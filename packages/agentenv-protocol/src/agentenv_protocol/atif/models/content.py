@@ -1,3 +1,4 @@
+# From Harbor 0.26.0, harbor/models/trajectories/content.py (Apache-2.0), with its import paths changed: see VENDORED.md.
 """Content models for multimodal ATIF trajectories.
 
 Added in ATIF-v1.6 to support multimodal content (images) in trajectories.

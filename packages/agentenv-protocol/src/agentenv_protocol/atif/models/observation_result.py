@@ -1,3 +1,4 @@
+# From Harbor 0.26.0, harbor/models/trajectories/observation_result.py (Apache-2.0), with its import paths changed: see VENDORED.md.
 """Observation result model for ATIF trajectories."""
 
 from typing import Any

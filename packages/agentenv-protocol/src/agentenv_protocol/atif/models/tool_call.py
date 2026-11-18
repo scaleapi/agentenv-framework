@@ -1,3 +1,4 @@
+# From Harbor 0.26.0, harbor/models/trajectories/tool_call.py (Apache-2.0), with its import paths changed: see VENDORED.md.
 """Tool call model for ATIF trajectories."""
 
 from typing import Any

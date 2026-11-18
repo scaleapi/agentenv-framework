@@ -4,9 +4,10 @@ anywhere, with network:
     python scripts/vendor_atif.py 0.26.0 [--check]
 
 It downloads that release's wheel, takes the modules under harbor/models/trajectories, rewrites their imports of
-harbor.models.trajectories to agentenv_protocol.atif.models and changes nothing else, and writes them with VENDORED.md,
-which records each upstream file's sha256 so a unit test can check offline that the copies differ from Harbor's only in
-import paths. ``--check`` compares instead of writing and exits 1 on any difference."""
+harbor.models.trajectories to agentenv_protocol.atif.models, puts a first line on each saying where it's from and that it
+was changed, as Apache-2.0 asks, and changes nothing else. It writes them with VENDORED.md, which records each upstream
+file's sha256 so a unit test can check offline that the copies differ from Harbor's only in that line and the import
+paths. ``--check`` compares instead of writing and exits 1 on any difference."""
 from __future__ import annotations
 
 import argparse
@@ -25,16 +26,19 @@ SOURCE = "harbor/models/trajectories/"
 DEST = Path(__file__).resolve().parents[1] / "packages/agentenv-protocol/src/agentenv_protocol/atif/models"
 _IMPORT = re.compile(r"^(\s*(?:from|import)\s+)" + re.escape(UPSTREAM) + r"\b", re.M)
 _LOCAL_IMPORT = re.compile(r"^(\s*(?:from|import)\s+)" + re.escape(LOCAL) + r"\b", re.M)
+_HEADER = re.compile(r"\A# From Harbor [^\n]*\n")
 
 
-def localize(text: str) -> str:
-    """Harbor's module text with its imports of the trajectory models pointed at the vendored copy."""
-    return _IMPORT.sub(r"\g<1>" + LOCAL, text)
+def localize(text: str, name: str, version: str) -> str:
+    """Harbor's module text with its imports of the trajectory models pointed at the vendored copy, under a first line
+    naming its source and the change."""
+    header = f"# From Harbor {version}, {SOURCE}{name} (Apache-2.0), with its import paths changed: see VENDORED.md.\n"
+    return header + _IMPORT.sub(r"\g<1>" + LOCAL, text)
 
 
 def upstream(text: str) -> str:
     """A vendored module's text as Harbor wrote it: the inverse of ``localize``."""
-    return _LOCAL_IMPORT.sub(r"\g<1>" + UPSTREAM, text)
+    return _LOCAL_IMPORT.sub(r"\g<1>" + UPSTREAM, _HEADER.sub("", text))
 
 
 def _get(url: str) -> bytes:
@@ -70,8 +74,9 @@ def vendored_md(version: str, wheel: str, digest: str, files: dict[str, str]) ->
 These files are Harbor's ATIF models, from `{SOURCE}` in the Harbor {version} release on PyPI (`{wheel}`, sha256
 `{digest}`). Harbor is Apache-2.0; `LICENSE` beside this file is the license that wheel ships.
 
-The only change is import paths: each `from {UPSTREAM}...` import reads `from {LOCAL}...`. Nothing else differs. A unit
-test turns the imports back and checks each file's sha256 against the table below.
+Each file has a first line naming its source and saying it was changed, and the only change is import paths: each
+`from {UPSTREAM}...` import reads `from {LOCAL}...`. Nothing else differs. A unit test takes off the first line, turns
+the imports back and checks each file's sha256 against the table below.
 
 Refresh with `python scripts/vendor_atif.py <version>` from the repository root, then review the diff and the fixtures.
 
@@ -87,7 +92,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="compare with the checked-in copy instead of writing")
     args = parser.parse_args()
     wheel, digest, files, license_text = fetch(args.version)
-    wanted = {name: localize(text) for name, text in files.items()}
+    wanted = {name: localize(text, name, args.version) for name, text in files.items()}
     wanted["VENDORED.md"] = vendored_md(args.version, wheel, digest, files)
     wanted["LICENSE"] = license_text
     if args.check:

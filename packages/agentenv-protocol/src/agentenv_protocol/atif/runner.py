@@ -33,9 +33,9 @@ class RecordedTask:
 
 
 class AdapterRun:
-    """One A2A context's conversion. Each call returns the live view after it, the closed steps a reader may be
-    served; ``document`` is everything so far. Every read is a fresh copy. ``media`` receives each media file once,
-    as ``(path, bytes)``; the files are also kept in ``media_files``."""
+    """One A2A context's conversion. ``page`` is the live view, the closed steps a reader may be served, built when
+    it's read; ``document`` is everything so far. Every read is a fresh copy. ``media`` receives each media file once,
+    as ``(path, bytes)``; without it, the files are kept in ``media_files``."""
 
     def __init__(self, adapter: type[Adapter], *, media: Callable[[str, bytes], None] | None = None) -> None:
         spec = vars(adapter).get("spec")
@@ -64,7 +64,7 @@ class AdapterRun:
     def page(self) -> dict[str, Any] | None:
         return self._doc.page()
 
-    def start_task(self, context: TurnContext) -> dict[str, Any] | None:
+    def start_task(self, context: TurnContext) -> None:
         """Open a task and write its user step. The context's first task creates the adapter."""
         if self._turn is not None:
             raise AtifError(f"task {self._turn.context.task_id} is still open")
@@ -72,16 +72,14 @@ class AdapterRun:
         self._turn = turn
         if self._adapter is None:
             self._adapter = self._cls(turn)
-        return self.page()
 
-    def native(self, record: Any) -> dict[str, Any] | None:
+    def native(self, record: Any) -> None:
         """Feed the task's next native record."""
         turn = self._open()
         method = self._spec.handler(None, record) or "unmatched"
         getattr(self._adapter, method)(record, turn)
-        return self.page()
 
-    def aux(self, name: str, record: Any) -> dict[str, Any] | None:
+    def aux(self, name: str, record: Any) -> None:
         """Feed the task's next record of aux file ``name``."""
         turn = self._open()
         if name not in self._spec.aux:
@@ -89,10 +87,9 @@ class AdapterRun:
         method = self._spec.handler(name, record)
         if method is not None:
             getattr(self._adapter, method)(record, turn)
-        return self.page()
 
     def end_task(self, *, state: str = "completed", final: Sequence[Any] | None = None,
-                 ended_at: str | datetime | None = None) -> dict[str, Any] | None:
+                 ended_at: str | datetime | None = None) -> None:
         """Close the task: run the adapter's ``@finish``, then write the final response, once, and the task's
         terminal state on its last step. The task is closed even when ``@finish`` raises, and the error is raised
         after."""
@@ -103,7 +100,6 @@ class AdapterRun:
         finally:
             self._doc.end_task(state=state, final=final, ended_at=ended_at)
             self._turn = None
-        return self.page()
 
     def _open(self) -> AtifTurn:
         if self._turn is None:

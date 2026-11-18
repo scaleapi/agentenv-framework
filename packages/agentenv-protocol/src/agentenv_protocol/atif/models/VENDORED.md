@@ -3,8 +3,9 @@
 These files are Harbor's ATIF models, from `harbor/models/trajectories/` in the Harbor 0.26.0 release on PyPI (`harbor-0.26.0-py3-none-any.whl`, sha256
 `b7c752c5b51ae2ee1fc2ea30621493c7dc0b5a3d0157295bed4552115027baee`). Harbor is Apache-2.0; `LICENSE` beside this file is the license that wheel ships.
 
-The only change is import paths: each `from harbor.models.trajectories...` import reads `from agentenv_protocol.atif.models...`. Nothing else differs. A unit
-test turns the imports back and checks each file's sha256 against the table below.
+Each file has a first line naming its source and saying it was changed, and the only change is import paths: each
+`from harbor.models.trajectories...` import reads `from agentenv_protocol.atif.models...`. Nothing else differs. A unit test takes off the first line, turns
+the imports back and checks each file's sha256 against the table below.
 
 Refresh with `python scripts/vendor_atif.py <version>` from the repository root, then review the diff and the fixtures.
 

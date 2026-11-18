@@ -12,6 +12,8 @@ from agentenv_protocol.atif import AtifError, Step, Trajectory, check
 
 MODELS = files("agentenv_protocol.atif.models")
 LOCAL_IMPORT = re.compile(r"^(\s*(?:from|import)\s+)agentenv_protocol\.atif\.models\b", re.M)
+HEADER = re.compile(r"\A# From Harbor 0\.26\.0, harbor/models/trajectories/(\S+) \(Apache-2\.0\), with its import paths "
+                    r"changed: see VENDORED\.md\.\n")
 
 
 def recorded() -> dict[str, str]:
@@ -19,13 +21,15 @@ def recorded() -> dict[str, str]:
     return dict(re.findall(r"^\| `([^`]+\.py)` \| `([0-9a-f]{64})` \|$", table, re.M))
 
 
-def test_the_vendored_files_differ_from_harbors_only_in_import_paths():
+def test_the_vendored_files_say_they_were_changed_and_differ_from_harbors_only_in_import_paths():
     shipped = {p.name for p in MODELS.iterdir() if p.name.endswith(".py")}
     assert shipped == set(recorded()) and len(shipped) == 11
     for name, digest in recorded().items():
         text = MODELS.joinpath(name).read_text(encoding="utf-8")
+        header = HEADER.match(text)
+        assert header and header.group(1) == name, name
         assert "harbor" not in "".join(line for line in text.splitlines() if line.lstrip().startswith(("from", "import")))
-        upstream = LOCAL_IMPORT.sub(r"\g<1>harbor.models.trajectories", text)
+        upstream = LOCAL_IMPORT.sub(r"\g<1>harbor.models.trajectories", text[header.end():])
         assert hashlib.sha256(upstream.encode("utf-8")).hexdigest() == digest, name
 
 

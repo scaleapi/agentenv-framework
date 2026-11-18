@@ -1,3 +1,4 @@
+# From Harbor 0.26.0, harbor/models/trajectories/__init__.py (Apache-2.0), with its import paths changed: see VENDORED.md.
 """Pydantic models for Agent Trajectory Interchange Format (ATIF).
 
 This module provides Pydantic models for validating and constructing

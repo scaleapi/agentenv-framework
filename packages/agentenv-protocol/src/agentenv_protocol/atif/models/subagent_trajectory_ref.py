@@ -1,3 +1,4 @@
+# From Harbor 0.26.0, harbor/models/trajectories/subagent_trajectory_ref.py (Apache-2.0), with its import paths changed: see VENDORED.md.
 """Subagent trajectory reference model for ATIF trajectories."""
 
 from typing import Any

@@ -216,6 +216,7 @@ class _Step:
     step_time: str | None = None
     closed: bool = False
     ended: bool = False
+    served: str | None = None
 
 
 @dataclass(eq=False)
@@ -234,6 +235,7 @@ class Document:
         self.spec = spec
         self.media: dict[str, bytes] = {}
         self._sink = sink
+        self._stored: set[str] = set()
         self._root: _Trajectory | None = None
         self._subs: dict[str, _Trajectory] = {}
         self._call_home: dict[str, tuple[_Trajectory, _Step]] = {}
@@ -394,10 +396,12 @@ class Document:
         digest = hashlib.sha256(data).hexdigest()
         extension = _EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type, strict=False) or ".bin"
         path = f"media/{digest}{extension}"
-        if path not in self.media:
-            self.media[path] = bytes(data)
+        if path not in self._stored:
+            self._stored.add(path)
             if self._sink is not None:
                 self._sink(path, bytes(data))
+            else:
+                self.media[path] = bytes(data)
         details = {"sha256": digest, "bytes": len(data), **{k: v for k, v in info.items() if v is not None}}
         return Media(path, media_type, _json(details, "media details"))
 
@@ -434,8 +438,8 @@ class Document:
         return self._render(closed_only=False)
 
     def page(self) -> dict[str, Any] | None:
-        """What a live reader is served: each trajectory's closed steps, up to the first one still waiting on a
-        result, or None while there are none."""
+        """What a live reader is served, built when it's read: each trajectory's closed steps, up to the first one
+        still waiting on a result, or None while there are none."""
         return self._render(closed_only=True)
 
     # Internals
@@ -530,9 +534,9 @@ class Document:
         linked = {actor for actor, count in counts.items() if actor is not None and count}
         doc: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "session_id": self._context_id,
                                "agent": dict(root.agent),
-                               "steps": [_render_step(s, linked) for s in root.steps[:counts[None]]]}
+                               "steps": _steps(root, counts[None], linked, closed_only)}
         subs = [{"schema_version": SCHEMA_VERSION, "trajectory_id": trajectory.actor, "agent": dict(trajectory.agent),
-                 "steps": [_render_step(s, linked) for s in trajectory.steps[:counts[trajectory.actor]]]}
+                 "steps": _steps(trajectory, counts[trajectory.actor], linked, closed_only)}
                 for trajectory in self._subs.values() if counts[trajectory.actor]]
         if subs:
             doc["subagent_trajectories"] = subs
@@ -586,7 +590,19 @@ def _message(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
     return [dict(part) for part in parts]
 
 
-def _render_step(step: _Step, linked: set[str]) -> dict[str, Any]:
+def _steps(trajectory: _Trajectory, count: int, linked: set[str], serving: bool) -> list[dict[str, Any]]:
+    """A trajectory's first ``count`` steps, as fresh copies. A step a page served never changes again, so its JSON is
+    rendered once and kept, and a read of a long document costs one parse rather than a render of every step."""
+    texts = []
+    for step in trajectory.steps[:count]:
+        text = step.served if step.served is not None else _step_json(step, linked)
+        if serving:
+            step.served = text
+        texts.append(text)
+    return json.loads(f"[{','.join(texts)}]")
+
+
+def _step_json(step: _Step, linked: set[str]) -> str:
     agentic = step.source == "agent"
     out: dict[str, Any] = {"step_id": step.index + 1}
     when = step.step_time or step.time
@@ -639,7 +655,7 @@ def _render_step(step: _Step, linked: set[str]) -> dict[str, Any]:
             ("data", b.get("data"))) if value is not None} for b in blocks]
     if profile:
         out["extra"] = {PROFILE_KEY: profile}
-    return json.loads(json.dumps(out))
+    return json.dumps(out)
 
 
 class AtifTurn:

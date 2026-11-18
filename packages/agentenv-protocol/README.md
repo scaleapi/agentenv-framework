@@ -1287,8 +1287,9 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   record no method takes is counted in the root profile.
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
-  terminal state on its last step. After every record it gives the live view: closed steps only, so a reader's earlier
-  page is always a prefix of a later one.
+  terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
+  reader's earlier page is always a prefix of a later one. A step is rendered once a page serves it and kept, so a
+  read costs one parse of the document, not a render of every step.
 - **Readers** (`load`, `tasks`, `media_paths`, `strip_profile`, `is_prefix`) take any valid ATIF document, with or
   without the profile, such as a Harbor task's trajectory.json.
 

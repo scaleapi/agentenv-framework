@@ -53,8 +53,13 @@ CTX = TurnContext(index=0, context_id="ctx", task_id="t1", message_id="m1", inbo
 
 def run_task(records, *, final=None, state="completed", cls=None):
     run = AdapterRun(cls or adapter())
-    pages = [run.start_task(CTX)] + [run.native(r) for r in records]
-    pages.append(run.end_task(final=final, state=state, ended_at="2026-11-18T10:05:00Z"))
+    run.start_task(CTX)
+    pages = [run.page()]
+    for record in records:
+        run.native(record)
+        pages.append(run.page())
+    run.end_task(final=final, state=state, ended_at="2026-11-18T10:05:00Z")
+    pages.append(run.page())
     return run, pages
 
 
@@ -215,7 +220,7 @@ def test_media_go_to_the_sink_once_and_types_atif_lacks_become_notes():
     check(document)
     png, mp4 = (r["observation"]["results"][0] for r in document["steps"][1::2])
     path = png["content"][0]["source"]["path"]
-    assert path.startswith("media/") and path.endswith(".png") and len(sunk) == 2
+    assert path.startswith("media/") and path.endswith(".png") and len(sunk) == 2 and run.media_files == {}
     assert profile_of(png)["media"][path] == {"sha256": path[6:-4], "bytes": 4, "width": 2, "height": 1}
     assert mp4["content"].startswith("[video: media/") and mp4["content"].endswith(", 4 B]")
     assert list(profile_of(mp4)["media"].values())[0]["media_type"] == "video/mp4"
@@ -519,8 +524,10 @@ def test_a_live_page_shows_a_pointer_only_with_a_step_of_its_sub_agent():
                    {"type": "sub", "step": "x1", "agent": "sub"}, {"type": "result", "id": "c1"},
                    {"type": "say", "step": "p2", "text": "next"}, {"type": "say", "step": "p3", "text": "more"},
                    {"type": "sub", "step": "x2", "agent": "sub"}]:
-        pages.append(run.native(record))
-    pages.append(run.end_task())
+        run.native(record)
+        pages.append(run.page())
+    run.end_task()
+    pages.append(run.page())
     assert [len(p["steps"]) if p else 0 for p in pages] == [1, 1, 1, 1, 1, 1, 3, 4]
     for page in filter(None, pages):
         trajectories = {sub["trajectory_id"] for sub in page.get("subagent_trajectories") or []}

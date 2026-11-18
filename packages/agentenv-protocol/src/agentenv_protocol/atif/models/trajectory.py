@@ -1,3 +1,4 @@
+# From Harbor 0.26.0, harbor/models/trajectories/trajectory.py (Apache-2.0), with its import paths changed: see VENDORED.md.
 """Trajectory model for ATIF (Agent Trajectory Interchange Format)."""
 
 from typing import Any, Literal

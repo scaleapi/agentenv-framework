@@ -227,10 +227,13 @@ def build(name: str) -> tuple[dict[str, Any], list[dict[str, Any] | None], dict[
         inbound += [run.media(label.encode(), media_type, **info) for label, media_type, info in task.inbound_media]
         if task.inbound_media and name == "odd_parts":
             inbound.append({"type": "text", "text": json.dumps({"ticket": 4411, "priority": "high"})})
-        pages.append(run.start_task(TurnContext(inbound=inbound, **context)))
+        run.start_task(TurnContext(inbound=inbound, **context))
+        pages.append(run.page())
         for record in task.records:
-            pages.append(run.native(record))
-        pages.append(run.end_task(state=task.state, final=task.final, ended_at=task.ended_at))
+            run.native(record)
+            pages.append(run.page())
+        run.end_task(state=task.state, final=task.final, ended_at=task.ended_at)
+        pages.append(run.page())
     document = run.document()
     assert document is not None
     return document, pages, run.media_files
