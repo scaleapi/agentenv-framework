@@ -34,8 +34,9 @@ class _RecordingVm:
     extra_hosts: tuple[str, ...] = ()
     ON_THIS_MACHINE = False
 
-    def __init__(self, exposed_ports: list[int], running: set[str | None]):
+    def __init__(self, exposed_ports: list[int], running: set[str | None], walls_verified: bool = False):
         self.exposed_ports = exposed_ports
+        self.walls_verified = walls_verified
         self.tunnel_urls = {port: f"https://tunnel-{port}" for port in exposed_ports}
         self.running = running
         self.calls: list[tuple] = []
@@ -105,7 +106,7 @@ async def _deploy(running: set[str | None] = frozenset({None}), **layout) -> tup
             mcp_server_name="crm",
             **layout,
         )
-    return vms[0], result, gp
+    return (vms[0] if vms else layout["existing_sandbox"]), result, gp
 
 
 def _scripts(vm: _RecordingVm) -> list[str]:
@@ -147,13 +148,19 @@ async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
     assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT}/mcp"
 
 
+SLOT_1_PORTS = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT)]
+
+
+def _walled_vm(running: set[str | None], ports: list[int] = SLOT_1_PORTS) -> _RecordingVm:
+    return _RecordingVm(ports, running, walls_verified=True)
+
+
 @pytest.mark.asyncio
 async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
     slot = StackLayout.for_slot(1)
-    vm, result, gp = await _deploy(running={None, "s1"}, stack_layout=slot)
+    vm = _walled_vm({None, "s1"})
+    _, result, gp = await _deploy(stack_layout=slot, existing_sandbox=vm)
 
-    shifted = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT)]
-    assert vm.exposed_ports == shifted
     scripts = _scripts(vm)
     assert scripts[0] == "mkdir -p /app/s1"
     assert _written(scripts[1])[0] == "/app/s1/init-schemas.sql"
@@ -175,21 +182,64 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
 
 
 @pytest.mark.asyncio
+async def test_a_slot_is_never_deployed_on_a_new_vm():
+    with pytest.raises(ValueError, match="walls between slots are verified"):
+        await _deploy(stack_layout=StackLayout.for_slot(1))
+
+
+@pytest.mark.asyncio
+async def test_a_slot_is_never_deployed_on_a_vm_whose_walls_are_not_verified():
+    vm = _RecordingVm(SLOT_1_PORTS, {"s1"})
+    with pytest.raises(ValueError, match="walls between slots are verified"):
+        await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=vm)
+    assert vm.calls == []
+
+
+def test_no_sandbox_has_verified_walls_today():
+    import importlib
+    import pkgutil
+
+    import agent_env.providers.sandbox_providers as package
+    from agent_env.providers.sandbox_providers.sandbox import Sandbox
+
+    for module in pkgutil.walk_packages(package.__path__, f"{package.__name__}.", onerror=lambda _: None):
+        try:
+            importlib.import_module(module.name)
+        except ImportError:
+            continue
+    subclasses, pending = [], [Sandbox]
+    while pending:
+        subclasses += (children := pending.pop().__subclasses__())
+        pending += children
+    assert subclasses
+    assert [c.__name__ for c in subclasses if c.walls_verified is not Sandbox.walls_verified] == []
+
+
+def test_a_provider_subclass_that_skips_init_keeps_the_default_layout():
+    class Skips(EnvironmentGatewayProvider):
+        def __init__(self):
+            pass
+
+    assert Skips().stack_layout == DEFAULT_STACK_LAYOUT
+
+
+@pytest.mark.asyncio
 async def test_slot_deploy_is_not_satisfied_by_another_stacks_gateway():
     with pytest.raises(RuntimeError, match="Gateway container not running"):
-        await _deploy(running={None, "s0"}, stack_layout=StackLayout.for_slot(1))
+        await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=_walled_vm({None, "s0"}))
 
 
 @pytest.mark.asyncio
 async def test_slot_deploy_on_a_vm_not_exposing_its_ports_names_the_missing_port():
-    vm = _RecordingVm([AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT], {"s1"})
+    vm = _walled_vm({"s1"}, [AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT])
     with pytest.raises(RuntimeError, match=f"no tunnel for slot port {AGENT_ENV_GATEWAY_MCP_PORT + 2000}"):
         await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=vm)
 
 
 @pytest.mark.asyncio
 async def test_slot_commands_after_deploy_stay_in_the_slot():
-    vm, _, gp = await _deploy(running={"s1"}, stack_layout=StackLayout.for_slot(1))
+    vm = _walled_vm({"s1"})
+    _, _, gp = await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=vm)
     gp._sandbox = vm
     vm.calls.clear()
 

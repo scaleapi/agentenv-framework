@@ -858,7 +858,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if memory_mb is not None:
                 vm_kwargs["memory"] = memory_mb
             self._sandbox = await sandbox_provider.create_vm(
-                exposed_ports=[layout.host_port(p) for p in [gateway_port, DB_WEB_PORT, DB_MCP_PORT, *(sc.host_port for sc in sidecars)]],
+                exposed_ports=[gateway_port, DB_WEB_PORT, DB_MCP_PORT] + [sc.host_port for sc in sidecars],
                 timeout=ttl_seconds,
                 disk_size_gb=disk_size_gb,
                 attribution=attribution,
@@ -1509,6 +1509,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         """
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
+        if stack_layout.is_slot and (existing_sandbox is None or not existing_sandbox.walls_verified):
+            raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a slot needs an existing sandbox "
+                             f"whose walls between slots are verified")
         self._stack_layout = stack_layout
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
         self._state_instance = state_instance

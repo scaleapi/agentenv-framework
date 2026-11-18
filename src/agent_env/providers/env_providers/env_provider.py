@@ -73,10 +73,11 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
 
     record_class: ClassVar[type[DeployedEnv]] = DeployedEnv  # the class its records load back as
 
+    _stack_layout: StackLayout = DEFAULT_STACK_LAYOUT
+
     def __init__(self):
         self._container_sandboxes: list[Sandbox] = []
         self._environment_sandboxes: dict[str, Sandbox] = {}
-        self._stack_layout: StackLayout = DEFAULT_STACK_LAYOUT
 
     @property
     def stack_layout(self) -> StackLayout:
