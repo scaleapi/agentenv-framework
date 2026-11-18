@@ -166,6 +166,7 @@ async def test_agent_triggers_e2e(agent):
         a2a_url=deployed.a2a_url,
         a2a_card=deployed.agent_card,
         sandbox_id=deployed.sandbox_id,
+        control_token=deployed.control_token,
     )
     context = TaskStepContext(deployed_agents=[da])
     step = RegisterAgentTriggersStep(
@@ -178,6 +179,6 @@ async def test_agent_triggers_e2e(agent):
     assert regs[-1]["agent_name"] == "stakeholder"
     assert "step-reg" in regs[-1]["added"]
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers=deployed.control_headers) as client:
         state = (await client.get(triggers_url)).json()
     assert "step-reg" in {t["id"] for t in state["triggers"]}
