@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env.env import EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.gateway.constants import CLOCK_WATCH_PATH, EXT_CLOCK_URI
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
@@ -50,7 +51,6 @@ def follower_name(agent: DeployedAgent) -> str:
 
 
 def _sync_time(agent: DeployedAgent) -> tuple[Optional[dict], Optional[str]]:
-    from agent_env.a2a_agent import A2AAgent
     return A2AAgent.operation(A2AAgent.find_extension(agent.a2a_card or {}, EXT_CLOCK_URI), "sync_time")
 
 

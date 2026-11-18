@@ -27,7 +27,7 @@ from agent_env.task.teardown import (
     tear_down,
 )
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.agent_clock import retire_followers
+from agent_env.a2a_agent.clock import retire_followers
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)

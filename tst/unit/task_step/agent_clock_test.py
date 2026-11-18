@@ -10,7 +10,7 @@ import pytest
 
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
-from agent_env.task_step.task_steps import agent_clock
+from agent_env.a2a_agent import clock as agent_clock
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
 from tst.unit.task_step.sync_env_clock_test import (CLOCK_URL, T0, _CARD, _CLOCK_EXT, _ZONE_EXT, _carded, _composed_card, _mock_http,
                                                     _step)
