@@ -14,10 +14,13 @@ from collections.abc import AsyncIterator, Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
 
 from a2a.types import TaskStatusUpdateEvent
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from ..env_clock import EnvClock
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +228,9 @@ class TaskRequest(Generic[ConfigT]):
     trajectory: TrajectoryLog = field(
         default_factory=TrajectoryLog, repr=False, compare=False
     )
+    # The task env's armed clock, read at the turn's start; None while unarmed. A harness reads it again between
+    # steps (``EnvClock.read``), and the framework has already ended ``parts`` with its time (``env_clock``).
+    env_clock: EnvClock | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parts", tuple(self.parts))

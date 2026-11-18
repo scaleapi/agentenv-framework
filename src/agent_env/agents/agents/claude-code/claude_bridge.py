@@ -16,11 +16,15 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from env_clock_hook import hook_settings
 from kit import in_thread_to_its_end
+
+if TYPE_CHECKING:
+    from agentenv_protocol.a2a_agent.env_clock import EnvClock
 
 logger = logging.getLogger(__name__)
 
@@ -421,18 +425,20 @@ async def run_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    env_clock: EnvClock | None = None,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
     is left of ``timeout_s``, so the turn never outlives its caller's deadline. ``CLAUDE_API_ERROR_RETRIES=0`` turns
     resumes off. ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is
-    held until it's known not to be resumed."""
+    held until it's known not to be resumed. ``env_clock``, the task env's armed clock (``TaskRequest.env_clock``),
+    has the CLI add the env's time after each tool call (``env_clock_hook``), and a resume carry it too."""
     deadline = time.monotonic() + timeout_s
     retries_left = _configured_api_error_retries()
     spawn = partial(
         _spawn_claude, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
         system_prompt=system_prompt, output_format=output_format, project_id=project_id, task_id=task_id,
         role=role, effort=effort, max_turns=max_turns, max_thinking_tokens=max_thinking_tokens,
-        builtin_tools=builtin_tools, event_callback=event_callback,
+        builtin_tools=builtin_tools, event_callback=event_callback, env_clock=env_clock,
     )
     attempt_prompt, attempt_resume, attempt_session = prompt, resume, session_id
     trajectory: list[dict] = []
@@ -479,6 +485,20 @@ async def run_claude(
         logger.warning(f"claude CLI turn cut short ({_redact(failure)!r}); resuming session {attempt_session} "
                        f"in {backoff}s with {int(budget_left)}s of the original {timeout_s}s budget left")
         await asyncio.sleep(backoff)
+        if env_clock is not None:
+            attempt_prompt = await _with_env_clock_note(_RESUME_PROMPT, env_clock)
+
+
+async def _with_env_clock_note(prompt: str, env_clock: EnvClock) -> str:
+    """``prompt`` with the env's time now: a resume after an API failure and its backoff mustn't carry on from the
+    time the turn's prompt gave. A failed read leaves it as it is."""
+    from agentenv_protocol.a2a_agent.env_clock import failure_reason, prompt_note
+
+    try:
+        return f"{prompt}\n\n{prompt_note(await env_clock.read())}"
+    except Exception as e:
+        logger.warning(f"env clock: no reading for the resume: {failure_reason(e)}")
+        return prompt
 
 
 _PROCESS_CLEANUP_TIMEOUT_S = 5
@@ -610,10 +630,11 @@ def _with_1m_window(model: str) -> str:
 def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools: list[str] | None,
              mcp_servers: dict[str, dict] | None, system_prompt: str | None, output_format: dict | None,
              role: str | None, effort: str | None, max_turns: int | None,
-             builtin_tools: ClaudeCodeTools | None = None) -> list[str]:
+             builtin_tools: ClaudeCodeTools | None = None, env_clock: bool = False) -> list[str]:
     """The CLI's argv. The prompt goes on stdin, since one argument over 128 KiB fails exec. ``builtin_tools`` selects
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
-    the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
+    the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``. ``env_clock`` adds the
+    hook that ends each tool call's result with the env's time."""
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
            "--setting-sources", "user"]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
@@ -649,6 +670,8 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
             return server
 
         cmd += ["--mcp-config", json.dumps({"mcpServers": {name: entry(info) for name, info in mcp_servers.items()}})]
+    if env_clock:
+        cmd += ["--settings", hook_settings()]
     return cmd
 
 
@@ -670,10 +693,17 @@ async def _spawn_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    env_clock: EnvClock | None = None,
 ) -> ClaudeResult:
     cmd = _command(session_id, resume, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
-                   max_turns=max_turns, builtin_tools=builtin_tools)
+                   max_turns=max_turns, builtin_tools=builtin_tools, env_clock=env_clock is not None)
+    env = cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
+                  max_thinking_tokens=max_thinking_tokens)
+    if env_clock is not None:
+        from agentenv_protocol.a2a_agent.env_clock import ENV_CLOCK_SERVER_ENV
+
+        env[ENV_CLOCK_SERVER_ENV] = env_clock.server.to_env()
     logger.info(f"Running claude CLI (resume={resume}, session_id={session_id}, model={model})")
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     proc = await _started(asyncio.create_subprocess_exec(
@@ -681,8 +711,7 @@ async def _spawn_claude(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
-                    max_thinking_tokens=max_thinking_tokens),
+        env=env,
         cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))
