@@ -157,7 +157,7 @@ def materialize(
                     write, done[_key(write)].version, _composing(composing, on_progress, write), dry_run):
                 left.append(write.id)
             if bootable and not dry_run and write.kind is BundleKind.ENV and (
-                    why := _unbootable(plan, write, done[_key(write)].version)):
+                    why := _unbootable(plan, write, done[_key(write)].version, composing)):
                 unbootable.append(why)
         if unbootable:
             raise BundleError(unbootable)
@@ -348,13 +348,14 @@ def _compose_reused(write: Write, version: int, composing: Composing, dry_run: b
     return True
 
 
-def _unbootable(plan: Plan, write: Write, version: int) -> str | None:
-    """Why the computer env ``write`` left at ``version`` can't be deployed, when its compose recorded builds but none a
-    deploy boots: each failed, was skipped, or another agent-env recorded it."""
+def _unbootable(plan: Plan, write: Write, version: int, composing: Composing) -> str | None:
+    """Why the computer env ``write`` left at ``version`` can't be deployed, when its compose recorded builds of
+    ``composing``'s forms but none a deploy boots: each failed, was skipped, or another agent-env recorded it."""
     env = Env.get(write.id, version)
     if not isinstance(env, ComputerEnv) or env.computer is None:
         return None
-    records = [(f"{form}/{arch}", record) for form, by_arch in env.metadata.get("composed", {}).items()
+    forms = composing.forms(env, composing.provider())
+    records = [(f"{form}/{arch}", record) for form, by_arch in env.metadata.get("composed", {}).items() if form in forms
                for arch, record in by_arch.items()]
     if not records or any(record.get("status") in BUILT and not stale(record) for _, record in records):
         return None

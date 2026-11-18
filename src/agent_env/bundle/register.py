@@ -82,6 +82,7 @@ def register_bundle(
     on_progress: Callable[[str], None] | None = None,
     sandbox: str | None = None,
     emulate: bool = True,
+    deploys_on: str | None = None,
 ) -> Registration:
     """Register the bundle at ``root``: ``tasks`` and ``evals`` by name, or with neither every task and eval it has,
     or every entity when it has none, with what they reference. ``prefix`` opens each entry's registry id, the folder's
@@ -89,13 +90,17 @@ def register_bundle(
     is given a line for each write, as it's checked or written, and before each image is built. A folder with no
     bundle.toml that uses plugin packages is given one, or told what to declare, as ``declaring`` says: by default as a
     run of the folder would (``declaring_for``). ``sandbox`` is the provider its computer envs compose on, by default
-    the env's, emulating an arch no link runs natively unless ``emulate`` is False, which leaves it skipped.
+    the env's, emulating an arch no link runs natively unless ``emulate`` is False, which leaves it skipped. With
+    ``deploys_on``, the provider its tasks' deploys will boot them on, each composes only the forms those deploys boot,
+    as a run does; without it, every form its base declares.
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse. So does
     a computer env whose compose left no build a deploy can boot, once every entity is written and before any task:
     registering again composes what it has left."""
-    composing = Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
+    composing = Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate,
+                          forms_of="deploys" if deploys_on else "base",
+                          deploys_on=build_sandbox_provider(deploys_on) if deploys_on else None)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
         resolved = resolve_bundle(bundle)

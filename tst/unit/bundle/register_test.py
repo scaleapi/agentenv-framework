@@ -6,6 +6,7 @@ import json
 import subprocess
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -513,26 +514,59 @@ def test_chromium_registers_into_a_shared_store_with_its_driver_and_base_compute
     assert (chromium.type, chromium.computer.id, chromium.driver.id) == ("computer_app", "ubuntu-24.04-browser", "page")
 
 
-def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_registration_before_its_tasks(
-        home, composed, monkeypatch):
-    """As a builder whose disk filled."""
+def _desktop(home, monkeypatch, compose):
+    """A bundle of a computer env on the shipped base and driver, registered into a shared store as the hub is, under
+    their aliases, ``compose`` standing in for the composer."""
     for module in (register_module, env_store_module):
         monkeypatch.setattr(module, "shared_store", lambda store: True)
     bases = {image.ref() for image in COMPUTER_IMAGES}
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in bases else None)
     monkeypatch.setattr(computer_artifact_module, "_inspect",
                         lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
+    monkeypatch.setattr(composer_module, "compose", compose)
+    files = {"envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n',
+             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}])}
+    return layout(home / "desk", files)
 
+
+def _link(containers=(), disks=()):
+    """A sandbox provider that runs containers of ``containers`` and boots disks of ``disks`` natively."""
+    link = SimpleNamespace(native_platforms=lambda: frozenset(f"linux/{arch}" for arch in containers),
+                           disk_image_platforms=lambda: frozenset(f"linux/{arch}" for arch in disks), ON_THIS_MACHINE=True)
+    link.links = (link,)
+    return link
+
+
+_DEPLOYS_ON = {"docker": _link(["amd64"]), "vms": _link(disks=["amd64"]),
+               "chain": SimpleNamespace(links=(_link(["amd64"]), _link(disks=["amd64"])))}
+
+
+@pytest.mark.parametrize("deploys_on, forms", [(None, ["container", "disk"]), ("docker", ["container"]),
+                                               ("vms", ["disk"]), ("chain", ["container", "disk"])])
+def test_a_registration_composes_the_forms_its_deploys_boot_on_the_provider_it_names_else_every_form(
+        home, composed, monkeypatch, deploys_on, forms):
+    composings = []
+    root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(composing))
+    monkeypatch.setattr(register_module, "build_sandbox_provider", _DEPLOYS_ON.__getitem__)
+
+    result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes",
+                                      *(["--deploys-on", deploys_on] if deploys_on else [])])
+
+    assert result.exit_code == 0, result.output
+    [used] = composings
+    assert used.forms(Env.get("desk-desktop"), used.provider()) == forms
+    assert (used.sandbox_provider, used.deploys_on) == (None, _DEPLOYS_ON.get(deploys_on))
+
+
+def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_registration_before_its_tasks(
+        home, composed, monkeypatch):
+    """As a builder whose disk filled."""
     def compose(env, pairs=None, composing=None):
         env.update_metadata({**env.metadata, "composed": {"container": {
             "amd64": {"status": "failed", "reason": "no space left on device", "composer": composition()},
             "arm64": {"status": "skipped", "reason": "no link runs linux/arm64 natively", "composer": composition()}}}})
 
-    monkeypatch.setattr(composer_module, "compose", compose)
-    files = {"envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n',
-             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}])}
-
-    result = CliRunner().invoke(cli, ["bundle", "register", str(layout(home / "desk", files)), "--yes"])
+    result = CliRunner().invoke(cli, ["bundle", "register", str(_desktop(home, monkeypatch, compose)), "--yes"])
 
     assert result.exit_code == 1, result.output
     assert ("envs/desktop: desk-desktop v1 has no build a deploy can boot (container/amd64 failed (no space left on "
@@ -543,6 +577,21 @@ def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_re
     assert Env.get("desk-desktop").version == 1
     with pytest.raises(NotFoundError):
         Task.get("desk-t")
+
+
+def test_a_registration_for_deploys_that_boot_containers_fails_on_a_failed_container_whatever_disk_was_built(
+        home, composed, monkeypatch):
+    def compose(env, pairs=None, composing=None):
+        env.update_metadata({**env.metadata, "composed": {
+            "container": {"amd64": {"status": "failed", "composer": composition()}},
+            "disk": {"amd64": {"status": "unverified", "image": "disk", "composer": composition()}}}})
+
+    root = _desktop(home, monkeypatch, compose)
+    monkeypatch.setattr(register_module, "build_sandbox_provider", _DEPLOYS_ON.__getitem__)
+
+    result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes", "--deploys-on", "docker"])
+
+    assert result.exit_code == 1 and "has no build a deploy can boot (container/amd64 failed), so" in result.output
 
 
 def test_a_write_that_fails_leaves_no_pending_row(home, monkeypatch):
