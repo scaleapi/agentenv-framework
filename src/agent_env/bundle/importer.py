@@ -149,6 +149,9 @@ class _EntityOut(ExportContext):
 
     def ref(self, entity: Any) -> str | dict:
         kind = _kind_of(entity)
+        if (bundle := self.importer._installed_for(kind, entity.id)) is not None:
+            self.importer.floating.append(Floating(self.folder, kind, entity.id, _from_bundle(bundle)))
+            return entity.id
         local = self.importer.local(kind, entity, self.folder)
         return local if local is not None else {kind.value: entity.id, "version": entity.version}
 
@@ -534,7 +537,7 @@ class _Importer:
 
     def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle) -> None:
         """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
-        why = f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
+        why = _from_bundle(bundle)
         if site.version is not None and site.version_key is not None:
             why += f"; the stored pin to v{site.version} is dropped, as such an entity has no fixed version"
         _unpin(site)
@@ -577,6 +580,10 @@ class _Importer:
 def _names_of(kind: BundleKind) -> str:
     """The folder whose names ``kind``'s share: artifacts' and skills' are one."""
     return BundleKind.ARTIFACT.value if kind is BundleKind.SKILL else kind.value
+
+
+def _from_bundle(bundle: InstalledBundle) -> str:
+    return f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
 
 
 def _kind_of(entity: Any) -> EntityKind:
