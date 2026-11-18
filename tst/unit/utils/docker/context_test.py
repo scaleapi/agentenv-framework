@@ -141,6 +141,18 @@ def test_what_image_kits_toml_takes_from_agent_envs_sources_is_sent_at_the_name_
     assert taken.source_digest(None) == BuildContext.of(held, held / "Dockerfile").source_digest(None)
 
 
+def test_the_ignore_file_applies_to_what_image_kits_toml_takes_as_to_the_folders_own(tmp_path):
+    ignore = "clock\n!clock/clock.conf\n"
+    root = _tree(tmp_path / "ctx", {**SERVER, ".dockerignore": ignore, KITS_FILE: 'clock = "image_kits/clock"\n'})
+    held = _tree(tmp_path / "held", {**SERVER, ".dockerignore": ignore})
+    shutil.copytree(SOURCES / "image_kits" / "clock", held / "clock")
+
+    taken = BuildContext.of(root, root / "Dockerfile")
+
+    assert [entry.name for entry in taken.entries if entry.name.startswith("clock")] == ["clock", "clock/clock.conf"]
+    assert taken.source_digest(None) == BuildContext.of(held, held / "Dockerfile").source_digest(None)
+
+
 @pytest.mark.parametrize(("folder", "kits", "problem"), [
     ({"clock/own.txt": ""}, 'clock = "image_kits/clock"\n', "clock: the folder has it and image_kits.toml takes it too"),
     ({}, 'clock = "../../../etc"\n', "names nothing in agent-env's sources"),

@@ -169,18 +169,19 @@ class _Walk:
             self.problems.append(f"{KITS_FILE}: {e}")
             return
         for name, source in sorted(kits.items()):
-            if name not in self.kept and self._excluded(name):
-                continue
             path = Path(os.path.realpath(os.path.join(SOURCES, source))) if isinstance(source, str) else None
+            excluded = name not in self.kept and self._excluded(name)
             if path is None or not in_sources(path) or not path.exists():
                 self.problems.append(f"{KITS_FILE}: {name} = {source!r} names nothing in agent-env's sources")
             elif name in self.names:
                 self.problems.append(f"{name}: the folder has it and {KITS_FILE} takes it too; keep one")
             elif path.is_dir():
-                if self._claim(name):
+                if (excluded and self._prunable(name)) or not self._claim(name):
+                    continue
+                if not excluded:
                     self.folders.add(name)
-                    self.run(path, (name,))
-            else:
+                self.run(path, (name,))
+            elif not excluded:
                 self._file(name, path)
 
     def entries(self) -> tuple[_Entry, ...]:

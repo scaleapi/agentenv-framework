@@ -72,9 +72,9 @@ installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and 
 clock-test: ## Build agent-env's libfaketime and run its gates in Docker (tst/clock)
 	$(PYTHON) -m pytest tst/clock --timeout=2400 $(PYTEST_ARGS)
 
-# The base computer's egress proxy, in the Go image its Dockerfile builds it with, so it needs Docker, not Go.
+# The egress proxy (image_kits/egress), in the Go image ubuntu-24.04's Dockerfile builds it with, so it needs Docker, not Go.
 EGRESS := src/agent_env/image_kits/egress
-EGRESS_GO_IMAGE = $(shell awk '/^FROM .*golang/ {print $$2; exit}' $(EGRESS)/../Dockerfile)
+EGRESS_GO_IMAGE = $(shell awk '/^FROM .*golang/ {print $$2; exit}' src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile)
 
 egress-test: ## gofmt, go vet and go test -race for the base computer's egress proxy, in Docker
 	docker run --rm -v "$(CURDIR)/$(EGRESS):/src" -w /src $(EGRESS_GO_IMAGE) \
