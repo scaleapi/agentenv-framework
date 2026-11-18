@@ -6,12 +6,13 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from agentenv_protocol.atif import Adapter, AdapterRun, TurnContext, atif_adapter, finish, native, strip_profile
 
-FIXTURES = Path(__file__).resolve().parents[1] / "src/agentenv_protocol/atif/fixtures"
+FIXTURES = Path(str(files("agentenv_protocol.atif").joinpath("fixtures")))
 CONTEXT = "ctx-7f3a"
 
 
