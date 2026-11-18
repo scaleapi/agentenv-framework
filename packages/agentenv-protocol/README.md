@@ -759,7 +759,8 @@ class MyDriver(ComputerDriverEnvironment):
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
   and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
   grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
-  computer down. A repeated `request_id`, or a repeated `end`, answers the same. A start past
+  computer down; `list` (a GET) returns `{recordings}`, each still recording as `{recording_id,
+  started_at}`. A repeated `request_id`, or a repeated `end`, answers the same. A start past
   `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
   failing for 60 s end a recording by itself.
 - **Segments.** A segment closes at `max_segment_s`, when the frame size changes or after a gap in the
@@ -797,7 +798,7 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held, counting the recordings a driver that `list`s them has open already; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
 At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), and its layout
 (`conformance/desk.py`) into `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
