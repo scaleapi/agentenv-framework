@@ -1044,10 +1044,10 @@ class Probe:
             return len((await self.driver.invoke(COMPUTER_RECORDING, "list"))["recordings"])
 
         async def limited_counting(most: int) -> str | None:
-            """Recordings the probe didn't start, as a task's that records while it probes, count against the limit
-            too and may start or end meanwhile, so each start is judged by the recordings listed around it: one refused
-            below the limit, or one started past it, fails only if a listing after it still says so."""
-            for _ in range(LIMIT_STARTS * (most + 1)):
+            """Below ``most`` open recordings a start succeeds, and at ``most`` it's refused, counting every recording the
+            driver lists. Others may start or end between a listing and a start, so a surprise is judged by a fresh one."""
+            tries = LIMIT_STARTS * (most + 1)
+            for _ in range(tries):
                 before = await recording_now()
                 try:
                     started = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
@@ -1059,11 +1059,11 @@ class Probe:
                     return f"refused limit_exceeded with {now} recordings open, of at most {most}"
                 if before >= most and (now := await recording_now()) > most:
                     return f"recording {now} of at most {most} started: {started['recording_id']}"
-            return f"the computer's recordings kept changing over {LIMIT_STARTS * (most + 1)} starts"
+            return f"the computer's recordings kept changing over {tries} starts"
 
         async def limited() -> str | None:
-            """Past ``max_concurrent``, a start is refused: counting the recordings a driver lists, or, from one that
-            doesn't list them, after the probe's own ``max_concurrent``."""
+            """A start past ``max_concurrent`` is refused. A driver that lists its recordings is checked with them all
+            counted; one that doesn't, after the probe's own ``max_concurrent``, as before it could."""
             most = params.get("max_concurrent")
             if not isinstance(most, int):
                 return "the card declares no max_concurrent"

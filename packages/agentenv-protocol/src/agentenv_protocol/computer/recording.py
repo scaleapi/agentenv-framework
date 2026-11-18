@@ -198,7 +198,7 @@ class Recordings:
         return manifest
 
     async def listed(self) -> list[dict]:
-        """Each recording still recording, as its start answered: the ones counted against ``max_concurrent``."""
+        """Each recording still recording, by id and start time: the ones counted against ``max_concurrent``."""
         async with self._lock:
             return [{"recording_id": rid, "started_at": _iso(r.requested_at)}
                     for rid, r in self.running.items() if not r.done]

@@ -45,6 +45,12 @@ async def _recording_checks(driver) -> dict[str, tuple[str, str]]:
     return {r.name: (r.status, r.detail) for r in probe.results}
 
 
+def _advertising(monkeypatch, most: int) -> None:
+    advertised = recording_module.recording_params
+    monkeypatch.setattr("agentenv_protocol.computer.card.recording_params",
+                        lambda features, streams: {**advertised(features, streams), "max_concurrent": most})
+
+
 @pytest.mark.asyncio
 async def test_a_driver_that_records_passes_the_recording_checks_at_full_and_leaves_nothing(home):
     with served(Recorder()) as url:
@@ -68,9 +74,7 @@ async def test_a_manifest_whose_hash_or_size_isnt_the_files_fails(home, monkeypa
 
 @pytest.mark.asyncio
 async def test_a_limit_the_driver_doesnt_keep_fails_and_its_recordings_are_still_ended(home, monkeypatch):
-    advertised = recording_module.recording_params
-    monkeypatch.setattr("agentenv_protocol.computer.card.recording_params",
-                        lambda features, streams: {**advertised(features, streams), "max_concurrent": 1})
+    _advertising(monkeypatch, 1)
     driver = Recorder()
     found = await _recording_checks(driver)
     assert found[NAMES[2]][0] == "failed" and "recording 2 of at most 1 started" in found[NAMES[2]][1]
@@ -98,12 +102,6 @@ async def test_a_computer_already_recording_passes_the_recording_checks_and_keep
     found, theirs, still = await _checks_while_recording(Recorder())
     assert {name: status for name, (status, _) in found.items()} == dict.fromkeys(NAMES, "passed")
     assert still == [theirs]
-
-
-def _advertising(monkeypatch, most: int) -> None:
-    advertised = recording_module.recording_params
-    monkeypatch.setattr("agentenv_protocol.computer.card.recording_params",
-                        lambda features, streams: {**advertised(features, streams), "max_concurrent": most})
 
 
 @pytest.mark.asyncio
