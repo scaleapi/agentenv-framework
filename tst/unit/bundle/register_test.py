@@ -543,7 +543,7 @@ _SANDBOXES = {"docker": _link(["amd64"]), "vms": _link(disks=["amd64"]),
 
 @pytest.mark.parametrize("sandbox, forms", [(None, ["container", "disk"]), ("docker", ["container"]),
                                             ("vms", ["disk"]), ("chain", ["container", "disk"])])
-def test_a_registration_composes_on_its_sandbox_the_forms_its_deploys_there_boot_else_every_form(
+def test_a_registration_composes_here_the_forms_its_deploys_on_its_sandbox_boot_else_every_form(
         home, composed, monkeypatch, sandbox, forms):
     composings = []
     root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(composing))
@@ -555,7 +555,7 @@ def test_a_registration_composes_on_its_sandbox_the_forms_its_deploys_there_boot
     assert result.exit_code == 0, result.output
     [used] = composings
     assert used.forms(Env.get("desk-desktop"), used.provider()) == forms
-    assert used.sandbox_provider is _SANDBOXES.get(sandbox)
+    assert (used.sandbox_provider, used.deploys_on) == (None, _SANDBOXES.get(sandbox))
 
 
 def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_registration_before_its_tasks(
@@ -571,9 +571,8 @@ def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_re
     assert result.exit_code == 1, result.output
     assert ("envs/desktop: desk-desktop v1 has no build a deploy can boot (container/amd64 failed (no space left on "
             "device); container/arm64 skipped (no link runs linux/arm64 natively)), so no task was written: register "
-            "again to compose what it left, emulating a skipped arch or on a --sandbox that runs it natively, or "
-            "compose it with agent-env env build --id desk-desktop --version 1 and then register again"
-            ) in result.output
+            "again to compose what it left, or compose it with agent-env env build --id desk-desktop --version 1, on a "
+            "--sandbox that runs a skipped arch natively, and then register again") in result.output
     assert Env.get("desk-desktop").version == 1
     with pytest.raises(NotFoundError):
         Task.get("desk-t")

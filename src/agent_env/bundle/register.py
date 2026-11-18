@@ -88,17 +88,16 @@ def register_bundle(
     name and a dash unless given. An id the store holds already takes a new version, whoever wrote it. ``on_progress``
     is given a line for each write, as it's checked or written, and before each image is built. A folder with no
     bundle.toml that uses plugin packages is given one, or told what to declare, as ``declaring`` says: by default as a
-    run of the folder would (``declaring_for``). ``sandbox`` is the provider its tasks deploy on: each computer env
-    composes there only the forms its deploys there boot, as a run does, emulating an arch no link runs natively unless
-    ``emulate`` is False, which leaves it skipped. Without it, each composes every form its base declares, on the env's
-    provider.
+    run of the folder would (``declaring_for``). ``sandbox`` is the provider its tasks deploy on, as a run's is: each
+    computer env composes only the forms its deploys there boot, and without it every form its base declares. Either
+    way it composes on the env's provider, emulating an arch no link of that one runs natively unless ``emulate`` is
+    False, which leaves it skipped.
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse. So does
     a computer env whose compose left no build a deploy can boot, once every entity is written and before any task:
     registering again composes what it has left."""
-    composing = Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate,
-                          forms_of="deploys" if sandbox else "base")
+    composing = Composing.for_run(build_sandbox_provider(sandbox), emulate) if sandbox else Composing(None, emulate)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
         resolved = resolve_bundle(bundle)

@@ -366,11 +366,11 @@ def _unbootable(plan: Plan, write: Write, version: int, composing: Composing) ->
     statuses = env.build_statuses()
     quoted = {pair: f" ({record['reason'][:_REASON_CHARS]})" for pair, record in records if record.get("reason")}
     builds = "; ".join(f"{pair} {statuses[pair]}{quoted.get(pair, '')}" for pair, _ in records)
-    how = (", emulating a skipped arch or on a --sandbox that runs it natively"
+    how = (", on a --sandbox that runs a skipped arch natively"
            if any(record.get("status") == "skipped" for _, record in records) else "")
     return (f"{_path(plan, write)}: {write.id} v{version} has no build a deploy can boot ({builds}), so no task was "
-            f"written: register again to compose what it left{how}, or compose it with agent-env env build --id "
-            f"{write.id} --version {version} and then register again")
+            f"written: register again to compose what it left, or compose it with agent-env env build --id "
+            f"{write.id} --version {version}{how}, and then register again")
 
 
 def _write_env(plan: Plan, write: Write, composing: Composing = Composing()) -> int:

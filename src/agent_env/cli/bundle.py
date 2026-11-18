@@ -87,13 +87,13 @@ def _report(imported: BundleImport, folder: Path) -> None:
 @click.option("--dry-run", is_flag=True, help="Check everything and say what would be written; write nothing.")
 @click.option("--yes", is_flag=True, help="Write to a store other than this machine's own without asking.")
 @click.option("--sandbox", default=None,
-              help="The sandbox provider the registered tasks deploy on, comma-separated for a chain: each computer env "
-                   "composes there, each arch on the first link that runs it natively, only the forms its deploys there "
-                   "boot, as agent-env run does. Without it, every form its base declares, on the env's provider. A "
-                   "deploy that boots a form not composed composes it first.")
+              help="The sandbox provider the registered tasks deploy on, comma-separated for a chain, as agent-env "
+                   "run's: each computer env composes only the forms its deploys there boot, and without it every form "
+                   "its base declares, on this machine either way. A deploy that boots a form not composed composes it "
+                   "first.")
 @click.option("--no-emulate", is_flag=True,
-              help="Skip, rather than emulate, an arch no link of the sandbox provider runs natively; a later register "
-                   "or env build builds it.")
+              help="Skip, rather than emulate, a computer env's arch the provider it composes on doesn't run "
+                   "natively; a later register or env build builds it.")
 def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefix: str | None,
              dry_run: bool, yes: bool, sandbox: str | None, no_emulate: bool):
     """Write the bundle at FOLDER into the configured stores under registry ids, so whatever runs the stores' tasks
