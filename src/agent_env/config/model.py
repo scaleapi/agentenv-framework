@@ -218,7 +218,7 @@ class ModelConfig:
             )
         if key is None:
             if api_base is not None and not same_endpoint(api_base, configured_base):
-                raise ConfigError(no_key_for(api_base))
+                raise ConfigError(no_key_for(api_base, "default_api_key"))
             key = os.getenv(ENV_API_KEY) or self._resolved_api_key(secret_resolver)
         params = dict(self.params)
         headers = self.headers_for(api_base, secret_resolver=secret_resolver)
@@ -301,12 +301,10 @@ def _netloc(url: str) -> str:
     return urlsplit(url).netloc.rpartition("@")[2] or url
 
 
-def no_key_for(url: str) -> str:
-    """Why a model call or an agent pointed at ``url`` with no key of its own is refused, and how to give it one."""
+def no_key_for(url: str, how: str) -> str:
+    """Why a model call or an agent pointed at ``url`` with no key of its own is refused, and ``how`` to give it one."""
     return (f"{_netloc(url)} isn't the configured model endpoint, so the configured key isn't sent there, and no key "
-            "was given with it. Pass one with the URL: litellm_api_key (judge_litellm_api_key for a judge) in the run's "
-            "overrides or a step's step_params, or LITELLM_API_KEY in the step's env_vars or the agent's "
-            "default_env_vars. Any non-empty value works for a server that needs no key.")
+            f"was given with it. Pass one with it: {how}. Any non-empty value works for a server that needs no key.")
 
 
 def _check_roles(roles: object) -> None:

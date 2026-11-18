@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.a2a_agent.a2a_agent import TAKES_CREDENTIALS
+from agent_env.a2a_agent.a2a_agent import AGENT_KEY_HOW, TAKES_CREDENTIALS
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
@@ -342,7 +342,7 @@ class _Walk:
         elif (own := self._agent_model_vars(agent_id, version)) is not None:
             url = url or own.get(ENV_BASE_URL)
             if url and ENV_API_KEY not in given and ENV_API_KEY not in own and not get_config().is_model_endpoint(url):
-                self._problem(where, f"deploys agent {agent_id!r}, but {no_key_for(url)}")
+                self._problem(where, f"deploys agent {agent_id!r}, but {no_key_for(url, AGENT_KEY_HOW)}")
             elif needed := _MODEL_VARS - given - own.keys():
                 self.model_users.append((where, needed))
         image = self._agent_image(agent_id, version)

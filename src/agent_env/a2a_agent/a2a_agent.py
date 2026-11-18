@@ -72,6 +72,9 @@ _DIND_PORT = 2375
 # Metadata an agent whose commands its player runs sets False: it is given no model endpoint, key or headers, whatever
 # a deploy passes, and none of the object store's shared credentials.
 TAKES_CREDENTIALS = "takes_credentials"
+# How an agent sent to a URL other than the configured endpoint is given that URL's key.
+AGENT_KEY_HOW = ("LITELLM_API_KEY in the step's env_vars or the agent's default_env_vars, or litellm_api_key in the "
+                 "run's overrides or the step's step_params")
 MODEL_CREDENTIALS_ENV = ("LITELLM_API_KEY", "LITELLM_BASE_URL", MODEL_HEADERS_ENV)
 
 
@@ -634,7 +637,7 @@ class A2AAgent:
         if "LITELLM_API_KEY" not in resolved_env and "LITELLM_API_KEY" not in self.default_env_vars:
             url = resolved_env.get("LITELLM_BASE_URL") or self.default_env_vars.get("LITELLM_BASE_URL")
             if url and not config.is_model_endpoint(url):
-                raise ConfigError(f"Agent {self.id!r}: {no_key_for(url)}")
+                raise ConfigError(f"Agent {self.id!r}: {no_key_for(url, AGENT_KEY_HOW)}")
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()

@@ -351,7 +351,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         for url_name, key_name in (("LITELLM_BASE_URL", "LITELLM_API_KEY"), ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")):
             url = given.get(url_name)
             if url and key_name not in given and not get_config().is_model_endpoint(url):
-                return f"{url_name}: {no_key_for(url)}"
+                return f"{url_name}: {no_key_for(url, f'{key_name} in the env_vars of the step or its step_params')}"
         return None
 
     def _merged_env(self, config, sandbox_type: Optional[str], extra_env: dict[str, str]) -> dict[str, str]:
