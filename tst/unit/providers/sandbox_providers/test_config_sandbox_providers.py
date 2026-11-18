@@ -14,6 +14,7 @@ from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSa
 from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
+from agent_env.providers.sandbox_providers.kosa8.provider import Kosa8SandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
@@ -358,6 +359,33 @@ def test_boxd_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
         build_sandbox_provider("boxd")
+
+
+def test_kosa8_builtin_receives_interpolated_key_and_region(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.kosa8.config]
+        api_key = "env:KOSA8_TEST_API_KEY"
+        region = "eu"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("KOSA8_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("kosa8")
+
+    assert isinstance(provider, Kosa8SandboxProvider)
+    assert provider._api._api_key == "resolved-test-key"
+    assert provider._region == "eu"
+
+
+def test_kosa8_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.kosa8.config]
+        region = "eu"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("kosa8")
 
 
 def test_coreweave_builtin_receives_an_interpolated_key(monkeypatch, tmp_path):

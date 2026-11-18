@@ -35,8 +35,9 @@ turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the res
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
 
 The image follows a task env's clock the way a computer does (FD-5916): it runs the computer base's clock follower
-and egress proxy, copied into `clock/` and `egress/` until the clock library image (FD-5700) ships them, each as its own
-user under root's supervisord (`start-agent`, `root.conf`), with agent-env's libfaketime preloaded for the agent's user.
+and egress proxy, taken from `utils/faketime_clock` and `utils/egress_proxy` through its `shared_sources.toml`, each as
+its own user under root's supervisord (`start-agent`, `root.conf`), with agent-env's libfaketime preloaded for the
+agent's user.
 The A2A server starts with the real-time marker, so it and its records stay on real time, and serves clock/v1's
 `sync_time`, which the protocol's framework serves on the card of any agent in an image with the follower
 (`agentenv_protocol.a2a_agent.clock`). Once `sync_env_clock` has armed the clock, it declares the agent at the gateway
