@@ -26,7 +26,8 @@ def _copied() -> list[str]:
 def test_every_file_the_image_copies_is_in_the_folder():
     copied = _copied()
 
-    assert copied and all((AGENT_DIR / name).is_file() for name in copied), copied
+    assert copied and all((AGENT_DIR / name).is_file() or (name.endswith("/") and (AGENT_DIR / name).is_dir())
+                          for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
     assert {"a2a_server.py", "codex_bridge.py", "codex_config.py", "codex_kit.py", "entrypoint.sh", "install.sh",
             "run.sh", "package.json", "package-lock.json"} <= set(copied)
@@ -54,7 +55,7 @@ def test_the_requirements_are_the_protocol_floor_the_config_writer_and_the_ca_bu
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.351", "tomli-w==1.2.0", "certifi"]
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.575", "tomli-w==1.2.0", "certifi"]
 
 
 def test_the_image_gives_the_models_python_the_document_libraries():
@@ -98,5 +99,5 @@ def test_tls_checks_stay_on():
 
 
 def test_the_image_starts_through_cmd_which_modal_passes_its_env_to():
-    assert 'CMD ["/opt/agent/entrypoint.sh"]' in DOCKERFILE
+    assert 'CMD ["/usr/local/bin/start-agent"]' in DOCKERFILE
     assert not re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE)
