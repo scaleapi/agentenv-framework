@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .models import Trajectory
 from .profile import (
@@ -35,6 +35,7 @@ MEDIA_PATH = re.compile(r"^media/(?P<sha256>[0-9a-f]{64})\.[A-Za-z0-9]+$")
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$")
 _COUNTS = (("prompt_tokens", "total_prompt_tokens"), ("completion_tokens", "total_completion_tokens"),
            ("cached_tokens", "total_cached_tokens"))
+_INT = TypeAdapter(int)
 #: A profile field that holds a nested profile object, by its owner and name.
 _NESTED: dict[tuple[str, str], type[BaseModel]] = {
     ("Trajectory", "adapter"): AdapterRef, ("Step", "error"): StepError,
@@ -208,10 +209,19 @@ def validate_live(pages: Sequence[Mapping[str, Any] | None], final: Mapping[str,
 
 # What the document holds
 
-def _trajectories(document: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
-    yield "", document
+def _trajectories(document: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, Mapping[str, Any]]]:
+    """The document and every sub-agent embedded in it, at any depth, with the path prefix of each."""
+    yield prefix, document
     for index, sub in enumerate(document.get("subagent_trajectories") or []):
-        yield f"subagent_trajectories[{index}].", sub
+        yield from _trajectories(sub, f"{prefix}subagent_trajectories[{index}].")
+
+
+def _count(value: Any) -> int | None:
+    """A token count as ATIF's models read it, a numeric string included, or None when there is none."""
+    try:
+        return None if value is None else _INT.validate_python(value)
+    except ValidationError:
+        return None
 
 
 def _steps(document: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
@@ -310,25 +320,41 @@ def _outside_keys(objects: list[tuple[str, str, Mapping[str, Any]]], found: _Fin
                           f"the profile names no key outside extra.{PROFILE_KEY} here")
 
 
+def _scopes(document: Mapping[str, Any], prefix: str = "", outer: frozenset = frozenset()) -> dict[str, frozenset]:
+    """The sub-agent ids a reference in each trajectory may name: those embedded in it or in a trajectory around it,
+    since the builder embeds every sub-agent in the root while ATIF also lets a sub-agent embed its own."""
+    scope = outer | {sub.get("trajectory_id") for sub in document.get("subagent_trajectories") or []}
+    scopes = {prefix: scope}
+    for index, sub in enumerate(document.get("subagent_trajectories") or []):
+        scopes.update(_scopes(sub, f"{prefix}subagent_trajectories[{index}].", scope))
+    return scopes
+
+
 def _calls_and_references(document: Mapping[str, Any], found: _Findings) -> None:
-    embedded = {sub.get("trajectory_id") for sub in document.get("subagent_trajectories") or []}
+    scopes = _scopes(document)
     seen: dict[str, str] = {}
-    for where, step in _steps(document):
-        for n, call in enumerate(step.get("tool_calls") or []):
-            call_id = call.get("tool_call_id")
-            if call_id in seen:
-                found.add("call-id", f"{where}.tool_calls[{n}]", f"{call_id!r} is also the id at {seen[call_id]}")
-            else:
-                seen[call_id] = f"{where}.tool_calls[{n}]"
-        for n, result in enumerate(_results(step)):
-            for m, ref in enumerate(result.get("subagent_trajectory_ref") or []):
-                at = f"{where}.observation.results[{n}].subagent_trajectory_ref[{m}]"
-                trajectory_id = ref.get("trajectory_id")
-                if trajectory_id is None:
-                    if not found.reader:
-                        found.add("reference", at, "names no embedded sub-agent: the profile embeds every sub-agent")
-                elif trajectory_id not in embedded:
-                    found.add("reference", at, f"no embedded sub-agent has trajectory_id {trajectory_id!r}")
+    for prefix, trajectory in _trajectories(document):
+        for index, step in enumerate(trajectory.get("steps") or []):
+            _step_calls(f"{prefix}steps[{index}]", step, scopes[prefix], seen, found)
+
+
+def _step_calls(where: str, step: Mapping[str, Any], embedded: frozenset, seen: dict[str, str],
+                found: _Findings) -> None:
+    for n, call in enumerate(step.get("tool_calls") or []):
+        call_id = call.get("tool_call_id")
+        if call_id in seen:
+            found.add("call-id", f"{where}.tool_calls[{n}]", f"{call_id!r} is also the id at {seen[call_id]}")
+        else:
+            seen[call_id] = f"{where}.tool_calls[{n}]"
+    for n, result in enumerate(_results(step)):
+        for m, ref in enumerate(result.get("subagent_trajectory_ref") or []):
+            at = f"{where}.observation.results[{n}].subagent_trajectory_ref[{m}]"
+            trajectory_id = ref.get("trajectory_id")
+            if trajectory_id is None:
+                if not found.reader:
+                    found.add("reference", at, "names no embedded sub-agent: the profile embeds every sub-agent")
+            elif trajectory_id not in embedded:
+                found.add("reference", at, f"no embedded sub-agent has trajectory_id {trajectory_id!r}")
 
 
 def _totals(document: Mapping[str, Any], found: _Findings) -> None:
@@ -338,35 +364,32 @@ def _totals(document: Mapping[str, Any], found: _Findings) -> None:
     model_steps = [step.get("metrics") or {} for _, trajectory in _trajectories(document)
                    for step in trajectory.get("steps") or []
                    if step.get("source") == "agent" and step.get("llm_call_count") != 0]
-    for count, total in _COUNTS:
-        if isinstance(totals.get(total), int) and all(isinstance(m.get(count), int) for m in model_steps):
-            expected = sum(metrics[count] for metrics in model_steps)
-            if totals[total] != expected:
-                found.add("totals", f"final_metrics.{total}",
-                          f"is {totals[total]}, but its model steps sum to {expected}")
-    writes = profile_of(totals).get("total_cache_write_tokens")
-    step_writes = [profile_of(metrics).get("cache_write_tokens") for metrics in model_steps]
-    if writes is not None and all(isinstance(w, int) for w in step_writes):
-        if writes != sum(step_writes):
-            found.add("totals", f"final_metrics.extra.{PROFILE_KEY}.total_cache_write_tokens",
-                      f"is {writes}, but its model steps sum to {sum(step_writes)}")
+    sums = [(f"final_metrics.{total}", _count(totals.get(total)), [_count(m.get(count)) for m in model_steps])
+            for count, total in _COUNTS]
+    sums.append((f"final_metrics.extra.{PROFILE_KEY}.total_cache_write_tokens",
+                 _count(profile_of(totals).get("total_cache_write_tokens")),
+                 [_count(profile_of(m).get("cache_write_tokens")) for m in model_steps]))
+    for where, total, counts in sums:
+        if total is not None and None not in counts and total != sum(counts):
+            found.add("totals", where, f"is {total}, but its model steps sum to {sum(counts)}")
     steps = len(document.get("steps") or [])
-    if totals.get("total_steps") is not None and totals["total_steps"] != steps and not document.get("notes"):
+    total_steps = _count(totals.get("total_steps"))
+    if total_steps is not None and total_steps != steps and not document.get("notes"):
         found.add("total-steps", "final_metrics.total_steps",
-                  f"is {totals['total_steps']}, but the root has {steps} steps and its notes don't say why")
+                  f"is {total_steps}, but the root has {steps} steps and its notes don't say why")
 
 
 def _usage(document: Mapping[str, Any], found: _Findings) -> None:
     for where, step in _steps(document):
         metrics = step.get("metrics") or {}
-        if metrics.get("prompt_tokens") is None:
+        prompt = _count(metrics.get("prompt_tokens"))
+        if prompt is None:
             continue
-        writes = profile_of(metrics).get("cache_write_tokens") or 0
-        cache = (metrics.get("cached_tokens") or 0) + (writes if isinstance(writes, int) else 0)
-        if cache > metrics["prompt_tokens"]:
+        writes = _count(profile_of(metrics).get("cache_write_tokens"))
+        cache = (_count(metrics.get("cached_tokens")) or 0) + (writes or 0)
+        if cache > prompt:
             found.add("usage", f"{where}.metrics",
-                      f"cache reads and writes ({cache}) exceed prompt_tokens ({metrics['prompt_tokens']}), "
-                      "which include them")
+                      f"cache reads and writes ({cache}) exceed prompt_tokens ({prompt}), which include them")
 
 
 def _media(document: Mapping[str, Any], found: _Findings, media: Path | Mapping[str, bytes] | None) -> None:
@@ -444,8 +467,8 @@ def _unanswered(page: Mapping[str, Any], found: _Findings) -> None:
             ended_steps.update(range(offset, offset + len(task.steps)))
         offset += len(task.steps)
     spawner: dict[Any, tuple[Any, int]] = {}
-    for _, trajectory in _trajectories(page):
-        owner = trajectory.get("trajectory_id") if trajectory is not page else None
+    for prefix, trajectory in _trajectories(page):
+        owner = trajectory.get("trajectory_id") if prefix else None
         for index, step in enumerate(trajectory.get("steps") or []):
             for result in _results(step):
                 for ref in result.get("subagent_trajectory_ref") or []:

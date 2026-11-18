@@ -156,6 +156,42 @@ def test_totals_sum_the_sub_agents_steps_and_skip_a_count_a_step_lacks():
     assert "totals" not in _rules(validate(document))
 
 
+def test_a_count_given_as_a_numeric_string_is_read_as_the_models_read_it():
+    document = _fixture("coding")
+    metrics = document["steps"][1]["metrics"]
+    metrics["prompt_tokens"] = str(metrics["prompt_tokens"])
+    assert _rules(validate(document)) == {"harbor-save"}
+    metrics["cached_tokens"] = str(int(metrics["prompt_tokens"]) + 1)
+    assert "usage" in _rules(errors(validate(document)))
+
+
+def test_a_sub_agent_embedded_in_a_sub_agent_is_checked_at_its_full_path():
+    document = _fixture("subagent")
+    sub = document["subagent_trajectories"][0]
+    nested = copy.deepcopy(sub)
+    nested["trajectory_id"] = "deeper"
+    for step in nested["steps"]:
+        for call in step.get("tool_calls") or []:
+            call["tool_call_id"] += "-deeper"
+        for result in (step.get("observation") or {}).get("results", []):
+            result["source_call_id"] += "-deeper"
+    nested["steps"][0].setdefault("extra", {}).setdefault("agentenv", {})["turn"] = "zero"
+    sub["subagent_trajectories"] = [nested]
+    assert ("profile", "subagent_trajectories[0].subagent_trajectories[0].steps[0].extra.agentenv.turn") in {
+        (f.rule, f.where) for f in errors(validate(document))}
+
+
+def test_a_reference_resolves_to_a_sub_agent_embedded_around_it():
+    document = _fixture("subagent")
+    sub = document["subagent_trajectories"][0]
+    step = next(s for s in sub["steps"] if s.get("tool_calls"))
+    result = next(r for r in step["observation"]["results"])
+    result["subagent_trajectory_ref"] = [{"trajectory_id": sub["trajectory_id"]}]
+    assert "reference" not in _rules(validate(document))
+    result["subagent_trajectory_ref"] = [{"trajectory_id": "nobody"}]
+    assert "reference" in _rules(errors(validate(document)))
+
+
 def _open_page(name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     """A case's final document and a page served while its task ran, with two closed steps."""
     document, pages, media = build(name)

@@ -43,10 +43,12 @@ class KitResult:
 
 def check_adapter(adapter: type[Adapter], recorded: Sequence[RecordedTask], *,
                   expected: Mapping[str, Any] | Path | None = None,
-                  from_atif: Sequence[Mapping[str, Any]] | None = None) -> KitResult:
+                  from_atif: Sequence[Mapping[str, Any]] | None = None,
+                  media: Mapping[str, bytes] | None = None) -> KitResult:
     """Run ``adapter`` over ``recorded``, one A2A context's tasks in order, and check it. ``expected`` is the document
     the run should write, or the file holding it. ``from_atif`` are the documents its ``from_atif`` is tried on; by
-    default, the run's own document with the profile stripped."""
+    default, the run's own document with the profile stripped. ``media`` holds, by path, the files of any Media in the
+    recorded tasks' inbound or final content; the adapter's own media come from the run."""
     run = AdapterRun(adapter)
     result = KitResult(document=None)
     where = ""
@@ -69,7 +71,7 @@ def check_adapter(adapter: type[Adapter], recorded: Sequence[RecordedTask], *,
         result.findings.append(Finding("kit-run", ERROR, where, f"{type(exc).__name__}: {exc}"))
         return result
     result.document = run.document()
-    result.media = run.media_files
+    result.media = {**(media or {}), **run.media_files}
     if result.document is None:
         result.findings.append(Finding("kit-run", ERROR, "", "the run wrote no step"))
         return result
