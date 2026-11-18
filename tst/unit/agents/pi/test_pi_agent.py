@@ -740,7 +740,10 @@ def test_install_extension_is_declared_on_the_card(client: TestClient) -> None:
                                 litellm_base_url="u") for command in install["install_commands"]]
     assert formatted[-1].endswith("c sh /opt/pi-a2a/start.sh")
     assert all("sk-secret" not in command.splitlines()[0] for command in formatted)
-    assert "LITELLM_API_KEY='sk-secret'" in formatted[-2].splitlines()
+    [env_file] = [command for command in formatted if "LITELLM_API_KEY" in command]
+    assert "LITELLM_API_KEY='sk-secret'" in env_file.splitlines()
+    assert install["optional_params"] == ["control_token"]
+    assert formatted[-2].splitlines()[1] == "AGENTENV_CONTROL_TOKEN=${AGENTENV_CONTROL_TOKEN:-}"
     assert all(command.startswith("$(sudo -n true 2>/dev/null && echo sudo) docker ") for command in formatted)
 
 

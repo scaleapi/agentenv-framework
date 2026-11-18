@@ -105,12 +105,12 @@ def _with_agent(state, steps):
         asyncio.run(run())
 
 
-async def _deployed(context) -> str:
+async def _deployed(context) -> tuple[str, dict[str, str]]:
     await DeployAgentTaskStep(id="agent", version=None, sandbox_type="local", a2a_agent_id=AGENT).execute(context)
     (agent,) = context.deployed_agents
     base_url = agent.a2a_url or agent.api_url
-    await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL})
-    return base_url
+    await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL}, headers=agent.control_headers)
+    return base_url, agent.control_headers
 
 
 async def _send(base_url: str, context_id: str, text: str) -> dict:
@@ -187,7 +187,7 @@ def test_a_context_continues_its_conversation_which_holds_neither_the_key_nor_th
     endpoint.respond = answer("pong")
 
     async def steps(context):
-        base_url = await _deployed(context)
+        base_url, headers = await _deployed(context)
         endpoint.respond = respond
         outcomes["first"] = await _send(base_url, "ctx", "Say pong.")
         outcomes["second"] = await _send(base_url, "ctx", "Look at your saved conversation.")
@@ -228,13 +228,13 @@ def test_a_run_past_its_timeout_mid_command_leaves_no_process_behind(state, endp
     endpoint.respond = answer("pong")
 
     async def steps(context):
-        base_url = await _deployed(context)
+        base_url, headers = await _deployed(context)
         endpoint.respond = respond
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 5})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 5}, headers=headers)
         started = time.monotonic()
         outcomes["timed_out"] = await _send(base_url, "ctx", "Sleep.")
         outcomes["seconds"] = time.monotonic() - started
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 120})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 120}, headers=headers)
         outcomes["after"] = await _send(base_url, "ctx", "List the processes.")
 
     _with_agent(state, steps)

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
+from agentenv_protocol.types import CONTROL_TOKEN_ENV
 
 from agent_env.config import get_config
 from agent_env.config.model import MODEL_HEADERS_ENV
@@ -541,6 +542,9 @@ class A2AAgent:
             resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
+        # Last, so no caller's env var stands in for it: the agent's extension routes take it from here on.
+        control_token = new_control_token()
+        merged_env[CONTROL_TOKEN_ENV] = control_token
         image = self.docker_image_artifact
         image_name = image.image_name
         if provider is None:
@@ -600,7 +604,7 @@ class A2AAgent:
                 a2a_url=a2a_url, sandbox_id=self._sandbox.sandbox_id,
                 agent_card=agent_card, sandbox_type=self._sandbox.type,
                 network_policy=self._sandbox.network_policy.to_dict() if self._sandbox.network_policy else None,
-                control_token=new_control_token(),
+                control_token=control_token,
             )
             from agent_env.a2a_agent.store import get_a2a_agent_instance_store
             deployed = get_a2a_agent_instance_store().create_instance(deployed, ttl_seconds)

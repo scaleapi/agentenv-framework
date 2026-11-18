@@ -1398,6 +1398,31 @@ next `await`. A process `run()` started keeps running unless `run()` stops it,
 so kill it before re-raising. Trajectory events it appended, including any it
 appends while cleaning up, are kept, and its log ends `canceled`.
 
+#### The control token
+
+agent-env deploys each agent with a token of its own in `AGENTENV_CONTROL_TOKEN`
+(`CONTROL_TOKEN_ENV`), and sends it on every call to the agent's extension routes
+in the `AgentEnv-Control-Token` header (`CONTROL_TOKEN_HEADER`;
+`client.control_token_headers(token)`), never in `Authorization`, which a front
+door may claim. When the application starts serving, under `serve()` or any ASGI
+server that runs its lifespan, it takes the token out of the environment, so the
+CLIs and tools the agent runs never inherit it, and from then on every extension
+operation refuses a call without it with a 401, before its body is read, and logs
+the refusal. `/a2a`, the card, `/health`, staging and the peer-agents MCP endpoint
+stay open. An agent deployed without a token, or an application that isn't served,
+answers anyone, as before.
+
+An agent that serves its `/ext/*` routes by hand adds `ControlTokenMiddleware`
+(`Middleware(ControlTokenMiddleware)`), which takes the token the same way and
+guards every `/ext/` path but staging and the peer-agents MCP endpoint.
+
+An agent installed into a running container (`install/v1`) gets its token when its
+declaration lists it in `optional_params` (`optional_params_host` for a host
+install): the installer exports it to every install command as
+`AGENTENV_CONTROL_TOKEN`, and the agent's install writes it where the agent's
+server reads its environment. An optional param is never a `{placeholder}`, so an
+installer that doesn't know it still installs the agent, without a token.
+
 #### Live trajectories
 
 A runtime that sees its native events as they happen appends each complete
