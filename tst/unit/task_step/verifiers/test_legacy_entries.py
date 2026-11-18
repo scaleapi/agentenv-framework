@@ -1,6 +1,7 @@
-"""run_container_unit_tests_verifier, verify_sandbox, env_outcome_verifier and aggregate_verifiers write the legacy
-``verifications`` entry they wrote before the VerifierTaskStep base, byte for byte with its key order, and raise what
-they raised: ``recorded/legacy_entries.json`` was recorded from main at 25b862bc6, object urls under ``<objects>/``."""
+"""run_container_unit_tests_verifier, verify_sandbox, env_outcome_verifier and aggregate_verifiers on the
+VerifierTaskStep base write the legacy ``verifications`` entry they wrote before it, byte for byte with its key order,
+and raise what they raised (``recorded/legacy_entries.json``, recorded from main at 25b862bc6, object urls under
+``<objects>/``), but for ``CHANGED``; and each writes its named grade beside it."""
 import asyncio
 import itertools
 import json
@@ -13,6 +14,7 @@ import pytest
 
 import agent_env.providers.sandbox_providers.sandbox_provider as sandbox_provider
 from agent_env.artifact import FileArtifact
+from agent_env.cli.task.run import _format_verifier_output
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
@@ -28,6 +30,11 @@ from tst.unit.computer_home import Computer
 RECORDED = json.loads((Path(__file__).parent / "recorded" / "legacy_entries.json").read_text())
 REWARD = "/logs/verifier/reward.txt"
 SCENARIOS = {}
+# What the base changes on purpose: an aggregate's entry has its (empty) results, and a script that returns None is
+# told so rather than by a log line's len().
+CHANGED_RAISES = {
+    "outcome_returns_none": "TypeError: verify() in artifact 's' returned None, not a list of criterion rows",
+}
 
 
 def scenario(fn):
@@ -468,11 +475,144 @@ def aggregate_missing_a_source(monkeypatch, tmp_path):
     return _aggregate(["fs", "gone"]), _sources()
 
 
+def _expected(name, step) -> tuple[str | None, dict | None]:
+    entry = RECORDED[name]["entry"]
+    if step.type == "aggregate_verifiers" and entry is not None:
+        entry = {"results": [], **entry}
+    return CHANGED_RAISES.get(name, RECORDED[name]["raised"]), entry
+
+
 @pytest.mark.parametrize("name", list(SCENARIOS))
 def test_each_path_writes_the_entry_and_raises_what_it_did_before_the_base(name, local_stores, monkeypatch, tmp_path):
     step, context = SCENARIOS[name](monkeypatch, tmp_path)
+    expected_raise, expected_entry = _expected(name, step)
 
     raised, entry = outcome(step, context)
 
-    assert raised == RECORDED[name]["raised"]
-    assert entry == json.dumps(RECORDED[name]["entry"])
+    assert raised == expected_raise
+    assert entry == json.dumps(expected_entry)
+
+
+@pytest.mark.parametrize("name", list(SCENARIOS))
+def test_each_path_writes_its_named_grade(name, local_stores, monkeypatch, tmp_path):
+    step, context = SCENARIOS[name](monkeypatch, tmp_path)
+    raised, entry = outcome(step, context)
+    entry = json.loads(entry)
+
+    grade = context.metadata["grades"][step.id]
+
+    assert (grade["name"], grade["verifier_type"]) == (step.id, step.type)
+    status = (grade["verifier_status"], grade["score"], grade["passed"])
+    if entry is None:
+        assert status == ("failed", None, False) and grade["verifier_error_reasoning"] == raised
+    elif entry.get("timed_out"):
+        assert status == ("failed", None, False)
+        assert grade["verifier_error_reasoning"] == raised.removeprefix("RuntimeError: ")
+    else:
+        score = float(entry["score"])
+        assert status == ("graded", score, score >= 1.0) and grade["verifier_error_reasoning"] is None
+        assert len(grade["verifier_criteria"]) == max(len(entry["results"] or []), 1)
+    assert "settings_error" not in grade["verifier_settings"]
+
+
+def test_a_test_runs_output_is_the_grades_and_a_large_one_goes_to_the_object_store(local_stores, monkeypatch,
+                                                                                  tmp_path):
+    for name, inline in (("passing_tests", True), ("result_file_over_the_inline_limit", False)):
+        step, context = SCENARIOS[name](monkeypatch, tmp_path)
+        outcome(step, context)
+        entry, grade = context.metadata["verifications"][step.verifier_id], context.metadata["grades"][step.id]
+
+        output = {key: value for key, value in entry.items() if key not in ("results", "score")}
+        if inline:
+            assert grade["verifier_output"] == output
+        else:
+            ref = grade["verifier_output_ref"]
+            assert grade["verifier_output"] is None and ref["bytes"] == len(json.dumps(output))
+            assert json.loads(get_config().get_object_store().get(ref["object_url"])) == output
+
+
+def test_a_test_runs_settings_name_its_env_vars_and_hold_the_runs_command_but_no_value(local_stores, monkeypatch,
+                                                                                       tmp_path):
+    step, context = step_params_and_seed(monkeypatch, tmp_path)
+    outcome(step, context)
+
+    grade = context.metadata["grades"]["tests"]
+
+    assert grade["verifier_settings"] == {
+        "scoring_rules": 1, "sandbox_name": "h", "container_name": "c", "env_id": None, "command": "pytest -k <case>",
+        "setup_commands": [], "timeout_sec": 300, "env_vars": ["STORED", "TOKEN"], "result_paths": [],
+        "reward_path": None, "score_aggregator": "all_pass", "overridden": ["command", "env_vars"],
+    }
+    assert "s3cret" not in json.dumps(grade)
+
+
+def test_a_test_run_refused_for_an_env_var_name_still_records_its_settings(local_stores, monkeypatch, tmp_path):
+    step, context = env_var_override_not_a_posix_name(monkeypatch, tmp_path)
+    outcome(step, context)
+
+    settings = context.metadata["grades"]["tests"]["verifier_settings"]
+
+    assert settings["env_vars"] == ["A B"] and settings["overridden"] == ["env_vars"]
+    assert settings["command"] == "bash /tests/test.sh"
+
+
+def test_a_probe_row_the_step_skips_is_skipped_on_its_grade_and_left_out_of_its_score(local_stores, monkeypatch,
+                                                                                     tmp_path):
+    step, context = probes_pass_beside_a_row_they_skip(monkeypatch, tmp_path)
+    outcome(step, context)
+
+    grade = context.metadata["grades"]["fs"]
+
+    assert [(row["id"], row["passed"], row["skipped"]) for row in grade["verifier_criteria"]] == [
+        ("0", True, False), ("1", True, False), ("chk", True, False), ("3", False, True), ("4", True, False)]
+    assert grade["score"] == 1.0
+
+
+def test_an_aggregate_grade_is_one_row_for_itself_at_its_weighted_average(local_stores, monkeypatch, tmp_path):
+    step, context = aggregate_two_sources(monkeypatch, tmp_path)
+    outcome(step, context)
+
+    grade = context.metadata["grades"]["final"]
+
+    assert grade["verifier_criteria"] == [{"id": "final", "score": 0.25, "passed": False, "weight": 1.0,
+                                           "skipped": False}]
+    assert grade["verifier_output"] == {"source_verifier_ids": ["fs", "judge"]}
+    assert grade["verifier_settings"] == {"scoring_rules": 1, "verifier_ids": ["fs", "judge"],
+                                          "score_aggregator": "weighted_average"}
+
+
+def test_task_run_prints_an_aggregates_score_without_an_empty_results_block(local_stores, monkeypatch, tmp_path):
+    step, context = aggregate_two_sources(monkeypatch, tmp_path)
+    outcome(step, context)
+
+    assert _format_verifier_output("final-vid", context.metadata["verifications"]["final-vid"]) == [
+        "score (verifier_id=final-vid): 0.25"]
+    assert _format_verifier_output("fs", context.metadata["verifications"]["fs"])[0] == "verification (verifier_id=fs):"
+
+
+STORED = [  # each step as main stored it
+    (RunContainer(id="tests", version=None, sandbox_name="h", container_name="c", command="bash t.sh",
+                  reward_path="/r.txt", env_vars={"A": "1"}),
+     {"id": "tests", "type": "run_container_unit_tests_verifier", "version": None, "fail_task_on_error": True,
+      "sandbox_name": "h", "container_name": "c", "env_id": None, "command": "bash t.sh", "verifier_id": "tests",
+      "setup_commands": [], "timeout_sec": 300, "env_vars": {"A": "1"}, "result_paths": ["/r.txt"],
+      "reward_path": "/r.txt"}),
+    (VerifySandboxTaskStep(id="fs", version=None, verifier_id="v1", criteria=[]),
+     {"id": "fs", "type": "verify_sandbox", "version": None, "fail_task_on_error": True, "criteria": [],
+      "agent_name": "default-agent", "base_dir": "/app", "shell_timeout_seconds": 120, "score_aggregator": "all_pass",
+      "verifier_id": "v1"}),
+    (EnvOutcomeVerifierTaskStep(id="outcome", version=None, env_id="e", file_artifact_id="s", file_artifact_version=2,
+                                verifier_id="outcome", prompt_id="p"),
+     {"id": "outcome", "type": "env_outcome_verifier", "version": None, "fail_task_on_error": True,
+      "verifier_id": "outcome", "env_id": "e", "file_artifact_id": "s", "file_artifact_version": 2,
+      "score_aggregator": "all_pass", "prompt_id": "p"}),
+    (AggregateVerifiersTaskStep(id="final", version=None, verifier_ids=["a", "b"], verifier_id="final-score"),
+     {"id": "final", "type": "aggregate_verifiers", "version": None, "fail_task_on_error": True,
+      "verifier_ids": ["a", "b"], "score_aggregator": "weighted_average", "verifier_id": "final-score"}),
+]
+
+
+@pytest.mark.parametrize("step, stored", STORED, ids=[stored["type"] for _, stored in STORED])
+def test_each_verifiers_stored_form_is_unchanged(step, stored):
+    assert step.to_dict() == stored
+    assert type(step).from_dict(stored).to_dict() == stored
