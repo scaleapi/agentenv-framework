@@ -3040,11 +3040,12 @@ class _GuardedAgent(AgentEnvAgent):
 
 
 def test_a_served_agent_takes_its_control_token_out_of_the_environment_and_its_routes_refuse_calls_without_it(
-    monkeypatch,
+    monkeypatch, caplog,
 ) -> None:
     monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
 
-    with TestClient(_GuardedAgent().create_app()) as agent:
+    with caplog.at_level("INFO", logger="agentenv_protocol.a2a_agent.control_token"), \
+            TestClient(_GuardedAgent().create_app()) as agent:
         left_in_environment = CONTROL_TOKEN_ENV in os.environ
         refused = [
             agent.get("/ext/mcp-config", headers=headers).status_code
@@ -3054,21 +3055,24 @@ def test_a_served_agent_takes_its_control_token_out_of_the_environment_and_its_r
         answered = agent.get("/ext/mcp-config", headers=protocol_client.control_token_headers("s3cret"))
         still_open = [agent.get(path).status_code for path in ("/health", "/.well-known/agent.json")]
 
-    assert not left_in_environment
+    assert not left_in_environment and "the extension routes take the agent's control token" in caplog.text
+    assert "s3cret" not in caplog.text
     assert refused == [401, 401, 401] and "AgentEnv-Control-Token" in detail
     assert answered.status_code == 200 and answered.json() == {"mcp_servers": {}}
     assert still_open == [200, 200]
 
 
-def test_an_agent_with_no_token_or_not_served_keeps_its_routes_open(monkeypatch) -> None:
+def test_an_agent_with_no_token_or_not_served_keeps_its_routes_open(monkeypatch, caplog) -> None:
     monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
     unserved = TestClient(_GuardedAgent().create_app()).get("/ext/mcp-config").status_code
     monkeypatch.delenv(CONTROL_TOKEN_ENV)
 
-    with TestClient(_GuardedAgent().create_app()) as agent:
+    with caplog.at_level("INFO", logger="agentenv_protocol.a2a_agent.control_token"), \
+            TestClient(_GuardedAgent().create_app()) as agent:
         tokenless = agent.get("/ext/mcp-config").status_code
 
     assert unserved == tokenless == 200
+    assert f"no {CONTROL_TOKEN_ENV}: the extension routes are open" in caplog.text
 
 
 def test_the_middleware_guards_a_hand_served_agents_extension_routes_where_its_app_is_mounted_but_staging_and_the_peer_tools(

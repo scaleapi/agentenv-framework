@@ -35,6 +35,15 @@ def carries_control_token(headers: Mapping[str, str], token: str | None) -> bool
     return hmac.compare_digest(headers.get(CONTROL_TOKEN_HEADER, "").encode(), token.encode())
 
 
+def log_guard(token: str | None) -> None:
+    """Say, as serving starts, whether the extension routes take a token: an agent deployed without one serves them
+    open, which is otherwise silent."""
+    if token is None:
+        logger.info("no %s: the extension routes are open", CONTROL_TOKEN_ENV)
+    else:
+        logger.info("the extension routes take the agent's control token (%s)", CONTROL_TOKEN_HEADER)
+
+
 def log_refusal(method: str, path: str, client: str | None) -> None:
     logger.warning("refused %s %s from %s: no valid %s", method, path, client or "unknown", CONTROL_TOKEN_HEADER)
 
@@ -47,6 +56,7 @@ class ControlTokenMiddleware:
     def __init__(self, app: ASGIApp, *, token: str | None = None) -> None:
         self.app = app
         self.token = token or take_control_token()
+        log_guard(self.token)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and _guarded(_route_path(scope)):

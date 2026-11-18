@@ -64,7 +64,7 @@ from .extensions import (
 )
 from ..computer.errors import ComputerError
 from . import clock as agent_clock
-from .control_token import REFUSAL, carries_control_token, log_refusal, take_control_token
+from .control_token import REFUSAL, carries_control_token, log_guard, log_refusal, take_control_token
 from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
 from .registry import RegisteredOperation, build_registry
 from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
@@ -989,6 +989,7 @@ def _taking_the_control_token(
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[Any]:
         application.control_token = take_control_token() or application.control_token
+        log_guard(application.control_token)
         if inner is None:
             yield None
         else:
