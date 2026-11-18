@@ -44,7 +44,7 @@ from pathlib import Path
 
 REGISTRY = "ghcr.io/scaleapi"
 REPO = Path(__file__).resolve().parents[2]
-# What an image's image_kits.toml names is under here, as agent_env.utils.paths.SOURCES is.
+# What an image's shared_sources.toml names is under here, as agent_env.utils.paths.SOURCES is.
 SOURCES = REPO / "src" / "agent_env"
 # Each image agent-env ships, by name, and the Dockerfile it's built from, with its folder as the context.
 IMAGES = {
@@ -232,7 +232,7 @@ def _build(entry: str, arch: str) -> int:
             build_args += ["--build-arg", f"{arg}={value}"]
     with tempfile.TemporaryDirectory(prefix="agentenv-context-") as staged:
         context, dockerfile = image["context"], image["dockerfile"]
-        if (Path(context) / "image_kits.toml").is_file():
+        if (Path(context) / "shared_sources.toml").is_file():
             context = _staged(image["context"], staged)
             dockerfile = os.path.join(context, os.path.relpath(image["dockerfile"], image["context"]))
         command = ["docker", "build", "--platform", target, "--provenance=false", "-f", dockerfile,
@@ -244,10 +244,10 @@ def _build(entry: str, arch: str) -> int:
 
 
 def _staged(context: str, staged: str) -> str:
-    """``context`` copied into ``staged`` with what its ``image_kits.toml`` takes from agent-env's sources, each at the
-    name it gives, as agent-env's build contexts send it (``agent_env.utils.docker.context``)."""
+    """``context`` copied into ``staged`` with what its ``shared_sources.toml`` takes from agent-env's sources, each at
+    the name it gives, as agent-env's build contexts send it (``agent_env.utils.docker.context``)."""
     shutil.copytree(context, staged, dirs_exist_ok=True)
-    declared = Path(context) / "image_kits.toml"
+    declared = Path(context) / "shared_sources.toml"
     for name, source in (tomllib.loads(declared.read_text()) if declared.is_file() else {}).items():
         path = SOURCES / source
         if path.is_dir():

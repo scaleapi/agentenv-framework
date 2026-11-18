@@ -1,5 +1,5 @@
-"""The file an image's build context sends under a name, its own or one its ``image_kits.toml`` takes from agent-env's
-sources: what a test of a shipped image reads, as its build reads it."""
+"""The file an image's build context sends under a name, its own or one its ``shared_sources.toml`` takes from
+agent-env's sources: what a test of a shipped image reads, as its build reads it."""
 
 from pathlib import Path
 

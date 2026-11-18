@@ -1,5 +1,5 @@
-"""The ubuntu-24.04-browser base on the universe clock: through its image_kits.toml it takes the clock library and the
-egress proxy from utils, as ubuntu-24.04 does, and ubuntu-24.04's root start and root's supervisord, so a change
+"""The ubuntu-24.04-browser base on the universe clock: through its shared_sources.toml it takes the clock library and
+the egress proxy from utils, as ubuntu-24.04 does, and ubuntu-24.04's root start and root's supervisord, so a change
 to any lands in both; it starts as root,
 its init the root start; the egress proxy listens where the variable its site proxies read names, which the base sets
 to an address the stand-in site proxy doesn't hold; the stand-in keeps real time; and X has no screensaver or DPMS,
@@ -50,9 +50,10 @@ def _conf(name: str) -> configparser.ConfigParser:
     (BROWSER, "clock", SOURCES / "utils" / "faketime_clock"), (BROWSER, "egress", SOURCES / "utils" / "egress_proxy"),
     (BROWSER, "root", DESKTOP / "root"), (BROWSER, "root.conf", DESKTOP / "root.conf")])
 def test_what_the_bases_share_is_taken_from_its_one_copy(base, part, shared):
-    taken = tomllib.loads((base / "image_kits.toml").read_text())
+    taken = tomllib.loads((base / "shared_sources.toml").read_text())
 
-    assert not (base / part).exists(), f"{base.name}/{part} is a copy: take it in {base.name}/image_kits.toml instead"
+    assert not (base / part).exists(), (f"{base.name}/{part} is a copy: take it in {base.name}/shared_sources.toml "
+                                        "instead")
     assert (SOURCES / taken[part]).resolve() == shared.resolve()
 
 

@@ -48,14 +48,14 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
     assert (computer.arch, computer.os.version, computer.session.user) == (["amd64", "arm64"], "24.04", "user")
     assert image.id == f"{UBUNTU}__forms_container_image" and image.dockerfile_path == "Dockerfile"
     built = next(call["build"] for call in builds if call["build"][2] == image.image_name)
-    assert built[1] == ["Dockerfile", "artifact.toml", "image_kits.toml", "root.conf", "root/init", "root/install.sh",
-                        "start-desktop", "supervisord.conf", "xfwm4.xml"]
+    assert built[1] == ["Dockerfile", "artifact.toml", "root.conf", "root/init", "root/install.sh",
+                        "shared_sources.toml", "start-desktop", "supervisord.conf", "xfwm4.xml"]
     stored = get_config().get_object_store_at(image.build_context_object_url).get(image.build_context_object_url)
     with tarfile.open(fileobj=io.BytesIO(stored), mode="r:gz") as context:
         sent = set(context.getnames())
     assert {f"clock/{name}" for name in ("build.sh", "clock-follower", "clock.conf", "clockpage.py", "libfaketime.patch")} <= sent
     assert {"egress/main.go", "egress/go.mod", "egress/testdata/page-armed.hex", "root/init"} <= sent
-    assert "image_kits.toml" not in sent
+    assert "shared_sources.toml" not in sent
     assert computer.metadata["validated_images"]["container"]["arm64"]["status"] == "uninspected"
 
 

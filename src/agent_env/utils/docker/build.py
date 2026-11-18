@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_env.utils.docker.context import KITS_FILE, BuildContext, extract
+from agent_env.utils.docker.context import SHARED_SOURCES_FILE, BuildContext, extract
 
 DEFAULT_BUILD_PLATFORM = "linux/amd64"  # the remote sandbox VMs
 DOCKER_INFO_TIMEOUT_SECONDS = 10
@@ -38,9 +38,10 @@ class DockerBuildError(RuntimeError):
 def build_image(dockerfile: Path, context: Path, tag: str, *, platform: str | None,
                 build_args: Mapping[str, str] | None = None, labels: Mapping[str, str] | None = None) -> None:
     """Build ``context`` with ``dockerfile`` into the local image ``tag``, for ``platform``, or for this host's
-    platform when it's None or empty. A context that takes from agent-env's sources (``KITS_FILE``) is built as its
-    build context sends it, what it takes included. Raises DockerBuildError, with the build's output, when it fails."""
-    if not (context / KITS_FILE).is_file():
+    platform when it's None or empty. A context that takes from agent-env's sources (``SHARED_SOURCES_FILE``) is built
+    as its build context sends it, what it takes included. Raises DockerBuildError, with the build's output, when it
+    fails."""
+    if not (context / SHARED_SOURCES_FILE).is_file():
         _build(dockerfile, context, tag, platform, build_args, labels)
         return
     with tempfile.TemporaryDirectory(prefix="agentenv-context-") as staged:

@@ -8,7 +8,7 @@ import os
 # What the OS or Python writes into a folder on its own. In an artifact or skill folder, everything
 # else is content, dot files included.
 LEAVINGS = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", "__pycache__"})
-# agent-env's own sources, from which a shipped image's ``image_kits.toml`` takes what several images share
+# agent-env's own sources, from which a shipped image's ``shared_sources.toml`` takes what several images share
 # (``utils/faketime_clock``, ``utils/egress_proxy``) into its build context.
 SOURCES = os.path.realpath(os.path.join(os.path.dirname(__file__), os.pardir))
 
