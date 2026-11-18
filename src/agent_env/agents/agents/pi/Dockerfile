@@ -26,7 +26,8 @@ RUN sh install.sh \
 # agent-env's libfaketime and its TLS shim preloaded into every process, faking only the agent's (clock.conf). The
 # follower's config is the agent's user's to write (agentenv_protocol.a2a_agent.clock) and the follower's to read.
 # supervisord goes into the agent's venv, whose bin is on the PATH start-agent runs with.
-RUN /opt/pi-a2a-venv/bin/pip install --no-cache-dir supervisor==4.2.5 \
+# supervisor 4.2.5 imports pkg_resources, which a Python 3.12 venv doesn't carry: setuptools before 81 brings it.
+RUN /opt/pi-a2a-venv/bin/pip install --no-cache-dir supervisor==4.2.5 'setuptools<81' \
     && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-clock \
     && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-egress \
     && mkdir -p /usr/local/lib/agentenv-clock /usr/local/lib/agentenv-egress /etc/agentenv \
