@@ -28,6 +28,7 @@ from agent_env.task.step_journal import (
     commit_ordered,
     replay_context,
 )
+from agent_env.task.outcome import FailedStep, RunQuality, run_quality
 from agent_env.task_step.context import TaskStepContext
 
 if TYPE_CHECKING:
@@ -184,6 +185,8 @@ class TaskInstance:
     # carries the epoch it was dispatched under and no-ops when older than the stored one,
     # fencing a writer from a rolled-back attempt. Missing (pre-field docs) reads as 0.
     attempt_epoch: int = 0
+    # Stamped with ``status="completed"``; clean until then, and on a run completed before the field existed.
+    quality: RunQuality = field(default_factory=RunQuality)
 
     @classmethod
     def from_dict(cls, data: dict) -> TaskInstance:
@@ -202,6 +205,7 @@ class TaskInstance:
             completed_steps=[TaskStepResult.from_dict(e) for e in data.get("completed_steps", [])],
             step_attempt_failures=data.get("step_attempt_failures", []),
             attempt_epoch=data.get("attempt_epoch", 0),
+            quality=RunQuality.from_dict(data.get("quality")),
         )
 
 
@@ -717,6 +721,13 @@ class TaskInstanceStore:
             if len(completed) >= total_steps and doc.get("status") not in ("failed", "cancelled"):
                 set_fields["status"] = "completed"
                 set_fields["completed_at_utc"] = completed_at_utc
+                # In the same write as the status, so no reader sees a completed run without its quality.
+                after = {"context": copy.deepcopy(doc.get("context"))}
+                _apply_forward(after, ops, move_to_end=rerecorded)
+                failed_steps = _get_path(after, "context.metadata.failed_steps") or []
+                set_fields["quality"] = run_quality(
+                    FailedStep.from_dict(f) for f in failed_steps if isinstance(f, dict)
+                ).to_dict()
             return UpdateSpec(set=set_fields, unset=set(ops.unsets))
 
         result = compare_and_swap(
