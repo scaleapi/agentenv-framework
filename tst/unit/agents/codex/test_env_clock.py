@@ -11,6 +11,12 @@ from tst.unit.agents.codex.agent import codex_bridge
 PROXY = "http://127.0.0.1:3128"
 
 
+@pytest.fixture(autouse=True)
+def _model_hosts_resolve_publicly(monkeypatch):
+    """A model host these tests name over HTTPS resolves to a public address, with no lookup leaving the machine."""
+    monkeypatch.setattr(codex_bridge.socket, "getaddrinfo", lambda host, port: [(None, None, None, "", ("93.184.216.34", 0))])
+
+
 def test_on_an_armed_clock_the_cli_goes_out_through_the_proxy():
     env = codex_bridge.cli_env({codex_bridge.EGRESS_PROXY_ENV: PROXY, "NO_PROXY": "registry.internal"},
                                clock_armed=True)
