@@ -26,7 +26,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
 from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
-from agent_env.config.model import MODEL_PARAMS_RESERVED
+from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
     EXT_CLOCK_URI,
@@ -392,16 +392,17 @@ class PromptAgentTaskStep(TaskStep):
         """Model and effort for this run: this step's ``step_overrides`` win over the run-wide ``agent_model`` / ``agent_effort`` and the stored values."""
         step_overrides = self.step_param_overrides(context)
         overrides = context.metadata.get("user_overrides", {})
-        model = step_overrides.get("model") or context.agent_model or self.model or context.default_agent_model
+        model = resolve_model(ModelRole.SOLVER, step_params=step_overrides.get("model"), run=context.agent_model,
+                              step=self.model, agent=context.default_agent_model).model
         effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
         return model, effort
 
     def _resolve_user_model(self, context: TaskStepContext) -> Optional[str]:
         """The user simulator's model for this run: this step's ``step_overrides``, then the run's ``user_model``, the
         stored value, and the config's ``user`` role when it names one."""
-        return (self.step_param_overrides(context).get("user_model")
-                or context.metadata.get("user_overrides", {}).get("user_model") or self.user_model
-                or get_config().get_model_for_role("user", or_default=False))
+        return get_config().resolve_model(
+            ModelRole.USER_SIMULATOR, step_params=self.step_param_overrides(context).get("user_model"),
+            run=context.metadata.get("user_overrides", {}).get("user_model"), step=self.user_model).model
 
     def _built_in_user_sim(self, context: TaskStepContext) -> Optional[tuple[dict, str]]:
         """The user deploy_user_sim_agent deployed, when it is this step's user, and their time zone; None for any other

@@ -4,10 +4,15 @@ import pytest
 
 from agent_env.config.errors import ConfigError
 from agent_env.config.model import (
+    JUDGE_FALLBACK_MODEL,
     MODEL_PARAMS_RESERVED,
     ModelCallConfig,
     ModelConfig,
     ModelParam,
+    ModelRole,
+    ModelSource,
+    ResolvedModel,
+    resolve_model,
 )
 
 
@@ -98,6 +103,72 @@ def test_a_role_asked_for_without_the_default_is_only_the_one_the_config_names()
     assert cfg.model_for_role("judge", or_default=False) is None
 
 
+@pytest.mark.parametrize("roles", [{"solver": "m-s", "user_simulator": "m-u"}, {"agent": "m-s", "user": "m-u"}],
+                         ids=["canonical", "synonyms"])
+def test_a_role_is_found_under_its_name_or_its_synonym_whichever_is_asked(roles):
+    cfg = ModelConfig.from_section({"roles": roles}, secret_resolver=_secrets({}))
+    for asked in ("solver", "agent", ModelRole.SOLVER):
+        assert cfg.role_model(asked) == "m-s"
+    for asked in ("user_simulator", "user", ModelRole.USER_SIMULATOR):
+        assert cfg.role_model(asked) == "m-u"
+
+
+def test_a_plugin_s_own_role_is_looked_up_by_its_name():
+    assert ModelConfig(roles={"reviewer": "m-r"}).model_for_role("reviewer") == "m-r"
+
+
+@pytest.mark.parametrize("roles, problem", [
+    ({"agent": "a", "solver": "s"}, "sets both 'solver' and 'agent'"),
+    ({"user": "a", "user_simulator": "s"}, "sets both 'user_simulator' and 'user'"),
+    ({"judge": {"endpoint": "local", "model": "fast"}}, "maps each role to a model name"),
+    ("claude", "maps each role to a model name"),
+], ids=["solver-twice", "user-simulator-twice", "table", "not-a-table"])
+def test_from_section_refuses_a_role_named_twice_or_mapped_to_anything_but_a_model(roles, problem):
+    with pytest.raises(ConfigError, match=problem):
+        ModelConfig.from_section({"roles": roles}, secret_resolver=_secrets({}))
+
+
+# --- resolve_model ------------------------------------------------------------
+
+_LAYERS = ("step_params", "run", "step", "agent")
+
+
+@pytest.mark.parametrize("first", range(len(_LAYERS)), ids=_LAYERS)
+@pytest.mark.parametrize("role", list(ModelRole))
+def test_the_first_layer_that_names_a_model_wins(role, first):
+    given = {layer: f"m-{layer}" for layer in _LAYERS[first:]}
+    resolved = resolve_model(role, config=ModelConfig(default="m-default", roles={role.value: "m-role"}), **given)
+    assert resolved == ResolvedModel(role, f"m-{_LAYERS[first]}", ModelSource(_LAYERS[first]))
+
+
+@pytest.mark.parametrize("role, config, expected", [
+    (ModelRole.SOLVER, ModelConfig(default="D", roles={"agent": "A"}), ("A", ModelSource.CONFIG_ROLE)),
+    (ModelRole.SOLVER, ModelConfig(default="D"), ("D", ModelSource.CONFIG_DEFAULT)),
+    (ModelRole.SOLVER, ModelConfig(), (None, None)),
+    (ModelRole.USER_SIMULATOR, ModelConfig(default="D", roles={"user": "U"}), ("U", ModelSource.CONFIG_ROLE)),
+    (ModelRole.USER_SIMULATOR, ModelConfig(default="D"), (None, None)),
+    (ModelRole.JUDGE, ModelConfig(default="D", roles={"judge": "J"}), ("J", ModelSource.CONFIG_ROLE)),
+    (ModelRole.JUDGE, ModelConfig(default="D"), ("D", ModelSource.CONFIG_DEFAULT)),
+    (ModelRole.JUDGE, ModelConfig(), (JUDGE_FALLBACK_MODEL, ModelSource.FALLBACK)),
+    (ModelRole.JUDGE, None, (JUDGE_FALLBACK_MODEL, ModelSource.FALLBACK)),
+    (ModelRole.SOLVER, None, (None, None)),
+], ids=["solver-role", "solver-default", "solver-none", "user-role", "user-never-the-default", "judge-role",
+        "judge-default", "judge-fallback", "judge-without-config", "solver-without-config"])
+def test_with_no_layer_the_config_decides_per_role(role, config, expected):
+    resolved = resolve_model(role, config=config)
+    assert (resolved.model, resolved.source) == expected
+
+
+def test_resolving_reads_no_environment_and_no_secret(monkeypatch):
+    def refuse(key):
+        raise AssertionError(f"resolution read the secret {key!r}")
+
+    monkeypatch.setattr("os.environ", {})
+    cfg = ModelConfig.from_section({"api_key": "secret:litellm_api_key", "headers": {"X-Org": "secret:org"},
+                                    "default": "D", "roles": {"judge": "J"}}, secret_resolver=refuse)
+    assert [resolve_model(role, config=cfg).model for role in ModelRole] == ["D", None, "J"]
+
+
 # --- resolve_api_key ----------------------------------------------------------
 
 def test_api_key_env_wins_and_refs_stay_lazy(monkeypatch):
@@ -124,24 +195,6 @@ def test_api_key_unconfigured_raises_actionable():
 
 
 # --- resolve_call -------------------------------------------------------------
-
-def test_resolve_call_inline_override_wins():
-    call = ModelConfig().resolve_call(
-        "m",
-        model_overrides={"m": {"secret_key": "k", "base_url": "https://ov"}},
-        secret_resolver=_secrets({"k": "sk-k"}),
-    )
-    assert call == ModelCallConfig(api_key="sk-k", api_base="https://ov", params={})
-
-
-def test_resolve_call_override_with_missing_secret_raises():
-    with pytest.raises(ConfigError, match="no value"):
-        ModelConfig().resolve_call(
-            "m",
-            model_overrides={"m": {"secret_key": "absent", "base_url": "https://ov"}},
-            secret_resolver=_secrets({}),
-        )
-
 
 def test_resolve_call_bare_model_without_endpoint_raises_actionable():
     with pytest.raises(ConfigError, match=r"\[model\] base_url"):
@@ -253,8 +306,7 @@ def test_a_header_ref_that_cant_be_sent_fails_loud(secrets, problem):
 @pytest.mark.parametrize("call, expected", [
     ({}, {"extra_headers": _RESOLVED}),
     ({"base_override": "https://elsewhere.example"}, {}),
-    ({"model_overrides": {"m": {"secret_key": "k", "base_url": "https://gw/v1"}}}, {}),
-], ids=["configured", "foreign-override", "model-override"])
+], ids=["configured", "foreign-override"])
 def test_resolve_call_sends_the_headers_only_to_the_configured_endpoint(call, expected):
     assert _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme", "k": "sk"}), **call).params == expected
 

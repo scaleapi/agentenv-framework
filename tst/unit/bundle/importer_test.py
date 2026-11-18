@@ -594,8 +594,8 @@ SCOPED = [
 SCOPED_FIELDS = {"env": ["sandbox_type", "metadata.attribution"],
                  "agent": ["a2a_agent_id", "sandbox_type", "litellm_base_url", "metadata.attribution"],
                  "prompt": ["trajectory_output_prefix", "max_thinking_tokens"],  # a set zero is set
-                 # A stored judge always holds a model: its author's, or the one its store's config named for judges.
-                 "judge": ["default_model", "judge_sandbox_type"],
+                 # The judge's author named no model, so none was stored and none is dropped.
+                 "judge": ["judge_sandbox_type"],
                  "install": ["a2a_agent_id"],
                  "fetch": ["urls"],
                  "build": ["docker_context_url"],

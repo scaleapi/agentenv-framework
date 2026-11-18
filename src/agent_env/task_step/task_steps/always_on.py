@@ -114,7 +114,7 @@ from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
@@ -706,11 +706,7 @@ class _Run:
         prompt_agent's ``_resolve_user_model`` honours it), else the user_sim step's ``model``."""
         overrides = self.ctx.metadata.get("user_overrides") or {}
         own = ((overrides.get("step_params") or {}).get(self.us.get("step_id")) or {}).get("model")
-        if own:
-            return own, "user_sim_step_params"
-        if overrides.get("user_model"):
-            return overrides["user_model"], "run_user_model"
-        return self.us["model"], "user_sim_step"
+        return user_sim_model(own=own, run=overrides.get("user_model"), step=self.us["model"])
 
     async def _configure_checks(self) -> None:
         """Give the agent's role scheduled checks (notifications/v1) on each env whose clock is set: by default when

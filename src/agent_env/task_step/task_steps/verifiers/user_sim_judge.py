@@ -332,7 +332,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
         items = [core.RubricItem.from_dict(i) for i in self.rubric_items]
         kind, step_id = self._find_run(context)
         response = _prompt_response(context, step_id)
-        model = (context.metadata.get("user_overrides") or {}).get("judge_model") or self.default_model
+        model = self._judge_model(context)
         entry: dict[str, Any] = {"run_step_id": step_id, "run_kind": kind, "judge_model": model}
         record = (context.metadata.get(ALWAYS_ON_KEY) or {}).get(step_id) if kind == ALWAYS_ON else None
         error_type = (record or {}).get("error_type") or (response.error_type if response else None)

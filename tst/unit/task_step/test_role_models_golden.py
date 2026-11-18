@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.config import get_config, reset_config
+from agent_env.config.model import ModelRole
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import DeployUserSimAgentTaskStep
@@ -70,12 +71,12 @@ def _subsets(names: tuple[str, ...]):
 
 def _deploy_default() -> str | None:
     """The solver's default a deploy_agent step sets on the context."""
-    return get_config().get_model_for_role("agent")
+    return get_config().resolve_model(ModelRole.SOLVER).model
 
 
 def _judge_model(verifier: RubricsVerifierTaskStep, context: TaskStepContext) -> str | None:
     """The model a rubrics judge asks for when it runs."""
-    return (context.metadata.get("user_overrides") or {}).get("judge_model") or verifier.default_model
+    return verifier._judge_model(context)
 
 
 @pytest.mark.parametrize("name", CONFIGS)

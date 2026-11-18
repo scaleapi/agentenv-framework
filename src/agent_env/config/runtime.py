@@ -464,6 +464,20 @@ class Config:
     def get_model_for_role(self, role: str, *, or_default: bool = True) -> str | None:
         return self._model_config().model_for_role(role, or_default=or_default)
 
+    def resolve_model(
+        self,
+        role: model_config.ModelRole,
+        *,
+        step_params: str | None = None,
+        run: str | None = None,
+        step: str | None = None,
+        agent: str | None = None,
+    ) -> model_config.ResolvedModel:
+        """``role``'s model for one step, falling back to this config's ``[model.roles]`` and default
+        (``model_config.resolve_model``)."""
+        return model_config.resolve_model(role, step_params=step_params, run=run, step=step, agent=agent,
+                                          config=self._model_config())
+
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)
         if overrides:
@@ -479,13 +493,11 @@ class Config:
         *,
         default_api_key: str | None = None,
         base_override: str | None = None,
-        model_overrides: dict[str, dict[str, str]] | None = None,
     ) -> model_config.ModelCallConfig:
         return self._model_config().resolve_call(
             model,
             default_api_key=default_api_key,
             base_override=base_override,
-            model_overrides=model_overrides,
             secret_resolver=self._resolve_secret,
         )
 

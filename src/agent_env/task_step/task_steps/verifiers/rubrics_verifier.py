@@ -19,7 +19,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
-from agent_env.config.model import ModelParam
+from agent_env.config.model import ModelParam, ModelRole
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -563,9 +563,9 @@ class RubricsVerifierTaskStep(TaskStep):
         self.verifier_id = verifier_id or uuid.uuid4().hex
         self.criteria = criteria
         self.prompt_id = prompt_id
-        # A stored judge always holds a model: its author's, or the one the config names for judges, as for a step
-        # built in code, which the A2A validator's are.
-        self.default_model = default_model or get_config().get_model_for_role("judge") or "claude-sonnet-4-6"
+        # The author's model, or None to judge with the run's config when the step runs (``_judge_model``), so a
+        # stored task never carries the config of whoever wrote it.
+        self.default_model = default_model
         self.default_model_api_base = default_model_api_base
         if isinstance(score_aggregator, str):
             score_aggregator = ScoreAggregator(score_aggregator)
@@ -636,6 +636,12 @@ class RubricsVerifierTaskStep(TaskStep):
         verifications[self.verifier_id] = skipped(self._entry_format_fields())
         if self._writes_mistakes_entry:
             verifications[trajectory_mistakes_key(self.verifier_id)] = skipped(self._mistakes_entry_fields())
+
+    def _judge_model(self, context: TaskStepContext) -> str:
+        """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
+        role and default, and claude-sonnet-4-6 last."""
+        overrides = context.metadata.get("user_overrides") or {}
+        return get_config().resolve_model(ModelRole.JUDGE, run=overrides.get("judge_model"), step=self.default_model).model
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -949,7 +955,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 raise
 
         try:
-            model = overrides.get("judge_model") or self.default_model
+            model = self._judge_model(context)
             context.record_model("judge", self.id, model)
             agent_prompt_text = prompt_response.prompt_text or ""
             judge_effort = overrides.get("judge_effort") or self.effort

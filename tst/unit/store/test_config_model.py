@@ -160,16 +160,6 @@ def test_arbitrary_role_falls_back_to_default(tmp_path, monkeypatch):
     assert _cfg(tmp_path, monkeypatch, _ROLES).get_model_for_role("some_custom_role") == "m-default"
 
 
-def test_model_overrides_tier(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path, monkeypatch, secrets={"ov_key": "sk-ov", "litellm_api_key": "sk-bundle"})
-    overrides = {"m": {"secret_key": "ov_key", "base_url": "https://ov.example"}}
-    assert cfg.resolve_model_call("m", model_overrides=overrides) == ModelCallConfig(
-        api_key="sk-ov",
-        api_base="https://ov.example",
-        params={},
-    )
-
-
 def test_base_override_wins(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch, _MODEL)
     call = cfg.resolve_model_call("claude-sonnet-4-6", default_api_key="k", base_override="https://ovr")

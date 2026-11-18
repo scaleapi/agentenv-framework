@@ -13,7 +13,7 @@ import httpx
 import litellm
 import pytest
 
-from agent_env.config.model import ModelConfig
+from agent_env.config.model import ModelConfig, resolve_model
 from agent_env.openenv.reward import reward_of
 from agent_env.store import LocalSecretStore
 from agent_env.task import Task
@@ -964,17 +964,19 @@ def test_by_default_it_fails_the_task_on_a_slip_and_judges_with_the_verifiers_de
     assert step.to_dict()["judge_model"] is None  # the task doesn't pin it
 
     class Config:
-        role = None
+        roles: dict = {}
 
-        def get_model_for_role(self, role):
+        def resolve_model(self, role, **layers):
             assert role == "judge"
-            return self.role
+            return resolve_model(role, config=ModelConfig(roles=self.roles), **layers)
 
     fake = Config()
     monkeypatch.setattr("agent_env.task_step.task_steps.verifiers.rubrics_verifier.get_config", lambda: fake)
-    assert usj.UserSimJudge("s", None, run_step_id="week").default_model == "claude-sonnet-4-6"
-    fake.role = "anthropic/claude-opus-4-8"
-    assert usj.UserSimJudge("s", None, run_step_id="week").default_model == "anthropic/claude-opus-4-8"
+    judge = usj.UserSimJudge("s", None, run_step_id="week")
+    assert judge.default_model is None
+    assert judge._judge_model(TaskStepContext()) == "claude-sonnet-4-6"
+    fake.roles = {"judge": "anthropic/claude-opus-4-8"}
+    assert judge._judge_model(TaskStepContext()) == "anthropic/claude-opus-4-8"
 
 
 # ---- the load checks ----------------------------------------------------------------------------------------------
