@@ -141,6 +141,8 @@ class Follower:
                         return  # its watch is left to end on its own; nothing it answers is applied
             if error is not None:
                 self.failed(error)
+                if read_config()[0] != self.raw:
+                    return  # a gateway that refuses at once answers every watch before the poll above sees a change
                 continue
             if read_config()[0] != self.raw:
                 return
