@@ -8,15 +8,12 @@ feed back result.session_id on subsequent turns.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextlib
-import ipaddress
 import json
 import logging
 import os
 import re
 import signal
-import socket
 import struct
 import threading
 import time
@@ -137,37 +134,12 @@ def clock_armed(page_path: str | None = None) -> bool:
     return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
 
 
-#: How long a CLI's start waits for its model host's addresses, once per host per process (``_GLOBAL_HOSTS``): the
-#: lookup runs on a thread of its own, so a slow resolver holds the server's loop this long at most, once.
-_RESOLVE_TIMEOUT_S = 2.0
-_GLOBAL_HOSTS: dict[str, bool] = {}
-_RESOLVER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-host")
-
-
-def _global_host(host: str) -> bool:
-    """Whether ``host`` is a public address, or a name every address of resolves to one: a host the egress proxy
-    reaches. A name that doesn't resolve here, or not within ``_RESOLVE_TIMEOUT_S``, is taken as public, for the proxy
-    to resolve; each name's answer is kept."""
-    try:
-        return ipaddress.ip_address(host).is_global
-    except ValueError:
-        pass
-    if host not in _GLOBAL_HOSTS:
-        try:
-            infos = _RESOLVER.submit(socket.getaddrinfo, host, None).result(timeout=_RESOLVE_TIMEOUT_S)
-            addresses = {info[4][0] for info in infos}
-            _GLOBAL_HOSTS[host] = all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses)
-        except (OSError, concurrent.futures.TimeoutError):
-            _GLOBAL_HOSTS[host] = True
-    return _GLOBAL_HOSTS[host]
-
-
 def model_direct_hosts(base_url: str | None) -> list[str]:
     """The model endpoint's host when the CLI reaches it directly on an armed clock: over plain HTTP, which has no
-    certificate to check at the env's date, or at an address that isn't public, which the egress proxy refuses."""
+    certificate to check at the env's date. Over TLS it goes through the egress proxy, which checks the certificate on
+    real time and, in an agent's image, reaches a private network's address too (``AGENTENV_EGRESS_PRIVATE``)."""
     endpoint = urlsplit(base_url or "")
-    host = endpoint.hostname or ""
-    return [host] if host and (endpoint.scheme == "http" or not _global_host(host)) else []
+    return [endpoint.hostname] if endpoint.hostname and endpoint.scheme == "http" else []
 
 
 def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
