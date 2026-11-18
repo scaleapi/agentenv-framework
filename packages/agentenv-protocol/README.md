@@ -1388,6 +1388,17 @@ Extensions come from explicit definitions, configured activations, and
 decorated handlers in one validated registry, so routes and card advertisement
 cannot drift.
 
+`Usage` reports what a task used: `tool_call_count`, `input_tokens`,
+`output_tokens`, `total_tokens`, `cost_usd`, the prompt-cache counts
+`cache_read_tokens` and `cache_write_tokens`, and `input_includes_cache`, which
+says whether `input_tokens` counts both cache counts (`True`), neither
+(`False`), or is unknown (`None`, the default). Set the flag whenever you set
+the cache counts: a price can't read them without it. Runtime-specific counts go
+in `provider_details`, but cache counts go in their own fields. `Usage.from_dict`
+reads what `to_dict` wrote under any protocol version, a field it leaves out
+being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
+usage=...)` carries usage on a failure as `success` does.
+
 `run(request)` is the required execution contract. It is an ordinary method
 and needs no decorator.
 
@@ -1830,7 +1841,12 @@ operations:
   records a call, each action must be one the last recorded call made, by name and
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
-  Calls to tools the turn doesn't offer aren't checked.
+  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's, in
+  OpenAI's shape (`prompt_tokens`, which counts `prompt_tokens_details.cached_tokens`
+  or LiteLLM's `cache_read_input_tokens` and `cache_creation_input_tokens`) or
+  Anthropic's (`input_tokens`, which counts neither). The turn's `Usage`, on its reply
+  or its error, sums each count over the calls that gave it, with `input_tokens`
+  counting the cache (`input_includes_cache` true); a value that isn't a count is left out.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 

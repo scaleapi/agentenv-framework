@@ -111,6 +111,7 @@ class _Turn:
     pending: list[tuple[str, str]] = field(default_factory=list)  # (tool, its canonical arguments) not yet run
     last_event: str = field(default_factory=lambda: _now())
     model: str | None = None
+    model_usage: list[Usage] = field(default_factory=list)  # each recorded model call's
 
 
 @contextlib.asynccontextmanager
@@ -175,11 +176,11 @@ class ProxyAgent(AgentEnvAgent):
         if reply.error is not None:
             turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt,
                                          completion={"error": reply.error}, failed=True))
-            return TaskResult.failure("proxy.driver_error", reply.error)
+            return TaskResult.failure("proxy.driver_error", reply.error, usage=_turn_usage(turn))
         turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt, completion={
             "content": [{"type": "text", "text": part.text} for part in reply.parts]}))
         return TaskResult.success(parts=tuple(TextPart(text=part.text) for part in reply.parts),
-                                  usage=Usage(tool_call_count=len(turn.actions)))
+                                  usage=_turn_usage(turn))
 
     @extension(PROXY_V1.claim)
     async def claim(self, request: ProxyClaimRequest) -> None:
@@ -249,6 +250,7 @@ class ProxyAgent(AgentEnvAgent):
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
         usage = request.usage or {}
+        turn.model_usage.append(_call_usage(usage))
         for key, names in (("input_tokens", ("input_tokens", "prompt_tokens")),
                            ("output_tokens", ("output_tokens", "completion_tokens"))):
             if (count := next((usage[name] for name in names if name in usage), None)) is not None:
@@ -518,6 +520,43 @@ def _whole(value: Any) -> Any:
 
 def _tool_error(message: str) -> ProxyToolResult:
     return ProxyToolResult(content=[{"type": "text", "text": f"error: {message}"}], is_error=True)
+
+
+_USAGE_SUMS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+def _call_usage(usage: dict[str, Any]) -> Usage:
+    """A recorded model call's usage, read from the shape its response carried it in, with ``input_tokens`` counting
+    the cache: OpenAI's ``prompt_tokens`` already counts it (``prompt_tokens_details.cached_tokens``, or the
+    ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` LiteLLM sets beside it), and Anthropic's
+    ``input_tokens`` counts neither of those, so they're added. A value that isn't a count is left out."""
+    details = usage.get("prompt_tokens_details")
+    cached = _count(details.get("cached_tokens")) if isinstance(details, dict) else None
+    read = cached if cached is not None else _count(usage.get("cache_read_input_tokens"))
+    write = _count(usage.get("cache_creation_input_tokens"))
+    if "prompt_tokens" in usage:
+        input_tokens = _count(usage["prompt_tokens"])
+    elif (input_tokens := _count(usage.get("input_tokens"))) is not None:
+        input_tokens += (read or 0) + (write or 0)
+    output = _count(usage.get("completion_tokens", usage.get("output_tokens")))
+    total = _count(usage.get("total_tokens"))
+    if total is None and input_tokens is not None and output is not None:
+        total = input_tokens + output
+    return Usage(input_tokens=input_tokens, output_tokens=output, total_tokens=total, cache_read_tokens=read,
+                 cache_write_tokens=write, input_includes_cache=True if input_tokens is not None else None)
+
+
+def _turn_usage(turn: _Turn) -> Usage:
+    """The turn's usage: the calls to its tools, and each count summed over the recorded model calls that gave it,
+    None when none did."""
+    sums = {name: sum(values) if (values := [v for c in turn.model_usage if (v := getattr(c, name)) is not None])
+            else None for name in _USAGE_SUMS}
+    return Usage(tool_call_count=len(turn.actions), **sums,
+                 input_includes_cache=True if sums["input_tokens"] is not None else None)
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,

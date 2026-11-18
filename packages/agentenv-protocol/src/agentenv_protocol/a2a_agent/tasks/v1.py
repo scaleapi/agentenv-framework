@@ -302,29 +302,44 @@ class NativeTrajectory:
         object.__setattr__(self, "payload", _copy_json_value(self.payload))
 
 
+_USAGE_COUNTERS = (
+    "tool_call_count",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Usage:
-    """Common execution metrics plus runtime-specific, JSON-shaped details."""
+    """Common execution metrics plus runtime-specific, JSON-shaped details. ``cache_read_tokens`` and
+    ``cache_write_tokens`` count the prompt tokens read from and written to the provider's prompt cache;
+    ``input_includes_cache`` says whether ``input_tokens`` counts both of them (True), neither (False), or is unknown
+    (None), which a price needs to read the counts."""
 
     tool_call_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    input_includes_cache: bool | None = None
     cost_usd: float | None = None
     provider_details: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in (
-            "tool_call_count",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-        ):
+        for name in _USAGE_COUNTERS:
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or value < 0
             ):
-                raise ValueError(f"{name} cannot be negative")
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.input_includes_cache is not None and not isinstance(
+            self.input_includes_cache, bool
+        ):
+            raise ValueError("input_includes_cache must be true, false or null")
         if self.cost_usd is not None and (
             isinstance(self.cost_usd, bool)
             or not isinstance(self.cost_usd, (int, float))
@@ -337,23 +352,32 @@ class Usage:
             self, "provider_details", _copy_json_value(self.provider_details)
         )
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Usage":
+        """The usage ``to_dict`` wrote, from this protocol version or another: a field it leaves out is None, and a
+        key this version doesn't know is ignored. Raises ValueError or TypeError for a field it can't hold."""
+        if not isinstance(data, Mapping):
+            raise TypeError("usage must be a mapping")
+        known = {
+            name: data[name]
+            for name in (*_USAGE_COUNTERS, "input_includes_cache", "cost_usd")
+            if data.get(name) is not None
+        }
+        return cls(**known, provider_details=data.get("provider_details") or {})
+
     @property
     def is_empty(self) -> bool:
         return (
-            self.tool_call_count is None
-            and self.input_tokens is None
-            and self.output_tokens is None
-            and self.total_tokens is None
+            all(getattr(self, name) is None for name in _USAGE_COUNTERS)
+            and self.input_includes_cache is None
             and self.cost_usd is None
             and not self.provider_details
         )
 
     def to_dict(self) -> dict[str, Any]:
         values = {
-            "tool_call_count": self.tool_call_count,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
+            **{name: getattr(self, name) for name in _USAGE_COUNTERS},
+            "input_includes_cache": self.input_includes_cache,
             "cost_usd": self.cost_usd,
         }
         result = {name: value for name, value in values.items() if value is not None}
@@ -425,11 +449,13 @@ class TaskResult:
         *,
         error_type: Literal["agent_error", "infra_error"] = "agent_error",
         parts: Iterable[TaskPart] | None = None,
+        usage: Usage | None = None,
     ) -> "TaskResult":
         return (
             cls.builder()
             .failed(code, message, error_type=error_type)
             .parts(parts if parts is not None else (TextPart(text=message),))
+            .usage(usage or Usage())
             .build()
         )
 

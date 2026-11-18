@@ -574,6 +574,50 @@ def test_recorded_model_calls_are_checked_against_the_actions_that_run(client, e
     assert task["status"]["message"]["parts"][1]["data"]["usage"]["tool_call_count"] == 3
 
 
+def _usage(task: dict[str, Any]) -> dict[str, Any]:
+    [usage] = [part["data"]["usage"] for part in task["status"]["message"]["parts"]
+               if part.get("kind") == "data" and "usage" in part["data"]]
+    return usage
+
+
+def test_a_turns_usage_sums_its_recorded_calls_with_input_counting_the_cache(client):
+    task_id = _send(client, "go")
+    for usage in ({"prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127,
+                   "prompt_tokens_details": {"cached_tokens": 100}},
+                  {"input_tokens": 3, "output_tokens": 9, "cache_read_input_tokens": 100,
+                   "cache_creation_input_tokens": 20},
+                  {"prompt_tokens": 50, "completion_tokens": 1, "cache_read_input_tokens": 40,
+                   "cache_creation_input_tokens": 10},
+                  None):
+        assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage).status_code == 200
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    assert _usage(_settled(client, task_id)) == {
+        "tool_call_count": 0, "input_tokens": 120 + 123 + 50, "output_tokens": 17, "total_tokens": 127 + 132 + 51,
+        "cache_read_tokens": 240, "cache_write_tokens": 30, "input_includes_cache": True}
+
+
+def test_counts_a_recorded_call_doesnt_give_or_cant_be_read_are_left_out(client):
+    task_id = _send(client, "go")
+    for usage in ({"prompt_tokens": "9", "completion_tokens": True, "prompt_tokens_details": "none"},
+                  {"completion_tokens": 4}):
+        assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage).status_code == 200
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    assert _usage(_settled(client, task_id)) == {"tool_call_count": 0, "output_tokens": 4}
+
+
+def test_an_error_reply_keeps_the_usage_recorded_before_it(client):
+    task_id = _send(client, "go")
+    _proxy(client, "record", task_id=task_id, message="Thinking.", usage={"input_tokens": 5, "output_tokens": 2})
+    _proxy(client, "reply", task_id=task_id, error="the driver gave up")
+
+    task = _settled(client, task_id)
+    assert task["status"]["state"] == "failed"
+    assert _usage(task) == {"tool_call_count": 0, "input_tokens": 5, "output_tokens": 2, "total_tokens": 7,
+                            "input_includes_cache": True}
+
+
 def test_an_env_tool_named_bash_is_held_to_all_its_recorded_arguments(terminal, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with TestClient(ProxyAgent(shell=False, long_poll_seconds=0.2).create_app()) as client:
