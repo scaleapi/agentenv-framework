@@ -76,9 +76,9 @@ def test_a_missing_docker_raises_rather_than_crashing(monkeypatch):
         build_image(Path("Dockerfile"), Path("."), "my-image", platform=None)
 
 
-def test_a_folder_that_takes_from_image_kits_is_built_from_a_context_holding_what_it_takes(monkeypatch, tmp_path):
+def test_a_folder_with_an_image_kits_toml_is_built_from_a_context_holding_what_it_takes(monkeypatch, tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM scratch\nCOPY clock/ /clock/\n")
-    (tmp_path / "image_kits.toml").write_text('clock = "image_kits/clock"\n')
+    (tmp_path / "image_kits.toml").write_text('clock = "utils/faketime_clock"\n')
     built = []
 
     def run(argv, **kwargs):

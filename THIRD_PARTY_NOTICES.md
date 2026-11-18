@@ -2546,7 +2546,7 @@ Platform-specific native binaries that npm installs for the machine running the 
 
 ## libfaketime
 
-`src/agent_env/image_kits/clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
+`src/agent_env/utils/faketime_clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
 0.9.12: `libfaketime.patch`, `agentenv_clock_page.c` and `agentenv_clock_waits.c`. Being derived from libfaketime,
 those three files are licensed as it is, under the GNU General Public License version 2 (`GPL-2.0-only`); the folder's
 `COPYING` is that license's text. libfaketime's own source is not in the repository: the folder's `build.sh` downloads
@@ -2558,7 +2558,7 @@ The folder's other files, like the rest of the repository, are licensed under th
 
 ## The egress proxy's Go modules
 
-`src/agent_env/image_kits/egress/` is agent-env's egress proxy, a Go program the base
+`src/agent_env/utils/egress_proxy/` is agent-env's egress proxy, a Go program the base
 computer's Dockerfile builds, statically linked with the Go standard library and the modules below. Their source is
 not in the repository: the folder's `go.sum` pins each, the build downloads them, and the program runs inside
 computers.

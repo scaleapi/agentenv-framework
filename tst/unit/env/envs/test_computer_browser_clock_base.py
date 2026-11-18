@@ -1,5 +1,5 @@
 """The ubuntu-24.04-browser base on the universe clock: through its image_kits.toml it takes the clock library and the
-egress proxy from image_kits, as ubuntu-24.04 does, and ubuntu-24.04's root start and root's supervisord, so a change
+egress proxy from utils, as ubuntu-24.04 does, and ubuntu-24.04's root start and root's supervisord, so a change
 to any lands in both; it starts as root,
 its init the root start; the egress proxy listens where the variable its site proxies read names, which the base sets
 to an address the stand-in site proxy doesn't hold; the stand-in keeps real time; and X has no screensaver or DPMS,
@@ -22,7 +22,7 @@ from tst.util.build_context import sent
 
 ARTIFACTS = Path(agent_env.__file__).parent / "computers" / "artifacts"
 DESKTOP, BROWSER = ARTIFACTS / "ubuntu-24.04", ARTIFACTS / "ubuntu-24.04-browser"
-KITS = Path(agent_env.__file__).parent / "image_kits"
+SOURCES = Path(agent_env.__file__).parent
 
 
 def _stand_in():
@@ -46,14 +46,14 @@ def _conf(name: str) -> configparser.ConfigParser:
 
 
 @pytest.mark.parametrize(("base", "part", "shared"), [
-    (DESKTOP, "clock", KITS / "clock"), (DESKTOP, "egress", KITS / "egress"),
-    (BROWSER, "clock", KITS / "clock"), (BROWSER, "egress", KITS / "egress"),
+    (DESKTOP, "clock", SOURCES / "utils" / "faketime_clock"), (DESKTOP, "egress", SOURCES / "utils" / "egress_proxy"),
+    (BROWSER, "clock", SOURCES / "utils" / "faketime_clock"), (BROWSER, "egress", SOURCES / "utils" / "egress_proxy"),
     (BROWSER, "root", DESKTOP / "root"), (BROWSER, "root.conf", DESKTOP / "root.conf")])
 def test_what_the_bases_share_is_taken_from_its_one_copy(base, part, shared):
     taken = tomllib.loads((base / "image_kits.toml").read_text())
 
     assert not (base / part).exists(), f"{base.name}/{part} is a copy: take it in {base.name}/image_kits.toml instead"
-    assert (KITS.parent / taken[part]).resolve() == shared.resolve()
+    assert (SOURCES / taken[part]).resolve() == shared.resolve()
 
 
 def test_it_starts_as_root_its_init_the_root_start_whose_supervisord_runs_the_session_as_the_session_user():

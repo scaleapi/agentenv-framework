@@ -56,7 +56,7 @@ What follows the universe, and what doesn't:
 
 Build it on x86_64 or aarch64 Linux with a C toolchain, make, patch and curl:
 
-    src/agent_env/image_kits/clock/build.sh OUT [TARBALL]
+    src/agent_env/utils/faketime_clock/build.sh OUT [TARBALL]
 
 ## The clock page
 

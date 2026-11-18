@@ -9,7 +9,7 @@ import os
 # else is content, dot files included.
 LEAVINGS = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", "__pycache__"})
 # agent-env's own sources, from which a shipped image's ``image_kits.toml`` takes what several images share
-# (``image_kits``) into its build context.
+# (``utils/faketime_clock``, ``utils/egress_proxy``) into its build context.
 SOURCES = os.path.realpath(os.path.join(os.path.dirname(__file__), os.pardir))
 
 

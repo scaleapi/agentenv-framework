@@ -21,7 +21,7 @@ import pytest
 import agent_env
 from agentenv_protocol.computer import clock as protocol_clock
 
-CLOCK = Path(agent_env.__file__).parent / "image_kits" / "clock"
+CLOCK = Path(agent_env.__file__).parent / "utils" / "faketime_clock"
 FOLLOWER = CLOCK / "clock-follower"
 
 

@@ -76,7 +76,7 @@ updates:
   # both.
   - package-ecosystem: "gomod"
     directories:
-      - "/src/agent_env/image_kits/egress"
+      - "/src/agent_env/utils/egress_proxy"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

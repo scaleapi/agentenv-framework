@@ -196,7 +196,7 @@ def test_build_builds_an_image_for_its_platform_under_its_tag_with_its_source_on
     assert runs[0] == runs[1] and waits == [script._RETRY_WAITS_SECONDS[0]]
 
 
-def test_build_builds_a_base_that_takes_from_image_kits_from_a_context_holding_what_it_takes(script, monkeypatch, workflow):
+def test_build_builds_a_base_with_an_image_kits_toml_from_a_context_holding_what_it_takes(script, monkeypatch, workflow):
     built = []
 
     def streamed(command):

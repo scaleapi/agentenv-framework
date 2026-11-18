@@ -129,10 +129,10 @@ def test_a_link_the_dockerignore_excludes_is_left_out(tmp_path):
 
 
 def test_what_image_kits_toml_takes_from_agent_envs_sources_is_sent_at_the_name_it_gives(tmp_path):
-    root = _tree(tmp_path / "ctx", {**SERVER, KITS_FILE: 'clock = "image_kits/clock"\nfollower = "image_kits/clock/clock-follower"\n'})
+    root = _tree(tmp_path / "ctx", {**SERVER, KITS_FILE: 'clock = "utils/faketime_clock"\nfollower = "utils/faketime_clock/clock-follower"\n'})
     held = _tree(tmp_path / "held", SERVER)
-    shutil.copytree(SOURCES / "image_kits" / "clock", held / "clock")
-    shutil.copy2(SOURCES / "image_kits" / "clock" / "clock-follower", held / "follower")
+    shutil.copytree(SOURCES / "utils" / "faketime_clock", held / "clock")
+    shutil.copy2(SOURCES / "utils" / "faketime_clock" / "clock-follower", held / "follower")
 
     taken = BuildContext.of(root, root / "Dockerfile")
     members = {m.name: m for m in _members(_written(taken, tmp_path))}
@@ -143,9 +143,9 @@ def test_what_image_kits_toml_takes_from_agent_envs_sources_is_sent_at_the_name_
 
 def test_the_ignore_file_applies_to_what_image_kits_toml_takes_as_to_the_folders_own(tmp_path):
     ignore = "clock\n!clock/clock.conf\n"
-    root = _tree(tmp_path / "ctx", {**SERVER, ".dockerignore": ignore, KITS_FILE: 'clock = "image_kits/clock"\n'})
+    root = _tree(tmp_path / "ctx", {**SERVER, ".dockerignore": ignore, KITS_FILE: 'clock = "utils/faketime_clock"\n'})
     held = _tree(tmp_path / "held", {**SERVER, ".dockerignore": ignore})
-    shutil.copytree(SOURCES / "image_kits" / "clock", held / "clock")
+    shutil.copytree(SOURCES / "utils" / "faketime_clock", held / "clock")
 
     taken = BuildContext.of(root, root / "Dockerfile")
 
@@ -154,9 +154,9 @@ def test_the_ignore_file_applies_to_what_image_kits_toml_takes_as_to_the_folders
 
 
 @pytest.mark.parametrize(("folder", "kits", "problem"), [
-    ({"clock/own.txt": ""}, 'clock = "image_kits/clock"\n', "clock: the folder has it and image_kits.toml takes it too"),
+    ({"clock/own.txt": ""}, 'clock = "utils/faketime_clock"\n', "clock: the folder has it and image_kits.toml takes it too"),
     ({}, 'clock = "../../../etc"\n', "names nothing in agent-env's sources"),
-    ({}, 'clock = "image_kits/nowhere"\n', "names nothing in agent-env's sources"),
+    ({}, 'clock = "utils/nowhere"\n', "names nothing in agent-env's sources"),
 ], ids=["a-name-the-folder-has", "a-path-outside-the-sources", "a-path-that-isnt-there"])
 def test_image_kits_toml_takes_only_whats_in_agent_envs_sources_at_a_name_the_folder_doesnt_have(tmp_path, folder, kits,
                                                                                                problem):

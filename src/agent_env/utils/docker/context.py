@@ -23,7 +23,7 @@ from agent_env.utils.paths import LEAVINGS, SOURCES, in_sources
 _DIGEST_SCHEME = 1
 _READ_CHUNK_BYTES = 1 << 20
 # Names what a context takes from agent-env's own sources, and at which name: the images agent-env ships share sources
-# (``image_kits``) this way and still build from one self-contained context.
+# (``utils/faketime_clock``, ``utils/egress_proxy``) this way and still build from one self-contained context.
 KITS_FILE = "image_kits.toml"
 
 
