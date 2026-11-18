@@ -36,7 +36,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.task_step.context import StepContextError, TaskStepContext
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -58,6 +58,7 @@ def _outcome(passed: bool, justification: str) -> dict:
 
 class VerifySandboxTaskStep(TaskStep):
     type: ClassVar[str] = "verify_sandbox"
+    step_role = StepRole.GRADER
     entity_refs = ()
 
     def __init__(

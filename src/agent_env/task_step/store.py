@@ -96,9 +96,9 @@ class TaskStepStore:
                 f"Unknown task step type: {task_step_type}"
                 f"{_registration.failure_note(_registration.TASK_STEPS, task_step_type)}"
             )
-        from agent_env.task_step.task_step import attach_retry_config
+        from agent_env.task_step.task_step import attach_base_fields
 
-        return attach_retry_config(cls.from_dict(doc), doc)
+        return attach_base_fields(cls.from_dict(doc), doc)
 
     def execute_query(self, query: TaskStepQuery) -> list[TaskStep]:
         filt, sort = to_document_query(query)
