@@ -136,8 +136,9 @@ def _context_env(context_id: str, direct: Iterable[str] = (), *, armed: bool = F
 
 
 def _mcp_hosts(mcp_servers: Mapping[str, Mapping] | None) -> list[str]:
-    """The hosts of the env's MCP servers, which the CLI connects to itself (``letta mcp``)."""
-    return [urlsplit(str(info.get("url") or "")).hostname or "" for info in (mcp_servers or {}).values()]
+    """The hosts of the env's plain-HTTP MCP servers, which the CLI connects to itself (``letta mcp``) and reaches directly;
+    an HTTPS one goes through the egress proxy, which checks its certificate on real time."""
+    return [url.hostname for url in (urlsplit(str(info.get("url") or "")) for info in (mcp_servers or {}).values()) if url.hostname and url.scheme == "http"]
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
