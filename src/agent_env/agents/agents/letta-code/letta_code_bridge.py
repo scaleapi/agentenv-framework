@@ -10,15 +10,18 @@ import logging
 import os
 import shutil
 import signal
+import struct
 import subprocess
 import tarfile
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
@@ -44,6 +47,60 @@ _CLI_TIMEOUT_S = 120
 _RELAY_MAX_REQUEST_BYTES = 100 * 1024**2
 
 
+#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
+#: while the agent follows an armed clock.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
+#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
+CLOCK_PAGE = "/dev/shm/agentenv-clock"
+_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
+_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
+_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+
+
+def clock_armed(page_path: str | None = None) -> bool:
+    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
+    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
+    try:
+        with open(page_path or CLOCK_PAGE, "rb") as page:
+            for _ in range(50):
+                page.seek(0)
+                raw = page.read(_PAGE.size)
+                if len(raw) < _PAGE.size:
+                    return False
+                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
+                    _PAGE.unpack(raw)
+                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
+                    return False
+                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
+                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
+                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ 0x9E3779B97F4A7C15) & _MASK
+                if seq % 2 == 0 and checked == expected:
+                    return bool(armed)
+                time.sleep(0.001)
+    except OSError:
+        return False
+    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
+
+
+def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
+    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
+    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
+    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
+    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
+    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
+    ``no_proxy``) stay direct."""
+    proxy = environ.get(EGRESS_PROXY_ENV)
+    if not proxy or not armed:
+        return {}
+    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
+    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
+    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
+            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
+
+
+
 def _base_url(environ: Mapping[str, str]) -> str:
     """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
@@ -57,11 +114,19 @@ def context_data_dir(context_id: str) -> Path:
     return Path(SESSIONS_ROOT) / ctx_hash
 
 
-def _context_env(context_id: str) -> dict[str, str]:
+def _context_env(context_id: str, direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for a context: its own data dir as HOME. On an armed clock (``armed``) the CLI and what it
+    starts go out through the egress proxy (``egress_env``); the model relay, on loopback, and the env's MCP servers,
+    which the CLI reaches itself over HTTP (``direct``), are reached directly."""
     home = context_data_dir(context_id)
     home.mkdir(parents=True, exist_ok=True)
     return {**os.environ, "HOME": str(home), "LETTA_LOCAL_BACKEND_DIR": str(home / ".letta/lc-local-backend"),
-            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1"}
+            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1", **egress_env(os.environ, direct, armed=armed)}
+
+
+def _mcp_hosts(mcp_servers: Mapping[str, Mapping] | None) -> list[str]:
+    """The hosts of the env's MCP servers, which the CLI connects to itself (``letta mcp``)."""
+    return [urlsplit(str(info.get("url") or "")).hostname or "" for info in (mcp_servers or {}).values()]
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
@@ -435,7 +500,7 @@ async def _turn(prompt, context_id, session_id, model, mcp_servers, system_promp
                 project_id, task_id, role, attachment_paths, effort, event_callback, workspace):
     model = model or DEFAULT_MODEL
     handle = "openai-compatible/" + model
-    env = _context_env(context_id)
+    env = _context_env(context_id, _mcp_hosts(mcp_servers), armed=clock_armed())
     home = Path(env["HOME"])
     (home / "context.json").write_text(json.dumps({"home": str(home)}))
     attribution = _attribution_headers(project_id, task_id)
