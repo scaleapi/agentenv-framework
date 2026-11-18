@@ -27,6 +27,7 @@ from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStep
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
     RunContainerUnitTestsVerifierTaskStep,
 )
@@ -121,6 +122,36 @@ async def test_verify_sandbox_scores_a_bare_local_sandbox(local_backends):
     assert work_dir.parent == sandboxes
     assert (work_dir / "greeting" / "hello.txt").read_text() == "hello, world\n"
     assert Task.get_instance(ctx.instance_id).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_each_verifier_of_a_run_leaves_its_named_grade_on_the_stored_run(local_backends):
+    tmp_path, _ = local_backends
+    suffix = uuid.uuid4().hex[:8]
+    universe = _greeting_universe(tmp_path / "greeting", suffix)
+    task = Task.put(id=f"graded-{suffix}", steps=[
+        DeploySandboxTaskStep(id="deploy", version=None, sandbox_name="box", sandbox_mode="vm", sandbox_type="local"),
+        LoadArtifactTaskStep(
+            id="load", version=None, artifact_id=universe.id, sandbox_name="box", destination_path="/app/greeting",
+        ),
+        _verify("hello", "hello", "python3 check.py"),
+        _verify("control", "goodbye", "python3 -c 'raise SystemExit(1)'"),
+        AggregateVerifiersTaskStep(id="overall", version=None, verifier_id="overall", verifier_ids=["hello", "control"]),
+    ])
+
+    ctx = await task.run()
+
+    grades = Task.get_instance(ctx.instance_id).context["metadata"]["grades"]
+    assert {name: (g["verifier_status"], g["score"], g["passed"], g["verifier_type"]) for name, g in grades.items()} == {
+        "hello": ("graded", 1.0, True, "verify_sandbox"),
+        "control": ("graded", 0.0, False, "verify_sandbox"),
+        "overall": ("graded", 0.5, False, "aggregate_verifiers"),
+    }
+    assert [row["passed"] for row in grades["hello"]["verifier_criteria"]] == [True, True]
+    assert grades["overall"]["verifier_output"] == {"source_verifier_ids": ["hello", "control"]}
+    assert grades["overall"]["verifier_settings"] == {
+        "scoring_rules": 1, "verifier_ids": ["hello", "control"], "score_aggregator": "weighted_average"}
+    assert ctx.metadata["verifications"]["overall"]["score"] == 0.5
 
 
 @pytest.mark.asyncio
@@ -291,6 +322,35 @@ async def test_the_reward_is_cleared_in_a_container_with_no_root_user_name(local
     entry = (await step.execute(context)).metadata["verifications"]["verify"]
 
     assert (entry["score"], entry["extracted_files"]) == (0.0, {"/logs/verifier/reward.txt": None})
+
+
+@pytest.mark.asyncio
+async def test_a_unit_tests_verifier_that_times_out_is_a_failed_grade_beside_its_entry(local_agent):
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    step = _reward_step(command="sleep 60", timeout_sec=2)
+
+    with pytest.raises(RuntimeError, match="timed out after 2s"):
+        await step.execute(context)
+
+    grade, entry = context.metadata["grades"]["verify"], context.metadata["verifications"]["verify"]
+    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("failed", None, False)
+    assert grade["verifier_error_reasoning"] == "Verifier 'verify' timed out after 2s"
+    assert entry["timed_out"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_unit_tests_verifiers_grade_holds_its_reward_and_names_its_env_vars_without_their_values(local_agent):
+    sandbox, context = local_agent
+    _as_deployed_container(sandbox, context)
+    step = _reward_step(command='test -n "$TOKEN" && echo 1 > /logs/verifier/reward.txt', env_vars={"TOKEN": "s3cret"})
+
+    await step.execute(context)
+
+    grade = context.metadata["grades"]["verify"]
+    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("graded", 1.0, True)
+    assert grade["verifier_settings"]["env_vars"] == ["TOKEN"] and grade["verifier_settings"]["overridden"] == []
+    assert "s3cret" not in json.dumps(grade)
 
 
 def _as_deployed_container(sandbox, context):

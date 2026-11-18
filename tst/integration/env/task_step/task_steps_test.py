@@ -614,6 +614,8 @@ async def test_task_steps_e2e(sandbox_provider, multi_env, email_service_artifac
     for criterion in verification_results:
         assert criterion["result"] is True, f"Criterion '{criterion['id']}' failed: {criterion['description']}"
     assert env_vdata["score"] == 1.0, f"Expected score 1.0, got {env_vdata['score']}"
+    env_grade = context.metadata["grades"][retrieved_verifier.id]
+    assert (env_grade["verifier_status"], env_grade["score"], env_grade["passed"]) == ("graded", 1.0, True)
     logger.info(f"Verification [{env_verifier_id}] results: {verification_results}, score: {env_vdata['score']}")
 
     # 19. Put and get RubricsVerifierTaskStep
@@ -663,6 +665,9 @@ async def test_task_steps_e2e(sandbox_provider, multi_env, email_service_artifac
     # Verify env outcome verifier results still exist
     assert env_verifier_id in context.metadata["verifications"], \
         "Env outcome verifier results were overwritten by rubrics verifier"
+    rubrics_grade = context.metadata["grades"][retrieved_rubrics.id]
+    assert (rubrics_grade["verifier_status"], rubrics_grade["score"], rubrics_grade["passed"]) == ("graded", 1.0, True)
+    assert rubrics_grade["verifier_settings"]["judge_model"] and "overridden" in rubrics_grade["verifier_settings"]
     logger.info(f"Verification [{rubrics_verifier_id}] results: {rubrics_results}, score: {rubrics_vdata['score']}")
 
     # 21. Put and get RubricsVerifierTaskStep with agent_name (reusing deployed agent)

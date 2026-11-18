@@ -189,9 +189,7 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
         ) if changed]
         settings["command"] = overrides.get("command", self.command)
         settings["env_vars"] = sorted({*self.env_vars, *override_env})
-        if overridden:
-            settings["overridden"] = overridden
-        return settings
+        return {**settings, "overridden": overridden}
 
     def _resolve_command(self, context: TaskStepContext) -> tuple[str, dict[str, str]]:
         """Resolve ``(command, extra_env)`` for this run, so a value can vary without a
