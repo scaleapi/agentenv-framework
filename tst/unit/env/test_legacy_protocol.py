@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import dataclasses
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file_part
 from agentenv_protocol.client import GetDataResponse
-from agentenv_protocol.computer import COMPUTER_EXEC
 
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv
@@ -227,19 +225,6 @@ def test_card_servers_of_a_leaf_card_is_the_env_itself_and_a_composed_card_servi
     driver = {**_COMPOSED, "name": "desktop", "capabilities": {"operations": ["data/get"]}}
     assert [s.environment_name for s in legacy_protocol.card_servers(driver, "https://d")] == ["desktop", "slack", "slack", "docs"]
 
-
-
-def test_a_computer_is_the_server_on_a_sandbox_of_its_own_offering_computer_exec_not_an_app_it_fronts():
-    driver = {"name": "desktop", "url": RPC_PATH,
-              "capabilities": {"operations": ["data/get"], "extensions": [{"uri": COMPUTER_EXEC}]},
-              "children_environments": [{"name": "notes", "url": "/apps/notes/agentenv",
-                                         "capabilities": {"extensions": []}}]}
-    record = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk")
-    listed = legacy_protocol.card_servers(driver, "https://d")
-
-    assert [(s.environment_name, dataclasses.replace(s, record=record).is_computer) for s in listed] == [
-        ("desktop", True), ("notes", False)]
-    assert not any(s.is_computer for s in listed)
 
 def _record(card: dict | None, card_url: str | None = "https://env.example/.well-known/agent-env.json"):
     from agent_env.env.env import DeployedGatewayEnv

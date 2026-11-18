@@ -5,11 +5,9 @@ stored env card declares clock/v1, then invokes sync_time on each backing server
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
 An env whose card offers no set_time has no gateway clock to arm, as a computer deployed alone, and is refused
 saying to deploy it in a multi env; a record that kept no card is refused saying so.
-Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. A multi env's computer
-whose card offers no clock/v1 (one booted from a disk or a VM bundle, or on a base without agent-env's clock) is one
-too: tolerated, it's skipped and stays on real time; otherwise it's refused, naming it. Place right before
-prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0 and start
-it with set_env_clock_rate right before prompt_agent.
+Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
+before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
+and start it with set_env_clock_rate right before prompt_agent.
 """
 
 from __future__ import annotations
@@ -182,10 +180,10 @@ class SyncEnvClockTaskStep(TaskStep):
                         tolerate: Optional[bool] = None, server: Optional[BackingServer] = None) -> dict:
         """Invoke sync_time on one server, an MCP server or with ``mcp=False`` a website, if its card advertises
         clock/v1; skip a server with no card or no clock/v1 when ``tolerate`` (tolerate_missing_sync_time by default),
-        else raise, a multi env's computer saying it can't follow the universe. ``execute`` tolerates every website, so
-        one that doesn't follow the clock never fails the step; one that follows it but can't take the task's timezone
-        does, as an MCP server does. ``server`` is the server as the env's card lists it (``legacy_protocol.server_card``);
-        without it, the card is ``service``'s on ``deployed``'s stored card, or read live at its gateway path."""
+        else raise. ``execute`` tolerates every website, so one that doesn't follow the clock never fails the step; one
+        that follows it but can't take the task's timezone does, as an MCP server does. ``server`` is the server as the
+        env's card lists it (``legacy_protocol.server_card``); without it, the card is ``service``'s on ``deployed``'s
+        stored card, or read live at its gateway path."""
         tolerate = self.tolerate_missing_sync_time if tolerate is None else tolerate
         from agent_env.env import legacy_protocol
 
@@ -201,12 +199,6 @@ class SyncEnvClockTaskStep(TaskStep):
             if tolerate:
                 logger.info(f"sync_env_clock: {service} does not advertise {EXT_CLOCK_URI}; skipping")
                 return {"synced": False, "reason": "not_advertised"}
-            if server is not None and server.is_computer:
-                raise StepContextError(
-                    f"computer {service!r} can't follow the universe clock: it offers no {EXT_CLOCK_URI} sync_time, "
-                    "as a computer booted from a disk or a VM bundle, or on a base without agent-env's clock, doesn't, "
-                    "so its session would stay on real time. Deploy it in a container form of a base that follows the "
-                    "clock, leave the clock unarmed, or set tolerate_missing_sync_time to leave it on real time")
             raise StepContextError(f"{service} does not advertise {EXT_CLOCK_URI}")
         if not env_get_time_url:
             raise RuntimeError(f"gateway did not expose env_get_time_url; cannot sync {service}")

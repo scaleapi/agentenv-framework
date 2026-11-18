@@ -327,4 +327,4 @@ async def test_a_remote_desktop_booted_from_its_disk_is_skipped_when_tolerated_a
         print("CLOCK CHECK", json.dumps(results), flush=True)
 
     assert ("desktop", "not_advertised") in results["tolerated"], results
-    assert "computer 'desktop' can't follow the universe clock" in results["refused"] and not report.failed
+    assert f"desktop does not advertise {EXT_CLOCK_URI}" in results["refused"] and not report.failed

@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 from agentenv_protocol import METHOD_GET, DataPart, client as protocol_v1
-from agentenv_protocol.computer import COMPUTER_EXEC
 from mcp import ClientSession
 from mcp.types import CallToolResult
 from mcp.client.streamable_http import streamable_http_client
@@ -61,12 +60,6 @@ class BackingServer:
     def card(self) -> Optional[dict]:
         """The server's card as the env's card lists it, or None."""
         return self.child.card if self.child is not None else None
-
-    @property
-    def is_computer(self) -> bool:
-        """Whether the server is a multi env's computer itself, on a sandbox of its own: its card offers
-        computer-exec/v1, which the apps it fronts don't."""
-        return self.record is not None and protocol_v1.find_extension(self.card or {}, COMPUTER_EXEC) is not None
 
     def owner(self, deployed: DeployedEnv) -> DeployedEnv:
         """The record whose control token a call to the server takes: its own ``record``, a multi env's computer's or
