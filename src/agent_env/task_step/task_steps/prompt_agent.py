@@ -559,11 +559,11 @@ class PromptAgentTaskStep(TaskStep):
             await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
                                              headers=agent.control_headers)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
-        context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
+        context.record_model(ModelRole.SOLVER.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
-            context.record_model("user simulator", self.id, built_in[0].get("model"))
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
@@ -573,7 +573,7 @@ class PromptAgentTaskStep(TaskStep):
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
                                                  headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
-            context.record_model("user simulator", self.id, negotiated.fields.get("model") if negotiated else None)
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name

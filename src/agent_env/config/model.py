@@ -43,12 +43,17 @@ MODEL_PARAMS_RESERVED = frozenset(p.value for p in ModelParam)
 
 
 class ModelRole(StrEnum):
-    """A role a model plays in a run, by the name the run's records use. ``[model.roles]`` also takes the names it
-    had first: ``agent`` for the solver and ``user`` for the user simulator."""
+    """A role a model plays in a run. ``[model.roles]`` also takes the names it had first: ``agent`` for the solver
+    and ``user`` for the user simulator."""
 
     SOLVER = "solver"
     USER_SIMULATOR = "user_simulator"
     JUDGE = "judge"
+
+    @property
+    def record_key(self) -> str:
+        """The role's key in ``metadata.models``, which its readers have always seen."""
+        return "user simulator" if self is ModelRole.USER_SIMULATOR else self.value
 
 
 ROLE_SYNONYMS: dict[str, ModelRole] = {"agent": ModelRole.SOLVER, "user": ModelRole.USER_SIMULATOR}
@@ -65,9 +70,6 @@ class ModelSource(StrEnum):
     CONFIG_ROLE = "config_role"
     CONFIG_DEFAULT = "config_default"
     FALLBACK = "fallback"
-
-
-GIVEN_SOURCES = frozenset({ModelSource.STEP_PARAMS, ModelSource.RUN, ModelSource.STEP, ModelSource.AGENT})
 
 
 @dataclass(frozen=True)
@@ -230,14 +232,33 @@ def resolve_model(
     agent: Optional[str] = None,
     config: Optional[ModelConfig] = None,
 ) -> ResolvedModel:
-    """``role``'s model for one step: the first of the layers its call site has that names one (this step's
-    ``step_params``, the run's override, the step's own field, the deployed agent's default), then with ``config``
-    ``[model.roles]`` and, for the solver and the judge, ``[model] default``; a judge always has one, claude-sonnet-4-6
-    last. It reads no environment, key or secret, so a plan can resolve every role before its run starts."""
+    """``role``'s model for one step: the first of the layers its call site has that names one, else ``config``'s
+    (``named_model``, then ``config_model``). It reads no environment, key or secret, so a plan can resolve every role
+    before its run starts."""
+    return (named_model(role, step_params=step_params, run=run, step=step, agent=agent)
+            or config_model(role, config))
+
+
+def named_model(
+    role: ModelRole,
+    *,
+    step_params: Optional[str] = None,
+    run: Optional[str] = None,
+    step: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> Optional[ResolvedModel]:
+    """The first of these layers that names a model: this step's ``step_params``, the run's override, the step's own
+    field, the deployed agent's default; None when none does."""
     for source, model in ((ModelSource.STEP_PARAMS, step_params), (ModelSource.RUN, run),
                           (ModelSource.STEP, step), (ModelSource.AGENT, agent)):
         if model:
             return ResolvedModel(role, model, source)
+    return None
+
+
+def config_model(role: ModelRole, config: Optional[ModelConfig]) -> ResolvedModel:
+    """``role``'s model when no layer names one: ``[model.roles]``, then for the solver and the judge ``[model]
+    default``; a judge always has one, claude-sonnet-4-6 last."""
     if config is not None:
         if model := config.role_model(role):
             return ResolvedModel(role, model, ModelSource.CONFIG_ROLE)

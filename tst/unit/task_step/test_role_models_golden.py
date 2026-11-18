@@ -1,6 +1,6 @@
-"""Each role's model for a step, as every existing config and override combination resolves it: the solver's
-default a deploy sets, the solver's model a prompt step asks for, the user simulator's at each of its three call
-sites, and the judge's. Written before role resolution moved into one resolver, so that move changes nothing."""
+"""Each role's model at each call site that resolves one, across the configs and overrides in use: the solver's
+default a deploy sets, the solver's model a prompt step asks for, the user simulator's at prompt_agent,
+deploy_user_sim_agent and always_on, and the judge's, a model stored in a task included."""
 
 from __future__ import annotations
 

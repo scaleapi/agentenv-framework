@@ -12,6 +12,8 @@ from agent_env.config.model import (
     ModelRole,
     ModelSource,
     ResolvedModel,
+    config_model,
+    named_model,
     resolve_model,
 )
 
@@ -317,3 +319,14 @@ def test_params_extra_headers_win_per_header_whatever_its_case():
     call = cfg.resolve_call("m", secret_resolver=_secrets({}))
     assert call.params == {"temperature": 0, "extra_headers": {"X-Plain": "v", "x-bill-to": "other"}}
     assert cfg.params == {"temperature": 0, "extra_headers": {"x-bill-to": "other"}}
+
+
+def test_each_role_records_under_the_key_metadata_models_has_always_used():
+    assert {role: role.record_key for role in ModelRole} == {
+        ModelRole.SOLVER: "solver", ModelRole.USER_SIMULATOR: "user simulator", ModelRole.JUDGE: "judge"}
+
+
+def test_no_named_layer_leaves_the_role_to_its_config():
+    assert named_model(ModelRole.SOLVER) is None
+    assert config_model(ModelRole.SOLVER, ModelConfig(default="D")) == ResolvedModel(
+        ModelRole.SOLVER, "D", ModelSource.CONFIG_DEFAULT)

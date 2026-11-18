@@ -473,13 +473,11 @@ class Config:
         step: str | None = None,
         agent: str | None = None,
     ) -> model_config.ResolvedModel:
-        """``role``'s model for one step, falling back to this config's ``[model.roles]`` and default
-        (``model_config.resolve_model``). ``[model]`` is read only when no layer names a model, so a fallback the step
-        doesn't use, such as an unset ``env:`` reference, can't fail it."""
-        given = model_config.resolve_model(role, step_params=step_params, run=run, step=step, agent=agent)
-        if given.source in model_config.GIVEN_SOURCES:
-            return given
-        return model_config.resolve_model(role, config=self._model_config())
+        """``role``'s model for one step, falling back to this config's ``[model.roles]`` and default. ``[model]`` is
+        read only when no layer names a model, so a fallback the step doesn't use, such as an unset ``env:``
+        reference, can't fail it."""
+        return (model_config.named_model(role, step_params=step_params, run=run, step=step, agent=agent)
+                or model_config.config_model(role, self._model_config()))
 
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)

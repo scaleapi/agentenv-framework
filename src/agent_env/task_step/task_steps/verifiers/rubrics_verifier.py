@@ -956,7 +956,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
         try:
             model = self._judge_model(context)
-            context.record_model("judge", self.id, model)
+            context.record_model(ModelRole.JUDGE.record_key, self.id, model)
             agent_prompt_text = prompt_response.prompt_text or ""
             judge_effort = overrides.get("judge_effort") or self.effort
             judge_max_thinking_tokens = overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens
@@ -1450,7 +1450,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload, headers=headers)
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
         # What the judge agent took; one that doesn't accept a model grades on its own.
-        context.record_model("judge", self.id, config_payload.get("model"))
+        context.record_model(ModelRole.JUDGE.record_key, self.id, config_payload.get("model"))
 
     async def _invoke_judge_a2a(
         self,

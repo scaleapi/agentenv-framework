@@ -110,6 +110,7 @@ from agent_env.env.gateway.constants import (
     EXT_TRIGGERS_URI,
     EXT_USER_CHAT_URI,
 )
+from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
@@ -593,7 +594,7 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.agent.control_headers)
-        ctx.record_model("solver", step.id, negotiated.fields.get("model") if negotiated else None)
+        ctx.record_model(ModelRole.SOLVER.record_key, step.id, negotiated.fields.get("model") if negotiated else None)
         self.rules_in_system_prompt = bool(desired.get("system_prompt") and negotiated
                                            and "system_prompt" in negotiated.fields)
         if desired.get("system_prompt") and not self.rules_in_system_prompt:
@@ -614,7 +615,7 @@ class _Run:
             await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.user_agent.control_headers)
         accepted = sorted(negotiated.fields) if negotiated else []
-        ctx.record_model("user simulator", step.id, negotiated.fields.get("model") if negotiated else None)
+        ctx.record_model(ModelRole.USER_SIMULATOR.record_key, step.id, negotiated.fields.get("model") if negotiated else None)
         self.user_setup = {"model": self.user_model, "model_from": self.user_model_from,
                            "user_sim_step_model": self.us.get("model"),
                            "model_set": "model" in accepted,  # else the agent ran its own
