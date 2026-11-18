@@ -206,6 +206,7 @@ def test_build_builds_a_base_that_takes_from_image_kits_from_a_context_holding_w
         return subprocess.CompletedProcess(command, 0, "#1 DONE\n", "")
 
     monkeypatch.setattr(script, "_streamed", streamed)
+    monkeypatch.chdir(REPO)
     base = "src/agent_env/computers/artifacts/ubuntu-24.04"
 
     assert _run(script, monkeypatch, "build", _gateway(name="agentenv-ubuntu-24.04", context=base,
