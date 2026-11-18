@@ -39,7 +39,7 @@ from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
-from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
@@ -156,6 +156,7 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
+    step_role = StepRole.AGENT
     DEFAULT_USER_AGENT_NAME: ClassVar[str] = "human_agent"
     entity_refs = (
         EntityRef.env("snapshot_config.env_id"),

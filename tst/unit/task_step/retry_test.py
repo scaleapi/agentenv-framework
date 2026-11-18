@@ -812,7 +812,7 @@ def test_retry_config_from_dict_validates():
 
 
 def test_retry_config_round_trips_on_non_prompt_step():
-    # deploy_env's __init__ does not accept retry_config; attach_retry_config must
+    # deploy_env's __init__ does not accept retry_config; attach_base_fields must
     # still hydrate it on the generic parse path, and it must round-trip out.
     doc = {
         "id": "t", "type": "task", "version": 1,
