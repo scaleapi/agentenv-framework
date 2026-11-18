@@ -1525,3 +1525,41 @@ diff -ruN a/src/libfaketime.map b/src/libfaketime.map
 +  pthread_cond_timedwait;
  } GLIBC_2.2.5;
  
+diff -ruN a/src/libfaketime.c b/src/libfaketime.c
+--- a/src/libfaketime.c
++++ b/src/libfaketime.c
+@@ -329,6 +329,9 @@
+   check_missing_real(#name, (NULL == real_##name))
+ 
+ static pthread_once_t initialized_once_control = PTHREAD_ONCE_INIT;
++/* Set on the thread running ftpl_really_init: a time call it makes, as an allocator that reads the clock does when
++ * dlsym allocates, takes the kernel's clock instead of waiting on the init it is part of. */
++static __thread int ftpl_initializing = 0;
+ 
+ /* prototypes */
+ static int    fake_gettimeofday(struct timeval *tv);
+@@ -2326,6 +2329,7 @@
+   int result;
+ 
+   ftpl_init();
++  if (ftpl_initializing) return syscall(SYS_clock_gettime, clk_id, tp);
+   // If ftpl_init ends up recursing, pthread_once will deadlock.
+   // (Previously we attempted to detect this situation, and bomb out,
+   // but the approach taken wasn't thread-safe and broke in practice.)
+@@ -3103,8 +3107,15 @@
+   dont_fake = dont_fake_final;
+ }
+ 
++static void ftpl_really_init_guarded(void) {
++  ftpl_initializing = 1;
++  ftpl_really_init();
++  ftpl_initializing = 0;
++}
++
+ inline static void ftpl_init(void) {
+-  pthread_once(&initialized_once_control, ftpl_really_init);
++  if (ftpl_initializing) return;
++  pthread_once(&initialized_once_control, ftpl_really_init_guarded);
+ }
+ 
+ void *ft_dlvsym(void *handle, const char *symbol, const char *version,

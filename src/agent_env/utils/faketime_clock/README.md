@@ -5,12 +5,12 @@ server does. Instead each session program loads agent-env's build of [libfaketim
 (through `/etc/ld.so.preload`), which answers clock reads with universe time from a page a follower process keeps in
 step with the gateway.
 
-It is part of the ubuntu-24.04 base, which builds the library and the shim from this folder in a stage of its
-Dockerfile, since an image builds only from its own folder; the ubuntu-24.04-browser base has a copy, which a unit test
-keeps identical. The base starts as root: the root start (`../root/init`) sets the zone, makes the clock page and file
-for the follower's user, `agentenv-clock`, and starts root's supervisord (`../root.conf`), which runs the follower
-(`clock-follower`) as that user and the session's supervisord as the session user. The session user can read the clock but neither write, replace nor
-stop it.
+Each image that runs it takes this folder into its build context through its `shared_sources.toml` (the ubuntu-24.04
+and ubuntu-24.04-browser bases, and the Claude Code agent image) and builds the library and the shim for its own libc
+in a stage of its Dockerfile. A base starts as root: its root start (`computers/artifacts/ubuntu-24.04/root/init`) sets
+the zone, makes the clock page and file for the follower's user, `agentenv-clock`, and starts root's supervisord
+(`root.conf` beside it), which runs the follower (`clock-follower`) as that user and the session's supervisord as the
+session user. The session user can read the clock but neither write, replace nor stop it.
 
 The follower long-polls the gateway's `/clock/watch`, writes each state it answers to the page and acknowledges it with
 its next watch. Core writes its config, the gateway's watch URL as the computer reaches it, the computer's name and its
@@ -35,6 +35,8 @@ What follows the universe, and what doesn't:
   their own (Chromium's BoringSSL, GnuTLS, NSS, Java's) and static binaries aren't covered.
 - **Who:** only the session user's processes (`AGENTENV_SESSION_UID`). A program started with `AGENTENV_REAL_TIME=1`
   stays real; the marker is taken out of its environment block, so its children are faked.
+- **Init:** a clock read made while the library initializes (an allocator `dlsym` calls, say) reads the kernel's
+  clock rather than wait on the initialization it is part of; Claude Code's CLI never started without it.
 - **Settings:** read once as the library loads, from `/etc/agentenv/clock.conf` (`clock.conf` is the default), or from
   the environment where there is no such file. While the file exists the environment changes none of them; the marker
   above is the one switch a program's environment has. No `getenv()` runs once the program has started: a `getenv()`
