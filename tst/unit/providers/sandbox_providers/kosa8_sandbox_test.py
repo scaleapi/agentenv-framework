@@ -6,7 +6,13 @@ import httpx
 import pytest
 
 from agent_env.providers.sandbox_providers.kosa8 import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.kosa8.sandbox import Kosa8Api, Kosa8Error, Kosa8Sandbox, allows_host
+from agent_env.providers.sandbox_providers.kosa8.sandbox import (
+    Kosa8Api,
+    Kosa8Error,
+    Kosa8Sandbox,
+    allows_host,
+    denied_entries,
+)
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from tst.unit.providers.sandbox_providers.kosa8_fakes import API_KEY, FakeKosa8, command_of, error, frames
 
@@ -142,3 +148,26 @@ def test_allows_host_follows_kosa8s_matching(policy, host, allowed):
 ])
 def test_the_sandbox_downloads_only_what_its_policy_admits(api, policy, url, fetches):
     assert _sandbox(api, policy)._can_download(url) is fetches
+
+
+@pytest.mark.parametrize(("enforced", "denied"), [
+    ("any", ()),
+    ("deny", ()),
+    ("allow:pypi.org", ()),
+    ("allow:*.amazonaws.com;deny:secret.s3.amazonaws.com,10.0.0.0/8", ("secret.s3.amazonaws.com", "10.0.0.0/8")),
+    ("block:*.amazonaws.com", ("*.amazonaws.com",)),
+])
+def test_denied_entries_are_what_a_compiled_policy_denies(enforced, denied):
+    assert denied_entries(enforced) == denied
+
+
+@pytest.mark.parametrize(("enforced", "url", "fetches"), [
+    ("block:*.amazonaws.com", "https://bucket.s3.amazonaws.com/x?sig=1", False),
+    ("block:gist.github.com", "https://bucket.s3.amazonaws.com/x?sig=1", True),
+    ("allow:*.amazonaws.com;deny:bucket.s3.amazonaws.com", "https://bucket.s3.amazonaws.com/x", False),
+    ("allow:*.amazonaws.com;deny:other.s3.amazonaws.com", "https://bucket.s3.amazonaws.com/x", True),
+])
+def test_a_host_the_enforced_policy_denies_is_pushed_rather_than_downloaded(api, enforced, url, fetches):
+    sandbox = _sandbox(api)
+    sandbox.enforce(enforced)
+    assert sandbox._can_download(url) is fetches

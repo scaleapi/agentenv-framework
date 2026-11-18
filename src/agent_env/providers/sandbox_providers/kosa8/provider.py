@@ -24,7 +24,6 @@ from agent_env.providers.sandbox_providers.kosa8.sandbox import (
     Kosa8Api,
     Kosa8Error,
     Kosa8Sandbox,
-    policy_from_enforced,
 )
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider, apply_default_attribution
@@ -223,7 +222,7 @@ class Kosa8SandboxProvider(SandboxProvider):
         sandbox = Kosa8Sandbox(self._api, sandbox_id, tunnel_urls={}, network_policy=effective_policy)
         try:
             await self._wait_until_running(created)
-            sandbox.network_policy = policy_from_enforced(await self._api.enforced_egress(sandbox_id))
+            sandbox.enforce(await self._api.enforced_egress(sandbox_id))
             sandbox.tunnel_urls = {port: await self._api.open_port(sandbox_id, port) for port in ports}
             logger.info(
                 "kosa8 sandbox started: id=%s name=%s size=%s disk_gb=%s ttl_s=%s ports=%s attribution=%s",
@@ -319,13 +318,11 @@ class Kosa8SandboxProvider(SandboxProvider):
 
     async def get_sandbox(self, sandbox_id: str) -> Kosa8Sandbox:
         """Reconnect, restoring the public URLs and the applied egress policy."""
-        sandbox = await self._api.get_sandbox(sandbox_id)
-        return Kosa8Sandbox(
-            self._api,
-            sandbox["id"],
-            tunnel_urls=await self._api.open_ports(sandbox["id"]),
-            network_policy=policy_from_enforced(await self._api.enforced_egress(sandbox["id"])),
-        )
+        found = await self._api.get_sandbox(sandbox_id)
+        sandbox = Kosa8Sandbox(self._api, found["id"], tunnel_urls=await self._api.open_ports(found["id"]),
+                               network_policy=None)
+        sandbox.enforce(await self._api.enforced_egress(found["id"]))
+        return sandbox
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
         await self._api.delete_sandbox(sandbox_id)

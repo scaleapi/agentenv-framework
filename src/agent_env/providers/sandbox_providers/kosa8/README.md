@@ -91,7 +91,8 @@ All keys go under `[sandbox.providers.kosa8.config]`. Unknown keys are refused.
 - **kosa8's own hosts:** `*.kosa8labs.com` is added to every allow list, so a restricted agent can reach the
   environments it talks to.
 - **Organization policy:** an organization's default egress policy applies to sandboxes that set none, and the
-  sandbox's `network_policy` reports what kosa8 enforces. A deny-only policy reads as allow-all.
+  sandbox's `network_policy` reports what kosa8 enforces. A deny-only policy reads as allow-all; the sandbox keeps
+  its denies, and a file whose signed URL is on a denied host is pushed over exec rather than downloaded.
 - **Reconnect:** `get_sandbox` restores the ports and the applied policy from kosa8.
 
 ## Cleanup

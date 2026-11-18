@@ -171,6 +171,19 @@ async def test_an_org_default_policy_is_what_the_sandbox_reports(api):
     api.org_default = "allow:pypi.org;deny:gist.github.com"
     sandbox = await _provider(api).create_vm(setup_for_gateway=False)
     assert sandbox.network_policy == NetworkPolicy(mode=ALLOWLIST, allow_hosts=("pypi.org",))
+    assert sandbox.denied_hosts == ("gist.github.com",)
+
+
+@pytest.mark.asyncio
+async def test_an_org_deny_list_survives_a_reconnect(api):
+    api.org_default = "block:*.amazonaws.com"
+    provider = _provider(api)
+    created = await provider.create_vm(setup_for_gateway=False)
+    reconnected = await _provider(api).get_sandbox(created.sandbox_id)
+    for sandbox in (created, reconnected):
+        assert sandbox.network_policy == NetworkPolicy()
+        assert sandbox.denied_hosts == ("*.amazonaws.com",)
+        assert not sandbox._can_download("https://bucket.s3.amazonaws.com/x?sig=1")
 
 
 @pytest.mark.parametrize(("status", "code"), [(400, "invalid_egress"), (403, "egress_not_allowed"), (501, "unsupported")])

@@ -240,7 +240,7 @@ def _origin(url: str) -> str:
 
 def policy_from_enforced(enforced: str) -> NetworkPolicy:
     """The egress policy a compiled kosa8 policy applies. ``block:…`` lets everything out but a deny list, which an
-    allowlist can't express, so it reads as allow-all."""
+    allowlist can't express, so it reads as allow-all; ``denied_entries`` keeps the denies."""
     if enforced == "deny":
         return NetworkPolicy(mode=NetworkMode.ALLOWLIST)
     if enforced.startswith("allow:"):
@@ -253,13 +253,28 @@ def policy_from_enforced(enforced: str) -> NetworkPolicy:
     return NetworkPolicy()
 
 
+def denied_entries(enforced: str) -> tuple[str, ...]:
+    """What a compiled kosa8 policy denies: a ``block:…`` list, or the ``;deny:…`` after an allow list. A
+    ``NetworkPolicy`` can't carry either, so the sandbox keeps them beside it."""
+    if enforced.startswith("block:"):
+        listed = enforced.removeprefix("block:")
+    elif ";deny:" in enforced:
+        listed = enforced.split(";deny:", 1)[1]
+    else:
+        return ()
+    return tuple(entry for entry in listed.split(",") if entry)
+
+
 def allows_host(policy: NetworkPolicy, host: str) -> bool:
-    """Whether ``policy`` lets the sandbox reach ``host`` by kosa8's rules: an exact name, a ``*.domain`` entry, which
-    covers every name under ``domain`` but not ``domain`` itself, or an address in a listed address or range."""
-    if not policy.restricts_egress:
-        return True
+    """Whether ``policy`` lets the sandbox reach ``host`` by kosa8's rules."""
+    return not policy.restricts_egress or matches_host((*policy.allow_hosts, *policy.allow_cidrs), host)
+
+
+def matches_host(entries: tuple[str, ...], host: str) -> bool:
+    """Whether a kosa8 entry names ``host``: an exact name, a ``*.domain`` entry, which covers every name under
+    ``domain`` but not ``domain`` itself, or an address in a listed address or range."""
     host = host.lower().rstrip(".")
-    for entry in policy.allow_hosts:
+    for entry in entries:
         entry = entry.lower().rstrip(".")
         if entry == host or (entry.startswith("*.") and host.endswith(entry[1:])):
             return True
@@ -267,11 +282,7 @@ def allows_host(policy: NetworkPolicy, host: str) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return any(
-        address in ipaddress.ip_network(entry, strict=False)
-        for entry in (*policy.allow_cidrs, *policy.allow_hosts)
-        if _is_address(entry)
-    )
+    return any(address in ipaddress.ip_network(entry, strict=False) for entry in entries if _is_address(entry))
 
 
 def _is_address(entry: str) -> bool:
@@ -323,7 +334,13 @@ class Kosa8Sandbox(VmSandbox):
         self.vnc_url = None
         self.tunnel_urls = tunnel_urls
         self.network_policy = network_policy
+        self.denied_hosts: tuple[str, ...] = ()
         self._staging_ready = False
+
+    def enforce(self, enforced: str) -> None:
+        """Take the policy kosa8 enforces, compiled: what it allows as ``network_policy``, and what it denies."""
+        self.network_policy = policy_from_enforced(enforced)
+        self.denied_hosts = denied_entries(enforced)
 
     async def terminate(self) -> None:
         await self._api.delete_sandbox(self.sandbox_id)
@@ -383,11 +400,13 @@ class Kosa8Sandbox(VmSandbox):
         await self.wait_for_vm()
 
     def _can_download(self, url: str | None) -> bool:
-        """Whether the sandbox can fetch ``url`` itself; an unknown policy counts as no."""
+        """Whether the sandbox can fetch ``url`` itself: its policy allows the host and nothing denies it. An unknown
+        policy counts as no."""
         if url is None or self.network_policy is None:
             return False
         host = urlparse(url).hostname
-        return host is not None and allows_host(self.network_policy, host)
+        return (host is not None and allows_host(self.network_policy, host)
+                and not matches_host(self.denied_hosts, host))
 
     async def _download_object_to_vm(self, object_url: str, vm_path: str) -> None:
         """Curl a signed URL the policy admits; push anything else over exec, which needs no egress."""
