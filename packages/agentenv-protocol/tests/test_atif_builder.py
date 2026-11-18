@@ -111,9 +111,9 @@ def test_a_step_still_waiting_on_a_result_is_served_when_its_task_ends():
     check(pages[-1])
 
 
-@pytest.mark.parametrize("includes,expected", [(False, 95), (True, 10)])
-def test_usage_is_written_in_atifs_terms(includes, expected):
-    run, _ = run_task([{"type": "usage", "step": "s1", "in": 10, "read": 80, "write": 5, "out": 7}],
+@pytest.mark.parametrize("includes,given,expected", [(False, 10, 95), (True, 100, 100)])
+def test_usage_is_written_in_atifs_terms(includes, given, expected):
+    run, _ = run_task([{"type": "usage", "step": "s1", "in": given, "read": 80, "write": 5, "out": 7}],
                       cls=adapter(includes))
     metrics = run.document()["steps"][1]["metrics"]
     assert metrics["prompt_tokens"] == expected and metrics["cached_tokens"] == 80
@@ -438,3 +438,110 @@ def test_a_step_with_no_model_call_takes_no_reasoning():
 
     with pytest.raises(AtifError, match="no model call"):
         run_task([{"type": "z"}], cls=Zero)
+
+
+@pytest.mark.parametrize("includes,expected", [(False, 160), (True, 100)])
+def test_usage_given_over_several_records_keeps_every_count(includes, expected):
+    run, pages = run_task([{"type": "usage", "step": "s1", "read": 50}, {"type": "usage", "step": "s1", "in": 100},
+                           {"type": "usage", "step": "s1", "write": 10, "out": 7}], cls=adapter(includes))
+    metrics = run.document()["steps"][1]["metrics"]
+    assert metrics["prompt_tokens"] == expected and metrics["cached_tokens"] == 50 and metrics["completion_tokens"] == 7
+    assert metrics["extra"] == {"agentenv": {"cache_write_tokens": 10}}
+    early = AdapterRun(adapter(includes))
+    early.start_task(CTX)
+    early.native({"type": "usage", "step": "s1", "read": 50})
+    assert "prompt_tokens" not in early.document()["steps"][1]["metrics"]
+
+
+def test_cache_counts_over_an_input_count_that_includes_them_are_refused():
+    run = AdapterRun(adapter(True))
+    run.start_task(CTX)
+    run.native({"type": "usage", "step": "s1", "in": 40, "read": 30})
+    before = run.document()
+    with pytest.raises(AtifError, match="exceed the input count"):
+        run.native({"type": "usage", "step": "s1", "write": 20})
+    assert run.document() == before
+
+
+def test_a_total_is_left_out_when_a_model_step_has_no_count():
+    run, _ = run_task([{"type": "say", "step": "s1", "text": "a"}, {"type": "usage", "step": "s1", "in": 100, "out": 5},
+                       {"type": "say", "step": "s2", "text": "b"}], final=["done"])
+    totals = run.document()["final_metrics"]
+    assert "total_prompt_tokens" not in totals and "total_completion_tokens" not in totals
+    measured, _ = run_task([{"type": "say", "step": "s1", "text": "a"}, {"type": "usage", "step": "s1", "in": 100}],
+                           final=["done"])
+    assert measured.document()["final_metrics"]["total_prompt_tokens"] == 100
+
+
+def _spawner():
+    @atif_adapter(native_format="toy-spawn/1", version="1", input_includes_cache=True)
+    class Spawner(Adapter):
+        @native(type="task")
+        def task(self, r, turn):
+            turn.tool_call(step=r["step"], tool_call_id=r["id"], function_name="Task", arguments={})
+
+        @native(type="spawn")
+        def spawn(self, r, turn):
+            turn.subagent(r["agent"], spawned_by=r["id"])
+
+        @native(type="sub")
+        def sub(self, r, turn):
+            turn.message(step=r["step"], text="working", agent=r["agent"])
+
+        @native(type="result")
+        def result(self, r, turn):
+            turn.tool_result(source_call_id=r["id"], text="done")
+
+        @native(type="say")
+        def say(self, r, turn):
+            turn.message(step=r["step"], text=r["text"])
+    return Spawner
+
+
+def _refs(read):
+    return [ref["trajectory_id"] for step in read["steps"] for result in (step.get("observation") or {}).get("results")
+            or [] for ref in result.get("subagent_trajectory_ref") or []]
+
+
+def test_a_sub_agent_that_wrote_no_step_is_left_out_with_its_pointer():
+    run, _ = run_task([{"type": "task", "step": "p1", "id": "c1"}, {"type": "spawn", "id": "c1", "agent": "sub"},
+                       {"type": "result", "id": "c1"}], final=["done"], cls=_spawner())
+    document = run.document()
+    check(document)
+    assert _refs(document) == [] and "subagent_trajectories" not in document
+
+
+def test_a_live_page_shows_a_pointer_only_with_a_step_of_its_sub_agent():
+    run = AdapterRun(_spawner())
+    run.start_task(CTX)
+    pages = []
+    for record in [{"type": "task", "step": "p1", "id": "c1"}, {"type": "spawn", "id": "c1", "agent": "sub"},
+                   {"type": "sub", "step": "x1", "agent": "sub"}, {"type": "result", "id": "c1"},
+                   {"type": "say", "step": "p2", "text": "next"}, {"type": "say", "step": "p3", "text": "more"},
+                   {"type": "sub", "step": "x2", "agent": "sub"}]:
+        pages.append(run.native(record))
+    pages.append(run.end_task())
+    assert [len(p["steps"]) if p else 0 for p in pages] == [1, 1, 1, 1, 1, 1, 3, 4]
+    for page in filter(None, pages):
+        trajectories = {sub["trajectory_id"] for sub in page.get("subagent_trajectories") or []}
+        assert set(_refs(page)) <= trajectories and is_prefix(page, run.document())
+    assert _refs(pages[-1]) == ["sub"]
+
+
+def test_a_sub_agent_is_spawned_by_a_call_of_its_task_waiting_on_its_result_and_writes_only_in_that_task():
+    run = AdapterRun(_spawner())
+    run.start_task(CTX)
+    for record in [{"type": "task", "step": "p1", "id": "c1"}, {"type": "result", "id": "c1"}]:
+        run.native(record)
+    with pytest.raises(AtifError, match="still waiting on its result"):
+        run.native({"type": "spawn", "id": "c1", "agent": "late"})
+    with pytest.raises(AtifError, match="still waiting on its result"):
+        run.native({"type": "spawn", "id": "nothing", "agent": "late"})
+    run.native({"type": "task", "step": "p2", "id": "c2"})
+    run.native({"type": "spawn", "id": "c2", "agent": "sub"})
+    with pytest.raises(AtifError, match="already spawned"):
+        run.native({"type": "spawn", "id": "c2", "agent": "other"})
+    run.end_task()
+    run.start_task(TurnContext(index=1, context_id="ctx", task_id="t2", inbound=["more"]))
+    with pytest.raises(AtifError, match="earlier task"):
+        run.native({"type": "sub", "step": "x1", "agent": "sub"})

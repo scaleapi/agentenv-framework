@@ -111,22 +111,35 @@ def media_paths(document: Mapping[str, Any]) -> list[str]:
 
 
 def strip_profile(document: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy without any ``extra.agentenv``; an ``extra`` left empty goes too. What remains is plain ATIF."""
-    def walk(value: Any) -> Any:
-        if isinstance(value, Mapping):
-            out = {}
-            for key, item in value.items():
-                if key == "extra" and isinstance(item, Mapping):
-                    rest = {k: walk(v) for k, v in item.items() if k != PROFILE_KEY}
-                    if rest:
-                        out[key] = rest
-                    continue
-                out[key] = walk(item)
-            return out
-        if isinstance(value, list):
-            return [walk(item) for item in value]
-        return value
-    return walk(document)
+    """A copy without the profile: ``extra.agentenv`` taken off each ATIF object that has an ``extra``, and an
+    ``extra`` left empty with it. Tool arguments and every other free-form value stay as they are."""
+    stripped = copy.deepcopy(dict(document))
+    _strip_trajectory(stripped)
+    return stripped
+
+
+def _strip_trajectory(trajectory: dict[str, Any]) -> None:
+    for owner in (trajectory, trajectory.get("agent"), trajectory.get("final_metrics")):
+        _strip(owner)
+    for step in trajectory.get("steps") or []:
+        _strip(step)
+        _strip(step.get("metrics"))
+        for call in step.get("tool_calls") or []:
+            _strip(call)
+        for result in (step.get("observation") or {}).get("results") or []:
+            _strip(result)
+            for ref in result.get("subagent_trajectory_ref") or []:
+                _strip(ref)
+    for sub in trajectory.get("subagent_trajectories") or []:
+        _strip_trajectory(sub)
+
+
+def _strip(owner: Any) -> None:
+    extra = owner.get("extra") if isinstance(owner, dict) else None
+    if isinstance(extra, dict) and PROFILE_KEY in extra:
+        del extra[PROFILE_KEY]
+        if not extra:
+            del owner["extra"]
 
 
 def is_prefix(page: Mapping[str, Any] | None, later: Mapping[str, Any] | None) -> bool:

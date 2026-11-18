@@ -28,7 +28,8 @@ to native exactly.
   index, and each earlier document names the next in `continued_trajectory_ref`. The worker that stores the earlier
   document sets that link, since the agent that wrote it may be gone.
 - A sub-agent is an embedded trajectory in `subagent_trajectories`, with its own steps, referenced from the spawning
-  call's result by `subagent_trajectory_ref`.
+  call's result by `subagent_trajectory_ref`. It belongs to the task of the call that spawned it. A sub-agent that
+  wrote no step is left out, and so is the reference to it.
 - `schema_version` is the oldest ATIF version that holds the document's fields: `ATIF-v1.8` for profile 1.0.
 - Format id: `atif/1`. The profile's own version is the root's `extra.agentenv.version`.
 
@@ -39,9 +40,10 @@ to native exactly.
   task ends.
 - A result always sits in the step that made its call, as ATIF requires. One that arrives after that step closed records
   when, in `arrived`.
-- A live reader is served closed steps only, each trajectory up to its first step still waiting on a result. Steps are
-  ordered, so a step waiting on a late result holds back the steps after it until the result comes or the task ends.
-  Everything a reader is served is a prefix of every later read.
+- A live reader is served closed steps only, each trajectory up to its first step still waiting on a result or
+  referencing a sub-agent the reader isn't served a step of yet. Steps are ordered, so such a step holds back the steps
+  after it until the result or the sub-agent's step comes, or the task ends. Everything a reader is served is a prefix
+  of every later read, and every reference it is served resolves.
 - The final response is written once. When the task's last agent step already holds the same text, nothing is added;
   otherwise one step is appended, `source: agent` and `llm_call_count` 0. The task's terminal state goes on the task's
   last step, which closes only when the task ends, so it is never served before the state is known.
@@ -53,7 +55,10 @@ to native exactly.
   validator on Python 3.10 reads no other.
 - Usage follows ATIF: `prompt_tokens` includes cache reads and writes, and `cached_tokens` is the cache reads. Each
   adapter's `input_includes_cache` constant says whether its native input count already includes the cache.
-  Cache writes go in `Metrics.extra.agentenv.cache_write_tokens`.
+  Cache writes go in `Metrics.extra.agentenv.cache_write_tokens`. An adapter may give a step's counts over several
+  records: each count is the latest given, and `prompt_tokens` is written once the input count is known.
+- `final_metrics` totals a count only when every model step, every agent step but those with `llm_call_count` 0, has
+  it; otherwise the total is left out, which ATIF readers read as unknown.
 - A tool call whose input isn't a JSON object is wrapped as Harbor wraps it: a string as `{"input": ...}`, a missing
   input as `{}`, any other value as `{"value": ...}`. The native input is kept in `ToolCall.extra.raw_arguments`, only
   when wrapping changed it. Harbor's ATIF-to-Codex resume reads that key back.
@@ -70,7 +75,9 @@ ATIF defines a step's `cost_usd` as the cost "based on current provider pricing 
 - A cost agentenv computes itself, from its own price table after the run, never goes in a typed field. The framework
   records that one with the run's usage instead, as a `priced` cost whose `cost_source` names the price table's
   version; `harness` and `provider` mean the same there as here.
-- When nothing reports a cost, the typed fields stay empty, which ATIF readers read as unknown.
+- `total_cost_usd` is the sum of the tasks' reported costs when every task has one, else of the steps' costs when
+  every model step has one. When nothing reports a cost, the typed fields stay empty, which ATIF readers read as
+  unknown.
 
 ## Errors
 

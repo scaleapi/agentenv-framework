@@ -44,6 +44,9 @@ _EXTENSIONS = {
 _TIME = re.compile(r"^(\d{4}-\d{2}-\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d+))?([Zz]|[+-]\d{2}:?\d{2})$")
 _JOIN = "\n\n"
 _UNSET: Any = object()
+_KILOBYTE = 1000
+_MEGABYTE = 1_000_000
+_PROMPT_PARTS = ("input", "cache_read", "cache_write")
 
 
 def timestamp(value: str | datetime | None) -> str | None:
@@ -115,9 +118,23 @@ def _json(value: Any, what: str) -> Any:
 
 
 def _size(count: int) -> str:
-    if count < 1000:
+    if count < _KILOBYTE:
         return f"{count} B"
-    return f"{count / 1000:.1f} KB" if count < 1_000_000 else f"{count / 1_000_000:.1f} MB"
+    return f"{count / _KILOBYTE:.1f} KB" if count < _MEGABYTE else f"{count / _MEGABYTE:.1f} MB"
+
+
+def _prompt_tokens(usage: Mapping[str, int], includes: bool | None) -> int | None:
+    """ATIF's ``prompt_tokens``, cache reads and writes included, from a step's native counts; unknown until its
+    input count is."""
+    if "input" not in usage:
+        return None
+    cache = usage.get("cache_read", 0) + usage.get("cache_write", 0)
+    if not includes:
+        return usage["input"] + cache
+    if cache > usage["input"]:
+        raise AtifError(f"cache reads and writes ({cache}) exceed the input count that includes them "
+                        f"({usage['input']})")
+    return usage["input"]
 
 
 @dataclass(frozen=True)
@@ -188,6 +205,7 @@ class _Step:
     results: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     metrics_profile: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, int] = field(default_factory=dict)
     profile: dict[str, Any] = field(default_factory=dict)
     pending: set[str] = field(default_factory=set)
     model_name: str | None = None
@@ -206,6 +224,7 @@ class _Trajectory:
     agent: dict[str, Any]
     steps: list[_Step] = field(default_factory=list)
     open: _Step | None = None
+    task: int = -1
 
 
 class Document:
@@ -283,12 +302,13 @@ class Document:
 
     # What handlers call, through AtifTurn
 
+    def peek(self, key: str, agent: str | None) -> _Step | None:
+        """The open step content under ``key`` would go to, or None when it would start a new one."""
+        step = self._traj(agent).open
+        return step if step is not None and step.key == key and step.source == "agent" else None
+
     def step_for(self, key: str, agent: str | None) -> _Step:
-        trajectory = self._traj(agent)
-        step = trajectory.open
-        if step is None or step.key != key or step.source != "agent":
-            step = self._start(trajectory, "agent", key)
-        return step
+        return self.peek(key, agent) or self._start(self._traj(agent), "agent", key)
 
     def open_step(self, agent: str | None) -> _Step:
         step = self._traj(agent).open
@@ -353,7 +373,14 @@ class Document:
             _str(value, f"a sub-agent's {what}")
         if agent_id in self._subs:
             raise AtifError(f"sub-agent {agent_id!r} is already declared")
-        self._subs[agent_id] = _Trajectory(agent_id, _agent(name or agent_id, version, model_name))
+        if self._context is None:
+            raise AtifError("no task is open")
+        home = self._call_home.get(spawned_by)
+        if home is None or home[1].task != self._task or spawned_by not in home[1].pending:
+            raise AtifError(f"spawned_by is a call of this task still waiting on its result, not {spawned_by!r}")
+        if spawned_by in self._spawned:
+            raise AtifError(f"call {spawned_by!r} already spawned sub-agent {self._spawned[spawned_by]!r}")
+        self._subs[agent_id] = _Trajectory(agent_id, _agent(name or agent_id, version, model_name), task=self._task)
         self._spawned[spawned_by] = agent_id
 
     def store(self, data: bytes, media_type: str, info: Mapping[str, Any]) -> Media:
@@ -425,7 +452,10 @@ class Document:
             raise AtifError(f"agent names a declared sub-agent by its id, not {agent!r}")
         if agent not in self._subs:
             raise AtifError(f"sub-agent {agent!r} isn't declared: call turn.subagent first")
-        return self._subs[agent]
+        trajectory = self._subs[agent]
+        if trajectory.task != self._task:
+            raise AtifError(f"sub-agent {agent!r} belongs to an earlier task")
+        return trajectory
 
     def _owner(self, step: _Step) -> _Trajectory:
         return next(t for t in self._trajs() if any(s is step for s in t.steps))
@@ -473,23 +503,37 @@ class Document:
             count += 1
         return count
 
+    def _counts(self, closed_only: bool) -> dict[str | None, int]:
+        """How many steps of each trajectory a read shows, by sub-agent id (None for the root). A live page also holds
+        back a step whose result points at a sub-agent it shows no step of yet, until the step's task ends."""
+        trajectories = self._trajs()
+        if not closed_only:
+            return {t.actor: len(t.steps) for t in trajectories}
+        counts = {t.actor: self._servable(t) for t in trajectories}
+        cut = True
+        while cut:
+            cut = False
+            for trajectory in trajectories:
+                for index, step in enumerate(trajectory.steps[:counts[trajectory.actor]]):
+                    if not step.ended and any(not counts[r["subagent"]] for r in step.results if "subagent" in r):
+                        counts[trajectory.actor], cut = index, True
+                        break
+        return counts
+
     def _render(self, *, closed_only: bool) -> dict[str, Any] | None:
         root = self._root
         if root is None:
             return None
-        root_count = self._servable(root) if closed_only else len(root.steps)
-        if root_count == 0:
+        counts = self._counts(closed_only)
+        if counts[None] == 0:
             return None
+        linked = {actor for actor, count in counts.items() if actor is not None and count}
         doc: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "session_id": self._context_id,
                                "agent": dict(root.agent),
-                               "steps": [_render_step(s) for s in root.steps[:root_count]]}
-        subs = []
-        for trajectory in self._subs.values():
-            count = self._servable(trajectory) if closed_only else len(trajectory.steps)
-            if count:
-                subs.append({"schema_version": SCHEMA_VERSION, "trajectory_id": trajectory.actor,
-                             "agent": dict(trajectory.agent),
-                             "steps": [_render_step(s) for s in trajectory.steps[:count]]})
+                               "steps": [_render_step(s, linked) for s in root.steps[:counts[None]]]}
+        subs = [{"schema_version": SCHEMA_VERSION, "trajectory_id": trajectory.actor, "agent": dict(trajectory.agent),
+                 "steps": [_render_step(s, linked) for s in trajectory.steps[:counts[trajectory.actor]]]}
+                for trajectory in self._subs.values() if counts[trajectory.actor]]
         if subs:
             doc["subagent_trajectories"] = subs
         if self._context is None:
@@ -502,8 +546,7 @@ class Document:
         return doc
 
     def _final_metrics(self, root: _Trajectory) -> dict[str, Any]:
-        steps = [s for t in self._trajs() for s in t.steps
-                 if s.source == "agent" and s.llm_call_count != 0 and (s.metrics or s.metrics_profile)]
+        steps = [s for t in self._trajs() for s in t.steps if s.source == "agent" and s.llm_call_count != 0]
         totals: dict[str, Any] = {}
         for key, total in (("prompt_tokens", "total_prompt_tokens"), ("completion_tokens", "total_completion_tokens"),
                            ("cached_tokens", "total_cached_tokens")):
@@ -543,7 +586,7 @@ def _message(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
     return [dict(part) for part in parts]
 
 
-def _render_step(step: _Step) -> dict[str, Any]:
+def _render_step(step: _Step, linked: set[str]) -> dict[str, Any]:
     agentic = step.source == "agent"
     out: dict[str, Any] = {"step_id": step.index + 1}
     when = step.step_time or step.time
@@ -570,7 +613,7 @@ def _render_step(step: _Step) -> dict[str, Any]:
         results = []
         for result in step.results:
             rendered = {"source_call_id": result["source_call_id"], "content": _message(result["parts"])}
-            if "subagent" in result:
+            if result.get("subagent") in linked:
                 rendered["subagent_trajectory_ref"] = [{"trajectory_id": result["subagent"]}]
             if result["profile"]:
                 rendered["extra"] = {PROFILE_KEY: dict(result["profile"])}
@@ -662,9 +705,10 @@ class AtifTurn:
              cache_write_tokens: int | None = None, cost_usd: float | None = None, cost_source: str | None = None,
              time: str | datetime | None = None, is_copied_context: bool | None = None,
              agent: str | None = None) -> None:
-        """What one model response cost and produced. Token counts are the native's; ATIF's ``prompt_tokens``
-        includes cache reads and writes, so the adapter's ``input_includes_cache`` decides the sum. A cost is
-        the harness's or the provider's (``cost_source``), never one agentenv computed."""
+        """What one model response cost and produced. Token counts are the native's, each the latest given for the
+        step; ATIF's ``prompt_tokens`` includes cache reads and writes, so the adapter's ``input_includes_cache``
+        decides the sum, written once the input count is known. A cost is the harness's or the provider's
+        (``cost_source``), never one agentenv computed."""
         _str(model_name, "model_name")
         _int(llm_call_count, "llm_call_count")
         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
@@ -685,9 +729,14 @@ class AtifTurn:
         if cost_usd is not None and cost_source not in COST_SOURCES:
             raise AtifError(f"a cost names its cost_source: one of {', '.join(COST_SOURCES)}")
         when = timestamp(time)
-        target = self._doc.step_for(_key(key), agent)
-        if llm_call_count == 0 and (target.metrics or target.metrics_profile or target.reasoning):
+        current = self._doc.peek(_key(key), agent)
+        usage = dict(current.usage) if current is not None else {}
+        usage.update({name: value for name, value in zip(_PROMPT_PARTS, prompt_parts) if value is not None})
+        prompt = _prompt_tokens(usage, includes)
+        if llm_call_count == 0 and current is not None and (current.metrics or current.metrics_profile
+                                                           or current.reasoning):
             raise AtifError("a step with no model call (llm_call_count 0) has no usage or reasoning, and this one has")
+        target = self._doc.step_for(_key(key), agent)
         if model_name is not None:
             target.model_name = model_name
         if reasoning_effort is not None:
@@ -695,13 +744,13 @@ class AtifTurn:
         target.llm_call_count = llm_call_count
         if is_copied_context is not None:
             target.is_copied_context = is_copied_context
-        if any(value is not None for value in prompt_parts):
-            prompt = (input_tokens or 0) + (0 if includes else (cache_read_tokens or 0) + (cache_write_tokens or 0))
+        target.usage = usage
+        if prompt is not None:
             target.metrics["prompt_tokens"] = prompt
-            if cache_read_tokens is not None:
-                target.metrics["cached_tokens"] = cache_read_tokens
-            if cache_write_tokens is not None:
-                target.metrics_profile["cache_write_tokens"] = cache_write_tokens
+        if "cache_read" in usage:
+            target.metrics["cached_tokens"] = usage["cache_read"]
+        if "cache_write" in usage:
+            target.metrics_profile["cache_write_tokens"] = usage["cache_write"]
         if output_tokens is not None:
             target.metrics["completion_tokens"] = output_tokens
         if cost_usd is not None:
@@ -732,8 +781,9 @@ class AtifTurn:
 
     def subagent(self, agent_id: str, *, spawned_by: str, name: str | None = None, version: str | None = None,
                  model_name: str | None = None) -> None:
-        """Declare a sub-agent the call ``spawned_by`` started. Its steps (written with ``agent=agent_id``) form an
-        embedded trajectory, and the spawning call's result points at it."""
+        """Declare a sub-agent the call ``spawned_by`` started: a call of this task still waiting on its result. Its
+        steps (written with ``agent=agent_id``, in this task) form an embedded trajectory, and the spawning call's
+        result points at it; a sub-agent that writes no step is left out, and so is the pointer."""
         self._doc.subagent(agent_id, spawned_by, name, version, model_name)
 
     def media(self, data: bytes, media_type: str, *, width: int | None = None, height: int | None = None,

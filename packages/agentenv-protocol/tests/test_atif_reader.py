@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agentenv_protocol.atif import AtifError, is_prefix, load, media_paths, strip_profile, tasks
+from agentenv_protocol.atif import AtifError, check, is_prefix, load, media_paths, strip_profile, tasks
 from atif_cases import FIXTURES
 
 
@@ -60,3 +60,17 @@ def test_a_page_is_a_prefix_only_when_its_steps_lead_every_trajectory():
     assert is_prefix(page, final) and is_prefix(None, final)
     assert not is_prefix({**page, "steps": final["steps"][1:3]}, final)
     assert not is_prefix(final, {**final, "subagent_trajectories": []})
+
+
+def test_stripping_the_profile_leaves_tool_arguments_and_other_extras_alone():
+    document = fixture("coding")
+    payload = {"extra": {"agentenv": {"x": 1}}, "nested": [{"extra": {"agentenv": 2}}]}
+    call = document["steps"][1]["tool_calls"][0]
+    call["arguments"] = payload
+    call["extra"] = {"raw_arguments": payload, "agentenv": {}}
+    document["extra"]["other"] = {"agentenv": "kept"}
+    stripped = strip_profile(document)
+    assert stripped["steps"][1]["tool_calls"][0] == {**call, "extra": {"raw_arguments": payload}}
+    assert stripped["extra"] == {"other": {"agentenv": "kept"}}
+    assert "extra" not in stripped["steps"][0] and document["steps"][1]["tool_calls"][0]["extra"]["agentenv"] == {}
+    check(stripped)
