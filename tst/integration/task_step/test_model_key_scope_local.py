@@ -16,7 +16,6 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
-from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     reset_agent_sandbox_provider,
     reset_env_sandbox_provider,
@@ -124,8 +123,10 @@ async def test_the_judge_sends_the_configured_key_only_to_the_configured_endpoin
 
 
 def _container_env(sandbox_id: str) -> dict[str, str]:
-    [container] = subprocess.run(["docker", "ps", "-aq", "--filter", f"label={SANDBOX_LABEL}={sandbox_id}"],
-                                 capture_output=True, text=True, check=True).stdout.split()
+    """The environment the agent's container behind ``sandbox_id`` was started with: the one named after it."""
+    names = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True,
+                           check=True).stdout.split()
+    [container] = [name for name in names if sandbox_id in name]
     inspected = subprocess.run(["docker", "inspect", "--format", "{{json .Config.Env}}", container],
                                capture_output=True, text=True, check=True).stdout
     return dict(pair.split("=", 1) for pair in json.loads(inspected))
