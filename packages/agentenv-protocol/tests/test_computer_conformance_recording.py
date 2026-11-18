@@ -15,7 +15,7 @@ pytest.importorskip("av")
 
 from probe_fake import FixtureDriver, served  # noqa: E402
 
-from agentenv_protocol.computer import RecordedFrame, Recording, capture, record  # noqa: E402
+from agentenv_protocol.computer import COMPUTER_RECORDING, RecordedFrame, Recording, capture, record  # noqa: E402
 from agentenv_protocol.computer import recording as recording_module  # noqa: E402
 from agentenv_protocol.computer.conformance import checks, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
@@ -76,6 +76,23 @@ async def test_a_limit_the_driver_doesnt_keep_fails_and_its_recordings_are_still
     assert found[NAMES[2]][0] == "failed" and "recording 2 of at most 1 started" in found[NAMES[2]][1]
     assert found[NAMES[0]][0] == found[NAMES[1]][0] == "passed"
     assert not driver._computer.recordings.running and not (home / ".agentenv-recordings").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_computer_already_recording_passes_the_recording_checks_and_keeps_its_recording(home):
+    """As a task's recording while it probes: it counts against max_concurrent, so the probe's own second start is
+    refused, and the probe ends only the recordings it started."""
+    driver = Recorder()
+    with served(driver) as url:
+        connected = await Driver.connect(url, 10)
+        async with connected.session() as session:
+            theirs = (await connected.invoke(COMPUTER_RECORDING, "start", {"request_id": "task"}))["recording_id"]
+            probe = checks.Probe(connected, session, 10)
+            await probe._recording()
+            running = [rid for rid, r in driver._computer.recordings.running.items() if not r.done]
+            await connected.invoke(COMPUTER_RECORDING, "end", {"recording_id": theirs})
+    assert {r.name: r.status for r in probe.results} == dict.fromkeys(NAMES, "passed")
+    assert running == [theirs]
 
 
 @pytest.mark.asyncio

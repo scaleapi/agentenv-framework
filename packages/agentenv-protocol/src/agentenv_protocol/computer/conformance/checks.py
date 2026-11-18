@@ -1038,15 +1038,19 @@ class Probe:
             return None if state.get("joined") else "a repeated request_id started a second recording"
 
         async def limited() -> str | None:
+            """Past ``max_concurrent``, a start is refused. A recording the probe didn't start, as a task's that records
+            while it probes, counts against the limit too, and the probe can't count those, so a refusal sooner holds
+            the limit as well."""
             most = params.get("max_concurrent")
             if not isinstance(most, int):
                 return "the card declares no max_concurrent"
-            for _ in range(most):
-                await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
-            try:
-                extra = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
-            except ExtensionCallError as e:
-                return None if e.code == "limit_exceeded" else f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
+            for _ in range(most + 1):
+                try:
+                    extra = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+                except ExtensionCallError as e:
+                    if e.code == "limit_exceeded":
+                        return None
+                    return f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
             return f"recording {most + 1} of at most {most} started: {extra['recording_id']}"
 
         try:
