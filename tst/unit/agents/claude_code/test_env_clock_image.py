@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import types
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -37,13 +38,21 @@ def test_hosts_the_agent_was_deployed_to_reach_directly_stay_direct_on_an_armed_
 
 @pytest.mark.parametrize("base_url, direct", [
     ("http://10.0.0.5:4000", True),  # plain HTTP, private: nothing to check at the env's date, and the proxy refuses it
-    ("https://litellm.example.com", False),  # TLS: its certificate is checked through the proxy, on real time
+    ("https://10.0.0.5:4000", True),  # private, over TLS too: the proxy refuses an address that isn't public
+    ("https://[fd00::5]:4000", True),
+    ("https://litellm.internal:4000", True),  # a name that resolves to a private address
+    ("https://8.8.8.8", False),  # TLS to a public address: its certificate is checked through the proxy
+    ("https://litellm.example.com", False),  # a name that resolves to a public one
+
 ])
-def test_a_model_endpoint_over_plain_http_is_reached_directly_on_an_armed_clock(base_url, direct):
+def test_a_model_endpoint_over_plain_http_or_at_a_private_address_is_reached_directly_on_an_armed_clock(
+        monkeypatch, base_url, direct):
+    resolves = {"litellm.internal": "10.1.2.3", "litellm.example.com": "93.184.216.34"}
+    monkeypatch.setattr(claude_bridge.socket, "getaddrinfo",
+                        lambda host, port: [(None, None, None, "", (resolves[host], 0))])
     env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY, "LITELLM_BASE_URL": base_url,
                                  "LITELLM_API_KEY": "k"}, clock_armed=True)
-    host = base_url.split("//")[1].split(":")[0]
-    assert (host in env["NO_PROXY"].split(",")) is direct and env["HTTPS_PROXY"] == PROXY
+    assert (urlsplit(base_url).hostname in env["NO_PROXY"].split(",")) is direct and env["HTTPS_PROXY"] == PROXY
 
 
 @pytest.mark.parametrize("environ, armed", [({}, True), ({claude_bridge.EGRESS_PROXY_ENV: PROXY}, False)])
