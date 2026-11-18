@@ -9,9 +9,11 @@ Then has every agent registered with the env whose card serves clock/v1 sync_tim
 (``agent_env.a2a_agent.clock``), so every program it runs reads the env's time and later clock writes can wait for it.
 An agent that can't is skipped, as every agent is until its image runs the follower, or fails the step with
 require_agent_clock.
-Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
-before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
-and start it with set_env_clock_rate right before prompt_agent.
+Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. A multi env's website
+browser that is Playwright MCP (``playwright-mcp``) stays on real time, so its pages read the real date: the step warns
+and records it (``real_time_browsers``); the browser computer (``browser_envs = ["chromium"]``) follows the clock.
+Place right before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it
+at rate 0 and start it with set_env_clock_rate right before prompt_agent.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import EnvCapabilityUnsupported
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -182,6 +185,14 @@ class SyncEnvClockTaskStep(TaskStep):
         if self.timezone is not None:
             configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time,
                                  get_time_zone=state.get("time_zone"))
+        real_time_browsers = [s["service"] for s in skipped
+                              if s["service"] == PLAYWRIGHT_MCP_ENVIRONMENT_NAME and not s.get("website")]
+        if real_time_browsers:
+            configuration["real_time_browsers"] = real_time_browsers
+            logger.warning(f"sync_env_clock env={self.env_id}: its website browser {real_time_browsers[0]!r}, "
+                           "Playwright MCP, stays on real time, so the pages it opens read the real date in their "
+                           "JavaScript; name the browser computer as the env's website browser "
+                           "(browser_envs = [\"chromium\"]) for a browser on the env's clock")
         context.metadata.setdefault("clock_configurations", []).append(configuration)
         logger.info(f"sync_env_clock env={self.env_id}: armed rate={self.virtual_seconds_per_real_second}; "
                     f"synced={[s['service'] for s in synced]} skipped={[s['service'] for s in skipped]} "

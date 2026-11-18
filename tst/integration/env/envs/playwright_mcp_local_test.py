@@ -2,11 +2,13 @@
 browser's card is served there, as every MCP server serves its card, and on the recorder's own port too, where deploys
 read it until they read it at the MCP port, the card first and the MCP port only once Playwright MCP answers behind it,
 which is what the gateway's health check asks; an MCP client lists and calls the browser's tools through the front; a
-recording through the card on the MCP port films the page the client opens; and a killed recorder comes back, the front
-with it, while the MCP server behind it stays up. Needs Docker."""
+recording through the card on the MCP port films the page the client opens; a screenshot the client leaves unnamed is
+saved and named to it with no real time in the name or its folder; and a killed recorder comes back, the front with it,
+while the MCP server behind it stays up. Needs Docker."""
 
 import asyncio
 import json
+import re
 import subprocess
 import time
 import uuid
@@ -181,6 +183,21 @@ async def test_a_recording_through_the_card_on_the_mcp_port_films_the_page_an_ag
 
     assert manifest["ended_by"] == "end" and manifest["segments"], manifest
     assert sum(segment["frames"] for segment in manifest["segments"]) >= 3, manifest
+
+
+@pytest.mark.asyncio
+async def test_a_screenshot_the_client_leaves_unnamed_is_named_with_a_counter_in_one_folder_and_no_real_time(browser):
+    """Playwright MCP names one after the real time (``page-{ISO time}.png`` in ``<epoch ms>/``) and says so."""
+    _, mcp, _ = browser
+    async with streamable_http_client(f"{mcp}/mcp") as (read, write, _), ClientSession(read, write) as session:
+        await session.initialize()
+        await session.call_tool("browser_navigate", {"url": PAGE})
+        said = ["".join(getattr(part, "text", "") for part in (await session.call_tool(
+            "browser_take_screenshot", arguments)).content) for arguments in ({}, {"type": "jpeg"})]
+
+    assert "saved it as /tmp/playwright-mcp-output/page-1.png" in said[0], said[0]
+    assert "saved it as /tmp/playwright-mcp-output/page-2.jpeg" in said[1], said[1]
+    assert not [text for text in said if re.search(r"\d{4}-\d\d-\d\dT|\b\d{13}\b", text)], said
 
 
 @pytest.mark.asyncio

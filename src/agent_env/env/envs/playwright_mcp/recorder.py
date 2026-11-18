@@ -1,11 +1,12 @@
 """The Playwright MCP browser's recorder: computer-recording/v1 of the page Playwright MCP drives, from Chrome DevTools
 screencast frames. It is the front of the browser's MCP port: it serves the browser's card and the recording there, as
 any MCP server serves its card at its own address, and passes every other request, streamed, to Playwright MCP on a
-loopback port of its own behind it. It serves the card on ``RECORDER_PORT`` (18766) too, where deploys read it until
-they read it at the MCP port. It is idle until a recording starts, which finds the browser through the remote debugging
-port Playwright opens for an ``--isolated`` Chromium and follows the page the agent is on. It runs standalone in the
-browser's image, so it imports only ``agentenv-framework-protocol[computer]`` and, to talk to the browser,
-``websockets``."""
+loopback port of its own behind it, naming the file of each screenshot or PDF a call leaves unnamed, which Playwright
+MCP would name after the real time (``page-{timestamp}``), with a counter instead. It serves the card on
+``RECORDER_PORT`` (18766) too, where deploys read it until they read it at the MCP port. It is idle until a recording
+starts, which finds the browser through the remote debugging port Playwright opens for an ``--isolated`` Chromium and
+follows the page the agent is on. It runs standalone in the browser's image, so it imports only
+``agentenv-framework-protocol[computer]`` and, to talk to the browser, ``websockets``."""
 from __future__ import annotations
 
 import asyncio
@@ -49,6 +50,14 @@ DEFAULT_MCP_PORT, DEFAULT_PLAYWRIGHT_MCP_PORT = 18765, 18767
 #: How long passing a request to Playwright MCP may wait to connect; its answer may take as long as it does. How often
 #: the front looks for Playwright MCP listening before it opens the MCP port.
 CONNECT_S, LISTENING_POLL_S = 10.0, 0.2
+#: Where Playwright MCP saves the files it names itself unless PLAYWRIGHT_MCP_OUTPUT_DIR says elsewhere (entrypoint.sh's
+#: --output-dir), and the tools that save one named after the real time when the call names none, each with the
+#: extension of what it saves by the call's arguments.
+DEFAULT_OUTPUT_DIR = "/tmp/playwright-mcp-output"
+SAVED_EXTENSIONS: dict[str, Callable[[dict], Optional[str]]] = {
+    "browser_take_screenshot": lambda arguments: {None: "png", "png": "png", "jpeg": "jpeg"}.get(arguments.get("type")),
+    "browser_pdf_save": lambda arguments: "pdf",
+}
 #: The headers that belong to one connection, which the front doesn't pass on; Host goes on as the caller sent it.
 HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
                          "transfer-encoding", "upgrade"})
@@ -301,26 +310,68 @@ class _Host:
         return self.driver.frames(hints)
 
 
-def create_app(recorder: BrowserRecorder, behind: Optional[httpx.AsyncClient] = None) -> Any:
+def create_app(recorder: BrowserRecorder, behind: Optional[httpx.AsyncClient] = None,
+               output_dir: Optional[Path] = None) -> Any:
     """The recorder's card and recording, and, as the front of the MCP port, every other request passed to ``behind``,
-    a client whose base URL is Playwright MCP's."""
+    a client whose base URL is Playwright MCP's, which saves the files it names itself in ``output_dir``
+    (PLAYWRIGHT_MCP_OUTPUT_DIR's by default)."""
     app = Starlette()
     AgentEnvStarletteApplication(recorder._build_card(), recorder).add_routes_to_app(app)
     if behind is not None:
-        app.router.routes.append(Route("/{path:path}", _passing_to(behind), methods=[
+        names = FileNames(output_dir or Path(os.environ.get("PLAYWRIGHT_MCP_OUTPUT_DIR", DEFAULT_OUTPUT_DIR)))
+        app.router.routes.append(Route("/{path:path}", _passing_to(behind, names), methods=[
             "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]))
     return app
 
 
-def _passing_to(behind: httpx.AsyncClient) -> Callable:
+class FileNames:
+    """Names for the files Playwright MCP saves for a call that names none: ``page-1.png``, ``page-2.pdf`` and on, each
+    one no file in ``folder`` has, so a recorder that restarted names none Playwright MCP saved before."""
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self._next = itertools.count(1)
+
+    def next(self, extension: str) -> str:
+        for n in self._next:
+            name = f"page-{n}.{extension}"
+            if not (self.folder / name).exists():
+                return name
+
+
+def named(body: bytes, names: FileNames) -> bytes:
+    """``body``, a JSON-RPC message or batch to Playwright MCP, with a file name from ``names`` given to each call of a
+    tool in ``SAVED_EXTENSIONS`` that names none; as it came when there's none, or it isn't JSON."""
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return body
+    changed = False
+    for call in message if isinstance(message, list) else [message]:
+        params = call.get("params") if isinstance(call, dict) and call.get("method") == "tools/call" else None
+        if not isinstance(params, dict) or params.get("name") not in SAVED_EXTENSIONS:
+            continue
+        arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict) or arguments.get("filename"):
+            continue
+        extension = SAVED_EXTENSIONS[params["name"]](arguments)
+        if extension is not None:
+            params["arguments"], changed = {**arguments, "filename": names.next(extension)}, True
+    return json.dumps(message).encode() if changed else body
+
+
+def _passing_to(behind: httpx.AsyncClient, names: FileNames) -> Callable:
     async def passed(request: Any) -> Any:
         """The request passed to Playwright MCP as it came, its body and its answer streamed, or 502 when Playwright
-        MCP doesn't answer."""
+        MCP doesn't answer; a JSON body is read whole, for ``named``."""
         has_body = request.method not in ("GET", "HEAD", "OPTIONS") or "content-length" in request.headers
-        sent = behind.build_request(
-            request.method, request.url.path, params=request.url.query or None,
-            headers=[(key, value) for key, value in request.headers.items() if key.lower() not in HOP_HEADERS],
-            content=request.stream() if has_body else None)
+        headers = [(key, value) for key, value in request.headers.items() if key.lower() not in HOP_HEADERS]
+        content: Any = request.stream() if has_body else None
+        if has_body and request.headers.get("content-type", "").split(";")[0].strip().lower() == "application/json":
+            content = named(await request.body(), names)
+            headers = [(key, value) for key, value in headers if key.lower() != "content-length"]
+        sent = behind.build_request(request.method, request.url.path, params=request.url.query or None,
+                                    headers=headers, content=content)
         try:
             answer = await behind.send(sent, stream=True)
         except httpx.TransportError as e:

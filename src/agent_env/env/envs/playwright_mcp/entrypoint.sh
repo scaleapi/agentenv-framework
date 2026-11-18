@@ -11,6 +11,10 @@ set -euo pipefail
 export MCP_PORT="${MCP_PORT:-18765}"
 export RECORDER_PORT="${RECORDER_PORT:-18766}"
 export PLAYWRIGHT_MCP_PORT="${PLAYWRIGHT_MCP_PORT:-18767}"
+# The files Playwright MCP names itself go in one folder, not one it would name after the real time its first MCP
+# session opened; the recorder names each screenshot or PDF a call leaves unnamed, which it would name after the real
+# time too.
+export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-/tmp/playwright-mcp-output}"
 (while true; do /opt/recorder/bin/python /app/recorder.py || true; sleep 1; done) &
 for _ in $(seq 1 "$(( ${RECORDER_WAIT_S:-20} * 10 ))"); do
     (exec 3<>"/dev/tcp/127.0.0.1/${RECORDER_PORT}") 2>/dev/null && break
@@ -25,4 +29,5 @@ exec npx @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
     --host 127.0.0.1 \
     --port "${PLAYWRIGHT_MCP_PORT}" \
     --allowed-hosts '*' \
-    --caps vision
+    --caps vision \
+    --output-dir "${PLAYWRIGHT_MCP_OUTPUT_DIR}"

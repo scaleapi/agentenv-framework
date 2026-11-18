@@ -109,6 +109,25 @@ async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_website_browser_on_real_time_is_named_in_a_warning_and_the_record(monkeypatch, caplog):
+    """Playwright MCP serves no clock/v1, so the pages it opens read the real date while every server reads the env's."""
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
+    browsing = TaskStepContext(deployed_envs=[_carded(await _composed_card(
+        {"mcp-email": [_CLOCK_EXT], "mcp-playwright-mcp": []}))])
+    alone = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])
+
+    with caplog.at_level("WARNING"):
+        await _step().execute(browsing)
+        await _step().execute(alone)
+
+    assert browsing.metadata["clock_configurations"][0]["real_time_browsers"] == ["playwright-mcp"]
+    assert "real_time_browsers" not in alone.metadata["clock_configurations"][0]
+    assert caplog.text.count("its website browser 'playwright-mcp', Playwright MCP, stays on real time") == 1
+    assert 'browser_envs = ["chromium"]' in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_execute_keeps_the_arm_failure_message(monkeypatch):
     _mock_http(monkeypatch, set_time_status=409)
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])

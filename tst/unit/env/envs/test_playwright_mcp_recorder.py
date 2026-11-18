@@ -2,7 +2,8 @@
 through DevTools target events, holds a still page's frame so the recording doesn't split, and serves
 computer-recording/v1 on a card of its own that the gateway nests as the playwright-mcp child env. It fronts the MCP
 port: the card and recording there, every other request passed to Playwright MCP behind it, streamed, and 502 when
-Playwright MCP doesn't answer."""
+Playwright MCP doesn't answer; a screenshot or PDF a call leaves unnamed, which Playwright MCP would name after the real
+time, is named with a counter, in the one folder Playwright MCP is given for its files."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import base64
 import contextlib
 import io
 import itertools
+import json
 import re
 import socket
 from pathlib import Path
@@ -242,6 +244,13 @@ def test_the_image_fronts_the_mcp_port_with_the_recorder_and_serves_the_card_whe
     assert "--isolated" in entrypoint  # the remote debugging port the recorder finds comes with it
 
 
+def test_the_image_gives_playwright_mcp_one_folder_for_its_files_where_the_front_looks():
+    entrypoint = (Path(playwright_mcp.__file__).parent / "entrypoint.sh").read_text()
+
+    assert f'PLAYWRIGHT_MCP_OUTPUT_DIR="${{PLAYWRIGHT_MCP_OUTPUT_DIR:-{recorder.DEFAULT_OUTPUT_DIR}}}"' in entrypoint
+    assert '--output-dir "${PLAYWRIGHT_MCP_OUTPUT_DIR}"' in entrypoint
+
+
 def _behind(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://playwright-mcp")
 
@@ -412,3 +421,39 @@ async def test_the_front_streams_an_event_stream_as_playwright_mcp_sends_it():
 
     assert answer.headers["content-type"] == "text/event-stream" and first == "event: message"
     assert rest[:1] == ["data: 1"]
+
+
+def _call(tool: str, call_id: int = 1, **arguments) -> dict:
+    return {"jsonrpc": "2.0", "id": call_id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}
+
+
+@pytest.mark.asyncio
+async def test_the_front_names_each_screenshot_or_pdf_a_call_leaves_unnamed_with_a_counter_not_the_time(tmp_path):
+    """Playwright MCP names such a file ``page-{timestamp}`` from the real time and says so to the model."""
+    (tmp_path / "page-4.png").write_bytes(b"saved before the recorder restarted")
+    passed = []
+
+    async def mcp(request):
+        body = await request.body()
+        passed.append((body, int(request.headers["content-length"]) == len(body)))
+        return JSONResponse({"jsonrpc": "2.0", "id": 1, "result": {}})
+
+    sent = [_call("browser_take_screenshot"), _call("browser_take_screenshot", type="jpeg", fullPage=True),
+            _call("browser_pdf_save"), _call("browser_take_screenshot", filename="mine.png"),
+            _call("browser_navigate", url="https://shop.test/"), _call("browser_take_screenshot", type="gif"),
+            [_call("browser_take_screenshot", 7), {"jsonrpc": "2.0", "method": "notifications/initialized"}]]
+    async with _behind(Starlette(routes=[Route("/mcp", mcp, methods=["POST"])])) as behind:
+        front = recorder.create_app(_recorder(_Browser()), behind, output_dir=tmp_path)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=front), base_url="http://front") as http:
+            for body in sent:
+                await http.post("/mcp", json=body)
+            await http.post("/mcp", content=b"not json", headers={"content-type": "application/json"})
+
+    received = [json.loads(body) for body, _ in passed[:-1]]
+    names = [[call.get("params", {}).get("arguments", {}).get("filename") for call in
+              (body if isinstance(body, list) else [body])] for body in received]
+    assert names == [["page-1.png"], ["page-2.jpeg"], ["page-3.pdf"], ["mine.png"], [None], [None],
+                     ["page-5.png", None]]
+    assert received[1]["params"]["arguments"] == {"type": "jpeg", "fullPage": True, "filename": "page-2.jpeg"}
+    assert all(length_matches for _, length_matches in passed)
+    assert passed[-1][0] == b"not json"
