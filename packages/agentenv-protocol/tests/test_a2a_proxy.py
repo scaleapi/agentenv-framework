@@ -170,6 +170,9 @@ def test_the_card_offers_the_proxy_env_servers_and_a_system_prompt():
     assert sorted(extensions["urn:agentenv:proxy/v1"]["params"]["methods"]) == [
         "act", "claim", "next", "record", "reply", "result", "tools"]
     assert "urn:agentenv:mcp-config/v1" in extensions
+    trajectory = extensions["urn:agentenv:trajectory/v1"]["params"]
+    assert (trajectory["formats"], trajectory["native"], trajectory["default"]) == (
+        ["agentenv-proxy/v1"], "agentenv-proxy/v1", "agentenv-proxy/v1")
     assert "system_prompt" in extensions["urn:agentenv:agent-config/v1"]["params"]["methods"]["set"]["request"][
         "supported"]
 
@@ -202,6 +205,7 @@ def test_a_message_is_an_open_turn_until_the_driver_replies(client):
     assert (turn["name"], _attrs(turn, "gen_ai.prompt"), _attrs(turn, "gen_ai.completion")) == (
         "turn", {"prompt": "fix the build", "system_prompt": "be brief"},
         {"content": [{"type": "text", "text": "fixed"}]})
+    assert client.post("/ext/trajectory", json={"task_id": task_id}).json()["format"] == "agentenv-proxy/v1"
     assert _turns(client, after=seen["version"])["turns"] == []
 
 

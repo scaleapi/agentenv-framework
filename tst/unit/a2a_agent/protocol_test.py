@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from starlette.testclient import TestClient
 
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.protocol import (
@@ -22,7 +23,17 @@ from agent_env.a2a_agent.protocol import (
     raise_for_extension_status,
     wake_poll,
 )
-from agentenv_protocol.a2a_agent import TaskResult, TextPart, Usage
+from agentenv_protocol.a2a_agent import (
+    TRAJECTORY_V1,
+    AgentEnvAgent,
+    AgentIdentity,
+    TaskRequest,
+    TaskResult,
+    TextPart,
+    Usage,
+    a2a_agent,
+    enable,
+)
 from agentenv_protocol.a2a_agent.framework import _to_a2a_parts
 
 
@@ -54,6 +65,29 @@ def test_extension_http_error_names_the_sdk_error_code_only():
 
     assert str(raised.value) == "snapshot save failed with HTTP 410: grant_expired"
     assert raised.value.response is response
+
+
+def test_a_trajectory_read_naming_an_unoffered_format_names_the_sdks_code():
+    @a2a_agent(
+        identity=AgentIdentity(name="formats", description="test", version="1"),
+        extensions=(enable(TRAJECTORY_V1, native="test-events/1"),),
+    )
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("done")
+
+    with TestClient(Agent().create_app()) as client:
+        answer = client.post("/ext/trajectory", json={"task_id": "task-1", "format": "atif/1"})
+    response = httpx.Response(
+        answer.status_code,
+        content=answer.content,
+        request=httpx.Request("POST", "https://agent.test/ext/trajectory"),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        raise_for_extension_status(response, operation="trajectory read")
+
+    assert str(raised.value) == "trajectory read failed with HTTP 400: format_not_offered"
 
 
 def test_extension_http_error_keeps_only_a_code_shaped_error_code():

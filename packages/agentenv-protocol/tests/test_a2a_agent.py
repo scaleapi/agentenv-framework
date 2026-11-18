@@ -257,14 +257,14 @@ def test_trajectory_cache_evicts_least_recently_used_context() -> None:
         trajectories.seal(
             f"task-{number}", TrajectoryState.COMPLETED, native=f"[{number}]".encode()
         )
-    assert trajectories.final("task-1") == b"[1]"
+    assert trajectories.final("task-1").body == b"[1]"
 
     trajectories.register("task-3", "context-3")
     trajectories.seal("task-3", TrajectoryState.COMPLETED, native=b"[3]")
 
-    assert trajectories.final("task-1") == b"[1]"
+    assert trajectories.final("task-1").body == b"[1]"
     assert trajectories.final("task-2") is None
-    assert trajectories.final("task-3") == b"[3]"
+    assert trajectories.final("task-3").body == b"[3]"
 
 
 @pytest.mark.asyncio
@@ -2066,6 +2066,7 @@ def test_trajectory_context_variant_is_advertised_only_with_handler() -> None:
     request = task_only.card_extensions()[0]["params"]["methods"]["get"]["request"]
     assert request == {
         "required": ["task_id"],
+        "optional": ["format"],
         "oneOf": [{}, {"required": ["objects"]}],
     }
 
@@ -2085,6 +2086,7 @@ def test_trajectory_context_variant_is_advertised_only_with_handler() -> None:
     )
     request = with_context.card_extensions()[0]["params"]["methods"]["get"]["request"]
     assert request == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
@@ -2110,7 +2112,7 @@ async def test_default_handler_delegation_accepts_sdk_request_variant() -> None:
         TaskTrajectoryRequest(task_id="task-1"),
     )
 
-    assert result == {"trajectory": [{"type": "result"}]}
+    assert result == {"trajectory": [{"type": "result"}], "format": None}
 
 
 def test_trajectory_override_annotates_every_sdk_variant() -> None:
@@ -2899,7 +2901,7 @@ def test_generated_app_serves_sdk_extensions_and_a2a_lifecycle() -> None:
             "get",
             {"task_id": task["id"]},
         )
-        assert trajectory_response.json() == {"trajectory": [{"type": "result"}]}
+        assert trajectory_response.json() == {"trajectory": [{"type": "result"}], "format": "test-events/v1"}
 
 
 def test_run_is_required() -> None:

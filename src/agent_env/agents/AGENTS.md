@@ -138,6 +138,10 @@ every exception.
 agent-env reads what the agent did, and verifiers grade it. Call `request.trajectory.set_format(...)`, then append
 each native event as it happens; with `enable(TRAJECTORY_V1, live=True)` it can be read while the turn runs. The SDK
 serves the reads; bind `get.context` and `get.context_objects` to serve a whole conversation from your own record.
+`native="<format id>"` in that `enable` declares the format: the card lists it as `formats`, `native` and `default`,
+a read naming any other format is refused before your handlers run, and the log and a returned `native_trajectory`
+must be in it. It needs a protocol floor that has `native`. A context read you bind names the format it serves as
+`format` in its response.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime

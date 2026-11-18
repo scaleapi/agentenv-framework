@@ -129,7 +129,7 @@ IDENTITY = AgentIdentity(
     description="An agent played from outside AgentEnv: a driver answers its turns.",
     version="1.0.0",
 )
-EXTENSIONS = (MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), PROXY_V1)
+EXTENSIONS = (MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT), PROXY_V1)
 
 
 @a2a_agent(identity=IDENTITY, config=ProxyConfig, extensions=EXTENSIONS, lifespan=stopping_actions)
@@ -152,7 +152,6 @@ class ProxyAgent(AgentEnvAgent):
     async def run(self, request: TaskRequest[ProxyConfig]) -> TaskResult:
         if any(not isinstance(part, TextPart) for part in request.parts):
             return TaskResult.failure("proxy.unsupported_part", "the proxy passes on text parts only")
-        request.trajectory.set_format(TRAJECTORY_FORMAT)
         turn = _Turn(
             task_id=request.task_id,
             context_id=request.context_id,
