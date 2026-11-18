@@ -1,0 +1,828 @@
+{
+ "binary": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "table-reserved",
+      "description": "A table is reserved",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "party-size",
+      "description": "Party size is four",
+      "score": 0.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": false
+     }
+    ],
+    "score": 0.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "partial_weighted": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_partial",
+    "results": [
+     {
+      "id": "q",
+      "description": "quality",
+      "outcomes": {
+       "min": {
+        "value": -1
+       },
+       "max": {
+        "value": 1
+       }
+      },
+      "score": 0.75,
+      "justification": "half c1",
+      "raw_score": 0.5,
+      "result": true
+     },
+     {
+      "id": "r",
+      "description": "recall",
+      "score": 0.5,
+      "justification": "half c2",
+      "result": true
+     }
+    ],
+    "score": 0.625,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "batches_with_a_bulk_verdict_retry": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "crit-01",
+      "title": "Criterion 1",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked row c1",
+      "result": true
+     },
+     {
+      "id": "crit-02",
+      "title": "Criterion 2",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked row c2",
+      "result": true
+     },
+     {
+      "id": "crit-03",
+      "title": "Criterion 3",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked row c3",
+      "result": true
+     },
+     {
+      "id": "crit-04",
+      "title": "Criterion 4",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked row c4",
+      "result": true
+     },
+     {
+      "id": "crit-05",
+      "title": "Criterion 5",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked row c5",
+      "result": true
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null,
+    "judge_output_retries": 6,
+    "judge_output_discrepancies": [
+     {
+      "kind": "bulk_verdicts",
+      "rows": 2,
+      "shared_justification": "pass",
+      "shared_count": 2,
+      "short_count": 2,
+      "batch": 1
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 2,
+      "shared_justification": "checked row c1",
+      "shared_count": 1,
+      "short_count": 2,
+      "batch": 1
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 2,
+      "shared_justification": "checked row c1",
+      "shared_count": 1,
+      "short_count": 2,
+      "accepted": true,
+      "batch": 1
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 2,
+      "shared_justification": "checked row c3",
+      "shared_count": 1,
+      "short_count": 2,
+      "batch": 2
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 2,
+      "shared_justification": "checked row c3",
+      "shared_count": 1,
+      "short_count": 2,
+      "batch": 2
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 2,
+      "shared_justification": "checked row c3",
+      "shared_count": 1,
+      "short_count": 2,
+      "accepted": true,
+      "batch": 2
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 1,
+      "shared_justification": "checked row c5",
+      "shared_count": 1,
+      "short_count": 1,
+      "batch": 3
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 1,
+      "shared_justification": "checked row c5",
+      "shared_count": 1,
+      "short_count": 1,
+      "batch": 3
+     },
+     {
+      "kind": "bulk_verdicts",
+      "rows": 1,
+      "shared_justification": "checked row c5",
+      "shared_count": 1,
+      "short_count": 1,
+      "accepted": true,
+      "batch": 3
+     }
+    ],
+    "judge_batches": 3,
+    "judge_batch_trajectory_object_urls": [
+     null,
+     null,
+     null
+    ]
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "an_answer_retry_for_a_missing_id": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "crit-01",
+      "title": "Criterion 1",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-02",
+      "title": "Criterion 2",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-03",
+      "title": "Criterion 3",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c3 with the sheet tool",
+      "result": true
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null,
+    "judge_output_retries": 1,
+    "judge_output_discrepancies": [
+     {
+      "expected_count": 3,
+      "returned_count": 2,
+      "expected_ids": [
+       "c1",
+       "c2",
+       "c3"
+      ],
+      "missing_ids": [
+       "c3"
+      ],
+      "duplicate_ids": [],
+      "unknown_ids": []
+     }
+    ]
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "a_compacted_trajectory": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "crit-01",
+      "title": "Criterion 1",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-02",
+      "title": "Criterion 2",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-03",
+      "title": "Criterion 3",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c3 with the sheet tool",
+      "result": true
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": "mem://compact/1.json",
+    "compact_trajectory_object_url": "mem://compact/1.json",
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "grade_up_to_turn": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "crit-01",
+      "title": "Criterion 1",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-02",
+      "title": "Criterion 2",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": true
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null,
+    "graded_up_to_turn": 1
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "prompt_error": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "prompt_error",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: prompt had error_type=timeout"
+     }
+    ],
+    "score": 0
+   }
+  },
+  "models": null,
+  "raised": null
+ },
+ "the_gate_on_an_unmet_row": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "table-reserved",
+      "description": "A table is reserved",
+      "score": 0.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": false
+     },
+     {
+      "id": "party-size",
+      "description": "Party size is four",
+      "score": 1.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": true
+     }
+    ],
+    "score": 0.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": "VerifierNotPassingError: Verifier 'vid' isn't passing (score 0.0); rows not met: ['table-reserved']"
+ },
+ "the_gate_on_a_prompt_error": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "prompt_error",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: prompt had error_type=timeout"
+     }
+    ],
+    "score": 0
+   }
+  },
+  "models": null,
+  "raised": "VerifierNotPassingError: Verifier 'vid' isn't passing (score 0); rows not met: ['prompt_error']"
+ },
+ "an_answer_the_judge_never_fixes": {
+  "verifications": null,
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": "ValueError: Judge returned 0 results but expected 2 criteria"
+ },
+ "a_judge_that_cannot_be_reached": {
+  "verifications": null,
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": "RuntimeError: LLM judge failed after 3 attempts"
+ },
+ "rubric_evidence": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence",
+    "results": [
+     {
+      "id": "table-reserved",
+      "description": "A table is reserved",
+      "frame": "[table-reserved] action 3",
+      "evidence_status": "visible",
+      "justification": "about c1",
+      "score": 1.0,
+      "result": true
+     },
+     {
+      "id": "party-size",
+      "description": "Party size is four",
+      "frame": "[party-size] action 3",
+      "evidence_status": "missing",
+      "justification": "about c2",
+      "score": 0.0,
+      "result": false
+     },
+     {
+      "id": "no-autocomplete",
+      "description": "No suggestion was accepted",
+      "weight": -1,
+      "frame": "[no-autocomplete] action 3",
+      "evidence_status": "not_applicable",
+      "justification": "about c3",
+      "score": 1.0,
+      "result": true
+     }
+    ],
+    "score": 0.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null,
+    "reasoning": "the frames show the booking",
+    "checks": [
+     {
+      "id": "typed",
+      "passed": true,
+      "evidence": "x"
+     }
+    ]
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "rubric_evidence_without_screenshots": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence",
+    "results": [
+     {
+      "id": "no_screenshots",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: rubric_evidence needs per-criterion frames, but the trajectory holds no screenshots"
+     }
+    ],
+    "score": 0
+   }
+  },
+  "models": null,
+  "raised": null
+ },
+ "with_mistakes": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence_with_mistakes",
+    "results": [
+     {
+      "id": "table-reserved",
+      "description": "A table is reserved",
+      "frame": "[table-reserved] action 3",
+      "evidence_status": "visible",
+      "justification": "about c1",
+      "score": 1.0,
+      "result": true
+     },
+     {
+      "id": "party-size",
+      "description": "Party size is four",
+      "frame": "[party-size] action 3",
+      "evidence_status": "missing",
+      "justification": "about c2",
+      "score": 0.0,
+      "result": false
+     },
+     {
+      "id": "no-autocomplete",
+      "description": "No suggestion was accepted",
+      "weight": -1,
+      "frame": "[no-autocomplete] action 3",
+      "evidence_status": "not_applicable",
+      "justification": "about c3",
+      "score": 1.0,
+      "result": true
+     }
+    ],
+    "score": 0.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null,
+    "reasoning": "the frames show the booking",
+    "checks": [
+     {
+      "id": "typed",
+      "passed": true,
+      "evidence": "x"
+     }
+    ]
+   },
+   "vid-trajectory-mistakes": {
+    "format": "trajectory_mistakes",
+    "source_verifier_id": "vid",
+    "results": [
+     {
+      "id": "summary",
+      "score": 0.0,
+      "result": false,
+      "weight": 0.0,
+      "justification": "one shortcut"
+     },
+     {
+      "id": "botched",
+      "score": 1.0,
+      "result": true,
+      "justification": "No flailing detected"
+     },
+     {
+      "id": "mistake_0",
+      "score": 0.0,
+      "result": false,
+      "severity": "high",
+      "step": 4,
+      "weight": -1.0,
+      "justification": "[high] type it \u2014 tapped a suggestion"
+     },
+     {
+      "id": "coverage_table-reserved",
+      "score": 1.0,
+      "result": true,
+      "justification": "shown: about c1"
+     },
+     {
+      "id": "coverage_party-size",
+      "score": 0.0,
+      "result": false,
+      "justification": "MISSING: about c2"
+     },
+     {
+      "id": "coverage_no-autocomplete",
+      "score": 1.0,
+      "result": true,
+      "justification": "shown: about c3"
+     }
+    ],
+    "score": 0.5,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "with_mistakes_without_screenshots": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence_with_mistakes",
+    "results": [
+     {
+      "id": "no_screenshots",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: rubric_evidence_with_mistakes needs per-criterion frames, but the trajectory holds no screenshots"
+     }
+    ],
+    "score": 0
+   },
+   "vid-trajectory-mistakes": {
+    "format": "trajectory_mistakes",
+    "source_verifier_id": "vid",
+    "results": [
+     {
+      "id": "no_screenshots",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: rubric_evidence_with_mistakes needs per-criterion frames, but the trajectory holds no screenshots"
+     }
+    ],
+    "score": 0
+   }
+  },
+  "models": null,
+  "raised": null
+ },
+ "with_mistakes_on_a_prompt_error": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence_with_mistakes",
+    "results": [
+     {
+      "id": "prompt_error",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: prompt had error_type=timeout"
+     }
+    ],
+    "score": 0
+   },
+   "vid-trajectory-mistakes": {
+    "format": "trajectory_mistakes",
+    "source_verifier_id": "vid",
+    "results": [
+     {
+      "id": "prompt_error",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: prompt had error_type=timeout"
+     }
+    ],
+    "score": 0
+   }
+  },
+  "models": null,
+  "raised": null
+ },
+ "with_mistakes_and_no_findings": {
+  "verifications": null,
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": "ValueError: Judge returned 0 results but expected 3 criteria"
+ },
+ "unjudged_rows": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "crit-01",
+      "title": "Criterion 1",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-02",
+      "title": "Criterion 2",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "auto",
+      "result": true,
+      "score": 1.0
+     },
+     {
+      "id": "na",
+      "result": false,
+      "score": 0.0,
+      "weight": 0
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-model"
+   }
+  },
+  "raised": null
+ },
+ "an_agent_judge_timing_out_once": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "crit-01",
+      "title": "Criterion 1",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     },
+     {
+      "id": "crit-02",
+      "title": "Criterion 2",
+      "description": "dddddddddddddddddddddddddddddddddddddddd",
+      "score": 1.0,
+      "justification": "Checked record c2 with the sheet tool",
+      "result": true
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": "mem://judge/a2a.json",
+    "judge_trajectory_object_url": "mem://judge/a2a.json",
+    "judge_output_discrepancies": [
+     {
+      "kind": "judge_timeout",
+      "attempt": 1,
+      "timeout_seconds": 1000,
+      "judge_trajectory_object_url": "mem://judge/timed-out.json"
+     }
+    ]
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": null
+   }
+  },
+  "raised": null
+ },
+ "a_runs_criteria_and_judge_overrides": {
+  "verifications": {
+   "vid": {
+    "format": "rubric_binary",
+    "results": [
+     {
+      "id": "only",
+      "description": "it",
+      "score": 1.0,
+      "justification": "Checked record c1 with the sheet tool",
+      "result": true
+     }
+    ],
+    "score": 1.0,
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null
+   }
+  },
+  "models": {
+   "judge": {
+    "verify": "judge-x"
+   }
+  },
+  "raised": null
+ }
+}

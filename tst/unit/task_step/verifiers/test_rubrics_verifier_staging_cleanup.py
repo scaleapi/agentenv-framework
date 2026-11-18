@@ -51,6 +51,6 @@ async def test_a_failed_staging_terminates_the_judge_the_verifier_deployed(monke
                                                agent_trajectory_object_url="mem://run/turn.json"))
 
     with pytest.raises(ConnectionError):
-        await verifier._grade(ctx)
+        await verifier._judged(ctx)
 
     assert terminated == ["sb-judge"]
