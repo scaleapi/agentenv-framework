@@ -18,13 +18,13 @@ from agent_env.cli.task._checks import runnable_task
 from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
-from agent_env.cli.teardown_output import echo_teardown
+from agent_env.cli.teardown_output import echo_finish_teardown, echo_teardown
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.store import get_task_instance_store, new_instance_id
+from agent_env.task.store import get_task_instance_store, new_instance_id, record_teardown
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -293,9 +293,19 @@ def _tear_down_kept(kept) -> None:
             reports = stopper.run(stopper.stopping(teardown_run(context) for _, context, _ in kept))
         except asyncio.CancelledError:
             click.echo(click.style("Stopped the teardown; what it hadn't reached is still up.", fg="yellow"))
+            _left_up([context for _, context, _ in kept])
             return
     for (tag, _, _), report in zip(kept, reports):
         echo_teardown(tag, report)
+    _left_up([context for (_, context, _), report in zip(kept, reports) if report.still_up])
+
+
+def _left_up(contexts: list[TaskStepContext]) -> None:
+    """Keep on each instance what its teardown left up, and name the command that finishes it."""
+    left = [context for context in contexts if context.instance_id]
+    for context in left:
+        record_teardown(context.instance_id, context)
+    echo_finish_teardown([context.instance_id for context in left])
 
 
 def _settle_kept(tagged_contexts, interrupts: Interrupts, interrupted) -> None:

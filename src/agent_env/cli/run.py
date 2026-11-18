@@ -16,6 +16,7 @@ from agent_env.bundle.installed import InstalledBundle, checked, installed_bundl
 from agent_env.bundle.plan import NotInStore
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
+from agent_env.cli.teardown_output import echo_finish_teardown
 from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
@@ -364,6 +365,8 @@ def _report_teardown(result: BundleRun) -> None:
         click.echo(click.style(f"Still up, {_sandboxes(len(still_up))}:", fg="yellow"))
         for sandbox in still_up:
             click.echo(f"  {_still_up(sandbox)}")
+        echo_finish_teardown([run.instance_id for run, report in zip(result.runs, reports)
+                              if run.instance_id and any(sandbox in still_up for sandbox in report.still_up)])
 
 
 def _still_up(sandbox: RecordedSandbox) -> str:

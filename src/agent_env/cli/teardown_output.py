@@ -14,3 +14,11 @@ def echo_teardown(tag: str, report: TeardownReport) -> None:
         click.echo(click.style(f"{prefix}Couldn't tear down {sandbox.sandbox_id}: {why}", fg="red"))
     for sandbox in report.left:
         click.echo(click.style(f"{prefix}Still up: {sandbox.sandbox_id} ({kind(sandbox)})", fg="red"))
+
+
+def echo_finish_teardown(instance_ids: list[str]) -> None:
+    """The command that finishes the teardown of each instance whose run left sandboxes up."""
+    if instance_ids:
+        click.echo("Tear down what's left with:")
+        for instance_id in instance_ids:
+            click.echo(f"  agent-env task teardown --instance {instance_id}")

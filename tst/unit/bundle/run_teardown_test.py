@@ -17,7 +17,7 @@ from agent_env.bundle import Outcome, RunInterrupted, run_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
-from agent_env.store.document_store import Filter
+from agent_env.store.document_store import Filter, UpdateSpec
 from agent_env.task import TaskInstanceStore, teardown
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
@@ -287,7 +287,68 @@ def test_the_cli_prints_a_sandbox_it_couldnt_tear_down_as_still_up(bundle_dir, t
 
     assert result.exit_code == 0, result.output
     assert "[tasks/ok.json] couldn't tear down sb-ok: RuntimeError: stuck\n" in result.output
-    assert result.output.endswith("\nStill up, 1 sandbox:\n  sb-ok  fake\n")
+    assert result.output.endswith(f"\nStill up, 1 sandbox:\n  sb-ok  fake\nTear down what's left with:\n"
+                                  f"  agent-env task teardown --instance {_instance(result.output, 'ok')}\n")
+
+
+def _instance(output: str, name: str) -> str:
+    return re.search(rf"instance (@local/\S+/{name}-\w+)", output).group(1)
+
+
+def _stored_context(instance_id: str) -> TaskStepContext:
+    return TaskStepContext.from_dict(local_store().find_one("task_instances", Filter.of(instance_id=instance_id))["context"])
+
+
+def test_a_teardown_a_second_signal_stopped_is_finished_by_the_command_the_run_names(bundle_dir, terminated,
+                                                                                     quiet_logs):
+    layout(bundle_dir, {"tasks/a.json": _task(nap=30, send="SIGINT")})
+    terminated.second_signal.add("sb-a")
+
+    stopped = CliRunner().invoke(cli, ["run", str(bundle_dir)])
+    instance = _instance(stopped.output, "a")
+    terminated.second_signal.clear()
+    finished = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+    again = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    assert stopped.exit_code == 130, stopped.output
+    assert stopped.output.endswith(f"Tear down what's left with:\n  agent-env task teardown --instance {instance}\n")
+    assert (finished.exit_code, terminated) == (0, ["sb-a"]), finished.output
+    assert finished.output == f"Tearing down 1 sandbox of instance {instance} (Ctrl-C to stop)\nTore down 1 sandbox\n"
+    assert (again.exit_code, again.output) == (0, f"Nothing instance {instance} recorded is still up.\n")
+
+
+def test_a_failed_teardown_is_recorded_on_the_instance_and_the_command_tries_again(bundle_dir, terminated,
+                                                                                   quiet_logs):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    terminated.failing.add("sb-ok")
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+    recorded = _stored_context(instance).metadata.get(teardown.TORN_DOWN_KEY)
+
+    still_stuck = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+    terminated.failing.clear()
+    finished = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    assert recorded is None
+    assert still_stuck.exit_code == 1 and "Couldn't tear down sb-ok: RuntimeError: stuck" in still_stuck.output
+    assert (finished.exit_code, terminated) == (0, ["sb-ok"]), finished.output
+    assert _stored_context(instance).metadata[teardown.TORN_DOWN_KEY] == ["sb-ok"]
+
+
+def test_the_command_leaves_a_run_recorded_running_alone_unless_forced_and_refuses_an_unknown_instance(
+        bundle_dir, terminated, quiet_logs):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    terminated.failing.add("sb-ok")
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+    terminated.failing.clear()
+    local_store().update("task_instances", Filter.of(instance_id=instance), UpdateSpec(set={"status": "running"}))
+
+    refused = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+    forced = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance, "--force"])
+    unknown = CliRunner().invoke(cli, ["task", "teardown", "--instance", "@local/~/nope/t-12345678"])
+
+    assert refused.exit_code == 1 and "is recorded running" in refused.output and "--force" in refused.output
+    assert (forced.exit_code, terminated) == (0, ["sb-ok"]), forced.output
+    assert unknown.exit_code == 1 and "no task instance '@local/~/nope/t-12345678'" in unknown.output
 
 
 def test_the_cli_keep_prints_the_endpoints_holds_and_tears_down_on_ctrl_c(bundle_dir, terminated, quiet_logs,

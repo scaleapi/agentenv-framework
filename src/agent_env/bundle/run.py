@@ -30,7 +30,7 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
-from agent_env.task.store import record_task_cancelled
+from agent_env.task.store import record_task_cancelled, record_teardown
 from agent_env.task.interrupts import Interrupts
 from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
@@ -139,6 +139,7 @@ class BundleRun:
         with Interrupts() as interrupts:
             reports = interrupts.run(interrupts.stopping(teardown_run(run.context) for run in kept))
             result = self._with_reports(kept, reports)
+            _record_left_up([replace(run, torn_down=report) for run, report in zip(kept, reports)])
             if interrupts.count:
                 raise RunInterrupted(result, interrupts.signum)
         return result
@@ -270,6 +271,7 @@ def run_bundle(
                                            solver_params(plan, prepared.materialization), keep, say, interrupts,
                                            source))
             _mark_cancelled(runs, interrupts.reason)
+            _record_left_up(runs)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
@@ -380,6 +382,15 @@ def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
         if run.cancelled and run.instance_id:
             with run_scope(run.task.id):
                 record_task_cancelled(run.instance_id, reason, Task._utc_now_str())
+
+
+def _record_left_up(runs: Sequence[TaskRun]) -> None:
+    """Keep on each run's instance the context its teardown ended with when it left sandboxes up, so ``agent-env task
+    teardown`` finds them, those a step a signal cut short had recorded included. Like ``_mark_cancelled``, it runs
+    once the loop has closed."""
+    for run in runs:
+        if run.torn_down is not None and run.torn_down.still_up and run.instance_id:
+            record_teardown(run.instance_id, run.context)
 
 
 def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRun, ...],
