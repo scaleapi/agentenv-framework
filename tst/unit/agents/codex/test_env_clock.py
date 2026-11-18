@@ -14,6 +14,7 @@ PROXY = "http://127.0.0.1:3128"
 @pytest.fixture(autouse=True)
 def _model_hosts_resolve_publicly(monkeypatch):
     """A model host these tests name over HTTPS resolves to a public address, with no lookup leaving the machine."""
+    monkeypatch.setattr(codex_bridge, "_GLOBAL_HOSTS", {})
     monkeypatch.setattr(codex_bridge.socket, "getaddrinfo", lambda host, port: [(None, None, None, "", ("93.184.216.34", 0))])
 
 
