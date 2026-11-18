@@ -92,7 +92,7 @@ class AdapterSpec:
     name: str
     native_format: str
     version: str
-    usage_input_includes_cache: bool | None
+    input_includes_cache: bool | None
     tested_with: tuple[str, ...]
     aux: Mapping[str, str]
     handlers: tuple[tuple[Selector, str], ...]
@@ -111,11 +111,11 @@ class AdapterSpec:
         return methods[0]
 
 
-def atif_adapter(*, native_format: str, version: str, usage_input_includes_cache: bool | None,
+def atif_adapter(*, native_format: str, version: str, input_includes_cache: bool | None,
                  tested_with: Sequence[str] = (), name: str | None = None) -> Callable[[type[A]], type[A]]:
     """Declare an Adapter subclass for ``native_format``.
 
-    ``usage_input_includes_cache`` says whether the native input token count already includes cache reads and writes
+    ``input_includes_cache`` says whether the native input token count already includes cache reads and writes
     (None when the native reports no usage); the builder uses it to write ATIF's ``prompt_tokens``, which include them.
     ``tested_with`` names the native producer versions its recorded fixtures come from."""
     if not isinstance(native_format, str) or not NATIVE_FORMAT.match(native_format):
@@ -124,8 +124,8 @@ def atif_adapter(*, native_format: str, version: str, usage_input_includes_cache
         raise AtifError(f"native_format {native_format!r}: atif is the format adapters produce, not a native one")
     if not isinstance(version, str) or not version:
         raise AtifError("version is the adapter's own version string")
-    if usage_input_includes_cache not in (True, False, None):
-        raise AtifError("usage_input_includes_cache is true, false or None")
+    if input_includes_cache not in (True, False, None):
+        raise AtifError("input_includes_cache is true, false or None")
 
     def declare(cls: type[A]) -> type[A]:
         if not (isinstance(cls, type) and issubclass(cls, Adapter)):
@@ -152,7 +152,7 @@ def atif_adapter(*, native_format: str, version: str, usage_input_includes_cache
             raise AtifError(f"{cls.__name__} has more than one @finish method: {', '.join(finishes)}")
         cls.spec = AdapterSpec(
             name=name or f"{native_format.split('/', 1)[0]}-atif", native_format=native_format, version=version,
-            usage_input_includes_cache=usage_input_includes_cache, tested_with=tuple(tested_with),
+            input_includes_cache=input_includes_cache, tested_with=tuple(tested_with),
             aux=dict(aux_types), handlers=tuple((selector, attr) for selector, attr in owners.items()),
             finish=finishes[0] if finishes else None)
         return cls

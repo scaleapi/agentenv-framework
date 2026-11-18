@@ -585,7 +585,7 @@ class AtifTurn:
              time: str | datetime | None = None, is_copied_context: bool | None = None,
              agent: str | None = None) -> None:
         """What one model response cost and produced. Token counts are the native's; ATIF's ``prompt_tokens``
-        includes cache reads and writes, so the adapter's ``usage_input_includes_cache`` decides the sum. A cost is
+        includes cache reads and writes, so the adapter's ``input_includes_cache`` decides the sum. A cost is
         the harness's or the provider's (``cost_source``), never one agentenv computed."""
         target = self._doc.step_for(key, agent)
         if model_name is not None:
@@ -603,9 +603,9 @@ class AtifTurn:
                 if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
                     raise AtifError(f"token counts are non-negative integers, not {value!r}")
         if input_tokens is not None or cache_read_tokens is not None or cache_write_tokens is not None:
-            includes = self.spec.usage_input_includes_cache
+            includes = self.spec.input_includes_cache
             if includes is None:
-                raise AtifError("declare usage_input_includes_cache on @atif_adapter to write prompt tokens")
+                raise AtifError("declare input_includes_cache on @atif_adapter to write prompt tokens")
             prompt = (input_tokens or 0) + (0 if includes else (cache_read_tokens or 0) + (cache_write_tokens or 0))
             target.metrics["prompt_tokens"] = prompt
             if cache_read_tokens is not None:

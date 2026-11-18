@@ -52,7 +52,7 @@ to native exactly.
 - Timestamps are UTC, written `YYYY-MM-DDTHH:MM:SS(.fff|.ffffff)Z`. Other precisions are normalized: ATIF's Step
   validator on Python 3.10 reads no other.
 - Usage follows ATIF: `prompt_tokens` includes cache reads and writes, and `cached_tokens` is the cache reads. Each
-  adapter's `usage_input_includes_cache` constant says whether its native input count already includes the cache.
+  adapter's `input_includes_cache` constant says whether its native input count already includes the cache.
   Cache writes go in `Metrics.extra.agentenv.cache_write_tokens`.
 - A tool call whose input isn't a JSON object is wrapped as Harbor wraps it: a string as `{"input": ...}`, a missing
   input as `{}`, any other value as `{"value": ...}`. The native input is kept in `ToolCall.extra.raw_arguments`, only
@@ -64,10 +64,12 @@ to native exactly.
 ATIF defines a step's `cost_usd` as the cost "based on current provider pricing for this step", and says the cost fields
 "store the calculated cost at the time of execution".
 
-- A cost the harness calculated from its own price table, or a billed amount the provider's API reported, goes in
-  `Metrics.cost_usd` or `FinalMetrics.total_cost_usd`. Its `cost_source` in the profile says which: `harness` or
-  `provider`.
-- A cost agentenv computes itself, from its own price table after the run, never goes in a typed field.
+- A cost the harness calculated from its own price table, or the endpoint's billed figure (the provider's, or a
+  proxy's such as LiteLLM's `x-litellm-response-cost`), goes in `Metrics.cost_usd` or `FinalMetrics.total_cost_usd`.
+  Its `cost_source` in the profile says which: `harness` or `provider`. These are the framework's reported costs.
+- A cost agentenv computes itself, from its own price table after the run, never goes in a typed field. The framework
+  records that one with the run's usage instead, as a `priced` cost whose `cost_source` names the price table's
+  version; `harness` and `provider` mean the same there as here.
 - When nothing reports a cost, the typed fields stay empty, which ATIF readers read as unknown.
 
 ## Errors
@@ -93,23 +95,23 @@ One vocabulary, in three places:
 | Object | Field | Meaning | Read by |
 | --- | --- | --- | --- |
 | Trajectory | `version` | The profile version: `1.0` | every reader |
-| Trajectory | `native_format` | The native format id the copy was built from | Y4, Y11 |
-| Trajectory | `adapter` | The adapter's `name` and `version` | Y4, Y11 |
-| Trajectory | `unmatched` | Native records no method took, counted by type | Y1b's adapter kit |
-| Step | `context_id`, `task_id`, `message_id`, `turn` | On a task's user step: its A2A ids and turn index | Y2b, Y4, Hub F3 |
-| Step | `state` | On a task's last step: its terminal state | Y7, Hub F3 |
-| Step | `attempt` | The harness attempt the step belongs to; absent means 1 | Y7 |
-| Step | `error` | A step-level error: `kind`, `message`, `code` | Y7 |
-| Step | `reasoning` | Each reasoning block: `chars`, `visibility`, `signature`, `data` | Y5 resume, Y10 RL replay |
-| Step | `media` | Details of the media the message names, by path | Y3, Y7 |
-| ObservationResult | `status` | The result's status; absent means `ok` | Y7 |
-| ObservationResult | `exit_code` | The command's exit code | Y7 |
-| ObservationResult | `arrived` | A late result's arrival: `at`, and the `step_id` open when it came | live readers, Y7 |
-| ObservationResult | `media` | Details of the media the result names, by path | Y3, Y7 |
-| Metrics | `cost_source` | Where `cost_usd` came from | E13 |
-| Metrics | `cache_write_tokens` | Cache writes, beside ATIF's `cached_tokens` | E13 |
-| FinalMetrics | `cost_source` | Where `total_cost_usd` came from | E13 |
-| FinalMetrics | `total_cache_write_tokens` | Cache writes summed over the steps | E13 |
+| Trajectory | `native_format` | The native format id the copy was built from | the worker that stores copies; renormalizing |
+| Trajectory | `adapter` | The adapter's `name` and `version` | the worker that stores copies; renormalizing |
+| Trajectory | `unmatched` | Native records no method took, counted by type | the adapter kit |
+| Step | `context_id`, `task_id`, `message_id`, `turn` | On a task's user step: its A2A ids and turn index | the SDK, the worker, the hub's turns view |
+| Step | `state` | On a task's last step: its terminal state | the explorer, the hub's turns view |
+| Step | `attempt` | The harness attempt the step belongs to; absent means 1 | the explorer |
+| Step | `error` | A step-level error: `kind`, `message`, `code` | the explorer |
+| Step | `reasoning` | Each reasoning block: `chars`, `visibility`, `signature`, `data` | resuming a session; RL replay |
+| Step | `media` | Details of the media the message names, by path | media transfer; the explorer |
+| ObservationResult | `status` | The result's status; absent means `ok` | the explorer, judges' turn events |
+| ObservationResult | `exit_code` | The command's exit code | the explorer, judges' turn events |
+| ObservationResult | `arrived` | A late result's arrival: `at`, and the `step_id` open when it came | live readers, the explorer |
+| ObservationResult | `media` | Details of the media the result names, by path | media transfer; the explorer |
+| Metrics | `cost_source` | Where `cost_usd` came from | the run's usage and cost result |
+| Metrics | `cache_write_tokens` | Cache writes, beside ATIF's `cached_tokens` | the run's usage and cost result |
+| FinalMetrics | `cost_source` | Where `total_cost_usd` came from | the run's usage and cost result |
+| FinalMetrics | `total_cache_write_tokens` | Cache writes summed over the steps | the run's usage and cost result |
 
 A media entry (MediaInfo) holds `sha256`, `bytes`, and, where they apply, `width`, `height`, `duration_ms`, `pages`
 and `name`, plus `media_type` for media ATIF has no part type for. A reasoning block (ReasoningBlock) holds `chars`,
@@ -134,8 +136,8 @@ A reader keeps a value it doesn't know.
 
 A minor version only adds optional fields and vocabulary values, each with the reader or producer that needs it. A
 field added in a later minor names the version it arrived in. Proposed for a later minor, with their first producer:
-`usage_input_includes_cache` on the root and `cost_status` (with F12's cross-check), per-part origins (when a reader
-needs them), and the always-on harness's five fields (FD-5840).
+`input_includes_cache` on the root and `cost_status` (`reported`, `priced` or `unpriced`), with the usage
+cross-check that reads them; per-part origins, when a reader needs them; and an always-on harness's fields.
 
 ## Fixtures
 

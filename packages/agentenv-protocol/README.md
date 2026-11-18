@@ -1269,7 +1269,7 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   ```python
   from agentenv_protocol.atif import Adapter, atif_adapter, native
 
-  @atif_adapter(native_format="my-cli-events/1", version="0.1.0", usage_input_includes_cache=False)
+  @atif_adapter(native_format="my-cli-events/1", version="0.1.0", input_includes_cache=False)
   class MyCliAtif(Adapter):
       @native(type="assistant")
       def assistant(self, record, turn):

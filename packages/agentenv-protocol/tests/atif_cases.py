@@ -15,7 +15,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "src/agentenv_protocol/atif/fix
 CONTEXT = "ctx-7f3a"
 
 
-@atif_adapter(native_format="toy-events/1", version="0.1.0", usage_input_includes_cache=False,
+@atif_adapter(native_format="toy-events/1", version="0.1.0", input_includes_cache=False,
               tested_with=("toy 1.0",))
 class Toy(Adapter):
     """A toy CLI whose records map one to one onto builder calls."""

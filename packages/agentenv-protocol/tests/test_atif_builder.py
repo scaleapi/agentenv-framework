@@ -26,7 +26,7 @@ from agentenv_protocol.atif import (
 
 
 def adapter(includes_cache=False):
-    @atif_adapter(native_format="toy-events/1", version="0.1.0", usage_input_includes_cache=includes_cache)
+    @atif_adapter(native_format="toy-events/1", version="0.1.0", input_includes_cache=includes_cache)
     class Toy(Adapter):
         @native(type="say")
         def say(self, r, turn):
@@ -173,7 +173,7 @@ def test_reads_are_fresh_copies():
 
 
 def test_reasoning_blocks_keep_their_boundaries_signatures_and_ciphertext():
-    @atif_adapter(native_format="toy-think/1", version="1", usage_input_includes_cache=None)
+    @atif_adapter(native_format="toy-think/1", version="1", input_includes_cache=None)
     class Thinker(Adapter):
         @native(type="think")
         def think(self, r, turn):
@@ -198,7 +198,7 @@ def test_reasoning_blocks_keep_their_boundaries_signatures_and_ciphertext():
 
 
 def test_media_go_to_the_sink_once_and_types_atif_lacks_become_notes():
-    @atif_adapter(native_format="toy-media/1", version="1", usage_input_includes_cache=None)
+    @atif_adapter(native_format="toy-media/1", version="1", input_includes_cache=None)
     class Shots(Adapter):
         @native(type="shot")
         def shot(self, r, turn):
@@ -227,7 +227,7 @@ def test_records_no_method_takes_are_counted_by_type():
 
 
 def test_a_sub_agent_is_an_embedded_trajectory_its_spawning_result_points_at():
-    @atif_adapter(native_format="toy-sub/1", version="1", usage_input_includes_cache=True)
+    @atif_adapter(native_format="toy-sub/1", version="1", input_includes_cache=True)
     class Parent(Adapter):
         @native(type="go")
         def go(self, r, turn):
@@ -253,7 +253,7 @@ def test_a_sub_agent_is_an_embedded_trajectory_its_spawning_result_points_at():
 
 
 def test_a_step_with_no_model_call_takes_no_usage():
-    @atif_adapter(native_format="toy-dispatch/1", version="1", usage_input_includes_cache=True)
+    @atif_adapter(native_format="toy-dispatch/1", version="1", input_includes_cache=True)
     class Dispatch(Adapter):
         @native(type="d")
         def d(self, r, turn):
@@ -264,7 +264,7 @@ def test_a_step_with_no_model_call_takes_no_usage():
 
 
 def test_finish_raising_still_closes_the_task():
-    @atif_adapter(native_format="toy-fail/1", version="1", usage_input_includes_cache=None)
+    @atif_adapter(native_format="toy-fail/1", version="1", input_includes_cache=None)
     class Fails(Adapter):
         @finish
         def close(self, turn):
@@ -289,15 +289,15 @@ def test_replaying_a_contexts_stored_tasks_builds_what_it_built_live():
 
 def test_declarations_are_checked_at_import():
     with pytest.raises(AtifError):
-        atif_adapter(native_format="atif/1", version="1", usage_input_includes_cache=True)
+        atif_adapter(native_format="atif/1", version="1", input_includes_cache=True)
     with pytest.raises(AtifError):
-        atif_adapter(native_format="no-version", version="1", usage_input_includes_cache=True)
+        atif_adapter(native_format="no-version", version="1", input_includes_cache=True)
     with pytest.raises(AtifError):
-        atif_adapter(native_format="toy/1", version="", usage_input_includes_cache=True)
+        atif_adapter(native_format="toy/1", version="", input_includes_cache=True)
     with pytest.raises(AtifError):
-        atif_adapter(native_format="toy/1", version="1", usage_input_includes_cache="yes")
+        atif_adapter(native_format="toy/1", version="1", input_includes_cache="yes")
     with pytest.raises(AtifError):
-        @atif_adapter(native_format="toy/1", version="1", usage_input_includes_cache=True)
+        @atif_adapter(native_format="toy/1", version="1", input_includes_cache=True)
         class TwoFinishes(Adapter):
             @finish
             def a(self, turn):
@@ -311,7 +311,7 @@ def test_declarations_are_checked_at_import():
 
 
 def test_the_most_specific_handler_takes_a_record_and_a_tie_is_refused():
-    @atif_adapter(native_format="toy-pick/1", version="1", usage_input_includes_cache=None)
+    @atif_adapter(native_format="toy-pick/1", version="1", input_includes_cache=None)
     class Pick(Adapter):
         @native(type="e")
         def general(self, r, turn):
@@ -324,7 +324,7 @@ def test_the_most_specific_handler_takes_a_record_and_a_tie_is_refused():
     run, _ = run_task([{"type": "e", "kind": "retry"}, {"type": "e", "kind": "other"}], cls=Pick)
     assert [s["message"] for s in run.document()["steps"][1:]] == ["retry", "general"]
 
-    @atif_adapter(native_format="toy-tie/1", version="1", usage_input_includes_cache=None)
+    @atif_adapter(native_format="toy-tie/1", version="1", input_includes_cache=None)
     class Tie(Adapter):
         @native(where={"a": 1})
         def one(self, r, turn):
