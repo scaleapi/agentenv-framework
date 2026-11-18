@@ -35,6 +35,8 @@ SCORING_RULES = 1
 DEFAULT_MIN_PASSING_SCORE = 1.0
 OUTPUT_INLINE_BYTES = 16 * 1024
 SETTING_INLINE_BYTES = 1024
+# A failed grade's reason is an exception's text, which can carry pages of logs (a judge's container output).
+REASONING_CHARS = 2000
 # The step's fields left out of its verifier_settings: those that name or schedule it rather than say how it grades, and
 # min_passing_score, which the grade holds itself.
 _NOT_SETTINGS = ("id", "type", "version", "depends_on", "fail_task_on_error", "retry_config", "verifier_id",
@@ -82,13 +84,15 @@ class Verification:
     ``output``: anything else worth keeping, such as a judge's justification or a test's log; a dict's keys also join
     the step's legacy ``verifications`` entry, after its ``results`` and ``score``. ``skipped``: why the verifier judged
     nothing. ``raise_after``: an exception the step raises once both are written, for a verdict that also fails its
-    step."""
+    step. ``error``: why the verdict it recorded can't be trusted, such as a test command that timed out: the grade is
+    failed with it, and the legacy entry is still written."""
 
     criteria: list[dict[str, Any]] = field(default_factory=list)
     score: Optional[float] = None
     output: Any = None
     skipped: Optional[str] = None
     raise_after: Optional[BaseException] = None
+    error: Optional[str] = None
 
 
 class VerifierTaskStep(TaskStep):
@@ -125,19 +129,17 @@ class VerifierTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         try:
             verification = await self.verify(context)
+            score = self._score(verification)
+            status = (VerifierStatus.SKIPPED if verification.skipped is not None
+                      else VerifierStatus.FAILED if verification.error is not None else VerifierStatus.GRADED)
+            grade = self._grade(context, status, float(score) if status is VerifierStatus.GRADED else None,
+                                verification.criteria or [], error=_capped(verification.error),
+                                skip=verification.skipped)
+            grade.update(await self._output(context, verification.output))
         except Exception as exc:
             self._write_grade(context, self._grade(context, VerifierStatus.FAILED, None, [],
-                                                   error=f"{type(exc).__name__}: {exc}"))
+                                                   error=_capped(f"{type(exc).__name__}: {exc}")))
             raise
-        if verification.skipped is not None:
-            status, score = VerifierStatus.SKIPPED, None
-        elif verification.score is not None:
-            status, score = VerifierStatus.GRADED, verification.score
-        else:
-            status, score = VerifierStatus.GRADED, aggregate_score(verification.criteria, self.score_aggregator)
-        grade = self._grade(context, status, None if score is None else float(score), verification.criteria,
-                            skip=verification.skipped)
-        grade.update(await self._output(context, verification.output))
         self._write_grade(context, grade)
         entry = {"results": verification.criteria, "score": score}
         if verification.skipped is not None:
@@ -150,11 +152,11 @@ class VerifierTaskStep(TaskStep):
         return context
 
     def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
-        """What this step grades with in ``context``'s run: its own fields, one over ``SETTING_INLINE_BYTES`` kept as its
-        sha256 and size, and its ``score_aggregator`` whether or not it is its default. A subclass adds what the run
-        changes or decides, such as the ``step_params`` it applies or a judge's model. Pure, since it is also read at
-        run start."""
-        fields = {k: _compact(v) for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
+        """What this step grades with in ``context``'s run: its own fields and its ``score_aggregator`` whether or not it
+        is its default. A subclass adds what the run changes or decides, such as the ``step_params`` it applies or a
+        judge's model. Pure, since it is also read at run start; the grade keeps a value over ``SETTING_INLINE_BYTES``
+        as its sha256 and size."""
+        fields = {k: v for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
         return {**fields, "score_aggregator": self.score_aggregator.value}
 
     def config_problems(self) -> list[str]:
@@ -200,8 +202,25 @@ class VerifierTaskStep(TaskStep):
             verifier_criteria=rows,
             verifier_type=self.type,
             verifier_version=_providing_version(type(self).__module__),
-            verifier_settings={"scoring_rules": SCORING_RULES, **self.verifier_settings(context)},
+            verifier_settings=self._settings(context),
         )
+
+    def _score(self, verification: Verification) -> Optional[float]:
+        if verification.skipped is not None:
+            return None
+        if verification.score is not None:
+            return verification.score
+        return aggregate_score(verification.criteria or [], self.score_aggregator)
+
+    def _settings(self, context: TaskStepContext) -> dict[str, Any]:
+        """``verifier_settings`` as the grade records it, compacted; a failing one is recorded rather than raised, since a
+        failed grade records settings too and must not lose the verifier's own error."""
+        try:
+            settings = self.verifier_settings(context)
+        except Exception as exc:
+            logger.warning("verifier %s: its settings couldn't be read: %s", self.id, exc)
+            return {"scoring_rules": SCORING_RULES, "settings_error": _capped(f"{type(exc).__name__}: {exc}")}
+        return {"scoring_rules": SCORING_RULES, **{k: _compact(v) for k, v in settings.items()}}
 
     async def _output(self, context: TaskStepContext, output: Any) -> dict[str, Any]:
         """``verifier_output`` inline, or, over ``OUTPUT_INLINE_BYTES``, a ``verifier_output_ref`` to its copy in the
@@ -241,6 +260,12 @@ def _row(index: int, row: dict[str, Any]) -> dict[str, Any]:
         "weight": row.get("weight", 1.0),
         "skipped": row.get("skipped", False),
     }
+
+
+def _capped(text: Optional[str]) -> Optional[str]:
+    if text is None or len(text) <= REASONING_CHARS:
+        return text
+    return f"{text[:REASONING_CHARS]}… ({len(text)} characters)"
 
 
 def _compact(value: Any) -> Any:

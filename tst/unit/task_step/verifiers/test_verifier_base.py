@@ -276,6 +276,83 @@ def test_the_grade_and_legacy_entry_survive_the_step_journal():
     assert stored["metadata"]["verifications"] == post.metadata["verifications"]
 
 
+def test_an_error_fails_the_grade_but_keeps_the_legacy_entry_it_recorded():
+    timeout = RuntimeError("tests timed out after 300s")
+    context = TaskStepContext()
+
+    with pytest.raises(RuntimeError) as raised:
+        _run(_Toy(outcome=Verification(criteria=[{"id": "reward", "score": 1.0, "result": True}], score=1.0,
+                                       error="timed out after 300s", raise_after=timeout)), context)
+
+    assert raised.value is timeout
+    grade = context.metadata["grades"]["check"]
+    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("failed", None, False)
+    assert grade["verifier_error_reasoning"] == "timed out after 300s"
+    assert context.metadata["verifications"]["check"] == {
+        "results": [{"id": "reward", "score": 1.0, "result": True}], "score": 1.0}
+
+
+@pytest.mark.parametrize("outcome", [Verification(criteria=["not a row"]),
+                                     Verification(score=1, output={"not json": object()})])
+def test_a_verification_the_base_cant_record_is_a_failed_grade_and_raises(outcome):
+    context = TaskStepContext()
+
+    with pytest.raises((AttributeError, TypeError)):
+        _run(_Toy(outcome=outcome), context)
+
+    assert context.metadata["grades"]["check"]["verifier_status"] == "failed"
+    assert "verifications" not in context.metadata
+
+
+def test_settings_that_cant_be_read_are_recorded_not_raised():
+    class _Unreadable(_Toy):
+        def verifier_settings(self, context):
+            raise KeyError("judge")
+
+    for outcome, status in ((Verification(score=1), "graded"), (ValueError("broken"), "failed")):
+        context = TaskStepContext()
+        try:
+            _run(_Unreadable(outcome=outcome), context)
+        except ValueError:
+            pass
+
+        grade = context.metadata["grades"]["check"]
+        assert grade["verifier_status"] == status
+        assert grade["verifier_settings"] == {"scoring_rules": 1, "settings_error": "KeyError: 'judge'"}
+
+
+def test_a_long_error_is_cut_with_its_length():
+    context = TaskStepContext()
+
+    with pytest.raises(RuntimeError):
+        _run(_Toy(outcome=RuntimeError("log line\n" * 1000)), context)
+
+    reasoning = context.metadata["grades"]["check"]["verifier_error_reasoning"]
+    assert len(reasoning) < verifier_module.REASONING_CHARS + 40
+    assert reasoning.endswith(f"… ({len('RuntimeError: ') + 9000} characters)")
+
+
+def test_settings_a_subclass_adds_are_compacted_too():
+    class _Judged(_Toy):
+        def verifier_settings(self, context):
+            return {**super().verifier_settings(context), "criteria": ["x" * 2000], "judge_model": "m"}
+
+    settings = _run(_Judged(outcome=Verification(score=1))).metadata["grades"]["check"]["verifier_settings"]
+
+    assert settings["judge_model"] == "m" and set(settings["criteria"]) == {"sha256", "bytes"}
+
+
+def test_criteria_of_none_are_kept_in_the_legacy_entry():
+    oops = TypeError("verify returned None")
+    context = TaskStepContext()
+
+    with pytest.raises(TypeError):
+        _run(_Toy(outcome=Verification(criteria=None, raise_after=oops)), context)
+
+    assert context.metadata["verifications"]["check"] == {"results": None, "score": 0.0}
+    assert context.metadata["grades"]["check"]["verifier_status"] == "graded"
+
+
 def test_a_verifier_on_the_base_is_a_grader():
     assert _Toy.step_role is StepRole.GRADER and "step_role" not in _Toy().to_dict()
 
