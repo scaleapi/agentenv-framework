@@ -175,6 +175,7 @@ async def invoke_transfer(
     timeout: float,
     response_model: type[_Response] | None = None,
     store: ObjectStore | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> Any:
     """Send ``call`` and return the agent's answer, validated against ``response_model`` when
     the call carried grants. An error never quotes the answer to such a call, which may echo a
@@ -186,7 +187,7 @@ async def invoke_transfer(
             await staged.push()
         async with httpx.AsyncClient() as client:
             send = client.post if verb == "POST" else client.put
-            resp = await send(url, json=call.payload, timeout=timeout)
+            resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
         try:
             raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
         except httpx.HTTPStatusError as exc:
@@ -651,6 +652,7 @@ async def fetch_trajectory(
     upload: TrajectoryUpload | None = None,
     timeout: float | None = None,
     store: ObjectStore | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> FetchedTrajectory:
     """POST one trajectory ``get``. With ``upload`` the agent uploads the trajectory through its
     grant, issued by ``store``, and the answer is checked. The default wait covers that upload."""
@@ -669,6 +671,7 @@ async def fetch_trajectory(
         timeout=timeout,
         response_model=TrajectoryObjectsResponse,
         store=store,
+        headers=headers,
     )
     if upload is not None:
         return FetchedTrajectory(object_url=upload.object_url)

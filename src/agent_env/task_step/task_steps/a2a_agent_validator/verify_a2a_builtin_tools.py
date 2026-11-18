@@ -78,7 +78,7 @@ class VerifyA2ABuiltinToolsStep(TaskStep):
                                       builtin_tools={"disable": "*"}).execute(context)
             limited = next(a for a in context.deployed_agents if a.agent_name == AGENT_NAME)
             url = (limited.a2a_url or limited.api_url) + params.get("endpoint", "/ext/agent-config")
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=limited.control_headers) as client:
                 refused = (await client.post(url, json={"builtin_tools": {"only": [NO_SUCH_TOOL]}})).status_code
                 config = (((await client.get(url)).json() or {}).get("config") or {}) if "get" in methods else None
             await PromptAgentTaskStep(id=prompt_id, version=None, prompt=PROMPT, prompt_id=prompt_id,

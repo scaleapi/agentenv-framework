@@ -10,6 +10,7 @@ import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
@@ -41,6 +42,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_url_rewrites,
 )
 from agent_env.attribution import Attribution
+from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 
 if TYPE_CHECKING:
     from agent_env.a2a_agent.store import A2AAgentQuery, A2AAgentStore
@@ -101,6 +103,8 @@ class DeployedA2AAgent:
     created_at_utc: str | None = None
     expires_at_utc: str | None = None
     network_policy: dict | None = None
+    # The token the agent's extension routes take: agent-env holds it and gives no other agent.
+    control_token: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "DeployedA2AAgent":
@@ -115,7 +119,12 @@ class DeployedA2AAgent:
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
             network_policy=data.get("network_policy"),
+            control_token=data.get("control_token"),
         )
+
+    @property
+    def control_headers(self) -> dict[str, str]:
+        return protocol_v1.control_token_headers(self.control_token)
 
 
 @dataclass(frozen=True)
@@ -261,6 +270,7 @@ class A2AAgent:
             operation=f"skill add ({name})",
             timeout=TRANSFER_TIMEOUT_SECONDS,
             store=store,
+            headers=deployed.control_headers,
         )
 
     @staticmethod
@@ -590,6 +600,7 @@ class A2AAgent:
                 a2a_url=a2a_url, sandbox_id=self._sandbox.sandbox_id,
                 agent_card=agent_card, sandbox_type=self._sandbox.type,
                 network_policy=self._sandbox.network_policy.to_dict() if self._sandbox.network_policy else None,
+                control_token=new_control_token(),
             )
             from agent_env.a2a_agent.store import get_a2a_agent_instance_store
             deployed = get_a2a_agent_instance_store().create_instance(deployed, ttl_seconds)

@@ -176,7 +176,7 @@ async def test_install_logs_show_the_command_template_not_the_model_key_or_heade
         "install_commands_host": ["start --key {litellm_api_key} --headers {litellm_extra_headers}"],
         "required_params_host": ["litellm_api_key", "litellm_extra_headers"], "a2a_port": 8000}}))
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
         sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
         tunnel_urls={"8000": "http://127.0.0.1:8000"})])
@@ -205,7 +205,7 @@ async def test_a_per_run_key_given_by_reference_is_resolved_through_the_secret_s
         "install_commands_host": ["start --key {litellm_api_key}"],
         "required_params_host": ["litellm_api_key"], "a2a_port": 8000}}))
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
@@ -341,7 +341,7 @@ def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, cont
     monkeypatch.setattr(step, "_extract_install_extension",
                         lambda sandbox, image: _resolved(cards[image.image_name])())
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="modal_vm",

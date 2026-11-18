@@ -117,6 +117,7 @@ class VerifyA2ASkillConfigStep(TaskStep):
                     operation="skill add (bundle)",
                     timeout=TRANSFER_TIMEOUT_SECONDS,
                     store=store,
+                    headers=deployed_agent.control_headers,
                 )
                 result = parse_response(SkillAddResponse, answer, operation="skill add (bundle)")
                 if result.name != name:
@@ -143,7 +144,8 @@ class VerifyA2ASkillConfigStep(TaskStep):
         list_ok = False
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(a2a_url + A2AAgent.operation(skill_ext, "list")[1], timeout=30)
+                resp = await client.get(a2a_url + A2AAgent.operation(skill_ext, "list")[1],
+                                        headers=deployed_agent.control_headers, timeout=30)
                 resp.raise_for_status()
                 data = resp.json()
                 skills = data.get("skills", {})

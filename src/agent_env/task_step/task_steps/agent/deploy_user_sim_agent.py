@@ -325,7 +325,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         if negotiated is None or "model" not in negotiated.fields:
             raise RuntimeError(f"{self.type} '{self.id}': agent '{self.agent_name}' takes no model through "
                                f"{A2AAgent.EXT_AGENT_CONFIG}, so it would play the user on a model of its own")
-        await protocol.post_agent_config((agent.a2a_url or agent.api_url) + negotiated.endpoint, negotiated.fields)
+        await protocol.post_agent_config((agent.a2a_url or agent.api_url) + negotiated.endpoint, negotiated.fields,
+                                         headers=agent.control_headers)
         context.record_model("user simulator", self.id, model)
         prompt = setup["system_prompt"]
         persona = self.persona

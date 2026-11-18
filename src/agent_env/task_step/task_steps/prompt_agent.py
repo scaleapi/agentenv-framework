@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any, ClassVar, Optional
 import httpx
 from a2a.types import TaskState
@@ -554,7 +555,8 @@ class PromptAgentTaskStep(TaskStep):
             desired_config["model_params"] = model_params
         negotiated = A2AAgent.negotiate_agent_config(card, desired_config)
         if negotiated:
-            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
+                                             headers=agent.control_headers)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
         context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
 
@@ -567,7 +569,8 @@ class PromptAgentTaskStep(TaskStep):
             user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
-                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
+                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
+                                                 headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
             context.record_model("user simulator", self.id, negotiated.fields.get("model") if negotiated else None)
 
@@ -625,7 +628,8 @@ class PromptAgentTaskStep(TaskStep):
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
-            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds) if live is not None else None
+            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers)
+            if live is not None else None
         )
         final_state: str = TaskState.completed.value
         trajectory_url: Optional[str] = None
@@ -701,6 +705,7 @@ class PromptAgentTaskStep(TaskStep):
                         turn_traj_uri = await self._fetch_trajectory(
                             target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
                             target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                            headers=agent.control_headers,
                         )
                     except Exception as e:
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
@@ -773,7 +778,7 @@ class PromptAgentTaskStep(TaskStep):
         if trig_ext and triggers_registered:  # best-effort firing-log readback (provenance only; never fails the run)
             try:
                 async with httpx.AsyncClient() as client:
-                    r = await client.get(state_url, timeout=15)
+                    r = await client.get(state_url, headers=user_sim.control_headers, timeout=15)
                     r.raise_for_status()
                     context.metadata.setdefault("agent_trigger_state", {})[self.id] = r.json().get("firing_log", [])
             except Exception as e:
@@ -887,7 +892,7 @@ class PromptAgentTaskStep(TaskStep):
 
     async def _fetch_trajectory(
         self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
-        target_a2a_task_id: str, *, sandbox_type: str | None, card: dict | None = None,
+        target_a2a_task_id: str, *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
     ) -> str | None:
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
         store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
@@ -905,7 +910,8 @@ class PromptAgentTaskStep(TaskStep):
                 TrajectoryUpload.to,
                 store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
             )
-        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store)
+        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                                         headers=headers)
         return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
 
     async def _env_clock(self, envs: list) -> dict:
@@ -940,12 +946,12 @@ class PromptAgentTaskStep(TaskStep):
         return env_triggers
 
     async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict,
-                      **quiet: bool) -> dict:
+                      *, headers: Mapping[str, str], **quiet: bool) -> dict:
         """Call the usersim's /decide for the triggers that should fire this turn."""
         payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id,
                    "env_triggers": env_triggers, **quiet}
         async with httpx.AsyncClient() as client:
-            resp = await client.post(decide_url, json=payload, timeout=self.user_agent_timeout_seconds)
+            resp = await client.post(decide_url, json=payload, headers=headers, timeout=self.user_agent_timeout_seconds)
             if resp.status_code >= 400:
                 raise RuntimeError(f"agent-trigger /decide failed (HTTP {resp.status_code}): {resp.text}")
             return resp.json()
@@ -1130,7 +1136,7 @@ class _UserSide:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id,
-                                            env_triggers)
+                                            env_triggers, headers=self._user_sim.control_headers)
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
             logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
             answer = _trigger_answer(resp)
@@ -1176,7 +1182,8 @@ class _UserSide:
         try:
             return await asyncio.wait_for(
                 step._fetch_trajectory(self._url, ext, task_id, step._trajectory_prefix() + "user_sim/", message_id,
-                                       card=card, sandbox_type=self._user_sim.sandbox_type),
+                                       card=card, sandbox_type=self._user_sim.sandbox_type,
+                                       headers=self._user_sim.control_headers),
                 _USER_SIM_TRAJECTORY_FETCH_SECONDS)
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
@@ -1192,7 +1199,7 @@ class _UserSide:
                                "agentenv-framework-protocol whose triggers/v1 decide takes record_unfired")
         env_triggers = await self._step._read_env_triggers(self._context)
         resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id, env_triggers,
-                                        record_unfired=False)
+                                        headers=self._user_sim.control_headers, record_unfired=False)
         logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
         answer = _trigger_answer(resp)
         if answer is not None:
