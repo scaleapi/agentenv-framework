@@ -45,6 +45,14 @@ def _status(image, **status) -> None:
     (image / "status.json").write_text(json.dumps(status))
 
 
+def _status_from_before(image, **status) -> None:
+    """A status the follower wrote for an earlier config, a second before this one: a file's mtime on Linux moves in
+    ticks of a few milliseconds, so a config written right after a status can share its mtime."""
+    _status(image, **status)
+    before = time.time_ns() - 1_000_000_000
+    os.utime(image / "status.json", ns=(before, before))
+
+
 def _follows_the_next_config(image, **status) -> threading.Thread:
     """A follower that, as the real one, writes its status once it reads a config other than the one it had."""
     config = image / "follower.json"
@@ -140,7 +148,7 @@ def test_a_zone_that_isnt_one_is_refused(image):
     {"url": "http://gw/clock/watch", "name": "agent-solver"},  # this one, under the token the config replaced
 ])
 def test_what_the_follower_showed_of_its_config_before_never_passes_for_the_new_one(image, before):
-    _status(image, connected=True, version="b:3", armed=True, **before)
+    _status_from_before(image, connected=True, version="b:3", armed=True, **before)
     with _app() as client:
         answer = client.post("/ext/clock/sync-time", json=REQUEST)
 
