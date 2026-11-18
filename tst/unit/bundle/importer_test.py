@@ -785,10 +785,9 @@ def test_an_agent_stored_under_an_installed_alias_by_anything_else_is_written_in
     imported = import_task("own", tmp_path / "imported", include_scopes=[FieldScope.USER])
 
     assert "claude-code" not in [ref.id for ref in imported.floating]
-    name = "claude-code-2" if registered_first else "claude-code"
     assert [(entity.folder, entity.id, entity.version) for entity in imported.written] == [
-        (f"agents/{name}", "claude-code", 2 if registered_first else 1)]
-    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == name
+        ("agents/claude-code-2", "claude-code", 2 if registered_first else 1)]
+    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == "claude-code-2"
 
 
 def test_a_folder_never_takes_an_alias_a_step_floats_so_each_version_keeps_its_own(registry, tmp_path):
@@ -804,3 +803,14 @@ def test_a_folder_never_takes_an_alias_a_step_floats_so_each_version_keeps_its_o
     assert [(entity.folder, entity.version) for entity in imported.written] == [("agents/claude-code-2", 2)]
     assert [(ref.where, ref.id) for ref in imported.floating if ref.id == "claude-code"] == [
         ("tasks/both.json: step 'registered': a2a_agent_id", "claude-code")]
+
+
+def test_an_export_whose_steps_name_no_installed_alias_never_reads_the_registration_ledger(store, monkeypatch):
+    def unreachable(*args, **kwargs):
+        raise AssertionError("the registration ledger was read")
+
+    monkeypatch.setattr(importer_module, "configured_store", unreachable)
+
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
+
+    assert [entity.folder for entity in imported.written] == ["envs/crm-env", "artifacts/crm-data", "agents/solver"]
