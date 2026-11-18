@@ -57,7 +57,10 @@ def test_a_graded_verification_writes_its_named_grade_and_the_legacy_entry():
     assert grade == {
         "name": "check", "score": 0.0, "min_passing_score": 1.0, "passed": False, "verifier_status": "graded",
         "verifier_error_reasoning": None, "verifier_skip_reasoning": None, "verifier_output": None,
-        "verifier_criteria": [{**ROWS[0], "weight": 1.0, "skipped": False}, {**ROWS[1], "weight": 1.0, "skipped": False}],
+        "verifier_criteria": [
+            {"id": "a", "score": 1.0, "why": "found it", "passed": True, "weight": 1.0, "skipped": False},
+            {"id": "b", "score": 0.0, "passed": False, "weight": 1.0, "skipped": False},
+        ],
         "verifier_type": "toy_verifier", "verifier_version": None,
         "verifier_settings": {"scoring_rules": 1, "note": "n"},
     }
@@ -83,7 +86,7 @@ def test_a_verification_with_no_rows_gets_one_for_the_grade_itself():
     grade = _run(_Toy(outcome=Verification(score=1))).metadata["grades"]["check"]
 
     assert grade["score"] == 1.0 and grade["passed"] is True
-    assert grade["verifier_criteria"] == [{"id": "check", "score": 1.0, "result": True, "weight": 1.0, "skipped": False}]
+    assert grade["verifier_criteria"] == [{"id": "check", "score": 1.0, "passed": True, "weight": 1.0, "skipped": False}]
 
 
 def test_a_raising_verifier_writes_a_failed_grade_no_legacy_entry_and_raises_the_same_exception():
@@ -98,7 +101,7 @@ def test_a_raising_verifier_writes_a_failed_grade_no_legacy_entry_and_raises_the
     grade = context.metadata["grades"]["check"]
     assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("failed", 0.0, False)
     assert grade["verifier_error_reasoning"] == "ValueError: criterion #2 has unknown type 'x'"
-    assert grade["verifier_criteria"] == [{"id": "check", "score": 0.0, "result": False, "weight": 1.0, "skipped": False}]
+    assert grade["verifier_criteria"] == [{"id": "check", "score": 0.0, "passed": False, "weight": 1.0, "skipped": False}]
 
 
 def test_raise_after_keeps_the_verdict_graded_then_fails_the_step():
@@ -146,13 +149,18 @@ def test_an_output_that_isnt_a_dict_stays_off_the_legacy_entry():
     [{"score": 1.0, "weight": 1}, {"score": 0.0, "weight": -1}],
     [{"result": "yes"}, {}],
 ])
-def test_the_grade_rows_aggregate_as_the_rows_the_verifier_gave(rows):
+def test_the_grade_rows_pass_and_score_as_scoring_read_the_rows_the_verifier_gave(rows):
+    by_rule = {ScoreAggregator.ALL_PASS: all, ScoreAggregator.ANY_PASS: any}
     for aggregator in ScoreAggregator:
         metadata = _run(_Toy(outcome=Verification(criteria=rows), score_aggregator=aggregator)).metadata
 
-        graded = metadata["grades"]["check"]["verifier_criteria"]
-        assert aggregate_score(graded, aggregator) == metadata["verifications"]["check"]["score"]
+        graded, legacy = metadata["grades"]["check"]["verifier_criteria"], metadata["verifications"]["check"]
+        if aggregator in by_rule:
+            assert legacy["score"] == (1.0 if by_rule[aggregator](row["passed"] for row in graded) else 0.0)
+        else:
+            assert aggregate_score(graded, aggregator) == legacy["score"]
         assert [row["id"] for row in graded] == [str(i) for i in range(len(rows))]
+        assert "result" not in graded[0] and legacy["results"] == rows
 
 
 @pytest.mark.parametrize("outcome", [Verification(criteria=ROWS), Verification(skipped="nothing to judge"),

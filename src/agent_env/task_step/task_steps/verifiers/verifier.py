@@ -63,8 +63,9 @@ class _GradeFields(TypedDict):
 
 class Grade(_GradeFields, total=False):
     """A verifier step's named grade, as ``context.metadata["grades"][<step id>]`` holds it. ``verifier_status`` is a
-    ``VerifierStatus`` value; each ``verifier_criteria`` row has ``id``, ``score``, ``result``, ``weight`` and
-    ``skipped``, besides any keys the verifier gave it. The two fields here are written only for a large output."""
+    ``VerifierStatus`` value; each ``verifier_criteria`` row has ``id``, ``score``, ``passed``, ``weight`` and
+    ``skipped``, besides any other keys the verifier gave it. The two fields here are written only for a large
+    output."""
 
     verifier_output_ref: dict[str, Any]
     verifier_output_offload_error: str
@@ -180,7 +181,7 @@ class VerifierTaskStep(TaskStep):
                *, error: Optional[str] = None, skip: Optional[str] = None) -> Grade:
         passed = status is VerifierStatus.GRADED and score >= self.min_passing_score
         rows = [_row(i, row) for i, row in enumerate(criteria)] or [{
-            "id": self.id, "score": score, "result": passed, "weight": 1.0, "skipped": status is VerifierStatus.SKIPPED,
+            "id": self.id, "score": score, "passed": passed, "weight": 1.0, "skipped": status is VerifierStatus.SKIPPED,
         }]
         return Grade(
             name=self.id,
@@ -223,13 +224,15 @@ class VerifierTaskStep(TaskStep):
 
 
 def _row(index: int, row: dict[str, Any]) -> dict[str, Any]:
-    """``row`` with the keys every grade's rows carry, each default chosen so ``aggregate_score`` reads the row as it
-    reads the original: ``result`` is never filled in, since ALL_PASS counts only an explicit ``True``."""
+    """The grade's copy of a verifier's ``row``: its ``passed`` whether the row passes under scoring rules 1, an
+    explicit ``True`` ``result`` (as ALL_PASS and ANY_PASS count it), and each other key's default the one
+    ``aggregate_score`` reads the row with."""
+    copied = {k: v for k, v in row.items() if k != "result"}
     return {
-        **row,
+        **copied,
         "id": row.get("id", str(index)),
         "score": row.get("score", 1.0 if row.get("result") else 0.0),
-        "result": row.get("result"),
+        "passed": row.get("result") is True,
         "weight": row.get("weight", 1.0),
         "skipped": row.get("skipped", False),
     }

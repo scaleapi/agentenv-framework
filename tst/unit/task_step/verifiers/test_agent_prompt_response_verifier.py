@@ -52,7 +52,8 @@ def test_the_legacy_entry_is_unchanged_and_the_grade_carries_its_score(aggregato
     assert grade["score"] == json.loads(BEFORE[aggregator])["score"]
     assert (grade["verifier_status"], grade["verifier_type"]) == ("graded", "agent_prompt_response_verifier")
     assert grade["verifier_version"] == _requirements.installed("agentenv-framework")
-    assert [row["id"] for row in grade["verifier_criteria"]] == ["says-done", "1", "names-file"]
+    assert [(row["id"], row["passed"]) for row in grade["verifier_criteria"]] == [
+        ("says-done", True), ("1", True), ("names-file", False)]
     assert recorded_scores([step], context) == {"check": json.loads(BEFORE[aggregator])["score"]}
 
 
