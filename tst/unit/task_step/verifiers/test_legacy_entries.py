@@ -1,13 +1,12 @@
 """run_container_unit_tests_verifier, verify_sandbox, env_outcome_verifier and aggregate_verifiers on the
 VerifierTaskStep base write the legacy ``verifications`` entry they wrote before it, byte for byte with its key order,
-and raise what they raised (``recorded/legacy_entries.json``, recorded from main at 25b862bc6, object urls under
-``<objects>/``), but for ``CHANGED``; and each writes its named grade beside it."""
+and raise what they raised (``tst/data/verifier_golden/legacy_entries.json``, recorded from main at 25b862bc6, object
+urls under ``<objects>/``), but for ``CHANGED``; and each writes its named grade beside it."""
 import asyncio
 import itertools
 import json
 import shlex
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,8 +25,9 @@ from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier 
 )
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
 from tst.unit.computer_home import Computer
+from tst.util.verifier_golden import GOLDEN
 
-RECORDED = json.loads((Path(__file__).parent / "recorded" / "legacy_entries.json").read_text())
+RECORDED = json.loads((GOLDEN / "legacy_entries.json").read_text())
 REWARD = "/logs/verifier/reward.txt"
 SCENARIOS = {}
 # What the base changes on purpose: an aggregate's entry has its (empty) results, and a script that returns None is
