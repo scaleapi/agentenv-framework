@@ -15,9 +15,12 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.run import dry_run_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils.composed import composition
+from agent_env.env.envs.computer.utils import composer as composer_module
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.store.base import NotFoundError
+from agent_env.task import Task
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.unit.bundle._support import layout, local_builds
 from tst.unit.bundle.computer_app_env_test import APP, TOML as APP_TOML
@@ -106,6 +109,37 @@ def test_a_reused_computer_env_composes_what_it_has_left_on_the_runs_provider_an
     assert composed == [(env.id, UBUNTU, REFERENCE, None),
                         (env.id, UBUNTU, REFERENCE, provider, [("container", "amd64"), ("container", "arm64"),
                                                                ("disk", "amd64"), ("disk", "arm64")])]
+
+
+def test_a_computer_env_no_deploy_could_boot_stops_its_tasks_until_composing_it_again_builds_one(tmp_path, composed,
+                                                                                                   monkeypatch):
+    """With ``bootable``, as a registration materializes: the env stays written, and its reuse composes what it has
+    left."""
+    results = iter(["failed", "ready"])
+
+    def compose(env, pairs=None, composing=Composing()):
+        composed.append(pairs)
+        env.update_metadata({**env.metadata, "composed": {"container": {
+            "amd64": {"status": next(results), "composer": composition()},
+            "arm64": {"status": "ready", "composer": "another agent-env's"}}}})
+
+    monkeypatch.setattr(composer_module, "compose", compose)
+    root = _bundle(tmp_path / "desk")
+    env_id, task_id = (f"{_plan(root).bundle.bundle.id_root}/{name}" for name in ("desktop", "t"))
+
+    with pytest.raises(BundleError) as stopped:
+        materialize(_plan(root), build_here=local_builds(_plan(root)), bootable=True)
+    assert stopped.value.problems == (
+        f"envs/desktop: {env_id} v1 has no build a deploy can boot (container/amd64 failed; container/arm64 ready, by "
+        f"another composer); register again to compose them again, or run agent-env env build --id {env_id} "
+        "--version 1",)
+    with pytest.raises(NotFoundError):
+        Task.get(task_id)
+
+    again = materialize(_plan(root), build_here=local_builds(_plan(root)), bootable=True)
+
+    assert composed == [None, [("container", "amd64"), ("container", "arm64"), ("disk", "amd64"), ("disk", "arm64")]]
+    assert [done.write.id for done in again.writes if not done.reused] == [task_id]
 
 
 def test_a_dry_run_says_what_it_would_compose_of_a_reused_computer_env(tmp_path, composed):

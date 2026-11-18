@@ -30,6 +30,7 @@ from agent_env.entity.refs import EntityKind, EntityRef, RefRole, ref_sites
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import composer
+from agent_env.env.envs.computer.utils.composed import BUILT, stale
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval, EvalTask
@@ -91,6 +92,7 @@ def materialize(
     composing: Composing = Composing(),
     on_progress: Callable[[Write, str], None] | None = None,
     sandbox: str | None = None,
+    bootable: bool = False,
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
@@ -107,7 +109,9 @@ def materialize(
     reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
 
     Each computer env written is composed as ``composing`` says, and so is what one reused has left, as ``agent-env
-    env build`` does; ``on_progress``, when given, is told how each goes, a line at a time with its write.
+    env build`` does; ``on_progress``, when given, is told how each goes, a line at a time with its write. With
+    ``bootable``, as a registration has it, a computer env written or reused whose compose left no build a deploy can
+    boot stops it once every entity is written, before any task or eval, raising BundleError naming each such env.
 
     ``ledger`` keeps the rows, this run's in the ``@local`` namespace's store unless given; it also says whether each
     task and eval names the versions it reads (``Ledger.pins_references``) and whether each image the bundle builds is
@@ -122,6 +126,7 @@ def materialize(
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
     done: dict[tuple[str, str], Materialized] = {}
     left: list[str] = []
+    unbootable: list[str] = []
 
     def through_ledger(write: Write, write_fn: Callable[[], int]) -> None:
         with _noted(plan, write, "checking" if dry_run else "writing"):
@@ -151,6 +156,11 @@ def materialize(
             if write.kind is BundleKind.ENV and done[_key(write)].reused and _compose_reused(
                     write, done[_key(write)].version, _composing(composing, on_progress, write), dry_run):
                 left.append(write.id)
+            if bootable and not dry_run and write.kind is BundleKind.ENV and (
+                    why := _unbootable(plan, write, done[_key(write)].version)):
+                unbootable.append(why)
+        if unbootable:
+            raise BundleError(unbootable)
         unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()
         written = done if ledger.pins_references else None
         built, problems, unchecked = {}, [], []
@@ -336,6 +346,23 @@ def _compose_reused(write: Write, version: int, composing: Composing, dry_run: b
         composing.on_progress(
             f"would compose {', '.join(f'{form}/{arch}' for form, arch in pairs) or 'its computer again'}")
     return True
+
+
+def _unbootable(plan: Plan, write: Write, version: int) -> str | None:
+    """Why the computer env ``write`` left at ``version`` can't be deployed, when its compose recorded builds but none a
+    deploy boots: each failed, was skipped, or another agent-env recorded it."""
+    env = Env.get(write.id, version)
+    if not isinstance(env, ComputerEnv) or env.computer is None:
+        return None
+    records = [(f"{form}/{arch}", record) for form, by_arch in env.metadata.get("composed", {}).items()
+               for arch, record in by_arch.items()]
+    if not records or any(record.get("status") in BUILT and not stale(record) for _, record in records):
+        return None
+    statuses = env.build_statuses()
+    builds = "; ".join(f"{pair} {statuses[pair]}" + (f" ({reason[:300]})" if (reason := record.get("reason")) else "")
+                       for pair, record in records)
+    return (f"{_path(plan, write)}: {write.id} v{version} has no build a deploy can boot ({builds}); register again "
+            f"to compose them again, or run agent-env env build --id {write.id} --version {version}")
 
 
 def _write_env(plan: Plan, write: Write, composing: Composing = Composing()) -> int:

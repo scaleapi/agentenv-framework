@@ -92,7 +92,9 @@ def register_bundle(
     the env's, emulating an arch no link runs natively unless ``emulate`` is False, which leaves it skipped.
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
-    written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
+    written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse. So does
+    a computer env whose compose left no build a deploy can boot, once every entity is written and before any task:
+    registering again composes what it has left."""
     composing = Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
@@ -116,7 +118,7 @@ def register_bundle(
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
             on_write=lambda done: say(f"  {registered_line(registered, done)}"), composing=composing,
-            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"))
+            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"), bootable=True)
     return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
 
 
