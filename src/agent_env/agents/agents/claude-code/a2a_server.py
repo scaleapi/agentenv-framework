@@ -110,6 +110,8 @@ _SKIPPABLE_WORKSPACE_ERRORS = (FileNotFoundError, PermissionError, NotADirectory
 _ERROR_MESSAGE_LIMIT = 1000
 # How much of a changing workspace file one read stages.
 _STAGE_CHUNK_BYTES = 1024 * 1024
+_STORED_GZIP_LEVEL = 0
+_SMALLEST_GZIP_LEVEL = 9
 
 # install/v1: the folder, unpacked on the sandbox's host, installs itself (install.sh); install_agent fills each {param}
 # in, quoted. The endpoint and CA go in the environment, not on the agent's command line.
@@ -252,7 +254,7 @@ def _write_workspace_archive(archive_path: Path, *, compresslevel: int, stage_so
 
 def _build_workspace_archive(archive_path: Path, max_bytes: int | None = None) -> tuple[int, int]:
     """``/app`` and the CLI's state as a gzip tar on disk, out of the agent's heap; its file count and size. The tar
-    goes in uncompressed (level 0), since deflate on one core is the save's bottleneck and gains nothing on media; an
+    goes in uncompressed, since deflate on one core is the save's bottleneck and gains nothing on media; an
     archive over ``max_bytes``, or one the disk has no room for, is rebuilt compressed, so a workspace that fit compressed
     still fits. A file that changes while it's read rebuilds the archive with each file staged first, so it can be
     skipped. Symlinked directories aren't followed."""
@@ -269,15 +271,15 @@ def _build_workspace_archive(archive_path: Path, max_bytes: int | None = None) -
             return _write_workspace_archive(archive_path, compresslevel=compresslevel, stage_sources=True)
 
     try:
-        file_count, size = write(0)
+        file_count, size = write(_STORED_GZIP_LEVEL)
     except OSError as exc:
         if exc.errno != errno.ENOSPC:
             raise
         logger.warning("No disk space for the uncompressed workspace archive; compressing")
-        return write(9)
+        return write(_SMALLEST_GZIP_LEVEL)
     if max_bytes is not None and size > max_bytes:
         logger.info(f"Workspace archive is {size} bytes uncompressed, over the {max_bytes}-byte grant; compressing")
-        file_count, size = write(9)
+        file_count, size = write(_SMALLEST_GZIP_LEVEL)
     return file_count, size
 
 
