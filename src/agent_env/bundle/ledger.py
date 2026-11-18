@@ -10,7 +10,6 @@ never reaches a configured store. Reading it never creates the store.
 from __future__ import annotations
 
 import hashlib
-import json
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
@@ -31,6 +30,7 @@ from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentSto
 from agent_env.store.ids import local_namespace
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
+from agent_env.utils.canonical import canonical_json
 from agent_env.utils.docker.context import shared_files
 
 from .authoring import build_context_files
@@ -326,7 +326,7 @@ def _diff(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[list[str
 
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_scalar).encode()
+    return canonical_json(value, default=_scalar)
 
 
 def _scalar(value: Any) -> str:
