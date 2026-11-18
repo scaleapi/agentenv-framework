@@ -16,7 +16,7 @@ import uuid
 from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class AggregateVerifiersTaskStep(TaskStep):
     type: ClassVar[str] = "aggregate_verifiers"
+    step_role = StepRole.GRADER
     entity_refs = ()
 
     def __init__(

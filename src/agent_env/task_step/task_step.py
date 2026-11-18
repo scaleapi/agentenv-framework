@@ -6,6 +6,7 @@ import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.task_step.context import TaskStepContext
@@ -40,13 +41,23 @@ def dependencies(raw: Any) -> list[TaskStepDependency] | None:
     return [dep if isinstance(dep, TaskStepDependency) else TaskStepDependency.from_dict(dep) for dep in raw]
 
 
-def attach_retry_config(step: "TaskStep", data: dict[str, Any]) -> "TaskStep":
-    """Hydrate ``retry_config`` after ``step_cls.from_dict`` at the generic
-    parse sites, so the field survives round-trips on step types whose
-    ``__init__`` doesn't accept it. No-op if already set or absent."""
+class StepRole(StrEnum):
+    """What a step contributes to a run, so a tolerated failure says what the run lost."""
+
+    GRADER = "grader"
+    EVIDENCE = "evidence"
+    AGENT = "agent"
+    OTHER = "other"
+
+
+def attach_base_fields(step: "TaskStep", data: dict[str, Any]) -> "TaskStep":
+    """Hydrate the base fields most step ``__init__``s don't accept (``retry_config``, ``step_role``) after
+    ``step_cls.from_dict`` at the generic parse sites, so they survive round-trips on every step type."""
     raw = data.get("retry_config")
     if raw is not None and getattr(step, "retry_config", None) is None:
         step.retry_config = RetryConfig.from_dict(raw)
+    if data.get("step_role") is not None:
+        step.step_role = StepRole(data["step_role"])
     return step
 
 
@@ -97,6 +108,9 @@ class TaskStep(ABC):
     # Each field of a scope other than the task's, by its path in the stored step; any other field is task-scoped. A
     # subclass merges its parent's. Such a field is optional, so a step written out without it still builds and runs.
     field_scopes: ClassVar[Mapping[str, FieldScope]] = {"metadata.attribution": FieldScope.USER}
+    # A step type declares its role; one step overrides it in config, e.g. a run_code step that grades. Not
+    # ``role``: deploy_agent and modify_env_tool_access already use that name for their own config.
+    step_role: StepRole = StepRole.OTHER
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -163,6 +177,8 @@ class TaskStep(ABC):
             base["depends_on"] = [dataclasses.asdict(d) for d in self.depends_on]
         if self.retry_config is not None:
             base["retry_config"] = dataclasses.asdict(self.retry_config)
+        if self.step_role != type(self).step_role:
+            base["step_role"] = self.step_role.value
         return base
 
     @classmethod
@@ -188,13 +204,11 @@ class TaskStep(ABC):
         from .store import get_task_step_store
 
         kwargs.setdefault("version", None)
-        # Most step __init__s don't accept retry_config (it lives on the base but
-        # subclasses don't forward it); construct without it, then hydrate so a
-        # retry_config on any step type round-trips through the step store.
-        retry_config_raw = kwargs.pop("retry_config", None)
+        # Most step __init__s don't accept the base-only fields; construct without
+        # them, then hydrate so they round-trip through the step store on any type.
+        base_fields = {k: kwargs.pop(k) for k in ("retry_config", "step_role") if k in kwargs}
         instance = cls(**kwargs)
-        if retry_config_raw is not None:
-            attach_retry_config(instance, {"retry_config": retry_config_raw})
+        attach_base_fields(instance, base_fields)
         return get_task_step_store().put_document(instance)
 
     @classmethod

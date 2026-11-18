@@ -10,7 +10,7 @@ from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.store import new_instance_id
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_step import TaskStep, attach_base_fields
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, is_prompt_step
 
 
@@ -100,5 +100,6 @@ def _in_episode(step: TaskStep, as_run: TaskStep, sandboxed: dict[str, bool], tu
             depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
         )
     if as_run.type == "prompt_agent" and as_run.agent_name in sandboxed and turn_timeout is not None:
-        return PromptAgentTaskStep.from_dict({**step.to_dict(), "timeout_seconds": math.ceil(turn_timeout)})
+        data = {**step.to_dict(), "timeout_seconds": math.ceil(turn_timeout)}
+        return attach_base_fields(PromptAgentTaskStep.from_dict(data), data)
     return step
