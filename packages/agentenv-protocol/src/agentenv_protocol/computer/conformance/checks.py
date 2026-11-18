@@ -68,6 +68,9 @@ RECORD_S = 2.0
 #: sees its motion as one event, and keys sent while the click that focuses a box waits go wherever focus was.
 BUSY_DESK_ATTEMPTS = 2
 RECORD_FPS = 5
+#: How many starts per slot of ``max_concurrent`` the limit check tries before it gives up on a computer whose other
+#: recordings keep starting and ending under it.
+LIMIT_STARTS = 3
 #: Prints a file's size and SHA-256 as JSON, run with ``python3 -c`` on the computer.
 READ_DIGEST = ("import hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
                "print(json.dumps({'size':len(d),'sha256':hashlib.sha256(d).hexdigest()}))")
@@ -1037,18 +1040,36 @@ class Probe:
         async def joined() -> str | None:
             return None if state.get("joined") else "a repeated request_id started a second recording"
 
+        async def recording_now() -> int:
+            return len((await self.driver.invoke(COMPUTER_RECORDING, "list"))["recordings"])
+
+        async def limited_counting(most: int) -> str | None:
+            """Recordings the probe didn't start, as a task's that records while it probes, count against the limit
+            too and may start or end meanwhile, so each start is judged by the recordings listed around it: one refused
+            below the limit, or one started past it, fails only if a listing after it still says so."""
+            for _ in range(LIMIT_STARTS * (most + 1)):
+                before = await recording_now()
+                try:
+                    started = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+                except ExtensionCallError as e:
+                    if e.code != "limit_exceeded":
+                        return f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
+                    if before >= most or (now := await recording_now()) >= most:
+                        return None
+                    return f"refused limit_exceeded with {now} recordings open, of at most {most}"
+                if before >= most and (now := await recording_now()) > most:
+                    return f"recording {now} of at most {most} started: {started['recording_id']}"
+            return f"the computer's recordings kept changing over {LIMIT_STARTS * (most + 1)} starts"
+
         async def limited() -> str | None:
-            """Past ``max_concurrent``, a start is refused. Recordings the probe didn't start, as a task's that records
-            while it probes, count against the limit too, so the probe starts only what's left of it: as many as the
-            driver lists still recording beside its own, or, from a driver that doesn't list them, ``max_concurrent``."""
+            """Past ``max_concurrent``, a start is refused: counting the recordings a driver lists, or, from one that
+            doesn't list them, after the probe's own ``max_concurrent``."""
             most = params.get("max_concurrent")
             if not isinstance(most, int):
                 return "the card declares no max_concurrent"
-            others = 0
             if "list" in (params.get("methods") or {}):
-                listed = await self.driver.invoke(COMPUTER_RECORDING, "list")
-                others = sum(r["recording_id"] not in made for r in listed["recordings"])
-            for _ in range(most - others):
+                return await limited_counting(most)
+            for _ in range(most):
                 await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
             try:
                 extra = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")

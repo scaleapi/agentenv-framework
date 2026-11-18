@@ -118,6 +118,33 @@ async def test_a_driver_that_refuses_short_of_the_limit_its_card_declares_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("meanwhile", ["ends", "starts"])
+async def test_a_recording_that_ends_or_starts_between_the_probes_count_and_its_start_doesnt_fail_it(home, monkeypatch,
+                                                                                                    meanwhile):
+    """The task's recording ending just before the probe's second limit start, or another starting just before its
+    first: a listing after the start says the limit held."""
+    real, limit_starts = recording_module.Recordings.start, []
+
+    async def start(self, request_id, *args):
+        if "-limit-" in request_id:
+            limit_starts.append(request_id)
+            if meanwhile == "ends" and len(limit_starts) == 2:
+                await self.end(self.started["task"]["recording_id"], None, "end")
+            if meanwhile == "starts" and len(limit_starts) == 1:
+                await real(self, "late", *args)
+        return await real(self, request_id, *args)
+
+    monkeypatch.setattr(recording_module.Recordings, "start", start)
+    driver = Recorder()
+    found, theirs, still = await _checks_while_recording(driver)
+    late = driver._computer.recordings.started.get("late")
+    if late:
+        await driver._computer.recordings.end(late["recording_id"], None, "end")
+    assert found[NAMES[2]] == ("passed", ""), found[NAMES[2]]
+    assert still == ([] if meanwhile == "ends" else [theirs, late["recording_id"]])
+
+
+@pytest.mark.asyncio
 async def test_from_a_driver_that_doesnt_list_its_recordings_the_probe_starts_the_whole_limit_as_before(home, monkeypatch):
     """So a computer that's recording already fails the limit check, as it did before drivers listed them."""
     params = Driver.params
