@@ -1,5 +1,6 @@
-"""rubrics_verifier leaves the legacy entries main left on every path that writes one, or none, with the judge faked
-below the seams the verifier's own code owns (``_prompt_llm_judge``, ``_invoke_judge_a2a``)."""
+"""rubrics_verifier leaves the legacy entries main left on every path that writes one, or none, and a named grade that
+agrees with them, with the judge faked below the seams the verifier's own code owns (``_prompt_llm_judge``,
+``_invoke_judge_a2a``)."""
 
 from __future__ import annotations
 
@@ -11,13 +12,18 @@ from types import SimpleNamespace
 import pytest
 
 from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import (
     CompactionType,
     FrameStrategy,
     TrajectoryFilter,
     TrajectoryText,
 )
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import JudgeTimeoutError, RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
+    JudgeTimeoutError,
+    RubricsVerifierTaskStep,
+    trajectory_mistakes_key,
+)
 from tst.util import verifier_golden
 
 FILE = "rubrics_verifier.json"
@@ -184,7 +190,7 @@ CASES: dict[str, Callable[[], tuple[RubricsVerifierTaskStep, TaskStepContext]]] 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", list(CASES))
-async def test_a_run_leaves_the_legacy_entries_main_left(case):
+async def test_a_run_leaves_the_legacy_entries_main_left_and_a_grade_that_agrees(case):
     step, context = CASES[case]()
     raised = None
     try:
@@ -193,3 +199,9 @@ async def test_a_run_leaves_the_legacy_entries_main_left(case):
         raised = exc
 
     verifier_golden.check(FILE, case, verifier_golden.observed(context, raised))
+    verifier_golden.check_grade(context, step, raised)
+    verifications = context.metadata.get("verifications") or {}
+    if step.verifier_id in verifications:
+        assert (trajectory_mistakes_key(step.verifier_id) in verifications) is (
+            step.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES)
+        assert set(context.metadata["grades"]) == {step.id}

@@ -1,5 +1,5 @@
-"""user_sim_judge and always_on_agent_verifier leave the legacy entries main left, with their own tests' fakes standing
-in for the judge and the runs they grade."""
+"""user_sim_judge and always_on_agent_verifier leave the legacy entries main left, and a named grade that agrees with
+them, with their own tests' fakes standing in for the judge and the runs they grade."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ async def _ran(step, context: TaskStepContext) -> dict:
         await step.execute(context)
     except Exception as exc:
         raised = exc
+    verifier_golden.check_grade(context, step, raised)
     return verifier_golden.observed(context, raised)
 
 
