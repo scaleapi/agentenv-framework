@@ -62,7 +62,7 @@ def test_a_graded_verification_writes_its_named_grade_and_the_legacy_entry():
             {"id": "b", "score": 0.0, "passed": False, "weight": 1.0, "skipped": False},
         ],
         "verifier_type": "toy_verifier", "verifier_version": None,
-        "verifier_settings": {"scoring_rules": 1, "note": "n"},
+        "verifier_settings": {"scoring_rules": 1, "note": "n", "score_aggregator": "all_pass"},
     }
 
 
@@ -99,9 +99,9 @@ def test_a_raising_verifier_writes_a_failed_grade_no_legacy_entry_and_raises_the
     assert raised.value is boom
     assert "verifications" not in context.metadata
     grade = context.metadata["grades"]["check"]
-    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("failed", 0.0, False)
+    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("failed", None, False)
     assert grade["verifier_error_reasoning"] == "ValueError: criterion #2 has unknown type 'x'"
-    assert grade["verifier_criteria"] == [{"id": "check", "score": 0.0, "passed": False, "weight": 1.0, "skipped": False}]
+    assert grade["verifier_criteria"] == [{"id": "check", "score": None, "passed": False, "weight": 1.0, "skipped": False}]
 
 
 def test_raise_after_keeps_the_verdict_graded_then_fails_the_step():
@@ -120,7 +120,7 @@ def test_a_skip_is_its_own_status_with_its_reason():
     metadata = _run(_Toy(outcome=Verification(skipped="no graded turns"))).metadata
 
     grade = metadata["grades"]["check"]
-    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("skipped", 0.0, False)
+    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("skipped", None, False)
     assert grade["verifier_skip_reasoning"] == "no graded turns"
     assert grade["verifier_criteria"][0]["skipped"] is True
     assert metadata["verifications"]["check"] == {"results": [], "score": None, "skipped": "no graded turns"}
@@ -180,11 +180,20 @@ def test_settings_are_the_steps_own_fields_with_large_ones_kept_by_digest():
     note = "x" * 2000
     step = _Toy(outcome=Verification(score=1), note=note, verifier_id="vid", min_passing_score=0.5)
 
-    settings = _run(step).metadata["grades"]["check"]["verifier_settings"]
+    grade = _run(step).metadata["grades"]["check"]
 
     body = json.dumps(note, sort_keys=True, separators=(",", ":")).encode()
-    assert settings == {"scoring_rules": 1, "min_passing_score": 0.5,
-                        "note": {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}}
+    assert grade["verifier_settings"] == {"scoring_rules": 1, "score_aggregator": "all_pass",
+                                          "note": {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}}
+    assert grade["min_passing_score"] == 0.5
+
+
+def test_settings_name_the_aggregator_the_step_scores_with_even_at_its_default():
+    for aggregator, written in ((None, "all_pass"), ("weighted_average", "weighted_average")):
+        settings = _run(_Toy(outcome=Verification(score=1), score_aggregator=aggregator)).metadata["grades"][
+            "check"]["verifier_settings"]
+
+        assert settings["score_aggregator"] == written
 
 
 def test_base_fields_are_serialized_only_when_not_default_and_round_trip():

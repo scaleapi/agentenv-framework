@@ -35,8 +35,10 @@ SCORING_RULES = 1
 DEFAULT_MIN_PASSING_SCORE = 1.0
 OUTPUT_INLINE_BYTES = 16 * 1024
 SETTING_INLINE_BYTES = 1024
-# The step's fields that name or schedule it rather than say how it grades, left out of its verifier_settings.
-_NOT_SETTINGS = ("id", "type", "version", "depends_on", "fail_task_on_error", "retry_config", "verifier_id")
+# The step's fields left out of its verifier_settings: those that name or schedule it rather than say how it grades, and
+# min_passing_score, which the grade holds itself.
+_NOT_SETTINGS = ("id", "type", "version", "depends_on", "fail_task_on_error", "retry_config", "verifier_id",
+                 "min_passing_score")
 _FRAMEWORK = "agentenv-framework"
 
 
@@ -48,7 +50,7 @@ class VerifierStatus(str, Enum):
 
 class _GradeFields(TypedDict):
     name: str
-    score: float
+    score: Optional[float]
     min_passing_score: float
     passed: bool
     verifier_status: str
@@ -63,9 +65,9 @@ class _GradeFields(TypedDict):
 
 class Grade(_GradeFields, total=False):
     """A verifier step's named grade, as ``context.metadata["grades"][<step id>]`` holds it. ``verifier_status`` is a
-    ``VerifierStatus`` value; each ``verifier_criteria`` row has ``id``, ``score``, ``passed``, ``weight`` and
-    ``skipped``, besides any other keys the verifier gave it. The two fields here are written only for a large
-    output."""
+    ``VerifierStatus`` value, and ``score`` is None unless it is ``graded``; each ``verifier_criteria`` row has ``id``,
+    ``score``, ``passed``, ``weight`` and ``skipped``, besides any other keys the verifier gave it. The two fields here
+    are written only for a large output."""
 
     verifier_output_ref: dict[str, Any]
     verifier_output_offload_error: str
@@ -123,7 +125,7 @@ class VerifierTaskStep(TaskStep):
         try:
             verification = await self.verify(context)
         except Exception as exc:
-            self._write_grade(context, self._grade(context, VerifierStatus.FAILED, 0.0, [],
+            self._write_grade(context, self._grade(context, VerifierStatus.FAILED, None, [],
                                                    error=f"{type(exc).__name__}: {exc}"))
             raise
         if verification.skipped is not None:
@@ -132,7 +134,7 @@ class VerifierTaskStep(TaskStep):
             status, score = VerifierStatus.GRADED, verification.score
         else:
             status, score = VerifierStatus.GRADED, aggregate_score(verification.criteria, self.score_aggregator)
-        grade = self._grade(context, status, 0.0 if score is None else float(score), verification.criteria,
+        grade = self._grade(context, status, None if score is None else float(score), verification.criteria,
                             skip=verification.skipped)
         grade.update(await self._output(context, verification.output))
         self._write_grade(context, grade)
@@ -148,9 +150,11 @@ class VerifierTaskStep(TaskStep):
 
     def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
         """What this step grades with in ``context``'s run: its own fields, one over ``SETTING_INLINE_BYTES`` kept as its
-        sha256 and size. A subclass adds what the run changes or decides, such as the ``step_params`` it applies or a
-        judge's model. Pure, since it is also read at run start."""
-        return {k: _compact(v) for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
+        sha256 and size, and its ``score_aggregator`` whether or not it is its default. A subclass adds what the run
+        changes or decides, such as the ``step_params`` it applies or a judge's model. Pure, since it is also read at
+        run start."""
+        fields = {k: _compact(v) for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
+        return {**fields, "score_aggregator": self.score_aggregator.value}
 
     def config_problems(self) -> list[str]:
         problems = super().config_problems()
@@ -177,8 +181,8 @@ class VerifierTaskStep(TaskStep):
             "min_passing_score": data.get("min_passing_score"),
         }
 
-    def _grade(self, context: TaskStepContext, status: VerifierStatus, score: float, criteria: list[dict[str, Any]],
-               *, error: Optional[str] = None, skip: Optional[str] = None) -> Grade:
+    def _grade(self, context: TaskStepContext, status: VerifierStatus, score: Optional[float],
+               criteria: list[dict[str, Any]], *, error: Optional[str] = None, skip: Optional[str] = None) -> Grade:
         passed = status is VerifierStatus.GRADED and score >= self.min_passing_score
         rows = [_row(i, row) for i, row in enumerate(criteria)] or [{
             "id": self.id, "score": score, "passed": passed, "weight": 1.0, "skipped": status is VerifierStatus.SKIPPED,

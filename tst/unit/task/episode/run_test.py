@@ -588,7 +588,7 @@ async def test_the_stored_run_holds_each_verifiers_named_grade_a_failed_one_incl
     assert await episode.result() == {"crates": 1.0}
     grades = Task.get_instance(episode.id).context["metadata"]["grades"]
     assert {step: (g["verifier_status"], g["score"], g["passed"]) for step, g in grades.items()} == {
-        "crates": ("graded", 1.0, True), "graded": ("failed", 0.0, False)}
+        "crates": ("graded", 1.0, True), "graded": ("failed", None, False)}
     assert grades["graded"]["verifier_error_reasoning"].startswith("StepContextError: PromptResponse")
     assert grades["crates"]["verifier_criteria"][0]["passed"] is True
 
