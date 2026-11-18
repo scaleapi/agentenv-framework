@@ -58,6 +58,15 @@ def _chained(outer: BaseException, inner: BaseException, *, explicit: bool = Tru
     (RuntimeError("sandbox command exited with code 137 (OOMKilled)"), FailureCause.TRANSIENT),
     (RuntimeError("Error code: 429 - Too Many Requests"), FailureCause.TRANSIENT),
     (httpx.ConnectError("All connection attempts failed"), FailureCause.TRANSIENT),
+    (RuntimeError('[API Error: {"error":{"message":"LiteLLM Rate Limit Handler for rate limit type = key.",'
+                  '"type":"None","param":"None","code":"429"}}]'), FailureCause.TRANSIENT),
+    (RuntimeError(r'''[API Error: {"error":{"message":"b'{\\n  \"error\": {\\n    \"code\": 503,\\n    \"status\": '''
+                  r'''\"UNAVAILABLE\"\\n  }\\n}\\n'","type":"None","param":"None","code":"503"}}]'''),
+     FailureCause.TRANSIENT),
+    (RuntimeError('[API Error: {"detail":"gemini upstream request failed: All connection attempts failed"}]'),
+     FailureCause.TRANSIENT),
+    (RuntimeError('[API Error: {"error":{"message":"Budget has been exceeded! Key=pub-xxxx Spend=1 Budget=1",'
+                  '"type":"budget_exceeded","param":null,"code":"400"}}]'), FailureCause.KEY_BUDGET),
     (_chained(RuntimeError("agent config not sent"), httpx.ConnectError("[Errno -3] Temporary failure in name resolution")),
      FailureCause.TRANSIENT),
     (RuntimeError("Authentication Error - Expired Key. Key Expiry time 2026-11-01 and current time 2026-11-17"),

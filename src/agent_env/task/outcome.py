@@ -45,6 +45,7 @@ _CAUSE_PATTERNS: tuple[tuple[FailureCause, re.Pattern[str]], ...] = (
     )),
     (FailureCause.TRANSIENT, re.compile(
         r"\bAPI Error: (?:Request rejected \()?(?:5\d\d|429)\b|\bError code: (?:5\d\d|429)\b"
+        r'|\bAPI Error: \{"error":\{[^\n]*"code":"(?:5\d\d|429)"\}\}|All connection attempts failed'
         r"|unexpected status (?:408|429|5\d\d)\b|Server error '5\d\d |Client error '429 |\brawError=429\b"
         r"|Server disconnected without sending a response|Request timed out"
         r"|\b(?:litellm|openai)\.(?:RateLimitError|APIConnectionError|APITimeoutError|Timeout|InternalServerError"
