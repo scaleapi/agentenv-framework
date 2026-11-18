@@ -1231,6 +1231,42 @@ def test_a_model_table_that_doesn_t_parse_says_why_rather_than_reading_as_a_miss
         MODEL_ENDPOINT_MISSING(frozenset({ENV_BASE_URL}))
 
 
+def test_a_deploy_sending_the_configured_key_to_another_url_is_refused_before_anything_runs(bundle_dir, monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://models:4000/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-1")
+    _agent("solver")
+    with namespace_routing():
+        A2AAgent.put(id="own-url", docker_image_artifact=_image("own-url-image"),
+                     default_env_vars={"LITELLM_BASE_URL": "http://other:5001"})
+    tests = {"id": "tests", "type": "run_container_unit_tests_verifier", "sandbox_name": "h", "container_name": "c",
+             "command": "true", "depends_on": [], "env_vars": {"ANTHROPIC_BASE_URL": "http://other:5001"}}
+    _task(bundle_dir, [{**AGENT, "litellm_base_url": "http://other:5001"}], name="step-url")
+    _task(bundle_dir, [{**AGENT, "env_vars": {"LITELLM_BASE_URL": "http://other:5001"}}], name="env-url")
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "own-url"}], name="own-url")
+    _task(bundle_dir, [tests], name="unit-tests")
+    _task(bundle_dir, [{**AGENT, "litellm_base_url": "http://MODELS:4000/"},
+                       {**AGENT, "id": "keyed", "litellm_base_url": "http://other:5001",
+                        "env_vars": {"LITELLM_API_KEY": "theirs"}},
+                       {**tests, "env_vars": {"ANTHROPIC_BASE_URL": "http://other:5001", "ANTHROPIC_API_KEY": "x"}}],
+          name="fine")
+
+    refused = "other:5001 isn't the configured model endpoint, so the configured key isn't sent there"
+    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local",
+                                                tasks=["step-url", "env-url", "own-url", "unit-tests", "fine"]))
+    assert sorted(problem.split(": ")[0] for problem in problems) == [
+        "tasks/env-url.json", "tasks/own-url.json", "tasks/unit-tests.json"]
+    assert any(problem.startswith("tasks/env-url.json: step 'agent' (and 1 more deploy): deploys agent 'solver'")
+               for problem in problems)  # step-url's, the same problem
+    assert all(refused in problem for problem in problems)
+    assert any("step 'agent': deploys agent 'own-url', but other:5001" in problem for problem in problems)
+    assert any("step 'tests': ANTHROPIC_BASE_URL: other:5001" in problem for problem in problems)
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["fine"], sandbox="local").runs] == ["fine"]
+    asks = {"id": "ask", "type": "prompt_agent", "prompt_id": "agent", "prompt": "go", "depends_on": ["agent"]}
+    _task(bundle_dir, [{**AGENT, "litellm_base_url": "http://other:5001"}, asks], name="trained")
+    with namespace_routing():  # a trainer gives the solver its own endpoint and key
+        assert prepare_bundle(bundle_dir, tasks=["trained"], sandbox="local", solver_endpoint=True)
+
+
 def test_an_agent_declaring_the_model_variables_itself_needs_no_endpoint_but_its_judge_does(bundle_dir, no_model):
     with namespace_routing():
         A2AAgent.put(id="echo", docker_image_artifact=_image("echo-image"),

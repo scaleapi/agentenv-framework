@@ -488,6 +488,9 @@ class Config:
     def get_model_headers(self, base_url: str | None) -> dict[str, str]:
         return self._model_config().headers_for(base_url, secret_resolver=self._resolve_secret)
 
+    def is_model_endpoint(self, url: str | None) -> bool:
+        return self._model_config().is_endpoint(url)
+
     def resolve_model_call(
         self,
         model: str,

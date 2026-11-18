@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from agent_env.config.errors import ConfigError
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, SecretResolver, interpolate
@@ -170,15 +170,19 @@ class ModelConfig:
             return None
         return interpolate(self.api_key, secret_resolver=secret_resolver)
 
+    def is_endpoint(self, url: Optional[str]) -> bool:
+        """Whether ``url`` names the configured endpoint (``LITELLM_BASE_URL``, else ``base_url``), by
+        ``same_endpoint``: the only URL the configured key and headers go to."""
+        return same_endpoint(url, os.getenv(ENV_BASE_URL) or self.base_url)
+
     def headers_for(self, base_url: Optional[str], *, secret_resolver: SecretResolver) -> dict[str, str]:
         """``[model.headers]``, resolved, for a call or an agent pointed at ``base_url``: none unless
         that is the configured endpoint, since a header may carry a credential."""
         if not self.headers or not base_url:
             return {}
-        configured_base = os.getenv(ENV_BASE_URL) or self.base_url
-        if not configured_base or base_url.rstrip("/") != configured_base.rstrip("/"):
+        if not self.is_endpoint(base_url):
             logger.info("Not sending [model.headers] to %s, which is not the configured model endpoint",
-                        urlparse(base_url).hostname or base_url)
+                        _netloc(base_url))
             return {}
         headers = interpolate(dict(self.headers), secret_resolver=secret_resolver)
         for name, value in headers.items():
@@ -194,8 +198,11 @@ class ModelConfig:
         secret_resolver: SecretResolver,
     ) -> ModelCallConfig:
         """A provider-prefixed model routes natively when no endpoint is configured; a bare
-        model name needs one (override/env/config) and fails actionably without it."""
-        key = default_api_key or os.getenv(ENV_API_KEY)
+        model name needs one (override/env/config) and fails actionably without it. The configured key, from
+        ``LITELLM_API_KEY`` or ``api_key``, goes only to the configured endpoint or a native route; a ``base_override``
+        elsewhere needs ``default_api_key``, since without one ``litellm`` would fall back to provider keys in the
+        environment."""
+        key = default_api_key
         configured_base = os.getenv(ENV_BASE_URL) or self.base_url
         if base_override:
             api_base = base_override
@@ -209,11 +216,10 @@ class ModelConfig:
                 f".agentenv/config.toml or {ENV_BASE_URL}, or use a provider-prefixed "
                 "model name (e.g. 'openai/gpt-4o') for native routing."
             )
-        # The configured key is scoped to the configured endpoint (and native routing):
-        # a base_override pointing elsewhere must not inherit it, or a caller-supplied
-        # URL would receive the configured proxy's credential.
-        if key is None and (api_base is None or api_base.rstrip("/") == (configured_base or "").rstrip("/")):
-            key = self._resolved_api_key(secret_resolver)
+        if key is None:
+            if api_base is not None and not same_endpoint(api_base, configured_base):
+                raise ConfigError(no_key_for(api_base))
+            key = os.getenv(ENV_API_KEY) or self._resolved_api_key(secret_resolver)
         params = dict(self.params)
         headers = self.headers_for(api_base, secret_resolver=secret_resolver)
         if headers:
@@ -267,6 +273,40 @@ def config_model(role: ModelRole, config: Optional[ModelConfig]) -> ResolvedMode
     if role is ModelRole.JUDGE:
         return ResolvedModel(role, JUDGE_FALLBACK_MODEL, ModelSource.FALLBACK)
     return ResolvedModel(role, None, None)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def same_endpoint(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two URLs name one model endpoint: scheme and host in any case, a default port, a trailing ``/`` and one
+    trailing ``/v1`` don't tell them apart, so a client that wants ``/v1`` and one that doesn't reach the same one."""
+    return bool(a and b) and _endpoint(a) == _endpoint(b)
+
+
+def _endpoint(url: str) -> tuple:
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return (url,)
+    path = parts.path.rstrip("/")
+    path = path.removesuffix("/v1").rstrip("/")
+    return scheme, (parts.hostname or "").lower(), None if port == _DEFAULT_PORTS.get(scheme) else port, path, parts.query
+
+
+def _netloc(url: str) -> str:
+    """``url``'s host and port, without any user or password it carries."""
+    return urlsplit(url).netloc.rpartition("@")[2] or url
+
+
+def no_key_for(url: str) -> str:
+    """Why a model call or an agent pointed at ``url`` with no key of its own is refused, and how to give it one."""
+    return (f"{_netloc(url)} isn't the configured model endpoint, so the configured key isn't sent there, and no key "
+            "was given with it. Pass one with the URL: litellm_api_key (judge_litellm_api_key for a judge) in the run's "
+            "overrides or a step's step_params, or LITELLM_API_KEY in the step's env_vars or the agent's "
+            "default_env_vars. Any non-empty value works for a server that needs no key.")
 
 
 def _check_roles(roles: object) -> None:

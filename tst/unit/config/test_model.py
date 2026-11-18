@@ -15,6 +15,7 @@ from agent_env.config.model import (
     config_model,
     named_model,
     resolve_model,
+    same_endpoint,
 )
 
 
@@ -217,17 +218,16 @@ def test_resolve_call_api_key_ref_resolves_lazily():
     assert call == ModelCallConfig(api_key="sk-secret", api_base="https://gw/v1", params={})
 
 
-def test_base_override_to_a_foreign_url_does_not_inherit_the_configured_key():
-    """The configured key is scoped to the configured endpoint — a caller-supplied
-    override URL must not receive the configured proxy's credential."""
-    call = ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
-        "m", base_override="https://elsewhere.example", secret_resolver=_secrets({"k": "sk-proxy"})
-    )
-    assert call.api_key is None
-    assert call.api_base == "https://elsewhere.example"
+def test_base_override_to_a_foreign_url_without_a_key_is_refused():
+    """The configured key is scoped to the configured endpoint, and a call there with no key would have litellm send
+    whatever provider key the environment holds."""
+    with pytest.raises(ConfigError, match="elsewhere.example isn't the configured model endpoint"):
+        ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
+            "m", base_override="https://elsewhere.example", secret_resolver=_secrets({"k": "sk-proxy"}))
 
 
-@pytest.mark.parametrize("override", ["https://proxy.example", "https://proxy.example/"])
+@pytest.mark.parametrize("override", ["https://proxy.example", "https://proxy.example/", "https://proxy.example/v1",
+                                      "HTTPS://Proxy.Example:443"])
 def test_base_override_equal_to_the_configured_base_keeps_the_key(override):
     call = ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
         "m", base_override=override, secret_resolver=_secrets({"k": "sk-proxy"})
@@ -307,7 +307,7 @@ def test_a_header_ref_that_cant_be_sent_fails_loud(secrets, problem):
 
 @pytest.mark.parametrize("call, expected", [
     ({}, {"extra_headers": _RESOLVED}),
-    ({"base_override": "https://elsewhere.example"}, {}),
+    ({"base_override": "https://elsewhere.example", "default_api_key": "theirs"}, {}),
 ], ids=["configured", "foreign-override"])
 def test_resolve_call_sends_the_headers_only_to_the_configured_endpoint(call, expected):
     assert _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme", "k": "sk"}), **call).params == expected
@@ -330,3 +330,32 @@ def test_no_named_layer_leaves_the_role_to_its_config():
     assert named_model(ModelRole.SOLVER) is None
     assert config_model(ModelRole.SOLVER, ModelConfig(default="D")) == ResolvedModel(
         ModelRole.SOLVER, "D", ModelSource.CONFIG_DEFAULT)
+
+
+@pytest.mark.parametrize("a, b", [
+    ("https://gw.example/v1", "https://gw.example"),
+    ("https://gw.example/v1/", "https://gw.example/"),
+    ("HTTPS://GW.Example/v1", "https://gw.example/v1"),
+    ("https://gw.example:443/v1", "https://gw.example/v1"),
+    ("http://gw.example:80", "http://gw.example"),
+    ("https://gw.example/litellm/v1", "https://gw.example/litellm"),
+    (" https://gw.example ", "https://gw.example"),
+], ids=["v1", "slashes", "case", "https-default-port", "http-default-port", "path-prefix", "whitespace"])
+def test_same_endpoint_reads_one_endpoint_spelled_two_ways_as_one(a, b):
+    assert same_endpoint(a, b) and same_endpoint(b, a)
+
+
+@pytest.mark.parametrize("a, b", [
+    ("https://gw.example", "http://gw.example"),
+    ("https://gw.example", "https://gw.example:8443"),
+    ("https://gw.example", "https://other.example"),
+    ("https://gw.example/team-a", "https://gw.example/team-b"),
+    ("https://gw.example/Team", "https://gw.example/team"),
+    ("https://gw.example/v1/v1", "https://gw.example"),
+    ("https://gw.example?team=a", "https://gw.example?team=b"),
+    ("https://gw.example", None),
+    (None, None),
+    ("", ""),
+], ids=["scheme", "port", "host", "path", "path-case", "two-v1s", "query", "none", "both-none", "both-empty"])
+def test_same_endpoint_tells_two_endpoints_apart(a, b):
+    assert not same_endpoint(a, b)

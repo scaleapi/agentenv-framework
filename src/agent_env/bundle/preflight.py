@@ -34,7 +34,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
+from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL, no_key_for
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
     GATEWAY,
@@ -77,6 +77,9 @@ from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
+    RunContainerUnitTestsVerifierTaskStep,
+)
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
@@ -170,6 +173,9 @@ class _Walk:
                     self._sandbox(where, step)
                 elif isinstance(step, RubricsVerifierTaskStep):
                     self._judge(where, step)
+                elif isinstance(step, RunContainerUnitTestsVerifierTaskStep):
+                    if problem := step.model_key_problem():
+                        self._problem(where, problem)
                 elif isinstance(step, InstallAgentTaskStep) and step.a2a_agent_id is None and override is None:
                     self.default_agent_users.append((where, "names no agent"))
             except ValueError as e:  # a provider that names no backend, or can't be built from its config
@@ -311,7 +317,8 @@ class _Walk:
                            *(_MODEL_VARS if endpoint_given else ())})
         agent_id, version = ((override.agent_id, override.version) if override is not None
                              else (step.a2a_agent_id, step.a2a_agent_version))
-        self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given)
+        self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given,
+                           url=step.litellm_base_url or step.env_vars.get(ENV_BASE_URL))
 
     def _judge(self, where: str, step: RubricsVerifierTaskStep) -> None:
         if not step.use_agent_judge or step.agent_name is not None:
@@ -322,13 +329,22 @@ class _Walk:
 
     def _agent_deploy(self, where: str, provider: SandboxProvider, agent_id: str | None, version: int | None,
                       unnamed: str, accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts, *,
-                      given: frozenset[str] = frozenset(), needs: frozenset[str] | None = None) -> None:
-        """Check an agent deploy, ``given`` the model variables its step sets, or ``needs`` those the config must."""
+                      given: frozenset[str] = frozenset(), needs: frozenset[str] | None = None,
+                      url: str | None = None) -> None:
+        """Check an agent deploy, ``given`` the model variables its step sets and ``url`` the endpoint it names, or
+        ``needs`` those the config must."""
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = self._default_agent_id()
-        if needed := needs if needs is not None else _MODEL_VARS - given - self._agent_env_vars(agent_id, version):
-            self.model_users.append((where, needed))
+        if needs is None:
+            own = self._agent_env_vars(agent_id, version)
+            url = url or own.get(ENV_BASE_URL)
+            if url and ENV_API_KEY not in given and ENV_API_KEY not in own and not get_config().is_model_endpoint(url):
+                self._problem(where, f"deploys agent {agent_id!r}, but {no_key_for(url)}")
+            elif needed := _MODEL_VARS - given - own.keys():
+                self.model_users.append((where, needed))
+        else:
+            self.model_users.append((where, needs))
         image = self._agent_image(agent_id, version)
         taking = self._check(where, provider, accepts, [image] if image else [], vms_load=True)
         if any(link.ON_THIS_MACHINE for link in taking):
@@ -352,14 +368,14 @@ class _Walk:
 
     # What a deploy runs
 
-    def _agent_env_vars(self, agent_id: str, version: int | None) -> frozenset[str]:
+    def _agent_env_vars(self, agent_id: str, version: int | None) -> dict[str, str]:
         """The variables the agent ``agent_id`` declares for itself, which a deploy doesn't take from the config."""
         if (agent := self.agents.get(agent_id)) is not None:
-            return frozenset(agent.config.get("default_env_vars") or {})
+            return dict(agent.config.get("default_env_vars") or {})
         try:
-            return frozenset(A2AAgent.get(agent_id, version).default_env_vars or {})
+            return dict(A2AAgent.get(agent_id, version).default_env_vars or {})
         except (NotFoundError, ValueError, KeyError, TypeError):
-            return frozenset()
+            return {}
 
     def _agent_image(self, agent_id: str, version: int | None) -> _Image | None:
         """The image the agent ``agent_id`` runs, or None when the store doesn't hold the agent or can't read it, which

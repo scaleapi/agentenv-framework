@@ -15,7 +15,8 @@ from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 from agentenv_protocol.types import CONTROL_TOKEN_ENV
 
 from agent_env.config import get_config
-from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.config.errors import ConfigError
+from agent_env.config.model import MODEL_HEADERS_ENV, no_key_for
 from agent_env.entity.refs import EntityRef
 from agent_env.plugins._bundles import installed_aliases
 from agent_env.store.base import NotFoundError
@@ -624,11 +625,16 @@ class A2AAgent:
 
     def _with_model_credentials(self, env_vars: dict[str, str], config) -> dict[str, str]:
         """``env_vars`` with the model endpoint, key and headers each taken from config when neither they nor
-        ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them."""
+        ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them. The
+        configured key goes only with the configured endpoint: an agent sent elsewhere with no key of its own is
+        refused before anything starts."""
         if not self.metadata.get(TAKES_CREDENTIALS, True):
             return {name: value for name, value in env_vars.items() if name not in MODEL_CREDENTIALS_ENV}
         resolved_env = dict(env_vars)
         if "LITELLM_API_KEY" not in resolved_env and "LITELLM_API_KEY" not in self.default_env_vars:
+            url = resolved_env.get("LITELLM_BASE_URL") or self.default_env_vars.get("LITELLM_BASE_URL")
+            if url and not config.is_model_endpoint(url):
+                raise ConfigError(f"Agent {self.id!r}: {no_key_for(url)}")
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
