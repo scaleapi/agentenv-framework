@@ -383,3 +383,21 @@ async def test_a_legacy_service_state_is_exported_with_the_deployments_control_t
                                   environment_card_url=f"http://gw{WELL_KNOWN_PATH}")
     assert await legacy_protocol.service_state(deployed, "http://gw", "email") == {"emails": []}
     assert seen[-1] == ("/svc/mcp-email/export-state", "Bearer t0ken")
+
+
+@pytest.mark.asyncio
+async def test_a_rest_call_without_headers_takes_the_token_its_env_was_granted():
+    from agentenv_protocol import client as protocol_v1
+    resp = MagicMock(); resp.raise_for_status = MagicMock(); resp.json = MagicMock(return_value={"ok": True})
+    client = _fake_client(resp)
+    client.get = AsyncMock(return_value=resp)
+    granted = {"X-Control-Token": "placeholder"}
+    with patch("agent_env.env.legacy_protocol.httpx.AsyncClient", return_value=client):
+        with protocol_v1.authorized({"http://gw": granted}):
+            await legacy_protocol.reset_via_rest("http://gw/svc/mcp-email", "/data/seed.json")
+            await legacy_protocol.export_state("http://gw", "email")
+        await legacy_protocol.reset_via_rest("http://gw/svc/mcp-email")
+
+    assert client.post.call_args_list[0].kwargs["headers"] == granted
+    assert client.get.call_args.kwargs["headers"] == granted
+    assert not client.post.call_args_list[1].kwargs["headers"]

@@ -215,7 +215,8 @@ async def reset_via_rest(
     which a gateway that has one takes on this route). Raises on non-2xx."""
     body = {"mock_data_path": mock_data_path} if mock_data_path is not None else None
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout, headers=headers)
+        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout,
+                                     headers=protocol_v1.request_headers(f"{base_url}/api/reset", headers))
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: REST reset succeeded: {result}")
@@ -226,7 +227,8 @@ async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify
                        headers: Optional[dict[str, str]] = None) -> dict:
     """POST ``{base_url}/api/add`` with a backend file path, and ``headers``. Raises on non-2xx."""
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout, headers=headers)
+        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout,
+                                     headers=protocol_v1.request_headers(f"{base_url}/api/add", headers))
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: add response: {result}")
@@ -243,7 +245,8 @@ async def export_state(
 
 async def _export_state_at(base_url: str, timeout: int, verify: bool, headers: Optional[dict[str, str]] = None) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url}/export-state", timeout=timeout, headers=headers)
+        response = await client.get(f"{base_url}/export-state", timeout=timeout,
+                                    headers=protocol_v1.request_headers(f"{base_url}/export-state", headers))
         response.raise_for_status()
         return response.json()
 
