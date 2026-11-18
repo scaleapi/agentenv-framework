@@ -26,7 +26,7 @@ def _deployed_compose(browser="website-browser"):
     """The compose file a deploy with a website writes, its browser named ``browser``."""
     return EnvironmentGatewayProvider().create_docker_compose(
         mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
-                     MCPServerConfig(image="browser:v1", environment_name=browser, card_port=18766)],
+                     MCPServerConfig(image="browser:v1", environment_name=browser)],
         website_configs=[WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop")],
         gateway_image="gateway:v38", gateway_port=AGENT_ENV_GATEWAY_MCP_PORT,
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(
@@ -79,6 +79,21 @@ async def test_the_reload_starts_the_servicedb_from_the_snapshot_and_keeps_every
     assert {name: service for name, service in after.items() if name != "servicedb"} == {
         name: service for name, service in before.items() if name != "servicedb"}
     assert [call.args[0] for call in get.call_args_list] == ["db-id"]  # the store it connects to; no image is read
+
+
+@pytest.mark.asyncio
+async def test_the_reload_keeps_the_browsers_card_where_an_older_deploy_read_it():
+    """A deploy before the browser's card moved to its MCP port read it, and proxied its REST, on the recorder's 18766,
+    which the image still serves; a reload of such a deploy leaves that as it was."""
+    newer = _deployed_compose("playwright-mcp")
+    older = newer.replace("mcp-playwright-mcp=http://playwright-mcp:18765",
+                          "mcp-playwright-mcp=http://playwright-mcp:18766")
+    assert older != newer
+    env = _env(older)
+
+    await _reload(env)
+
+    assert "mcp-playwright-mcp=http://playwright-mcp:18766" in _written(env)
 
 
 @pytest.mark.asyncio

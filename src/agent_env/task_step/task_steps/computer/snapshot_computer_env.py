@@ -12,9 +12,9 @@ from pydantic import TypeAdapter, ValidationError
 from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.snapshot_env import DEFAULT_EXPORT_TIMEOUT_SECONDS, SnapshotEnvTaskStep
 
@@ -81,9 +81,8 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         problems = super().preflight()
         if self.env_id is None:
             return problems
-        try:
-            env = Env.get(self.env_id)
-        except NotFoundError:  # what the run reports
+        env = stored_env(self.env_id)
+        if env is None:  # what the run reports
             return problems
         return problems if isinstance(env, ComputerEnv) else [*problems, _not_a_computer(env)]
 

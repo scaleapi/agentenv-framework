@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, ClassVar, Optional
 
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -45,7 +45,7 @@ class VerifyMCPEnvAssessmentStep(TaskStep):
 
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
-            raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+            raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
 
         if prompt_response.error_type:
             logger.warning(f"Skipping assessment: prompt had error_type={prompt_response.error_type}")
@@ -55,7 +55,7 @@ class VerifyMCPEnvAssessmentStep(TaskStep):
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         env = Env.get(self.env_id, deployed.env_version)
         env.update_metadata({**env.metadata, "mcp_tool_correctness_validation": result})
 

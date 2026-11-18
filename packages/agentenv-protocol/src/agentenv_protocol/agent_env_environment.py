@@ -245,12 +245,22 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
 class ForwardedTool(NamedTuple):
     """A tool an environment serves on another server's behalf, as that server lists it: its descriptor, its own
     schema included, its MCP ``annotations`` and its ``output_schema``; ``call`` takes the call's arguments as keywords
-    and returns the other server's ``CallToolResult``, which reaches the caller as it is."""
+    and returns the other server's ``CallToolResult``, which reaches the caller as it is. ``hidden_by_default`` hides it
+    as ``@tool(hidden_by_default=True)`` hides a tool of the environment's own."""
 
     tool: EnvironmentTool
     call: Callable[..., Any]
     annotations: dict | None = None
     output_schema: dict | None = None
+    hidden_by_default: bool = False
+
+    @classmethod
+    def listed(cls, tool: dict, call: Callable[..., Any], *, hidden_by_default: bool = False) -> "ForwardedTool":
+        """The tool another server's ``tools/list`` lists as ``tool``, called through ``call``: its name, description,
+        input and output schemas and annotations as listed."""
+        return cls(EnvironmentTool(name=tool["name"], description=tool.get("description"),
+                                   inputSchema=tool["inputSchema"]),
+                   call, tool.get("annotations"), tool.get("outputSchema"), hidden_by_default)
 
 
 class _ResourceMarker(NamedTuple):
@@ -309,7 +319,8 @@ class AgentEnvApplication(ABC):
         self._app: Any = None
         ext_handlers = _served_extensions(handler, _discover_extensions(handler))
         environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
-        tool_handlers = _served_tools(handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler))
+        tool_handlers = _named_tools(handler, _served_tools(
+            handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler)))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
         self._resources = _discover_resources(handler)
@@ -449,7 +460,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             fn_metadata=FuncMetadata(arg_model=_passed_through(), output_schema=schema,
                                      output_model=_as_it_came() if schema is not None else None),
             is_async=True,
-            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None)
+            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None,
+            meta={HIDDEN_BY_DEFAULT_META_KEY: True} if forwarded.hidden_by_default else None)
 
     def _register_resource(self, app: Any, resource: _ServedResource) -> None:
         """A resource as it is, its description absent when it has none, or a template through FastMCP's own
@@ -591,6 +603,11 @@ class AgentEnvStarletteApplication(AgentEnvApplication):
         app.router.routes.append(Route(path, handler, methods=methods))
 
 
+def mcp_port() -> int:
+    """The port ``create_fastmcp_app`` serves on: ``MCP_PORT``'s, else 18765."""
+    return int(os.environ.get("MCP_PORT", "18765"))
+
+
 def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs: Any) -> Any:
     """FastMCP app wired for the agent-env deploy contract, with ``handler`` mounted under ``card``; returned un-served."""
     try:
@@ -599,7 +616,7 @@ def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs:
         raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install 'mcp>=1.25,<2'") from e
     app = FastMCP(card.name, **{"instructions": _instructions(handler), **fastmcp_kwargs})
     app.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
-    app.settings.port = int(os.environ.get("MCP_PORT", "18765"))
+    app.settings.port = mcp_port()
     app.settings.transport_security.enable_dns_rebinding_protection = False
     AgentEnvFastMCPApplication(card, handler).add_routes_to_app(app)
     return app
@@ -973,7 +990,7 @@ def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = 
 
 def _fastmcp_tool_result(answer: Any) -> Any:
     """A hook's ``mcp.types.CallToolResult`` as the ``ToolResult`` a fastmcp middleware chain returns, the error
-    flag kept, under the field spellings of mcp 1 and 2."""
+    flag and ``_meta`` kept, under the field spellings of mcp 1 and 2."""
     from fastmcp.tools import ToolResult
     # mcp 2's spellings first: on mcp 1 they are plain misses, on mcp 2 the camel-case ones are deprecation shims.
     structured = getattr(answer, "structured_content", None)
@@ -982,7 +999,8 @@ def _fastmcp_tool_result(answer: Any) -> Any:
     is_error = getattr(answer, "is_error", None)
     if is_error is None:
         is_error = getattr(answer, "isError", False)
-    return ToolResult(content=list(answer.content), structured_content=structured, is_error=bool(is_error))
+    return ToolResult(content=list(answer.content), structured_content=structured, meta=getattr(answer, "meta", None),
+                      is_error=bool(is_error))
 
 
 def _mcp_tool_annotations(annotations: Any) -> Any:
@@ -1107,11 +1125,15 @@ def _with_parts(method: Callable, parts: dict[str, str]) -> Callable:
 
 
 def _instructions(handler: Any) -> str | None:
-    """What the handler's @server_instructions method returns; None without one."""
+    """What the handler's @server_instructions method returns, as its ``served_instructions`` serves it; None without
+    one."""
     marked = [method for method, _marker in _marked_members(handler, _INSTRUCTIONS_ATTR)]
     if len(marked) > 1:
         raise ValueError(f"an environment has one @server_instructions method, not {sorted(m.__name__ for m in marked)}")
-    return marked[0]() if marked else None
+    if not marked:
+        return None
+    hook = getattr(handler, "served_instructions", None)
+    return hook(marked[0]()) if hook is not None else marked[0]()
 
 
 def _discover_methods(handler: Any) -> dict:
@@ -1278,6 +1300,8 @@ def _forwarding(forwarded: ForwardedTool) -> Callable:
         return await forwarded.call(**arguments)
 
     setattr(call, _FORWARDED_ATTR, forwarded)
+    if forwarded.hidden_by_default:
+        setattr(call, _HIDDEN_BY_DEFAULT_ATTR, True)
     return call
 
 
@@ -1318,6 +1342,20 @@ def _served_tools(handler: Any, tool_handlers: list) -> list:
     if len(set(names)) != len(names):
         raise ValueError(f"served_tools returned a tool twice: {sorted({n for n in names if names.count(n) > 1})}")
     return [(descriptor, by_name[descriptor.name]) for descriptor in chosen]
+
+
+def _named_tools(handler: Any, tool_handlers: list) -> list:
+    """The tools as the handler's ``serve_tools_as`` names and describes them, in their order; as they are without one."""
+    hook = getattr(handler, "serve_tools_as", None)
+    if hook is None:
+        return tool_handlers
+    named = list(hook([descriptor for descriptor, _fn in tool_handlers]))
+    if len(named) != len(tool_handlers):
+        raise ValueError(f"serve_tools_as returned {len(named)} tools for {len(tool_handlers)}")
+    names = [descriptor.name for descriptor in named]
+    if len(set(names)) != len(names):
+        raise ValueError(f"serve_tools_as named two tools alike: {sorted({n for n in names if names.count(n) > 1})}")
+    return [(descriptor, fn) for descriptor, (_old, fn) in zip(named, tool_handlers)]
 
 
 def _merge_tools(card: EnvironmentCard, tool_handlers: list) -> EnvironmentCard:

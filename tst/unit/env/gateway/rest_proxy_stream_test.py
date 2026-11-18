@@ -8,16 +8,22 @@ from __future__ import annotations
 
 import asyncio
 import doctest
+import gzip
 import json
+from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import Tool as MCPTool
 from starlette.testclient import TestClient
 from agentenv_protocol.website import ApiContext, WebsiteEnvironment, api, website
 
-from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY
+from agent_env.env.gateway import (AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY, AGENT_ENV_ROLE_META_KEY,
+                                   AGENT_ENV_SESSION_META_KEY, InternalMCPServer)
 from agent_env.env.gateway import gateway as gateway_module
+from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.gateway import Gateway
 
@@ -449,7 +455,8 @@ async def test_a_proxied_child_mcp_post_carries_the_gateway_s_role_in_every_requ
     forged = {AGENT_ENV_ROLE_META_KEY: "victim@example.com", AGENT_ENV_SESSION_META_KEY: "forged"}
     one = json.dumps(_rpc(name="t", arguments={}, _meta=forged)).encode()
     batch = json.dumps([_rpc(name="t", arguments={}), {"jsonrpc": "2.0", "method": "notifications/initialized"}]).encode()
-    for path, body in [("/svc/mcp-svc/mcp", one), ("/svc/mcp-svc/mcp/", batch), ("/svc/mcp-svc/x/../mcp", one)]:
+    for path, body in [("/svc/mcp-svc/mcp", one), ("/svc/mcp-svc/mcp/", batch), ("/svc/mcp-svc/x/../mcp", one),
+                       ("/svc/mcp-svc/public%2Fx/../mcp", one)]:
         status, _, _ = await _call(gw, path, method="POST", body=body, headers={
             "AgentEnv-Role": "alice@example.com", "content-type": "application/json", "content-length": str(len(body))})
         assert status == 200
@@ -458,6 +465,7 @@ async def test_a_proxied_child_mcp_post_carries_the_gateway_s_role_in_every_requ
     assert sent[0]["params"]["_meta"] == stamp  # the forged role and session key are gone
     assert sent[1][0]["params"]["_meta"] == stamp and "params" not in sent[1][1]  # each request of a batch
     assert sent[2]["params"]["_meta"] == stamp and up.requests[2].url.path == "/mcp"  # dot segments collapse upstream
+    assert sent[3]["params"]["_meta"] == stamp and up.requests[3].url.path == "/mcp"  # routed as /public/mcp, sent to /mcp
     assert all(r.headers["content-length"] == str(len(r.content)) for r in up.requests)  # re-serialised, re-measured
     assert all(r.headers.get_list("agentenv-role") == ["alice@example.com"] for r in up.requests)
 
@@ -470,17 +478,159 @@ async def test_bodies_that_are_not_a_child_mcp_request_are_forwarded_untouched(m
                  rest_proxy_urls={"mcp-svc": UPSTREAM, "backend": UPSTREAM})
     rpc = json.dumps(_rpc(name="t", arguments={}, _meta={AGENT_ENV_ROLE_META_KEY: "x"})).encode()
     cases = [
-        ("/svc/mcp-svc/mcp", "POST", b"not json"),  # unparsable: as it came
         ("/svc/mcp-svc/mcp", "GET", b""),  # not a POST
         ("/svc/mcp-svc/mcpx", "POST", rpc),  # not the MCP endpoint
         ("/svc/mcp-svc/agentenv", "POST", rpc),  # the data plane keeps its body
         ("/svc/backend/mcp", "POST", rpc),  # not an mcp-* service
         ("/svc/mcp-svc/mcp", "POST", b'{"jsonrpc": "2.0", "id": 1, "result": {}}'),  # no params: nothing to stamp
     ]
+    gw._apply_rule("alice@example.com", "t", True)  # the tool gate reads only a child's MCP endpoint
     for path, method, body in cases:
         status, _, _ = await _call(gw, path, method=method, body=body, headers={"AgentEnv-Role": "alice@example.com"})
         assert status == 200, path
     assert [r.content for r in up.requests] == [body for _, _, body in cases]
+
+
+# --- A call to a child's MCP endpoint through /svc meets the tool rules /mcp applies ---
+
+
+class _Listing:
+    """A child session as discovery reads it: the tools the child lists."""
+
+    def __init__(self, tools: list[MCPTool]):
+        self.tools = tools
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=self.tools)
+
+
+def _tool(name: str, meta: dict | None = None) -> MCPTool:
+    return MCPTool(name=name, description="", inputSchema={"type": "object", "properties": {}}, _meta=meta)
+
+
+def _gated(*tools: MCPTool, servers=None, **kw) -> Gateway:
+    kw.setdefault("rest_proxy_urls", {"mcp-svc": UPSTREAM})
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t",
+                 internal_mcp_servers=servers or [InternalMCPServer("svc", f"{UPSTREAM}/mcp")], **kw)
+
+    async def open_session(server, stack, report):
+        return _Listing(list(tools))
+
+    gw._sessions.open_session = open_session  # type: ignore[method-assign]
+    return gw
+
+
+async def _post_rpc(gw: Gateway, payload, role: str, path: str = "/svc/mcp-svc/mcp") -> tuple[int, dict]:
+    body = json.dumps(payload).encode()
+    try:
+        status, _, chunks = await _call(gw, path, method="POST", body=body, headers={
+            "AgentEnv-Role": role, "content-type": "application/json", "content-length": str(len(body))})
+    finally:
+        await gw._close_child_sessions()
+    return status, json.loads(b"".join(chunks))
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_mcp_endpoint_is_elsewhere_has_the_role_stamped_there_and_not_at_mcp(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", rest_proxy_urls={"mcp-svc": UPSTREAM},
+                 internal_mcp_servers=[InternalMCPServer(name="svc", mcp_url=f"{UPSTREAM}/rpc")])
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
+    for path in ("/svc/mcp-svc/rpc", "/svc/mcp-svc/mcp"):
+        await _call(gw, path, method="POST", body=body, headers={
+            "AgentEnv-Role": "alice@example.com", "content-type": "application/json", "content-length": str(len(body))})
+    assert [json.loads(r.content)["params"].get("_meta") for r in up.requests] == [
+        {AGENT_ENV_ROLE_META_KEY: "alice@example.com"}, None]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_never_reaches_the_child(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("read"), _tool("list"))
+    gw._apply_rule("alice@example.com", "read", True)
+    refused = await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com")
+    respelled = [await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com", path=path)
+                 for path in ("/svc/mcp-svc/MCP/", "/svc/mcp-svc/public%2Fx/../mcp")]
+    allowed = [await _post_rpc(gw, _rpc(name="list", arguments={}), "alice@example.com"),
+               await _post_rpc(gw, _rpc(name="read", arguments={}), "carol@example.com")]
+    token = Caller(role="alice@example.com").bind()
+    try:
+        with pytest.raises(ToolError) as on_mcp:
+            await gw._mcp._tool_manager.call_tool("read", {})
+    finally:
+        Caller.reset(token)
+    assert [refused, *respelled] == [(200, {"jsonrpc": "2.0", "id": 1, "result": {
+        "content": [{"type": "text", "text": str(on_mcp.value)}], "isError": True}})] * 3
+    assert allowed == [(200, {}), (200, {})]
+    assert [json.loads(r.content)["params"]["name"] for r in up.requests] == ["list", "read"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_hidden_by_default_is_refused_until_a_rule_names_it(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("insert", {AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY: True}))
+    call = _rpc(name="insert", arguments={})
+    unnamed = await _post_rpc(gw, call, "default")  # the first call discovers what is hidden
+    gw._apply_rule("*", "*", False)  # a rule for every tool never reaches a hidden one
+    wildcard = await _post_rpc(gw, call, "default")
+    gw._apply_rule("*", "insert", False)
+    named = await _post_rpc(gw, call, "default")
+    assert unnamed[1]["result"]["isError"] and wildcard[1]["result"]["isError"]
+    assert named == (200, {}) and len(up.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_batch_with_a_disabled_call_is_refused_whole(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("read"), _tool("list"))
+    gw._apply_rule("alice@example.com", "read", True)
+    batch = [_rpc(name="list", arguments={}), {**_rpc(name="read", arguments={}), "id": 2}]
+    status, body = await _post_rpc(gw, batch, "alice@example.com")
+    assert status == 400 and body["error"]["message"] == "Tool 'read' is disabled for role 'alice@example.com'"
+    assert up.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_body_the_gateway_cannot_read_is_refused_not_forwarded(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("read"))
+    gw._apply_rule("alice@example.com", "read", True)
+    for body, headers in [(b"not json", {}),
+                          (gzip.compress(json.dumps(_rpc(name="read", arguments={})).encode()), {"content-encoding": "gzip"})]:
+        status, _, chunks = await _call(gw, "/svc/mcp-svc/mcp", method="POST", body=body,
+                                        headers={"AgentEnv-Role": "alice@example.com", **headers})
+        assert status == 400 and json.loads(b"".join(chunks))["error"]["message"] == "The request body is not JSON"
+    assert up.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_site_s_own_mcp_endpoint_is_gated_the_same_way(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("checkout"), servers=[InternalMCPServer("shop", f"{UPSTREAM}/tools/mcp")],
+                rest_proxy_urls={"shop": UPSTREAM}, website_urls={"shop": UPSTREAM})
+    gw._apply_rule("default", "checkout", True)
+    status, body = await _post_rpc(gw, _rpc(name="checkout", arguments={}), "default", path="/svc/shop/tools/mcp")
+    assert status == 200 and body["result"]["isError"] and up.forwarded == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_is_refused_while_discovery_cannot_complete(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated()
+
+    async def unreachable(server, stack, report):
+        raise httpx.ConnectError("down")
+
+    gw._sessions.open_session = unreachable  # type: ignore[method-assign]
+    status, body = await _post_rpc(gw, _rpc(name="read", arguments={}), "default")
+    assert status == 503 and "discovery" in body["error"] and up.requests == []
 
 
 def _forwarded(request: httpx.Request) -> tuple[list[str], list[str], list[str]]:
@@ -527,7 +677,9 @@ async def test_a_client_serving_the_route_at_its_own_root_is_told_no_prefix_and_
     ("javascript://notes.test", (["front.example"], ["https"], [])),
     ("https://notes.test/elsewhere", (["front.example"], ["https"], [])),
     ("https://user@notes.test", (["front.example"], ["https"], [])),
-], ids=["origin", "port", "not-http", "a-path", "userinfo"])
+    ("https://]notes.test[", (["front.example"], ["https"], [])),
+    ("https://nötes.test", (["front.example"], ["https"], [])),
+], ids=["origin", "port", "not-http", "a-path", "userinfo", "unbalanced-bracket", "not-ascii"])
 async def test_a_site_root_naming_an_origin_is_the_address_though_a_front_rewrote_the_forwarded_host(
         monkeypatch, root, expected):
     """A front between a computer's site proxy and the gateway, as a provider's ingress is, may set its own
@@ -535,9 +687,24 @@ async def test_a_site_root_naming_an_origin_is_the_address_though_a_front_rewrot
     up = _Upstream([b"ok"])
     up.install(monkeypatch)
     gw = _gateway(website_urls={"web": "http://web"})
-    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "x-forwarded-host": "front.example",
-                                                   "x-forwarded-proto": "https", "agentenv-site-root": root})
+    await _call(gw, "/website/web/api/x", raw_headers=[
+        (b"host", b"gw.example"), (b"x-forwarded-host", b"front.example"), (b"x-forwarded-proto", b"https"),
+        (b"agentenv-site-root", root.encode())])
     assert [_forwarded(r) for r in up.forwarded] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_isnt_printable_ascii_names_nothing_and_the_request_still_goes_through(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"}, site_names={"web": ["shop.test"]})
+    answered = [(await _call(gw, "/website/web/x", raw_headers=raw))[0] for raw in (
+        [(b"host", "shöp.test".encode())],
+        [(b"host", b"shop.test"), (b"x-forwarded-host", "shöp.test".encode())],
+        [(b"host", b"gw.example"), (b"x-forwarded-host", b"shop.test\x7f")])]
+    assert answered == [200, 200, 200]
+    assert [(r.headers["host"], _forwarded(r)[0]) for r in up.forwarded] == [
+        ("web", []), ("shop.test", ["shop.test"]), ("web", ["gw.example"])]
 
 
 @pytest.mark.asyncio
@@ -557,6 +724,119 @@ async def test_a_front_s_own_forwarded_host_and_scheme_win_and_reach_the_upstrea
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method, headers, host", [
+    ("GET", {"agentenv-site-root": "https://shop.test"}, "shop.test"),
+    ("HEAD", {"agentenv-site-root": "https://shop.test"}, "shop.test"),
+    ("POST", {"agentenv-site-root": "https://Shop.TEST:8443"}, "Shop.TEST:8443"),
+    ("GET", {"x-forwarded-host": "www.shop.test, gw.example", "x-forwarded-proto": "https"}, "www.shop.test"),
+    ("GET", {"host": "shop.test"}, "shop.test"),
+    ("GET", {"agentenv-site-root": "https://api.shop.test"}, "api.shop.test"),
+    ("GET", {"agentenv-site-root": "https://a.b.shop.test"}, "web"),
+    ("GET", {"agentenv-site-root": "https://evil.example"}, "web"),
+    ("GET", {"x-forwarded-host": "shop.test.evil.example"}, "web"),
+    ("GET", {"host": "evil.example"}, "web"),
+    ("GET", {"x-forwarded-host": "shop.test:65536"}, "web"),
+    ("GET", {"x-forwarded-host": "shop.test@evil.example"}, "web"),
+    ("GET", {"x-forwarded-host": "shop..test"}, "web"),
+    ("GET", {"x-forwarded-host": "[::1]:80"}, "web"),
+], ids=["site-root", "head", "case-and-port", "front", "host", "wildcard", "two-labels-under-a-wildcard", "forged-root",
+        "suffix", "forged-host", "bad-port", "userinfo", "empty-label", "address"])
+async def test_a_site_reached_at_one_of_its_names_takes_it_as_its_host_and_at_any_other_keeps_its_own(
+        monkeypatch, method, headers, host):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"}, site_names={"web": ["shop.test", "www.shop.test", "*.shop.test"]})
+    await _call(gw, "/website/web/api/x", method=method, headers={"host": "gw.example", **headers})
+    assert [r.headers["host"] for r in up.forwarded] == [host]
+
+
+@pytest.mark.asyncio
+async def test_a_site_with_no_names_and_a_svc_route_keep_their_own_host_wherever_the_client_was(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                 website_urls={"web": "http://web", "docs": "http://docs"}, rest_proxy_urls={"web": "http://web"},
+                 site_names={"web": ["shop.test"]})
+    for path in ("/website/docs/x", "/svc/web/x"):
+        await _call(gw, path, headers={"host": "shop.test", "agentenv-site-root": "https://shop.test"})
+    assert [r.headers["host"] for r in up.forwarded] == ["docs", "web"]
+
+
+def _card_site(seen: list[str], declared: dict[str, list[str]]):
+    """A site at each host of ``declared`` whose card declares those names; ``seen`` takes each other request's Host,
+    and a host ``declared`` doesn't name serves no card."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/.well-known/agent-env.json":
+            if request.url.host not in declared:
+                return httpx.Response(404)
+            return httpx.Response(200, json={"name": request.url.host, "capabilities": {"extensions": [
+                {"uri": "urn:agentenv:website/v1", "params": {"domains": declared[request.url.host]}}]}})
+        seen.append(request.headers["host"])
+
+        async def body():
+            yield b"ok"
+        return httpx.Response(200, content=body())
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_a_site_whose_env_stores_no_names_takes_its_host_from_the_names_its_card_declares(monkeypatch):
+    seen: list[str] = []
+    transport = _card_site(seen, {"notes": ["Notes.Test"], "kept": ["notes.test"]})
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(website_urls={"notes": "http://notes", "kept": "http://kept"}, site_names={"kept": ["kept.test"]})
+    for path, root in (("notes", "https://notes.test"), ("kept", "https://notes.test"), ("kept", "https://kept.test")):
+        await _call(gw, f"/website/{path}/x", headers={"host": "gw.example", "agentenv-site-root": root})
+    assert seen == ["notes.test", "kept", "kept.test"]
+
+
+@pytest.mark.parametrize("upstream, destination", [
+    ("https://notes.internal", {"host": "notes.internal", "port": 443, "server_hostname": "notes.internal"}),
+    ("http://notes.internal", {"host": "notes.internal", "port": 80, "server_hostname": "unset"}),
+    ("https://notes.internal:8443", {"host": "notes.internal", "port": 8443, "server_hostname": "notes.internal"}),
+], ids=["https", "http", "https-port"])
+def test_a_websocket_to_a_site_reached_by_name_connects_to_its_upstream_and_checks_the_upstreams_certificate(
+        monkeypatch, upstream, destination):
+    """Straight to the upstream, never through a proxy the environment names, which would tunnel to the site's
+    name: a real domain for a site named after one."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    transport = _card_site([], {})
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    asked = []
+
+    async def connect(uri, **kwargs):
+        asked.append((uri, {key: kwargs.get(key, "unset") for key in ("host", "port", "server_hostname", "proxy")}))
+        raise OSError("refused")
+    monkeypatch.setattr(rest_proxy_module, "connect_websocket", connect)
+    gw = _gateway(website_urls={"notes": upstream}, site_names={"notes": ["notes.test"]})
+    with pytest.raises(Exception):
+        with TestClient(gw._asgi_app()).websocket_connect("/website/notes/live",
+                                                         headers={"AgentEnv-Site-Root": "https://notes.test"}):
+            pass
+    scheme = "wss" if upstream.startswith("https") else "ws"
+    assert asked == [(f"{scheme}://notes.test/live", {**destination, "proxy": None})]
+
+
+@pytest.mark.asyncio
+async def test_list_website_urls_gives_a_site_listed_by_name_at_its_first_name_and_any_other_behind_the_gateway(
+        monkeypatch):
+    transport = _card_site([], {"carded": ["carded.test"]})
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    sites = ("shop", "notes", "wild", "bare", "carded", "other")
+    gw = _gateway(website_urls={site: f"http://{site}" for site in sites},
+                  site_names={"shop": ["*.shop.test", "www.shop.test", "shop.test"], "notes": ["notes.localhost"],
+                              "wild": ["*.wild.test"], "other": ["other.test"]},
+                  listed_by_name=["shop", "notes", "wild", "bare", "carded"])
+    listed = await gw._mcp._tool_manager.get_tool("list_website_urls").fn()
+    assert listed == ["https://www.shop.test/", "http://notes.localhost/", "http://wild", "http://bare",
+                      "https://carded.test/", "http://other"]
+
+
+@pytest.mark.asyncio
 async def test_an_sdk_site_behind_the_gateway_names_the_gateway_s_address(monkeypatch):
     @website(domains=["notes.example"])
     class Notes(WebsiteEnvironment):
@@ -565,7 +845,8 @@ async def test_an_sdk_site_behind_the_gateway_names_the_gateway_s_address(monkey
             return {"base_url": ctx.base_url}
 
     transport = httpx.ASGITransport(app=Notes().create_app())
-    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(website_urls={"notes": "http://notes"})
 
     async def whoami(path: str) -> tuple[int, dict, bytes]:

@@ -2,10 +2,12 @@
 caches or locks, and its finished downloads; data/add applies such a state while the browser runs, the start tabs
 loaded again after cookies change, a load's tabs in place of the open ones, and a profile restored with the browser
 stopped, every part checked first; once an agent has acted, a load can't change the profile or the tabs, a failed one
-isn't reset, and one that fails part way says what it applied; data/reset ends the addresses, puts the profile back as
-installed, empties the downloads and uploads and starts the record over."""
+isn't reset, and one that fails part way says what it applied; a load whose start tabs on one of the env's sites
+don't load fails naming them, as does a reset's relaunch, while a live one never does; data/reset ends the addresses,
+puts the profile back as installed, empties the downloads and uploads and starts the record over."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -14,9 +16,10 @@ from types import SimpleNamespace
 import pytest
 
 from agentenv_protocol import website_browser
+from agentenv_protocol.website_browser import log as browser_log
 from agentenv_protocol.computer import Launch, Ready, app, linux
 from agentenv_protocol.computer.app import AGENT_ACTED
-from agentenv_protocol.computer.errors import InvalidArgument
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, AddDataRequest
 from agentenv_protocol.website_browser import WebsiteBrowserEnvironment
@@ -34,17 +37,17 @@ class FakeControl:
     """The browser's control, answering from what a test sets and recording what it's asked to do."""
 
     def __init__(self):
-        self.did, self.fail = [], None
+        self.did, self.fail, self.start_tabs_outcome = [], None, "loaded"
         self.cookie_list = [{"name": "sid", "value": "s1", "domain": "shop.test", "path": "/", "expires": -1,
                              "httpOnly": True, "secure": False, "sameSite": "Lax"}]
 
-    async def cookies(self, urls=None):
+    async def cookies(self, urls=None, context=None):
         return self.cookie_list
 
-    async def local_storage(self, origins=None):
+    async def local_storage(self, origins=None, context=None):
         return [{"origin": "https://shop.test", "localStorage": [{"name": "cart", "value": "3"}]}]
 
-    async def tab_list(self):
+    async def tab_list(self, context=None, *, every=False):
         return [{"id": "t1", "url": "https://shop.test/", "title": "Shop", "opened_at": "t0", "opener": None,
                  "active": True}]
 
@@ -52,22 +55,28 @@ class FakeControl:
         return {"closed_tabs": [{"id": "t0", "url": "about:blank", "title": "", "opened_at": "t0", "opener": None,
                                  "closed_at": "t1", "closed_by": "agentenv"}], "downloads": []}
 
+    def download_list(self, context=None, *, every=False):
+        return []
+
     async def _done(self, what, value=None):
         if self.fail == what:
             raise RuntimeError(f"{what} failed")
         self.did.append((what, value))
 
-    async def set_cookies(self, cookies):
+    async def set_cookies(self, cookies, context=None):
         await self._done("cookies", [cookie.name for cookie in cookies])
 
-    async def set_local_storage(self, origins):
+    async def set_local_storage(self, origins, context=None):
         await self._done("local_storage", [origin.origin for origin in origins])
 
-    async def replace_tabs(self, tabs):
+    async def replace_tabs(self, tabs, context=None):
         await self._done("tabs", [(tab.url, tab.active) for tab in tabs])
 
-    async def reopen_start_tabs(self, urls):
+    async def load_start_tabs(self, urls, site_of, own_timeout_s, live_timeout_s):
+        self.waits = (own_timeout_s, live_timeout_s)
         await self._done("start_tabs", urls)
+        return [{"tab": f"t{index}", "url": url, "final_url": url, "status": 503, "error": None, "load_ms": 40,
+                 "site": site_of(url), "outcome": self.start_tabs_outcome} for index, url in enumerate(urls)]
 
     def forget(self):
         self.did.append(("forget", None))
@@ -85,6 +94,8 @@ def browser(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "folder")
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
     monkeypatch.setenv("AGENTENV_APP_SETTINGS", json.dumps({"chromium": {"start_urls": ["https://shop.test/"]}}))
+    monkeypatch.setattr(browser_log, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setenv("AGENTENV_NETWORK_LOG", str(tmp_path / "network.jsonl"))
     made = Browser()
     made.control = FakeControl()
     launches = []
@@ -106,7 +117,7 @@ def browser(tmp_path, monkeypatch):
         yield
         launches.append("continue")
 
-    made._computer_app = SimpleNamespace(stop_app=stop_app, launch_app=launch_app, paused=paused)
+    made._computer_app = SimpleNamespace(stop_app=stop_app, launch_app=launch_app, paused=paused, timeout_s=60.0)
     made._until_ready = until_ready
     made.launches = launches
     return made
@@ -140,12 +151,78 @@ async def test_data_get_is_its_state_its_profile_without_caches_or_locks_and_its
     files = _files(await browser.browser_get_data())
 
     state = json.loads(files.pop("browser-state.json"))
-    assert set(state) == {"cookies", "local_storage", "tabs", "closed_tabs", "downloads", "clock"}
+    assert json.loads(files.pop("network.har"))["log"]["entries"] == []
+    assert set(state) == {"cookies", "local_storage", "tabs", "closed_tabs", "downloads", "clock", "start_tabs",
+                          "contexts"}
     assert state["cookies"] == FakeControl().cookie_list and "partitionKey" not in state["cookies"][0]
     assert state["clock"]["mode"] == "real" and state["tabs"][0]["id"] == "t1" and state["closed_tabs"][0]["id"] == "t0"
     assert files == {f"{PROFILE}/Default/Cookies": b"db", f"{PROFILE}/Default/Cookies-journal": b"j",
-                     f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b"}
+                     f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b",
+                     "browser-log.jsonl": b""}
     assert not list((home / ".cache").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_data_get_exports_the_log_written_so_far_and_data_add_passes_over_it(browser):
+    browser.log.note("reset", {})
+    pending = browser.log.reserve()
+    files = _files(await browser.browser_get_data())
+    browser.log.write(pending, {"reset": {}})
+
+    logged = [json.loads(line) for line in files["browser-log.jsonl"].decode().splitlines()]
+    assert [line["seq"] for line in logged] == [1] and logged[0]["reset"] == {}
+    await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state()),
+                                          _file("browser-log.jsonl", files["browser-log.jsonl"])))
+    assert ("cookies", ["sid"]) in browser.control.did
+
+
+@pytest.mark.asyncio
+async def test_data_get_exports_the_network_log_as_har_and_data_add_passes_over_it(browser, tmp_path):
+    lines = [{"seq": 1, "at": "2026-11-11T10:00:00.000Z", "open": {
+                 "id": "1-1", "kind": "exchange", "started": "2026-11-11T10:00:00.000Z",
+                 "request": {"method": "GET", "url": "https://shop.test/cart?n=2", "http_version": "HTTP/1.1",
+                             "headers": [["Host", "shop.test"]]}}},
+             {"seq": 2, "at": "2026-11-11T10:00:00.250Z", "end": {
+                 "id": "1-1", "ended": "2026-11-11T10:00:00.250Z", "answered": "2026-11-11T10:00:00.200Z",
+                 "response": {"status": 200, "reason": "OK", "http_version": "HTTP/1.1",
+                              "headers": [["Content-Type", "application/json"]],
+                              "body": {"size": 2, "sha256": "x", "base64": base64.b64encode(b"{}").decode()}}}}]
+    (tmp_path / "network.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    files = _files(await browser.browser_get_data())
+    [entry] = json.loads(files["network.har"])["log"]["entries"]
+
+    assert (entry["request"]["url"], entry["response"]["status"], entry["response"]["content"]["text"]) == (
+        "https://shop.test/cart?n=2", 200, "{}")
+    assert entry["time"] == 250 and entry["timings"]["wait"] == 200
+    assert (await browser.browser_network(after=1)) == {"lines": [lines[1]], "last": 2, "more": False}
+    await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state()),
+                                          _file("network.har", files["network.har"])))
+    assert ("cookies", ["sid"]) in browser.control.did
+
+
+@pytest.mark.asyncio
+async def test_a_browser_no_proxy_logs_for_exports_no_har_and_network_reads_nothing(tmp_path, monkeypatch, browser):
+    monkeypatch.delenv("AGENTENV_NETWORK_LOG")
+    made = Browser()
+    made.control, made._computer_app = browser.control, browser._computer_app
+
+    files = _files(await made.browser_get_data())
+
+    assert made.network is None and "network.har" not in files and "browser-state.json" in files
+    assert await made.browser_network(after=3) == {"lines": [], "last": 3, "more": False}
+
+
+@pytest.mark.asyncio
+async def test_with_its_network_setting_off_data_get_exports_no_har_and_network_reads_nothing(browser, tmp_path):
+    (tmp_path / "network.jsonl").write_text(json.dumps({"seq": 1, "at": "t", "end": {"id": "1-1", "ended": "t"}})
+                                            + "\n")
+    browser.settings = browser.settings.model_copy(update={"network": False})
+
+    files = _files(await browser.browser_get_data())
+
+    assert "network.har" not in files and "browser-state.json" in files
+    assert await browser.browser_network(after=0) == {"lines": [], "last": 0, "more": False}
 
 
 @pytest.mark.asyncio
@@ -178,7 +255,8 @@ async def test_data_get_leaves_out_what_the_browser_removes_while_it_copies(brow
     monkeypatch.setattr(website_browser.data.shutil, "copy2", removed_meanwhile)
     files = _files(await browser.browser_get_data())
 
-    assert set(files) == {"browser-state.json", f"{PROFILE}/Default/Cookies", f"{PROFILE}/Default/Session Storage/LOG"}
+    assert set(files) == {"browser-state.json", "browser-log.jsonl", "network.har", f"{PROFILE}/Default/Cookies",
+                          f"{PROFILE}/Default/Session Storage/LOG"}
 
 
 def _snapshot_state(**changes) -> bytes:
@@ -275,6 +353,85 @@ async def test_a_load_that_fails_part_way_says_what_it_had_applied_and_one_befor
         await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state())))
 
     assert browser._resets_failed_add() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sites, refused", [([{"name": "shop", "domains": ["shop.test"]}], True), ([], False)],
+                         ids=["own-site", "live"])
+async def test_a_load_whose_start_tab_on_an_env_site_doesnt_load_fails_naming_it_and_a_live_one_doesnt(
+        browser, sites, refused):
+    browser.control.start_tabs_outcome = "failed"
+    await browser.browser_sites_set(sites)
+    load = browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state())))
+
+    if refused:
+        with pytest.raises(InvalidArgument, match=r"start tab https://shop.test/ on the env's site shop answered 503 "
+                                                  r"\(the load had applied the cookies, the local storage\)"):
+            await load
+    else:
+        await load
+    assert browser.start_tab_launches[-1]["tabs"][0]["site"] == ("shop" if refused else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("set_up_s, waits", [(None, (60, 30)), (45, (15, 15)), (75, (0, 0))],
+                         ids=["a-reopen", "a-launch-whose-setup-took-45-s", "a-launch-past-its-timeout"])
+async def test_start_tabs_settle_within_the_ready_timeout_of_their_launch_its_setup_counted(browser, set_up_s, waits):
+    loop = asyncio.get_running_loop()
+
+    await browser._load_start_tabs(["https://shop.test/"], "t", None if set_up_s is None else loop.time() - set_up_s)
+
+    own, live = browser.control.waits
+    assert (round(own), round(live)) == waits
+
+
+@pytest.mark.asyncio
+async def test_after_a_reset_relaunches_it_a_start_tab_on_an_env_site_that_failed_fails_the_reset(browser):
+    def launched(url, site, outcome, **why):
+        return {"at": "t", "tabs": [{"tab": "t1", "url": url, "final_url": None, "status": None, "error": None,
+                                     "load_ms": 60000, "site": site, "outcome": outcome, **why}]}
+
+    browser._following = asyncio.get_running_loop().create_future()
+    browser._following.set_result(None)
+    browser.start_tab_launches = [launched("https://slack.com/", None, "timed_out")]
+    await browser._relaunched("data/reset")
+    browser.start_tab_launches.append(launched("https://shop.test/", "shop", "timed_out"))
+    with pytest.raises(InvalidArgument, match="start tab https://shop.test/ on the env's site shop was still loading "
+                                              "after 60 s"):
+        await browser._relaunched("data/reset")
+    browser.start_tab_launches.append(launched("https://shop.test/", "shop", "failed",
+                                               error="net::ERR_CONNECTION_REFUSED"))
+    with pytest.raises(InvalidArgument, match="didn't load: net::ERR_CONNECTION_REFUSED"):
+        await browser._relaunched("data/reset")
+    assert browser.launches == ["ready"]
+
+
+@pytest.mark.asyncio
+async def test_after_a_reset_relaunches_it_start_tabs_still_settling_past_its_time_and_margin_fail_the_reset(
+        browser, monkeypatch):
+    monkeypatch.setattr(website_browser.environment, "START_TABS_MARGIN_S", 0.05)
+    browser._computer_app.timeout_s = 0.05
+    browser._following = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(DeviceUnavailable, match="start tabs hadn't settled after 0.1 s"):
+        await browser._relaunched("data/reset")
+
+
+@pytest.mark.asyncio
+async def test_sites_set_keeps_the_env_sites_a_start_tab_matches_by_name_or_one_label_under_a_wildcard(browser):
+    environment = website_browser.environment
+    before = environment._read_sites()
+
+    await browser.browser_sites_set([{"name": "shop", "domains": ["shop.test"]},
+                                     {"name": "mail", "domains": ["*.mail.test"]}])
+    sites = environment._read_sites()
+    with pytest.raises(InvalidArgument, match=r"sites\[0\]: domains"):
+        await browser.browser_sites_set([{"name": "shop", "domains": []}])
+
+    assert before == [] and [site.name for site in environment._read_sites()] == ["shop", "mail"]
+    assert [environment._site_of(url, sites) for url in (
+        "https://shop.test/", "https://SHOP.test./cart", "https://www.mail.test/", "https://a.b.mail.test/",
+        "https://mail.test/", "https://slack.com/", "about:blank")] == ["shop", "shop", "mail", None, None, None, None]
 
 
 @pytest.mark.asyncio

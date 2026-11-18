@@ -30,13 +30,14 @@ from urllib.parse import urlsplit
 
 from agent_env.config import get_config
 from agent_env.entity.refs import RefRole, ref_sites
-from agent_env.plugins._bundles import AGENT_ALIASES
+from agent_env.plugins._bundles import AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host
-from agent_env.store.routing import configured_store, namespace_routing
+from agent_env.store.routing import configured_store, namespace_routing, shared_store
+from agent_env.task_step.context import context_path_segments, renamed_context_path
 from agent_env.task_step.registry import get_task_step_registry
 
 from ._secrets import credentials_in
@@ -105,7 +106,7 @@ def register_bundle(
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
         ledger = RegistrationLedger(target, registered, identity, commit, dirty)
-        problems = list(_unregistrable(registered, shared))
+        problems = [*_aliased_envs_refused(plan, ids, shared), *_unregistrable(registered, shared)]
         if problems:
             raise BundleError(problems)
         requires = tuple(declare(resolved, declaring or declaring_for(bundle.root, installed=False, dry_run=dry_run)))
@@ -117,11 +118,6 @@ def register_bundle(
             on_write=lambda done: say(f"  {registered_line(registered, done)}"), composing=composing,
             on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"))
     return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
-
-
-def shared_store(store: DocumentStore) -> bool:
-    """Whether ``store`` is other than this machine's own, so others read what's written to it."""
-    return not isinstance(store, LocalSqliteDocumentStore)
 
 
 def registered_line(plan: Plan, done: Materialized) -> str:
@@ -158,10 +154,10 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
     """The registry id each ``@local`` id the plan writes takes, and each problem giving them.
 
     The bundle's own entry is ``<prefix><name>``, its name lowercased with each run of what an id can't hold made
-    ``-``. An installed bundle's agent pulled in by a reference takes the first alias its bundle gives it, which the
-    reference named it by; any other entity of an installed bundle has no registry id, and an env's alias can't be
-    one, since no store env may start on an installed env alias's id. An id derived from another (``<id>__env_image``) keeps its suffix after the
-    other's registry id, and a task's output is ``<task id>-<name>``."""
+    ``-``. An installed bundle's agent, env or artifact pulled in by a reference takes the first alias its bundle gives
+    it, which the reference named it by; any other entity of an installed bundle has no registry id. An id derived
+    from another (``<id>__env_image``) keeps its suffix after the other's registry id, and a task's output is
+    ``<task id>-<name>``."""
     ids: dict[str, str] = {}
     problems: list[str] = []
     for write in plan.writes:
@@ -171,8 +167,8 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
         if entry in plan.origins:
             alias = _alias(plan.origins[entry], entry)
             if alias is None:
-                problems.append(f"{plan.path(entry)}: comes with an installed bundle, and only an agent with an alias "
-                                "is registered from one; name an entity the store holds instead")
+                problems.append(f"{plan.path(entry)}: comes with an installed bundle, and only an agent, env or "
+                                "artifact with an alias is registered from one; name an entity the store holds instead")
                 continue
             ids[entry.id] = alias
         elif name := _slug(entry.name):
@@ -206,8 +202,25 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
 
 
 def _alias(bundle: Bundle, entry: BundleEntry) -> str | None:
-    aliases = bundle.aliases.get(AGENT_ALIASES, {}).get(entry.name, ()) if entry.kind is BundleKind.AGENT else ()
+    table = _ALIAS_TABLES.get(entry.kind)
+    aliases = bundle.aliases.get(table, {}).get(entry.name, ()) if table else ()
     return aliases[0] if aliases else None
+
+
+def _aliased_envs_refused(plan: Plan, ids: Mapping[str, str], shared: bool) -> Iterator[str]:
+    """For a store that isn't ``shared``, a problem for each installed bundle's env registered under its alias, which
+    this machine's own env store refuses (``EnvStore.put_document``), found before anything is written."""
+    if shared:
+        return
+    for entry in plan.origins:
+        if entry.kind is BundleKind.ENV and entry.id in ids:
+            yield (f"{plan.path(entry)}: comes with an installed bundle, so it registers under its alias "
+                   f"{ids[entry.id]!r}, and this machine's own store holds no env under an alias's id; register it "
+                   "into a shared store")
+
+
+# The aliases.toml table an installed bundle's entity of each kind takes its registry id from.
+_ALIAS_TABLES = {BundleKind.AGENT: AGENT_ALIASES, BundleKind.ENV: ENV_ALIASES, BundleKind.ARTIFACT: ARTIFACT_ALIASES}
 
 
 def _derived(entity_id: str, ids: Mapping[str, str]) -> str | None:
@@ -286,9 +299,13 @@ def _aliased(use: AliasUse, ids: Mapping[str, str]) -> AliasUse:
 
 
 def _renamed(value: Any, ids: Mapping[str, str]) -> Any:
-    """A copy of ``value`` with each string that's an ``@local`` id in ``ids``, or derived from one, its registry id."""
+    """A copy of ``value`` with each string that's an ``@local`` id in ``ids``, or derived from one, its registry id, and
+    each such id in a path into a run's context its registry id too."""
     if isinstance(value, str):
-        return ids.get(value) or _derived(value, ids) or value if is_local_id(value) else value
+        if is_local_id(value):
+            return ids.get(value) or _derived(value, ids) or value
+        return renamed_context_path(value, lambda segment: (ids.get(segment) or _derived(segment, ids))
+                                    if is_local_id(segment) else None)
     if isinstance(value, dict):
         return {key: _renamed(item, ids) for key, item in value.items()}
     if isinstance(value, list):
@@ -360,8 +377,10 @@ def _unregistrable(plan: Plan, shared: bool) -> Iterator[str]:
             continue
         where = plan.path(write.source.entry)
         for path, text in _strings(write.source.config):
-            if is_local_id(text):
-                yield f"{where}: {path or 'its value'} names {text!r}, which only this machine's stores hold"
+            local = text if is_local_id(text) else next(
+                (segment for segment in context_path_segments(text) or () if is_local_id(segment)), None)
+            if local is not None:
+                yield f"{where}: {path or 'its value'} names {local!r}, which only this machine's stores hold"
             elif shared and (url := _local_url(text)) is not None:
                 yield f"{where}: {path or 'its value'} names {url}, which only this machine reaches"
         if shared:

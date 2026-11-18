@@ -122,7 +122,7 @@ def mac(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(lume, "_free_port", lambda: 48123)
     monkeypatch.setattr(lume, "_POLL_S", 0.05)
-    monkeypatch.setattr(lume, "_local_grants", lambda: None)
+    monkeypatch.setattr(lume, "local_grants", lambda: None)
     provider = LumeSandboxProvider(lume=str(bin_ / "lume"), ssh=str(bin_ / "ssh"), relay_python=str(bin_ / "relay"),
                                    ssh_password="s3cret-pw", boot_timeout_s=10)
     provider.fake = tmp_path
@@ -183,7 +183,7 @@ async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forw
     trust.mkdir()
     (trust / "ca-bundle.pem").write_text("roots and the CA")
     (trust / "ca.pem").write_text("the CA")
-    monkeypatch.setattr(lume, "_local_grants", lambda: (54321, trust))
+    monkeypatch.setattr(lume, "local_grants", lambda: (54321, trust))
 
     sandbox = await mac.create_vm(image="local:bench", env={"ENVIRONMENT_NAME": "desk"}, exposed_ports=[18765])
 
@@ -200,7 +200,7 @@ async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forw
     assert LumeSandboxProvider.REACHES_HOST_AT == "127.0.0.1"
 
     ports = iter([54322, 54323])
-    monkeypatch.setattr(lume, "_local_grants", lambda: (next(ports), trust))
+    monkeypatch.setattr(lume, "local_grants", lambda: (next(ports), trust))
     await asyncio.gather(mac.get_sandbox(sandbox.sandbox_id), mac.get_sandbox(sandbox.sandbox_id))
 
     assert {call["args"][-2] for call in _waited(lambda: _forwards(mac.fake, 3))[1:]} == {
@@ -208,7 +208,7 @@ async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forw
     forwards = json.loads((folder.parent / "state.json").read_text())["forwards"]
     assert set(forwards) == {"54321", "54322", "54323"}
 
-    monkeypatch.setattr(lume, "_local_grants", lambda: (54324, trust))
+    monkeypatch.setattr(lume, "local_grants", lambda: (54324, trust))
     monkeypatch.setenv("FAKE_LUME_SLOW_DELETE", "1")
     _, reconnect = await asyncio.gather(sandbox.terminate(), mac.get_sandbox(sandbox.sandbox_id),
                                         return_exceptions=True)

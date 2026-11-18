@@ -1,0 +1,20 @@
+type = "computer"
+description = "Omarchy 4.5, an Arch Linux desktop on Hyprland, built from Omarchy's own stable VM image on the Linux machine with KVM that composes it; its user is signed in at boot"
+arch = ["amd64"]
+os = { type = "linux", distribution = "omarchy", version = "4.5.0", display = "wayland" }
+session = { user = "omarchy" }
+
+[forms.disk]
+source = { url = "https://nightly.omarchy.org/stable/4.5.0/479/omarchy-4.5.0.qcow2", sha256 = "dcb401aabf1b01bf3c983a1b048bcd0ac7d66e4f5a755acd9452bf66e18cd5c4" }
+init = "systemd"
+input_channel = "nocloud"
+firmware = ["efi"]
+min_disk_gb = 40
+
+[config.resolution]
+default = "1920x1080"
+phase = "deploy"
+
+[config.timezone]
+default = "UTC"
+phase = "deploy"

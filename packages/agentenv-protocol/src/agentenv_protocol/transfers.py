@@ -46,6 +46,28 @@ _TRANSFER_TIMEOUT = httpx.Timeout(
     write=TRANSFER_IDLE_TIMEOUT_SECONDS,
     pool=_CONNECT_TIMEOUT_SECONDS,
 )
+#: Whether this process's transfers take a proxy from the environment's settings. A computer's own servers turn it
+#: off (``direct``): they run on real time and reach the object store directly, while the programs they start keep
+#: the settings that send them through the computer's egress proxy.
+_proxy_from_environment = True
+
+
+def direct() -> None:
+    """Have this process's transfers reach their objects directly, whatever proxy the environment names; the
+    environment, and so every process this one starts, keeps it."""
+    global _proxy_from_environment
+    _proxy_from_environment = False
+
+
+def client_options() -> dict:
+    """The options a transfer's HTTP client takes: none, or for a ``direct`` process, no proxy from the environment
+    but still its certificates (``SSL_CERT_FILE``, ``SSL_CERT_DIR``), since httpx takes both from it or neither and a
+    local store's CA is trusted through them."""
+    if _proxy_from_environment:
+        return {}
+    return {"trust_env": False, "verify": httpx.create_ssl_context(trust_env=True)}
+
+
 # The longest the helpers take to give up on a transfer whose every connection stalls.
 TRANSFER_STALL_BUDGET_SECONDS = TRANSFER_ATTEMPTS * (
     _CONNECT_TIMEOUT_SECONDS + TRANSFER_IDLE_TIMEOUT_SECONDS
@@ -483,7 +505,7 @@ async def upload(target: WriteObject, source: Path | bytes) -> Uploaded:
     async def put() -> Uploaded:
         with _transfer_request(target.write.expires_at):
             async with httpx.AsyncClient(
-                follow_redirects=False, timeout=_TRANSFER_TIMEOUT
+                follow_redirects=False, timeout=_TRANSFER_TIMEOUT, **client_options()
             ) as client:
 
                 async def to(url: str) -> Uploaded:
@@ -519,7 +541,7 @@ async def download(source: ReadObject, destination: Path) -> None:
         digest = hashlib.sha256()
         with _transfer_request(source.read.expires_at):
             async with httpx.AsyncClient(
-                follow_redirects=False, timeout=_TRANSFER_TIMEOUT
+                follow_redirects=False, timeout=_TRANSFER_TIMEOUT, **client_options()
             ) as client:
                 response = await _send_to_first_listening(
                     urls,
@@ -571,7 +593,7 @@ def _post_to_namespace(
     fields.setdefault("Content-Type", "application/octet-stream")
     with (
         _transfer_request(target.expires_at),
-        httpx.Client(follow_redirects=False, timeout=_TRANSFER_TIMEOUT) as client,
+        httpx.Client(follow_redirects=False, timeout=_TRANSFER_TIMEOUT, **client_options()) as client,
     ):
 
         def to(url: str) -> Uploaded:

@@ -157,8 +157,8 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
     (TOML, [], ("left",), "Desk declares no platform: name them with @computer_driver(supports=[...])"),
     ('type = "computer_driver"\nmodule = "driver.py:Desk"\nimage = "x"\n', LINUX, ("left",), "unknown key 'image'"),
     (f"{TOML}port = 0\n", LINUX, ("left",), "port must be 1 to 65535, not 0"),
-    (f'{TOML}[install.windows]\n{SERVE}\n', LINUX, ("left",),
-     "install.windows: an install is for an OS type agent-env composes: linux"),
+    (f'{TOML}[install.freebsd]\n{SERVE}\n', LINUX, ("left",),
+     "install.freebsd: an install is for an OS type agent-env composes: linux, macos, windows"),
     (f'{TOML}[install.linux]\npython = "requirements.txt"\n{SERVE}\n', LINUX, ("left",),
      "install.linux.python: 'requirements.txt' isn't in this folder"),
     (f'{TOML}[install.linux]\nfiles = "linux"\n{SERVE}\n', LINUX, ("left",),
@@ -179,9 +179,17 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
     (f'{TOML}[install.linux]\ndownloads = [{{ url = "https://example.com/t", sha256 = "abc", to = "t" }}]\n{SERVE}\n',
      LINUX, ("left",), "install.linux.downloads.0.sha256: String should match pattern"),
     (f'{TOML}[install.linux]\nports = [70000]\n{SERVE}\n', LINUX, ("left",), "a port is 1 to 65535, not [70000]"),
+    (f'{TOML}[install."linux/Omarchy"]\n{SERVE}\n', LINUX, ("left",),
+     "install.linux/Omarchy: an install is for an OS type agent-env composes: linux, macos, windows, or one of its "
+     "distributions as <os>/<distribution>"),
+    (f'{TOML}[install."linux/omarchy"]\n{SERVE}\n', LINUX, ("left",),
+     "install.linux/omarchy: no supports entry names 'omarchy' on linux, so this never applies"),
+    (f'{TOML}[[known_failures."linux/omarchy"]]\ncheck = "P6"\nname = "typed text"\nreason = "its plugin"\n', LINUX,
+     ("left",), "known_failures.linux/omarchy: no supports entry names 'omarchy' on linux, so this never applies"),
 ], ids=["no-module", "module-file", "module-class", "button", "no-platform", "unknown-key", "port", "install-os",
         "install-python", "install-files", "install-escape", "no-service", "service-twice", "service-scope",
-        "run-missing", "apt-word", "sources-alone", "download-sha", "install-port"])
+        "run-missing", "apt-word", "sources-alone", "download-sha", "install-port", "distribution-key",
+        "unsupported-distribution", "unsupported-known-failures"])
 def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle_dir, toml, supports, buttons,
                                                                           problem):
     _bundle(bundle_dir, toml=toml, supports=supports, buttons=buttons)
@@ -189,6 +197,22 @@ def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle
     assert problem in _problems(bundle_dir)
     with pytest.raises(Exception):
         Env.get(f"{ROOT}/desk")
+
+
+def test_a_driver_takes_an_install_and_known_failures_for_a_distribution_it_supports(bundle_dir):
+    omarchy = [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]},
+               {"os": {"type": "linux", "distribution": "omarchy", "display": ["wayland"]}, "arch": ["amd64"]}]
+    _bundle(bundle_dir, supports=omarchy, toml=(
+        f'{TOML}[install.linux]\n{SERVE}\n\n[install."linux/omarchy"]\npython = "requirements.txt"\n{SERVE}\n\n'
+        '[[known_failures."linux/omarchy"]]\ncheck = "P6"\nname = "typed text"\nreason = "its plugin"\n'),
+        **{"envs/desk/requirements.txt": "mss>=9,<11\n"})
+
+    _run(bundle_dir)
+
+    desk = Env.get(f"{ROOT}/desk")
+    assert set(desk.install) == {"linux", "linux/omarchy"} and desk.install["linux/omarchy"].python == "requirements.txt"
+    assert [failure.name for failure in desk.known_failures["linux/omarchy"]] == ["typed text"]
+    assert Env.get(desk.id, desk.version).install["linux/omarchy"].python == "requirements.txt"
 
 
 @pytest.mark.parametrize("line", ["-r base.txt", "--requirement=base.txt", "-c pins.txt", "--constraint pins.txt",

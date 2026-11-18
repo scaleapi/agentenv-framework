@@ -11,6 +11,7 @@ import os
 import shlex
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -25,8 +26,10 @@ if TYPE_CHECKING:
     from .app import Launch
 
 #: Where an app's server marks that it launched the app since the computer booted, at boot or on demand: a folder a
-#: boot clears, under /tmp on macOS, which has no /run and lets the session user write nothing at its root.
-LAUNCHED = Path("/tmp/agentenv/apps" if sys.platform == "darwin" else "/run/agentenv/apps")
+#: boot clears, under /tmp on macOS, which has no /run and lets the session user write nothing at its root, and on
+#: Windows in the session user's temp folder, whose disk each boot starts afresh.
+LAUNCHED = (Path("/tmp/agentenv/apps") if sys.platform == "darwin" else
+            Path(tempfile.gettempdir()) / "agentenv" / "apps" if sys.platform == "win32" else Path("/run/agentenv/apps"))
 #: How long one readiness check may take; an app's checks run at once.
 CHECK_TIMEOUT_S = 10.0
 #: Where an app's server keeps the pid of the app it launched last, in the app's folder, so a server that restarts can
@@ -77,14 +80,14 @@ class AppRuntime:
         self.checking: dict[str, asyncio.Future] = {}
 
     async def start(self) -> None:
-        """Once its X display is up, when it has one, add the app's menu launcher on a desktop and launch a boot app,
-        unless the computer has launched it since it booted, at boot or on demand, or its boot launch is held
-        (``boot_launch_held``): a server that restarts leaves the app be, or with ``relaunch_on_start``, for an app
-        only the server that launched it can talk to, stops it and launches it again, whether it was launched at boot
-        or on demand."""
+        """Once its session is up, its X display or Hyprland, when it has one, add the app's menu launcher on a desktop
+        and launch a boot app, unless the computer has launched it since it booted, at boot or on demand, or its boot
+        launch is held (``boot_launch_held``): a server that restarts leaves the app be, or with ``relaunch_on_start``,
+        for an app only the server that launched it can talk to, stops it and launches it again, whether it was
+        launched at boot or on demand."""
         if self.launch is None:
             return
-        if os.environ.get("DISPLAY"):
+        if os.environ.get("DISPLAY") or os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
             await session.wait_until_up()
         if self.desktop:
             session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
@@ -139,10 +142,8 @@ class AppRuntime:
         return _running() is not None
 
     def paused(self) -> contextlib.AbstractContextManager:
-        """The app this server launched last, every process of it, paused while the block runs, so a copy of its files
-        taken meanwhile is of one moment."""
-        pid = _running()
-        return session.paused(pid) if pid is not None else contextlib.nullcontext()
+        """The app this server launched last paused while the block runs (``paused_app``)."""
+        return paused_app()
 
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
@@ -240,6 +241,13 @@ def _running() -> Optional[int]:
     """The pid of the app this server launched last, while it runs."""
     pid = _recorded_pid()
     return pid if pid is not None and session.alive(pid) else None
+
+
+def paused_app() -> contextlib.AbstractContextManager:
+    """The app this server launched last, every process of it, paused while the block runs, so a copy of its files
+    taken meanwhile is of one moment; nothing when it isn't running."""
+    pid = _running()
+    return session.paused(pid) if pid is not None else contextlib.nullcontext()
 
 
 async def _bounded(name: str, check: Awaitable[Optional[str]]) -> Optional[str]:

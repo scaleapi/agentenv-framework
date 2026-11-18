@@ -84,12 +84,12 @@ def test_a_computer_naming_a_registry_image_is_written_over_its_pin_and_inspecte
 
 
 def test_a_computer_folder_that_declares_what_isnt_supported_is_refused_naming_the_folder(bundle_dir, builds):
-    layout(bundle_dir, _files('{ dockerfile = "container/Dockerfile" }', os='{ type = "windows", version = "11" }'))
+    layout(bundle_dir, _files('{ dockerfile = "container/Dockerfile" }', os='{ type = "freebsd", version = "14" }'))
 
     with pytest.raises(BundleError) as refused:
         _run(bundle_dir)
 
-    assert "artifacts/desktop: artifact.toml: os: Value error, os.type 'windows' isn't supported yet" in str(refused.value)
+    assert "artifacts/desktop: artifact.toml: os: Value error, os.type 'freebsd' isn't supported yet" in str(refused.value)
 
 
 def test_a_registry_image_that_isnt_what_the_computer_declares_is_refused_naming_the_folder(bundle_dir, builds,

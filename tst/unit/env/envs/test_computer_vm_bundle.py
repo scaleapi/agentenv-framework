@@ -30,9 +30,11 @@ from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import composer, install, macos_vm_bundle
+from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import Grant, MacInstall, MacService
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
 BASE_IMAGE = "ghcr.io/trycua/macos:26-x@sha256:" + "7c" * 32
 SERVE = "venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk"
@@ -367,6 +369,18 @@ def test_a_macos_base_refuses_a_driver_that_declares_no_install_for_it(mac, tmp_
     driver.install = {}
     with pytest.raises(ValueError, match="declares no install for macos"):
         _put(driver, mac)
+
+
+def test_site_routing_into_a_macos_computer_is_refused_at_save_and_at_deploy(mac, tmp_path):
+    env = _put(_driver(tmp_path / "desk"), mac)
+    params = {"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["a.test"]}]}
+
+    saved = DeployEnvTaskStep(id="d", version=None, env_id=env.id, env_params=params).preflight()
+    _, _, problems = computer_params.checked(env, params)
+
+    assert problems == ["env_params.site_routing: site routing reaches Linux computers alone, and this computer runs "
+                        "macos"]
+    assert len(saved) == 1 and problems[0] in saved[0]
 
 
 def test_the_service_runner_reads_the_protocols_seed_byte_for_byte(tmp_path):

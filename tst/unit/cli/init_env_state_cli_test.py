@@ -120,30 +120,19 @@ def test_persistent_backend_materializes_base_via_acquire_then_prepare():
     assert "esi-base9" in res.output
 
 
-def test_website_env_includes_the_gateway_auto_added_browser_environment():
-    """An env with websites gets a ``website_browser`` MCP server auto-added by the gateway, and the
-    gateway passes it to ``prepare`` at deploy. The pre-initialized store must carry that schema too —
-    otherwise the deploy builds an overlay over a base schema that was never created."""
-    browser = MagicMock()
-    browser.environment_name = "website_browser"
-
-    def _get(env_id, *a, **kw):
-        return browser if env_id == "website-browser-env" else _fake_multi_env(
-            mcp=("slack",), websites=("shop",)
-        )
-
+def test_website_env_has_no_schema_for_the_browser_the_gateway_adds():
+    """The gateway adds a website browser to an env with websites but gives it no schema at deploy, so the
+    pre-initialized store carries the env's own MCP servers and websites alone, as the deploy's ``prepare`` does."""
     provider = MagicMock()
     provider.prepare = AsyncMock()
-    cfg = MagicMock(default_website_browser_env_id="website-browser-env")
-    with patch.object(Env, "get", side_effect=_get), \
+    with patch.object(Env, "get", return_value=_fake_multi_env(mcp=("slack",), websites=("shop",))), \
          patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=_fake_instance())), \
-         patch("agent_env.providers.env_state.build_state_provider", return_value=provider), \
-         patch("agent_env.config.get_config", return_value=cfg):
+         patch("agent_env.providers.env_state.build_state_provider", return_value=provider):
         res = CliRunner().invoke(
             init_env_state, ["--id", "multi-shop", "--env-state-type", "remote_postgres"]
         )
     assert res.exit_code == 0, res.output
-    assert provider.prepare.await_args.args[0] == ["slack", "shop", "website_browser"]
+    assert provider.prepare.await_args.args[0] == ["slack", "shop"]
 
 
 def test_environment_names_are_deduped():

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import math
 import os
 import threading
 import time
@@ -23,6 +22,7 @@ from Xlib import display as xdisplay
 from Xlib.error import ConnectionClosedError, DisplayConnectionError
 from Xlib.ext import xtest
 
+from ._desktop import CLICK_GAP_S, MAX_CLICK_COUNT, MAX_DRAG_POINTS, drag_steps, mss_capture
 from .driver import ComputerDriverEnvironment
 from .errors import DeliveryFailed, DeviceUnavailable, Unsupported
 from .operations import (Display, Image, ReadyCheck, capture, click, display, drag, key_down, key_up, pointer_down,
@@ -44,13 +44,9 @@ KEYSYMS = {
     "PrintScreen": "Print", "Pause": "Pause", " ": "space", **{f"F{n}": f"F{n}" for n in range(1, 25)},
 }
 TYPED = {"\n": "Return", "\t": "Tab"}
-#: The pause between the presses of a double or triple click, in seconds.
-CLICK_GAP_S = 0.04
 #: How long a button's release may take to reach the app, and how often the driver looks.
 RELEASE_WAIT_S = 5.0
 RELEASE_POLL_S = 0.005
-#: How far apart a drag's pointer moves are, in pixels.
-DRAG_STEP_PX = 20
 DROPPED = (ConnectionClosedError, DisplayConnectionError, OSError)
 
 
@@ -58,8 +54,8 @@ class X11Driver(ComputerDriverEnvironment):
     """The computer/v1 operations, the pointer and keyboard groups among them, on an X11 desktop."""
 
     buttons = ("left", "right", "middle", "back", "forward")
-    max_click_count = 3
-    max_drag_points = 50
+    max_click_count = MAX_CLICK_COUNT
+    max_drag_points = MAX_DRAG_POINTS
     recording = Recording(max_fps=30)
 
     def __init__(self, settings: ComputerSettings | None = None, platform: Platform | None = None) -> None:
@@ -78,7 +74,7 @@ class X11Driver(ComputerDriverEnvironment):
 
     @capture
     async def grab(self) -> Image:
-        return await asyncio.to_thread(_grab)
+        return await asyncio.to_thread(mss_capture, mss.MSS)
 
     @record
     async def stream(self, hints: RecordHints) -> AsyncIterator[RecordedFrame]:
@@ -123,7 +119,7 @@ class X11Driver(ComputerDriverEnvironment):
     @drag
     async def drag_along(self, path, button, duration_ms, modifiers) -> None:
         syms = [_keysym(k) for k in modifiers]
-        steps = _steps(path)
+        steps = drag_steps(path)
         pause = duration_ms / 1000 / len(steps)
         held: list[int] = []
 
@@ -217,7 +213,8 @@ class X11Driver(ComputerDriverEnvironment):
     async def keys_up(self, keys) -> None:
         def act(c):
             for key in keys:
-                c.release(reversed(self._held.pop(key, None) or c.codes(_keysym(key))[-1:]))
+                held = self._held.pop(key, None)
+                c.release(reversed(c.codes(_keysym(key))[-1:] if held is None else held))
         await self._send(act)
 
     async def _read(self, fn: Callable[[_Connection], Any]) -> Any:
@@ -366,24 +363,6 @@ class _Connection:
 
     def _down(self) -> set[int]:
         return {8 * i + bit for i, byte in enumerate(self.d.query_keymap()) for bit in range(8) if byte >> bit & 1}
-
-
-def _grab() -> Image:
-    try:
-        with mss.MSS() as m:
-            shot = m.grab(m.monitors[0])
-            return Image(shot.width, shot.height, bytes(shot.bgra), "BGRA")
-    except Exception as e:
-        raise DeviceUnavailable(f"capture failed: {type(e).__name__}: {e}") from None
-
-
-def _steps(path: list) -> list[tuple[float, float]]:
-    """The points a drag moves through after its start, about every DRAG_STEP_PX pixels."""
-    steps = []
-    for (x0, y0), (x1, y1) in zip(path, path[1:]):
-        n = max(2, int(math.hypot(x1 - x0, y1 - y0) / DRAG_STEP_PX))
-        steps += [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(1, n + 1)]
-    return steps
 
 
 def _keysym(key: str) -> int:

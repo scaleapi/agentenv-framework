@@ -20,9 +20,28 @@ from ..client import find_extension_method, invoke_extension
 WEBSITE_EXTENSION_URI = "urn:agentenv:website/v1"
 WEBSITE_READY_OP = "ready"
 WEBSITE_BROWSE_URL_PARAM = "browse_url"
+#: A live site's ``website/v1`` params: that it is one, and the other hosts its pages reach.
+WEBSITE_LIVE_PARAM = "live"
+WEBSITE_ALLOW_HOSTS_PARAM = "allow_hosts"
+#: A site's ``website/v1`` param naming its clock when it keeps real time, which the conformance check reads.
+WEBSITE_CLOCK_PARAM = "clock"
+#: A site's ``website/v1`` param naming the request headers only its own calls send, a sign-in header among them, whose
+#: values the browser's network log takes out.
+WEBSITE_SIGN_IN_HEADERS_PARAM = "sign_in_headers"
+#: A site's clocks: the universe's, which ``clock/v1`` can tie to the gateway's, and real time, which a third-party app
+#: keeps and nothing moves.
+UNIVERSE_CLOCK, REAL_CLOCK = "universe", "real"
 READY_TIMEOUT_S = 10.0
 SITE_READY_TIMEOUT_S = 300.0
 DEFAULT_HEALTH_PATH = "/api/health"
+
+
+def names_host(domain: str, host: str) -> bool:
+    """Whether ``host`` is a name the site's ``domain`` names: itself, or for ``*.example.com`` one label more."""
+    if domain.startswith("*."):
+        head, dot, rest = host.partition(".")
+        return bool(head) and bool(dot) and rest == domain[2:]
+    return host == domain
 
 
 class WebsiteReadiness(BaseModel):

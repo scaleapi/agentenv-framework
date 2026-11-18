@@ -23,9 +23,10 @@ def _deployed_env(metadata):
     )
 
 
-def _fake_env(deployed_env):
+def _fake_env(deployed_env, live_websites=()):
     env = MagicMock()
     env.deploy = AsyncMock(return_value=deployed_env)
+    env.live_websites.return_value = list(live_websites)
     return env
 
 
@@ -191,6 +192,21 @@ async def test_execute_persists_annotations_to_the_instance_record():
 
 
 @pytest.mark.asyncio
+async def test_a_run_that_deploys_a_live_website_is_marked_live_and_not_reproducible():
+    deployed_env = _deployed_env(None)
+    deployed_env.instance_id = "art-1-abcd1234"
+    live = [{"env_id": "github-site", "environment_name": "github", "domains": ["github.com"], "allow_hosts": []}]
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+
+    with patch("agent_env.env.env.Env") as Env, patch(_UPDATE_TARGET) as update:
+        Env.get.return_value = _fake_env(deployed_env, live)
+        context = await step.execute(TaskStepContext())
+
+    update.assert_called_once_with("art-1-abcd1234", {"deploy_step_id": "t-1.deploy_env", "live": True})
+    assert (context.metadata["live_websites"], context.metadata["reproducible"]) == ({"art-1": live}, False)
+
+
+@pytest.mark.asyncio
 async def test_execute_copies_no_run_metadata_onto_the_instance_record():
     deployed_env = _deployed_env(None)
     deployed_env.instance_id = "art-1-abcd1234"
@@ -267,13 +283,30 @@ def test_preflight_passes_what_the_env_takes(kind, options):
     assert _preflight(env, **options) == []
 
 
-@pytest.mark.parametrize("kind, refusal", [
-    ("server", "env 'mcp-email' has env_provider_type 'server', which doesn't take env_params"),
-    ("other", "other envs take no env_params"),
-])
-def test_preflight_refuses_env_params_an_env_doesnt_take(kind, refusal):
+@pytest.mark.parametrize("kind", ["server", "gateway", "other"])
+def test_preflight_refuses_env_params_an_env_doesnt_take(kind):
     env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
-    assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {refusal}"]
+    assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {env.type} envs take no env_params"]
+
+
+class _TakesEverything:
+    """A plugin provider whose deploy() takes every option."""
+
+    async def deploy(self, env, sandbox_provider, **options): ...
+
+
+@pytest.mark.parametrize("option, refusal", [
+    ({"env_params": {"form": "container"}}, "mcp_server envs take no env_params"),
+    ({"child_envs": {"desktop": {"cpu": 4}}}, "mcp_server envs have no child envs"),
+], ids=["env-params", "child-envs"])
+@pytest.mark.asyncio
+async def test_what_a_run_refuses_behind_a_provider_that_takes_every_option_is_refused_at_save_too(option, refusal):
+    step = DeployEnvTaskStep(id="d", version=None, env_id="mcp-email", **option)
+    with patch("agent_env.env.envs.mcp_server.provider_or_class", return_value=_TakesEverything), \
+            patch("agent_env.env.env.Env.get", return_value=_mcp_env("plugin_kw")):
+        assert step.preflight() == [f"deploy_env 'd': {refusal}"]
+        with pytest.raises(ValueError, match=refusal):
+            await step.execute(TaskStepContext())
 
 
 @pytest.mark.parametrize("kind", ["server", "gateway", "other"])
@@ -342,6 +375,7 @@ def _preflight(env, **options) -> list[str]:
 def _env_with_fixed_deploy(deployed_env):
     """An env whose deploy() takes a fixed param list, like every built-in env."""
     env = MagicMock()
+    env.live_websites.return_value = []
 
     async def deploy(ttl_seconds=10800, disk_size_gb=10, gateway_mode=None, cpu=None,
                      memory_mb=None, sandbox_type=None, priority=None, env_state_type=None,
@@ -448,3 +482,93 @@ def test_deployment_settings_keep_their_positions():
     they did: the fifth positional is still ttl_seconds."""
     step = DeployEnvTaskStep("t-1.deploy_env", None, "art-1", 2, 60)
     assert (step.ttl_seconds, step.artifact_id, step.artifact_version) == (60, None, None)
+
+
+# --- child_envs: each child env's options by its name, which only an env with child envs takes ---
+
+
+def _multi_env():
+    from agent_env.env.envs.multi_env import MultiEnv
+    from agent_env.env.envs.website import WebsiteEnv
+
+    shop = WebsiteEnv(id="web-shop", version=1, backend_docker_image_artifact=MagicMock(),
+                      frontend_docker_image_artifact=MagicMock(), environment_name="shop")
+    return MultiEnv(id="office", version=1, mcp_server_envs=[_mcp_env("gateway")], website_envs=[shop])
+
+
+def test_child_envs_round_trip_and_are_written_only_when_set():
+    entries = {"desktop": {"cpu": 4, "env_params": {"form": "container"}}}
+    step = DeployEnvTaskStep(id="d", version=None, env_id="office", child_envs=entries)
+    assert DeployEnvTaskStep.from_dict(step.to_dict()).child_envs == entries
+    assert "child_envs" not in DeployEnvTaskStep(id="d", version=None, env_id="office").to_dict()
+
+
+def test_writing_a_step_out_for_elsewhere_drops_each_child_envs_sandbox_type_as_it_drops_the_steps():
+    from agent_env.entity.scopes import FieldScope, prune
+
+    data = DeployEnvTaskStep(id="d", version=None, env_id="office", sandbox_type="modal",
+                             child_envs={"desktop": {"sandbox_type": "modal_vm", "cpu": 4}}).to_dict()
+    left = prune(data, DeployEnvTaskStep.field_scopes, frozenset({FieldScope.TASK}))
+    assert "sandbox_type" not in data and data["child_envs"] == {"desktop": {"cpu": 4}}
+    assert {where for where, _ in left} == {"sandbox_type", "child_envs.desktop.sandbox_type"}
+    assert prune({"child_envs": ["desktop"]}, DeployEnvTaskStep.field_scopes, frozenset({FieldScope.TASK})) == []
+
+
+@pytest.mark.parametrize("kind", ["server", "gateway", "other"])
+def test_preflight_refuses_child_envs_for_an_env_with_no_child_envs(kind):
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
+    assert _preflight(env, child_envs={"desktop": {"cpu": 4}}) == [f"deploy_env 'd': {env.type} envs have no child envs"]
+
+
+def test_exporting_a_step_leaves_the_steps_own_child_envs_as_they_were():
+    from agent_env.entity.scopes import FieldScope, prune
+
+    step = DeployEnvTaskStep(id="d", version=None, env_id="office", child_envs={"desktop": {"sandbox_type": "modal_vm"}})
+    prune(step.to_dict(), DeployEnvTaskStep.field_scopes, frozenset({FieldScope.TASK}))
+    assert step.child_envs == {"desktop": {"sandbox_type": "modal_vm"}}
+
+
+_ENTRY = "an entry is a table of sandbox_type, cpu, memory_mb, disk_size_gb, env_params, not"
+_SHARED = "runs on the multi env's own sandbox, which the step's own fields set, so it takes no entry"
+
+
+@pytest.mark.parametrize("child_envs, problem", [
+    ({"desktop": {"cpu": 4}}, "child_envs.desktop: env 'office' has no child env named 'desktop'; its child envs are email, shop"),
+    ({"shop": {"cpu": 4}}, f"child_envs.shop: shop {_SHARED}"),
+    ({"email": {"env_params": {"form": "container"}}}, f"child_envs.email: email {_SHARED}"),
+    ({"email": {"ttl_seconds": 60, "gateway_mode": "consistent"}}, f"child_envs.email: {_ENTRY} gateway_mode, ttl_seconds"),
+    ({"email": "big"}, f"child_envs.email: {_ENTRY} a str"),
+    ({"email": {1: "a", "b": 2}}, f"child_envs.email: {_ENTRY} 1, b"),
+    ({"email": {}, "shop": {}}, f"child_envs.email: email {_SHARED}; child_envs.shop: shop {_SHARED}"),
+    (["email"], "child_envs is a table of child env names, not list"),
+], ids=["unknown-name", "website", "mcp-server-params", "whole-env-fields", "not-a-table", "keys-of-two-types", "each-named",
+     "not-a-table-of-names"])
+def test_preflight_names_the_child_env_each_problem_is_with(child_envs, problem):
+    assert _preflight(_multi_env(), child_envs=child_envs) == [f"deploy_env 'd': {problem}"]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_env_deploy_refuses_child_envs_before_it_deploys_anything():
+    with patch("agent_env.env.envs.multi_env.deploy_through_provider") as deploy, \
+            pytest.raises(ValueError, match=f"child_envs.shop: shop {_SHARED}"):
+        await _multi_env().deploy(child_envs={"shop": {"cpu": 4}})
+    deploy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_passes_child_envs_to_a_deploy_that_takes_them():
+    entries = {"desktop": {"cpu": 4, "env_params": {"form": "container"}}}
+    step = DeployEnvTaskStep(id="d", version=None, env_id="art-1", env_version=2, child_envs=entries)
+    with patch("agent_env.env.env.Env") as Env, patch(_UPDATE_TARGET):
+        Env.get.return_value = _fake_env(_deployed_env(None))
+        await step.execute(TaskStepContext())
+    assert Env.get.return_value.deploy.call_args.kwargs["child_envs"] == entries
+
+
+@pytest.mark.asyncio
+async def test_execute_refuses_child_envs_for_an_env_whose_deploy_takes_none():
+    step = DeployEnvTaskStep(id="d", version=None, env_id="art-1", child_envs={"desktop": {"cpu": 4}})
+    env = _env_with_fixed_deploy(_deployed_env(None))
+    with patch("agent_env.env.env.Env") as Env, pytest.raises(ValueError, match="have no child envs"):
+        Env.get.return_value = env
+        await step.execute(TaskStepContext())

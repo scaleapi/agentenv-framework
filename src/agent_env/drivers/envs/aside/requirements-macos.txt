@@ -1,0 +1,4 @@
+# What a composed macOS computer installs into the driver's venv: the protocol with MacOSDriver, whose screen and input
+# need its macos extra, and the MCP client the forwarded tool reaches Aside's MCP server with. A release pins it to the
+# version it ships. Aside is the pinned download, whose executables' sha256 the driver checks.
+agentenv-framework-protocol[computer,macos]>=0.1.459

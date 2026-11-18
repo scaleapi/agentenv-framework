@@ -127,7 +127,7 @@ class FakeDocker:
         layers = [(None, {"etc/os-release": b"ubuntu"})]
         for line in dockerfile.splitlines():
             instruction, _, rest = line.partition(" ")
-            command = rest.removeprefix("--network=none ")
+            command = re.sub(r"^(--\S+ )+", "", rest)  # BuildKit records a RUN without its flags
             if instruction == "RUN":
                 layers.append((f"RUN /bin/sh -c {command} # buildkit", {
                     path: content for key, files in self.writes.items() if key in command for path, content in files.items()}))
@@ -355,7 +355,7 @@ MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pr
 #: The program of the mail app's own server.
 MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
                "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
-               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
+               "environment=ENVIRONMENT_NAME=\"mail\",AGENTENV_REAL_TIME=\"1\"\nautorestart=true\nredirect_stderr=true\n"
                "stdout_logfile=/var/log/agentenv/app-mail.log\n")
 
 

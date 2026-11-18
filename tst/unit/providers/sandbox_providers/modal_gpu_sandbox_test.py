@@ -1,8 +1,8 @@
 """GPU support on ModalSandboxProvider.
 
 A ``gpu`` spec must route create_container through the V1 ``modal.Sandbox.create`` factory
-(the only one that accepts ``gpu=``), with docker-in-gVisor enabled; the default path must
-stay on V2 ``_experimental_create`` with ``i6pn`` unchanged. ``gpu`` + ``i6pn`` is
+(the only one that accepts ``gpu=``), with docker-in-gVisor enabled; private networking uses
+``_experimental_create`` with ``i6pn`` enabled. ``gpu`` + ``i6pn`` is
 unsatisfiable (V1 has no i6pn) and must fail before a sandbox is created.
 """
 
@@ -55,7 +55,7 @@ async def test_gpu_uses_v1_create_with_gpu_and_docker_in_gvisor():
 
 
 @pytest.mark.asyncio
-async def test_default_stays_on_v2_experimental_create_with_i6pn():
+async def test_private_network_uses_experimental_create_with_i6pn():
     captured, fake = _capture()
     provider = _provider()  # no gpu
     with _patched("modal.Sandbox._experimental_create", fake), pytest.raises(Exception):

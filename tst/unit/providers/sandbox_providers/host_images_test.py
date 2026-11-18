@@ -28,7 +28,7 @@ def docker(monkeypatch):
         builds.append((dockerfile.relative_to(context).as_posix(),
                        sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
                        tag, platform, labels))
-        held[tag] = labels[host_images._SOURCES_LABEL]
+        held[tag] = labels[host_images.SOURCES_LABEL]
 
     monkeypatch.setattr(host_images, "build_image", build)
     monkeypatch.setattr(host_images, "_built_from", held.get)
@@ -58,7 +58,7 @@ def test_an_image_is_built_natively_from_its_stored_context_labeled_with_its_sou
     host_images.build(image)
 
     assert builds == [("Dockerfile", ["Dockerfile", "run.sh"], image.image_name, None,
-                       {host_images._SOURCES_LABEL: image.source_digest})]
+                       {host_images.SOURCES_LABEL: image.source_digest})]
     assert host_images.held(image) and host_images.built_here(image.image_name)
 
 

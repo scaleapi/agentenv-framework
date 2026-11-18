@@ -2,12 +2,12 @@
 
 The script defines ``run(input) -> JSON``, where ``input = {"args", "results"}``.
 The result is stored at ``context.metadata["script_results"][result_id]``.
-A script run for an env also gets ``input["env"] = {"id", "url", "mcp_url"}``: the env's
+A script run for an env also gets ``input["env"] = {"id", "url", "mcp_url", "headers"}``: the env's
 address, where its card is at ``/.well-known/agent-env.json``, and its MCP endpoint, as the script
-reaches them: on the env's host as that host does (``Sandbox.url_on_host``), since a host can't
-always call its own public URL; inside a computer, the driver on loopback, with the ``headers`` that
-carry the computer's control token to its framework-only routes. A script run in an agent's sandbox
-never gets the token.
+reaches them, and the ``headers`` that carry the env's control token to its framework-only routes and
+its data plane: on the env's host as that host does (``Sandbox.url_on_host``), since a host can't
+always call its own public URL; inside a computer, the driver on loopback. A script run in an agent's
+sandbox never gets the token.
 
 ``script_artifact_id`` is either a single-file ``FileArtifact`` or a
 ``FileArtifactUniverse`` whose ``.py`` members are staged side by side so the entry
@@ -30,7 +30,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -43,7 +42,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import DeployedSandboxEnv, require_sandbox
 from agent_env.env.envs.computer.utils import inside
 from agent_env.providers.sandbox_providers.sandbox import into_container
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -55,14 +54,14 @@ _RUN_DIR = "/tmp/agent_env_run_code"
 _COMPUTER_RUN_DIR = ".agentenv/run_code"
 # How much longer than the script's timeout a computer lets the runner run, so the runner stops the script first.
 _RUNNER_SLACK_S = 10
-# What a POSIX extended regular expression, as `pkill -f` reads one, gives a meaning to outside brackets.
-_ERE_SPECIAL = re.compile(r"[.\[\\()*+?{|^$]")
-
 # The bootstrap we run in the sandbox: `python3 runner.py <run_dir> <entrypoint> <script_file> <timeout_seconds>`.
 _RUNNER_SOURCE = (Path(__file__).parent / "run_code_runner.py").read_text(encoding="utf-8")
+# Inside a computer, the runner's own `--clear` and `--size` stand in for the shell tools its OS may not have, isolated
+# from the home it runs in.
+_RUNNER_TOOL = ("python3", "-I", "-c", _RUNNER_SOURCE)
 
 # A universe member with one of these names would shadow run_code's own staging files.
-_RESERVED_MEMBERS = frozenset({"runner.py", "input.json", "output.json"})
+_RESERVED_MEMBERS = frozenset({"runner.py", "input.json", "output.json", "runner.lock", "runner.pid"})
 
 # Where a single-file FileArtifact is always staged, regardless of its own filename.
 _STAGED_SCRIPT = "script.py"
@@ -373,10 +372,11 @@ class RunCodeTaskStep(TaskStep):
         # rejected here rather than slurped into the worker — and we never decode a
         # truncated file (which would crash strict UTF-8 decode mid-codepoint).
         path = f"{run_dir}/output.json"
-        exit_code, size_out, stderr = await target.run("wc", "-c", path)
-        if exit_code != 0:
-            raise self._exec_error(f"wrote no result file: {self._stderr_tail(stderr)}")
-        if int(size_out.split()[0]) > self.MAX_OUTPUT_BYTES:
+        try:
+            size = await target.size(path)
+        except OSError as exc:
+            raise self._exec_error(f"wrote no result file: {self._stderr_tail(str(exc))}") from exc
+        if size > self.MAX_OUTPUT_BYTES:
             raise self._validation_error(
                 f"result exceeds {self.MAX_OUTPUT_BYTES}-byte cap"
             )
@@ -406,7 +406,7 @@ class RunCodeTaskStep(TaskStep):
         if deployed is not None:
             deployed = require_sandbox(deployed, "run_code on the env's host")
         if deployed is None or not deployed.sandbox_id:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Env '{self.env_id}' not found in context.deployed_envs "
                 "(or missing sandbox_id)"
             )
@@ -457,7 +457,7 @@ class RunCodeTaskStep(TaskStep):
             (s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None
         )
         if deployed is None:
-            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+            raise StepContextError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
         provider = (
             build_sandbox_provider(deployed.sandbox_type)
             if deployed.sandbox_type
@@ -487,7 +487,7 @@ class RunCodeTaskStep(TaskStep):
             (a for a in context.deployed_agents if a.agent_name == self.agent_name), None
         )
         if agent is None or not agent.sandbox_id:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Agent '{self.agent_name}' not found in context.deployed_agents "
                 "(or missing sandbox_id)"
             )
@@ -538,12 +538,14 @@ def _is_safe_member(name: str) -> bool:
 
 
 def _env_on_host(deployed: DeployedSandboxEnv, sandbox: Any) -> dict:
-    """The env's id, address and MCP endpoint as a script on its host reaches them."""
+    """The env's id, address and MCP endpoint as a script on its host reaches them, and the headers its control token
+    travels in."""
     url, mcp_url = deployed.environment_url, deployed.mcp_url
     return {
         "id": deployed.env_id,
         "url": url and sandbox.url_on_host(url),
         "mcp_url": mcp_url and sandbox.url_on_host(mcp_url),
+        "headers": deployed.control_headers,
     }
 
 
@@ -554,12 +556,20 @@ async def _cat(target: _ExecTarget, path: str) -> str:
     return stdout
 
 
+async def _size(target: _ExecTarget, *command: str) -> int:
+    exit_code, stdout, stderr = await target.run(*command)
+    if exit_code != 0:
+        raise OSError(stderr)
+    return int(stdout.split()[0])
+
+
 class _ExecTarget(Protocol):
     def run_dir(self, step_id: str) -> str: ...
     def endpoints(self, deployed: DeployedSandboxEnv) -> dict: ...
     async def reset_dir(self, path: str) -> None: ...
     async def write_file(self, path: str, content: str) -> None: ...
     async def read_file(self, path: str) -> str: ...
+    async def size(self, path: str) -> int: ...
     async def run(self, *command: str) -> tuple[int, str, str]: ...
 
 
@@ -586,6 +596,9 @@ class _HostTarget:
 
     async def read_file(self, path: str) -> str:
         return await _cat(self, path)
+
+    async def size(self, path: str) -> int:
+        return await _size(self, "wc", "-c", path)
 
     async def run(self, *command: str) -> tuple[int, str, str]:
         # Files are written as root, so run as root too.
@@ -618,6 +631,9 @@ class _AgentTarget:
     async def read_file(self, path: str) -> str:
         return await _cat(self, path)
 
+    async def size(self, path: str) -> int:
+        return await _size(self, "wc", "-c", path)
+
     async def run(self, *command: str) -> tuple[int, str, str]:
         return await self.sandbox.exec_with_output(*self.prefix, *command)
 
@@ -639,14 +655,16 @@ class _DriverTarget:
         return inside.loopback(deployed)
 
     async def reset_dir(self, path: str) -> None:
-        """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
-        await self.run("pkill", "-f", _ERE_SPECIAL.sub(r"\\\g<0>", f"{path}/runner.py"))
         await self.remove_dir(path)
 
     async def remove_dir(self, path: str) -> None:
-        exit_code, _, stderr = await self.run("rm", "-rf", path)
+        """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
+        exit_code, _, stderr = await self.run(*_RUNNER_TOOL, "--clear", path)
         if exit_code != 0:
             raise OSError(stderr)
+
+    async def size(self, path: str) -> int:
+        return await _size(self, *_RUNNER_TOOL, "--size", path)
 
     async def write_file(self, path: str, content: str) -> None:
         await inside.add_files(self.deployed, {path: content.encode("utf-8")})

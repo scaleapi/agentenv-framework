@@ -21,10 +21,16 @@ the folder changes. A run that deploys the agent registers that image when it's 
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
-`node`, without npm or npx, and the Python packages `model-requirements.txt` pins. A `deploy_agent` `builtin_tools`
+`node`, without npm or npx, and the Python packages `model-requirements.txt` pins: boto3, and openpyxl, pypdf,
+python-docx and python-pptx, which read the .xlsx, .pdf, .docx and .pptx files tasks often give the model. Without them
+a script that opens such a file stops at `ModuleNotFoundError`, and the model spends turns working around it or fails
+the task for a reason that isn't the model's; a sandbox with no network can't install them either. They add about 50 MB,
+mostly the lxml and Pillow they depend on, and their pins match the Codex and Gemini images' and Harbor bundles', so a
+task's documents read the same way in each. A `deploy_agent` `builtin_tools`
 selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
-`--strict-mcp-config`, so its MCP servers are only the task env's. The names are `ClaudeCodeTool`'s in
+`--strict-mcp-config`, so its MCP servers are only the task env's. Tool search is off unless the agent's environment sets
+`ENABLE_TOOL_SEARCH`, so the CLI sends the env's tools and its own up front. The names are `ClaudeCodeTool`'s in
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
 
@@ -76,12 +82,13 @@ a relay that adds task attribution, and takes its model from the prompt, else `o
 `install/v1` too, into a container or onto a Linux host with glibc. Its folder's `README.md` covers the extensions
 it implements. Run its smoke task with `agent-env run agents --task letta-code-smoke`.
 
-`agents/browser-use/` runs [Browser Use Pi](https://github.com/browser-use/browser-use-pi) behind the protocol's A2A
-agent framework: each turn is one `node agent.mjs` run that drives the browser the task gives it through
-`cdp-config/v1`, with the task env's MCP tools beside it, and a context's turns continue one conversation. Name it as
-`browser-use`, its alias, or by its id, `@local/agentenv-framework/agents/browser-use`. It calls the `[model]`
-endpoint as an OpenAI-compatible one and takes its model from the prompt. Its folder's `README.md` covers the extensions it implements. Run its smoke task with
-`agent-env run agents --task browser-use-smoke`.
+`agents/browser-use/` runs [browser-use](https://github.com/browser-use/browser-use) 1.0 behind the protocol's A2A
+agent framework: each turn is one `agent.py` run, in browser-use's own environment, that drives the browser the task
+gives it through `cdp-config/v1`, with the task env's MCP tools beside it, and a context's turns continue one
+conversation. Name it as `browser-use`, its alias, or by its id, `@local/agentenv-framework/agents/browser-use`. It
+takes its model from the prompt and calls the `[model]` endpoint through its Anthropic Messages route for a Claude
+model, as browser-use runs Claude, and as an OpenAI-compatible one for any other. Its folder's `README.md` covers the
+extensions it implements. Run its smoke task with `agent-env run agents --task browser-use-smoke`.
 
 `agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
 protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a

@@ -116,7 +116,7 @@ class ComputerRuntime:
         async with self.queue.turn(self.driver.settings.queue_wait_s):
             if operation in DIALOG_BLOCKS and self.has("page") and (dialog := (await self.page_now()).dialog):
                 raise DialogOpen(f'a {dialog.type} dialog is open on the page: "{dialog.message}"; answer it with '
-                                 "computer_dialog first")
+                                 f"{self.driver._computer_prefix.served('computer_dialog')} first")
             if mapped and frame is not None:
                 self.frames.check_current(frame, await self.display_now())
             if at_pointer:
@@ -154,7 +154,7 @@ class ComputerRuntime:
             result.summary = f"{result.summary}; the screenshot after it failed ({e.code}: {e.message})"
             return send(result)
         result.summary, result.frame = f"{result.summary}, then captured {new.id}{new.note()}", new.result()
-        return send(result, new.encode())
+        return send(result, new.encode(), new.captured_at)
 
     async def _hold_for(self, ms: int, keys: list[str]) -> None:
         """Keep ``keys`` down for ``ms``, then release them, also when the call is cancelled meanwhile."""

@@ -38,7 +38,7 @@ from agentenv_protocol import (  # noqa: E402
     tool,
 )
 from agentenv_protocol.agent_env_environment import _is_fastmcp_context_annotation, _schema_from_signature  # noqa: E402
-from agentenv_protocol.tool_context import EMPTY, bound, context_from_mcp  # noqa: E402
+from agentenv_protocol.tool_context import EMPTY, bound, context_from_http, context_from_mcp  # noqa: E402
 
 
 def _text(result: Any) -> str:
@@ -180,6 +180,11 @@ def test_a_dict_meta_is_read_as_the_custom_entries():
     assert context_from_mcp(as_dict, "t", {}).caller == Caller("zed", "s")
     assert context_from_mcp(_request_context({ROLE_META_KEY: "zed"}), "t", {}).caller == Caller("zed")
     assert context_from_mcp(SimpleNamespace(request_context=SimpleNamespace(meta=42, request=None)), "t", {}).caller == Caller()
+
+
+def test_only_an_mcp_tool_calls_context_says_it_is_one():
+    assert context_from_mcp(None, "computer_click", {}).mcp is True
+    assert context_from_http(None, "_computer_ready_status", {}).mcp is False and EMPTY.mcp is False
 
 
 @pytest.mark.asyncio

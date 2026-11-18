@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import heapq
-from typing import Any
+from typing import Any, Callable, Container
 
 
 class ChangeAttribution:
-    """The write windows (changelog ids before and after a call) of the trajectory events logged since start."""
+    """The write windows (changelog ids before and after a call) of the trajectory events logged since start. A call
+    to a tool `unwindowed` names, a computer's, claims none: a computer writes the env's data only through its
+    browser's requests, which carry windows of their own, while its calls may run for seconds as others write."""
 
-    def __init__(self) -> None:
+    def __init__(self, unwindowed: Callable[[], Container[str]] = frozenset) -> None:
         self._calls: dict[str, dict] = {}
         self._windows: list[tuple[int, int, int, dict]] = []  # (before, after, order, actor)
+        self._unwindowed = unwindowed
 
     def observe(self, event: dict) -> None:
         """Take one trajectory event as `_log_event` writes it."""
@@ -21,10 +24,11 @@ class ChangeAttribution:
                                               **_who(event)}
         elif kind in ("tool_call_result", "tool_call_failed"):
             actor = self._calls.pop(event.get("tool_call_event_id"), None)
-            if actor is not None and "changelog_id_before" in event:  # a gateway-native tool's result has no window
+            if (actor is not None and "changelog_id_before" in event  # a gateway-native tool's result has no window
+                    and actor["tool"] not in self._unwindowed()):
                 failed = {"failed": True} if kind == "tool_call_failed" else {}
                 self._add(event["changelog_id_before"], event.get("changelog_id"), {**actor, **failed})
-        elif kind == "internal_tool_call":
+        elif kind == "internal_tool_call" and event.get("tool") not in self._unwindowed():
             self._add(event.get("changelog_id_before"), event.get("changelog_id_after"), {
                 "kind": "trigger_action", "event_id": event["event_id"], "trigger_id": event.get("trigger_id"),
                 "action_index": event.get("action_index"), "tool": event.get("tool"), "role": event.get("as")})

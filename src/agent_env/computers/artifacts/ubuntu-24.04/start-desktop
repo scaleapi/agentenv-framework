@@ -1,7 +1,7 @@
 #!/bin/sh
-# The base's start, with the settings a deploy passes as AGENTENV_SETTING_<NAME>, their defaults artifact.toml's:
-# init applies the time zone for every program and starts supervisord, which runs xvfb at the resolution, and with-x
-# runs a program, the XFCE session first, once X answers.
+# The base's start, with the settings a deploy passes as AGENTENV_SETTING_<NAME>, their defaults artifact.toml's. init,
+# as root at the computer's start, is the root start (root/init), which starts the session's supervisord as the session
+# user. That one runs xvfb at the resolution, and with-x runs a program, the XFCE session first, once X answers.
 set -eu
 resolution="${AGENTENV_SETTING_RESOLUTION:-1280x800}"
 width="${resolution%%x*}" height="${resolution#*x}"
@@ -9,16 +9,14 @@ echo "$resolution" | grep -Eqx '[1-9][0-9]{0,4}x[1-9][0-9]{0,4}' && [ "$width" -
     || { echo "resolution is <width>x<height>, each 1 to 32767 pixels, not '$resolution'" >&2; exit 2; }
 case "${1:-}" in
     init)
-        timezone="${AGENTENV_SETTING_TIMEZONE:-UTC}"
-        [ -f "/usr/share/zoneinfo/$timezone" ] || { echo "timezone '$timezone' isn't in /usr/share/zoneinfo" >&2; exit 2; }
-        export TZ="$timezone"
-        exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
+        exec /usr/local/lib/agentenv-root/init
         ;;
     xvfb)
         # supervisord runs one X at a time, so a lock here is one a killed X left, and X refuses to start while the pid
         # it names is taken, which after a restart it often is.
         rm -f "/tmp/.X${DISPLAY#:}-lock"
-        exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac
+        # No screensaver and no DPMS: their timeouts run on real time, and would blank an unattended screen.
+        exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac -s 0 -dpms
         ;;
     with-x)
         shift

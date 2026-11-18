@@ -1,10 +1,13 @@
 """Serve a computer app's class from its file, as its computer's program starts it:
 ``python -m agentenv_protocol.computer.serve_app <file>:<Class>``, run in the app's folder, serves the class's card and
-``computer-app/v1`` on the Unix socket ``.agentenv/server.sock`` there, which only the computer reaches, so it takes no
-control token (``CONTROL_TOKEN_ENV``): the driver checks it in front of the app. Before it serves, it keeps a copy of
+``computer-app/v1`` where only the computer reaches it (``served``): on Linux and macOS the Unix socket
+``.agentenv/server.sock`` there, on Windows a loopback port it writes there with a token. It takes no control token
+(``CONTROL_TOKEN_ENV``): the driver checks it in front of the app. Before it serves, it keeps a copy of
 the app's data paths as installed, which a reset puts back; once it serves, it adds the app's launcher and launches a
 boot app (``AppRuntime.start``). A server that can't start, or whose start fails once it serves, writes why to
-``.agentenv/server.failure``, which its computer's driver reports, and exits. Needs the ``app`` extra."""
+``.agentenv/server.failure``, which its computer's driver reports, and exits. It runs on real time, so its own
+transfers reach the object store directly, not through the computer's egress proxy (``transfers.direct``). Needs the
+``app`` extra."""
 from __future__ import annotations
 
 import asyncio
@@ -16,15 +19,18 @@ from pathlib import Path
 
 import uvicorn
 
+from .. import transfers
 from ..types import CONTROL_TOKEN_ENV
 from ._load import load_class
-from .app import FAILURE, SOCKET, ComputerAppEnvironment
+from .app import FAILURE, ComputerAppEnvironment
+from .served import LOOPBACK, SOCKET, bind, guarded
 
 USAGE = "usage: python -m agentenv_protocol.computer.serve_app <file>:<Class>"
 
 
 def main(argv: list[str]) -> None:
     FAILURE.unlink(missing_ok=True)
+    transfers.direct()
     try:
         _serve(argv)
     except (Exception, SystemExit) as e:
@@ -43,7 +49,6 @@ def _serve(argv: list[str]) -> None:
     runtime = app._computer_app_runtime()
     app._computer_app_data_plane().keep_initial()
     asgi = app.create_app().streamable_http_app()
-    server = uvicorn.Server(uvicorn.Config(asgi, uds=str(SOCKET), log_level="warning"))
     serving, failed = asgi.router.lifespan_context, []
 
     def stop(task: asyncio.Task) -> None:
@@ -60,8 +65,15 @@ def _serve(argv: list[str]) -> None:
             started.cancel()
 
     asgi.router.lifespan_context = lifespan
-    SOCKET.unlink(missing_ok=True)
-    server.run()
+    served = app.served_asgi(asgi)
+    if LOOPBACK:
+        listening, token = bind(Path.cwd())
+        server = uvicorn.Server(uvicorn.Config(guarded(served, token), log_level="warning"))
+        server.run(sockets=[listening])
+    else:
+        server = uvicorn.Server(uvicorn.Config(served, uds=str(SOCKET), log_level="warning"))
+        SOCKET.unlink(missing_ok=True)
+        server.run()
     if failed:
         raise failed[0]
 

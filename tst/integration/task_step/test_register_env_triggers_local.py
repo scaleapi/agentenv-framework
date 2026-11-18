@@ -45,7 +45,7 @@ async def suite(tmp_path_factory):
 async def items_env(suite):
     """The module's env as a fresh deploy leaves it: no triggers, executors or events, no clock, and no items."""
     _, deployed, _ = suite
-    async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+    async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60, headers=deployed.control_headers) as client:
         for path in ("/triggers/clear", "/clock/clear"):
             (await client.post(path)).raise_for_status()
         reset = (await client.post(RPC_PATH, json={"jsonrpc": "2.0", "id": "reset", "method": METHOD_RESET,
@@ -71,7 +71,7 @@ async def test_each_nl_action_reaches_the_executor_it_names(items_env):
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[alice.agent, bob.agent], metadata={})
         await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers,
                                       watch_roles=["default"], executor_timeout_seconds=60).execute(context)
-        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60, headers=deployed.control_headers) as client:
             provoke = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})
             assert provoke.status_code == 200, provoke.text
             state = await _quiet(client, {"to-alice": 1, "to-bob": 1, "on-add": 0})
@@ -116,7 +116,7 @@ async def test_personas_react_to_each_other_until_one_stays_quiet(items_env):
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[denise.agent, bob.agent], metadata={})
         await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers,
                                       watch_roles=["default"], executor_timeout_seconds=60).execute(context)
-        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60, headers=deployed.control_headers) as client:
             provoke = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})
             assert provoke.status_code == 200, provoke.text
             state = await _quiet(client, {"denise-hears-solver": 1, "bob-hears-denise": 2, "denise-hears-bob": 1})
@@ -145,7 +145,7 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(it
     try:
         bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
-        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60, headers=deployed.control_headers) as client:
             # The env is shared, so its trajectory holds the earlier tests' calls: read this test's, after them.
             earlier = len((await client.get("/trajectory")).raise_for_status().text.splitlines())
             await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
@@ -163,9 +163,11 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(it
 
     paced = [e for e in state["events"] if e["kind"] in ("delayed", "deferred", "action_ok")]
     assert [e["kind"] for e in paced] == ["delayed", "deferred", "action_ok"]
-    delayed, deferred, _ = paced
+    _, deferred, _ = paced
     assert deferred["until"] == "2026-10-14T09:00:00Z"
-    assert (_virtual(deferred) - _virtual(delayed)).total_seconds() >= 120
+    detected = next(e for e in state["events"] if e["kind"] == "detected" and e["trigger_id"] == "bob-hears-solver")
+    # The delay runs from the provoking call, read as it's detected, whose stamp can trail that reading a little at 60x.
+    assert (_virtual(deferred) - _virtual(detected)).total_seconds() >= 119
     calls = [e for e in trajectory if e.get("event_type") == "tool_call"]
     cause = [{"trigger_id": "bob-hears-solver", "action_index": 0, "fire": 1}]
     assert ("list_items", "default", None) in [(e["tool_call"]["function_name"], e["role"], e.get("caused_by"))
@@ -190,7 +192,7 @@ async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(items_env):
     try:
         bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
-        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60, headers=deployed.control_headers) as client:
             await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
             await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
                                           executor_timeout_seconds=60).execute(context)
@@ -220,7 +222,7 @@ async def test_the_step_can_wait_for_start_of_run_time_triggers(items_env):
                 {"id": "later", "when": {"type": "time", "at": "2026-10-14T18:00:00Z"},
                  "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "LATER"}}]}]
     context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[], metadata={})
-    async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+    async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60, headers=deployed.control_headers) as client:
         await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
         started = time.monotonic()
         await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],

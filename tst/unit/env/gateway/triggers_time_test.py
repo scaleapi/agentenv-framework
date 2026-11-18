@@ -423,6 +423,46 @@ async def test_unarmed_clock_defers_then_fires_once_armed():
 
 
 @pytest.mark.asyncio
+async def test_a_stopped_clock_holds_a_relative_trigger_and_a_restart_keeps_its_mark():
+    engine, gw, clock, now = _make()
+    clock.set_time(T0, rate=1.0)
+    engine.register({"watch_roles": ["default"], "triggers": [
+        {"id": "rel", "when": {"type": "time", "at": "PT10M"}, "actions": [_perm()]}]})
+    _tick_call(engine, now, 300)
+    clock.set_rate(0)
+    _tick_call(engine, now, 86_400)
+    await _settle(engine)
+    assert engine._triggers["rel"]["fire_count"] == 0
+    clock.set_rate(1.0)
+    _tick_call(engine, now, 299)
+    await _settle(engine)
+    assert engine._triggers["rel"]["fire_count"] == 0
+    _tick_call(engine, now, 2)
+    await _settle(engine)
+    assert engine._triggers["rel"]["fire_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_clock_fires_only_the_marks_it_already_passed():
+    engine, gw, clock, now = _make()
+    clock.set_time(T0, rate=1.0)
+    engine.register({"watch_roles": ["default"], "triggers": [
+        {"id": "rec", "when": {"type": "time", "every": "PT1M"}, "actions": [_perm()]},
+        {"id": "late", "when": {"type": "time", "at": "PT10M"}, "actions": [_perm()]}]})
+    _tick_call(engine, now, 1)
+    await _settle(engine)
+    now.tick(210)
+    clock.set_rate(0)
+    engine.clock_advanced()
+    await _settle(engine)
+    assert engine._triggers["rec"]["fire_count"] == 3
+    for _ in range(24):
+        _tick_call(engine, now, 3600)
+        await _settle(engine)
+    assert (engine._triggers["rec"]["fire_count"], engine._triggers["late"]["fire_count"]) == (3, 0)
+
+
+@pytest.mark.asyncio
 async def test_time_advance_alone_is_inert_without_driver_or_calls():
     """No hidden timer: with no watched call and no driver, advancing virtual time fires nothing."""
     engine, gw, clock, now = _make()

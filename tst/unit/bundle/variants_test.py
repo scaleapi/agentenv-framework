@@ -87,13 +87,25 @@ def test_a_reference_by_id_is_repointed_at_the_variant(tmp_path):
     steps = [{**DEPLOY, "env_id": f"{ROOT}/desktop"}, {**AGENT, "env_ids": [f"{ROOT}/desktop"]}, PROMPT]
     root = _bundle(tmp_path / "desk", steps, {"evals/e.toml": f'tasks = ["{ROOT}/t"]\n'})
 
-    bundle = _varied(root, "envs/desktop.computer=ubuntu-24.04-headless", "envs/desktop.tools=standard")
+    bundle = _varied(root, "envs/desktop.computer=ubuntu-24.04-browser", "envs/desktop.tools=standard")
 
-    label = "desktop.computer ubuntu-24.04-headless, desktop.tools standard"
+    label = "desktop.computer ubuntu-24.04-browser, desktop.tools standard"
     assert [step.get("env_id") or step.get("env_ids") for step in _entry(bundle, "t").config] == [
         f"{ROOT}/desktop({label})", [f"{ROOT}/desktop({label})"], None]
     assert _entry(bundle, "e").config["tasks"] == [f"{ROOT}/t({label})"]
     assert _entry(bundle, "desktop").config["tools"] == "standard"
+
+
+def test_a_context_fact_naming_the_env_by_id_is_repointed_at_the_variant(tmp_path):
+    judge = {"id": "judge", "type": "rubrics_verifier", "prompt_id": "ask", "verifier_id": "v",
+             "criteria": [{"id": "c", "description": "ok"}],
+             "context_facts_for_judge": {"wf-1": f"env_trigger_state[{ROOT}/desktop].statuses.wf-1"}}
+    steps = [{**DEPLOY, "env_id": f"{ROOT}/desktop"}, {**AGENT, "env_ids": [f"{ROOT}/desktop"]}, PROMPT, judge]
+
+    bundle = _varied(_bundle(tmp_path / "desk", steps), "envs/desktop.driver=cua-driver")
+
+    assert _entry(bundle, "t").config[3]["context_facts_for_judge"] == {
+        "wf-1": f"env_trigger_state[{ROOT}/desktop(desktop.driver cua-driver)].statuses.wf-1"}
 
 
 @pytest.mark.parametrize("named", ["t", f"{ROOT}/t"], ids=["name", "id"])

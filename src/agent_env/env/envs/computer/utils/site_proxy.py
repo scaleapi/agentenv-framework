@@ -4,24 +4,32 @@
 ``python3``, so it uses the standard library alone.
 
 ``install``, as root, maps each exact name to loopback in the hosts file, trusts the deployment's CA in the system
-store, Firefox's policies, Chromium's managed policies and the session user's NSS databases, starts ``serve`` and checks, as the session user, that
-each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS, on 80 to redirect those to HTTPS
-and to serve ``.localhost`` names over HTTP, and on 53 for DNS, over UDP and TCP, when a name is a wildcard, which a
-hosts file can't list; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent, which runs as
-the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees itself at ``/`` under its own name: the path goes upstream under
-the route's prefix, ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` say the name and scheme the browser used,
-``AgentEnv-Site-Root`` has the gateway tell the site no prefix, so the links it makes are rooted at ``/`` too, and a
-``Location`` or cookie naming the route is rewritten back to the name. Hop-by-hop headers and the browser's own
-``X-Forwarded-*`` never go upstream; ``Transfer-Encoding`` does, since bodies are relayed as framed, and an
-``Alt-Svc`` offering HTTP/3, which the proxy doesn't serve, never reaches the browser. A WebSocket's upgrade is
-relayed, for an upstream that answers it."""
+store, Firefox's policies, Chromium's managed policies and the session user's NSS databases, starts ``serve`` and
+checks, as the session user, that each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS,
+on 80 to redirect those to HTTPS and to serve ``.localhost`` names over HTTP, on 53 for DNS, over UDP and TCP, when a
+name is a wildcard, which a hosts file can't list, and, on a browser computer, on ``proxy_port`` (3129) as a forward
+proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs,
+takes a live site's hosts (``direct``) straight to them, or, when every address of one is public and the base names
+an egress proxy (``AGENTENV_EGRESS_PROXY``), through that, so it loads at any universe date, and refuses any other
+host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
+which runs as the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees
+itself at ``/`` under its own name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and
+``X-Forwarded-Proto`` say the name and scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no
+prefix, so the links it makes are rooted at ``/`` too, and a ``Location`` or cookie naming the route is rewritten back
+to the name. Hop-by-hop headers and the browser's own ``X-Forwarded-*`` never go upstream; ``Transfer-Encoding`` does,
+since bodies are relayed as framed, and an ``Alt-Svc`` offering HTTP/3, which the proxy doesn't serve, never reaches the
+browser. A WebSocket's upgrade is relayed, for an upstream that answers it."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import ipaddress
+import itertools
 import json
 import os
-import pwd
+import re
 import shutil
 import socket
 import ssl
@@ -32,9 +40,15 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Optional
 from urllib.parse import urlsplit, urlunsplit
+
+try:
+    import pwd
+except ImportError:  # Windows, which agent-env does not target, imports is_local and matches from here on its host.
+    pwd = None
 
 HOSTS_BEGIN = "# agentenv sites"
 HOSTS_END = "# end agentenv sites"
@@ -46,11 +60,17 @@ HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "proxy-a
 SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 FORWARDED = frozenset({"x-forwarded-host", "x-forwarded-proto", "x-forwarded-for", "x-forwarded-port",
                        "x-forwarded-prefix", "forwarded", SITE_ROOT_HEADER.lower()})
+#: Who a request is the gateway's to say: the computer it came from goes upstream from the config alone, and no page
+#: names a role, so its request takes the role driving the computer.
+ROLE_HEADER, COMPUTER_HEADER = "AgentEnv-Role", "AgentEnv-Computer"
+AGENTENV_IDENTITY = frozenset({ROLE_HEADER.lower(), COMPUTER_HEADER.lower()})
 RESPONSE_DROP = frozenset({"connection", "keep-alive", "proxy-connection", "alt-svc"})
 UPSTREAM_HEADERS_FILE = "upstream_headers.json"
 HEAD_LIMIT = 1 << 20
 CHUNK = 1 << 16
 UPSTREAM_TIMEOUT_S = 30.0
+#: The variable naming a base's egress proxy, which a browser computer's live sites go out through when it has one.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
 DNS_TIMEOUT_S = 4.0
 NAMESERVER_PORT = 53
 DATAGRAM_MAX = 65535
@@ -59,9 +79,39 @@ LISTEN_TIMEOUT_S = 15.0
 # log the failure shows.
 LISTEN_PROBE_S, LISTEN_POLL_S, LOG_TAIL_CHARS = 1.0, 0.2, 2000
 CHECK_TIMEOUT_S = 15.0
+#: The checks after each site's: Python through ``SSL_CERT_FILE``, Node and curl, and the forward port's.
+RUNTIME_CHECKS = 4
+#: What a JDK's store is opened with unless it says otherwise, how deep a JDK's store is looked for under its folders,
+#: the folders not looked in, and how long a ``keytool`` call may take.
+JAVA_STORE_PASSWORD = "changeit"
+JDK_SEARCH_DEPTH = 8
+JDK_SKIPPED = frozenset({"node_modules", ".git", "__pycache__", "site-packages"})
+KEYTOOL_TIMEOUT_S = 60.0
+#: A PEM certificate, from its BEGIN line to its END line.
+PEM_CERTIFICATE = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
+#: A Node program loading the URL it's given, printing the status it's answered, and failing with the error it meets.
+NODE_GET = ("require('https').get(process.argv[1], r => { console.log(r.statusCode); r.resume(); })"
+            ".on('error', e => { console.error(e.message); process.exit(1); })")
 RESTART_DELAY_S = 1.0
 SERVE_USER = "nobody"
 FAILED = (("X-Agentenv-Site-Proxy", "failed"),)
+#: The most of a request's body, and of an answer's, the network log keeps, and the answers it keeps any of, by their
+#: type: text, JSON, forms, XML and scripts.
+REQUEST_BODY_LIMIT, ANSWER_BODY_LIMIT = 10 << 20, 1 << 20
+KEPT_ANSWERS = re.compile(
+    r"^\s*(text/|application/(json|x-www-form-urlencoded|xml|javascript|ecmascript)\b|[^;]*\+(json|xml)\b)", re.I)
+#: What the network log keeps of a header a site names as its sign-in header.
+REMOVED = "<removed>"
+#: A site's fields in the config ``install`` reads that the config it serves from keeps as given, which the session
+#: user reads too; its certificate and key ``install`` writes to files, and its upstream headers to one root alone
+#: reads (``PRIVATE_SITE_FIELDS``). Every field a site's config has is one or the other.
+SERVED_SITE_FIELDS = ("name", "upstream", "domains", "sign_in_headers")
+PRIVATE_SITE_FIELDS = ("cert_pem", "key_pem", "upstream_headers")
+#: How a network log line begins, its number, its kind and its entry's id, so a proxy started again finds its last
+#: number and the entries left open without reading every body.
+NUMBERED = re.compile(rb'^\{"seq":(\d+),"at":"[^"]*","(open|end)":\{"id":"([^"]*)"')
+#: Why an entry a proxy left open ended: it was carrying it when it stopped.
+RESTARTED = {"reason": "the proxy restarted", "error": "it was in flight when the proxy that carried it stopped"}
 
 
 class BadRequest(Exception):
@@ -83,6 +133,150 @@ def matches(pattern: str, host: str) -> bool:
     return host == pattern
 
 
+def log_event(**fields) -> None:
+    """One JSON line in the proxy's log, every line it writes being one: ``connection`` (host, port, address, bytes each
+    way, start, duration) when a connection to a live site's host ends, ``failed`` (method, host, port, ``reason``
+    "doesn't resolve" or "no answer", the error, and when it was asked for) for one that couldn't open, both in the same shapes as the
+    headless base's stand-in proxy's; ``refused`` for a host that's no site, ``error`` for a connection that failed
+    unexpectedly, and ``restarted`` when ``keep`` starts the proxy again."""
+    print(json.dumps(fields), file=sys.stderr, flush=True)
+
+
+def when(at: float) -> str:
+    """A log line's time, to the second, in UTC."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
+
+
+def stamp() -> str:
+    """Now, to the millisecond, in UTC, as the network log, and HAR after it, write times."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def described(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}".removesuffix(": ")
+
+
+class Count:
+    """The bytes a relay has carried one way, counted as it goes, so a connection that ends on an error keeps them."""
+
+    def __init__(self, start: int = 0):
+        self.bytes = start
+
+    def add(self, data: bytes) -> None:
+        self.bytes += len(data)
+
+
+class Capture:
+    """A body as it is relayed: its size and, when it is ``logged``, its sha256 and, when ``keep``, its first ``limit``
+    bytes; with no network log to write it to, its size alone, so nothing is held or hashed for nothing."""
+
+    def __init__(self, limit: int, keep: bool = True, logged: bool = True):
+        self.limit, self.keep, self.size = limit, keep and logged, 0
+        self.data, self.digest = bytearray(), hashlib.sha256() if logged else None
+
+    def add(self, data: bytes) -> None:
+        self.size += len(data)
+        if self.digest is not None:
+            self.digest.update(data)
+        if self.keep and len(self.data) < self.limit:
+            self.data += data[:self.limit - len(self.data)]
+
+    def record(self) -> dict:
+        """The body as the network log keeps it: its bytes base64, kept or not, and cut or not."""
+        if self.digest is None:
+            return {"size": self.size}
+        kept = {"base64": base64.b64encode(bytes(self.data)).decode(), "truncated": self.size > self.limit} \
+            if self.keep else {}
+        return {"size": self.size, "sha256": self.digest.hexdigest(), **kept}
+
+
+class Frames:
+    """One direction of a WebSocket, its messages counted as its bytes go by: a message ends at a data frame marked
+    final, and control frames aren't messages."""
+
+    def __init__(self):
+        self.messages = self.bytes = self._payload = 0
+        self._head = b""
+
+    def add(self, data: bytes) -> None:
+        self.bytes += len(data)
+        data, at = self._head + data, 0
+        self._head = b""
+        while at < len(data):
+            if self._payload:
+                taken = min(self._payload, len(data) - at)
+                self._payload -= taken
+                at += taken
+                continue
+            if len(data) - at < 2:
+                break
+            first, second = data[at], data[at + 1]
+            size, length = second & 0x7F, 2 + (2 if second & 0x7F == 126 else 8 if second & 0x7F == 127 else 0)
+            if len(data) - at < length + (4 if second & 0x80 else 0):
+                break
+            if size >= 126:
+                size = int.from_bytes(data[at + 2:at + length], "big")
+            if first & 0x80 and first & 0x0F < 8:
+                self.messages += 1
+            at += length + (4 if second & 0x80 else 0)
+            self._payload = size
+        self._head = data[at:] if not self._payload else b""
+
+
+class NetworkLog:
+    """The network log in ``path``: JSON lines appended as the proxy runs, each numbered after the last the file holds,
+    so a proxy started again carries on, and timed. ``open`` opens it as root, readable by every user, before
+    ``serve`` drops privileges, so the session user can read the log and can't write it."""
+
+    def __init__(self, file, seq: int):
+        self.file, self.seq, self.ids = file, seq, itertools.count(1)
+        self.run = f"{os.getpid()}-{seq}"
+
+    @classmethod
+    def open(cls, path: str) -> NetworkLog:
+        """The log, numbered on from the file's last line, a line a crash cut ended first and every entry the proxy
+        before left open ended as ``RESTARTED``."""
+        seq, partial, left = 0, False, {}
+        try:
+            with open(path, "rb") as existing:
+                for raw in existing:
+                    partial = not raw.endswith(b"\n")
+                    if not partial and (numbered := NUMBERED.match(raw)):
+                        seq = max(seq, int(numbered.group(1)))
+                        kind, key = numbered.group(2), numbered.group(3).decode()
+                        if kind == b"open":
+                            left[key] = True
+                        else:
+                            left.pop(key, None)
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        os.fchmod(descriptor, 0o644)
+        file = os.fdopen(descriptor, "ab")
+        if partial:
+            file.write(b"\n")
+        log = cls(file, seq)
+        for key in left:
+            log.write("end", {"id": key, "ended": stamp(), "failed": RESTARTED})
+        return log
+
+    def key(self) -> str:
+        """An id for a request or tunnel, which its ``open`` and ``end`` lines both name: unique to this run of the
+        proxy, by its pid and the number the log stood at when it started, so a proxy started again never reuses one."""
+        return f"{self.run}-{next(self.ids)}"
+
+    def write(self, kind: str, record: dict) -> None:
+        """A line of ``kind``, ``open`` or ``end``, holding ``record``, its ``id`` first."""
+        self.seq += 1
+        line = json.dumps({"seq": self.seq, "at": stamp(), kind: {"id": record["id"], **record}},
+                          separators=(",", ":")) + "\n"
+        try:
+            self.file.write(line.encode())
+            self.file.flush()
+        except (OSError, ValueError) as e:
+            log_event(error={"connection": "network log", "error": described(e)})
+
+
 @dataclass
 class Site:
     """One site as the proxy serves it: its names, the route on the gateway it forwards to, and its certificate and key
@@ -94,6 +288,7 @@ class Site:
     cert: Optional[str] = None
     key: Optional[str] = None
     upstream_headers: dict[str, str] = field(default_factory=dict)
+    sign_in_headers: list[str] = field(default_factory=list)
     scheme: str = field(init=False)
     host: str = field(init=False)
     port: int = field(init=False)
@@ -127,8 +322,11 @@ class Config:
     listen: str = LOOPBACK
     https_port: int = 443
     http_port: int = 80
+    proxy_port: Optional[int] = None
     dns_port: Optional[int] = None
     nameservers: list[str] = field(default_factory=list)
+    direct: list[str] = field(default_factory=list)
+    network_log: Optional[str] = None
 
     @classmethod
     def load(cls, path: str) -> Config:
@@ -141,12 +339,14 @@ class Config:
                 headers = json.loads(Path(data["upstream_headers"]).read_text())
             except PermissionError:
                 headers = {}
-        sites = [Site(name=s["name"], upstream=s["upstream"], domains=list(s["domains"]), cert=s.get("cert"),
+        sites = [Site(**{field: s[field] for field in SERVED_SITE_FIELDS if field in s}, cert=s.get("cert"),
                       key=s.get("key"), upstream_headers=dict(headers.get(s["name"]) or {})) for s in data["sites"]]
         return cls(user=data.get("user"), sites=sites, serve_user=data.get("serve_user"),
                    listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
-                   dns_port=data.get("dns_port"), nameservers=list(data.get("nameservers") or []))
+                   proxy_port=data.get("proxy_port"), dns_port=data.get("dns_port"),
+                   nameservers=list(data.get("nameservers") or []), direct=list(data.get("direct") or []),
+                   network_log=data.get("network_log"))
 
     def site_for(self, host: str) -> Optional[Site]:
         """The site ``host`` names: one naming it exactly before one whose wildcard covers it."""
@@ -156,6 +356,17 @@ class Config:
                 if any(matches(name, host) for name in site.domains if name.startswith("*.") != exact):
                     return site
         return None
+
+    def is_direct(self, host: str) -> bool:
+        """Whether the forward port takes ``host`` straight to it: a name of a live site's (``direct``), never an
+        address or a ``.localhost`` name."""
+        host = host.lower().rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+            return False
+        except ValueError:
+            pass
+        return bool(host) and not is_local(host) and any(matches(pattern, host) for pattern in self.direct)
 
 
 def header(headers: list[tuple[str, str]], name: str) -> Optional[str]:
@@ -239,7 +450,8 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
         parts = urlsplit(target)
         target = urlunsplit(("", "", parts.path or "/", parts.query, ""))
     provided = {key.lower() for key in site.upstream_headers}
-    kept = [(key, value) for key, value in headers if key.lower() not in HOP_BY_HOP | FORWARDED | provided]
+    kept = [(key, value) for key, value in headers
+            if key.lower() not in HOP_BY_HOP | FORWARDED | AGENTENV_IDENTITY | provided]
     kept += [("Host", site.netloc), ("X-Forwarded-Host", host), ("X-Forwarded-Proto", scheme),
              ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, f"{scheme}://{host}"), *site.upstream_headers.items()]
     kept += [("Connection", "Upgrade"), ("Upgrade", upgrade)] if upgrade else [("Connection", "close")]
@@ -247,9 +459,86 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 
+async def resolve(host: str, port: int) -> list[str]:
+    """The addresses ``host`` resolves to, each once, in the resolver's order."""
+    found = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(info[4][0] for info in found))
+
+
+class EgressRefused(ConnectionError):
+    """The egress proxy's answer to a ``CONNECT`` that isn't established, as it gave it."""
+
+
+def egress_proxy() -> Optional[tuple[str, int]]:
+    """The egress proxy's address, as ``AGENTENV_EGRESS_PROXY`` names it, or None in a base with none."""
+    url = urlsplit(os.environ.get(EGRESS_PROXY_ENV) or "")
+    return (url.hostname, url.port or 80) if url.hostname else None
+
+
+def public(addresses: list[str]) -> bool:
+    """Whether every one of ``addresses`` is public, the only destinations the egress proxy takes."""
+    return bool(addresses) and all(ipaddress.ip_address(address.split("%", 1)[0]).is_global for address in addresses)
+
+
+async def through_egress(egress: tuple[str, int], host: str,
+                         port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A ``CONNECT`` tunnel to ``host`` at ``port`` through the egress proxy at ``egress``, established; it raises
+    ``EgressRefused`` with the proxy's status line when the proxy won't open one."""
+    authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    reader, writer = await asyncio.open_connection(*egress, limit=HEAD_LIMIT)
+    try:
+        writer.write(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("latin-1"))
+        await writer.drain()
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError as e:
+            raise EgressRefused("the egress proxy closed the tunnel before answering it") from e
+        except asyncio.LimitOverrunError as e:
+            raise EgressRefused("the egress proxy's answer has no end to its head") from e
+        status = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        if status.split(" ", 2)[1:2] != ["200"]:
+            raise EgressRefused(f"the egress proxy answered {status!r}")
+    except BaseException:
+        writer.close()
+        raise
+    return reader, writer
+
+
+async def open_live(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str, Optional[str]]:
+    """A connection to ``host``, a live site's, at ``port``, the address it reached and what it went through: the
+    base's egress proxy (``"egress"``, the address the proxy's own) when there is one and every address of ``host`` is
+    public, else nothing (None)."""
+    if (egress := egress_proxy()) is not None and public(await resolve(host, port)):
+        reader, writer = await through_egress(egress, host, port)
+        return reader, writer, (writer.get_extra_info("peername") or egress)[0], "egress"
+    reader, writer = await asyncio.open_connection(host, port, limit=HEAD_LIMIT)
+    return reader, writer, (writer.get_extra_info("peername") or ("",))[0], None
+
+
+def direct_head(start: str, headers: list[tuple[str, str]]) -> bytes:
+    """A request a browser alone named by its URL, as it goes straight to a live site's host: the path alone on its
+    request line, the proxy's own headers dropped, and a connection that closes after it."""
+    method, target, version = start.split(" ")
+    parts = urlsplit(target)
+    kept = [(key, value) for key, value in headers
+            if key.lower() not in {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}]
+    lines = [f"{method} {urlunsplit(('', '', parts.path or '/', parts.query, ''))} {version}",
+             *(f"{key}: {value}" for key, value in kept), "Connection: close"]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
 def response_head(status_line: str, headers: list[tuple[str, str]], site: Site, *, scheme: str, host: str,
                   connection: str) -> bytes:
     _, _, status = status_line.partition(" ")
+    lines = [f"HTTP/1.1 {status}", *(f"{key}: {value}" for key, value in
+                                     public_headers(headers, site, scheme=scheme, host=host, connection=connection))]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
+def public_headers(headers: list[tuple[str, str]], site: Site, *, scheme: str, host: str,
+                   connection: str) -> list[tuple[str, str]]:
+    """An answer's headers as the browser gets them: the proxy's own dropped, ``Location`` and cookies naming the route
+    moved onto the site's name, and ``connection``."""
     kept = []
     for key, value in headers:
         lower = key.lower()
@@ -261,8 +550,36 @@ def response_head(status_line: str, headers: list[tuple[str, str]], site: Site, 
             value = public_cookie(value, site)
         kept.append((key, value))
     kept.append(("Connection", connection))
-    lines = [f"HTTP/1.1 {status}", *(f"{key}: {value}" for key, value in kept)]
-    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+    return kept
+
+
+def logged_headers(headers: list[tuple[str, str]], removed: list[str]) -> list[list[str]]:
+    """A request's headers as the network log keeps them: each as the browser sent it, but for those named in
+    ``removed``, a site's sign-in headers, whose values are taken out."""
+    names = {name.lower() for name in removed}
+    return [[key, REMOVED if key.lower() in names else value] for key, value in headers]
+
+
+def kept_answer(headers: list[tuple[str, str]]) -> bool:
+    """Whether the network log keeps any of an answer's body, by its ``Content-Type``."""
+    return bool(KEPT_ANSWERS.match(header(headers, "content-type") or ""))
+
+
+def status_parts(status_line: str) -> tuple[str, int, str]:
+    """An answer's status line as its version, its code and its reason."""
+    version, _, rest = status_line.partition(" ")
+    code, _, reason = rest.partition(" ")
+    try:
+        return version, int(code), reason
+    except ValueError:
+        raise BadRequest(f"a malformed status line {status_line!r}") from None
+
+
+def answered(status_line: str, headers: list[tuple[str, str]]) -> dict:
+    """An answer as the network log keeps it, before its body: its status, its reason and its headers."""
+    version, code, reason = status_parts(status_line)
+    return {"status": code, "reason": reason, "http_version": version,
+            "headers": [[key, value] for key, value in headers]}
 
 
 def simple_response(status: str, body: str, extra: tuple[tuple[str, str], ...] = ()) -> bytes:
@@ -284,18 +601,22 @@ async def read_head(reader: asyncio.StreamReader) -> Optional[bytes]:
         raise BadRequest("a head over the limit") from None
 
 
-async def relay_exact(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, size: int) -> None:
+async def relay_exact(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, size: int,
+                      capture: Optional[Capture] = None) -> None:
     while size > 0:
         data = await reader.read(min(size, CHUNK))
         if not data:
             raise BadRequest("the body ended early")
         writer.write(data)
         await writer.drain()
+        if capture is not None:
+            capture.add(data)
         size -= len(data)
 
 
-async def relay_chunked(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """A chunked body relayed as framed, to its last chunk and trailers."""
+async def relay_chunked(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                        capture: Optional[Capture] = None) -> None:
+    """A chunked body relayed as framed, to its last chunk and trailers; ``capture`` takes the chunks' data alone."""
     while True:
         line = await reader.readuntil(b"\r\n")
         writer.write(line)
@@ -309,32 +630,38 @@ async def relay_chunked(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             writer.write(trailer)
             await writer.drain()
             return
-        await relay_exact(reader, writer, size + 2)
+        await relay_exact(reader, writer, size, capture)
+        await relay_exact(reader, writer, 2)
 
 
-async def relay_until_eof(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def relay_until_eof(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, count=None) -> None:
+    """Everything ``reader`` sends until it ends, each piece handed to ``count`` (a ``Count``, a ``Capture`` or
+    ``Frames``) when given."""
     while data := await reader.read(CHUNK):
         writer.write(data)
         await writer.drain()
+        if count is not None:
+            count.add(data)
 
 
 async def relay_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: list[tuple[str, str]],
-                     *, to_eof: bool) -> None:
+                     *, to_eof: bool, capture: Optional[Capture] = None) -> None:
     if "chunked" in tokens(headers, "transfer-encoding"):
-        await relay_chunked(reader, writer)
+        await relay_chunked(reader, writer, capture)
     elif (length := header(headers, "content-length")) is not None:
         try:
-            await relay_exact(reader, writer, int(length))
+            await relay_exact(reader, writer, int(length), capture)
         except ValueError:
             raise BadRequest(f"a malformed Content-Length {length!r}") from None
     elif to_eof:
-        await relay_until_eof(reader, writer)
+        await relay_until_eof(reader, writer, capture)
 
 
-async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction."""
+async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, count=None) -> None:
+    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction;
+    each piece it carries handed to ``count`` when given."""
     try:
-        await relay_until_eof(reader, writer)
+        await relay_until_eof(reader, writer, count)
     except (ConnectionError, OSError, ssl.SSLError):
         pass
     finally:
@@ -343,23 +670,236 @@ async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
 
 class SiteProxy:
     """The proxy's HTTP side: one connection's requests, each forwarded on a connection of its own to its site's
-    route."""
+    route; with a ``network`` log, each request and each tunnel in it as it begins and as it ends."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, tls: Optional[ssl.SSLContext] = None, network: Optional[NetworkLog] = None):
         self.config = config
+        self.tls = tls
         self.upstream_tls = ssl.create_default_context()
+        self.network = network
+
+    def _id(self) -> str:
+        return self.network.key() if self.network is not None else ""
+
+    def _note(self, kind: str, record: dict) -> None:
+        if self.network is not None:
+            self.network.write(kind, record)
+
+    def _capture(self, limit: int, keep: bool = True) -> Capture:
+        return Capture(limit, keep, logged=self.network is not None)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str) -> None:
-        peer = (writer.get_extra_info("peername") or (LOOPBACK,))[0]
+        await self._serving(writer, scheme, self._requests(reader, writer, scheme, _peer(writer), forward=False))
+
+    async def handle_forward(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """The forward-proxy port's connection: a ``CONNECT`` to a site's name tunnels to the site as the listeners
+        serve it, over TLS with its certificate for a name served over HTTPS, and any other request is served as the
+        HTTP listener serves it; ``exchange`` refuses one naming any other host, loopback among them, at once and logs
+        it."""
+        await self._serving(writer, "proxy", self._proxied(reader, writer, _peer(writer)))
+
+    async def _requests(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str, peer: str, *,
+                        forward: bool) -> None:
+        while await self.exchange(reader, writer, scheme, peer, forward=forward):
+            pass
+
+    async def _proxied(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str) -> None:
+        while (head := await read_head(reader)) is not None:
+            start, headers = parse_head(head)
+            method, _, rest = start.partition(" ")
+            if method == "CONNECT":
+                await self._tunnel(reader, writer, peer, rest.rpartition(" ")[0])
+                return
+            target = urlsplit(rest.rpartition(" ")[0])
+            if target.hostname and self.config.site_for(target.hostname) is None and self.config.is_direct(
+                    target.hostname):
+                await self._direct_exchange(reader, writer, start, headers, target.hostname, target.port or 80)
+                return
+            if not await self.exchange(reader, writer, "http", peer, head=head, forward=True):
+                return
+
+    async def _tunnel(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str,
+                      authority: str) -> None:
+        """A ``CONNECT`` to ``authority``: the site it names, whose certificate the tunnel's TLS needs before any
+        request in it, then each request in it, as the port serves them; or a live site's host, tunnelled straight
+        to it."""
+        host = split_host(authority)
+        if (site := self.config.site_for(host)) is None:
+            if self.config.is_direct(host):
+                port = authority.rpartition(":")[2] if host != authority else ""
+                await self._direct(reader, writer, host, int(port) if port.isdigit() else 443)
+                return
+            self._refuse(writer, "CONNECT", authority)
+            return
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        await writer.drain()
+        tls = site.tls(host.lower())
+        if tls:
+            if self.tls is None:
+                raise BadRequest(f"{host} is served over HTTPS, and this proxy has no certificate for it")
+            await writer.start_tls(self.tls)
+        await self._requests(reader, writer, "https" if tls else "http", peer, forward=True)
+
+    async def _connect_direct(self, writer: asyncio.StreamWriter, method: str, host: str, port: int, key: str,
+                              started: str, record: dict) -> Optional[tuple]:
+        """A connection to ``host``, a live site's, at ``port``, its reader, writer and address; or None once the browser
+        has a 502 for one that doesn't resolve or answer within ``UPSTREAM_TIMEOUT_S``, the lookup and every address's
+        attempt together, which is logged (``log_event``) and ends ``record`` in the network log."""
+        asked = time.time()
         try:
-            while await self.exchange(reader, writer, scheme, peer):
-                pass
+            up_reader, up_writer, address, via = await asyncio.wait_for(open_live(host, port), UPSTREAM_TIMEOUT_S)
+        except (OSError, asyncio.TimeoutError) as e:
+            unresolved = isinstance(e, socket.gaierror)
+            reason = "doesn't resolve" if unresolved else "no answer"
+            log_event(failed={"method": method, "host": host, "port": port, "reason": reason, "error": described(e),
+                              "started": when(asked)})
+            self._note("end", {**record, "id": key, "started": started, "ended": stamp(),
+                               "failed": {"reason": reason, "error": described(e)}})
+            writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n" if unresolved else
+                                         f"{host}:{port} didn't answer\n", FAILED))
+            return None
+        if via:
+            record["via"] = via
+        return up_reader, up_writer, address
+
+    async def _direct(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int) -> None:
+        """A ``CONNECT`` to ``host``, a live site's, tunnelled straight to it at ``port`` and answered as established;
+        then both ends relayed until either closes. The tunnel is in the network log as it opens and as it ends, and
+        the connection is logged (``log_event``) as it ends."""
+        key, started = self._id(), stamp()
+        tunnel = {"kind": "tunnel", "host": host, "port": port}
+        if (opened := await self._connect_direct(writer, "CONNECT", host, port, key, started, tunnel)) is None:
+            return
+        up_reader, up_writer, address = opened
+        self._note("open", {**tunnel, "id": key, "started": started, "address": address})
+        wall, began, sent, received = time.time(), time.monotonic(), Count(), Count()
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        try:
+            await asyncio.gather(writer.drain(), up_writer.drain())
+            await asyncio.gather(splice(reader, up_writer, sent), splice(up_reader, writer, received))
+        finally:
+            self._note("end", {"id": key, "ended": stamp(), "bytes_sent": sent.bytes, "bytes_received": received.bytes})
+            log_event(connection={"host": host, "port": port, "address": address,
+                                  **({"via": tunnel["via"]} if "via" in tunnel else {}), "bytes_sent": sent.bytes,
+                                  "bytes_received": received.bytes, "started": when(wall),
+                                  "duration_s": round(time.monotonic() - began, 3)})
+
+    async def _direct_exchange(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, start: str,
+                               headers: list[tuple[str, str]], host: str, port: int) -> None:
+        """A request a browser alone named by its URL on a live site's ``host``, sent straight to it at ``port`` with its
+        path alone and a connection that closes after it. Its body and the answer go both ways at once, as a tunnel's
+        bytes do, so an answer that comes before the body is done, a ``100 Continue`` or an early 413, reaches the
+        browser as it comes. The exchange is in the network log in full; an answer the proxy can't read as HTTP is
+        relayed as it came, its entry saying so (``unparsed``). The connection is logged (``log_event``) as a tunnel's
+        is."""
+        method, _, rest = start.partition(" ")
+        target, _, version = rest.rpartition(" ")
+        key, started = self._id(), stamp()
+        request = {"method": method, "url": target, "http_version": version, "headers": logged_headers(headers, [])}
+        record = {"kind": "exchange", "request": request}
+        if (opened := await self._connect_direct(writer, method, host, port, key, started, record)) is None:
+            return
+        up_reader, up_writer, address = opened
+        head = direct_head(start, headers)
+        wall, began, sent, received = time.time(), time.monotonic(), Count(len(head)), Count()
+        body, kept, ended, noted = self._capture(REQUEST_BODY_LIMIT), None, {"id": key}, []
+
+        def sent_request() -> dict:
+            return {**request, **({"body": body.record()} if body.size else {})}
+
+        async def upload() -> None:
+            try:
+                up_writer.write(head)
+                await relay_body(reader, up_writer, headers, to_eof=False, capture=body)
+                await up_writer.drain()
+            except (BadRequest, ConnectionError, OSError, asyncio.IncompleteReadError) as e:
+                ended.setdefault("failed", {"reason": "the request broke off", "error": described(e)})
+                up_writer.close()
+                return
+            self._note("open", {**record, "id": key, "started": started, "address": address,
+                                "request": sent_request()})
+            noted.append(True)
+
+        sending = asyncio.ensure_future(upload())
+        try:
+            while True:
+                try:
+                    answer = await up_reader.readuntil(b"\r\n\r\n")
+                    status_line, answer_headers = parse_head(answer)
+                    code = status_parts(status_line)[1]
+                except asyncio.IncompleteReadError as e:
+                    if not e.partial.strip():
+                        writer.write(simple_response("502 Bad Gateway", f"{host} closed without answering\n",
+                                                     FAILED))
+                        ended.setdefault("failed", {"reason": "no answer",
+                                                    "error": f"{host} closed without answering"})
+                        return
+                    await self._unparsed(up_reader, writer, e.partial, received, ended, "the answer's head ended early")
+                    return
+                except asyncio.LimitOverrunError:
+                    await self._unparsed(up_reader, writer, await up_reader.read(HEAD_LIMIT), received, ended,
+                                         "a head over the limit")
+                    return
+                except BadRequest as e:
+                    await self._unparsed(up_reader, writer, answer, received, ended, str(e))
+                    return
+                received.bytes += len(answer)
+                writer.write(answer)
+                if not 100 <= code < 200:
+                    break
+                await writer.drain()
+            ended.update(answered=stamp(), response=answered(status_line, answer_headers))
+            kept = self._capture(ANSWER_BODY_LIMIT, kept_answer(answer_headers))
+            if method != "HEAD" and code not in (204, 304):
+                await relay_body(up_reader, writer, answer_headers, to_eof=True, capture=kept)
+            await writer.drain()
+            received.bytes += kept.size
+        except BaseException as e:
+            ended.setdefault("failed", {"reason": "the exchange broke off", "error": described(e)})
+            raise
+        finally:
+            if not sending.done():
+                sending.cancel()
+            await asyncio.gather(sending, return_exceptions=True)
+            sent.bytes += body.size
+            if kept is not None and kept.size:
+                ended["response"]["body"] = kept.record()
+            alone = {} if noted else {**record, "request": sent_request(), "started": started, "address": address}
+            self._note("end", {**ended, "ended": stamp(), **alone})
+            log_event(connection={"host": host, "port": port, "address": address,
+                                  **({"via": record["via"]} if "via" in record else {}), "bytes_sent": sent.bytes,
+                                  "bytes_received": received.bytes, "started": when(wall),
+                                  "duration_s": round(time.monotonic() - began, 3)})
+            up_writer.close()
+
+    @staticmethod
+    async def _unparsed(up_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, first: bytes, received: Count,
+                        ended: dict, why: str) -> None:
+        """An answer the proxy can't read as HTTP, relayed as it came, from ``first`` to its end."""
+        ended["unparsed"] = {"reason": "an answer the proxy can't read as HTTP", "error": why}
+        received.add(first)
+        writer.write(first)
+        await writer.drain()
+        await relay_until_eof(up_reader, writer, received)
+
+    def _refuse(self, writer: asyncio.StreamWriter, method: str, host: str) -> None:
+        log_event(refused={"method": method, "host": host, "reason": "no site of this computer"})
+        now = stamp()
+        self._note("end", {"id": self._id(), "kind": "refused", "started": now, "ended": now, "method": method,
+                           "url": host, "refused": {"reason": "no site of this computer"}})
+        writer.write(simple_response("403 Forbidden", f"{host} is no site of this computer, and the browser reaches "
+                                     "its sites alone\n", FAILED))
+
+    @staticmethod
+    async def _serving(writer: asyncio.StreamWriter, label: str, serving: Awaitable[None]) -> None:
+        try:
+            await serving
         except BadRequest as e:
             writer.write(simple_response("400 Bad Request", f"{e}\n"))
         except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, OSError):
             pass
         except Exception as e:
-            print(f"site proxy: a {scheme} connection failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            log_event(error={"connection": label, "error": described(e)})
         finally:
             try:
                 await writer.drain()
@@ -369,9 +909,10 @@ class SiteProxy:
                 pass
 
     async def exchange(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str,
-                       peer: str) -> bool:
-        """One request and its answer; whether the connection takes another."""
-        head = await read_head(reader)
+                       peer: str, head: Optional[bytes] = None, *, forward: bool = False) -> bool:
+        """One request, read unless its ``head`` is given, and its answer; whether the connection takes another. One
+        naming no site gets 421, or on the forward port (``forward``) the port's refusal, logged."""
+        head = head or await read_head(reader)
         if head is None:
             return False
         start, headers = parse_head(head)
@@ -379,15 +920,26 @@ class SiteProxy:
             method, target, version = start.split(" ")
         except ValueError:
             raise BadRequest(f"a malformed request line {start!r}") from None
-        host = header(headers, "host") or (urlsplit(target).netloc if "://" in target else "")
+        host = (urlsplit(target).netloc if "://" in target else "") or header(headers, "host") or ""
         site = self.config.site_for(split_host(host)) if host else None
         if site is None:
-            writer.write(simple_response("421 Misdirected Request", f"{host or 'no host'} is no site of this "
-                                         "computer\n", FAILED))
+            if forward:
+                self._refuse(writer, method, host or target)
+            else:
+                writer.write(simple_response("421 Misdirected Request", f"{host or 'no host'} is no site of this "
+                                             "computer\n", FAILED))
             return False
+        key, started = self._id(), stamp()
+        request = {"method": method, "url": target if "://" in target else f"{scheme}://{host}{target}",
+                   "http_version": version, "headers": logged_headers(headers, site.sign_in_headers)}
         if scheme == "http" and site.tls(split_host(host).lower()):
-            location = f"https://{split_host(host)}{target if target.startswith('/') else urlsplit(target).path}"
+            parts = urlsplit(target)
+            path = target if target.startswith("/") else urlunsplit(("", "", parts.path or "/", parts.query, ""))
+            location = f"https://{split_host(host)}{path}"
             writer.write(simple_response("308 Permanent Redirect", f"{location}\n", (("Location", location),)))
+            self._note("end", {"id": key, "kind": "exchange", "started": started, "ended": stamp(), "request": request,
+                               "response": {"status": 308, "reason": "Permanent Redirect", "http_version": "HTTP/1.1",
+                                            "headers": [["Location", location]]}})
             return False
         upgrade = header(headers, "upgrade") if "upgrade" in tokens(headers, "connection") else None
         if "100-continue" in tokens(headers, "expect"):
@@ -399,49 +951,80 @@ class SiteProxy:
         except (OSError, asyncio.TimeoutError, ssl.SSLError) as e:
             writer.write(simple_response("502 Bad Gateway", f"the site {site.name} can't be reached at "
                                          f"{site.upstream}: {type(e).__name__}: {e}\n", FAILED))
+            self._note("end", {"id": key, "kind": "exchange", "started": started, "ended": stamp(), "request": request,
+                               "failed": {"reason": "the site can't be reached", "error": described(e)}})
             return False
         try:
             return await self._forward(reader, writer, up_reader, up_writer, method, target, version, headers, site,
-                                       scheme=scheme, host=host, peer=peer, upgrade=upgrade)
+                                       scheme=scheme, host=host, peer=peer, upgrade=upgrade, key=key, started=started,
+                                       request=request)
         finally:
             up_writer.close()
 
     async def _forward(self, reader, writer, up_reader, up_writer, method, target, version, headers, site, *,
-                       scheme, host, peer, upgrade) -> bool:
-        up_writer.write(upstream_request(method, target, headers, site, scheme=scheme, host=host, peer=peer,
-                                         upgrade=upgrade))
-        await relay_body(reader, up_writer, headers, to_eof=False)
-        await up_writer.drain()
-        while True:
-            answer = await read_head(up_reader)
-            if answer is None:
-                writer.write(simple_response("502 Bad Gateway", f"the site {site.name} closed without answering\n",
-                                             FAILED))
-                return False
-            status_line, answer_headers = parse_head(answer)
-            code = int(status_line.split(" ")[1])
-            if code == 101 and upgrade:
-                writer.write(response_head(status_line, answer_headers, site, scheme=scheme, host=host,
-                                           connection="Upgrade"))
-                await writer.drain()
-                await asyncio.gather(splice(reader, up_writer), splice(up_reader, writer))
-                return False
-            if 100 <= code < 200:
-                continue
-            break
-        bodiless = method == "HEAD" or code in (204, 304)
-        framed = bodiless or "chunked" in tokens(answer_headers, "transfer-encoding") \
-            or header(answer_headers, "content-length") is not None
-        keep = framed and version == "HTTP/1.1" and "close" not in tokens(headers, "connection")
-        writer.write(response_head(status_line, answer_headers, site, scheme=scheme, host=host,
-                                   connection="keep-alive" if keep else "close"))
-        if not bodiless:
-            try:
-                await relay_body(up_reader, writer, answer_headers, to_eof=True)
-            except (BadRequest, asyncio.IncompleteReadError):
-                return False
-        await writer.drain()
-        return keep
+                       scheme, host, peer, upgrade, key, started, request) -> bool:
+        """The request sent on to the site's route and its answer relayed back; whether the connection takes another.
+        The request is in the network log once it has gone upstream, and its answer once it is done."""
+        body, kept, ended, noted = self._capture(REQUEST_BODY_LIMIT), None, {"id": key}, False
+        try:
+            up_writer.write(upstream_request(method, target, headers, site, scheme=scheme, host=host, peer=peer,
+                                             upgrade=upgrade))
+            await relay_body(reader, up_writer, headers, to_eof=False, capture=body)
+            await up_writer.drain()
+            self._note("open", {"id": key, "kind": "exchange", "started": started,
+                                "request": {**request, **({"body": body.record()} if body.size else {})}})
+            noted = True
+            while True:
+                answer = await read_head(up_reader)
+                if answer is None:
+                    writer.write(simple_response("502 Bad Gateway",
+                                                 f"the site {site.name} closed without answering\n", FAILED))
+                    ended["failed"] = {"reason": "no answer", "error": f"the site {site.name} closed without answering"}
+                    return False
+                status_line, answer_headers = parse_head(answer)
+                code = status_parts(status_line)[1]
+                if code == 101 and upgrade:
+                    shown = public_headers(answer_headers, site, scheme=scheme, host=host, connection="Upgrade")
+                    ended.update(answered=stamp(), response=answered(status_line, shown))
+                    writer.write(response_head(status_line, answer_headers, site, scheme=scheme, host=host,
+                                               connection="Upgrade"))
+                    await writer.drain()
+                    out, back = Frames(), Frames()
+                    try:
+                        await asyncio.gather(splice(reader, up_writer, out), splice(up_reader, writer, back))
+                    finally:
+                        ended["websocket"] = {"messages_sent": out.messages, "messages_received": back.messages,
+                                              "bytes_sent": out.bytes, "bytes_received": back.bytes}
+                    return False
+                if 100 <= code < 200:
+                    continue
+                break
+            bodiless = method == "HEAD" or code in (204, 304)
+            framed = bodiless or "chunked" in tokens(answer_headers, "transfer-encoding") \
+                or header(answer_headers, "content-length") is not None
+            keep = framed and version == "HTTP/1.1" and "close" not in tokens(headers, "connection")
+            connection = "keep-alive" if keep else "close"
+            shown = public_headers(answer_headers, site, scheme=scheme, host=host, connection=connection)
+            ended.update(answered=stamp(), response=answered(status_line, shown))
+            writer.write(response_head(status_line, answer_headers, site, scheme=scheme, host=host,
+                                       connection=connection))
+            kept = self._capture(ANSWER_BODY_LIMIT, kept_answer(answer_headers))
+            if not bodiless:
+                try:
+                    await relay_body(up_reader, writer, answer_headers, to_eof=True, capture=kept)
+                except (BadRequest, asyncio.IncompleteReadError) as e:
+                    ended["failed"] = {"reason": "the answer ended early", "error": described(e)}
+                    return False
+            await writer.drain()
+            return keep
+        except BaseException as e:
+            ended.setdefault("failed", {"reason": "the exchange broke off", "error": described(e)})
+            raise
+        finally:
+            if kept is not None and kept.size:
+                ended["response"]["body"] = kept.record()
+            extra = {} if noted else {"kind": "exchange", "started": started, "request": request}
+            self._note("end", {**ended, "ended": stamp(), **extra})
 
 
 class Resolver(asyncio.DatagramProtocol):
@@ -561,6 +1144,10 @@ def failed_answer(query: bytes, question: tuple[str, int, int]) -> bytes:
     return struct.pack("!HHHHHH", ident, 0x8082 | (flags & 0x0100), 1, 0, 0, 0) + query[12:question[2]]
 
 
+def _peer(writer: asyncio.StreamWriter) -> str:
+    return (writer.get_extra_info("peername") or (LOOPBACK,))[0]
+
+
 def tls_context(config: Config) -> Optional[ssl.SSLContext]:
     """The HTTPS side's context: each site's certificate, picked by the name the browser asks for."""
     contexts = {}
@@ -585,14 +1172,20 @@ def tls_context(config: Config) -> Optional[ssl.SSLContext]:
 
 
 async def serve(config: Config) -> None:
-    """Listen, drop to the user it serves as, and serve until cancelled."""
-    proxy = SiteProxy(config)
+    """Listen, open the network log when the config names one, drop to the user it serves as, and serve until
+    cancelled. The log is opened before the drop, so the user it serves as writes it through this process alone."""
+    context = tls_context(config)
+    network = NetworkLog.open(config.network_log) if config.network_log else None
+    proxy = SiteProxy(config, tls=context, network=network)
     servers = []
-    if (context := tls_context(config)) is not None:
+    if context is not None:
         servers.append(await asyncio.start_server(lambda r, w: proxy.handle(r, w, "https"), config.listen,
                                                   config.https_port, ssl=context, limit=HEAD_LIMIT))
     servers.append(await asyncio.start_server(lambda r, w: proxy.handle(r, w, "http"), config.listen,
                                               config.http_port, limit=HEAD_LIMIT))
+    if config.proxy_port:
+        servers.append(await asyncio.start_server(proxy.handle_forward, config.listen, config.proxy_port,
+                                                  limit=HEAD_LIMIT))
     transport = None
     if config.dns_port:
         resolver = Resolver(config)
@@ -662,8 +1255,21 @@ class Paths:
         return self.root / f"etc/profile.d/{CA_NAME}.sh"
 
     @property
-    def system_bundle(self) -> Path:
-        return self.root / "etc/ssl/certs/ca-certificates.crt"
+    def system_bundles(self) -> tuple[Path, ...]:
+        """Where the system store keeps its public roots in one file, Debian's then Red Hat's."""
+        return self.root / "etc/ssl/certs/ca-certificates.crt", self.root / "etc/pki/tls/certs/ca-bundle.crt"
+
+    @property
+    def java_hook_store(self) -> Path:
+        """The JDK store the system store's hook (``ca-certificates-java``) builds from it, which apt JDKs link to."""
+        return self.root / "etc/ssl/certs/java/cacerts"
+
+    @property
+    def jdk_folders(self) -> tuple[Path, ...]:
+        return self.root / "usr/lib/jvm", self.root / "opt"
+
+    def rooted(self, path: str) -> Path:
+        return self.root / path.lstrip("/")
 
 
 def hosts_text(current: str, names: list[str]) -> str:
@@ -731,6 +1337,102 @@ def trust_system(paths: Paths, ca_pem: str) -> Optional[str]:
     return None
 
 
+def public_roots(paths: Paths) -> Optional[Path]:
+    """The system store's file of public roots, or None on a Linux with none of them."""
+    return next((bundle for bundle in paths.system_bundles if bundle.exists()), None)
+
+
+def add_trust_files(paths: Paths, files: dict, ca_pem: str) -> list[str]:
+    """The CA added to ``files["ca"]``, the CAs agentenv adds, and ``files["bundle"]`` made again from the system
+    store's public roots as they are now, which ``trust_system`` added the CA to where it could, and every CA in
+    ``files["ca"]``, so it also holds what apps added to the system store after the image or a provider made it. A
+    Linux with no file of public roots keeps the bundle the image or a provider made, and one with neither is refused
+    rather than given a bundle of the CA alone. Both, and their folder, readable by everyone."""
+    ca, bundle = paths.rooted(files["ca"]), paths.rooted(files["bundle"])
+    if (system := public_roots(paths)) is not None:
+        roots = system.read_text()
+    elif bundle.exists() and bundle.read_text().strip():
+        roots = bundle.read_text()
+    else:
+        raise SystemExit(f"there are no public roots to make {files['bundle']} from: none of "
+                         f"{', '.join(str(path) for path in paths.system_bundles)} is there")
+    added = ca.read_text() if ca.exists() else ""
+    if ca_pem.strip() not in added:
+        added = (added.rstrip("\n") + "\n" if added.strip() else "") + ca_pem.strip() + "\n"
+    missing = "".join(pem + "\n" for pem in PEM_CERTIFICATE.findall(added) if pem not in roots)
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.parent.chmod(0o755)
+    for path, text in ((ca, added), (bundle, roots.rstrip("\n") + "\n" + missing)):
+        write_in_place(path, text)
+        path.chmod(0o644)
+    return [str(ca), str(bundle)]
+
+
+def trust_java(paths: Paths, ca: str, ca_pem: str) -> dict:
+    """Each JDK's store trusting the CA, by its path, as ``keytool -list`` finds it there: the store the system store's
+    hook builds as ``trust_system`` updated it, and any other given the CA with ``keytool``, that JDK's own else any;
+    none on a computer with no JDK."""
+    fingerprint = sha256_fingerprint(ca_pem)
+    hook = paths.java_hook_store.resolve() if paths.java_hook_store.exists() else None
+    results: dict = {}
+    for store in java_stores(paths):
+        keytool = home_keytool(store) or shutil.which("keytool")
+        if keytool is None:
+            results[str(store)] = {"error": "there's no keytool to add the CA with"}
+            continue
+        opened = ["-keystore", str(store), "-storepass", JAVA_STORE_PASSWORD]
+        try:
+            if store.resolve() != hook:
+                subprocess.run([keytool, "-delete", "-alias", CA_NAME, *opened], capture_output=True, text=True,
+                               timeout=KEYTOOL_TIMEOUT_S)
+                subprocess.run([keytool, "-importcert", "-noprompt", "-trustcacerts", "-alias", CA_NAME, "-file", ca,
+                                *opened], check=True, capture_output=True, text=True, timeout=KEYTOOL_TIMEOUT_S)
+            listed = subprocess.run([keytool, "-list", "-v", *opened], check=True, capture_output=True, text=True,
+                                    timeout=KEYTOOL_TIMEOUT_S).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            results[str(store)] = {"error": _why(e)}
+            continue
+        results[str(store)] = {"trusted": True} if fingerprint in listed else {
+            "error": "keytool -list doesn't list the CA in it"}
+    return results
+
+
+def java_stores(paths: Paths) -> list[Path]:
+    """Each JDK's store, ``lib/security/cacerts``, a Java 8 JRE's among them, under the JDK folders and ``/opt`` to
+    ``JDK_SEARCH_DEPTH``: a store two paths lead to once."""
+    found, seen = [], set()
+    for top in paths.jdk_folders:
+        for folder, folders, files in os.walk(top):
+            here = Path(folder)
+            folders[:] = [] if len(here.relative_to(top).parts) >= JDK_SEARCH_DEPTH else [
+                name for name in folders if name not in JDK_SKIPPED]
+            if here.parts[-2:] == ("lib", "security") and "cacerts" in files:
+                store = here / "cacerts"
+                if (key := store.resolve()) not in seen:
+                    seen.add(key)
+                    found.append(store)
+    return found
+
+
+def home_keytool(store: Path) -> Optional[str]:
+    keytool = store.parents[2] / "bin" / "keytool"
+    return str(keytool) if keytool.exists() else None
+
+
+def sha256_fingerprint(pem: str) -> str:
+    """``pem``'s SHA-256 fingerprint as ``keytool -list -v`` prints it: hex pairs, upper case, joined by colons."""
+    body = "".join(line.strip() for line in pem.splitlines() if line.strip() and not line.startswith("-----"))
+    return ":".join(f"{byte:02X}" for byte in hashlib.sha256(base64.b64decode(body)).digest())
+
+
+def _why(error: Exception) -> str:
+    """What a program run with text output said it failed on, its last line; else the error."""
+    if isinstance(error, subprocess.CalledProcessError):
+        lines = (error.stderr or error.stdout or "").strip().splitlines()
+        return lines[-1] if lines else f"exited {error.returncode}"
+    return f"{type(error).__name__}: {error}"
+
+
 def trust_nss(user: Optional[str], ca: str) -> list[str]:
     """Add the CA to the session user's NSS databases, Chromium's (and a snap Chromium's when there is one), as that
     user, for a Chromium too old to read its ``CACertificates`` policy; none without ``certutil``."""
@@ -773,7 +1475,7 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
         Path(ca).write_text(given["ca_pem"])
     sites = []
     for site in given["sites"]:
-        served = {"name": site["name"], "upstream": site["upstream"], "domains": site["domains"]}
+        served = {field: site[field] for field in SERVED_SITE_FIELDS if field in site}
         if site.get("cert_pem"):
             cert, key = folder / f"{site['name']}.crt", folder / f"{site['name']}.key"
             cert.write_text(site["cert_pem"])
@@ -802,12 +1504,14 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
             write_in_place(policy, chromium_policies(given["ca_pem"]))
         trust["chromium"] = [str(policy) for policy in paths.chromium_policies]
         trust["nss"] = trust_nss(user, ca)
-        bundle = paths.system_bundle if paths.system_bundle.exists() else None
-        write_in_place(paths.profile, f"export NODE_EXTRA_CA_CERTS={ca}\n"
-                       + (f"export REQUESTS_CA_BUNDLE={bundle}\n" if bundle else ""))
+        trust["java"] = trust_java(paths, ca, given["ca_pem"])
+        trust["added"] = add_trust_files(paths, given["trust_files"], given["ca_pem"])
+        write_in_place(paths.profile, "".join(f"export {name}={value}\n"
+                                              for name, value in given["trust_environment"].items()))
         trust["environment"] = str(paths.profile)
-    serving = {"user": user, "serve_user": serve_user(user), "sites": sites, **{key: given[key] for key in ("listen", "https_port", "http_port")
-                                                 if key in given}}
+    serving = {"user": user, "serve_user": serve_user(user), "sites": sites,
+               **{key: given[key] for key in ("listen", "https_port", "http_port", "proxy_port", "direct",
+                                              "network_log") if key in given}}
     if wildcard:
         serving.update(dns_port=given.get("dns_port", 53), nameservers=nameservers)
     if upstream_headers:
@@ -815,7 +1519,9 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
     serve_path = folder / "serve.json"
     serve_path.write_text(json.dumps(serving))
     start(str(serve_path), given.get("log"))
-    return {"trust": trust, "names": names, "checks": checks_as(user, str(serve_path))}
+    checks = checks_as(user, str(serve_path))
+    return {"trust": trust, "names": names, "checks": checks["sites"], "runtimes": checks["runtimes"],
+            **({"forward_port": checks["forward_port"]} if "forward_port" in checks else {})}
 
 
 def start(serve_path: str, log: Optional[str]) -> None:
@@ -850,42 +1556,89 @@ def keep(serve_path: str) -> None:
     while True:
         ended = subprocess.run([sys.executable, os.path.abspath(__file__), "serve", serve_path],
                                stdin=subprocess.DEVNULL).returncode
-        print(f"the site proxy ended ({ended}); starting it again", flush=True)
+        print(json.dumps({"restarted": {"exit_code": ended}}), flush=True)
         time.sleep(RESTART_DELAY_S)
 
 
 def checks_as(user: Optional[str], serve_path: str) -> dict:
-    """``check`` run as ``user``, given each site's timeout one after another and a margin for its start."""
+    """``check`` run as ``user``, with the environment it's given, each site's timeout and each runtime's given one
+    after another and a margin for its start."""
     sites = len(Config.load(serve_path).sites)
     done = subprocess.run(as_user(user, [sys.executable, os.path.abspath(__file__), "check", serve_path]),
-                          capture_output=True, text=True, timeout=CHECK_TIMEOUT_S * (sites + 2))
+                          capture_output=True, text=True, timeout=CHECK_TIMEOUT_S * (sites + RUNTIME_CHECKS + 2))
     if done.returncode != 0:
-        return {"*": {"error": (done.stderr.strip().splitlines() or ["the check failed"])[-1]}}
+        return {"sites": {"*": {"error": (done.stderr.strip().splitlines() or ["the check failed"])[-1]}},
+                "runtimes": {}}
     return json.loads(done.stdout)
 
 
 def check(config: Config) -> dict:
-    """Each site's first name loaded, over HTTPS but for a ``.localhost`` name, through the system's resolver and
-    trust store: its status, or why it didn't load, which an answer the proxy made itself (it marks them ``FAILED``),
-    such as its 502 for a gateway it couldn't reach, is too."""
+    """``sites``: each site's first name loaded, over HTTPS but for a ``.localhost`` name, through the system's
+    resolver and trust store (``_loaded``). ``runtimes``: the first of them over HTTPS loaded through each other
+    runtime's own trust (``check_runtimes``). ``forward_port``, with one: the first of them over HTTPS, else the first,
+    loaded through it as a browser alone loads it."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     results = {}
     for site in config.sites:
         name = next((n for n in site.domains if not n.startswith("*.")), None) \
             or "agentenv-check." + site.domains[0].removeprefix("*.")
-        url = f"{'https' if site.tls(name) else 'http'}://{name}/"
+        results[name] = _loaded(opener, f"{'https' if site.tls(name) else 'http'}://{name}/")
+    secure = next((result["url"] for result in results.values() if result["url"].startswith("https:")), None)
+    report = {"sites": results, "runtimes": check_runtimes(secure) if secure else {}}
+    if config.proxy_port and results:
+        proxy = f"http://{config.listen}:{config.proxy_port}"
+        forward = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        report["forward_port"] = {"proxy": proxy, **_loaded(forward, secure or next(iter(results.values()))["url"])}
+    return report
+
+
+def _loaded(opener, url: str) -> dict:
+    """``url`` loaded by ``opener``: its status, or why it didn't load, which an answer the proxy made itself (it marks
+    them ``FAILED``), such as its 502 for a gateway it couldn't reach, is too."""
+    try:
+        with opener.open(url, timeout=CHECK_TIMEOUT_S) as response:
+            return {"url": url, "status": response.status}
+    except urllib.error.HTTPError as e:
+        if e.headers is not None and e.headers.get(FAILED[0][0]) == FAILED[0][1]:
+            return {"url": url, "error": f"{e.code} {e.reason}: {e.read().decode(errors='replace').strip()}"}
+        return {"url": url, "status": e.code}
+    except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+        return {"url": url, "error": str(getattr(e, "reason", e))}
+
+
+def check_runtimes(url: str) -> dict:
+    """``url`` loaded through each runtime's own trust: Python through ``SSL_CERT_FILE`` alone, and Node and curl where
+    the computer has them, each by name with the status it was answered, any answer meaning the CA was trusted, or
+    why it couldn't."""
+    results = {"python SSL_CERT_FILE": _python_through_cert_file(url)}
+    for runtime, argv in (("node", ["-e", NODE_GET, url]),
+                          ("curl", ["-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time",
+                                    str(int(CHECK_TIMEOUT_S)), url])):
+        if (program := shutil.which(runtime)) is None:
+            continue
         try:
-            with opener.open(url, timeout=CHECK_TIMEOUT_S) as response:
-                results[name] = {"url": url, "status": response.status}
-        except urllib.error.HTTPError as e:
-            if e.headers is not None and e.headers.get(FAILED[0][0]) == FAILED[0][1]:
-                body = e.read().decode(errors="replace").strip()
-                results[name] = {"url": url, "error": f"{e.code} {e.reason}: {body}"}
-            else:
-                results[name] = {"url": url, "status": e.code}
-        except (urllib.error.URLError, OSError, ssl.SSLError) as e:
-            results[name] = {"url": url, "error": str(getattr(e, "reason", e))}
+            done = subprocess.run([program, *argv], check=True, capture_output=True, text=True,
+                                  timeout=CHECK_TIMEOUT_S + 5)
+            results[runtime] = {"url": url, "status": int(done.stdout.strip().splitlines()[-1])}
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+            results[runtime] = {"url": url, "error": _why(e)}
     return results
+
+
+def _python_through_cert_file(url: str) -> dict:
+    cert_file = os.environ.get("SSL_CERT_FILE")
+    if not cert_file:
+        return {"url": url, "error": "SSL_CERT_FILE isn't set in the computer's environment"}
+    try:
+        context = ssl.create_default_context(cafile=cert_file)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                             urllib.request.HTTPSHandler(context=context))
+        with opener.open(url, timeout=CHECK_TIMEOUT_S) as response:
+            return {"url": url, "status": response.status}
+    except urllib.error.HTTPError as e:
+        return {"url": url, "status": e.code}
+    except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+        return {"url": url, "error": str(getattr(e, "reason", e))}
 
 
 def main(argv: list[str]) -> None:

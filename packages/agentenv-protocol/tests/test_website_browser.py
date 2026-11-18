@@ -1,5 +1,5 @@
-"""WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, and the proxy rule
-for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
+"""WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, headful on an X
+server alone or headless with none, and the proxy rule for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
 its launch run with no desktop when alone; a CDP connection over a new debugging pipe at each launch, which its ready
 check asks, and a browser launched again when its server restarts; its shared memory in files only on a small
 /dev/shm; an empty cache and the deploy's prompt answers in its profile at each launch; its policies, card params and
@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import sys
+from urllib.parse import urldefrag, urlsplit, urlunsplit
 
 import pytest
 
@@ -23,34 +24,66 @@ from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import (ALONE_BYPASS, BROWSER, COMPUTER_BYPASS, POLICIES, SITE_PROXY_ENV, SKILL,
                                                BrowserControl, DevToolsError, WebsiteBrowserEnvironment)
+from agentenv_protocol.website_browser.control import STOP
 
 PROXY = "http://127.0.0.1:3128"
 OWNED = ["--user-data-dir", "--disk-cache-dir", "--remote-debugging-pipe", "--no-first-run",
          "--no-default-browser-check", "--lang=en-US"]
 # A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its
-# product, Target.createTarget by writing the tab's URL to tabs.txt beside it, a new window's after "window ", anything
-# else with an error.
+# product; its first tab, "start", made known and attached to; Target.createTarget by writing the tab's URL, or a new
+# window's after "window ", to tabs.txt beside it and attaching to the tab; Page.navigate by writing "navigate <tab>
+# <url>" there, then committing and loading it; the calls agentenv makes to follow a page with nothing; anything else
+# with an error.
 FAKE_BROWSER = """import json, os
-buffer = b""
+buffer, loaders = b"", 0
+def send(method, params, session=None):
+    os.write(4, json.dumps({"method": method, "params": params, **({"sessionId": session} if session else {})}).encode()
+             + b"\\0")
+def page(target, url="about:blank"):
+    return {"targetId": target, "type": "page", "url": url, "title": ""}
 while chunk := os.read(3, 65536):
     buffer += chunk
     while b"\\0" in buffer:
         raw, buffer = buffer.split(b"\\0", 1)
         message = json.loads(raw)
-        if message["method"] == "Browser.getVersion":
+        method, params, session = message["method"], message.get("params") or {}, message.get("sessionId")
+        events = []
+        if method == "Browser.getVersion":
             answer = {"result": {"product": "Fake/1"}}
-        elif message["method"] in ("Target.setDiscoverTargets", "Target.setAutoAttach", "Browser.setDownloadBehavior"):
+        elif method == "Target.setDiscoverTargets":
             answer = {"result": {}}
-            if message["method"] == "Target.setDiscoverTargets":
-                created = {"targetInfo": {"targetId": "start", "type": "page", "url": "about:blank", "title": ""}}
-                os.write(4, json.dumps({"method": "Target.targetCreated", "params": created}).encode() + b"\\0")
-        elif message["method"] == "Target.createTarget":
+            events = [("Target.targetCreated", {"targetInfo": page("start")}, None)]
+        elif method == "Target.setAutoAttach":
+            answer = {"result": {}}
+            events = [("Target.attachedToTarget", {"sessionId": "s-start", "targetInfo": page("start"),
+                                                   "waitingForDebugger": True}, None)]
+        elif method == "Target.createTarget":
             with open("tabs.txt", "a") as tabs:
-                tabs.write(("window " if message["params"].get("newWindow") else "") + message["params"]["url"] + "\\n")
-            answer = {"result": {"targetId": message["params"]["url"]}}
+                tabs.write(("window " if params.get("newWindow") else "") + params["url"] + "\\n")
+            target = f"t{len(open('tabs.txt').read().splitlines())}"
+            answer = {"result": {"targetId": target}}
+            events = [("Target.targetCreated", {"targetInfo": page(target)}, None),
+                      ("Target.attachedToTarget", {"sessionId": "s-" + target, "targetInfo": page(target),
+                                                   "waitingForDebugger": True}, None)]
+        elif method == "Page.navigate":
+            target, loaders = session[2:], loaders + 1
+            with open("tabs.txt", "a") as tabs:
+                tabs.write(f"navigate {target} {params['url']}\\n")
+            answer = {"result": {"frameId": target, "loaderId": f"L{loaders}"}}
+            events = [("Page.frameNavigated", {"frame": {"id": target, "loaderId": f"L{loaders}",
+                                                         "url": params["url"]}}, session),
+                      ("Page.loadEventFired", {}, session)]
+        elif method == "Target.getTargets":
+            answer = {"result": {"targetInfos": []}}
+        elif method in ("Browser.setDownloadBehavior", "Page.enable", "Emulation.setDeviceMetricsOverride",
+                        "Page.setInterceptFileChooserDialog", "Runtime.runIfWaitingForDebugger", "Network.enable",
+                        "Network.disable", "Target.activateTarget", "Page.bringToFront"):
+            answer = {"result": {}}
         else:
             answer = {"error": {"code": -32601, "message": "unknown method"}}
         os.write(4, json.dumps({"id": message["id"], **answer}).encode() + b"\\0")
+        for event in events:
+            send(*event)
 """
 
 
@@ -89,9 +122,13 @@ def _settings(monkeypatch, **values) -> None:
     monkeypatch.setenv(APP_SETTINGS_ENV, json.dumps({"chromium": values}))
 
 
-def _alone(monkeypatch) -> None:
-    """On a computer with no display, a browser computer's."""
+def _alone(monkeypatch, x_server: bool = False) -> None:
+    """On a computer with no display, a browser computer's, with an X server only the browser uses or none."""
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux", display="none"))
+    if x_server:
+        monkeypatch.setenv("DISPLAY", ":99")
+    else:
+        monkeypatch.delenv("DISPLAY", raising=False)
 
 
 def test_in_a_computer_its_flags_follow_its_command_then_its_start_tabs_and_its_window_is_waited_for(browser_home):
@@ -129,6 +166,21 @@ def test_alone_it_goes_through_its_proxy_headless_at_its_window_and_its_launch_w
     assert browser._computer_app.desktop is False and browser._computer_app.timeout_s == 30
 
 
+def test_alone_on_an_x_server_it_runs_headful_at_its_window_with_webgl_and_its_launch_waits_on_no_window(monkeypatch):
+    _alone(monkeypatch, x_server=True)
+    monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
+    _settings(monkeypatch, window={"width": 1024, "height": 768})
+
+    browser = Browser()
+    launch = browser.launch
+
+    assert f"--proxy-bypass-list={ALONE_BYPASS}" in launch.command
+    assert launch.command[-3:] == ["--window-size=1024,768", "--enable-unsafe-swiftshader", "about:blank"]
+    assert not any(flag.startswith("--headless") for flag in launch.command)
+    assert launch.window is None and launch.ready is None
+    assert browser._computer_app.desktop is False
+
+
 def test_alone_its_launch_keeps_the_port_and_command_it_waits_on_and_their_timeout(monkeypatch):
     @linux(launch=Launch(command=["chromium/chrome"], window={"class": "Chromium"},
                          ready=Ready(window=True, port=9000, command=["true"], timeout_s=45)))
@@ -154,7 +206,8 @@ def test_alone_it_refuses_to_launch_without_a_site_proxy(monkeypatch):
 
 @pytest.mark.parametrize("flag", ["--remote-debugging-port=9222", "--remote-allow-origins=*", "--headless",
                                   "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile",
-                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage"])
+                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage",
+                                  "--enable-unsafe-swiftshader"])
 def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_declared(flag):
     @linux(launch=Launch(command=["chromium/chrome", flag]))
     class Widened(WebsiteBrowserEnvironment):
@@ -195,13 +248,15 @@ async def test_each_launch_starts_with_an_empty_cache_and_the_deploys_prompt_ans
     assert not (browser_home / ".cache/chromium").exists()
 
 
-def test_its_settings_give_its_start_tabs_language_and_time_zone_and_no_start_url_is_a_flag(monkeypatch):
+def test_its_settings_give_its_language_and_time_zone_its_start_tabs_open_over_its_pipe_and_none_is_a_flag(
+        monkeypatch):
     _settings(monkeypatch, start_urls=["https://slack.com", "https://linear.app"], locale="fr-FR",
               time_zone="Europe/Paris")
     launch = Browser().launch
     _settings(monkeypatch, start_urls=["--remote-allow-origins=*"])
 
-    assert launch.command[-2:] == ["https://slack.com", "https://linear.app"] and "--lang=fr-FR" in launch.command
+    assert launch.command[-1] == "about:blank" and "--lang=fr-FR" in launch.command
+    assert not any("slack.com" in arg or "linear.app" in arg for arg in launch.command)
     assert launch.env == {"TZ": "Europe/Paris"}
     with pytest.raises(ValueError, match="start_urls are URLs, not flags"):
         Browser()
@@ -271,7 +326,7 @@ async def test_each_launch_gets_a_new_pipe_its_server_talks_cdp_over_and_its_rea
     await runtime.launch_app()
     version = await browser.devtools.call("Browser.getVersion")
     with pytest.raises(DevToolsError, match="unknown method"):
-        await browser.devtools.call("Page.navigate", {"url": "about:blank"})
+        await browser.devtools.call("Page.printToPDF")
     launched = await _answering(browser)
     await runtime.stop_app()
     stopped = await browser.devtools_answers()
@@ -282,7 +337,7 @@ async def test_each_launch_gets_a_new_pipe_its_server_talks_cdp_over_and_its_rea
 
     assert unlaunched is False and version == {"product": "Fake/1"} and launched is True
     assert stopped is False and relaunched is True
-    assert "devtools_answers" in runtime.ready_checks
+    assert {"devtools_answers", "start_tabs_loaded"} <= set(runtime.ready_checks)
 
 
 @pytest.mark.asyncio
@@ -306,7 +361,8 @@ async def test_a_launch_while_it_runs_opens_a_window_over_its_pipe_and_starts_no
 
 
 @pytest.mark.asyncio
-async def test_headless_it_opens_one_start_tab_from_its_command_line_and_the_rest_over_its_pipe(monkeypatch, tmp_path):
+async def test_headless_its_start_tabs_open_blank_held_to_its_window_then_load_in_order_and_count_it_ready(
+        monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
     _alone(monkeypatch)
@@ -316,14 +372,20 @@ async def test_headless_it_opens_one_start_tab_from_its_command_line_and_the_res
 
     await browser._computer_app.launch_app()
     for _ in range(50):
-        if ready := await browser.devtools_answers():
+        if ready := await browser.start_tabs_loaded():
             break
         await asyncio.sleep(0.1)
     await browser._computer_app.stop_app()
     browser.devtools.close()
 
-    assert browser.launch.command[-2:] == ["--headless=new", "https://slack.com"]
-    assert ready is True and (tmp_path / "tabs.txt").read_text() == "https://linear.app\nhttps://github.com\n"
+    assert browser.launch.command[-2:] == ["--headless=new", "about:blank"]
+    assert ready is True and (tmp_path / "tabs.txt").read_text().splitlines() == [
+        "about:blank", "about:blank", "navigate start https://slack.com", "navigate t1 https://linear.app",
+        "navigate t2 https://github.com"]
+    tabs = browser.start_tab_launches[-1]["tabs"]
+    assert [(tab["tab"], tab["url"], tab["outcome"], tab["site"]) for tab in tabs] == [
+        ("start", "https://slack.com", "loaded", None), ("t1", "https://linear.app", "loaded", None),
+        ("t2", "https://github.com", "loaded", None)]
 
 
 @pytest.mark.asyncio
@@ -393,14 +455,18 @@ def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads
     assert [step.name for step in Browser.declaration().install_steps] == ["write_policies"]
 
 
-def test_its_card_declares_browser_v1_with_its_build_and_clock_and_alone_its_window(monkeypatch):
+def test_its_card_declares_browser_v1_with_its_build_clock_and_mode_and_alone_its_window(monkeypatch):
     in_computer = Browser().extension_params(BROWSER)
-    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
-    alone = Browser().extension_params(BROWSER)
+    _alone(monkeypatch)
+    headless = Browser().extension_params(BROWSER)
+    _alone(monkeypatch, x_server=True)
+    headful = Browser().extension_params(BROWSER)
 
-    assert in_computer == {"chromium": "156.0.8078.4", "clock": "real"}
-    assert alone == {"chromium": "156.0.8078.4", "clock": "real", "window": {"width": 1280, "height": 800}}
+    window = {"width": 1280, "height": 800}
+    assert in_computer == {"chromium": "156.0.8078.4", "clock": "real", "mode": "headful"}
+    assert headless == {"chromium": "156.0.8078.4", "clock": "real", "mode": "headless", "window": window}
+    assert headful == {"chromium": "156.0.8078.4", "clock": "real", "mode": "headful", "window": window}
 
 
 @pytest.mark.asyncio
@@ -452,6 +518,12 @@ class StubDevTools:
         answer = self.answers.get(method, {})
         return answer(params, session_id) if callable(answer) else answer
 
+    async def request(self, method, params=None, *, session_id=None, answered=None):
+        try:
+            return {"result": await self.call(method, params, session_id=session_id)}
+        except DevToolsError as e:
+            return {"error": {"message": str(e)}}
+
     def send(self, method, params, session=None):
         self.listener({"method": method, "params": params, **({"sessionId": session} if session else {})})
 
@@ -494,7 +566,7 @@ async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to
     control = BrowserControl(devtools, "agent")
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
     assert ("Page.enable", {}, "s-popup") in devtools.calls
     assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
@@ -509,7 +581,7 @@ async def test_alone_each_page_it_attaches_to_is_held_to_its_window_before_it_ru
     control = BrowserControl(devtools, "agent", (1024, 768))
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
     sent = [method for method, _, session in devtools.calls if session == "s-popup"]
     assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
@@ -529,10 +601,300 @@ async def test_a_page_it_couldnt_prepare_is_still_told_to_run_so_it_never_stays_
     control = BrowserControl(devtools, "agent", (1024, 768))
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0.01)
+
+    assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
+        "Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+        "Runtime.runIfWaitingForDebugger"]
+
+
+class PausedUntilRun(StubDevTools):
+    """A browser whose popup, paused as it opened, answers Page.enable only once it's told to run, as Chromium does a
+    popup a click opened before its first navigation."""
+
+    def __init__(self):
+        super().__init__()
+        self.ran = asyncio.Event()
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        self.calls.append((method, params or {}, session_id))
+        if method == "Runtime.runIfWaitingForDebugger":
+            self.ran.set()
+        elif method == "Page.enable" and session_id == "s-popup":
+            await asyncio.wait_for(self.ran.wait(), timeout_s or 30)
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_a_popup_that_answers_page_enable_only_once_it_runs_is_told_to_run_at_once_held_to_its_window_first():
+    devtools = PausedUntilRun()
+    control = BrowserControl(devtools, "agent", (1024, 768))
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.wait_for(devtools.ran.wait(), 1)
     await asyncio.sleep(0)
 
     assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
-        "Page.enable", "Runtime.runIfWaitingForDebugger"]
+        "Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+        "Runtime.runIfWaitingForDebugger"]
+
+
+class Navigating(StubDevTools):
+    """A browser whose first tab is ``start`` and whose new tabs are t1, t2, …, each attached as it opens, answering a
+    navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
+    follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
+    ``refused``, a network error; ``aborted``, a document request that fails before it commits; ``silent``, never
+    answered, as a page that never answers isn't; or ``stale``, a load event with no commit. A navigation that stays in
+    a tab's document, to a URL with a fragment that differs from where it is (``at``) in its fragment alone, as a
+    browser spells both (``_document``), moves within it and names no loader, as a browser's does; a reload loads where
+    the tab is as a navigation there would, naming no loader either."""
+
+    #: How long after the browser answers them a move within a document lands, and a reload starts loading.
+    MOVE_LANDS_S, RELOAD_LOADS_S = 0.05, 0.01
+
+    def __init__(self, pages, reload_answers=True):
+        super().__init__({"Target.getTargets": {"targetInfos": []}})
+        self.pages, self.opened, self.loaders, self.urls, self.pending = pages, 0, 0, {}, []
+        self.reload_answers = reload_answers
+
+    def at(self, target, url):
+        """The tab ``target`` at ``url``, as the browser tells the control."""
+        self.urls[target] = url
+        self.send("Target.targetInfoChanged", _page(target, url))
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.createTarget":
+            self.calls.append((method, params, session_id))
+            self.opened += 1
+            target = f"t{self.opened}"
+            self.send("Target.targetCreated", _page(target))
+            self.send("Target.attachedToTarget", {"sessionId": f"s-{target}", "waitingForDebugger": True,
+                                                  **_page(target)})
+            return {"targetId": target}
+        if method == "Page.reload":
+            self.calls.append((method, params, session_id))
+            if not self.reload_answers:
+                await asyncio.Event().wait()
+            self.pending.append(asyncio.ensure_future(self._reload(self.urls[session_id[2:]], session_id)))
+            return {}
+        if method != "Page.navigate":
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+        self.calls.append((method, params, session_id))
+        url, target = params["url"], session_id[2:]
+        if "#" in url and _document(url) == _document(self.urls.get(target, "")):
+            self.pending.append(asyncio.ensure_future(self._move_within(target, url, session_id)))
+            return {"frameId": target}
+        return await self._load(url, session_id)
+
+    async def _move_within(self, target, url, session_id):
+        """A move within a tab's document, which the browser answers before it lands."""
+        await asyncio.sleep(self.MOVE_LANDS_S)
+        self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
+        self.at(target, url)
+
+    async def _reload(self, url, session_id):
+        """A reload, which the browser answers before it commits."""
+        await asyncio.sleep(self.RELOAD_LOADS_S)
+        await self._load(url, session_id)
+
+    async def _load(self, url, session_id):
+        page, target = self.pages[url], session_id[2:]
+        self.urls[target] = url
+        self.loaders += 1
+        loader, request = f"L{self.loaders}", f"r{self.loaders}"
+        if page == "aborted":
+            document = {"requestId": request, "loaderId": loader, "type": "Document", "frameId": target}
+            self.send("Network.requestWillBeSent", document, session_id)
+            self.send("Network.loadingFailed", {"requestId": request, "errorText": "net::ERR_ABORTED"}, session_id)
+            return {"frameId": target, "loaderId": loader, "errorText": "net::ERR_ABORTED"}
+        if page == "refused":
+            return {"frameId": target, "loaderId": loader, "errorText": "net::ERR_CONNECTION_REFUSED"}
+        if page == "silent":
+            await asyncio.Event().wait()
+        if page == "stale":
+            self.send("Page.loadEventFired", {}, session_id)
+            return {"frameId": target, "loaderId": loader}
+        status, final_url, *rest = page
+        self._document(session_id, target, loader, request, status, final_url)
+        if rest and isinstance(rest[0], tuple):
+            _, status, final_url = rest[0]
+            self._document(session_id, target, f"{loader}-redirect", f"{request}-redirect", status, final_url)
+        if "no-load" not in rest:
+            self.send("Page.loadEventFired", {}, session_id)
+        return {"frameId": target, "loaderId": loader}
+
+    def _document(self, session, target, loader, request, status, url):
+        document = {"requestId": request, "loaderId": loader, "type": "Document", "frameId": target}
+        self.send("Network.requestWillBeSent", document, session)
+        self.send("Network.responseReceived", {**document, "response": {"status": status, "url": url}}, session)
+        self.send("Page.frameNavigated", {"frame": {"id": target, "loaderId": loader, "url": url}}, session)
+
+
+def _document(url):
+    """The document ``url`` names, as a browser spells it: without its fragment, an empty path as "/"."""
+    parts = urlsplit(urldefrag(url)[0])
+    return urlunsplit(parts._replace(path=parts.path or "/"))
+
+
+async def _started(devtools, viewport=(1280, 800)) -> BrowserControl:
+    """A control following a browser just launched, on its first tab, ``start``."""
+    control = BrowserControl(devtools, "agent", viewport)
+    await control.attach()
+    devtools.send("Target.targetCreated", _page("start"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-start", "waitingForDebugger": True, **_page("start")})
+    return control
+
+
+def _shop(url):
+    return "shop" if "shop.test" in url else None
+
+
+def _outcomes(tabs):
+    return [(tab["tab"], tab["url"], tab["final_url"], tab["status"], tab["error"], tab["site"], tab["outcome"])
+            for tab in tabs]
+
+
+@pytest.mark.asyncio
+async def test_its_start_tabs_load_in_order_in_its_first_tab_then_blank_ones_held_first_and_the_first_is_active():
+    devtools = Navigating({"https://shop.test/": (200, "https://shop.test/login"), "https://slack.com/": "silent",
+                           "https://github.com/": (404, "https://github.com/")})
+    control = await _started(devtools)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    tabs = await control.load_start_tabs(list(devtools.pages), _shop, own_timeout_s=5, live_timeout_s=0.3)
+
+    assert _outcomes(tabs) == [
+        ("start", "https://shop.test/", "https://shop.test/login", 200, None, "shop", "loaded"),
+        ("t1", "https://slack.com/", None, None, None, None, "timed_out"),
+        ("t2", "https://github.com/", "https://github.com/", 404, None, None, "failed")]
+    assert loop.time() - started < 2
+    assert list(control.tabs) == ["start", "t1", "t2"] and all(isinstance(tab["load_ms"], int) for tab in tabs)
+    assert _sent(devtools, "Target.createTarget") == [({"url": "about:blank", "background": True}, None)] * 2
+    for tab_session in ("s-start", "s-t1", "s-t2"):
+        sent = [method for method, _, on in devtools.calls if on == tab_session]
+        assert sent.index("Emulation.setDeviceMetricsOverride") < sent.index("Network.enable") < \
+            sent.index("Page.navigate") < sent.index("Network.disable"), sent
+    assert devtools.calls[-2][:2] == ("Target.activateTarget", {"targetId": "start"})
+    assert not control._loading
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, page, outcome, error, status, waited", [
+    ("https://shop.test/", (503, "https://shop.test/", "no-load"), "failed", None, 503, False),
+    ("https://shop.test/", "refused", "failed", "net::ERR_CONNECTION_REFUSED", None, False),
+    ("https://shop.test/", "silent", "timed_out", None, None, True),
+    ("https://shop.test/", "stale", "timed_out", None, None, True),
+    ("https://slack.com/", "silent", "timed_out", None, None, True),
+    ("https://slack.com/", (503, "https://slack.com/", "no-load"), "timed_out", None, 503, True),
+    ("https://slack.com/", "refused", "failed", "net::ERR_CONNECTION_REFUSED", None, False),
+], ids=["own-error-status-at-once", "own-refused", "own-never-loads", "own-stale-load", "live-never-loads",
+        "live-error-status-waited", "live-refused"])
+async def test_a_start_tab_settles_strictly_on_an_env_site_and_at_most_its_time_on_a_live_one(
+        url, page, outcome, error, status, waited):
+    control = await _started(Navigating({url: page}))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=0.3 if url.startswith("https://shop") else 5,
+                                           live_timeout_s=0.3 if url.startswith("https://slack") else 5)
+
+    assert (tab["outcome"], tab["error"], tab["status"]) == (outcome, error, status)
+    assert (loop.time() - started >= 0.3) is waited
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redirect, final, status, outcome", [
+    (("redirect", 200, "https://shop.test/notes"), "https://shop.test/notes", 200, "loaded"),
+    (("redirect", 404, "https://shop.test/gone"), "https://shop.test/gone", 404, "failed"),
+], ids=["to-a-page", "to-an-error"])
+async def test_a_start_page_that_sends_itself_elsewhere_before_it_loads_is_judged_by_the_page_it_ends_on(
+        redirect, final, status, outcome):
+    control = await _started(Navigating({"https://shop.test/": (200, "https://shop.test/", redirect)}))
+
+    (tab,) = await control.load_start_tabs(["https://shop.test/"], _shop, own_timeout_s=5)
+
+    assert (tab["final_url"], tab["status"], tab["outcome"]) == (final, status, outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at, url", [("https://shop.test/#/orders", "https://shop.test/#/orders"),
+                                     ("https://shop.test/#/cart", "https://shop.test/#/orders"),
+                                     ("https://shop.test/#/orders", "https://shop.test#/orders")],
+                         ids=["at-its-url", "at-another-route-of-its-page", "at-its-url-spelled-otherwise"])
+async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_loads_again(at, url):
+    devtools = Navigating({url: (200, url)})
+    control = await _started(devtools)
+    devtools.at("start", at)
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["status"], tab["final_url"], tab["error"]) == ("loaded", 200, url, None)
+    assert [(method, params) for method, params, on in devtools.calls if on == "s-start" and method in (
+        "Page.navigate", "Page.reload")] == [("Page.navigate", {"url": url}), ("Page.reload", {})]
+    assert not control._loading
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_whose_reload_fails_before_it_commits_fails_at_once_naming_why():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: "aborted"})
+    control = await _started(devtools)
+    devtools.at("start", url)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["error"]) == ("failed", "net::ERR_ABORTED")
+    assert loop.time() - started < 1
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_whose_reload_never_answers_times_out_and_leaves_no_cause_for_a_later_navigation():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)}, reload_answers=False)
+    control = await _started(devtools)
+    devtools.at("start", url)
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=0.5)
+    await asyncio.sleep(0)
+
+    assert tab["outcome"] == "timed_out"
+    assert "start" not in control.causes._next
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_on_another_page_of_its_site_navigates_and_isnt_reloaded():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)})
+    control = await _started(devtools)
+    devtools.at("start", "https://shop.test/account")
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["final_url"]) == ("loaded", url)
+    assert (_sent(devtools, "Page.navigate"), _sent(devtools, "Page.reload")) == ([({"url": url}, "s-start")], [])
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_still_loading_when_the_browser_ends_fails_naming_that_and_is_kept_with_its_pipe_gone():
+    def gone(params, session):
+        raise ConnectionError("the browser closed its debugging pipe")
+
+    devtools = Navigating({"https://shop.test/": "silent"})
+    devtools.answers["Target.activateTarget"] = gone
+    control = await _started(devtools)
+    loading = asyncio.ensure_future(control.load_start_tabs(["https://shop.test/"], _shop, own_timeout_s=5))
+    for _ in range(100):
+        if control._loading:
+            break
+        await asyncio.sleep(0.01)
+    control.ended(STOP)
+
+    (tab,) = await loading
+
+    assert (tab["outcome"], tab["error"]) == ("failed", "the browser ended")
 
 
 class Painting(StubDevTools):
@@ -654,13 +1016,57 @@ async def test_a_tab_it_opens_loads_once_held_to_the_window_comes_to_the_front_a
     devtools.send("Target.targetDestroyed", {"targetId": "b"})
 
     on_b = [name for name, _, session in devtools.calls if session == "s-b"]
-    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank"}, None)]
+    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank", "background": False},
+                                                                         None)]
     assert ({"url": "https://mail.test/b"}, "s-b") in _sent(devtools, "Page.navigate")
     assert on_b.index("Emulation.setDeviceMetricsOverride") < on_b.index("Page.navigate")
     assert [(tab["id"], tab["active"]) for tab in after_open] == [("a", False), ("b", True)]
     assert [(tab["id"], tab["active"]) for tab in after_switch] == [("a", True), ("b", False)]
     assert ({}, "s-a") in _sent(devtools, "Page.bringToFront")
     assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs] == [("b", "agentenv")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("focus_moves", [False, True])
+async def test_a_tab_opened_in_the_background_opens_behind_the_active_one_which_stays_in_front(focus_moves):
+    focus = {"s-a": True}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {
+        "result": {"value": ["visible", focus.get(session, False)]}}})
+    control = await _tabs(devtools, "a")
+
+    opening = asyncio.ensure_future(control.open_tab("https://mail.test/b", background=True))
+    await asyncio.sleep(0)
+    devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
+    if focus_moves:
+        focus.update({"s-a": False, "s-b": True})
+    opened = await opening
+
+    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank", "background": True},
+                                                                         None)]
+    assert ({"url": "https://mail.test/b"}, "s-b") in _sent(devtools, "Page.navigate")
+    assert ({}, "s-b") not in _sent(devtools, "Page.bringToFront")
+    assert _sent(devtools, "Target.activateTarget") == ([({"targetId": "a"}, None)] if focus_moves else [])
+    if not focus_moves:
+        assert [(tab["id"], tab["active"]) for tab in await control.tab_list()] == [("a", True), ("b", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_background_open_leaves_a_tab_another_call_switched_to_meanwhile_in_front():
+    focus = {"s-a": True}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {
+        "result": {"value": ["visible", focus.get(session, False)]}}})
+    control = await _tabs(devtools, "a", "c")
+
+    opening = asyncio.ensure_future(control.open_tab("https://mail.test/b", background=True))
+    await asyncio.sleep(0)
+    focus.update({"s-a": False, "s-c": True})
+    devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
+    await opening
+
+    assert _sent(devtools, "Target.activateTarget") == []
+    assert [(tab["id"], tab["active"]) for tab in await control.tab_list()] == [("a", False), ("c", True), ("b", False)]
 
 
 @pytest.mark.asyncio
@@ -874,7 +1280,7 @@ async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_
 
     devtools.send("Page.javascriptDialogOpening", {"type": kind, "message": "Sure?", "url": "https://a.test/",
                                                    "defaultPrompt": "yes"}, "s-a")
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
     devtools.send("Page.javascriptDialogClosed", {"result": answer == "accepted"}, "s-a")
 
     assert ("Page.enable", {}, "s-a") in devtools.calls
@@ -907,6 +1313,27 @@ async def test_its_control_records_a_completed_download_with_its_size_and_sha256
     assert in_progress["state"] == "inProgress" and "sha256" not in in_progress
     assert (done["state"], done["size"], done["path"]) == ("completed", 15, str(tmp_path / "report.pdf"))
     assert done["sha256"] == hashlib.sha256(b"%PDF-1.7 report").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_its_control_records_ended_at_when_download_hashing_fails(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, "agent")
+    missing_file = tmp_path / "nonexistent.pdf"
+
+    devtools.send("Browser.downloadWillBegin", {"guid": "g2", "url": "https://a.test/missing.pdf",
+                                                "suggestedFilename": "missing.pdf"})
+    devtools.send("Browser.downloadProgress", {"guid": "g2", "state": "completed",
+                                               "filePath": str(missing_file)})
+    for _ in range(int(WAIT_S / POLL_S)):
+        if "ended_at" in control.downloads.get("g2", {}):
+            break
+        await asyncio.sleep(POLL_S)
+
+    done = control.downloads["g2"]
+    assert done["state"] == "completed"
+    assert "ended_at" in done
+    assert "sha256" not in done
 
 
 @pytest.mark.asyncio

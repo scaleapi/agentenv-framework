@@ -193,9 +193,10 @@ def broken() -> set[Path]:
 
 
 def snapshot(python: Path) -> Snapshot:
-    """The environment's installed distributions, read by a fresh interpreter."""
+    """The environment's installed distributions, read by a fresh interpreter without the current folder on its
+    path, so no module there runs."""
     proc = subprocess.run(
-        [str(python), "-c", _SNAPSHOT_PROBE], capture_output=True, text=True, timeout=_SNAPSHOT_TIMEOUT_S
+        [str(python), "-P", "-c", _SNAPSHOT_PROBE], capture_output=True, text=True, timeout=_SNAPSHOT_TIMEOUT_S
     )
     if proc.returncode != 0:
         raise InstallerError(f"could not read the installed packages: {proc.stderr.strip() or proc.returncode}")
@@ -584,7 +585,7 @@ def _preview(env: Environment, specs: list[str], index_url: Optional[str]) -> bo
     """A resolver dry run, for the installers that have one. False when it cannot resolve."""
     flags = ("--index-url", index_url) if index_url else ()
     if env.has_pip:
-        command = [str(env.python), "-m", "pip", "install", "--dry-run", *flags, *specs]
+        command = [str(env.python), "-P", "-m", "pip", "install", "--dry-run", *flags, *specs]
     elif shutil.which("uv"):
         command = ["uv", "pip", "install", "--dry-run", "--python", str(env.python), *specs]
         command += ["--default-index", index_url] if index_url else []

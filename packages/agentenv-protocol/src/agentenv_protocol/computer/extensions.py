@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Optional
 
 from ..agent_env_environment import agent_skill, extension
-from . import card
+from . import card, clock
 from .card import (
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,
@@ -52,6 +52,12 @@ class Extensions:
             status["failed"] = "; ".join(f"{c.name}: {c.detail}" for c in failed)
         return status
 
+    @extension(clock.CLOCK, description="Follow the gateway's universe clock: the computer's clock follower already "
+               "follows the gateway core configured it with; this checks the task's zone against the one the computer "
+               "booted with and answers once the follower is connected, or says why it isn't.")
+    async def sync_time(self, env_get_time_url: str, timezone: Optional[str] = None) -> dict:
+        return await clock.sync_time(env_get_time_url, timezone)
+
     @extension(COMPUTER_DISPLAY, op="get", method="GET", description="Get or set the display's resolution and scale.")
     async def _computer_display_get(self) -> dict:
         return _display_data(await self._computer.display_now(), self.display_modes)
@@ -79,8 +85,8 @@ class Extensions:
                                    self.settings.default_norm_scale)
         self.settings = self.settings.model_copy(update={"default_space": space, "default_norm_scale": scale})
         for tool in self.mounted_card().capabilities.tools or []:
-            if tool.name in card.POINT_TOOLS:
-                await self.update_tool(tool.name, description=card.point_description(self, tool.name))
+            if (own := self._computer_prefix.own(tool.name)) in card.POINT_TOOLS:
+                await self.update_tool(tool.name, description=self._computer_prefix.text(card.point_description(self, own)))
         return await self._computer_spaces_get()
 
     @extension(COMPUTER_KEYBOARD, op="get", method="GET",

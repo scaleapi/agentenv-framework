@@ -14,11 +14,19 @@ an agent can act on the site through tools beside its pages. A site with none se
 
 One route is built in, replaced by a site's own ``@api`` route at its very path and answering before one whose path
 parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the acting
-user in when nobody is (GET), or to sign out (DELETE)."""
+user in when nobody is (GET), or to sign out (DELETE).
+
+A live site, ``@website(live=True, ...)``, is a real site, such as github.com, that its server serves no pages of: the
+real site does, at its ``domains``, its pages reaching the ``allow_hosts`` too. Its server holds what agentenv knows of
+it: the card, a data plane that seeds and reads its account through the real site's API, ``ready`` saying the account
+works, and ``session``, the account's cookies and local storage, from the method marked ``@session_state``. The site's
+``Settings``, which a deploy hands it as ``WEBSITE_SETTINGS_ENV`` (its credentials, ``SecretStr`` fields, among them), are
+``self.settings``, unless the site has a member of that name of its own; any site may declare them."""
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import math
 import os
 import re
@@ -27,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar, NamedTuple, Optional
 from urllib.parse import unquote
 
+from pydantic import BaseModel
 from starlette.applications import Starlette
 from starlette.datastructures import MutableHeaders
 from starlette.middleware import Middleware
@@ -44,17 +53,22 @@ from ..agent_env_environment import (
     create_fastmcp_app,
     extension,
 )
+from ..types import EnvironmentExtension
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock, clock_patch_script, iso
 from .errors import ApiError, NotFound
-from .readiness import SITE_READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
+from .readiness import (REAL_CLOCK, SITE_READY_TIMEOUT_S, UNIVERSE_CLOCK, WEBSITE_ALLOW_HOSTS_PARAM, WEBSITE_CLOCK_PARAM,
+                        WEBSITE_EXTENSION_URI, WEBSITE_LIVE_PARAM, WEBSITE_READY_OP, WebsiteReadiness)
 from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
                      reserved_path, routes_of)
 from .session import SessionSigner, session_cookie_name
 
 SESSION_PATH = "/api/session"
+#: The variable a deploy hands a site its settings in, a JSON object of each by its name.
+WEBSITE_SETTINGS_ENV = "AGENTENV_WEBSITE_SETTINGS"
 CHECK_TIMEOUT_S = 10.0
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
+_SESSION_ATTR = "_aee_website_session"
 _HEAD = re.compile(rb"<head(?:\s[^>]*)?>", re.IGNORECASE)
 _PREAMBLE = re.compile(rb"\A(?:\s|<!--.*?-->|<!doctype[^>]*>|<html(?:\s[^>]*)?>)*", re.IGNORECASE | re.DOTALL)
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
@@ -62,23 +76,50 @@ _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]
 
 class WebsiteDeclaration(NamedTuple):
     """What ``@website`` declares: the site's domains, its static folder (relative to the class's file), how long it
-    may take to be ready after its server starts, and whether its HTML pages read the universe's time."""
+    may take to be ready after its server starts, whether its HTML pages read the universe's time, for a live site
+    that it is one and the other hosts its pages reach, whether it serves agentenv's built-in site routes, and its
+    clock: the universe's, which a deploy can move, or real time, for an app that can't follow another."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
     ready_timeout_s: float = SITE_READY_TIMEOUT_S
     clock_patch: bool = False
+    live: bool = False
+    allow_hosts: tuple[str, ...] = ()
+    builtin_routes: bool = True
+    clock: str = UNIVERSE_CLOCK
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
-            ready_timeout_s: float = SITE_READY_TIMEOUT_S, clock_patch: bool = False) -> Any:
-    """Declare a WebsiteEnvironment's site."""
+            ready_timeout_s: float = SITE_READY_TIMEOUT_S, clock_patch: bool = False, live: bool = False,
+            allow_hosts: list[str] | tuple[str, ...] = (), builtin_routes: bool = True,
+            clock: str = UNIVERSE_CLOCK) -> Any:
+    """Declare a WebsiteEnvironment's site; ``live=True`` a real one, at its ``domains``, whose pages reach the
+    ``allow_hosts`` too. ``builtin_routes=False`` serves none of agentenv's own site routes (``/api/session``), so a
+    mounted app answers every path but the card's and the data plane's, as a third-party app wrapped by its site does;
+    ``clock="real"`` declares a site that keeps real time, whose card serves no ``clock/v1`` and whose answers carry no
+    ``X-Universe-Now``."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
-    if isinstance(domains, str):
-        raise ValueError(f"domains is a list of host names, not the string {domains!r}")
-    if problems := [problem for host in domains if (problem := host_problem(host))]:
-        raise ValueError(f"domains: {problems[0]}")
+    for field, hosts in (("domains", domains), ("allow_hosts", allow_hosts)):
+        if isinstance(hosts, str):
+            raise ValueError(f"{field} is a list of host names, not the string {hosts!r}")
+        if problems := [problem for host in hosts if (problem := host_problem(host))]:
+            raise ValueError(f"{field}: {problems[0]}")
+    if not isinstance(live, bool):
+        raise ValueError(f"live is True or False, not {live!r}")
+    if live and not domains:
+        raise ValueError("a live site names the domains the real site is at")
+    if live and static is not None:
+        raise ValueError("a live site serves no pages, the real site does, so it takes no static folder")
+    if allow_hosts and not live:
+        raise ValueError("allow_hosts are the other hosts a live site's pages reach; declare live=True")
+    if not isinstance(builtin_routes, bool):
+        raise ValueError(f"builtin_routes is True or False, not {builtin_routes!r}")
+    if clock not in (UNIVERSE_CLOCK, REAL_CLOCK):
+        raise ValueError(f"clock is {UNIVERSE_CLOCK!r} or {REAL_CLOCK!r}, not {clock!r}")
+    if clock_patch and clock == REAL_CLOCK:
+        raise ValueError("clock_patch puts the universe's time in a site's pages; a site with a real clock has none to put")
     if isinstance(ready_timeout_s, bool) or not isinstance(ready_timeout_s, (int, float)) or not (
             0 < ready_timeout_s < math.inf):
         raise ValueError(f"ready_timeout_s is a number of seconds above 0, not {ready_timeout_s!r}")
@@ -86,7 +127,8 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
-        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, float(ready_timeout_s), clock_patch))
+        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, float(ready_timeout_s), clock_patch, live,
+                                                       tuple(allow_hosts), builtin_routes, clock))
         return cls
 
     return deco
@@ -98,6 +140,14 @@ def host_problem(host: Any) -> str | None:
     if not isinstance(host, str) or not _HOST.fullmatch(host):
         return f"{host!r} is not a host name such as example.com or *.example.com"
     return None
+
+
+def session_state(fn: Any) -> Any:
+    """Mark the method that answers ``website/v1``'s ``session``: it takes ``user``, the account to sign in as or
+    None, and returns ``{cookies, local_storage}``, each cookie with no domain and a ``max_age``. A live site marks
+    one, since only the real site's cookies sign a browser in to it; a site that marks none signs its own cookie."""
+    setattr(fn, _SESSION_ATTR, True)
+    return fn
 
 
 def ready_check(fn: Any) -> Any:
@@ -115,6 +165,10 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     app: ClassVar[Any] = None
     asgi: Any = None
 
+    class Settings(BaseModel):
+        """The site's settings, which a deploy hands it: a site declares its own; a ``SecretStr`` field is a secret,
+        whose env.toml value is a ``secret:`` or ``env:`` reference agentenv resolves only as it starts the server."""
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         routes_of(cls)
@@ -124,6 +178,9 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         self._signer = SessionSigner(cookie_name=session_cookie_name(self._build_card().name))
         self._started = time.monotonic()
         self._checking: dict[str, asyncio.Future] = {}
+        settings = type(self).Settings.model_validate(json.loads(os.environ.get(WEBSITE_SETTINGS_ENV) or "{}"))
+        if not hasattr(type(self), "settings"):  # a site's own member named settings, an @api route say, stays its own
+            self.settings = settings
 
     @classmethod
     def declaration(cls) -> WebsiteDeclaration:
@@ -180,14 +237,19 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         else:
             asgi = Starlette(middleware=middleware)
             AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
-        if SESSION_PATH not in taken:
+        if SESSION_PATH not in taken and not declaration.live and declaration.builtin_routes:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
                                         methods=[r.method]) for r in api_routes)
-        asgi.router.default = _Fallback(root, type(self).app)
+        asgi.router.default = _Fallback(root, self.fallback_app())
         self.asgi = asgi
         self._mounted = True
         return asgi
+
+    def fallback_app(self) -> Any:
+        """The app that answers what the site's routes and static folder don't: ``app``, unless a subclass builds its
+        own, as one that forwards to an app beside it does."""
+        return type(self).app
 
     def serves_mcp(self) -> bool:
         """Whether the site is an MCP server too: it has ``@tool`` or ``@resource`` methods, or forwards tools."""
@@ -209,10 +271,22 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == WEBSITE_EXTENSION_URI:
             declaration = self.declaration()
-            return {"domains": list(declaration.domains),
-                    "routes": [r.advertised() for r in self.routes()], "session_cookie": self.session_cookie,
-                    "session_path": SESSION_PATH}
+            clock = {WEBSITE_CLOCK_PARAM: REAL_CLOCK} if declaration.clock == REAL_CLOCK else {}
+            if declaration.live:
+                return {"domains": list(declaration.domains), WEBSITE_LIVE_PARAM: True,
+                        WEBSITE_ALLOW_HOSTS_PARAM: list(declaration.allow_hosts), **clock}
+            session = {"session_cookie": self.session_cookie, "session_path": SESSION_PATH} \
+                if declaration.builtin_routes else {}
+            return {"domains": list(declaration.domains), "routes": [r.advertised() for r in self.routes()],
+                    **session, **clock}
         return super().extension_params(uri)
+
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        """A site with a real clock serves no ``clock/v1``: nothing could move its time."""
+        served = super().served_extensions(extensions)
+        if self.declaration().clock == REAL_CLOCK:
+            return [extension for extension in served if extension.uri != CLOCK_EXTENSION_URI]
+        return served
 
     @extension(CLOCK_EXTENSION_URI, description="Sync this site to the gateway's virtual clock.")
     async def sync_time(self, env_get_time_url: str, timezone: Optional[str] = None) -> dict:
@@ -242,6 +316,18 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
+        marked = [method for method, _marker in _marked_members(self, _SESSION_ATTR)]
+        if len(marked) > 1:
+            raise TypeError(f"{type(self).__qualname__} marks {len(marked)} methods @session_state; mark one")
+        if marked:
+            state = await _maybe_await(marked[0](user))
+            if not (isinstance(state, dict) and isinstance(state.get("cookies", []), list)
+                    and isinstance(state.get("local_storage", []), list)):
+                raise TypeError(f"@session_state {marked[0].__name__} returns {{cookies, local_storage}}, not {state!r}")
+            return {"cookies": state.get("cookies", []), "local_storage": state.get("local_storage", [])}
+        if self.declaration().live:
+            raise TypeError(f"{type(self).__qualname__} is a live site and marks no @session_state method, so it can't "
+                            "sign a browser in")
         return {"cookies": [self._session_signer().cookie(user)], "local_storage": []}
 
     async def _not_ready(self) -> list[str]:
@@ -309,8 +395,8 @@ class _Forwarded:
         if scope["type"] in ("http", "websocket"):
             headers = dict(scope["headers"])
             host = _first(headers.get(b"x-forwarded-host"))
+            scope = dict(scope, **{SITE_RAW_PATH: scope.get("raw_path")})
             proto = _first(headers.get(b"x-forwarded-proto")).lower()
-            scope = dict(scope)
             if host:
                 scope["headers"] = [(k, v) for k, v in scope["headers"] if k != b"host"] + [(b"host", host.encode())]
             if proto in ("http", "https"):
@@ -322,6 +408,11 @@ class _Forwarded:
                 if scope.get("raw_path") is not None:
                     scope["raw_path"] = prefix.encode("latin-1") + scope["raw_path"]
         await self.app(scope, receive, send)
+
+
+#: Where the scope keeps the request's path as it reached the server, its encoding intact, before ``_Forwarded`` put a
+#: forwarded prefix before it: the site's own path, as a forwarding site sends it on.
+SITE_RAW_PATH = "agentenv.site_raw_path"
 
 
 def _first(value: bytes | None) -> str:
@@ -341,13 +432,13 @@ class _Universe:
         self.app, self.env = app, env
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
+        if scope["type"] != "http" or self.env.declaration().clock == REAL_CLOCK:
             return await self.app(scope, receive, send)
         clock = self.env._clock()
         try:
             now: Any = await clock.read()
         except ClockUnavailable as e:
-            if not reserved_path(_route_path(scope)):
+            if not reserved_path(route_path(scope)):
                 return await error_response(ApiError(str(e), code="clock_unavailable", status=503))(scope, receive, send)
             now = None
         token = clock.answering_at(now)
@@ -395,7 +486,7 @@ def _with_script(html: bytes, script: bytes) -> bytes:
     return html[:at] + script + html[at:]
 
 
-def _route_path(scope: dict) -> str:
+def route_path(scope: dict) -> str:
     """The site's own path of a request, as routing reads it: its path without the ``root_path`` a forwarded prefix put
     before it (``_Forwarded``)."""
     root, path = scope.get("root_path", ""), scope["path"]
@@ -406,7 +497,7 @@ def _unreserved(handler: Any) -> Any:
     """``handler``, an ``@api`` route's endpoint, answering 404 at the data plane's and card's paths, so a broad route
     (``/{rest:path}``) never serves a page there; the routes agentenv registers at those paths answer before it."""
     async def answer(request: Request) -> Response:
-        if reserved_path(_route_path(request.scope)):
+        if reserved_path(route_path(request.scope)):
             return error_response(NotFound("not found"))
         return await handler(request)
     return answer
@@ -425,7 +516,7 @@ class _Fallback:
             if self.app is not None:
                 await self.app(scope, receive, send)
             return
-        path, reading = _route_path(scope), scope["method"] in ("GET", "HEAD")
+        path, reading = route_path(scope), scope["method"] in ("GET", "HEAD")
         if reserved_path(path):
             return await error_response(NotFound("not found"))(scope, receive, send)
         if reading and (file := self._file(path)) is not None:

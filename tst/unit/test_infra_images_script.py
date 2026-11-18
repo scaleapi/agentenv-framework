@@ -9,7 +9,7 @@ import tomllib
 import pytest
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import BUNDLE_IMAGES, release_digests
+from agent_env.env.published_images import BUNDLE_IMAGES, release_digests, released_computers
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError
 from tst.util.scripts import load_script
 
@@ -76,7 +76,7 @@ def test_plan_only_lists_the_infra_images_the_agents_images_or_the_disk_forms(sc
     assert "agentenv-gateway" in names["infra"] and bundles == [
         "agentenv-browser-use", "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-hermes",
         "agentenv-letta-code", "agentenv-opencode", "agentenv-openhands", "agentenv-pi", "agentenv-proxy",
-        "agentenv-pydantic-ai", "agentenv-mail-mcp", "agentenv-ubuntu-24.04", "agentenv-ubuntu-24.04-headless"]
+        "agentenv-pydantic-ai", "agentenv-mail-mcp", "agentenv-ubuntu-24.04", "agentenv-ubuntu-24.04-browser"]
 
 
 def test_plan_missing_lists_the_images_the_registry_lacks_or_refuses_to_show(script, monkeypatch, capsys):
@@ -102,6 +102,22 @@ def test_write_records_the_digest_served_under_every_tag(script, monkeypatch, tm
 
     assert _run(script, monkeypatch, "write", str(path)) == 0
 
+    assert release_digests(path) == {image.ref(): _DIGEST for image in bootstrap.PUBLISHED_IMAGES}
+
+
+def test_write_records_the_composed_computers_it_is_handed_beside_the_images(script, monkeypatch, tmp_path):
+    _registry(script, monkeypatch, {})
+    computers = [{"env": "@local/agentenv-framework/browsers/chromium", "form": "container",
+                  "index": f"ghcr.io/scaleapi/agentenv-chromium:index-{'a' * 64}@sha256:{'b' * 64}", "arches": {
+                      arch: {"key": "sha256:" + "c" * 64, "image": f"ghcr.io/scaleapi/agentenv-chromium@sha256:{c * 64}",
+                             "lock": {"inputs": "sha256:" + "d" * 64, "arch": arch}}
+                      for arch, c in (("amd64", "1"), ("arm64", "2"))}}]
+    handed, path = tmp_path / "computers.json", tmp_path / "published_images.json"
+    handed.write_text(json.dumps(computers))
+
+    assert _run(script, monkeypatch, "write", str(path), "--computers", str(handed)) == 0
+
+    assert released_computers(path) == computers
     assert release_digests(path) == {image.ref(): _DIGEST for image in bootstrap.PUBLISHED_IMAGES}
 
 

@@ -2,8 +2,9 @@
 the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
 the copy its server kept before it served; its card declares a file tree. Hooks override paths, and read the parts they
 get with part_bytes. Around a load and a reset the app is stopped and relaunched, a failed load is followed by a reset,
-and data calls take turns; an app that loads live is left running through a load, and a failed one is reset with it
-stopped, or left as it is when the app says so; an app with hooks may keep its paths as installed. A call past
+and data calls take turns; an export of a file the paused app holds stops it, copies it in what's left of its
+timeout, and relaunches it after; an app that loads live is left running through a load, and a failed one is reset
+with it stopped, or left as it is when the app says so; an app with hooks may keep its paths as installed. A call past
 data_timeout_s fails then and is cancelled, but a sync hook runs in a thread, which its reset and relaunch, and the next
 call, wait for. The app serves its skill file."""
 from __future__ import annotations
@@ -20,7 +21,7 @@ pytest.importorskip("mcp.server.fastmcp")
 
 import httpx  # noqa: E402
 
-from agentenv_protocol import add_data, client, reset_data  # noqa: E402
+from agentenv_protocol import add_data, client, get_data, reset_data  # noqa: E402
 from agentenv_protocol.agent_env_environment import OP_ADD_DATA  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, linux, part_bytes  # noqa: E402
 from agentenv_protocol.computer import app, app_data, app_runtime, session  # noqa: E402
@@ -106,8 +107,10 @@ def desktop(monkeypatch):
     @contextlib.contextmanager
     def paused(pid):
         events.append(("pause", pid))
-        yield
-        events.append(("continue", pid))
+        try:
+            yield
+        finally:
+            events.append(("continue", pid))
 
     monkeypatch.setattr(session, "launch", launch)
     monkeypatch.setattr(session, "stop", stop)
@@ -136,6 +139,19 @@ async def test_an_app_with_only_paths_loads_exports_and_resets_them_as_installed
     assert client.find_extension(card, INTAKE_EXTENSION_URI) is not None
     assert loaded == {"Mail/inbox.txt": b"loaded", "Mail/new.txt": b"new", ".config/mail/accounts.json": b"{}"}
     assert reset == {"Mail/inbox.txt": b"installed"}
+
+
+@pytest.mark.asyncio
+async def test_get_takes_paths_and_a_write_namespace_and_pauses_the_running_app_as_exported_apps_call_it(home,
+                                                                                                        desktop):
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("kept")
+    await PathsMail()._computer_app.launch_app()
+
+    parts = await app_data.get(["Mail"], None)
+
+    assert [await part_bytes(part) for part in parts] == [b"kept"]
+    assert desktop == [("launch", 4242), ("pause", 4242), ("continue", 4242)]
 
 
 @pytest.mark.asyncio
@@ -198,6 +214,32 @@ async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_ex
 
 
 @pytest.mark.asyncio
+async def test_an_export_of_a_file_the_paused_app_holds_stops_the_app_copies_it_and_relaunches_it(home, desktop,
+                                                                                                 monkeypatch):
+    """As Windows lets an app hold a file that no other process may read, which a pause doesn't release."""
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("held")
+    mail = PathsMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+    stage = app_data._stage
+
+    def held_while_running(*args):
+        if desktop[-1][0] == "pause":
+            held = PermissionError(13, "The process cannot access the file", str(home / "Mail/inbox.txt"))
+            held.winerror = 32
+            raise held
+        stage(*args)
+
+    monkeypatch.setattr(app_data, "_stage", held_while_running)
+    async with _http(mail) as http:
+        exported = _files(await _rpc(http, "data/get", {}))
+
+    assert [event[0] for event in desktop] == ["launch", "pause", "continue", "stop", "launch"]
+    assert desktop[3] == ("stop", 4242) and exported["Mail/inbox.txt"] == b"held"
+
+
+@pytest.mark.asyncio
 async def test_an_export_copies_the_paths_with_the_app_paused_and_sends_the_copy_once_it_runs_again(home, desktop,
                                                                                                   monkeypatch):
     (home / "Mail").mkdir()
@@ -237,6 +279,37 @@ async def test_an_export_sends_a_linked_files_contents_from_inside_the_home_and_
         exported = _files(await _rpc(http, "data/get", {}))
 
     assert exported == {"Mail/latest.txt": b"archived"}
+
+
+@linux(paths=MAIL, launch=Launch(command=["mail"]))
+class CheckedMail(ComputerAppEnvironment):
+    """Mail that, once a data call relaunches it, checks it came back, failing while ``broken``."""
+    relaunched: list = []
+    broken = False
+
+    async def _relaunched(self, op: str) -> None:
+        type(self).relaunched.append(op)
+        if type(self).broken:
+            raise RuntimeError("it came back broken")
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_relaunched_the_app_awaits_its_relaunch_check_whose_failure_fails_the_call(home, desktop):
+    mail = CheckedMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        await _rpc(http, "data/reset", {})
+        await _rpc(http, "data/get", {})
+        CheckedMail.broken = True
+        broken = await http.post(RPC_PATH, json=_call("data/reset", {}))
+    await mail._computer_app.stop_app()
+
+    assert CheckedMail.relaunched == ["reset_data", "reset_data"]
+    assert "it came back broken" in broken.json()["error"]["message"]
+    assert [event for event, _ in desktop] == ["launch", "stop", "launch", "pause", "continue", "stop", "launch",
+                                               "stop"]
 
 
 @pytest.mark.asyncio
@@ -368,6 +441,32 @@ async def test_calls_take_turns_and_one_past_its_timeout_fails_then_while_what_f
     assert card.status_code == 200
     assert desktop == [("launch", 4242), ("stop", 4242), ("load", 2), ("answered",), ("loaded", 2), ("reset",),
                        ("launch", 4248), ("stop", 4248), ("load", 1), ("loaded", 1), ("launch", 4252)]
+
+
+@pytest.mark.asyncio
+async def test_an_export_retried_with_the_app_stopped_gets_only_what_is_left_of_its_timeout(home, desktop):
+    @linux(launch=Launch(command=["held"]))
+    class Held(ComputerAppEnvironment):
+        data_timeout_s = 1.0
+
+        @get_data
+        async def export(self) -> list:
+            if desktop[-1][0] == "launch":
+                await asyncio.sleep(0.8)
+                raise app_data.HeldByApp("the running app holds a file")
+            await asyncio.Event().wait()
+
+    held = Held()
+    await held._computer_app.launch_app()
+    started = time.monotonic()
+    async with _http(held) as http:
+        late = await http.post(RPC_PATH, json=_call("data/get", {}))
+    answered = time.monotonic() - started
+    await asyncio.gather(*held._computer_app_data_plane().changing)
+
+    assert late.json()["error"]["message"] == "get_data ran past the app's data_timeout_s, 1 s"
+    assert answered < 1.5
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
 
 
 @pytest.mark.asyncio

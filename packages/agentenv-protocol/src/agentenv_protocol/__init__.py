@@ -21,6 +21,7 @@ from .agent_env_environment import (
     extension,
     get_data,
     injecting,
+    mcp_port,
     reset_data,
     tool,
 )
@@ -54,6 +55,7 @@ from .manifest import (
 )
 from .types import (
     CONTROL_TOKEN_ENV,
+    CONTROL_TOKEN_HEADER,
     DATA_OBJECTS_EXTENSION_URI,
     INTAKE_EXTENSION_URI,
     MCP_PATH,
@@ -94,6 +96,7 @@ __all__ = [
     "AgentEnvStarletteApplication",
     "ForwardedTool",
     "create_fastmcp_app",
+    "mcp_port",
     "environment_card",
     "reset_data",
     "add_data",
@@ -163,6 +166,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "RPC_PATH",
     "CONTROL_TOKEN_ENV",
+    "CONTROL_TOKEN_HEADER",
     "WELL_KNOWN_PATH",
     "METHOD_RESET",
     "METHOD_ADD",

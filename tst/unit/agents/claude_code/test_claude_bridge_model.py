@@ -11,8 +11,8 @@ def _cli_model(model: str | None) -> str | None:
     return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
 
 
-@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-opus-4-8",
-                                   "claude-opus-4-7"])
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-fable-5-2",
+                                   "claude-opus-4-8", "claude-opus-4-7"])
 def test_a_native_1m_model_gets_its_1m_window(model):
     assert _cli_model(model) == f"{model}[1m]"
 

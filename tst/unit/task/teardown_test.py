@@ -384,14 +384,53 @@ def test_a_reattached_local_agent_has_its_container_and_work_folder_removed(sand
         return ""
 
     monkeypatch.setattr(LocalSandbox, "exec_script", record)
+    async def listed(self, *args):
+        return (0, self.container_name, "")
+    monkeypatch.setattr(LocalSandbox, "exec_with_output", listed)
     context = TaskStepContext(deployed_agents=[
         DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id=agent.sandbox_id, sandbox_type="local")])
 
     report = _run(context)
 
     assert report.terminated == (RecordedSandbox(agent.sandbox_id, "local", "agent"),)
-    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null 2>&1 || true"]
+    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null"]
     assert list(sandbox_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["list", "remove", "network"])
+def test_local_docker_refusal_retains_folder_and_retry_removes_it(sandbox_root, tmp_path, monkeypatch, failure):
+    agent = LocalSandbox()
+    (agent.work_dir / ".agent-container-mode").write_text(agent.container_name)
+    if failure == "network":
+        (agent.work_dir / ".closed-network").write_text("closed-owned")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    docker = bindir / "docker"
+    permit, alive = tmp_path / "permit", tmp_path / "alive"
+    alive.touch()
+    docker.write_text(
+        f"#!/bin/sh\n"
+        f"if [ ! -f '{permit}' ] && [ \"$1\" = '{'rm' if failure == 'remove' else 'network' if failure == 'network' else 'ps'}' ]; then "
+        "echo 'daemon unavailable' >&2; exit 1; fi\n"
+        f"if [ \"$1\" = ps ] && [ -f '{alive}' ]; then echo owned-container; fi\n"
+        f"if [ \"$1\" = rm ]; then rm -f '{alive}'; fi\n"
+        "exit 0\n"
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    context = TaskStepContext(deployed_agents=[
+        DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id=agent.sandbox_id, sandbox_type="local")])
+
+    failed = _run(context)
+
+    assert agent.work_dir.is_dir()
+    assert alive.exists() is (failure != "network")
+    assert [entry.sandbox_id for entry in failed.still_up] == [agent.sandbox_id]
+    assert agent.sandbox_id not in context.metadata.get(TORN_DOWN_KEY, [])
+    permit.touch()
+    retried = _run(context)
+    assert retried.terminated == (RecordedSandbox(agent.sandbox_id, "local", "agent"),)
+    assert not agent.work_dir.exists() and not alive.exists()
 
 
 def test_a_slow_folder_removal_does_not_count_against_the_terminate_timeout(sandbox_root, monkeypatch):

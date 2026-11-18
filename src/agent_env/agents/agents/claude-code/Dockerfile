@@ -6,7 +6,7 @@ FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:c20888b6acdd1e63e1c43
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 # Claude Code's native build for this machine's platform, checked against its release manifest.
-ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_CODE_VERSION=2.1.322
 RUN set -eu; \
     case "$(uname -m)" in x86_64) platform=linux-x64 ;; aarch64) platform=linux-arm64 ;; \
       *) echo "Claude Code has no build for $(uname -m)" >&2; exit 1 ;; esac; \

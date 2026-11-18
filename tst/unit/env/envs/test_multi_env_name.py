@@ -67,7 +67,7 @@ async def test_a_deploy_records_the_mcp_url_and_name_its_gateway_card_gives():
     card = {"name": "crm", "additionalInterfaces": [{"url": "/mcp", "transport": "mcp"}]}
     result = SimpleNamespace(gateway_url="https://gw.example", mcp_url="https://gw.example/mcp", db_web_url=None, db_mcp_url=None,
                              website_frontend_urls=None, environment_card=card, environment_card_read_at_utc="t",
-                             env_state_instance_ids=[], mcp_server_name="crm")
+                             env_state_instance_ids=[], mcp_server_name="crm", control_token="t0k")
 
     async def deploy_gateway(self, sandbox_provider, **kwargs):
         self._sandbox = SimpleNamespace(sandbox_id="gw", type="modal_vm")
@@ -80,4 +80,5 @@ async def test_a_deploy_records_the_mcp_url_and_name_its_gateway_card_gives():
          patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=None)), \
          patch("agent_env.env.envs._deployment.register_env_instance", side_effect=lambda deployed, ttl: deployed):
         record = await MultiEnv(id="e", version=1, mcp_server_envs=[], name="crm").deploy()
-    assert (type(record), record.env_provider_type, record.mcp_url, record.mcp_server_name) == (DeployedGatewayEnv, "gateway", "https://gw.example/mcp", "crm")
+    assert (type(record), record.env_provider_type, record.mcp_url, record.mcp_server_name, record.control_token) == (
+        DeployedGatewayEnv, "gateway", "https://gw.example/mcp", "crm", "t0k")

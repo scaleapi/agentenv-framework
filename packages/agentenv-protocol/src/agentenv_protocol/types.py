@@ -19,6 +19,8 @@ RPC_PATH = "/agentenv"
 #: The variable that hands an env the token its framework-only routes take as their bearer, everything it serves but
 #: its MCP endpoint and its card; agent-env sets it when it deploys the env, and without it those routes are open.
 CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
+#: The header a control token travels in where it must not collide with a front door's own ``Authorization``.
+CONTROL_TOKEN_HEADER = "AgentEnv-Control-Token"
 
 # A card declares its MCP endpoint as an `additionalInterfaces` entry with this transport; a card
 # without one is reached at MCP_PATH by convention.
@@ -200,6 +202,8 @@ class EnvironmentCard(BaseModel):
     additionalInterfaces: list[EnvironmentInterface] = Field(default_factory=list)
     capabilities: EnvironmentCapabilities = Field(default_factory=EnvironmentCapabilities)
     children_environments: Optional[list[EnvironmentCard]] = None
+    # Set by a composer on each child it nests: the name the child env is registered as, which its own name needn't be.
+    environment_name: Optional[str] = None
 
 
 EnvironmentCard.model_rebuild()

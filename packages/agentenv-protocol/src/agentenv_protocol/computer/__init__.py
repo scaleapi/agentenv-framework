@@ -21,11 +21,13 @@ from .app import (
     Ready,
     RunScript,
     Service,
+    Windows,
     computer_app,
     install,
     install_step,
     linux,
     ready_check,
+    windows,
 )
 from .errors import (
     BackgroundUnavailable,
@@ -82,7 +84,7 @@ from .dataplane import part_bytes
 from .keys import PRINTABLE_KEYS
 from .manifest import ManifestSegment, RecordingManifest
 from .platform import Platform
-from .settings import SETTINGS_ENV, ComputerSettings
+from .settings import SETTINGS_ENV, TOOL_PREFIX_ENV, ComputerSettings, tool_prefix_problem
 
 if TYPE_CHECKING:
     from .card import (
@@ -98,11 +100,12 @@ if TYPE_CHECKING:
     )
     from .driver import DEFAULT_IDENTITY, ComputerDriverEnvironment, DriverDeclaration, computer_driver
     from ._macos import MacOSDriver
+    from ._windows import WindowsDriver
     from ._x11 import X11Driver
     from .recording import RecordedFrame, RecordedSegment, RecordHints, Recording, frames_in_thread
 
 # The names whose modules need the computer extra (mcp, av and Pillow), by module; MacOSDriver's, the macos extra too,
-# on first use of the Mac, and X11Driver's, the x11 extra.
+# on first use of the Mac, X11Driver's, the x11 extra, and WindowsDriver's, the windows extra.
 _ON_USE = {
     "driver": ("ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration"),
     "card": ("COMPUTER", "COMPUTER_READY", "COMPUTER_DISPLAY", "COMPUTER_SPACES", "COMPUTER_POINTER",
@@ -110,6 +113,7 @@ _ON_USE = {
     "recording": ("Recording", "RecordHints", "RecordedFrame", "RecordedSegment", "frames_in_thread"),
     "_macos": ("MacOSDriver",),
     "_x11": ("X11Driver",),
+    "_windows": ("WindowsDriver",),
 }
 
 
@@ -122,12 +126,13 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration", "MacOSDriver",
-    "X11Driver",
-    "ComputerAppEnvironment", "computer_app", "install", "linux", "install_step", "ready_check", "Linux", "Service",
+    "X11Driver", "WindowsDriver",
+    "ComputerAppEnvironment", "computer_app", "install", "linux", "windows", "install_step", "ready_check", "Linux",
+    "Windows", "Service",
     "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
     "AppDeclaration", "AppOs",
     "APP_SETTINGS_ENV", "part_bytes",
-    "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
+    "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV", "TOOL_PREFIX_ENV", "tool_prefix_problem",
     "Tab", "PageState", "PageDialog", "FileChooser",
     "PRINTABLE_KEYS",
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",

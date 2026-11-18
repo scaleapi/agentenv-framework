@@ -1,0 +1,20 @@
+#!/bin/sh
+# The base's start. init, as root at the computer's start, is the root start (root/init), which takes the time zone a
+# deploy passes as AGENTENV_SETTING_TIMEZONE and starts the session's supervisord as the session user. That one runs
+# xvfb.
+set -eu
+case "${1:-}" in
+    init)
+        exec /usr/local/lib/agentenv-root/init
+        ;;
+    xvfb)
+        # supervisord runs one X at a time, so a lock here is one a killed X left, and X refuses to start while the pid
+        # it names is taken, which after a restart it often is.
+        rm -f "/tmp/.X${DISPLAY#:}-lock"
+        # No screensaver and no DPMS: their timeouts run on the universe's clock, and would blank the screen.
+        exec Xvfb "$DISPLAY" -screen 0 1920x1080x24 -nolisten tcp -ac -s 0 -dpms
+        ;;
+    *)
+        echo "usage: start-computer init|xvfb" >&2; exit 2
+        ;;
+esac

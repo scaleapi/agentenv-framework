@@ -23,7 +23,7 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import (
     _GATEWAY_ONLY_FIELDS, DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, Env, EnvCapabilityUnsupported, EnvNeedsGateway,
-    EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox,
+    EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox, website_child,
 )
 from agent_env.env.gateway.constants import (
     EXT_CHANGES_URI, EXT_CLOCK_URI, EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI, EXT_STATE_URI, EXT_STEP_URI, EXT_TRAJECTORY_URI, EXT_TRIGGERS_URI,
@@ -147,6 +147,20 @@ def test_a_leaf_card_is_its_own_only_child_env_and_a_composed_one_with_a_data_pl
     assert _record(desk).get_child_env_card("desk") is desk and _record(desk).get_child_env_card("mail") is mail
     alone = {**desk, "children_environments": [{**mail, "name": "desk"}]}
     assert _record(alone).get_child_env_card("desk") is alone
+
+
+def test_a_child_whose_card_is_named_otherwise_is_found_by_the_environment_name_its_gateway_states():
+    """A card the SDK didn't build can carry another name than the env's; the gateway states the env's beside it, and
+    a website served at /svc/<environment_name> is still told from an MCP server by its route."""
+    notes = {"name": "Notes App", "url": "/svc/notes/agentenv", "environment_name": "notes"}
+    mail = {"name": "Mail", "url": "/svc/mcp-mail/agentenv", "environment_name": "mail"}
+    deployed = _record({"name": "office", "children_environments": [notes, mail]})
+    assert deployed.get_child_env_card("notes") is notes and deployed.get_child_env_card("Notes App") is None
+    assert deployed.child_env("notes", mcp=False).card is notes and deployed.child_env("mail", mcp=True).card is mail
+    assert website_child(deployed.child_env("notes")) and not website_child(deployed.child_env("mail"))
+    # A card from a gateway that states none is found by its own name, as before.
+    assert _record({"name": "office", "children_environments": [{"name": "notes", "url": "/svc/notes/agentenv"}]}
+                   ).get_child_env_card("notes")["url"] == "/svc/notes/agentenv"
 
 
 _SITE_MAIL = {"name": "mail", "url": "/svc/mail/agentenv",

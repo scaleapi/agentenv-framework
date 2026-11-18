@@ -48,10 +48,26 @@ grant_executable() {
     granted "$executable" 1 "$executable" "$@"
 }
 
+# file_url PATH: the file URL of the folder PATH as Foundation writes a bundle's: letters, digits and "!$&'()*+,-./:=@_~"
+# as they are, every other printable ASCII character percent-encoded. A path with any other byte fails, since Foundation
+# decomposes such a character before encoding it.
+file_url() {
+    local LC_ALL=C path=${1%/} url= char i
+    for ((i = 0; i < ${#path}; i++)); do
+        char=${path:i:1}
+        case "$char" in
+            [A-Za-z0-9/._~!\$\&\'\(\)\*+,:=@-]) url+=$char ;;
+            [[:print:]]) url+=$(printf '%%%02X' "'$char") ;;
+            *) fail "$1 isn't printable ASCII, so its file URL can't be written for its screen capture approval" ;;
+        esac
+    done
+    echo "file://$url/"
+}
+
 # granted CLIENT TYPE PROGRAM SERVICE...: the TCC rows of CLIENT, a bundle identifier (TYPE 0) or a path (TYPE 1), for
 # each SERVICE, bound to PROGRAM's designated requirement.
 granted() {
-    local client=$1 type=$2 program=$3 requirement hex service now csreq approvals quoted
+    local client=$1 type=$2 program=$3 requirement hex service now csreq approvals quoted keys key
     shift 3
     quoted=${client//\'/\'\'}
     requirement=$(codesign -d -r- "$program" 2>&1 | sed -n 's/^\(# *\)\{0,1\}designated => //p')
@@ -74,13 +90,21 @@ granted() {
             last_reminded) VALUES ('$service', '$quoted', $type, 2, 2, 1, X'$hex', NULL, 0, 'UNUSED', NULL, 0, $now, NULL,
             NULL, 'UNUSED', $now);"
         if [ "$service" = kTCCServiceScreenCapture ]; then
-            # macOS asks once a program, even granted, before its first direct capture, keyed by the identifier or the
-            # path TCC knows it by; an approval recorded ahead counts.
+            # macOS asks a program, even granted, before its first direct capture, keyed by the identifier or the path
+            # TCC knows it by, and an app by its bundle's file URL too, "to bypass the system private window picker",
+            # and again once its privacy hint's date passes; approvals recorded ahead under each, hinted at no sooner
+            # than they are, count.
             approvals="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
             mkdir -p "$(dirname "$approvals")"
-            defaults write "$approvals" "$client" -dict \
-                kScreenCaptureApprovalLastAlerted -date "3024-01-01 00:00:00 +0000" \
-                kScreenCaptureApprovalLastUsed -date "3024-01-01 00:00:00 +0000"
+            keys=("$client")
+            if ((type == 0)); then keys+=("$(file_url "$program")"); fi
+            for key in "${keys[@]}"; do
+                defaults write "$approvals" "$key" -dict \
+                    kScreenCaptureApprovalLastAlerted -date "3024-01-01 00:00:00 +0000" \
+                    kScreenCaptureApprovalLastUsed -date "3024-01-01 00:00:00 +0000" \
+                    kScreenCapturePrivacyHintDate -date "3024-01-01 00:00:00 +0000" \
+                    kScreenCapturePrivacyHintPolicy -int 3153600000
+            done
         fi
     done
     for pid in $(pgrep -x tccd); do as_root kill "$pid" 2>/dev/null || true; done

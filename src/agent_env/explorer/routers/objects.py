@@ -17,12 +17,13 @@ router = APIRouter(prefix="/api/v1/objects", tags=["objects"])
 
 _CONTENT_STREAM_CHUNK = 64 * 1024
 
-# Types a browser runs as a document — served under CSP sandbox so a stored
-# HTML/SVG artifact can't execute script on the explorer origin.
-_SANDBOX_TYPES = frozenset({
-    "text/html", "application/xhtml+xml", "image/svg+xml",
-    "application/xml", "text/xml", "application/xslt+xml",
-})
+# Types a browser shows without running anything. They are served inline under a policy that still runs no script;
+# every other type, HTML, SVG and any XML or multipart one included, is served under CSP sandbox. An object's type and
+# name come from whoever wrote it, an agent included, so only a type known to be passive escapes the sandbox.
+_PASSIVE_TYPES = frozenset({"application/pdf", "text/plain", "text/csv", "application/json"})
+_PASSIVE_KINDS = ("image/", "audio/", "video/")
+_PASSIVE_POLICY = "script-src 'none'; frame-ancestors 'self'"
+_SANDBOX_POLICY = "sandbox; frame-ancestors 'self'"
 
 
 def _owned_store(object_url: str):
@@ -94,8 +95,7 @@ def _streamed(tmp: str, object_url: str, meta) -> StreamingResponse:
         "X-Content-Type-Options": "nosniff",  # untrusted artifact bytes must not sniff-execute
         "Content-Disposition": _content_disposition(_filename(object_url)),
     }
-    if content_type.split(";")[0].strip().lower() in _SANDBOX_TYPES:
-        headers["Content-Security-Policy"] = "sandbox"
+    headers["Content-Security-Policy"] = _PASSIVE_POLICY if _passive(content_type) else _SANDBOX_POLICY
     # Reads return the bytes as stored, so the browser needs the encoding to decode them.
     if meta.content_encoding:
         headers["Content-Encoding"] = meta.content_encoding
@@ -116,3 +116,8 @@ def object_metadata(object_url: str = Query(...)):
     if meta is None:
         raise HTTPException(status_code=404, detail="no object at the given object_url")
     return {"size_bytes": meta.size, "content_type": _content_type(object_url, meta)}
+
+
+def _passive(content_type: str) -> bool:
+    media = content_type.split(";")[0].strip().lower()
+    return media in _PASSIVE_TYPES or (media.startswith(_PASSIVE_KINDS) and not media.endswith("+xml"))

@@ -421,6 +421,7 @@ from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from agent_env.providers.sandbox_providers.disk_launcher import RESET, launcher_variables  # noqa: E402
+from agent_env.providers.sandbox_providers.local_docker.disk import Exported  # noqa: E402
 
 DISK_IMAGE = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
 
@@ -429,7 +430,8 @@ DISK_IMAGE = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" 
 def modal_fake(monkeypatch):
     """Modal's create, with each call's command and arguments, a sandbox's tunnel, the disk's export and the launcher's
     image recorded; and each secret's variables."""
-    made = SimpleNamespace(creates=[], secrets=[], exported=[], launcher=MagicMock(name="launcher"))
+    made = SimpleNamespace(creates=[], secrets=[], exported=[], launcher=MagicMock(name="launcher"),
+                           export=Exported(Path("/cache/disk.img.zst")))
 
     async def create(*command, **kwargs):
         made.creates.append((command, kwargs))
@@ -440,10 +442,10 @@ def modal_fake(monkeypatch):
         sb.exec.aio = AsyncMock(side_effect=AssertionError("a disk's sandbox runs nothing at create"))
         return sb
 
-    monkeypatch.setattr(mvs.modal.Sandbox, "_experimental_create", SimpleNamespace(aio=create))
+    monkeypatch.setattr(mvs.modal.Sandbox, "create", SimpleNamespace(aio=create))
     monkeypatch.setattr(mvs.modal.Secret, "from_dict", lambda variables: made.secrets.append(variables) or variables)
     monkeypatch.setattr(mvs, "exported_disk", lambda image, platform: made.exported.append((image, platform))
-                        or Path("/cache/disk.img.zst"))
+                        or made.export)
     monkeypatch.setattr(mvs, "_launcher", AsyncMock(return_value=made.launcher))
     monkeypatch.setattr(mvs, "_log_sandbox_started", AsyncMock())
     return made
@@ -456,8 +458,8 @@ def _vm_provider(**config) -> ModalVmSandboxProvider:
     return provider
 
 
-def test_modal_vm_boots_amd64_disks():
-    assert ModalVmSandboxProvider.disk_image_platforms() == frozenset({"linux/amd64"})
+def test_modal_vm_boots_amd64_disks_linux_and_windows():
+    assert ModalVmSandboxProvider.disk_image_platforms() == frozenset({"linux/amd64", "windows/amd64"})
 
 
 @pytest.mark.asyncio
@@ -484,6 +486,26 @@ async def test_a_disk_boots_in_a_vm_sandbox_whose_image_is_the_launcher_with_the
 
 
 @pytest.mark.asyncio
+async def test_a_thin_disk_boots_with_its_base_and_guest_file_mounted_beside_it_and_its_base_expanded_there(modal_fake):
+    modal_fake.export = Exported(Path("/cache/disk.img.zst"), Path("/cache/base-1.img.zst"),
+                                 Path("/cache/disk.img.zst.guest"))
+
+    await _vm_provider().create_vm(image=DISK_IMAGE, env={}, exposed_ports=[18765], cpu=2, memory=4096)
+
+    ((_, kwargs),) = modal_fake.creates
+    disk = modal_fake.launcher.add_local_file
+    base = disk.return_value.add_local_file
+    guest = base.return_value.add_local_file
+    assert [mount.call_args for mount in (disk, base, guest)] == [
+        ((Path("/cache/disk.img.zst"), "/disk/disk.img.zst"), {"copy": False}),
+        ((Path("/cache/base-1.img.zst"), "/disk/base.img.zst"), {"copy": False}),
+        ((Path("/cache/disk.img.zst.guest"), "/disk/guest"), {"copy": False})]
+    assert kwargs["image"] is guest.return_value
+    assert modal_fake.secrets == [{**launcher_variables([18765], {}, 2, 4096), "VM_DISK": "/disk/disk.img.zst",
+                                   "VM_BASE": "/disk/base.img.zst"}]
+
+
+@pytest.mark.asyncio
 async def test_a_configured_region_and_idle_timeout_hold_for_every_sandbox_the_provider_makes(modal_fake):
     """A computer's, an agent's and a gateway's alike, so they land together; neither is passed by default."""
     provider = _vm_provider(region="us-west", idle_timeout=600)
@@ -497,7 +519,7 @@ async def test_a_configured_region_and_idle_timeout_hold_for_every_sandbox_the_p
     (_, disk), (_, agent), (_, gateway), (_, default) = modal_fake.creates
     assert [(kwargs.get("region"), kwargs.get("idle_timeout")) for kwargs in (disk, agent, gateway, default)] == [
         ("us-west", 600), ("us-west", 600), ("us-west", 600), (None, None)]
-    assert agent["experimental_options"] == gateway["experimental_options"] == {"vm_runtime": True}
+    assert agent["runtime"] == gateway["runtime"] == "vm"
 
 
 @pytest.mark.asyncio

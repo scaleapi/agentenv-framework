@@ -1,0 +1,125 @@
+"""A computer's side of clock/v1. A base that follows the universe clock runs a follower (its image has ``FOLLOWER``),
+which core configures through the sandbox's root channel (``CONFIG``, root's and the follower's alone, holding the
+computer's read token) and which says how it's doing in ``STATUS``, holding no token. The driver serves clock/v1's
+``sync_time``, the method every server that follows the clock serves, so the computer's card is what tells core and the
+gateway that it follows: called when the clock is armed, it checks the task's zone against the one the computer booted
+with and answers once the follower shows the gateway's current version, or says why it doesn't. That version it reads
+from the gateway's watch, as any reader may: a watch naming no follower is answered at once and acknowledges nothing."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+from .errors import InvalidArgument, TargetUnavailable
+
+CLOCK = "urn:agentenv:clock/v1"
+FOLLOWER = "/usr/local/lib/agentenv-clock/clock-follower"
+#: The follower's user, whose group may read ``CONFIG``.
+FOLLOWER_USER = "agentenv-clock"
+CONFIG = "/etc/agentenv/clock/follower.json"
+STATUS = "/run/agentenv-clock/status.json"
+#: What a disk form's guest has, made from the computer's container image: core's root channel reaches its launcher,
+#: not the guest, so it can't configure a follower there, and a disk computer stays on real time for now.
+DISK_GUEST = "/etc/agentenv/vm/image.env"
+#: How long ``sync_time`` waits for the follower to show the gateway's current version, as after a gateway restart
+#: or a clock change it catches up.
+CONNECT_WAIT_S = 10.0
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def follows() -> bool:
+    """Whether this computer follows the universe clock: its base runs the follower, and it isn't a disk guest."""
+    return os.path.exists(FOLLOWER) and not os.path.exists(DISK_GUEST)
+
+
+def session_zone() -> str:
+    """The zone the computer booted with, which every session program is in."""
+    try:
+        return os.environ.get("TZ") or Path("/etc/timezone").read_text().strip() or "UTC"
+    except OSError:
+        return "UTC"
+
+
+def follower_status() -> dict:
+    return _status_written()[0]
+
+
+def _status_written() -> tuple[dict, int]:
+    """The follower's status and when it wrote it (``st_mtime_ns``; 0 when there is none)."""
+    try:
+        path = Path(STATUS)
+        written, status = path.stat().st_mtime_ns, json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}, 0
+    return (status, written) if isinstance(status, dict) else ({}, 0)
+
+
+def gateway_version(watch_url: str) -> str:
+    """The version the gateway's clock has now, read from its watch naming no version and no follower."""
+    with _DIRECT.open(f"{watch_url}?{urllib.parse.urlencode({'after': ''})}", timeout=5) as answer:
+        return json.loads(answer.read())["version"]
+
+
+def _why(status: dict, current: Optional[str], unread: Optional[str], stale: bool = False) -> str:
+    if stale:
+        return (f"it still shows the config it had, the gateway at {status.get('url')} as {status.get('name')!r}, "
+                f"not the one just written")
+    if status.get("error"):
+        return f"it can't reach the gateway at {status.get('url')}: {status['error']}"
+    if not status.get("url"):
+        return "core hasn't written its config, which it does when a multi env deploys this computer"
+    if not status.get("connected"):
+        return f"it hasn't heard from the gateway at {status['url']} yet"
+    if unread is not None:
+        return f"this computer can't read the gateway's version at {status['url']}: {unread}"
+    return f"it shows the gateway's version {status.get('version')!r}, and the gateway is at {current!r}"
+
+
+async def sync_time(env_get_time_url: str, timezone: Optional[str] = None) -> dict:
+    """``clock/v1``'s ``sync_time`` on a computer: its follower already follows the gateway core configured it with,
+    so ``env_get_time_url`` is taken as every server takes it and not used; ``timezone``, the task's, must be the one
+    the computer booted with, which a deploy sets (``computer_settings.timezone``)."""
+    if not follows():
+        raise TargetUnavailable("this computer's base doesn't follow the universe clock")
+    zone = session_zone()
+    if timezone is not None and timezone.strip() != zone:
+        raise InvalidArgument(f"the task's clock is in {timezone.strip()!r} and this computer's session in {zone!r}; "
+                              f"deploy it with computer_settings.timezone = {timezone.strip()!r}")
+    follower = await following("this computer's clock follower")
+    return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url, "follower": follower}
+
+
+async def following(whose: str, wait_s: float = CONNECT_WAIT_S, *, url: Optional[str] = None,
+                    name: Optional[str] = None, since_ns: int = 0) -> dict:
+    """The follower's status once it shows the gateway's current version; TargetUnavailable saying why ``whose``
+    doesn't within ``wait_s``. A computer's ``sync_time`` and an agent's (``agentenv_protocol.a2a_agent.clock``) both answer
+    with it. An agent's, which has just written the follower's config, names it: only a status of that ``url`` and
+    ``name`` the follower wrote since ``since_ns`` counts, so what it showed of a config before is never taken for
+    this one's."""
+    deadline = time.monotonic() + wait_s
+
+    def read() -> tuple[dict, bool]:
+        status, written = _status_written()
+        stale = bool(status) and (written < since_ns or (url is not None and status.get("url") != url)
+                                  or (name is not None and status.get("name") != name))
+        return status, stale
+
+    while True:
+        (status, stale), current, unread = read(), None, None
+        if not stale and status.get("connected") and status.get("url"):
+            try:
+                current = await asyncio.to_thread(gateway_version, status["url"])
+            except Exception as e:  # noqa: BLE001 - away or answering something else: said as why, tried again
+                unread = f"{type(e).__name__}: {e}"[:300]
+            status, stale = read()
+            if not stale and current is not None and status.get("connected") and status.get("version") == current:
+                return {key: status.get(key) for key in ("name", "url", "version", "armed")}
+        if time.monotonic() >= deadline:
+            raise TargetUnavailable(f"{whose} isn't following the gateway: " + _why(status, current, unread, stale))
+        await asyncio.sleep(0.1)

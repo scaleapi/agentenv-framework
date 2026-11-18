@@ -50,7 +50,7 @@ async def _capture(**overrides):
         sandbox_type="local",
     )
     kwargs.update(overrides)
-    return await mod.capture_workspace(**kwargs)
+    return await mod.capture_workspace(**kwargs, headers={})
 
 
 def _granted(rec) -> dict[str, str]:
@@ -214,7 +214,7 @@ async def _read(card, **overrides):
         trajectory_output_prefix=PARTIAL_PREFIX, sandbox_type="local",
     )
     kwargs.update(overrides)
-    return await mod.read_partial_trajectory(**kwargs)
+    return await mod.read_partial_trajectory(**kwargs, headers={})
 
 
 @pytest.mark.asyncio

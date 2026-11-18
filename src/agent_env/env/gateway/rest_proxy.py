@@ -15,7 +15,8 @@ its response streamed through, under five invariants:
   own, when one before the gateway sent them, else the request's ``Host`` and scheme) and ``X-Forwarded-Prefix``, the
   route prefix (``/svc/{service}`` or ``/website/{service}``) the gateway strips, which a client never sets: a client
   that serves the route at a root of its own (a computer's site proxy, at ``https://notes.test/``) says so with
-  ``AgentEnv-Site-Root``, and the upstream is then told no prefix;
+  ``AgentEnv-Site-Root``, and the upstream is then told no prefix; a site reached at one of its own names gets that
+  name as its ``Host`` too, and any other host leaves ``Host`` its internal address, so a forged one never reaches it;
 - the upstream response and the client it came through are closed when the response ends, iterated or not.
 
 A WebSocket on ``/website/{service}/{path}`` is relayed under the same rules (:func:`relay_websocket`): the gateway
@@ -36,11 +37,12 @@ import json
 import logging
 import posixpath
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any, NamedTuple
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
+from mcp.types import INVALID_REQUEST
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
@@ -71,6 +73,10 @@ HOP_BY_HOP = frozenset({
 ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
 
 FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX = "x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix"
+# A host as a site's name: a DNS name, an optional port.
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_SITE_HOST = re.compile(rf"({_LABEL}(?:\.{_LABEL})*)(?::([0-9]{{1,5}}))?")
+_MAX_PORT = 65535
 _FORWARDED = frozenset(name.encode() for name in (FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX,
                                                    AGENT_ENV_SITE_ROOT_HEADER.lower()))
 # A WebSocket's handshake fields, which the gateway's own connection upstream writes for itself.
@@ -86,9 +92,10 @@ WEBSOCKET_MESSAGE_MAX_BYTES = 16 * 1024 * 1024
 
 async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
                   on_done: Callable[[int], Awaitable[None]] | None = None,
-                  withheld: frozenset[bytes] = frozenset(), mcp_endpoint: str = "mcp") -> Response:
+                  withheld: frozenset[bytes] = frozenset(), mcp_endpoint: str = "mcp",
+                  site_names: tuple[str, ...] = ()) -> Response:
     """Forward `request` to the service at `base_url` as `role`, without the headers named in `withheld`, and stream
-    the response through. `mcp_server` says
+    the response through; a site's `site_names` say which hosts it takes as its ``Host``. `mcp_server` says
     the service is a backing MCP server, whose own endpoint, `mcp_endpoint` under it, takes the role in its JSON-RPC
     `_meta` as well as in the header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
     `on_done` is awaited with the status once the response has ended, after its last byte when streamed."""
@@ -97,8 +104,8 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
     except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path
         return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
-    headers = upstream_headers(request, role, withheld=withheld)
-    if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", ""), mcp_endpoint):
+    headers = upstream_headers(request, role, withheld=withheld, site_names=site_names)
+    if mcp_server and request.method == "POST" and reaches_child_mcp(request, base_url, mcp_endpoint):
         # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
         # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
         content = stamp_jsonrpc_role(content, role)
@@ -142,15 +149,19 @@ def client_headers(connection: HTTPConnection, withheld: frozenset[bytes] = froz
     return [(k, v) for k, v in connection.headers.raw if k.lower() not in HOP_BY_HOP and k.lower() not in withheld]
 
 
-def upstream_headers(request: HTTPConnection, role: str, *, withheld: frozenset[bytes] = frozenset()) -> httpx.Headers:
+def upstream_headers(request: HTTPConnection, role: str, *, withheld: frozenset[bytes] = frozenset(),
+                     site_names: tuple[str, ...] = ()) -> httpx.Headers:
     """The client's headers (``client_headers``) as a proxied request sends them. The role header is the gateway's to
     set: the client's copies are dropped and the role the gateway attributed the request to goes in their place, so
     the upstream never reads a value the gateway did not write. So are the forwarded-address headers
-    (`forwarded_address`)."""
+    (`forwarded_address`), and ``Host`` is the site's own name when the client reached it at one of `site_names`
+    (``site_host``), else the upstream's address."""
     headers = httpx.Headers([(k, v) for k, v in client_headers(request, withheld)
                              if k.lower() != ROLE_HEADER_BYTES and k.lower() not in _FORWARDED])
     headers[AGENT_ENV_ROLE_HEADER] = role
     headers.update(forwarded_address(request))
+    if host := site_host(request, site_names):
+        headers["host"] = host
     # Bytes are forwarded undecoded, so only ask upstream for encodings the caller can take.
     headers.setdefault("accept-encoding", "identity")
     return headers
@@ -165,10 +176,11 @@ def forwarded_address(request: HTTPConnection) -> dict[str, str]:
     (``https://notes.test``) is that root's address, ahead of any ``X-Forwarded-Host``/``-Proto``, which a front
     between the client and the gateway may have rewritten to its own. Like the host, that only changes the links the
     client's own answer names; what the route reaches is the path's alone. A header with nothing to say is left
-    out."""
+    out, as is a host that isn't printable ASCII, which no header upstream could carry."""
     root = request.headers.get(AGENT_ENV_SITE_ROOT_HEADER, "").strip()
     origin = _origin(root)
-    host = origin[1] if origin else _first(request.headers.get(FORWARDED_HOST, "")) or request.headers.get("host", "")
+    host = origin[1] if origin else (_plain(_first(request.headers.get(FORWARDED_HOST, "")))
+                                     or _plain(request.headers.get("host", "")))
     proto = origin[0] if origin else _first(request.headers.get(FORWARDED_PROTO, "")).lower()
     at_root = bool(root)
     scheme = _HTTP_SCHEME.get(request.url.scheme, request.url.scheme)
@@ -179,15 +191,62 @@ def forwarded_address(request: HTTPConnection) -> dict[str, str]:
 
 def _origin(value: str) -> tuple[str, str] | None:
     """The scheme and host of ``value`` when it is an origin (``https://notes.test``, a port allowed), else None."""
-    parts = urlsplit(value)
+    try:
+        parts = urlsplit(value)
+    except ValueError:  # an unbalanced bracket, as in ``https://]x[``
+        return None
     if (parts.scheme in ("http", "https") and parts.netloc and parts.path in ("", "/") and not parts.query
-            and not parts.fragment and "@" not in parts.netloc and value.isprintable()):
+            and not parts.fragment and "@" not in parts.netloc and _plain(value)):
         return parts.scheme, parts.netloc
     return None
 
 
+def _plain(value: str) -> str:
+    return value if value.isascii() and value.isprintable() else ""
+
+
 def _first(value: str) -> str:
     return value.split(",")[0].strip()
+
+
+def site_host(request: HTTPConnection, names: tuple[str, ...]) -> str | None:
+    """The host the client reached a site at (``forwarded_address``), when its name is one the site's ``names`` name,
+    compared without case or port: what the site's ``Host`` says, so a site that builds its links from ``Host`` names
+    itself as the client reached it. None for any other host, which a site never sees as its ``Host``."""
+    host = forwarded_address(request).get(FORWARDED_HOST, "")
+    found = _SITE_HOST.fullmatch(host)
+    if not found or int(found.group(2) or 0) > _MAX_PORT:
+        return None
+    return host if named(found.group(1).lower(), names) else None
+
+
+def named(host: str, names: tuple[str, ...]) -> bool:
+    """Whether lowercase ``host`` is one ``names`` name: one of them, or one label more than a ``*.`` one, as a
+    computer's site proxy matches a site's names."""
+    head, _, rest = host.partition(".")
+    return host in names or bool(head and rest) and f"*.{rest}" in names
+
+
+def lowered(names: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(name.lower() for name in names if isinstance(name, str) and name))
+
+
+def declared_site_names(card: dict) -> tuple[str, ...]:
+    """The names a site's card declares, its ``website/v1`` ``domains``, lowercase; none when it declares none."""
+    for ext in (card.get("capabilities") or {}).get("extensions") or []:
+        params = ext.get("params") if isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI else None
+        if isinstance(params, dict) and isinstance(params.get("domains"), list):
+            return lowered(params["domains"])
+    return ()
+
+
+def listed_url(names: tuple[str, ...]) -> str | None:
+    """The address a browser computer opens a site with ``names`` at: its first name that isn't a ``*.`` one, over
+    HTTPS but for a ``.localhost`` one, as its site proxy serves them. None with no such name."""
+    name = next((name for name in names if not name.startswith("*.")), None)
+    if name is None:
+        return None
+    return f"{'http' if name == 'localhost' or name.endswith('.localhost') else 'https'}://{name}/"
 
 
 def route_prefix(request: HTTPConnection) -> str:
@@ -203,16 +262,40 @@ def route_prefix(request: HTTPConnection) -> str:
 def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
     """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`endpoint`, `mcp` unless
     its card declares another, or anything under it), judged after dot-segment normalisation, since httpx collapses
-    `x/../mcp` to `/mcp` on the way upstream.
+    `x/../mcp` to `/mcp` on the way upstream, and ignoring case, as some servers' routing does.
 
-    >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "mcpx", "agentenv", "")]
-    [True, True, True, True, True, True, False, False, False]
-    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "mcp")]
-    [True, True, False]
+    >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "MCP", "mcpx", "agentenv", "")]
+    [True, True, True, True, True, True, True, False, False, False]
+    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "Tools/Mcp", "mcp")]
+    [True, True, True, False]
     """
-    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/"))
-    at = posixpath.normpath("/" + endpoint.strip("/"))
+    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/")).lower()
+    at = posixpath.normpath("/" + endpoint.strip("/")).lower()
     return normalized == at or normalized.startswith(at + "/")
+
+
+def reaches_child_mcp(request: HTTPConnection, base_url: str, endpoint: str = "mcp") -> bool:
+    """Whether a /svc request reaches the MCP endpoint of the backing server at ``base_url`` (:func:`reaches`)."""
+    return reaches(base_url, request.scope["raw_path"], request.scope["path"], request.path_params.get("path", ""), endpoint)
+
+
+def reaches(base_url: str, raw_path: bytes, decoded_path: str, decoded_rest: str, endpoint: str) -> bool:
+    """Whether a /svc request whose routed remainder is ``decoded_rest`` reaches ``endpoint`` of the backing server at
+    ``base_url`` (:func:`is_child_mcp_path`): by that remainder, or by the path the server receives, the base's path and
+    the raw remainder forwarded, its dot segments removed by httpx and then decoded. They differ when an encoded slash
+    sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``) or a dot segment climbs into a base's path
+    (``../prefix/mcp`` reaches base ``/prefix``'s ``/mcp``). ``endpoint`` is decoded as both paths are. False for a
+    request-target forward() refuses."""
+    endpoint = unquote(endpoint)
+    if is_child_mcp_path(decoded_rest, endpoint):
+        return True
+    try:
+        raw_rest = raw_remainder(raw_path, decoded_path, decoded_rest) if decoded_rest else b""
+        sent = httpx.URL(f"{base_url.rstrip('/')}/{raw_rest.decode('latin-1')}").path
+        base = httpx.URL(base_url).path.rstrip("/")
+    except (ValueError, httpx.InvalidURL):
+        return False
+    return is_child_mcp_path(sent, f"{base}/{endpoint.lstrip('/')}")
 
 
 def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
@@ -240,6 +323,37 @@ def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
     return json.dumps(parsed).encode() if stamped else body
 
 
+def called_tools(body: bytes) -> list[str] | None:
+    """The tool each JSON-RPC ``tools/call`` request in `body` (one request or a batch) names; None for a body that is
+    not JSON.
+
+    >>> called_tools(b'[{"method": "tools/call", "params": {"name": "a"}}, {"method": "tools/list", "params": {}}]')
+    ['a']
+    >>> called_tools(b"not json") is None
+    True
+    """
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    return [item["params"]["name"] for item in (parsed if isinstance(parsed, list) else [parsed])
+            if isinstance(item, dict) and item.get("method") == "tools/call" and isinstance(item.get("params"), dict)
+            and isinstance(item["params"].get("name"), str)]
+
+
+def tool_call_refusal(body: bytes, message: str) -> Response:
+    """The gateway's answer to a child MCP POST it won't forward: one request gets the tool error the gateway's own
+    ``/mcp`` gives, and a batch, or a body that is not JSON, is refused whole as an invalid request."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return _json_response({"jsonrpc": "2.0", "id": parsed.get("id"),
+                               "result": {"content": [{"type": "text", "text": message}], "isError": True}}, 200)
+    return _json_response({"jsonrpc": "2.0", "id": None, "error": {"code": INVALID_REQUEST, "message": message}}, 400)
+
+
 def raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> bytes:
     """The still-encoded tail of `raw_path` that Starlette's decoded `{path}` param came from.
 
@@ -254,7 +368,8 @@ def raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> byte
 
 
 async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str,
-                          open_timeout: float = 10.0, withheld: frozenset[bytes] = frozenset()) -> None:
+                          open_timeout: float = 10.0, withheld: frozenset[bytes] = frozenset(),
+                          site_names: tuple[str, ...] = ()) -> None:
     """Relay `websocket` to the service at `base_url` as `role`: a WebSocket of the gateway's own is opened to the same
     path, with the headers ``upstream_headers`` sends, asking for the subprotocols the client offered; `websocket` is
     accepted with the one the service chose and the headers its answer carried (a ``Set-Cookie`` among them, each
@@ -262,20 +377,30 @@ async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str,
     close, with its code, closes the other; a message from the service larger than ``WEBSOCKET_MESSAGE_MAX_BYTES``, the
     size uvicorn takes from a client, closes both with 1009 rather than be held whole. A service that refuses the
     handshake has its answer relayed as the refusal, its headers as an accepted one's are; one that never answers is a
-    502. The headers named in `withheld` don't go upstream, as with ``upstream_headers``."""
+    502. The headers named in `withheld` don't go upstream, as with ``upstream_headers``, and a site reached at one of
+    its `site_names` takes it as its ``Host``."""
     try:
         target_url = upstream_url(base_url, websocket)
     except ValueError as e:
         await refuse_websocket(websocket, _json_response({"error": str(e)}, 400))
         return
-    headers = [(key, value) for key, value in upstream_headers(websocket, role, withheld=withheld).multi_items()
-               if key.lower() not in _WEBSOCKET_HANDSHAKE]
+    headers = [(key, value) for key, value in
+               upstream_headers(websocket, role, withheld=withheld, site_names=site_names).multi_items()
+               if key.lower() not in _WEBSOCKET_HANDSHAKE and key.lower() != "host"]
+    uri, destination = "ws" + target_url.removeprefix("http"), {}
+    if host := site_host(websocket, site_names):  # websockets writes Host from the URI; TCP and TLS go to the upstream
+        parts = urlsplit(uri)
+        secure = parts.scheme == "wss"
+        destination = {"host": parts.hostname, "port": parts.port or (443 if secure else 80),
+                       **({"server_hostname": parts.hostname} if secure else {})}
+        uri = urlunsplit(parts._replace(netloc=host))
     offered = [protocol.strip() for value in websocket.headers.getlist("sec-websocket-protocol")
                for protocol in value.split(",") if protocol.strip()]
     try:
-        upstream = await connect_websocket("ws" + target_url.removeprefix("http"), additional_headers=headers,
+        upstream = await connect_websocket(uri, additional_headers=headers,  # never through a proxy: it's internal
                                            subprotocols=offered or None, user_agent_header=None,
-                                           open_timeout=open_timeout, max_size=WEBSOCKET_MESSAGE_MAX_BYTES)
+                                           open_timeout=open_timeout, max_size=WEBSOCKET_MESSAGE_MAX_BYTES,
+                                           proxy=None, **destination)
     except InvalidStatus as e:
         refusal = Response(content=bytes(e.response.body or b""), status_code=e.response.status_code)
         refusal.raw_headers = [*(item for item in refusal.raw_headers if item[0] == b"content-length"),

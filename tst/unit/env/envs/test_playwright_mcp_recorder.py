@@ -1,22 +1,30 @@
 """The Playwright MCP browser's recorder: it finds the browser Playwright MCP launched, follows the page the agent is on
 through DevTools target events, holds a still page's frame so the recording doesn't split, and serves
-computer-recording/v1 on a card of its own that the gateway nests as the playwright-mcp child env."""
+computer-recording/v1 on a card of its own that the gateway nests as the playwright-mcp child env. It fronts the MCP
+port: the card and recording there, every other request passed to Playwright MCP behind it, streamed, and 502 when
+Playwright MCP doesn't answer."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import itertools
 import re
+import socket
 from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
 
 av = pytest.importorskip("av")
 
 from PIL import Image as PILImage  # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+from starlette.routing import Route  # noqa: E402
 from agentenv_protocol import client as protocol_client  # noqa: E402
 from agentenv_protocol.computer.card import COMPUTER_RECORDING  # noqa: E402
 from agentenv_protocol.computer.recording import RecordHints  # noqa: E402
@@ -221,8 +229,186 @@ async def test_the_gateway_nests_the_card_as_a_child_env_whose_recording_is_invo
         "end": "/svc/mcp-playwright-mcp/agentenv/ext/computer-recording/end"}
 
 
-def test_the_image_serves_the_recorder_on_the_port_the_gateway_reads_the_card_on():
+def test_the_image_fronts_the_mcp_port_with_the_recorder_and_serves_the_card_where_deploys_read_it():
     entrypoint = (Path(playwright_mcp.__file__).parent / "entrypoint.sh").read_text()
-    default = re.search(r'RECORDER_PORT="\$\{RECORDER_PORT:-(\d+)\}"', entrypoint).group(1)
-    assert int(default) == recorder.DEFAULT_PORT == playwright_mcp.PLAYWRIGHT_MCP_RECORDER_PORT
+
+    def default(name: str) -> int:
+        return int(re.search(rf'{name}="\$\{{{name}:-(\d+)\}}"', entrypoint).group(1))
+
+    assert default("RECORDER_PORT") == recorder.DEFAULT_PORT == playwright_mcp.PLAYWRIGHT_MCP_RECORDER_PORT
+    assert default("MCP_PORT") == recorder.DEFAULT_MCP_PORT
+    assert default("PLAYWRIGHT_MCP_PORT") == recorder.DEFAULT_PLAYWRIGHT_MCP_PORT
+    assert '--host 127.0.0.1' in entrypoint and '--port "${PLAYWRIGHT_MCP_PORT}"' in entrypoint
     assert "--isolated" in entrypoint  # the remote debugging port the recorder finds comes with it
+
+
+def _behind(app) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://playwright-mcp")
+
+
+@pytest.mark.asyncio
+async def test_the_front_serves_the_card_and_recording_and_passes_everything_else_to_playwright_mcp():
+    passed = []
+
+    async def mcp(request):
+        passed.append((request.method, request.url.path, request.url.query, await request.body(),
+                       request.headers.get("mcp-session-id"), request.headers.get("host")))
+        return JSONResponse({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s-2"})
+
+    playwright = Starlette(routes=[Route("/mcp", mcp, methods=["POST", "DELETE"])])
+    async with _behind(playwright) as behind:
+        front = recorder.create_app(_recorder(_Browser()), behind)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=front), base_url="http://front") as http:
+            card = (await http.get("/.well-known/agent-env.json")).json()
+            answer = await http.post("/mcp?x=1", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                                     headers={"Mcp-Session-Id": "s-1"})
+            closed = await http.delete("/mcp", headers={"Mcp-Session-Id": "s-2"})
+
+    assert card["name"] == "playwright-mcp"
+    assert [e["uri"] for e in card["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
+    assert (answer.status_code, answer.json()["result"], answer.headers["mcp-session-id"]) == (200, {}, "s-2")
+    assert passed[0][:3] == ("POST", "/mcp", "x=1") and b'"tools/list"' in passed[0][3] and passed[0][4] == "s-1"
+    assert passed[0][5] == "front"  # the Host the caller sent, not Playwright MCP's own address
+    assert closed.status_code == 200 and (passed[1][0], passed[1][4]) == ("DELETE", "s-2")
+
+
+@pytest.mark.asyncio
+async def test_the_front_answers_502_naming_playwright_mcp_when_it_doesnt_answer():
+    def refuse(request):
+        raise httpx.ConnectError("Connection refused", request=request)
+
+    behind = httpx.AsyncClient(transport=httpx.MockTransport(refuse), base_url="http://playwright-mcp")
+    front = recorder.create_app(_recorder(_Browser()), behind)
+    async with behind, httpx.AsyncClient(transport=httpx.ASGITransport(app=front), base_url="http://front") as http:
+        answer = await http.post("/mcp", json={})
+        card = await http.get("/.well-known/agent-env.json")
+
+    assert answer.status_code == 502 and answer.text.startswith("Playwright MCP isn't answering: ConnectError")
+    assert card.status_code == 200
+
+
+async def _serve(app) -> tuple[uvicorn.Server, int]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    config = uvicorn.Config(app, lifespan="off", log_level="critical", access_log=False)
+    config.load()
+    server = uvicorn.Server(config)
+    server.lifespan = config.lifespan_class(config)
+    await server.startup(sockets=[sock])
+    return server, sock.getsockname()[1]
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def _accepts(port: int) -> bool:
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", port)
+    except OSError:
+        return False
+    writer.close()
+    return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("socket_enabled")
+async def test_the_card_is_served_at_once_and_the_mcp_port_opens_only_once_playwright_mcp_listens(monkeypatch):
+    mcp, card, behind = _free_port(), _free_port(), _free_port()
+    for name, port in (("MCP_PORT", mcp), ("RECORDER_PORT", card), ("PLAYWRIGHT_MCP_PORT", behind)):
+        monkeypatch.setenv(name, str(port))
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    serving = asyncio.create_task(recorder.serve())
+    playwright = None
+    try:
+        for _ in range(100):
+            if await _accepts(card):
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(3 * recorder.LISTENING_POLL_S)
+        card_first, mcp_first = await _accepts(card), await _accepts(mcp)
+        playwright = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", behind)
+        for _ in range(100):
+            if await _accepts(mcp):
+                break
+            await asyncio.sleep(0.05)
+        async with httpx.AsyncClient() as http:
+            served = (await http.get(f"http://127.0.0.1:{mcp}/.well-known/agent-env.json")).json()
+    finally:
+        serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+        if playwright is not None:
+            playwright.close()
+
+    assert (card_first, mcp_first) == (True, False)
+    assert served["name"] == "playwright-mcp"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"], ids=["disconnect-message", "send-raises"])
+async def test_an_answer_is_closed_when_its_caller_leaves_before_the_first_chunk(spec_version):
+    """Under ASGI 2.4 a caller that left shows as ``send`` raising; before it, as a disconnect message."""
+    closed = asyncio.Event()
+
+    class Held(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield b""
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    answer = httpx.Response(200, headers=[("Set-Cookie", "a=1"), ("Set-Cookie", "b=2"), ("Connection", "close")],
+                            stream=Held())
+    passed = recorder.PassedAnswer(answer)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if spec_version == "2.4":
+            raise OSError("the caller left")
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(passed({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send), 5)
+
+    assert closed.is_set()
+    assert [value for key, value in passed.raw_headers if key == b"set-cookie"] == [b"a=1", b"b=2"]
+    assert b"connection" not in dict(passed.raw_headers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("socket_enabled")
+async def test_the_front_streams_an_event_stream_as_playwright_mcp_sends_it():
+    release = asyncio.Event()
+
+    async def stream(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        event = b"event: message\ndata: 1\n\n"
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                     + f"{len(event):x}\r\n".encode() + event + b"\r\n")
+        await writer.drain()
+        await release.wait()
+        writer.write(b"0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    playwright = await asyncio.start_server(stream, "127.0.0.1", 0)
+    behind = httpx.AsyncClient(base_url=f"http://127.0.0.1:{playwright.sockets[0].getsockname()[1]}")
+    server, port = await _serve(recorder.create_app(_recorder(_Browser()), behind))
+    try:
+        async with httpx.AsyncClient() as http, http.stream("GET", f"http://127.0.0.1:{port}/mcp") as answer:
+            lines = answer.aiter_lines()
+            first = await asyncio.wait_for(anext(lines), 5)
+            release.set()
+            rest = [line async for line in lines]
+    finally:
+        await server.shutdown()
+        playwright.close()
+        await behind.aclose()
+
+    assert answer.headers["content-type"] == "text/event-stream" and first == "event: message"
+    assert rest[:1] == ["data: 1"]

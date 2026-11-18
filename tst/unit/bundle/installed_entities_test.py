@@ -420,6 +420,15 @@ def test_an_env_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it_b
     assert plan.alias_uses[EntityKind.AGENT] == {} and plan.store_refs == ()
 
 
+def test_a_context_fact_naming_an_env_by_an_installed_alias_names_the_env_the_alias_names(bundle_dir, tmp_path):
+    facts = {"wf-1": "env_trigger_state.crm-x.statuses.wf-1", "verdict": "verifications.env.score"}
+    judge = {**JUDGE, "id": "judge", "context_facts_for_judge": facts}
+
+    plan = _plan(_task(bundle_dir, [*CRM_STEPS, judge]), _kit(tmp_path, ENV_ALIASED))
+
+    assert _step(plan, "judge")["context_facts_for_judge"] == {**facts, "wf-1": f"env_trigger_state[{CRM}].statuses.wf-1"}
+
+
 def test_the_stores_env_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     kit = _kit(tmp_path, ENV_ALIASED)
     with namespace_routing():

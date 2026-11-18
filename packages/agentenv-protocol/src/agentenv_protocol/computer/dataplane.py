@@ -15,7 +15,8 @@ import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from ..agent_env_environment import add_data, get_data
-from ..transfers import NamespaceUploader, ReadObject, RelativePath, TransferError, WriteNamespaceGrant, download
+from ..transfers import (NamespaceUploader, ReadObject, RelativePath, TransferError, WriteNamespaceGrant, client_options,
+                         download)
 from ..types import DATA_OBJECTS_EXTENSION_URI, FilePart, FileWithBytes, FileWithUri, uploaded_file_part, uploaded_object_path
 
 if TYPE_CHECKING:
@@ -115,7 +116,7 @@ async def _get_url(file: FileWithUri) -> bytes:
     if not file.uri.startswith("https://"):
         raise ValueError("a file part's uri is an https URL")
     data = bytearray()
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60, **client_options()) as client:
         async with client.stream("GET", file.uri) as response:
             response.raise_for_status()
             async for chunk in response.aiter_bytes():

@@ -40,14 +40,28 @@ def locate_bundle(
     on_progress: Callable[[str], None] | None = None,
 ) -> Located:
     """The bundle ``text`` names, as ``agent-env run BUNDLE`` reads it: an ``hf://`` reference, fetched first; else a folder,
-    when it starts like a path or exists spelled as written; else a bundle ``installed`` lists. Raises BundleError."""
+    when it starts like a path or exists spelled as written; else a bundle ``installed`` lists. A name that is both a
+    folder here and an installed bundle is refused, so a folder in the current directory never stands in for the
+    bundle meant. Raises BundleError."""
     if is_hub_reference(text):
         hub = fetch_bundle(text, on_progress=on_progress)
         return Located(hub.root, hub.id_root, hub)
-    if path_like(text) or _spelled_folder(text):
+    if path_like(text):
+        return Located(Path(text), None, None)
+    if _spelled_folder(text):
+        if namesakes := _installed_as(text, installed()):
+            raise BundleError([f"{text!r} is both a folder here and the installed bundle {namesakes[0].qualified}: run "
+                               f"agent-env run ./{text} for the folder or agent-env run {namesakes[0].qualified} for "
+                               "the bundle"])
         return Located(Path(text), None, None)
     found = find_bundle(text, installed())
     return Located(found.root, found.id_root, None)
+
+
+def _installed_as(text: str, bundles: tuple[InstalledBundle, ...]) -> list[InstalledBundle]:
+    """The installed bundles ``text`` could name, as ``<name>`` or ``<dist>/<name>``."""
+    dist, _, name = text.rpartition("/")
+    return [bundle for bundle in bundles if bundle.name == name and (not dist or bundle.dist == canonicalize_name(dist))]
 
 
 def path_like(text: str) -> bool:
@@ -86,7 +100,7 @@ def find_bundle(text: str, bundles: tuple[InstalledBundle, ...] | None = None) -
     """The installed bundle ``text`` names, as ``<name>`` or ``<dist>/<name>``. Raises BundleError."""
     bundles = installed_bundles() if bundles is None else bundles
     dist, _, name = text.rpartition("/")
-    matches = [bundle for bundle in bundles if bundle.name == name and (not dist or bundle.dist == canonicalize_name(dist))]
+    matches = _installed_as(text, bundles)
     if not dist and len({bundle.dist for bundle in matches}) > 1:
         matches = [bundle for bundle in matches if bundle.dist == CORE]
         if not matches:

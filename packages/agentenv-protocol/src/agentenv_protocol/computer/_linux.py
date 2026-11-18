@@ -1,12 +1,15 @@
-"""The base class's defaults for the OS operations on Linux and macOS, which use POSIX alone. The driver runs as the
-session user inside the desktop session, so both act directly: a command inherits the session's environment, a file
-lands as that user."""
+"""The base class's defaults for the OS operations on Linux, macOS and Windows. The driver runs as the session user
+inside the desktop session, so both act directly: a command inherits the session's environment, a file lands as that
+user. A command runs in a process group of its own, which a timeout kills whole: on Windows, a new process group with no
+console window, killed with its children by taskkill."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import os
 import signal
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -22,6 +25,10 @@ POLL_S = 0.02
 #: How much of a stream is read at a time.
 READ_BYTES = 65536
 _draining: set = set()
+WINDOWS = sys.platform == "win32"
+#: How a command starts: in a session, or on Windows, a process group, of its own, with no console window there.
+_SPAWN = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if WINDOWS else
+          {"start_new_session": True})
 
 
 async def run_in_session(argv: list[str], cwd: str | None, env: dict[str, str] | None, timeout_s: float, *,
@@ -33,15 +40,14 @@ async def run_in_session(argv: list[str], cwd: str | None, env: dict[str, str] |
     try:
         process = await asyncio.create_subprocess_exec(
             *argv, cwd=workdir, env={**os.environ, **(env or {})}, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **_SPAWN)
     except (FileNotFoundError, PermissionError, NotADirectoryError) as e:
         raise InvalidArgument(f"cannot run {argv[0]!r}: {e.strerror or e}") from None
     outputs = [_Capped(output_bytes), _Capped(output_bytes)]
     readers = [asyncio.ensure_future(out.read(stream)) for out, stream in zip(outputs, (process.stdout, process.stderr))]
     timed_out = not await _exited(process, timeout_s)
     if timed_out:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        await _killed(process.pid)
         await _exited(process, DRAIN_S)
     _, pending = await asyncio.wait(readers, timeout=DRAIN_S)
     for out in outputs:
@@ -52,6 +58,17 @@ async def run_in_session(argv: list[str], cwd: str | None, env: dict[str, str] |
     stdout, stderr = outputs
     return ExecResult(exit_code=None if timed_out else process.returncode, stdout=bytes(stdout.kept),
                       stderr=bytes(stderr.kept), timed_out=timed_out, truncated=stdout.cut or stderr.cut)
+
+
+async def _killed(pid: int) -> None:
+    """The process group ``pid`` leads killed: on Windows, the process and its children."""
+    if WINDOWS:
+        killer = await asyncio.create_subprocess_exec("taskkill", "/F", "/T", "/PID", str(pid),
+                                                      stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await killer.wait()
+        return
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
 
 
 async def _exited(process: asyncio.subprocess.Process, timeout_s: float) -> bool:

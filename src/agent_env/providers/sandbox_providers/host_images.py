@@ -29,7 +29,7 @@ from agent_env.utils.docker.build import build_image, normalize_platform
 
 logger = logging.getLogger(__name__)
 
-_SOURCES_LABEL = "dev.agentenv.sources"
+SOURCES_LABEL = "dev.agentenv.sources"
 _SAVED_PREFIX = "host-images"
 
 
@@ -106,7 +106,7 @@ def build_for(image: DockerImageArtifact, platform: str) -> str:
                 _extract_context(image, context)
                 logger.info(f"Building {tag} for {platform} from its build context on this machine...")
                 build_image(context / image.dockerfile_path, context, tag, platform=platform,
-                            labels={_SOURCES_LABEL: built_from})
+                            labels={SOURCES_LABEL: built_from})
     return tag
 
 
@@ -129,7 +129,7 @@ def _extract_context(image: DockerImageArtifact, context: Path) -> None:
 
 
 def _build(context: Path, dockerfile: str, image_name: str, image_sources: str) -> None:
-    build_image(context / dockerfile, context, image_name, platform=None, labels={_SOURCES_LABEL: image_sources})
+    build_image(context / dockerfile, context, image_name, platform=None, labels={SOURCES_LABEL: image_sources})
 
 
 async def build_here(image: DockerImageArtifact) -> None:
@@ -137,11 +137,18 @@ async def build_here(image: DockerImageArtifact) -> None:
     await asyncio.to_thread(build, image)
 
 
+def pull_lock(image_name: str) -> str:
+    """The lock a pull of ``image_name`` on this machine holds, ``docker pull``'s or that of a container of an image
+    Docker lacks: two at once, even of two of its platforms, can leave Docker's containerd image store holding a
+    platform's manifest without all its layers, and creating a container of it then fails."""
+    return f"image-pull:{image_name}"
+
+
 def pull(image: DockerImageArtifact) -> None:
     """Have this machine's Docker hold ``image``, one with an ``image_digest``, under its name, unless it already holds
     it (``holds_digest``): pulled by its digest, or, when that fails, built from its build context. Raises RuntimeError
     when it can't be pulled or built."""
-    with holding_locks([f"image-pull:{image.pinned_name}"]):
+    with holding_locks([pull_lock(image.pinned_name)]):
         if holds_digest(image):
             return
         pulled = subprocess.run(["docker", "pull", image.pinned_name], capture_output=True, text=True, errors="replace")
@@ -170,7 +177,7 @@ def _built_from(image_name: str) -> str | None:
     """The sources this machine's image ``image_name`` was built from, or None when there is none."""
     try:
         result = subprocess.run(["docker", "image", "inspect", "--format",
-                                 f'{{{{ index .Config.Labels "{_SOURCES_LABEL}" }}}}', image_name],
+                                 f'{{{{ index .Config.Labels "{SOURCES_LABEL}" }}}}', image_name],
                                 capture_output=True, text=True, errors="replace")
     except FileNotFoundError:  # no docker on PATH, so no image here; a build says so
         return None

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, Optional
 from mcp.types import CallToolResult
 from pydantic import Field
 
-from ..agent_env_environment import tool
+from ..agent_env_environment import _TOOL_ATTR, tool
 from ..tool_context import ToolContext
 from .errors import InvalidArgument, Unsupported
 from .frames import Frame
@@ -99,7 +99,7 @@ class Tools:
                                         identity=identity, parent=parent, origin=(box[0], box[1]))
             summary = f"Cropped {frame.id}: {frame.width}×{frame.height} of {parent.id} at ({box[0]}, {box[1]})"
         result = ScreenshotResult(summary=summary, **frame.result().model_dump())
-        return send(result, frame.encode(format, quality))
+        return send(result, frame.encode(format, quality), frame.captured_at)
 
     @tool(annotations=_INPUT)
     async def computer_click(
@@ -201,7 +201,8 @@ class Tools:
             raise InvalidArgument(f"text is at most {self.max_text_length} characters on this computer, got {len(text)}")
         control = sorted({f"U+{ord(c):04X}" for c in text if c not in "\n\t" and unicodedata.category(c) == "Cc"})
         if control:
-            raise InvalidArgument(f"text has control characters {control}; press keys with computer_key")
+            raise InvalidArgument(f"text has control characters {control}; press keys with "
+                                  f"{self._computer_prefix.served('computer_key')}")
         return await computer.act(ctx, "type_text", (text,), frame=computer.frames.latest(self.caller_identity(ctx)),
                                   screenshot=screenshot, summary=f"Typed {len(text)} characters")
 
@@ -241,7 +242,7 @@ class Tools:
         frame = await self._computer.capture(self.caller_identity(ctx))
         return send(WaitResult(summary=f"{summary}, then captured {frame.id}{frame.note()}", waited_ms=ms,
                                frame=frame.result()),
-                    frame.encode())
+                    frame.encode(), frame.captured_at)
 
     @tool(annotations=_INPUT)
     async def computer_pointer_move(
@@ -404,7 +405,8 @@ class Tools:
                 "switch": f"Switched to tab {tab}", "close": f"Closed tab {tab}"}[action]
 
         def listed(result: InputResult, tabs: Any) -> TabsResult:
-            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active) for t in tabs or []]
+            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active, context=t.context)
+                    for t in tabs or []]
             active = next((row for row in rows if row.active), None)
             shown = f', the active one "{active.title}" ({active.url})' if active is not None else ""
             return TabsResult(**{**result.model_dump(), "summary": f"{verb}; {len(rows)} open{shown}"
@@ -509,3 +511,7 @@ def _check_range(name: str, value: int, low: int, high: int) -> None:
 def _display(frame: Frame) -> str:
     d = frame.display
     return f"{d.width}×{d.height}" + (f" at scale {d.scale:g}" if d.scale != 1 else "")
+
+
+#: The tools the SDK serves on every computer, by their own names.
+COMPUTER_TOOLS: tuple[str, ...] = tuple(sorted(name for name, member in vars(Tools).items() if hasattr(member, _TOOL_ATTR)))

@@ -1,0 +1,15 @@
+type = "computer"
+description = "Windows 11 Enterprise, Microsoft's evaluation, installed on the Linux machine with KVM that composes it, from Microsoft's media fetched there once; its user signs in at boot"
+arch = ["amd64"]
+os = { type = "windows", version = "11", edition = "Enterprise Evaluation", display = "dwm" }
+session = { user = "user" }
+
+[forms.disk]
+init = "agentenv-session"
+input_channel = "nocloud"
+firmware = ["efi"]
+min_disk_gb = 64
+
+[config.resolution]
+default = "1920x1080"
+phase = "deploy"

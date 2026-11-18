@@ -211,6 +211,16 @@ class Sandbox(ABC):
     async def terminate(self) -> None:
         """Terminate the sandbox."""
 
+    async def exit_status(self) -> Optional[int]:
+        """The exit status of the process the sandbox was made to run, a computer's container or the launcher booting
+        its disk, once that has exited; None while it runs, or when its provider can't tell, as by default."""
+        return None
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines that process wrote, a disk's console among them; none when its provider can't read
+        them, as by default."""
+        return []
+
     async def exec(self, *command: str) -> Any:
         """Execute a command in the sandbox. Returns a ContainerProcess-like object with stdout, stderr, wait()."""
         raise NotImplementedError(f"{self.__class__.__name__} does not support exec")
@@ -350,11 +360,19 @@ class VmSandbox(Sandbox):
             raise RuntimeError(f"Couldn't pull {why}. {e}") from e
 
     async def pull_published(self, artifacts: list) -> list[tuple[Any, str]]:
-        """Pull each image by its digest, concurrently, and tag it with its ``image_name``, which its containers start
-        from; return each the VM couldn't pull, with why, for it to build from its build context instead."""
+        """Pull each image by its digest, concurrently, after logging in to each registry the image store holds
+        credentials for, as ``pull_images`` does, and tag it with its ``image_name``, which its containers start from;
+        return each the VM couldn't pull, with why, for it to build from its build context instead. An image of a
+        registry the VM couldn't log in to isn't pulled, and is returned with why."""
+        refused = await self._log_in([artifact.pinned_name for artifact in artifacts], tolerate=True)
+        unpulled = [(artifact, refused[host]) for artifact in artifacts
+                    if (host := registry_host_from_ref(artifact.pinned_name)) in refused]
+        for artifact, reason in unpulled:
+            logger.warning("Couldn't pull %s on %s, so it's built from its build context: %s", artifact.pinned_name,
+                           self.sandbox_id, reason)
+        artifacts = [artifact for artifact in artifacts if registry_host_from_ref(artifact.pinned_name) not in refused]
         results = await asyncio.gather(*(_pull_published(self, artifact) for artifact in artifacts),
                                        return_exceptions=True)
-        unpulled = []
         for artifact, result in zip(artifacts, results, strict=True):
             if isinstance(result, RuntimeError):
                 reason = _last_output_line(str(result))
@@ -427,12 +445,7 @@ class VmSandbox(Sandbox):
         the failure back; the command a cancelled exec started keeps running on the VM until it ends or the VM does. A
         network policy restricting egress isn't widened for them: it must allow the registries itself."""
         image_names = list(dict.fromkeys(image_names))
-        store = get_config().get_image_store()
-        one_per_registry = {registry_host_from_ref(image_name): image_name for image_name in reversed(image_names)}
-        for image_name in one_per_registry.values():
-            auth = await asyncio.to_thread(store.auth, image_name)
-            if auth is not None:
-                await self.docker_login(auth)
+        await self._log_in(image_names)
         pulls = [asyncio.ensure_future(_pull(self, image_name)) for image_name in image_names]
         try:
             await asyncio.gather(*pulls)
@@ -441,6 +454,25 @@ class VmSandbox(Sandbox):
                 pull.cancel()
             await asyncio.gather(*pulls, return_exceptions=True)
             raise
+
+    async def _log_in(self, refs: list[str], *, tolerate: bool = False) -> dict[str, str]:
+        """``docker login`` to each registry of ``refs`` the image store holds credentials for, once per registry,
+        since minting a login can be a network round trip; a registry it holds none for, a public one, is left alone.
+        With ``tolerate``, each registry whose login failed is returned with why rather than raised, for a caller that
+        has another way to its images."""
+        store = get_config().get_image_store()
+        one_per_registry = {registry_host_from_ref(ref): ref for ref in reversed(refs)}
+        refused = {}
+        for host, ref in one_per_registry.items():
+            try:
+                auth = await asyncio.to_thread(store.auth, ref)
+                if auth is not None:
+                    await self.docker_login(auth)
+            except Exception as e:
+                if not tolerate:
+                    raise
+                refused[host] = f"logging in to {host} failed: {e}"
+        return refused
 
     @staticmethod
     async def _signed_image_urls(artifacts: list) -> list[str | None]:
@@ -589,12 +621,13 @@ class VmSandbox(Sandbox):
         if len(encoded) <= self._WFT_CHUNK_BYTES:
             await self.exec_script(f"base64 -d <<'ENDB64' > {shlex.quote(vm_path)}\n{encoded}\nENDB64")
             return
-        # Too big for one heredoc arg: append the (shell-safe) base64 in bounded chunks.
+        # Too big for one heredoc arg: append the (shell-safe) base64 in bounded chunks, then decode it from stdin,
+        # since macOS's base64, a local sandbox's host's there, takes no file argument.
         vm_b64 = f"{vm_path}.b64"
         await self.exec_script(f": > {shlex.quote(vm_b64)}")
         for i in range(0, len(encoded), self._WFT_CHUNK_BYTES):
             await self.exec_script(f"printf '%s' {shlex.quote(encoded[i:i + self._WFT_CHUNK_BYTES])} >> {shlex.quote(vm_b64)}")
-        await self.exec_script(f"base64 -d {shlex.quote(vm_b64)} > {shlex.quote(vm_path)} && rm -f {shlex.quote(vm_b64)}")
+        await self.exec_script(f"base64 -d < {shlex.quote(vm_b64)} > {shlex.quote(vm_path)} && rm -f {shlex.quote(vm_b64)}")
 
     async def write_host_file(self, data: bytes, vm_path: str) -> None:
         """Write bytes to vm_path on the VM host itself, not into the agent container."""

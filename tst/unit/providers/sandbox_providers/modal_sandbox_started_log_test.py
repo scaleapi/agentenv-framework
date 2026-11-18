@@ -85,7 +85,7 @@ async def test_create_container_emits_the_started_line(caplog):
     provider = ModalSandboxProvider(app_name="agent-env-test")
     provider._get_app = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
     provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as create, \
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as create, \
             caplog.at_level(logging.INFO, logger="agent_env.providers.sandbox_providers.modal_sandbox"):
         create.aio = AsyncMock(return_value=_fake_sb())
         await provider.create_container(image_name="img:latest", port=8000, env={}, attribution=_TAGS)

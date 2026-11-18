@@ -77,6 +77,20 @@ async def test_get_card_gets_well_known():
 
 
 @pytest.mark.asyncio
+async def test_rpc_and_card_strip_trailing_slashes_from_base_url():
+    base_with_slash = f"{_BASE}/"
+    client = _client(_resp({"jsonrpc": "2.0", "id": 1, "result": {}}))
+    with _patch(client):
+        await protocol_v1.reset_data(base_with_slash)
+    assert client.post.call_args.args[0] == f"{_BASE}/agentenv"
+
+    client = _client(_resp({"name": "items"}))
+    with _patch(client):
+        await protocol_v1.get_card(base_with_slash)
+    assert client.get.call_args.args[0] == f"{_BASE}/.well-known/agent-env.json"
+
+
+@pytest.mark.asyncio
 async def test_supports_v1_true_on_card():
     with _patch(_client(_resp({"name": "items"}))):
         assert await protocol_v1.supports_v1(_BASE) is True
@@ -236,6 +250,22 @@ def test_child_named_refuses_a_name_two_children_share():
     assert protocol_v1.find_child(_SHARED_NAME, "mail")["url"] == "/svc/mcp-mail/agentenv"
 
 
+_STATED = {"name": "gw", "children_environments": [
+    {"name": "Notes", "url": "/svc/notes/agentenv", "environment_name": "notes"},
+    {"name": "slack", "url": "/svc/mcp-slack/agentenv"},
+]}
+
+
+def test_a_child_is_known_by_the_environment_name_its_composer_states_else_by_its_cards_name():
+    notes, slack = protocol_v1.children(_STATED)
+    assert (notes.name, notes.environment_name, notes.known_as) == ("Notes", "notes", "notes")
+    assert (slack.environment_name, slack.known_as) == (None, "slack")  # a composer that states none
+    assert protocol_v1.child_named(_STATED, "notes").url == "/svc/notes/agentenv"
+    assert protocol_v1.child_named(_STATED, "Notes") is None
+    assert protocol_v1.find_child(_STATED, "notes")["name"] == "Notes"
+    assert protocol_v1.find_child(_STATED, "slack")["url"] == "/svc/mcp-slack/agentenv"
+
+
 def test_serves_is_what_a_card_declares_of_a_method_and_none_when_it_declares_no_operations():
     assert protocol_v1.serves({"capabilities": {"operations": ["data/get"]}}, "data/get") is True
     assert protocol_v1.serves({"capabilities": {"operations": ["data/add"]}}, "data/get") is False
@@ -268,6 +298,19 @@ async def test_invoke_extension_posts_to_advertised_endpoint():
     args, kwargs = client.request.call_args
     assert args[0] == "POST" and args[1] == f"{_BASE}/agentenv/ext/set_errors"
     assert kwargs["json"] == {"tool_name": "list_items", "error_rate": 0.75}
+
+
+@pytest.mark.asyncio
+async def test_invoke_extension_strips_trailing_slashes_from_base_url():
+    base_with_slash = f"{_BASE}/"
+    client = _client(_resp({"tool_name": "list_items", "error_rate": 0.75}))
+    with _patch(client):
+        await protocol_v1.invoke_extension(
+            base_with_slash, _CARD_SET_ERRORS, "urn:agentenv:set-errors/v1",
+            {"tool_name": "list_items", "error_rate": 0.75},
+        )
+    args, _ = client.request.call_args
+    assert args[1] == f"{_BASE}/agentenv/ext/set_errors"
 
 
 @pytest.mark.asyncio
@@ -396,3 +439,10 @@ async def test_invoke_extension_unknown_method_raises_without_calling():
 async def test_invoke_extension_named_method_on_a_methodless_extension_raises():
     with pytest.raises(ValueError, match=re.escape("does not advertise method 'set_time' (advertises: none)")):
         await protocol_v1.invoke_extension(_BASE, _CARD_WITH_EXT, "urn:agentenv:clock/v1", method="set_time")
+
+
+@pytest.mark.asyncio
+async def test_invoke_extension_missing_endpoint_raises_value_error():
+    card = {"capabilities": {"extensions": [{"uri": "urn:agentenv:test/v1", "params": {}}]}}
+    with pytest.raises(ValueError, match="has no endpoint in params"):
+        await protocol_v1.invoke_extension(_BASE, card, "urn:agentenv:test/v1")

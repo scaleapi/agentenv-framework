@@ -13,8 +13,8 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import urllib.parse
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,12 +22,15 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from agentenv_protocol import CONTROL_TOKEN_ENV
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
+from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
+from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
+from agent_env.artifact.artifacts import docker_image
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
@@ -39,10 +42,14 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
+from agent_env.env import published_images
 from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
                                                probing, resolve_in_base)
+from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.store.image_store import registry_api
+from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
@@ -53,6 +60,7 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_
 from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
@@ -99,10 +107,10 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", 'ENV AGENTENV_SETTING_THEME="dark"',
         "COPY driver/ /opt/agentenv/drivers/desk/",
-        "COPY packages/wheels/driver/ /tmp/agentenv-packages/wheels/driver/",
-        "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
-        "install --no-index --no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
-        "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-packages/wheels/driver",
+        "RUN --network=none --mount=type=bind,source=packages/wheels/driver,target=/tmp/agentenv-packages/wheels/driver "
+        "python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip install --no-index "
+        "--no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
+        "--format=json > /opt/agentenv/drivers/desk/installed.json",
         "COPY agentenv-driver-desk.conf /etc/supervisor/conf.d/agentenv-driver-desk.conf",
         "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-driver-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
@@ -116,9 +124,24 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
-        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
+        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765",AGENTENV_REAL_TIME="1"\n'
+        'autorestart=true\n'
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_starts_as_root(base, driver, docker):
+    image = base.image()
+    rooted = _base(image, forms={"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                                               "input_channel": "env", "start_as": "root"}})
+
+    _put(rooted, driver)
+
+    composed = Env.get("@local/~/kit/desktop").metadata["computer"]
+    assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert ComputerArtifact.get(composed["id"], composed["version"]).forms.container.start_as == "root"
+    assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
+    assert "start_as" not in base.model_dump()["forms"]["container"]
 
 
 def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
@@ -168,6 +191,18 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
         "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}
     index = ComputerArtifact.get(f"{second.id}__computer").image().image_name.partition("@")[0]
     assert docker_calls == [("join", index, auth)]
+
+
+def test_the_same_driver_stored_under_another_id_composes_the_same_image(base, driver, docker):
+    first = _put(base, driver)
+    stored_again = ComputerDriverEnv.put(id="@local/~/kit/registered-desk", module=driver.module, files=driver.files,
+                                         declaration=driver.declaration, install=driver.install, port=driver.port)
+    second = _put(base, stored_again, id="@local/~/kit/other", environment_name="other")
+
+    built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
+    assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
+    assert {arch: r["key"] for arch, r in reused.items()} == {arch: r["key"] for arch, r in built.items()}
+    assert all("COPY driver/ /opt/agentenv/drivers/desk/" in build["dockerfile"] for build in docker.builds)
 
 
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service", "display-read-at-build"])
@@ -263,6 +298,58 @@ def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_pa
                                                                                       "theme": "dark"}}
 
 
+
+@pytest.mark.parametrize("asks", [1024, None])
+def test_the_probe_boots_a_build_with_the_shared_memory_its_apps_ask_for_as_a_deploy_does(base, driver, docker,
+                                                                                         tmp_path, monkeypatch, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, compose=False, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                                       defaults={"token": "env:MAIL_TOKEN"})])
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert booted[0]["shm_mb"] == asks
+
+
+@pytest.mark.asyncio
+async def test_a_boot_asks_for_shared_memory_only_where_its_provider_gives_it_and_logs_where_it_doesnt(monkeypatch,
+                                                                                                    caplog):
+    created, sandbox = [], SimpleNamespace(tunnel_urls={18765: "http://computer"})
+
+    class Gives(SandboxProvider):
+        SHARED_MEMORY = True
+
+        async def create_container(self, **kwargs):
+            created.append(kwargs)
+            return sandbox
+
+    class OldPlugin(SandboxProvider):
+        async def create_container(self, *, image_name, port, env, network_policy=None, disk_size_gb=10, timeout=7200,
+                                   attribution=None):
+            created.append({"image_name": image_name})
+            return sandbox
+
+    monkeypatch.setattr(boot, "ready", AsyncMock(return_value=CARD))
+    with caplog.at_level(logging.INFO, logger="agent_env.env.envs.computer.utils.boot"):
+        for provider in (Gives(), OldPlugin()):
+            await boot.boot(provider, image="img", port=18765, environment={}, token="t", network_policy=None,
+                            timeout=60, attribution=None, shm_mb=1024)
+
+    assert created[0]["shm_mb"] == 1024 and "shm_mb" not in created[1]
+    assert "OldPlugin can't size /dev/shm: the container keeps its default, not the 1024 MiB asked for" in caplog.text
+    assert "Gives can't size" not in caplog.text
+
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])
 def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a_native_arch(base, driver, docker,
@@ -305,6 +392,43 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
     probed.assert_awaited_once_with("http://computer", "full", token=booted[0]["token"])
 
 
+def test_a_build_the_probe_cant_boot_for_a_setting_that_doesnt_resolve_stays_unverified_until_a_compose_where_it_does(
+        base, driver, docker, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    booted = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    unprobed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    left = composer.pending(Env.get(env.id))
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    composer.compose(Env.get(env.id), left)
+    probed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+
+    assert (unprobed["status"], unprobed["reason"]) == ("unverified", "not probed: a setting it boots with didn't "
+                                                        "resolve here: Unresolved env:MAIL_TOKEN reference (no value "
+                                                        "and no default)")
+    assert left == [("container", "arm64")]
+    assert probed["status"] == "ready" and probed["image"] == unprobed["image"]
+    assert len(booted) == 1 and json.loads(booted[0]["AGENTENV_APP_SETTINGS"])["mail"]["token"] == "t0ken"
+
+
+def _probing_for_real(monkeypatch) -> list[dict]:
+    """Gate 3's own probe, which resolves the settings it boots with, over a boot and a probe that pass: the
+    environment of each boot it makes."""
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs["environment"])
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(probing, "_probe", _probe)
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value=ProbeReport.of("full", "desk", [CheckResult(
+        check="P0", name="the card", status="passed", extensions=[CARD_EXTENSION])], [CARD_EXTENSION])))
+    return booted
+
+
 def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
                                                                                                 monkeypatch):
     docker.probe_fails["arm64"] = "the click never landed"
@@ -332,6 +456,25 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
                                          "wasn't ready within 180 s")
     assert (stuck["status"], stuck["stage"], stuck["reason"]) == (
         "failed", "probe", f"the probe didn't finish within {probing._PROBE_TIMEOUT_S} s")
+
+
+def test_known_failures_for_a_distribution_are_waived_on_it_alone_and_replace_its_os_types_there(
+        base, docker, tmp_path):
+    docker.probe_fails["arm64"] = "the click never landed"
+    clicks = KnownFailure(check="P4", name="clicks show their effect", reason="its clicks lag")
+    elsewhere = _driver(tmp_path / "elsewhere", known_failures={"linux/omarchy": [clicks]})
+    here = _driver(tmp_path / "here", known_failures={
+        "linux": [KnownFailure(check="P0", name="the card", reason="its card was late")], "linux/ubuntu": [clicks]})
+
+    on_elsewhere = Env.get(_put(base, elsewhere, id="@local/~/kit/elsewhere", environment_name="elsewhere").id
+                           ).metadata["composed"]["container"]["arm64"]
+    on_here = Env.get(_put(base, here, id="@local/~/kit/here", environment_name="here").id).metadata[
+        "composed"]["container"]["arm64"]
+    docker.probe_fails.clear()
+
+    assert on_elsewhere["status"] == "failed"
+    assert on_here["status"] == "ready" and on_here["probe"]["known_failures"][0]["reason"] == "its clicks lag"
+    assert "unused_known_failures" not in on_here["probe"]
 
 
 def test_a_check_the_driver_declares_it_fails_is_waived_and_recorded_and_a_declared_one_that_didnt_fail_is_flagged(
@@ -622,6 +765,180 @@ def test_env_build_by_an_installed_alias_composes_under_the_id_of_the_env_it_nam
         "@local/acme-kit/kit/desktop__computer").image().image_name])
 
 
+MIRROR = "ghcr.io/org/computers"
+
+
+def _mirrored(docker, monkeypatch, read=None):
+    """Move every composed image out of the env's image store into the computer image mirror, as a fresh runner of CI
+    finds them, and record each copy back: the mirror's refs, read with ``read`` when given."""
+    stored = {ref: digest for ref, digest in docker.registry.tags.items()
+              if f"/{composed.REPOSITORY}:" in ref and ":index-" not in ref}
+    for ref in stored:
+        del docker.registry.tags[ref]
+    mirror = {f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}": digest for ref, digest in stored.items()}
+    copied, real = [], composer.pin_if_served
+
+    def pin(ref, auth):
+        if ref.startswith(f"{MIRROR}:"):
+            return read(ref) if read else (f"{ref}@{mirror[ref]}" if ref in mirror else None)
+        return real(ref, auth)
+
+    def copy(source, target, source_auth, target_auth):
+        copied.append((source.partition("@")[0], target))
+        docker.registry.tags[target] = source.rpartition("@")[2]
+
+    monkeypatch.setattr(composer, "pin_if_served", pin)
+    monkeypatch.setattr(composer, "copy_image", copy)
+    monkeypatch.setattr(get_config(), "computer_image_mirror", MIRROR)
+    return stored, copied
+
+
+def test_an_image_the_store_lacks_is_copied_from_the_computer_image_mirror_and_reused_rather_than_built(base, driver,
+                                                                                                        docker,
+                                                                                                        monkeypatch):
+    first = _put(base, driver)
+    stored, copied = _mirrored(docker, monkeypatch)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    reused = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 2 and all(r["reused"] for r in reused.values())
+    assert sorted(copied) == sorted((f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}", ref) for ref in stored)
+    assert {arch: r["image"] for arch, r in reused.items()} == {
+        arch: r["image"] for arch, r in Env.get(first.id).metadata["composed"]["container"].items()}
+
+
+def test_a_change_to_the_code_that_composes_an_image_misses_the_mirror_and_builds_it(base, driver, docker,
+                                                                                    monkeypatch):
+    _put(base, driver)
+    _, copied = _mirrored(docker, monkeypatch)
+    monkeypatch.setattr(composed, "composition", lambda: "sha256:" + "f" * 64)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    assert len(docker.builds) == 4 and copied == []
+    assert not any(r["reused"] for r in Env.get(second.id).metadata["composed"]["container"].values())
+
+
+def test_a_computer_image_mirror_that_cant_be_read_leaves_the_image_to_be_built(base, driver, docker, monkeypatch,
+                                                                               caplog):
+    _put(base, driver)
+
+    def refused(ref):
+        raise RegistryRefusedError(f"{ref}: ghcr.io refused to serve it (HTTP 403)")
+
+    _, copied = _mirrored(docker, monkeypatch, read=refused)
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    built = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 4 and not any(r["reused"] for r in built.values()) and copied == []
+    assert f"the computer image mirror {MIRROR} couldn't give" in caplog.text
+
+
+RELEASED = "ghcr.io/scaleapi/agentenv-chromium"
+
+
+def _released(env, docker, tmp_path, monkeypatch, arches=("amd64", "arm64"), key=None, digest=None):
+    """Record ``env``'s composed ``arches`` as a release wheel records the computers it published, each image in the
+    released repository by the digest it was composed under (``digest`` in its place when given), with its key
+    (``key``) and the lock it was composed from, joined as one index the registry serves; and take that record as the
+    install's. Each arch's released image, and the index."""
+    pairs = Env.get(env.id).metadata["composed"]["container"]
+    record = {arch: {"key": key or pairs[arch]["key"],
+                     "image": f"{RELEASED}@{digest or pairs[arch]['image'].rpartition('@')[2]}",
+                     "lock": json.loads(packages.stored(pairs[arch]["lock"], env.id).model_dump_json())}
+              for arch in arches}
+    index = f"{RELEASED}:index-{'a' * 64}@" + docker.registry.index(**{
+        arch: pairs[arch]["image"].rpartition("@")[2] for arch in arches})
+    path = tmp_path / "published_images.json"
+    path.write_text(json.dumps({"images": [], "computers": [
+        {"env": env.id, "form": "container", "index": index, "arches": record}]}))
+    monkeypatch.setattr(published_images, "RELEASE_FILE", path)
+    serving = docker.registry.pin_digest
+    monkeypatch.setattr(docker_image, "pin_digest", lambda ref, auth: ref if ref.startswith(RELEASED) and "@" in ref
+                        else serving(ref, auth))
+    return {arch: built["image"] for arch, built in record.items()}, index
+
+
+def test_a_compose_of_what_the_release_published_pulls_its_image_without_resolving_or_building(base, driver, docker,
+                                                                                            tmp_path, monkeypatch):
+    released, index = _released(_put(base, driver), docker, tmp_path, monkeypatch)
+    builds, resolved, told = len(docker.builds), len(docker.resolved), []
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other",
+                  composing=Composing(on_progress=told.append))
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == builds and len(docker.resolved) == resolved
+    assert {arch: (r["image"], r["published"], r["reused"], r["status"]) for arch, r in pairs.items()} == {
+        arch: (image, True, True, "ready" if arch == "arm64" else "unverified") for arch, image in released.items()}
+    assert f"container/arm64: reusing the image agent-env's release published, {released['arm64']}" in told
+    assert not [line for line in told if "resolving" in line or "building" in line]
+    assert ComputerArtifact.get(f"{second.id}__computer").image().image_name == index
+
+
+def test_a_release_record_of_another_key_or_an_image_the_registry_wont_give_leaves_the_compose_as_before(
+        base, driver, docker, tmp_path, monkeypatch, caplog):
+    first = _put(base, driver)
+    _released(first, docker, tmp_path, monkeypatch, key="sha256:" + "c" * 64)
+    other = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+    unserved, _ = _released(first, docker, tmp_path, monkeypatch, digest="sha256:" + "d" * 64)
+
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        third = _put(base, driver, id="@local/~/kit/third", environment_name="third")
+
+    for env in (other, third):
+        pairs = Env.get(env.id).metadata["composed"]["container"]
+        assert all(r["reused"] and not r.get("published") for r in pairs.values())
+    assert f"agent-env's release published it as {unserved['arm64']}, which can't be pulled" in caplog.text
+
+
+def test_a_released_index_the_registry_wont_give_is_joined_in_the_store_instead(base, driver, docker, tmp_path,
+                                                                                  monkeypatch, caplog):
+    released, index = _released(_put(base, driver), docker, tmp_path, monkeypatch)
+    serving = docker.registry.pin_digest
+
+    def pin(ref, auth):
+        if ref == index:
+            raise registry_api.NoSuchImageError(f"{ref}: ghcr.io has no such image")
+        return ref if ref.startswith(RELEASED) and "@" in ref else serving(ref, auth)
+
+    monkeypatch.setattr(docker_image, "pin_digest", pin)
+    monkeypatch.setattr(composer, "copy_image", lambda source, target, source_auth, target_auth: (
+        docker.registry.tags.__setitem__(target, source.rpartition("@")[2])))
+
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    assert all(pairs[arch]["image"] == image and pairs[arch]["published"] for arch, image in released.items())
+    assert ComputerArtifact.get(f"{second.id}__computer").image().image_name.startswith(
+        f"localhost:5000/{composed.REPOSITORY}:index-")
+    assert f"agent-env's release published its index as {index}, which can't be read" in caplog.text
+
+
+def test_an_arch_the_release_published_beside_one_composed_here_joins_an_index_in_the_store(base, driver, docker,
+                                                                                          tmp_path, monkeypatch):
+    released, _ = _released(_put(base, driver), docker, tmp_path, monkeypatch, arches=("arm64",))
+    copied, joined = [], {}
+    monkeypatch.setattr(composer, "copy_image", lambda source, target, source_auth, target_auth: (
+        copied.append((source, target)), docker.registry.tags.__setitem__(target, source.rpartition("@")[2])))
+    monkeypatch.setattr(composer, "write_index", lambda index, images, auth: (
+        joined.update({index: images}), docker.joined(index, images, auth)))
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    digest = released["arm64"].rpartition("@")[2]
+    in_store = f"localhost:5000/{composed.REPOSITORY}:released-{digest.removeprefix('sha256:')}"
+    assert pairs["arm64"]["image"] == released["arm64"] and pairs["arm64"]["published"]
+    assert not pairs["amd64"].get("published") and copied == [(released["arm64"], in_store)]
+    index = ComputerArtifact.get(f"{second.id}__computer").image().image_name
+    assert joined == {index.partition("@")[0]: {"linux/amd64": pairs["amd64"]["image"],
+                                                "linux/arm64": f"{in_store}@{digest}"}}
+
+
 def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_replace_a_built_one(base, driver,
                                                                                                     docker,
                                                                                                     monkeypatch):
@@ -630,7 +947,7 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 
     composer.compose(first, [("container", "amd64")])
     composer.compose(second, [("container", "arm64")])
-    monkeypatch.setattr(composer, "_served", lambda ref, store: None)
+    monkeypatch.setattr(composer, "pin_if_served", lambda ref, auth: None)
     docker.fail["linux/arm64"] = "boom"
     composer.compose(third, [("container", "arm64")])
 
@@ -729,6 +1046,65 @@ async def test_a_deploy_composes_again_what_an_agent_env_that_composes_different
 
 
 @pytest.mark.asyncio
+async def test_a_deploy_probes_a_container_left_unprobed_once_its_setting_resolves_and_boots_it_only_once_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, display={"width": 1600, "height": 900}, apps=[_app(
+        base, driver, tmp_path / "mail", compose=False, defaults={"token": "env:MAIL_TOKEN"})])
+    unprobed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+
+    deployed = await Env.get(env.id).deploy()
+
+    build = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    (booted,) = boots.boots
+    assert unprobed["status"] == "unverified" and build["status"] == "ready"
+    assert build["image"] == unprobed["image"] == booted["image"] == deployed.metadata["computer"]["image"]
+    assert len(probed) == 1 and json.loads(probed[0]["AGENTENV_APP_SETTINGS"])["mail"]["token"] == "t0ken"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_refuses_a_container_still_unprobed_for_a_setting_that_doesnt_resolve_saying_why(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'unverified', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_says_why_its_native_container_is_unprobed_though_another_arch_it_cant_run_is_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    stored = Env.get(env.id)
+    composed = stored.metadata["composed"]
+    composed["container"]["amd64"] = {**composed["container"]["amd64"], "status": "ready"}
+    stored.update_metadata({**stored.metadata, "composed": composed})
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'ready', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
+
+
+@pytest.mark.asyncio
 async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_where_the_last_one_ran(
         base, driver, docker, boots, monkeypatch):
     env = _put(base, driver, display={"width": 1600, "height": 900})
@@ -754,8 +1130,37 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
-                                                         deployed.control_token, answering=False)
+                                                         deployed.control_token, answering=False, sandbox=sandbox)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_computer_boots_with_the_shared_memory_its_apps_ask_for_records_it_and_a_reset_keeps_it(
+        base, driver, docker, boots, monkeypatch, tmp_path, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    resets = []
+
+    async def reset_container(self, sandbox, **kwargs):
+        resets.append(kwargs)
+
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset_container)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((booted,), (reset,)) = boots.boots, resets
+    assert booted["shm_mb"] == asks and deployed.metadata["computer"].get("shm_mb") == asks
+    assert reset.get("shm_mb") == asks
 
 
 @pytest.mark.asyncio
@@ -781,6 +1186,72 @@ async def test_a_computer_envs_tools_are_given_its_agents_at_deploy_and_again_af
 
     assert Env.get(env.id).tools == tools and given == changes
     assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_a_tool_prefix_has_its_driver_serve_its_tools_under_it_and_gives_them_by_those_names(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools="standard")
+    deployed = await Env.get(env.id).deploy(tool_prefix="desktop_")
+    (booted,), (sandbox,) = boots.boots, boots.sandboxes
+    given = [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)]
+    reset = AsyncMock()
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    boots.calls.clear()
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    changes = [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": ["*"]}),
+               (ENABLE_TOOL_EXTENSION_URI, "enable", {"role": "default",
+                                                      "tools": [f"desktop_{tool}" for tool in COMPUTER_TOOLS]})]
+    assert booted["environment"][TOOL_PREFIX_ENV] == "desktop_" == deployed.metadata["computer"]["tool_prefix"]
+    assert reset.call_args.kwargs["env"][TOOL_PREFIX_ENV] == "desktop_"
+    assert given == changes
+    assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_without_a_tool_prefix_gives_its_driver_none(base, driver, docker, boots):
+    deployed = await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy()
+    assert TOOL_PREFIX_ENV not in boots.boots[0]["environment"] and "tool_prefix" not in deployed.metadata["computer"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_prefix_a_tool_name_cant_hold_is_refused_before_anything_boots(base, driver, docker, boots):
+    with pytest.raises(Exception, match="tool prefix 'desk top_' holds characters a tool's name can't"):
+        await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy(tool_prefix="desk top_")
+    assert boots.boots == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow, reach, allowed", [
+    (["pypi.org"], "https://gw.example/mcp", ("pypi.org", "gw.example")),
+    (["pypi.org"], "http://localhost:18765", ("pypi.org", "host.docker.internal")),
+    (["gw.example"], "https://gw.example", ("gw.example",)),
+    (["pypi.org"], "", ("pypi.org",)),
+], ids=["added", "as-its-sandbox-reaches-it", "already-allowed", "nothing-to-reach"])
+async def test_a_deploy_given_a_url_to_reach_allows_its_host_on_a_network_that_lists_the_hosts_allowed(
+        base, driver, docker, boots, monkeypatch, allow, reach, allowed):
+    class Enforces(local_sandbox.LocalSandboxProvider):
+        @classmethod
+        def supports_network_policy(cls, policy):
+            return True
+
+    monkeypatch.setattr(providers, "build_sandbox_provider", lambda spec: Enforces())
+    env = _put(base, driver, display={"width": 1600, "height": 900}, network={"mode": "allowlist", "allow_hosts": allow})
+
+    await Env.get(env.id).deploy(sandbox_type="enforcing", reach=reach)
+
+    assert boots.boots[0]["network_policy"].allow_hosts == allowed
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_given_a_url_to_reach_leaves_a_network_it_doesnt_restrict_as_it_is(base, driver, docker, boots):
+    await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy(reach="https://gw.example")
+    assert boots.boots[0]["network_policy"] is None
 
 
 @pytest.mark.asyncio
@@ -827,7 +1298,7 @@ def _sites_gateway():
 @pytest.fixture
 def routes(monkeypatch):
     """Each site routing a deploy asks for, as (sandbox, sites, options), answering what the proxy's install would; the
-    gateway serving the notes site's card."""
+    gateway serving the notes site's card, its websites ready."""
     from agentenv_protocol import client as protocol_v1
 
     made = []
@@ -841,6 +1312,7 @@ def routes(monkeypatch):
         return NOTES_CARD
 
     monkeypatch.setattr(env_computer_provider.sites, "route", route)
+    monkeypatch.setattr(env_computer_provider.sites, "require_ready", AsyncMock())
     monkeypatch.setattr(protocol_v1, "get_card", get_card)
     monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
     return made
@@ -860,12 +1332,41 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
-                                                      "domains": ["notes.test"]}]
-    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop"}
+                                                      "domains": ["notes.test"], "sign_in_headers": []}]
+    assert options == {"user": "user", "network": None, "label": "desktop", "os_type": "linux", "display": "x11",
+                       "live_hosts": ()}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
-    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM"}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
+
+
+@pytest.mark.asyncio
+async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_routes_them_when_given_as_a_multi_env_does(
+        base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+
+    deployed = await env.deploy(ttl_seconds=3600, env_params={"site_routing": True}, sites_later=True)
+    held, routed_before = boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV], list(routes)
+    await env.route_sites([{"name": "notes", "url": "http://localhost:8080/website/notes/", "domains": ["notes.test"]}])
+
+    assert held == "1" and routed_before == []
+    # The trust its held apps launch with, which a boot knowing its sites would give it, before they're known.
+    assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
+    ((sandbox, sites, options),) = routes
+    assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
+    record = deployed.metadata["computer"]
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["ca"] == "CA PEM"
+
+
+@pytest.mark.asyncio
+async def test_a_computer_given_its_sites_later_still_refuses_sites_its_params_cant_hold(base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+    await env.deploy(env_params={"site_routing": True}, sites_later=True)
+
+    with pytest.raises(ValueError, match="sites"):
+        await env.route_sites([{"name": "notes"}])
+    assert routes == []
 
 
 @pytest.mark.asyncio
@@ -887,10 +1388,11 @@ async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_
 
     assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
     assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"] and boots.boots[0]["held"] is False
+    assert not set(env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"]) & set(boots.boots[0]["environment"])
 
 
 @pytest.mark.asyncio
-async def test_a_computer_routing_sites_boots_until_its_driver_answers_and_checks_its_display_once_ready(
+async def test_a_computer_routing_sites_boots_with_its_trust_until_its_driver_answers_and_checks_its_display(
         base, driver, docker, boots, routes, monkeypatch):
     """A page driver's screen is its browser's page, whose launch a deploy routing sites holds: the boot waits only for
     the driver to answer, and the display is checked once the sites are routed and the computer is ready."""
@@ -916,6 +1418,8 @@ async def test_a_computer_routing_sites_boots_until_its_driver_answers_and_check
                             env_params={"site_routing": True}).execute(TaskStepContext(deployed_envs=[_sites_gateway()]))
 
     assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
+    assert env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"].items() <= boots.boots[0]["environment"].items()
+    assert "AGENTENV_SITE_PROXY" not in boots.boots[0]["environment"]
 
 
 @pytest.mark.asyncio
@@ -970,15 +1474,117 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_
     monkeypatch.setattr(env_computer_provider, "ready", ready)
     monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
     record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"})
-    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+    await env_computer_provider._launch_held_apps(env, record, "http://computer", [])
 
     assert order == [("listed", "http://computer", ["mail", "notes"]), (COMPUTER_APP, "launch", "mail", True, "mail"),
                      (COMPUTER_APP, "launch", "notes", True, "mail"), ("ready", "http://computer", "t0ken")]
     assert record.environment_card == {"name": "ready"} and record.environment_card_read_at_utc
     order.clear()
     apps[:] = [apps[1]]
-    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+    await env_computer_provider._launch_held_apps(env, record, "http://computer", [])
     assert order == [("ready", "http://computer", "t0ken")]
+
+
+def _app_card(name, browser_methods=None):
+    """A held app's card, launched through computer-app/v1, a website browser when it serves ``browser_methods``."""
+    extensions = [{"uri": COMPUTER_APP, "params": {"endpoint": f"/svc/{name}/agentenv/ext/app",
+                                                   "methods": {"launch": {}}}}]
+    if browser_methods is not None:
+        extensions.append({"uri": BROWSER, "params": {"endpoint": f"/svc/{name}/agentenv/ext/browser",
+                                                      "methods": {method: {} for method in browser_methods}}})
+    return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": extensions}}
+
+
+@pytest.mark.asyncio
+async def test_each_held_browser_is_handed_the_routed_sites_before_its_launch_and_one_built_before_is_only_launched(
+        monkeypatch, caplog):
+    from agent_env.env.env import EnvCapabilityUnsupported
+    from agent_env.env.envs.computer.utils.params import Site
+
+    calls = []
+    apps = [SimpleNamespace(environment_name=name, launch=lambda os_type: SimpleNamespace(at="boot"))
+            for name in ("chromium", "older", "mail")]
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
+    listed_card = {"name": "desk", "children_environments": [
+        _app_card("chromium", ["record", "sites/set"]), _app_card("older", ["record"]), _app_card("mail")]}
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        if method == "sites/set" and child.name == "older":
+            raise EnvCapabilityUnsupported(uri, method, "desk", None, child.name)
+        calls.append((uri, method, child.name, params))
+
+    monkeypatch.setattr(env_computer_provider, "listed", AsyncMock(return_value=listed_card))
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=listed_card))
+    monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={}, env_id="desk")
+    routed = [Site(name="shop", url="http://gw/website/shop/", domains=["shop.test", "*.shop.test"]),
+              Site(name="bare", url="http://gw/website/bare/")]
+
+    with caplog.at_level(logging.WARNING):
+        await env_computer_provider._launch_held_apps(env, record, "http://computer", routed)
+
+    assert calls == [(BROWSER, "sites/set", "chromium", {"sites": [{"name": "shop", "domains": ["shop.test",
+                                                                                                  "*.shop.test"]}]}),
+                     (COMPUTER_APP, "launch", "chromium", None), (COMPUTER_APP, "launch", "older", None),
+                     (COMPUTER_APP, "launch", "mail", None)]
+    assert "older in desk serves no browser/v1 sites/set" in caplog.text
+
+
+def _start_tabs_record(card, launches_by_browser):
+    """A deployed computer whose card is ``card`` and whose browsers' ``record`` keeps ``launches_by_browser``, by the
+    browser's name, None for the computer's own card; a browser absent from it built before start tabs."""
+    from agent_env.env.env import EnvCapabilityUnsupported
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        name = child.name if child is not None else None
+        if (uri, method) != (BROWSER, "record") or name not in launches_by_browser:
+            raise EnvCapabilityUnsupported(uri, method, "desk", None, name)
+        return {"start_tabs": [{"at": "t", "tabs": tabs} for tabs in launches_by_browser[name]]}
+
+    return SimpleNamespace(invoke=invoke, environment_card=card, env_id="@local/desk")
+
+
+def _tab(url, site=None, outcome="loaded", **fields):
+    return {"tab": "t1", "url": url, "final_url": url, "status": 200, "error": None, "load_ms": 120, "site": site,
+            "outcome": outcome, **fields}
+
+
+@pytest.mark.asyncio
+async def test_each_browsers_start_tabs_of_its_latest_launch_are_kept_and_one_built_before_them_is_left_out():
+    card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"]), _app_card("older", []),
+                                                      _app_card("mail")]}
+    record = _start_tabs_record(card, {"chromium": [[_tab("about:blank")], [
+        _tab("https://shop.test/", "shop"), _tab("https://slack.com/", outcome="timed_out", status=None)]]})
+    alone = _start_tabs_record({"name": "chromium-driver", "capabilities": {"extensions": [
+        {"uri": BROWSER, "params": {"endpoint": "/ext/browser", "methods": {"record": {}}}}]}},
+        {None: [[_tab("https://linear.app/")]]})
+
+    assert await env_computer_provider._start_tabs(record) == {"chromium": [
+        _tab("https://shop.test/", "shop"), _tab("https://slack.com/", outcome="timed_out", status=None)]}
+    assert await env_computer_provider._start_tabs(alone) == {"chromium-driver": [_tab("https://linear.app/")]}
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boot_naming_each_once_kept(
+        monkeypatch):
+    card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"])]}
+    tabs = [_tab("https://shop.test/", "shop", "failed", status=503),
+            _tab("https://mail.test/", "mail", "failed", status=None, error="net::ERR_CONNECTION_REFUSED"),
+            _tab("https://notes.test/", "notes", "timed_out", status=None, load_ms=60000),
+            _tab("https://slack.com/", None, "failed", status=500)]
+    record = _start_tabs_record(card, {"chromium": [tabs]})
+    record.metadata = {"computer": {"start_tabs": {"chromium": [_tab("https://shop.test/", "shop")]}}}
+    monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
+
+    with pytest.raises(RuntimeError) as failed:
+        await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
+                                                 SimpleNamespace(site_routing=False), None)
+
+    assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
+    assert str(failed.value) == (
+        "computer env '@local/desk': chromium's start tab https://shop.test/ on the env's site shop answered 503; "
+        "chromium's start tab https://mail.test/ on the env's site mail didn't load: net::ERR_CONNECTION_REFUSED; "
+        "chromium's start tab https://notes.test/ on the env's site notes was still loading after 60 s")
 
 
 @pytest.mark.asyncio
@@ -1017,8 +1623,8 @@ async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
 
     first, again = routes
-    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
-    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+    assert again[0] is sandbox and again[1] == first[1] and again[2] == first[2]
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
@@ -1160,7 +1766,7 @@ async def test_a_boot_hands_the_computer_its_token_and_one_never_ready_takes_its
                         attribution=None)
 
     assert create.await_args.kwargs["env"] == {"ENVIRONMENT_NAME": "desk", CONTROL_TOKEN_ENV: "t0ken"}
-    assert boot.ready.await_args.args[2] == "t0ken"
+    assert boot.ready.await_args.args[2] == "t0ken" and boot.ready.await_args.kwargs["sandbox"] is sandbox
     sandbox.terminate.assert_awaited_once()
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
 
@@ -1449,7 +2055,8 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
         "name": "apps-mail", "folder": "/ctx/apps/mail", "requirements": "requirements.txt",
         "add": [f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"]}
     for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
-                 "RUN --network=none python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
+                 "RUN --network=none --mount=type=bind,source=packages/wheels/apps-mail,target=/tmp/agentenv-packages/"
+                 "wheels/apps-mail python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
                  " install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl",
                  "RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv",
                  "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
@@ -1483,6 +2090,38 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     assert boot.ready_timeout([app], "windows") == boot.READY_TIMEOUT_S
 
 
+def test_the_locks_debs_and_wheels_are_mounted_into_the_runs_that_install_them_never_copied_into_a_layer(
+        base, driver, docker, tmp_path):
+    """A COPY's files stay in its layer of the image though the RUN after it removes them."""
+    _app(base, driver, tmp_path / "mail", install={"python": "requirements.txt", "packages": {"apt": ["hello"]},
+                                                   "services": []})
+
+    build = next(build for build in docker.builds if build["platform"] == "linux/arm64")
+    lines = build["dockerfile"].splitlines()
+    installs = [line for line in lines if "/tmp/agentenv-packages" in line]
+
+    assert [line for line in lines if line.startswith("COPY packages/")] == []
+    assert installs == [
+        "RUN --network=none --mount=type=bind,source=packages/apt,target=/tmp/agentenv-packages/apt apt-get install -y "
+        "--no-install-recommends /tmp/agentenv-packages/apt/*.deb",
+        *(f"RUN --network=none --mount=type=bind,source=packages/wheels/{name},target=/tmp/agentenv-packages/wheels/"
+          f"{name} python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-index --no-deps "
+          f"/tmp/agentenv-packages/wheels/{name}/*.whl && {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json"
+          for name, prefix in (("driver", "/opt/agentenv/drivers/desk"), ("apps-mail", "/opt/agentenv/apps/mail")))]
+    assert {"packages/apt/hello_1.0_arm64.deb", "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"} <= set(
+        build["files"])
+
+
+def test_an_app_that_declares_for_a_distribution_is_told_the_platform_it_was_composed_for(base, driver, docker,
+                                                                                         tmp_path):
+    _app(base, driver, tmp_path / "mail", steps=[("index_mail", "session", "linux/ubuntu")])
+
+    build = {build["platform"]: build for build in docker.builds}["linux/arm64"]
+    assert ("RUN --network=none cd /opt/agentenv/apps/mail && AGENTENV_PLATFORM=linux/ubuntu venv/bin/python -m "
+            "agentenv_protocol.computer.run_install_step app.py:Mail index_mail") in build["dockerfile"]
+    assert 'AGENTENV_PLATFORM="linux/ubuntu"' in build["confs"]["agentenv-app-mail.conf"]
+
+
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
                                                                                                tmp_path, monkeypatch):
     tool = b"#!/bin/sh\necho tool\n"
@@ -1503,11 +2142,10 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
         {"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"], "key": "/ctx/apps/mail/ppa.asc"}]
     builds = {build["platform"]: build for build in docker.builds}
     lines = builds["linux/arm64"]["dockerfile"].splitlines()
-    first = lines.index("COPY packages/apt/ /tmp/agentenv-packages/apt/")
-    assert lines[first:first + 3] == [
-        "COPY packages/apt/ /tmp/agentenv-packages/apt/",
-        "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-packages/apt/*.deb && rm -rf "
-        "/tmp/agentenv-packages/apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
+    first = lines.index("USER root") + 1
+    assert lines[first:first + 2] == [
+        "RUN --network=none --mount=type=bind,source=packages/apt,target=/tmp/agentenv-packages/apt apt-get install -y "
+        "--no-install-recommends /tmp/agentenv-packages/apt/*.deb", "COPY driver/ /opt/agentenv/drivers/desk/"]
     steps = lines.index("RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv")
     assert lines[steps + 1:steps + 8] == [
         "RUN --network=none cd /opt/agentenv/apps/mail && './set up.sh'",
@@ -1610,6 +2248,34 @@ def _local(work, context):
     shutil.copytree(context, work / builder.CONTEXT)
     base = SimpleNamespace(image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1")
     return builder.LocalBuilder("LocalSandboxProvider", work, base, "linux/arm64")
+
+
+def test_a_command_the_resolver_runs_that_fails_ends_it_with_the_commands_code_and_no_traceback(monkeypatch, capsys):
+    """The composer reports the output's last line as the reason: it must be the command's error, apt's ``E:`` line,
+    not a traceback naming the command."""
+    def fail(*_args):
+        raise subprocess.CalledProcessError(100, ["apt-get", "install"])
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 100
+    assert capsys.readouterr().err == ""
+
+
+def test_a_captured_command_that_fails_has_its_error_printed_last(monkeypatch, capsys):
+    def fail(*_args):
+        raise subprocess.CalledProcessError(2, ["dpkg-deb", "-f"], stderr="dpkg-deb: error: not a Debian archive\n")
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 2
+    assert capsys.readouterr().err.strip().splitlines()[-1] == "dpkg-deb: error: not a Debian archive"
 
 
 def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):

@@ -33,7 +33,10 @@ async def post_turn(turn, params):
     answer = await turn.user_triggers()
     if answer is not None:
         return answer
-    t0 = min([_utc((await env.invoke(CLOCK, "state"))["t0"]) for env in envs])
+    states = [await env.invoke(CLOCK, "state") for env in envs]
+    t0 = min([_utc(state["t0"]) for state in states])
+    zones = {state.get("time_zone") for state in states} - {None}
+    zone = zones.pop() if len(zones) == 1 else "UTC"  # as prompt_agent labels what it delivers
     end = _end_instant(end_time, t0)
     sent = _delivered_person(turn)
     for jump in range(max_jumps + 1):
@@ -44,7 +47,7 @@ async def post_turn(turn, params):
             turn.record({"woke_at": _iso(now), "for": due + ["person"] * len(due_person),
                          **({"person_at": [_iso(m["at"]) for m in due_person]} if due_person else {})})
             # prompt_agent puts what came due on notifications/v1 ahead of this; [] sends only that
-            return {"message": _person_message(due_person) if due_person else []}
+            return {"message": _person_message(due_person, zone) if due_person else []}
         if jump == max_jumps:  # checked above: what the last jump made due still wakes the agent
             return _end(turn, "max_jumps_per_turn", at=_iso(now))
         nxt = await _next(envs, role, person, now, sent)
@@ -134,9 +137,9 @@ def _delivered_person(turn):
     return sent
 
 
-def _person_message(person):
-    """One line per message, oldest first, each saying when it was written."""
-    return "\n".join(f"[{label_time(_iso(m['at']))}] {m['text']}" for m in person)
+def _person_message(person, zone):
+    """One line per message, oldest first, each saying when it was written, in the world's time zone."""
+    return "\n".join(f"[{label_time(_iso(m['at']), zone)}] {m['text']}" for m in person)
 
 
 async def _advance(env, target):

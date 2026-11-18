@@ -1,7 +1,7 @@
 """The allowlist must actually reach Modal's create call.
 
 modal_network_policy_test.py covers the lowering as a pure function; that passes even if
-neither backend spreads the result into _experimental_create. Modal is the only backend
+neither backend spreads the result into create. Modal is the only backend
 that enforces anything, so losing that spread would provision open while the deployment
 record still claimed the allowlist.
 """
@@ -33,7 +33,7 @@ def _capture():
 def _patched_create(fake):
     create = MagicMock()
     create.aio = fake
-    return patch("modal.Sandbox._experimental_create", create)
+    return patch("modal.Sandbox.create", create)
 
 
 @pytest.mark.asyncio

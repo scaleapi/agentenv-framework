@@ -27,17 +27,12 @@ def _resolve_environment_names(env: Env) -> list[str]:
     standalone servicedb-backed env contributes its single one.
 
     Must match the list the gateway passes to ``prepare`` at deploy (``EnvironmentGatewayProvider._all_environments``,
-    the authoritative one) — including the ``website_browser`` server the gateway auto-adds whenever an
-    env has websites. A name missing here yields a base without that schema, and the deploy then builds
-    it a silently-empty overlay."""
+    the authoritative one), which leaves out the website browser the gateway adds. A name missing here yields a
+    base without that schema, and the deploy then builds it a silently-empty overlay."""
     if isinstance(env, MultiEnv):
         names = [e.environment_name for e in env.mcp_server_envs] + [
             e.environment_name for e in env.website_envs
         ]
-        if env.website_envs:
-            from agent_env.config import get_config
-
-            names.append(Env.get(get_config().default_website_browser_env_id).environment_name)
     elif hasattr(env, "environment_name"):
         names = [env.environment_name]
     else:

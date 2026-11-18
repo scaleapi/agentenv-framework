@@ -10,6 +10,7 @@ pytest.importorskip("PIL")
 import asyncio  # noqa: E402
 import base64  # noqa: E402
 import io  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 from computer_fake import LINUX, FakeDriver, FakeScreen, MinimalDriver, http_client, mcp_session  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
@@ -46,7 +47,7 @@ from agentenv_protocol.computer.tools import _modifiers  # noqa: E402
 
 MACOS = Platform(os="macos", arch="arm64")
 #: A platform the base class has no OS defaults for.
-WINDOWS = Platform(os="windows", arch="amd64")
+FREEBSD = Platform(os="freebsd", arch="amd64")
 
 
 def _required(namespace: dict) -> dict:
@@ -133,7 +134,7 @@ def test_a_driver_method_replaces_the_linux_default():
     Driver = _define({"run": run_in_session(lambda self, *a: None)})
     assert declared(Driver)["run_in_session"] == [("run", {})]
     assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session",
-                                                         {"os": frozenset({"linux", "macos"})})]
+                                                         {"os": frozenset({"linux", "macos", "windows"})})]
 
 
 def test_the_platform_is_detected(tmp_path, monkeypatch):
@@ -148,6 +149,11 @@ def test_the_platform_is_detected(tmp_path, monkeypatch):
     monkeypatch.setattr("agentenv_protocol.computer.platform.sys.platform", "darwin")
     monkeypatch.setattr("agentenv_protocol.computer.platform._platform.mac_ver", lambda: ("26.5.2", ("", "", ""), ""))
     assert detect({"DISPLAY": ":0"}, release) == Platform("macos", None, "26.5.2", "arm64", "aqua")
+    monkeypatch.setattr("agentenv_protocol.computer.platform.sys.platform", "win32")
+    monkeypatch.setattr("agentenv_protocol.computer.platform._platform.machine", lambda: "AMD64")
+    monkeypatch.setattr("agentenv_protocol.computer.platform.sys.getwindowsversion",
+                        lambda: SimpleNamespace(build=26200), raising=False)
+    assert detect({}, release) == Platform("windows", None, "11", "amd64", "dwm")
 
 
 def test_settings_come_from_one_json_value():
@@ -216,6 +222,18 @@ async def test_the_skill_is_written_from_the_computer_as_it_booted_under_the_nam
 
 
 @pytest.mark.asyncio
+async def test_the_skills_shortcuts_are_its_distributions_own_where_it_has_them(monkeypatch):
+    monkeypatch.setattr("agentenv_protocol.computer.skill.getpass.getuser", lambda: "omarchy")
+    omarchy = Platform(os="linux", distribution="omarchy", version="4.5.0", arch="amd64", display="wayland")
+    async with http_client(FakeDriver(platform=omarchy)) as http:
+        skill_md = (await http.get("/agentenv/ext/skill/get", params={"name": "computer-desktop"})).json()["skill_md"]
+
+    shortcuts = skill_md.partition("## Shortcuts")[2]
+    assert "- Omarchy 4.5.0 (amd64), a Wayland session" in skill_md
+    assert "`['Super', 'Alt', ' ']` the app launcher" in shortcuts and "`['Alt', 'Tab']`" not in skill_md
+
+
+@pytest.mark.asyncio
 async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_computers_part_follows(monkeypatch):
     class Bundling(FakeDriver):
         keys = ("Enter", "Escape", *(chr(code) for code in range(0x21, 0x7F)))
@@ -235,7 +253,7 @@ async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_compu
 
 @pytest.mark.asyncio
 async def test_a_minimal_driver_declares_only_what_it_has():
-    async with http_client(MinimalDriver(platform=WINDOWS)) as http:
+    async with http_client(MinimalDriver(platform=FREEBSD)) as http:
         card = (await http.get("/.well-known/agent-env.json")).json()
         display_set = await http.post("/agentenv/ext/computer-display/set", json={"width": 1, "height": 1})
         exec_run = await http.post("/agentenv/ext/computer-exec/run", json={"argv": ["true"], "request_id": "r"})
@@ -462,14 +480,14 @@ def test_a_driver_class_declares_what_it_serves_on_each_platform(monkeypatch):
             raise AssertionError("declaration builds the card without the subclass's __init__")
 
     linux = Declared.declaration(LINUX)
-    elsewhere = MinimalDriver.declaration(Platform(os="windows"))
+    elsewhere = MinimalDriver.declaration(Platform(os="freebsd"))
     uris = lambda card: {e.uri for e in card.capabilities.extensions}  # noqa: E731
     assert linux.name == "declared" and len(linux.capabilities.tools) == 14
     assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-exec/v1"} <= uris(linux)
     assert elsewhere.name == "MinimalDriver" and len(elsewhere.capabilities.tools) == 7
     assert "urn:agentenv:computer-exec/v1" not in uris(elsewhere)
     computer = next(e for e in elsewhere.capabilities.extensions if e.uri == "urn:agentenv:computer/v1")
-    assert computer.params["platform"] == {"os": "windows"}
+    assert computer.params["platform"] == {"os": "freebsd"}
 
 
 def test_a_supports_entry_names_each_platform_it_covers():

@@ -38,7 +38,7 @@ from agent_env.config import get_config
 from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.local_docker.provider import (
     LocalSandboxProvider,
-    local_grant_trust,
+    local_grants,
     trust_env,
 )
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
@@ -49,7 +49,6 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.store.local_state import awaiting_lock
-from agent_env.store.routing import LocalRunObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +202,7 @@ class LumeSandboxProvider(SandboxProvider):
 
     async def get_sandbox(self, sandbox_id: str) -> LumeSandbox:
         """The VM ``sandbox_id``, with this process's grant server forwarded into it, as another process reconnects."""
-        grants = await asyncio.to_thread(_local_grants)
+        grants = await asyncio.to_thread(local_grants)
         async with self._changing(sandbox_id):
             state = self._state(sandbox_id)
             if "address" in state and grants is not None:
@@ -349,7 +348,7 @@ class LumeSandboxProvider(SandboxProvider):
         if sizes:
             await self._lume("set", name, *[part for pair in zip(sizes[::2], sizes[1::2]) for part in pair])
         folder = self._folder(name)
-        grants = None if state.get("build") else await asyncio.to_thread(_local_grants)
+        grants = None if state.get("build") else await asyncio.to_thread(local_grants)
         if grants is not None:
             env = {**trust_env(f"{SHARED_FILES}/{SEED_FOLDER}/{TRUST_FOLDER}"), **env}
         share = (f"{state['build']}:rw" if state.get("build")
@@ -586,13 +585,3 @@ def _alive(pid: Optional[int]) -> bool:
 def _kill(pid: int) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pid, signal.SIGTERM)
-
-
-def _local_grants() -> Optional[tuple[int, Path]]:
-    """The port of the configured object store's grant server, started, and the local transfer CA's trust files, when
-    the store is a local one handing out grants; None otherwise."""
-    trust = local_grant_trust()
-    if trust is None:
-        return None
-    store = get_config().get_object_store()
-    return (store.local if isinstance(store, LocalRunObjectStore) else store).grant_port(), trust

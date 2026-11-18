@@ -37,6 +37,7 @@ from agent_env.providers.sandbox_providers.host_images import build, build_stage
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task.task import Task
+from agent_env.task_step.preflight import pinned
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.build import DockerBuildError
@@ -163,7 +164,8 @@ def materialize(
             raise BundleError(problems)
         for write in tasks:
             through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps,
-                                                   requires=write.requires).version)
+                                                   requires=write.requires,
+                                                   entity_ids=built[write.id].entity_ids).version)
         for write in evals:
             through_ledger(write, lambda: _write_eval(plan, write, written))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked), tuple(left))
@@ -417,7 +419,8 @@ def _build(write: Write, plan: Plan, written: Mapping[tuple[str, str], Materiali
     """The task ``write`` puts: as resolved, or given what was ``written``, with each reference that takes a version
     naming the one it reads."""
     steps = write.source.config if written is None else pinned_steps(plan, write, written)
-    return Task(id=write.id, version=None, steps=[build_step(step) for step in steps])
+    return Task(id=write.id, version=None, steps=[build_step(step) for step in steps],
+                entity_ids=write.source.entity_ids)
 
 
 def pinned_steps(plan: Plan, write: Write, written: Mapping[tuple[str, str], Materialized]) -> list[dict]:
@@ -450,8 +453,11 @@ def _preflight(plan: Plan, write: Write, task: Task, unwritten: set[tuple[str, s
     a step that deploys on a provider for the run's ``sandbox``, which overrides it."""
     outputs = {output.id for output in write.source.outputs}
     solver = plan.agent.steps.get(write.id, ()) if plan.agent is not None else ()
-    problems, unchecked = [], []
+    problems, unchecked, versions = [], [], {}
     for config, step in zip(write.source.config, task.steps):
+        before = dict(versions)
+        if (deployed := step.deploys_env()) is not None:
+            versions.setdefault(*deployed)
         overrides = {key: sandbox for key in _SANDBOX_FIELDS if sandbox is not None and hasattr(step, key)}
         if step.id in solver:
             overrides |= {"a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": plan.agent.version}
@@ -466,7 +472,8 @@ def _preflight(plan: Plan, write: Write, task: Task, unwritten: set[tuple[str, s
             if type(step).preflight is not TaskStep.preflight:
                 unchecked.append(step)
             continue
-        problems.extend(step.preflight())
+        with pinned(before):
+            problems.extend(step.preflight())
     return problems, unchecked
 
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -174,7 +176,7 @@ async def test_install_logs_show_the_command_template_not_the_model_key_or_heade
         "install_commands_host": ["start --key {litellm_api_key} --headers {litellm_extra_headers}"],
         "required_params_host": ["litellm_api_key", "litellm_extra_headers"], "a2a_port": 8000}}))
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
         sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
         tunnel_urls={"8000": "http://127.0.0.1:8000"})])
@@ -203,7 +205,7 @@ async def test_a_per_run_key_given_by_reference_is_resolved_through_the_secret_s
         "install_commands_host": ["start --key {litellm_api_key}"],
         "required_params_host": ["litellm_api_key"], "a2a_port": 8000}}))
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
@@ -336,9 +338,10 @@ def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, cont
     step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver",
                                 container_name=container_name)
     cards = {"agent-x-image": codex, f"{PROXY}-image": PROXY_INSTALL}
-    monkeypatch.setattr(step, "_extract_install_extension", lambda sandbox, image: _resolved(cards[image])())
+    monkeypatch.setattr(step, "_extract_install_extension",
+                        lambda sandbox, image: _resolved(cards[image.image_name])())
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="modal_vm",
@@ -401,3 +404,59 @@ def test_only_an_install_in_another_agents_place_gives_its_workdir_and_user():
         agent_name="solver", replaced=HostPlace(workdir="/opt/agent-solver/workspace", user="agent-solver"),
     )
     assert (placed["host_workdir"](), placed["host_user"]()) == ("/opt/agent-solver/workspace", "agent-solver")
+
+
+class _CardSandbox:
+    """Runs an agent image's card dump, answering after ``delay`` with a card offering ``INSTALL``, or failing first
+    ``failures`` times; each run recorded."""
+
+    def __init__(self, delay: float = 0, failures: int = 0):
+        self.runs, self.delay, self.failures = [], delay, failures
+
+    async def exec_with_output(self, *args):
+        self.runs.append(args[-3])
+        await asyncio.sleep(self.delay)
+        if len(self.runs) <= self.failures:
+            return 1, "", "the image's Python exited"
+        return 0, json.dumps({"capabilities": {"extensions": [INSTALL]}}), ""
+
+
+INSTALL = {"uri": A2AAgent.EXT_INSTALL, "params": {"a2a_port": 8000}}
+
+
+def _card_image(version: int, name: str | None = None):
+    return SimpleNamespace(id=f"agent-image-{uuid.uuid4().hex}" if name is None else name, version=version,
+                           image_name="agent:latest")
+
+
+def _card_step():
+    return InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+
+
+@pytest.mark.asyncio
+async def test_an_images_install_extension_is_read_once_for_each_version_of_its_artifact():
+    """A tarball's images carry no digest, so two versions under one name differ only as versions."""
+    sandbox, name = _CardSandbox(), f"agent-image-{uuid.uuid4().hex}"
+
+    read = [await _card_step()._extract_install_extension(sandbox, _card_image(version, name)) for version in (1, 1, 2)]
+
+    assert read == [INSTALL] * 3 and sandbox.runs == ["agent:latest", "agent:latest"]
+
+
+@pytest.mark.asyncio
+async def test_installs_at_once_share_one_read_of_an_images_install_extension():
+    sandbox, image = _CardSandbox(delay=0.05), _card_image(1)
+
+    read = await asyncio.gather(*(_card_step()._extract_install_extension(sandbox, image) for _ in range(8)))
+
+    assert read == [INSTALL] * 8 and len(sandbox.runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_of_an_images_install_extension_is_made_again():
+    sandbox, image = _CardSandbox(failures=1), _card_image(1)
+
+    with pytest.raises(RuntimeError, match="the image's Python exited"):
+        await _card_step()._extract_install_extension(sandbox, image)
+
+    assert await _card_step()._extract_install_extension(sandbox, image) == INSTALL and len(sandbox.runs) == 2

@@ -163,7 +163,7 @@ def docker(monkeypatch):
 
     def build(dockerfile, context, tag, *, platform, labels=None):
         builds.append(tag)
-        held[tag] = (labels or {}).get(host_images._SOURCES_LABEL)
+        held[tag] = (labels or {}).get(host_images.SOURCES_LABEL)
 
     monkeypatch.setattr(host_images, "build_image", build)
     monkeypatch.setattr(host_images, "_built_from", held.get)

@@ -1,22 +1,40 @@
 Base computers that come with agent-env, each a `computer` artifact a computer env composes a driver and apps onto.
-`agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-headless` composes a bundle's `desktop` env on
+`agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-browser` composes a bundle's `desktop` env on
 another of them for one run, the bundle left as written.
 
-`artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
-supervisord, which runs every program as the session user, `user` (uid 1000); nothing in it runs as root. Its home
+`artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. It starts as
+root: its init sets the time zone, makes the clock page and boots the egress proxy, then root's supervisord runs the
+clock follower as `agentenv-clock`, the egress proxy as `agentenv-egress` and the session's supervisord as the
+session user, `user` (uid 1000), which runs every session program. Every session program goes out through the
+egress proxy, on `127.0.0.1:3128` and on real time (`egress/`, a Go program the Dockerfile builds and tests): it
+passes a site's TLS through untouched when the universe's date is inside the site's certificate, else verifies the
+site against real time and hands the program a certificate from the computer's own CA, minted at boot, its key the
+proxy's alone, and valid from 1950 to 9999, so a live site loads however far the clock is from now. Its handshake
+with the site is built from the program's own, so the site sees the program's TLS fingerprint either way, and it
+refuses any destination that isn't global. Java and Node's `fetch` reach it by their own settings, which the
+session sets too. Its home
 has a desktop's standard folders (`Desktop`, `Documents`, `Downloads`, `Pictures` and the rest, from `xdg-user-dirs`). Its
 container form's image is built from the folder's `Dockerfile`, and a release publishes it as
 `ghcr.io/scaleapi/agentenv-ubuntu-24.04:src-<hex>`, tagged by its sources, so a run pulls it by digest instead of
 building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.toml` gives it, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04`.
 
-`artifacts/ubuntu-24.04-headless/` is Ubuntu 24.04 (`amd64` and `arm64`) with no display server or desktop
-(`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
-browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
-session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out, which forwards every
-request to wherever it names, refusing nothing: the sandbox's network policy is all that limits it until the shared
-site proxy replaces it. It has a container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by
-its id, `@local/agentenv-framework/computers/ubuntu-24.04-headless`.
+`artifacts/ubuntu-24.04-browser/` is Ubuntu 24.04 (`amd64` and `arm64`) with no desktop (`display = "none"`), for one
+website browser and the `page` driver, whose screen is the browser's page: a browser computer, which agentenv's
+`chromium` deploys alone as. The browser runs headful on an X server of its own, Xvfb on `:99` at 1920x1080, which no
+agent sees, records or drives, so the sites it visits see a browser with a window, not a headless one; the page's size
+is the browser's `window` setting. supervisord runs every program as the session user, among them that X server and a
+stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
+routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
+nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
+is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. It
+keeps the browser's network log too, in `/var/log/agentenv/network.jsonl`, which `AGENTENV_NETWORK_LOG` names: an
+`open` and an `end` line for each connection, numbered, in the shared site proxy's shapes. A computer that routes sites names the shared site proxy's forward port,
+`127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
+container form only. Name it from another bundle as `ubuntu-24.04-browser`, or by its id,
+`@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was `ubuntu-24.04-headless`, a name nothing resolves
+any more, so what still names it fails rather than gets a headful browser; its image, `agentenv-ubuntu-24.04-headless`,
+stays published for what pins it.
 
 It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,
@@ -34,14 +52,21 @@ partition kept, so nothing is emulated or privileged. A disk boots where `/dev/k
 KVM probes it. A deploy boots it with `env_params = { form = "disk" }`. The launcher serves each of the computer's ports
 through socat, whose listen backlog takes a burst of connections, in front of QEMU's own forward, whose backlog is 1, and
 a reset boots the disk afresh on a new overlay in the same launcher, at the same URLs; a container an agent-env from
-before reset in place started is refused a reset, to be redeployed. It boots on local Docker where
-Docker can pass it `/dev/kvm`, and on `modal_vm`, amd64 only, whose sandbox runs the launcher as its image under nested
-virtualization: the provider exports the disk from the image store with this machine's Docker, compressed, once for each
-composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal uploads once for each
-content and the launcher expands onto the sandbox's disk. Such a sandbox is ended once it has been idle, with no
-connection open, for the provider's `idle_timeout`, 30 minutes unless its config sets another, as a running QEMU isn't
-activity. A gate 3 probe that ends with the connection to the driver dropped, refused or timed out runs again on a fresh
-boot, up to three in all, and the record keeps each attempt; one with a failed check is recorded as it is.
+before reset in place started is refused a reset, to be redeployed. It boots on local Docker where Docker can pass it
+`/dev/kvm`, the disk image's files mounted read-only into the launcher where Docker mounts images (28 and later, on the
+containerd image store), so no copy of a disk, nor of a Windows disk's base, is made for each launcher, else copied into
+an image of the launcher it keeps for the next boot. There its computer uses a local object store's grants as a container
+does, at `host.docker.internal`: Linux's init and Windows' setup map that name to 10.0.2.2, QEMU's address for the
+launcher, which forwards the grant server's port to this machine (`VM_HOST_PORTS`), and the local transfer CA's trust
+files ride in the seed (`VM_TRUST`), where the init and agentenv-session point TLS clients at them; and on `modal_vm`, amd64 only, whose sandbox runs the launcher as
+its image under nested virtualization: the provider exports the disk from the image store with this machine's Docker,
+compressed, once for each composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal
+uploads once for each content and the launcher expands onto the sandbox's disk; a thin disk, a Windows one, carries its
+base too, exported once for each base and expanded beside it there, so another computer on that base adds its layer
+alone. Such a sandbox is ended once it has been idle, with no connection open, for the provider's `idle_timeout`, 30
+minutes unless its config sets another, as a running QEMU isn't activity. A gate 3 probe that ends with the connection
+to the driver dropped, refused or timed out runs again on a fresh boot, up to three in all, and the record keeps each
+attempt; one with a failed check is recorded as it is.
 
 A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
 link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
@@ -50,7 +75,10 @@ names another, never on the sandbox it deploys on. A compose of a disk also comp
 unless that's built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes
 it first on that same provider, saying which, reusing what's built, as every build is reused by its key; deploys of one
 env at once compose it once, the others
-waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
+waiting for it, a deploy that finds it building included. A container built but left unverified though the deploy's
+sandbox runs it natively, as one is when a setting its probe boots with doesn't resolve, is composed again the same way:
+its image reused and probed, and booted only once ready; a deploy that still has no ready build names why each such
+container wasn't probed. In `agent-env run` it says why and each stage as it goes, and
 a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
 deploy refuses for want of a ready build and names `agent-env env build`.
@@ -60,6 +88,14 @@ and the protocol's `computer` package. A build an agent-env with other composing
 records named it, isn't deployed: a deploy that boots its form composes it again first, saying so, as `env build` and
 a put do, and its record says `by another composer` until then. So upgrading agent-env never boots a computer composed
 the old way.
+
+A computer app a release publishes composed, `chromium`, needs no build: the wheel records the lock each arch was
+composed from and the key it took (`published_images.released_computers`), so a compose of the same inputs takes that
+lock rather than resolving one, finds its key in the record, and records the image the release published, pulled by
+its digest from `ghcr.io/scaleapi/agentenv-chromium`, as `reused` and `published`, then probes it as any reuse is
+probed. The computer is written over the index the release published of its arches; an arch it composed here beside
+one the release published is joined in the env's own store, the released one copied there first. A record of another
+key, an image the registry won't give, or a checkout's compose, which stages the protocol's source, composes as before.
 
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 
@@ -140,6 +176,85 @@ Virtualization.framework runs a VM only in a logged-in session, so on a Mac with
 agent-env runs as logs in at boot and agent-env runs in that session (`launchctl asuser`). A Mac runs two macOS VMs at
 once, as Apple's licence allows and Virtualization.framework enforces; `lume` refuses a third. Its `resolution` setting
 sizes the virtual display.
+
+`artifacts/windows-11/` is Windows 11 Enterprise (`amd64`), Microsoft's evaluation, as a disk. Windows isn't
+agent-env's to publish, so no image of it is: the first compose on a Linux machine with KVM fetches the evaluation ISO
+from Microsoft's link into the per-user cache, once, printing one line that says so, and installs it unattended in the
+QEMU launcher (`disk/windows/`): `autounattend.xml` answers setup, with the licence accepted, a UEFI disk and two local
+accounts, `agentadmin`, whom agent-env composes as over ssh with a key of the base's own, and `user`, the session user
+the desktop signs in as at every boot; `setup.ps1` runs once at `agentadmin`'s first sign-in, OpenSSH first, so a
+setup that fails is read back over ssh at once (`setup-failed`), then turns off what would get in an agent's way
+(updates, the lock screen, notifications, Widgets, Copilot, first-run pages, the page file and the firewall, behind
+QEMU's network, which reaches the guest at the ports the launcher forwards alone), installs the pinned Python with Tk
+and `agentenv-session`, and switches the sign-in to `user`. Setup takes about 13 minutes. The installed disk, trimmed,
+becomes the base's image, `disk/base.img` in a layer of its own under an empty overlay of it, with the date its 90-day
+evaluation expires and the key to `agentadmin`; it's pushed to the env's image store, as Linux disks
+are, under a tag of its recipe, so another machine composing on it pulls it rather than installing Windows, and fetches
+no ISO. A compose installs a base afresh once fewer than 7 days of its evaluation are left, from the ISO Microsoft's
+link serves then. Name it as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.
+
+A Windows computer env is composed on the same machine as a thin disk (`env/envs/computer/utils/thin_disk.py`, with
+what's Windows' own in `windows_disk.py`): the base booted on an overlay kept in a folder of its own, each layer
+installed over ssh as `agentadmin` by a PowerShell script composing writes, as its `[install.windows]` says (its files
+under `C:\agentenv\drivers\<name>`, or an app's under `C:\agentenv\apps\<name>`, its downloads checked by sha256, its
+venv on the pinned Python, its PowerShell run scripts, elevated, an app's install steps, elevated too, and its
+services), then shut down and packed onto the base's image, so every computer composed on a base shares one copy of it,
+and pushed to the env's image store under its key, pinned, as a Linux disk is; a compose of the same inputs on any
+machine reuses it, and a deploy pulls it. Gate 3 probes it at full. At the session user's sign-in, `agentenv-session`,
+run windowless by `pythonw`, reads the deploy's environment from the NoCloud seed, which the launcher attaches as a
+removable USB drive, since Windows mounts a FAT filesystem with no partition table on removable media alone, and starts
+each layer's services in that session, again whenever one exits. A Windows computer boots with 4 vCPUs and 8 GB, on
+local Docker with KVM and on `modal_vm`; it has computer-exec and data/add, through the protocol's Windows defaults, so
+the probe runs its fixture there as on Linux, with Python one-liners for the commands it would give a shell. On
+`modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your own; whether they
+allow it there is yours to check. Composing leaves `C:\agentenv` the admins', as `/opt/agentenv` is root's on Linux:
+every user, and every sandboxed process (Chrome's, as Program Files allows it), reads and runs what's there, and the
+session user writes only the services' logs and each app's `.agentenv` folder. An app's own server runs in the session
+as its services do, on a loopback port it writes with a token to that folder, which only the session user, SYSTEM and
+Administrators reach; it launches the app in a Job object, which ends whatever the app started. Composing signs in as
+`agentadmin`, so an app's install step for the session user can't run on Windows, and gate 1 refuses an app that
+declares one there.
+
+`artifacts/omarchy-4.5/` is Omarchy 4.5 (`amd64`), an Arch Linux desktop on Hyprland, as a disk alone: Hyprland needs a
+GPU, which a container doesn't get. Its base is built from Omarchy's own stable VM image, which its `[forms.disk]` names
+by `source`, a URL and a sha256, fetched once into this machine's cache and checked. It's booted once by the QEMU
+launcher as a `linux-desktop` guest (a virtio GPU at the computer's resolution, 4 vCPUs and 8 GB), with root's ssh key
+passed as a systemd credential, Omarchy signing its user `omarchy` in as it does at every boot, and made a base by
+`disk/omarchy/recipe.sh`, run as root over ssh. The recipe refuses an image whose os-release isn't the artifact's
+`omarchy` `4.5.0`; adds `agentenv.lua` to Hyprland's config (cua-driver's Hyprland plugin loaded at start, a US keymap,
+the idle cursor hidden, the display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's
+toggles for an unattended desktop (staying awake, no animations, no screensaver or suspend, notifications silenced);
+turns off crash toasts, dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets
+in only ssh and LocalSend while the launcher forwards only the computer's own ports; builds the plugin; and locks
+`omarchy`'s password and leaves the machine id empty. The plugin is the one cua-driver's release at the driver's
+Hyprland pin ships, built from its source by that release's kit, unmodified, as `omarchy` with `makepkg`, each archive
+pinned by sha256. The kit builds only on what it pins, Arch's Hyprland 0.56.2-1 and the GCC 16.1.1 it was built with,
+where Omarchy 4.5 ships newer builds of both, so first the recipe installs those from that day of the Arch Linux
+Archive (`disk/omarchy/arch-day.conf`, packages signature-checked by pacman), with the Hyprland libraries of that day,
+and cmake and ninja, which it removes after the build. It ends the builder's desktop session first, as the kit says to
+install it, and only then adds the drop-in: Hyprland reloads its config whenever a file of it changes, and the one
+running there can neither load the plugin nor show, without hanging, the error a config naming a missing one makes. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
+under a tag of its recipe and source. Name it as `omarchy-4.5`, or by its id,
+`@local/agentenv-framework/computers/omarchy-4.5`.
+
+An Omarchy computer env is composed on the same machine as a thin disk too, with what's Omarchy's own in
+`omarchy_disk.py`: each layer is installed over ssh as root by a bash script composing writes, as its
+`[install."linux/omarchy"]` says (its files under `/opt/agentenv/drivers/<name>`, its downloads checked by sha256, its
+venv on the system Python, its run scripts), and its services become systemd user units of the graphical session, which
+start with the session, and again with it, through `with-seed`. The composed disk has no ssh: only a compose logs
+in, and it boots the base. At every boot, before SDDM starts the session,
+`agentenv-seed.service` reads the deploy's environment from the NoCloud seed with the Linux disk's own `seed-env` and
+writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it makes the folder an
+app's server marks its launches in (`/run/agentenv/apps`) the session user's; it sets the hostname and
+the computer's `timezone` (UTC by default; a deploy is refused one that isn't an IANA zone, and one the disk doesn't
+have is written as the refusal every service then names), names `host.docker.internal` at QEMU's address for the launcher, and writes the display's mode for Hyprland
+from the computer's `resolution`. Gate 3 probes it at full. Each app is a layer of its own beside the driver, under
+`/opt/agentenv/apps/<name>`, installed as its `[install."linux/omarchy"]` says: its venv with the protocol's `app`
+extra, its own `.agentenv/` folder the session user's alone, its run scripts and install steps as their scopes say,
+and its server and services as user units beside the driver's. Gate 1 refuses an app asking for `shm_mb`, and a
+driver or app whose Linux install names apt packages, which Omarchy has no apt for. When
+Hyprland crashes, its watchdog brings it back in safe mode, without cua-driver's plugin, and cua-driver reports the
+computer failed for good.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

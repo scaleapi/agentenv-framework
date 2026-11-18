@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import tempfile
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -516,6 +517,26 @@ class TestAgentContainerPath:
         except RuntimeError as e:
             assert "could not size" in str(e)
 
+    @pytest.mark.parametrize("mode, shown", [("a1ff", "lrwxrwxrwx"), ("21b6", "crw-rw-rw-"), ("11a4", "prw-r--r--"),
+                                             ("41ed", "drwxr-xr-x"), ("c1ed", "srwxr-xr-x")],
+                             ids=["link", "device", "fifo", "directory", "socket"])
+    def test_get_file_size_refuses_anything_but_a_regular_file(self, mode, shown):
+        """By the raw mode bits stat prints, which no locale translates, as it does a file type's name."""
+        step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.exec_with_output = AsyncMock(return_value=(0, f"{mode}:0\n", ""))
+        with pytest.raises(RuntimeError, match=f"not a regular file \\({shown}\\)"):
+            _run(step._get_file_size(sandbox, None, "/app/artifact/report.pdf"))
+        assert sandbox.exec_with_output.await_args.args[:3] == ("stat", "-c", "%f:%s")
+
+    def test_get_file_size_sizes_a_regular_file_even_when_empty(self):
+        step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.exec_with_output = AsyncMock(side_effect=[(0, "81a4:0\n", ""), (0, "8180:4096\n", "")])
+        assert [_run(step._get_file_size(sandbox, None, "/x")) for _ in range(2)] == [0, 4096]
+
     def test_unreachable_sandbox_is_clear_error(self):
         """A re-run targeting an expired/unreachable sandbox fails with a clear message."""
         step = CollectArtifactsTaskStep(
@@ -598,6 +619,43 @@ class TestManifestResolution:
         # logical name -> (absolute source path, base_path-relative object name)
         assert items["gold_patch"] == ("/app/workspace/patches/gold_patch.diff", "patches/gold_patch.diff")
         assert items["dockerfile"] == ("/app/workspace/Dockerfile", "Dockerfile")
+
+    def test_manifest_entries_outside_base_path_are_named_by_their_file(self):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
+        ctx = _manifest_ctx({"kept": "/app/workspace/out/./report.md", "note": "/app/handoff/REJECTED.md"})
+        assert step._resolve_items(ctx) == [
+            ("kept", "/app/workspace/out/report.md", "out/report.md"),
+            ("note", "/app/handoff/REJECTED.md", "REJECTED.md"),
+        ]
+
+    def test_manifest_names_become_keys_with_no_separators_or_dot_segments(self):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
+        ctx = _manifest_ctx({
+            "../../.bashrc": "/app/workspace/payload",
+            "logs/run.json": "/app/workspace/logs/run.json",
+            "..\\..\\evil": "/app/workspace/evil",
+            "..": "/app/workspace/dots.txt",
+        })
+        assert [k for k, _, _ in step._resolve_items(ctx)] == [".bashrc", "logs_run.json", "evil", "dots.txt"]
+
+    def test_manifest_names_that_clean_to_one_key_each_keep_a_key_of_their_own(self):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
+        ctx = _manifest_ctx({
+            "logs/run.json": "/app/workspace/a.json",
+            "logs_run.json": "/app/workspace/b.json",
+            "../logs/run.json": "/app/workspace/c.json",
+        })
+        assert [(k, src) for k, src, _ in step._resolve_items(ctx)] == [
+            ("logs_run.json", "/app/workspace/a.json"),
+            ("logs_run.json (2)", "/app/workspace/b.json"),
+            ("logs_run.json (3)", "/app/workspace/c.json"),
+        ]
+
+    @pytest.mark.parametrize("base_path", ["/app/./workspace", "/app/workspace/", "/app//workspace"])
+    def test_manifest_entries_are_matched_against_base_path_normalized(self, base_path):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path=base_path, manifest_step_id="m9")
+        ctx = _manifest_ctx({"report": "/app/workspace/out/report.md"})
+        assert step._resolve_items(ctx) == [("report", "/app/workspace/out/report.md", "out/report.md")]
 
     def test_enumeration_drops_excluded_basenames(self):
         step = CollectArtifactsTaskStep(
@@ -935,6 +993,31 @@ class TestControllerChunkedRead:
                 assert False, "expected RuntimeError on a short read"
             except RuntimeError as e:
                 assert "refusing to upload a partial artifact" in str(e)
+
+    @pytest.mark.parametrize("make, size", [
+        (lambda p, tmp: p.write_bytes(b"hello"), 5),
+        (lambda p, tmp: None, -1),
+        (lambda p, tmp: p.symlink_to(tmp / "gone"), -1),
+        (lambda p, tmp: p.symlink_to("/dev/zero"), None),
+        (lambda p, tmp: os.mkfifo(p), None),
+        (lambda p, tmp: p.mkdir(), None),
+    ], ids=["regular", "absent", "dangling-link", "link-to-dev-zero", "fifo", "directory"])
+    def test_the_size_probe_sizes_only_a_regular_file(self, tmp_path, make, size):
+        """The probe's own script, run by a real shell as cua_bash runs it on the VM."""
+        target = tmp_path / "deliverable"
+        make(target, tmp_path)
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+
+        async def call(deployed_env, tool_name, arguments):
+            done = subprocess.run(["bash", "-c", arguments["script"]], capture_output=True, text=True, timeout=10)
+            return json.dumps({"output": done.stdout, "error": done.stderr, "returncode": done.returncode})
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            if size is None:
+                with pytest.raises(RuntimeError, match="not a regular file"):
+                    _run(step._controller_file_size(_cua_record(), str(target)))
+            else:
+                assert _run(step._controller_file_size(_cua_record(), str(target))) == size
 
     def test_absent_file_raises_filenotfound(self):
         """A missing file (wc errors with 'No such file') is reported absent so the caller

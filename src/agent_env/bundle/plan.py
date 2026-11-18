@@ -39,6 +39,7 @@ from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs import _multi_computers
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.published_images import published_bundle_image
@@ -62,14 +63,14 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .variants import Varied
 from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
-                      resolve_bundle)
+                      resolve_bundle, sync_context_paths)
 
 if TYPE_CHECKING:
     from .installed import InstalledBundle
@@ -894,7 +895,9 @@ class _Planner:
         """Each env of a multi runs as containers its environment_name names: an MCP server as one by that name, a
         website as its backend's and frontend's. No two of a multi's envs may name one container, and a provider
         other than the core's, which gives a multi one env card, can't tell an MCP server and a website of one name
-        apart. Nor may two of its websites claim one name."""
+        apart. Nor may two of its websites claim one name. A computer runs on a sandbox of its own, which the gateway
+        knows by its name alone, and serves its tools under it (``_multi_computers.name_problems``); its apps' names
+        are no other child env's, since loads and snapshots find an environment by its name."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ENV:
@@ -904,6 +907,8 @@ class _Planner:
             where = self._path(source.entry)
             taken: dict[str, str] = {}  # each container a child runs as, by the field naming the child
             named: dict[str, set[str]] = {}  # the environment_names of each list's envs
+            computers: list[str] = []  # the computers' environment_names, in order
+            apps: dict[str, set[str]] = {}  # each computer's apps' environment_names, when they're known
             claimed = [sites.Claim(domain, sites.SYNTHETIC, ref.where) for ref in source.references
                        if ref.where.startswith("website_envs[")
                        for domain in dict.fromkeys(self._domains(ref, store_latest))]
@@ -915,7 +920,14 @@ class _Planner:
                 if name is None:
                     continue
                 group = ref.where.partition("[")[0]
+                if group == "browser_envs":  # a browser computer runs as a computer, any other browser as an MCP server
+                    group = "computer_envs" if self._is_computer(ref, store_latest) else "mcp_server_envs"
                 named.setdefault(group, set()).add(name)
+                if group == "computer_envs":
+                    computers.append(name)
+                    if (held := self._server_names(ref, store_latest)) is not None:
+                        apps[name] = held - {name}
+                    continue
                 containers = [name] if group == "mcp_server_envs" else [
                     f"{name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}", f"{name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}"]
                 clash = next((container for container in containers if container in taken), None)
@@ -924,6 +936,10 @@ class _Planner:
                                          f"{clash!r}, as {taken[clash]}'s does; each env of a multi needs its own")
                 else:
                     taken.update(dict.fromkeys(containers, ref.where))
+            self.problems += [f"{where}: computer_envs: {problem}" for problem in _multi_computers.name_problems(
+                computers, mcp_servers=named.get("mcp_server_envs", ()), websites=named.get("website_envs", ()))]
+            self.problems += [f"{where}: computer_envs: {problem}" for problem in _multi_computers.app_name_problems(
+                apps, [*named.get("mcp_server_envs", ()), *named.get("website_envs", ()), *computers])]
             provider_type = source.config.get("env_provider_type", EnvironmentGatewayProvider.type)
             try:
                 provider = _env_provider_class(provider_type)
@@ -935,6 +951,8 @@ class _Planner:
                                       website_names=named.get("website_envs", ()))
             if reason is not None:
                 self.problems.append(f"{where}: env_provider_type {provider_type!r} {reason}; rename one")
+            if (reason := provider_refusal(provider, MultiEnv, computer_names=computers)) is not None:
+                self.problems.append(f"{where}: env_provider_type {provider_type!r} {reason}")
 
     def _check_environment_names(self, closure: set[_Key],
                                  store_latest: dict[tuple[EntityKind, str], int] | None) -> None:
@@ -1002,13 +1020,21 @@ class _Planner:
 
     def _server_names(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> set[str] | None:
         """The environment_names of the servers the env ``ref`` names runs: an MCP server's or a website's own, each
-        of a multi's envs', or a computer's own and each of its apps'. None when they aren't all known."""
+        of a multi's envs', its computers' apps' too, or a computer's own and each of its apps'. None when they aren't
+        all known."""
         if isinstance(ref.local, BundleEntry):
             cls = get_env_registry().get(ref.local.type)
             children = self.nodes[_key(ref.local)].references
             if cls is not None and issubclass(cls, MultiEnv):
-                names = {self._environment_name(child, store_latest) for child in children
-                         if child.kind is EntityKind.ENV}
+                names = set()
+                for child in children:
+                    if child.kind is not EntityKind.ENV:
+                        continue
+                    computer = child.where.startswith("computer_envs[") or (
+                        child.where.startswith("browser_envs[") and self._is_computer(child, store_latest))
+                    held = (self._server_names(child, store_latest) if computer
+                            else {self._environment_name(child, store_latest)})
+                    names |= held if held is not None else {None}
             else:
                 names = {self.accepted.get(_key(ref.local), {}).get("environment_name")}
             if cls is not None and issubclass(cls, ComputerEnv):
@@ -1022,7 +1048,11 @@ class _Planner:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
         if isinstance(env, MultiEnv):
-            return {child.environment_name for child in [*env.mcp_server_envs, *env.website_envs]}
+            browsers = env.browser_envs or []
+            return {*(child.environment_name for child in [*env.mcp_server_envs, *env.website_envs,
+                                                           *(b for b in browsers if not isinstance(b, ComputerEnv))]),
+                    *(name for computer in [*env.computer_envs, *(b for b in browsers if isinstance(b, ComputerEnv))]
+                      for name in (computer.environment_name, *(app.environment_name for app in computer.composed_apps())))}
         if isinstance(env, ComputerEnv):
             return {env.environment_name, *(app.environment_name for app in env.composed_apps())}
         name = getattr(env, "environment_name", None)
@@ -1056,6 +1086,13 @@ class _Planner:
         if ref.local is not None:
             return list(self.accepted.get(_key(ref.local), {}).get("domains") or [])
         return list(getattr(self._store_entity(ref, store_latest), "domains", None) or [])
+
+    def _is_computer(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> bool:
+        """Whether the env ``ref`` names is a computer env, the bundle's own by its type, a store one's as stored."""
+        if isinstance(ref.local, BundleEntry):
+            cls = get_env_registry().get(ref.local.type)
+            return cls is not None and issubclass(cls, ComputerEnv)
+        return isinstance(self._store_entity(ref, store_latest), ComputerEnv)
 
     def _store_entity(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> Any:
         """The store's entity ``ref`` names at the version the plan read, or None when that's unknown."""
@@ -1182,11 +1219,10 @@ _UNREAD: Any = object()  # the configured default agent, before a task needs it
 
 
 def solver_steps(steps: Any) -> tuple[str, ...]:
-    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` step
-    prompts, and not as its user simulator: the solver's."""
-    prompts = [step for step in steps if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type]
-    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts}
-    prompted -= {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in prompts}
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a step prompts as the agent
+    under test (``is_prompt_step``), and not as its user simulator: the solver's."""
+    prompts = [step for step in steps if isinstance(step, dict) and is_prompt_step(step)]
+    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts} - user_sim_agents(steps)
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
                  and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
@@ -1218,6 +1254,8 @@ def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) ->
     for site in sites:
         if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
             site.rewrite(ids[site.ref.kind, site.value])
+    if entry.entry.kind is BundleKind.TASK:
+        sync_context_paths(entry.entry.config, config)
     return config
 
 

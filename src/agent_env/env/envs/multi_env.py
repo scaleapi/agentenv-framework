@@ -1,13 +1,15 @@
-"""Multi environment combining multiple MCP servers and websites."""
+"""Multi environment combining multiple MCP servers, websites and computers."""
 from __future__ import annotations
 
 import logging
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 import yaml
+from agentenv_protocol import client as protocol_v1
 
 logger = logging.getLogger(__name__)
 
@@ -31,26 +33,84 @@ if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.entity.export import ExportContext
-    from agent_env.env.env import DeployedEnv, LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
+    from agent_env.env.envs.computer.env import ComputerEnv
+    from agent_env.env.env import LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
     from agent_env.providers.env_state import DatabaseStateProvider
 
+from agent_env.config import get_config, website_browser_env_id
 from agent_env.entity.refs import EntityRef
-from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.env import DeployedEnv, Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    plugin_provider_like_a_builtin, provider_or_class,
+    plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
 )
+from agent_env.env import store as env_store
+from agent_env.env.envs import _multi_computers
+from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME
 from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
 from agent_env.providers.env_state.local_postgres import INIT_SCRIPT_MOUNT_PATH
+from agent_env.store.base import NotFoundError
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
+from agent_env.env.registry import get_env_registry
 from agent_env.attribution import Attribution
+
+
+# A child_envs entry's options: a deploy_env step's for that env alone, less the multi env's (lifetime, gateway, state).
+CHILD_ENV_OPTIONS = ("sandbox_type", "cpu", "memory_mb", "disk_size_gb", "env_params")
+
+
+
+@dataclass(frozen=True)
+class WebsiteBrowser:
+    """The website browser a multi env's deploy adds, and where it runs: ``computer``, a browser computer, on a sandbox
+    of its own beside its computers; ``server``, an MCP server env, among its gateway's MCP servers; or neither, with
+    ``runs`` when it is the run's (``website_browser_env_id``) and the store doesn't hold it as either yet, an infra
+    env a run may set up later, which the gateway looks up as it deploys."""
+
+    computer: Optional[ComputerEnv] = None
+    server: Optional[MCPServerEnv] = None
+    runs: bool = False
+
+    @property
+    def env(self) -> Optional[Env]:
+        return self.computer or self.server
+
+
+def placed(browser: Optional[Env]) -> WebsiteBrowser:
+    """``browser`` where a multi env runs it: a computer on a sandbox of its own, an MCP server env among its gateway's
+    MCP servers, and an env of another kind left for the gateway to look up as it deploys."""
+    if browser is None:
+        return WebsiteBrowser()
+    if isinstance(browser, get_env_registry()[COMPUTER_ENV_TYPE]):
+        return WebsiteBrowser(computer=browser)
+    if isinstance(browser, MCPServerEnv):
+        return WebsiteBrowser(server=browser)
+    return WebsiteBrowser(runs=True)
+
+
+def browser_problems(envs: list[Env]) -> list[str]:
+    """Why ``envs``, a multi env's ``browser_envs``, can't be its website browsers: more than one, as a multi env runs
+    one, or an env that isn't a website browser env, an MCP server env serving one as ``playwright-mcp`` does or a
+    computer env with a website browser app, as ``chromium`` is."""
+    problems = []
+    if len(envs) > 1:
+        problems.append(f"browser_envs names {len(envs)} envs, and a multi env runs one website browser")
+    computer = get_env_registry()[COMPUTER_ENV_TYPE]
+    for i, env in enumerate(envs):
+        if isinstance(env, computer) and not env.serves_website_browser():
+            problems.append(f"browser_envs[{i}]: computer env {env.id!r} has no website browser among its apps")
+        elif not isinstance(env, (MCPServerEnv, computer)):
+            problems.append(f"browser_envs[{i}]: {env.id!r} is a {env.type} env, not a website browser env: an MCP "
+                            "server env serving one, as playwright-mcp is, or a computer env with a website browser "
+                            "app, as chromium is")
+    return problems
 
 
 # The servicedb's image line in a deploy's compose file, as the local Postgres state renders it.
@@ -71,13 +131,17 @@ def snapshot_compose(compose: str, db_image: str) -> str:
 
 class MultiEnv(Env):
     type: ClassVar[str] = "multi"
-    description = "Multi environment combining multiple MCP servers and websites, deployed through the environment provider its env_provider_type names"
+    description = ("Multi environment combining multiple MCP servers, websites and computers, deployed through the environment "
+                   "provider its env_provider_type names")
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.env("mcp_server_envs[]", env_type=MCPServerEnv.type),
-                                                  EntityRef.env("website_envs[]", env_type=WebsiteEnv.type))
-    toml_keys: ClassVar[dict[str, type]] = {"mcp_server_envs": list, "website_envs": list, "name": str,
-                                            "env_provider_type": str}
+                                                  EntityRef.env("website_envs[]", env_type=WebsiteEnv.type),
+                                                  EntityRef.env("computer_envs[]", env_type=COMPUTER_ENV_TYPE),
+                                                  EntityRef.env("browser_envs[]"))
+    toml_keys: ClassVar[dict[str, type]] = {"mcp_server_envs": list, "website_envs": list, "computer_envs": list,
+                                            "browser_envs": list, "name": str, "env_provider_type": str}
 
-    def __init__(self, id: str, version: Optional[int], mcp_server_envs: list[MCPServerEnv], website_envs: list[WebsiteEnv] | None = None, metadata: Optional[dict[str, str]] = None, name: Optional[str] = None, env_provider_type: str = "gateway"):
+    def __init__(self, id: str, version: Optional[int], mcp_server_envs: list[MCPServerEnv], website_envs: list[WebsiteEnv] | None = None, metadata: Optional[dict[str, str]] = None, name: Optional[str] = None, env_provider_type: str = "gateway",
+                 computer_envs: list[ComputerEnv] | None = None, browser_envs: list[Env] | None = None):
         super().__init__(id, version, metadata=metadata)
         if name is not None and (not name or any(ch.isspace() for ch in name)):
             raise ValueError("name must be non-empty with no whitespace")
@@ -87,10 +151,20 @@ class MultiEnv(Env):
         self.env_provider_type = env_provider_type  # the children's own types are ignored: this one deploys them all
         self.mcp_server_envs = mcp_server_envs
         self.website_envs = website_envs or []
-        if conflicts := sites.name_conflicts([sites.Claim(name, sites.SYNTHETIC, f"{env.environment_name} at website_envs[{i}]")
+        # A live site's names are the real site's, which a synthetic site claiming one of them wins.
+        if conflicts := sites.name_conflicts([sites.Claim(name, sites.ALLOWLIST if env.live else sites.SYNTHETIC,
+                                                          f"{env.environment_name} at website_envs[{i}]")
                                               for i, env in enumerate(self.website_envs)
                                               for name in dict.fromkeys(env.domains)]):
             raise sites.SiteConflict(f"multi env {id!r}: its websites claim names twice: {'; '.join(conflicts)}")
+        self._computers = _multi_computers.Computers(computer_envs or [], owner=id)
+        # None leaves the browser to the run, as for every env with websites; [] is none.
+        self.browser_envs = list(browser_envs) if browser_envs is not None else None
+        problems = browser_problems(self.browser_envs or [])
+        if not problems:
+            problems = self._name_problems(placed(self.browser_envs[0] if self.browser_envs else None))
+        if problems:
+            raise ValueError(f"multi env {id!r}: {'; '.join(problems)}")
         self._sandbox = None
         self._gateway_url = None
         self._gateway_mode = GatewayMode.PERFORMANCE
@@ -98,6 +172,44 @@ class MultiEnv(Env):
         self._mcp_server_name: Optional[str] = None
         self._deployed: Optional[DeployedEnv] = None
         self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
+
+    @property
+    def computer_envs(self) -> list[ComputerEnv]:
+        """Its computers, each on a sandbox of its own, which the gateway fronts by its name: after a deploy, that deploy's."""
+        return self._computers.envs
+
+    def _name_problems(self, browser: WebsiteBrowser) -> list[str]:
+        """What's wrong with the names of its computers and ``browser``, its website browser, beside its other child
+        envs' (``_multi_computers.name_problems``, ``app_name_problems``): a browser computer named as a computer is,
+        and an MCP server browser as an MCP server, which no other MCP server may name either."""
+        computer, server = browser.computer, browser.server
+        computer_envs = [*self.computer_envs, *([computer] if computer is not None else [])]
+        mcp_servers = [env.environment_name for env in (*self.mcp_server_envs, *([server] if server else []))]
+        websites = [env.environment_name for env in self.website_envs]
+        servers = [*mcp_servers, *websites]
+        computers = [env.environment_name for env in computer_envs]
+        problems = []
+        if server is not None and mcp_servers.count(server.environment_name) > 1:
+            problems.append(f"website browser {server.environment_name!r} has the name of another of its MCP servers, "
+                            "and the gateway runs each as a container of that name")
+        return [*problems, *_multi_computers.name_problems(computers, mcp_servers=mcp_servers, websites=websites),
+                *_multi_computers.app_name_problems({env.environment_name: [app.environment_name
+                                                                            for app in env.composed_apps()
+                                                                            if app is not env]  # an app deployed alone
+                                                     for env in computer_envs}, [*servers, *computers])]
+
+    def website_browser(self) -> WebsiteBrowser:
+        """The website browser a deploy adds, and where it runs: the one ``browser_envs`` names, none when it names
+        none, and without it the run's (``website_browser_env_id``) when it has websites, as every env with websites
+        gets."""
+        if self.browser_envs is not None:
+            return placed(self.browser_envs[0] if self.browser_envs else None)
+        if not self.website_envs:
+            return WebsiteBrowser()
+        try:
+            return placed(Env.get(website_browser_env_id(get_config())))
+        except NotFoundError:
+            return WebsiteBrowser(runs=True)
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -109,6 +221,11 @@ class MultiEnv(Env):
             {"id": env.id, "type": env.type, "version": env.version}
             for env in self.website_envs
         ]
+        if self.computer_envs:
+            base["computer_envs"] = [{"id": env.id, "type": env.type, "version": env.version} for env in self.computer_envs]
+        if self.browser_envs is not None:
+            base["browser_envs"] = [{"id": env.id, "type": env.type, "version": env.version}
+                                    for env in self.browser_envs]
         if self.name:
             base["name"] = self.name
         base["env_provider_type"] = self.env_provider_type
@@ -124,18 +241,31 @@ class MultiEnv(Env):
             Env.get(ref["id"], version=ref["version"])
             for ref in data.get("website_envs", [])
         ]
+        computer_envs = [Env.get(ref["id"], version=ref["version"]) for ref in data.get("computer_envs", [])]
+        browser_envs = ([Env.get(ref["id"], version=ref["version"]) for ref in data["browser_envs"]]
+                        if data.get("browser_envs") is not None else None)
         return cls(id=data["id"], version=data.get("version"), mcp_server_envs=mcp_server_envs, website_envs=website_envs, metadata=data.get("metadata", {}),
-                   name=data.get("name"), env_provider_type=data.get("env_provider_type", "gateway"))
+                   name=data.get("name"), env_provider_type=data.get("env_provider_type", "gateway"),
+                   computer_envs=computer_envs, browser_envs=browser_envs)
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> MultiEnv:
-        """Write the env authored as ``data`` (its env.toml, with ``mcp_server_envs`` and ``website_envs`` resolved to
-        env ids) under ``ctx.id`` and return it, unless deploying it would be refused."""
+        """Write the env authored as ``data`` (its env.toml, with ``mcp_server_envs``, ``website_envs``,
+        ``computer_envs`` and ``browser_envs`` resolved to env ids) under ``ctx.id`` and return it, unless saving it
+        would be refused."""
         fields = cls.accept_toml(data, ctx)
+        computer = get_env_registry()[COMPUTER_ENV_TYPE]
         env = dict(mcp_server_envs=[ctx.env(ref, MCPServerEnv) for ref in fields.get("mcp_server_envs", [])],
                    website_envs=[ctx.env(ref, WebsiteEnv) for ref in fields.get("website_envs", [])],
+                   computer_envs=[ctx.env(ref, computer) for ref in fields.get("computer_envs", [])],
+                   browser_envs=([ctx.env(ref) for ref in fields["browser_envs"]] if "browser_envs" in fields
+                                 else None),
                    name=fields.get("name"), env_provider_type=fields["env_provider_type"])
-        if refusal := cls(id=ctx.id, version=None, **env).deploy_refusal():
+        try:
+            refusal = cls(id=ctx.id, version=None, **env).save_refusal()
+        except ValueError as e:
+            refusal = str(e)
+        if refusal:
             ctx.refuse([refusal])
         return cls.put(id=ctx.id, **env)
 
@@ -144,6 +274,10 @@ class MultiEnv(Env):
         toml = {"type": self.type, "mcp_server_envs": [out.ref(env) for env in self.mcp_server_envs]}
         if self.website_envs:
             toml["website_envs"] = [out.ref(env) for env in self.website_envs]
+        if self.computer_envs:
+            toml["computer_envs"] = [out.ref(env) for env in self.computer_envs]
+        if self.browser_envs is not None:
+            toml["browser_envs"] = [out.ref(env) for env in self.browser_envs]
         if self.name:
             toml["name"] = self.name
         return {**toml, **self.provider_toml(out, self.env_provider_type)}
@@ -152,8 +286,9 @@ class MultiEnv(Env):
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a multi env takes. Raises BundleError listing every problem."""
         fields, problems = ctx.accepted_env(data, cls)
-        if not (fields.get("mcp_server_envs") or fields.get("website_envs")):
-            problems.append(ctx.config_problem("a multi env needs at least one env in mcp_server_envs or website_envs"))
+        if not (fields.get("mcp_server_envs") or fields.get("website_envs") or fields.get("computer_envs")):
+            problems.append(ctx.config_problem("a multi env needs at least one env in mcp_server_envs, website_envs or "
+                                               "computer_envs"))
         name = fields.get("name")
         if name is not None and (not name or any(ch.isspace() for ch in name)):
             problems.append(ctx.config_problem(f"name must be non-empty with no whitespace, not {name!r}"))
@@ -161,26 +296,149 @@ class MultiEnv(Env):
             ctx.refuse(problems)
         return fields
 
-    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
-        deployed_env = await deploy_through_provider(
-            self, environment_name=None, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
-            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
-            env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            artifact_id=artifact_id, artifact_version=artifact_version,
-        )
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None,
+                     child_envs: Optional[dict] = None) -> DeployedEnv:
+        browser = self.website_browser()
+        if refusal := self._child_envs_refusal(child_envs, sandbox_type, browser):
+            raise ValueError(refusal)
+        self._computers.begin(browser.computer)
+        deployer = self._computers.deployer(self._entries(child_envs, browser.computer), sandbox_type=sandbox_type,
+                                            ttl_seconds=ttl_seconds, attribution=attribution, websites=self._websites(),
+                                            live_hosts=self.live_hosts())
+        computers = dict(children=deployer, then=self._computers.finish) if self._computers.every else {}
+        try:
+            deployed_env = await deploy_through_provider(
+                self, environment_name=None, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
+                disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
+                env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
+                artifact_id=artifact_id, artifact_version=artifact_version, **computers,
+            )
+        except BaseException:
+            self._computers.rollback()
+            raise
+        self._computers.commit()
         self._gateway_mode = gateway_mode
         self._mcp_server_name = deployed_env.mcp_server_name
         _hand_provider_to_child_envs(self)
         _hand_record_to_child_envs(self, deployed_env)
         return deployed_env
 
-    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+    def _entries(self, child_envs: Optional[dict], browser: Optional[ComputerEnv]) -> Optional[dict]:
+        """``child_envs``, with ``browser``, its website browser when that is a computer, routing all its synthetic
+        websites unless its entry's ``env_params`` say whether it routes them (``site_routing``), as the browser an MCP
+        server runs reaches them all."""
+        synthetic = any(not env.live for env in self.website_envs)
+        if browser is None or not synthetic or not isinstance(child_envs, (dict, type(None))):
+            return child_envs
+        entry = (child_envs or {}).get(browser.environment_name)
+        params = entry.get("env_params") if isinstance(entry, dict) else None
+        if not isinstance(entry, (dict, type(None))) or not isinstance(params, (dict, type(None))) or \
+                "site_routing" in (params or {}):
+            return child_envs
+        routing = {**(entry or {}), "env_params": {**(params or {}), "site_routing": True}}
+        return {**(child_envs or {}), browser.environment_name: routing}
+
+    def _websites(self) -> dict[str, str]:
+        """Its websites' environment names by env id, the ids a computer's ``site_routing`` may name."""
+        return {env.id: env.environment_name for env in self.website_envs}
+
+    def _start_tab_names(self, entry: Optional[dict]) -> Optional[list[str]]:
+        """The names a computer with ``entry`` may open start tabs at: those of the websites its ``site_routing``
+        routes, all of them or those it lists, and every live site's domains and ``allow_hosts``, which the computer
+        reaches the real sites at; None while a routed site stores no names, since its card may declare any at
+        deploy, which checks the start tabs then."""
+        params = entry.get("env_params") if isinstance(entry, dict) else None
+        routing = params.get("site_routing") if isinstance(params, dict) else None
+        listed = routing if isinstance(routing, list) else None
+        routed = [env for env in self.website_envs if not env.live and (listed is None or env.id in listed)]
+        if any(not env.domains for env in routed):
+            return None
+        return [name for env in routed for name in env.domains] + [
+            name for env in self.website_envs if env.live for name in [*env.domains, *env.allow_hosts]]
+
+    def live_hosts(self) -> list[str]:
+        """The hosts its live websites reach the real sites at, each one's domains and ``allow_hosts``, which a
+        computer whose network is an allowlist is let reach; a name one of its synthetic websites' names covers is
+        that site's, routed to it, and left out, while a wider one is kept, the synthetic name still routed within
+        it."""
+        synthetic = [name for env in self.website_envs if not env.live for name in env.domains]
+        hosts = []
+        for env in (env for env in self.website_envs if env.live):
+            for host in dict.fromkeys([*env.domains, *env.allow_hosts]):
+                if claimed := next((name for name in synthetic if sites.covers(name, host)), None):
+                    logger.warning(f"multi env '{self.id}': live site {env.environment_name!r} names {host!r}, which "
+                                   f"the synthetic site at {claimed!r} claims, so the computer reaches that site there")
+                elif host not in hosts:
+                    hosts.append(host)
+        return hosts
+
+    def live_websites(self) -> list[dict]:
+        """Its live websites, as a run records them (``WebsiteEnv.live_websites``)."""
+        return [site for env in self.website_envs for site in env.live_websites()]
+
+    def save_refusal(self) -> str | None:
+        """Why saving the env would be refused, or None: its env_provider_type can't deploy it. How each computer fits a
+        sandbox is a deploy's question, as it is for a computer saved alone (``deploy_refusal``)."""
+        return deploy_refusal(self, provider_or_class(self), {})
+
+    def deploy_refusal(self, *, sandbox_type: str | None = None, child_envs: Optional[dict] = None, **options) -> str | None:
         """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
-        ``sandbox_type`` is deploy()'s own, which no provider takes."""
-        return deploy_refusal(self, provider_or_class(self), options)
+        ``sandbox_type`` and ``child_envs`` are deploy()'s own, which no provider takes."""
+        return (deploy_refusal(self, provider_or_class(self), options)
+                or self.child_envs_refusal(child_envs, sandbox_type=sandbox_type))
+
+    def child_envs_refusal(self, child_envs: Optional[dict], *, sandbox_type: str | None = None) -> str | None:
+        """Why a deploy would refuse ``child_envs``, each child env's options by its environment name, or None. A
+        computer, and its website browser when that is one (``website_browser``), is checked as its entry, or no entry,
+        would deploy it on a sandbox of its own, ``sandbox_type`` (the multi env's) unless the entry names one, the
+        browser routing its synthetic websites unless its entry says whether it does; any other child env runs on the
+        multi env's sandbox and takes no entry."""
+        return self._child_envs_refusal(child_envs, sandbox_type, self.website_browser())
+
+    def _child_envs_refusal(self, child_envs: Optional[dict], sandbox_type: str | None,
+                            browser: WebsiteBrowser) -> str | None:
+        if child_envs and not isinstance(child_envs, dict):
+            return f"child_envs is a table of child env names, not {type(child_envs).__name__}"
+        computer = browser.computer
+        entries = self._entries(child_envs, computer) or {}
+        child_envs = child_envs or {}
+        computers = {env.environment_name: env for env in [*self.computer_envs, *([computer] if computer else [])]}
+        names = list(dict.fromkeys(env.environment_name for env in (*self.mcp_server_envs, *self.website_envs,
+                                                                    *computers.values())))
+        # A browser browser_envs names had its names checked at put; the run's is checked here.
+        problems = self._name_problems(browser) if browser.env is not None and self.browser_envs is None else []
+        for name, entry in child_envs.items():
+            extra = sorted(map(str, set(entry) - set(CHILD_ENV_OPTIONS))) if isinstance(entry, dict) else []
+            if name not in names:
+                problems.append(f"child_envs.{name}: env '{self.id}' has no child env named {name!r}; its child envs "
+                                f"are {', '.join(names)}")
+            elif not isinstance(entry, dict) or extra:
+                problems.append(f"child_envs.{name}: an entry is a table of {', '.join(CHILD_ENV_OPTIONS)}, not " +
+                                (', '.join(extra) if extra else f"a {type(entry).__name__}"))
+            elif name not in computers:
+                problems.append(f"child_envs.{name}: {name} runs on the multi env's own sandbox, which the step's own "
+                                "fields set, so it takes no entry")
+        for name, env in computers.items():
+            entry = entries.get(name)
+            if entry is None or (isinstance(entry, dict) and set(entry) <= set(CHILD_ENV_OPTIONS)):
+                if refusal := _multi_computers.refusal(env, entry or {}, sandbox_type, self._websites()):
+                    problems.append(f"child_envs.{name}: {refusal}" if name in child_envs else refusal)
+                if (names := self._start_tab_names(entry)) is not None:
+                    problems += [f"child_envs.{name}: {problem}"
+                                 for problem in _multi_computers.start_tab_problems(env, entry, names)]
+        return "; ".join(problems) or None
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> MultiEnv:
+        env = await cls._attached(deployed)
+        if getattr(deployed, "child_envs", None):
+            await env._computers.reattach(deployed)
+        return env
+
+    @classmethod
+    async def _attached(cls, deployed: DeployedEnv) -> MultiEnv:
+        """The multi env ``deployed`` records, attached to it as its loads are: its gateway reattached, and its MCP
+        servers and websites handed the provider and the record; its computers aren't reattached."""
         env = Env.get(deployed.env_id, deployed.env_version)
         if not isinstance(env, MultiEnv):
             raise TypeError(f"Expected MultiEnv, got {type(env).__name__}")
@@ -204,12 +462,17 @@ class MultiEnv(Env):
         # MCP servers are checked first; if a website shares the same environment_name, the MCP server wins.
         for env in self.mcp_server_envs:
             if env.environment_name == environment_artifact.environment_name:
-                await env.load_environment_artifact(environment_artifact)
+                with _record_grant(self._deployed):
+                    await env.load_environment_artifact(environment_artifact)
                 return
         for env in self.website_envs:
             if env.environment_name == environment_artifact.environment_name:
-                await env.load_environment_artifact(environment_artifact)
+                with _record_grant(self._deployed):
+                    await env.load_environment_artifact(environment_artifact)
                 return
+        if (computer := self._computers.holding(environment_artifact.environment_name)) is not None:
+            await computer.load_environment_artifact(environment_artifact)
+            return
         logger.warning(f"No env with environment_name '{environment_artifact.environment_name}' — skipping")
 
     async def load_environment_universe_artifact(
@@ -221,6 +484,7 @@ class MultiEnv(Env):
 
         A snapshot restore swaps a pre-ingested servicedb image; a miss re-ingests every
         service over HTTP under a fixed 600s per-service cap.
+        Either way each computer's environments then load into it, in its own order.
 
         Restore is NOT reliably faster. Measured on a 13-service / ~8.7GB universe:
         restore ~4min (an image pull plus recreating every service container) versus
@@ -263,6 +527,9 @@ class MultiEnv(Env):
             env_fingerprint=env_fingerprint,
         ) if can_restore else None
         restored_from_snapshot = False
+        # The universe's environments, read at most once, and only for a load that needs them: a restore reads none
+        # unless the multi env has computers to load.
+        environments: Optional[list[EnvironmentArtifact]] = None
         snapshot_baked: bool | None = None
         snapshot_bake_error: str | None = None
 
@@ -272,16 +539,14 @@ class MultiEnv(Env):
             restored_from_snapshot = True
             # A restore swaps the whole database at once, so per-service resume state from
             # any earlier partial re-ingest no longer describes anything real.
-            if self._instance_id:
-                try:
-                    from agent_env.env.store import get_env_instance_store
-                    get_env_instance_store().clear_loaded_environments(self._instance_id)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Could not clear resume state after a snapshot restore: %s", e)
+            _forget_loaded_environments(self._instance_id)
         else:
             import asyncio
             import time
-            environment_artifacts = environment_universe_artifact.get_environment_artifacts()
+            # The services' alone: the computers' load after them, in each computer's own order.
+            environments = environment_universe_artifact.get_environment_artifacts()
+            environment_artifacts = [artifact for artifact in environments
+                                     if self._computers.holding(artifact.environment_name) is None]
             total = len(environment_artifacts)
             # WARNING, not info: this is the path that can FAIL. Every service is
             # re-ingested over HTTP under a fixed per-service timeout, and one service
@@ -370,9 +635,13 @@ class MultiEnv(Env):
                         for i, name, e in failed
                     )
                 )
+        if self._computers.every:
+            # Every time, never skipped as a resumed service is: the changelog a resume reads doesn't see a computer's
+            # files.
+            await self._computers.load(environments if environments is not None
+                                       else environment_universe_artifact.get_environment_artifacts())
         if self._instance_id:
-            from agent_env.env.store import update_env_instance_environment_universe
-            update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
+            env_store.update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
 
         # Bake the snapshot that makes the NEXT load of this (images, universe) pair an
         # image swap. Deliberately placed here: after the universe stamp, which
@@ -436,9 +705,8 @@ class MultiEnv(Env):
             return set()
         try:
             from agent_env.env.snapshot_store import _check_changelog_empty
-            from agent_env.env.store import get_env_instance_store
 
-            recorded = set(get_env_instance_store().get_loaded_environments(
+            recorded = set(env_store.get_env_instance_store().get_loaded_environments(
                 self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version,
             ))
             if not recorded:
@@ -470,9 +738,7 @@ class MultiEnv(Env):
         if not self._instance_id:
             return
         try:
-            from agent_env.env.store import get_env_instance_store
-
-            get_env_instance_store().record_loaded_environment(
+            env_store.get_env_instance_store().record_loaded_environment(
                 self._instance_id, environment_universe_artifact.id,
                 environment_universe_artifact.version, environment_name,
             )
@@ -787,7 +1053,31 @@ class MultiEnv(Env):
         # (the final task step), so it persists wherever the Task runs — not only via this method.
         return context.instance_id
 
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Reset every child env at once, each as it resets alone: a computer reboots from its own record and gets its
+        ``tools`` again, and an MCP server or website is emptied of what loads put in, so a task loads again after; one
+        serving no reset takes no load, and stays as it is. A child that fails to reset fails the reset, each such one
+        named, once the others have reset. Before any server is emptied, which services the instance's loads put in is
+        forgotten, so the next load puts each in again rather than resuming past one; a reset that can't forget it
+        empties nothing."""
+        services = self
+        if self.mcp_server_envs or self.website_envs:
+            services = await type(self)._attached(deployed)
+            if deployed.instance_id:
+                env_store.get_env_instance_store().clear_loaded_environments(deployed.instance_id)
+        resets = [*((f"computer {name!r}", call) for name, call in self._computers.resets(deployed)),
+                  *((f"MCP server {env.environment_name!r}", reset_server_data(env, mcp=True))
+                    for env in services.mcp_server_envs),
+                  *((f"website {env.environment_name!r}", reset_server_data(env, mcp=False))
+                    for env in services.website_envs)]
+        with _record_grant(deployed):
+            results = await _multi_computers.each(self.id, "reset", resets)
+        for (child, _), result in zip(resets, results):
+            if result is False:
+                logger.info(f"multi env '{self.id}': {child} serves no reset and takes no load, so it stays as it is")
+
     async def close(self) -> None:
+        await self._computers.close()
         await close_replaced(self)
         if self._env_provider is not None:
             try:
@@ -801,6 +1091,18 @@ class MultiEnv(Env):
             except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
+
+
+def _forget_loaded_environments(instance_id: Optional[str]) -> None:
+    """Forget which services the instance's loads put in, so its next load puts each in again rather than resuming;
+    best-effort, since only a resumed load reads it."""
+    if not instance_id:
+        return
+    try:
+        env_store.get_env_instance_store().clear_loaded_environments(instance_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not forget which services instance {instance_id!r} loaded; a resumed load may skip "
+                       f"one: {e}")
 
 
 def _hand_provider_to_child_envs(env: MultiEnv) -> None:
@@ -822,6 +1124,14 @@ def _gateway_state_provider(env: MultiEnv) -> DatabaseStateProvider | None:
     """The state provider behind our gateway, which a snapshot restores into or captures from; None for a deployment without it."""
     from agent_env.providers import EnvironmentGatewayProvider
     return env._env_provider._state_provider if isinstance(env._env_provider, EnvironmentGatewayProvider) else None
+
+
+def _record_grant(deployed: Optional[DeployedEnv]):
+    """The grant of ``deployed``'s control token to calls under its address and its gateway's, for a child env that a
+    name it shares with another keeps from the record (``_hand_record_to_child_envs``), whose calls go to the gateway."""
+    if deployed is None:
+        return protocol_v1.authorized({})
+    return protocol_v1.authorized({url: deployed.control_headers for url in (deployed.environment_url, gateway_url_of(deployed))})
 
 
 def _hand_record_to_child_envs(env: MultiEnv, deployed: DeployedEnv) -> None:

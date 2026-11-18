@@ -98,6 +98,20 @@ async def test_the_run_has_every_turn_and_one_firing_per_fire_each_in_its_turn()
     assert run.firings(env="calendar") == run.firings("confirm") + run.firings("late")
 
 
+@pytest.mark.asyncio
+async def test_an_env_the_run_s_task_renamed_is_found_by_the_id_the_task_names_it_by():
+    context, prompt_response, _ = recorded_run()
+    renamed = "@local/~/runs/pn/calendar"
+    state = context.metadata["env_trigger_state"]
+    state[renamed] = state.pop("calendar")
+    context.metadata["entity_ids"] = {"calendar": renamed}
+
+    run = await load_run_context(context, prompt_response)
+
+    assert run.firing("confirm", env="calendar").source == f"env:{renamed}"
+    assert run.firings(env="calendar") == run.firings(env=renamed) == run.firings("confirm") + run.firings("late")
+
+
 def test_the_gateway_log_folds_into_one_firing_per_fire():
     ts = [f"2026-10-20T10:00:0{i}+00:00" for i in range(8)]
     events = [

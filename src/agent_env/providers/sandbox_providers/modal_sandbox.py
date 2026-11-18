@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import contextlib
 import functools
 import hashlib
@@ -59,6 +60,10 @@ _STDIN_CHUNK_BYTES = 8 * 1024 * 1024 - ((8 * 1024 * 1024) % 3)
 _CANCELLED_CREATE_WAIT_SECONDS = 30
 # Terminations started after their create's cancel had gone on, kept so they run to their end.
 _LATE_TERMINATIONS: set[asyncio.Task] = set()
+# How long reading what an ended sandbox's process wrote may take, and how many of the last lines of each of its
+# streams it keeps.
+_OUTPUT_READ_SECONDS, _OUTPUT_KEPT_LINES = 15, 1000
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
 async def _terminate_created(sb: modal.Sandbox) -> None:
@@ -99,7 +104,7 @@ async def _terminate_by_id(client, sandbox_id: str) -> None:
 
 
 def _modal_network_kwargs(policy: NetworkPolicy) -> dict:
-    """``policy`` as Modal ``_experimental_create`` kwargs.
+    """``policy`` as Modal sandbox creation kwargs.
 
     ALLOW_ALL contributes nothing: passing ``outbound_domain_allowlist`` at all flips Modal
     OPEN -> ALLOWLIST and drops raw-IP egress, even for ``["*"]``.
@@ -124,6 +129,47 @@ async def _resolve_i6pn_address(sb: modal.Sandbox) -> Optional[str]:
     except Exception as e:
         logger.warning(f"i6pn address resolution failed: {type(e).__name__}: {e}")
     return None
+
+
+async def _ended_output(sb: modal.Sandbox) -> Optional[tuple[list[str], list[str]]]:
+    """The last ``_OUTPUT_KEPT_LINES`` lines of each of the output and the errors of ``sb``'s process, once it has
+    exited, read a chunk at a time so no more than those are held; None while it runs, as Modal hands a sandbox's
+    stream only to its end. Reading that fails or takes past ``_OUTPUT_READ_SECONDS`` keeps what it read."""
+    if await sb.poll.aio() is None:
+        return None
+    output, errors = collections.deque(maxlen=_OUTPUT_KEPT_LINES), collections.deque(maxlen=_OUTPUT_KEPT_LINES)
+    try:
+        async with asyncio.timeout(_OUTPUT_READ_SECONDS):
+            failures = await asyncio.gather(_read_lines(sb.stdout, output), _read_lines(sb.stderr, errors),
+                                            return_exceptions=True)
+    except TimeoutError:
+        failures = [TimeoutError(f"reading took past {_OUTPUT_READ_SECONDS} s")]
+    for failure in failures:
+        if failure is not None:
+            logger.info(f"Couldn't read all the output of Modal sandbox {sb.object_id}: {fmt_exc(failure)}")
+    return list(output), list(errors)
+
+
+async def _read_lines(stream, kept: collections.deque) -> None:
+    """Each line of ``stream``, a sandbox's, into ``kept``, a chunk at a time; blank ones left out."""
+    partial = ""
+    async for chunk in stream:
+        *whole, partial = _LINE_BREAK.split(partial + chunk)
+        kept.extend(line for line in whole if line)
+    if partial:
+        kept.append(partial)
+
+
+def _last_lines(ended: Optional[tuple[list[str], list[str]]], lines: int) -> list[str]:
+    """The last ``lines`` of an ended sandbox's output and errors, ``ended``, its output's then its errors'. Modal keeps
+    no order between the two, so each keeps at least half of them, or all it has, and neither crowds out the other's
+    last lines."""
+    if ended is None:
+        return []
+    output, errors = ended
+    from_errors = min(len(errors), max(lines // 2, lines - len(output)))
+    from_output = min(len(output), lines - from_errors)
+    return output[len(output) - from_output:] + errors[len(errors) - from_errors:]
 
 
 class _ModalStreamAdapter:
@@ -156,6 +202,7 @@ class ModalSandbox(Sandbox):
         self.vnc_url = None
         self.mode = SANDBOX_MODE_CONTAINER
         self.network_policy = network_policy
+        self._ended: Optional[tuple[list[str], list[str]]] = None
 
     @property
     def private_host(self) -> str | None:
@@ -164,6 +211,15 @@ class ModalSandbox(Sandbox):
 
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
+
+    async def exit_status(self) -> Optional[int]:
+        return await self._sb.poll.aio()
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines its container wrote, once it has exited; none while it runs."""
+        if self._ended is None:
+            self._ended = await _ended_output(self._sb)
+        return _last_lines(self._ended, lines)
 
     async def exec(self, *command: str):
         process = await self._sb.exec.aio(*command, text=False)
@@ -233,6 +289,9 @@ class ModalSandboxProvider(SandboxProvider):
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     PRIVATE_NETWORK = True
     WEBSOCKETS = True
+    # A sandbox's /dev/shm is a tmpfs as large as its host's memory, more than an app can ask for, which create_container
+    # can't size: Modal's SDK has no option for it.
+    SHARED_MEMORY = True
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
@@ -249,11 +308,7 @@ class ModalSandboxProvider(SandboxProvider):
         self._ecr_pull_secret_name = ecr_pull_secret_name
         self._environment_name = environment_name
         self._client: Optional[modal.Client] = None
-        # Optional Modal GPU spec (e.g. "H100", "A100", "H100:2"). When set, create_container
-        # provisions the sandbox with the V1 ``modal.Sandbox.create`` factory (which accepts
-        # ``gpu=`` + docker-in-gVisor) instead of the V2 ``_experimental_create``, which
-        # cannot attach a GPU. V1 has no ``i6pn``, so a GPU sandbox has no private-IPv6
-        # east-west networking (fine for a single sandbox; not for an i6pn mesh).
+        # GPU sandboxes use the V1 backend, which supports Docker in gVisor but not i6pn.
         self._gpu = gpu
         # Looked up on demand and cached by name.
         self._apps: dict[str, modal.App] = {}
@@ -330,15 +385,12 @@ class ModalSandboxProvider(SandboxProvider):
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
         private_network: bool = False,
+        shm_mb: Optional[int] = None,
     ) -> Sandbox:
         # The private network is i6pn, Modal's network between sandboxes, in the configured region.
         i6pn = private_network
         region = get_config().modal_default_region if private_network else None
-        # GPU sandboxes need the V1 ``Sandbox.create`` factory: the V2
-        # ``_experimental_create`` has no ``gpu`` parameter and cannot attach one. V1 in
-        # turn has no ``i6pn``, so reject that combination up front — before any Modal
-        # call — rather than silently returning one whose i6pn_address is None
-        # and failing downstream (e.g. the gateway's "service-db has no i6pn address").
+        # The GPU backend does not support private IPv6 networking.
         if self._gpu and i6pn:
             raise ValueError(
                 "i6pn is unavailable on GPU sandboxes: the GPU-capable factory "
@@ -375,7 +427,7 @@ class ModalSandboxProvider(SandboxProvider):
             f"app={app_name} region={region} i6pn={i6pn}"
         )
 
-        # ``i6pn`` is threaded per-factory below (V2 only); everything else is shared.
+        # Private networking requires the experimental factory; other calls use the public API.
         create_kwargs = dict(
             app=app, cpu=cpu, memory=memory, timeout=timeout,
             env=env or {}, client=client, **port_kwargs,
@@ -395,9 +447,11 @@ class ModalSandboxProvider(SandboxProvider):
                     image=image,
                     **create_kwargs,
                 )
-            return await modal.Sandbox._experimental_create.aio(
-                *(command or []), i6pn=i6pn, image=image, **create_kwargs
-            )
+            if i6pn:
+                return await modal.Sandbox._experimental_create.aio(
+                    *(command or []), i6pn=True, image=image, **create_kwargs
+                )
+            return await modal.Sandbox.create.aio(*(command or []), image=image, **create_kwargs)
 
         async def create_rebuilding_once() -> modal.Sandbox:
             try:
@@ -515,7 +569,7 @@ class ModalSandboxProvider(SandboxProvider):
         )
         auth = None if uses_ecr_pull_secret else await asyncio.to_thread(image_store.auth, image_name)
         if uses_ecr_pull_secret:
-            return modal.Image.from_aws_ecr(image_name, secret=modal.Secret.from_name(
+            return modal.Image.from_registry(image_name, secret=modal.Secret.from_name(
                 self._ecr_pull_secret_name, required_keys=ECR_READER_SECRET_KEYS,
                 environment_name=self._environment_name))
         if auth is not None:

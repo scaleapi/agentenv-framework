@@ -1,0 +1,4 @@
+# What a composed macOS computer installs into the driver's venv: the protocol with MacOSDriver, whose screen and input
+# need its macos extra, and the MCP client the forwarded tools reach Codex's cua_repl server with. A release pins it to
+# the version it ships. The ChatGPT app is the pinned download, whose executables' sha256 the driver checks.
+agentenv-framework-protocol[computer,macos]>=0.1.459
