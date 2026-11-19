@@ -72,6 +72,7 @@ from .constants import (
     WEBSITE_BROWSE_URL_PARAM,
     WELL_KNOWN_PATH,
     WILDCARD,
+    PGWEB_CONSOLE,
     GatewayMode,
     tool_name_clashes_text,
 )
@@ -81,6 +82,7 @@ from .changes import ChangeAttribution
 from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
 from .clock_followers import ClockFollowers, parse_wait
+from .console_session import ConsoleSession, LinkRedaction, without_session_cookie
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
     ROLE_HEADER_BYTES,
@@ -212,11 +214,13 @@ class Gateway:
             log = logging.getLogger(name)
             if not any(isinstance(f, TokenRedaction) for f in log.filters):
                 log.addFilter(TokenRedaction())
+                log.addFilter(LinkRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
         self._consoles = dict(console_urls or {}) if control_token else {}
+        self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
         if clashes := sorted(self._consoles.keys() & self.rest_proxy_urls.keys()):
             raise ValueError(f"console keys {clashes} are also backing servers' /svc keys")
         self._computers = frozenset(computers)
@@ -620,8 +624,13 @@ class Gateway:
         async def app(scope, receive, send):
             if self._control_bearer and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
+                if scope["type"] == "http" and self._console_session and (
+                        link := self._console_session.opening_link(scope)) is not None:
+                    await self._open_console(link)(scope, receive, send)
+                    return
                 if scope["type"] == "http" and self._takes_control_token(scope) and not hmac.compare_digest(
-                        dict(headers).get(b"authorization", b""), self._control_bearer):
+                        dict(headers).get(b"authorization", b""), self._control_bearer) and not (
+                        self._console_session and self._is_pgweb(scope) and self._console_session.admits(scope)):
                     logger.warning("refused %s %s: it takes the env's control token", scope["method"], scope["path"])
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
@@ -629,8 +638,9 @@ class Gateway:
                 # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
                 # receive it, through their /svc routes; every other request goes on without it.
                 if not self._keeps_control_token(scope["path"]):
-                    scope = {**scope, "headers": [(name, value) for name, value in headers if not (
-                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
+                    headers = [(name, value) for name, value in headers if not (
+                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]
+                scope = {**scope, "headers": without_session_cookie(headers)}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
@@ -646,6 +656,21 @@ class Gateway:
                 Caller.reset(token)
 
         return app
+
+    def _open_console(self, link: str) -> Response:
+        """The answer to a link to the pgweb console: its session cookie and the console, or 401 for a link this
+        deployment did not mint or that has expired."""
+        if not self._console_session.opens(link):
+            logger.warning("refused a pgweb link: not this deployment's, or expired")
+            return self._json_response({"ok": False, "error": "this link is not valid for this env"}, 401)
+        return Response(status_code=303, headers={"location": "./", "set-cookie": self._console_session.set_cookie(),
+                                                  "cache-control": "no-store", "referrer-policy": "no-referrer"})
+
+    @staticmethod
+    def _is_pgweb(scope: dict) -> bool:
+        """Whether ``scope`` is routed to the pgweb console: the service its path names, as the /svc route reads it."""
+        prefix, _, rest = scope["path"].lstrip("/").partition("/")
+        return prefix == "svc" and rest.partition("/")[0] == PGWEB_CONSOLE
 
     def _takes_control_token(self, scope: dict) -> bool:
         """Whether a request takes the deploy's control token: a control route, the env's data plane, any path of a SQL
