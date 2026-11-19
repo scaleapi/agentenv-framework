@@ -38,7 +38,8 @@ from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.context import BuildContext
 from agent_env.env.published_images import EXAMPLE_IMAGES
-from tst.unit.bundle._support import CLAUDE_CODE_IMAGE, DIGEST, RefusingStore, layout, local_builds, local_store, plan_of, shipped_agent
+from tst.unit.bundle._support import (CLAUDE_CODE_IMAGE, DIGEST, GRADED_STEPS, RefusingStore, layout, local_builds,
+                                      local_store, plan_of, shipped_agent)
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -375,6 +376,38 @@ def test_the_written_task_records_the_ids_its_bundle_gave_what_it_names(bundle_d
     _run(bundle_dir)
 
     assert Task.get(f"{ROOT}/t").entity_ids == {"solver": f"{ROOT}/solver"}
+
+
+def _task_file(root, **fields):
+    steps = list(GRADED_STEPS)
+    (root / "tasks/t.json").write_text(json.dumps({**fields, "steps": steps} if fields else steps))
+
+
+def test_a_task_files_headline_verifiers_are_written_and_changing_them_writes_a_new_version(bundle_dir):
+    _task_file(bundle_dir)
+    bare = _summary(_run(bundle_dir))[f"{ROOT}/t"]
+    _task_file(bundle_dir, headline_verifiers=[])
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"] == (bare[0], True, ())
+
+    _task_file(bundle_dir, headline_verifiers=["final"])
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"] == (bare[0] + 1, False, ("headline_verifiers final",))
+    assert Task.get(f"{ROOT}/t").headline_verifiers == ["final"]
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"] == (bare[0] + 1, True, ())
+
+    _task_file(bundle_dir, headline_verifiers=["tests", "final"])
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"][1:] == (False, ("headline_verifiers tests, final",))
+    assert Task.get(f"{ROOT}/t").headline_verifiers == ["tests", "final"]
+
+
+@_RUN_OR_DRY_RUN
+def test_a_headline_naming_no_step_is_refused_before_anything_is_written(bundle_dir, dry_run):
+    _task_file(bundle_dir, headline_verifiers=["finl"])
+
+    (problem,) = _problems(lambda: _run(bundle_dir, dry_run=dry_run))
+
+    assert problem.startswith("tasks/t.json: headline_verifiers names no step in this task: ['finl']")
+    with pytest.raises(NotFoundError):
+        Task.get(f"{ROOT}/t")
 
 
 @pytest.mark.parametrize(("toml", "problem"), [

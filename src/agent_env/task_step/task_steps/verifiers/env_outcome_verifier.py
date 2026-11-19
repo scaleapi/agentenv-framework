@@ -10,14 +10,16 @@ import logging
 import os
 import tempfile
 import uuid
+from collections.abc import Sized
 from typing import ClassVar, Optional
 
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierTaskStep
 
 __all__ = ["EnvOutcomeVerifierTaskStep", "ScoreAggregator", "aggregate_score"]
 
@@ -25,14 +27,13 @@ __all__ = ["EnvOutcomeVerifierTaskStep", "ScoreAggregator", "aggregate_score"]
 logger = logging.getLogger(__name__)
 
 
-class EnvOutcomeVerifierTaskStep(TaskStep):
+class EnvOutcomeVerifierTaskStep(VerifierTaskStep):
     """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, a
     ``trajectory`` parameter that prompt's agent trajectory, and an ``env_url`` parameter the env's address, which the
     protocol client takes as it is: like every step, ``verify`` runs under ``Task.run``'s grant of each deployed env's
     control token, so its calls reach the env's framework-only routes as written."""
 
     type: ClassVar[str] = "env_outcome_verifier"
-    step_role = StepRole.GRADER
     entity_refs = (
         EntityRef.env("env_id"),
         EntityRef.artifact("file_artifact_id", version_field="file_artifact_version", artifact_type="file"),
@@ -45,21 +46,20 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         env_id: str,
         file_artifact_id: str,
         file_artifact_version: Optional[int] = None,
-        score_aggregator: Optional[ScoreAggregator] = None,
+        score_aggregator: Optional[ScoreAggregator | str] = None,
         verifier_id: Optional[str] = None,
         prompt_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        min_passing_score: Optional[float] = None,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.verifier_id = verifier_id or uuid.uuid4().hex
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id or uuid.uuid4().hex, score_aggregator=score_aggregator,
+                         min_passing_score=min_passing_score)
         self.prompt_id = prompt_id
         self.env_id = env_id
         self.file_artifact_id = file_artifact_id
         self.file_artifact_version = file_artifact_version
-        if isinstance(score_aggregator, str):
-            score_aggregator = ScoreAggregator(score_aggregator)
-        self.score_aggregator = score_aggregator or ScoreAggregator.ALL_PASS
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -90,18 +90,15 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> EnvOutcomeVerifierTaskStep:
-        raw = data.get("score_aggregator")
         return cls(
             **cls._base_from_dict(data),
             env_id=data["env_id"],
             file_artifact_id=data["file_artifact_id"],
             file_artifact_version=data.get("file_artifact_version"),
-            score_aggregator=ScoreAggregator(raw) if raw else None,
-            verifier_id=data.get("verifier_id"),
             prompt_id=data.get("prompt_id"),
         )
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def verify(self, context: TaskStepContext) -> Verification:
         from agent_env.artifact import FileArtifact
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
@@ -129,20 +126,17 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             if "trajectory" in parameters:
                 keywords["trajectory"] = await asyncio.to_thread(_trajectory, self._graded_prompt(context))
             results = await module.verify(deployed.mcp_url, **keywords)
-
-            score = aggregate_score(results, self.score_aggregator)
-            if "verifications" not in context.metadata:
-                context.metadata["verifications"] = {}
-            context.metadata["verifications"][self.verifier_id] = {
-                "results": results,
-                "score": score,
-            }
-            logger.info(f"Verification '{self.verifier_id}' complete: {len(results)} criteria, score={score}")
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        return context
+        if not isinstance(results, Sized):
+            # Scores 0 with the rows as returned, and fails its step.
+            return Verification(criteria=results, raise_after=TypeError(
+                f"verify() in artifact '{self.file_artifact_id}' returned {results!r}, not a list of criterion rows"))
+        score = aggregate_score(results, self.score_aggregator)
+        logger.info(f"Verification '{self.verifier_id}' complete: {len(results)} criteria, score={score}")
+        return Verification(criteria=results, score=score)
 
     def _graded_prompt(self, context: TaskStepContext) -> Optional[PromptResponse]:
         if self.prompt_id is None:

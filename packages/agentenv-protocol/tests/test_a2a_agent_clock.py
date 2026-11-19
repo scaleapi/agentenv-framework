@@ -45,6 +45,17 @@ def _status(image, **status) -> None:
     (image / "status.json").write_text(json.dumps(status))
 
 
+EARLIER_STATUS_AGE_NS = 1_000_000_000
+
+
+def _status_from_before(image, **status) -> None:
+    """A status the follower wrote for an earlier config, ``EARLIER_STATUS_AGE_NS`` before this one: a file's mtime on
+    Linux moves in ticks of a few milliseconds, so a config written right after a status can share its mtime."""
+    _status(image, **status)
+    before = time.time_ns() - EARLIER_STATUS_AGE_NS
+    os.utime(image / "status.json", ns=(before, before))
+
+
 def _follows_the_next_config(image, **status) -> threading.Thread:
     """A follower that, as the real one, writes its status once it reads a config other than the one it had."""
     config = image / "follower.json"
@@ -140,7 +151,7 @@ def test_a_zone_that_isnt_one_is_refused(image):
     {"url": "http://gw/clock/watch", "name": "agent-solver"},  # this one, under the token the config replaced
 ])
 def test_what_the_follower_showed_of_its_config_before_never_passes_for_the_new_one(image, before):
-    _status(image, connected=True, version="b:3", armed=True, **before)
+    _status_from_before(image, connected=True, version="b:3", armed=True, **before)
     with _app() as client:
         answer = client.post("/ext/clock/sync-time", json=REQUEST)
 
@@ -179,3 +190,19 @@ def test_a_server_starting_without_a_saved_zone_keeps_its_own(image, monkeypatch
     with _app() as client:
         assert client.get("/.well-known/agent.json").status_code == 200
     assert os.environ["TZ"] == "UTC"
+
+
+@pytest.mark.parametrize("spec, expected", [
+    (None, None),
+    ("+0 x1\n", None),
+    ("@1748768400.000000000 x2 ^{past}\n", 1748768400.0 + 20),
+    ("@1748768400.000000000 x1 ^{future}\n", 1748768400.0),
+    ("@1748768400.000000000 x0 ^{past}\n", 1748768400.0),
+])
+def test_the_session_time_is_the_universe_while_the_clock_is_armed_and_real_time_otherwise(
+        tmp_path, monkeypatch, spec, expected):
+    clock_file = tmp_path / "clock"
+    if spec is not None:
+        clock_file.write_text(spec.format(past=time.time() - 10, future=time.time() + 3600))
+    monkeypatch.setattr(follower, "CLOCK_FILE", str(clock_file))
+    assert follower.session_time() == pytest.approx(time.time() if expected is None else expected, abs=1)

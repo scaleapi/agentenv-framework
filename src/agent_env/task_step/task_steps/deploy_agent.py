@@ -30,6 +30,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
+from agent_env.config.model import ModelRole
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
@@ -520,7 +521,7 @@ class DeployAgentTaskStep(TaskStep):
             card.update(identity.fields)
             logger.info(f"Stamped card identity on '{self.agent_name}': {sorted(identity.fields)}")
 
-        default_model = config.get_model_for_role("agent")
+        default_model = config.resolve_model(ModelRole.SOLVER).model
         if default_model and not context.default_agent_model:
             context.default_agent_model = default_model
             logger.info(f"Set context.default_agent_model to '{default_model}'")

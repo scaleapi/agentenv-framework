@@ -1,0 +1,171 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-7f3a",
+ "agent": {
+  "name": "toy",
+  "version": "1.0",
+  "model_name": "claude-opus-5-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-04T17:00:00.000Z",
+   "source": "user",
+   "message": "Find the config files.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-7f3a",
+     "task_id": "task-s1",
+     "message_id": "msg-s1",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_s1",
+     "function_name": "Task",
+     "arguments": {
+      "description": "find config files"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_s1",
+      "content": "Found a.toml, b.toml and c.toml.",
+      "subagent_trajectory_ref": [
+       {
+        "trajectory_id": "sub1"
+       }
+      ]
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 1000,
+    "cached_tokens": 800,
+    "completion_tokens": 50,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 100
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "There are three: a.toml, b.toml and c.toml.",
+   "metrics": {
+    "prompt_tokens": 1050,
+    "cached_tokens": 900,
+    "completion_tokens": 30,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 50
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "subagent_trajectories": [
+  {
+   "schema_version": "ATIF-v1.8",
+   "trajectory_id": "sub1",
+   "agent": {
+    "name": "explore",
+    "version": "unknown",
+    "model_name": "claude-haiku-5-5"
+   },
+   "steps": [
+    {
+     "step_id": 1,
+     "source": "agent",
+     "model_name": "claude-haiku-5-5",
+     "message": "",
+     "tool_calls": [
+      {
+       "tool_call_id": "toolu_s2",
+       "function_name": "Bash",
+       "arguments": {
+        "command": "ls config"
+       }
+      }
+     ],
+     "observation": {
+      "results": [
+       {
+        "source_call_id": "toolu_s2",
+        "content": "a.toml b.toml c.toml"
+       }
+      ]
+     },
+     "metrics": {
+      "prompt_tokens": 500,
+      "cached_tokens": 400,
+      "completion_tokens": 20,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 50
+       }
+      }
+     },
+     "llm_call_count": 1
+    },
+    {
+     "step_id": 2,
+     "source": "agent",
+     "model_name": "claude-haiku-5-5",
+     "message": "Found a.toml, b.toml and c.toml.",
+     "metrics": {
+      "prompt_tokens": 510,
+      "cached_tokens": 450,
+      "completion_tokens": 15,
+      "extra": {
+       "agentenv": {
+        "cache_write_tokens": 0
+       }
+      }
+     },
+     "llm_call_count": 1
+    }
+   ]
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 3060,
+  "total_completion_tokens": 115,
+  "total_cached_tokens": 2550,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 200
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "toy-events/1",
+   "adapter": {
+    "name": "toy-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

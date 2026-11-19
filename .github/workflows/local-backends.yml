@@ -143,6 +143,11 @@ jobs:
           python -m pip install --quiet -r .github/ci-requirements.txt
           uv sync --locked --extra dev --python "$(command -v python)"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      # Ubuntu's archive stopped answering for hours at a time on 11-19, failing every build and compose that runs apt,
+      # on main too, while the Azure mirror of it the runners use stayed up. Builds, containers and the runner resolve
+      # the archive to that mirror.
+      - name: Resolve Ubuntu's archive to Azure's mirror
+        run: bash .github/scripts/ubuntu_archive_dns.sh
       # loadscope keeps a module's or class's tests on one worker, so its fixtures run once, as make int-test-fast does.
       - name: Integration tier on the local defaults
         run: |
@@ -190,6 +195,11 @@ jobs:
       # starts afterwards.
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
+      # Ubuntu's archive stopped answering for hours at a time on 11-19, failing every build and compose that runs apt,
+      # on main too, while the Azure mirror of it the runners use stayed up. Builds, containers and the runner resolve
+      # the archive to that mirror.
+      - name: Resolve Ubuntu's archive to Azure's mirror
+        run: bash .github/scripts/ubuntu_archive_dns.sh
       # The computer tests share the package locks a compose resolves, and the files they name, in the packages folder
       # (tst/util/package_cache.py). An image's key includes its lock, which the composer otherwise resolves from
       # Ubuntu's archive, PyPI and download URLs, so the folder is restored from what main saved latest this week.
@@ -280,6 +290,11 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
+      # Ubuntu's archive stopped answering for hours at a time on 11-19, failing every build and compose that runs apt,
+      # on main too, while the Azure mirror of it the runners use stayed up. Builds, containers and the runner resolve
+      # the archive to that mirror.
+      - name: Resolve Ubuntu's archive to Azure's mirror
+        run: bash .github/scripts/ubuntu_archive_dns.sh
       - name: Start the local registry
         run: |
           docker run --detach --name registry --publish 5000:5000 mirror.gcr.io/library/registry:2

@@ -103,7 +103,7 @@ def test_a_bridge_exception_is_an_infra_error_with_its_partial_trajectory(codex,
         "error_code": "infra_error",
         "error_message": "codex CLI event limit exceeded",
     }
-    assert trajectory.json() == {"trajectory": [{"type": "thread.started", "thread_id": "tid-raise"}]}
+    assert trajectory.json() == {"trajectory": [{"type": "thread.started", "thread_id": "tid-raise"}], "format": a2a_server.TRAJECTORY_FORMAT}
     assert codex.agent.session_ref_for_context("ctx-raise") == "tid-raise"
 
 

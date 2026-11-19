@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from starlette.testclient import TestClient
 
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.protocol import (
@@ -22,7 +23,17 @@ from agent_env.a2a_agent.protocol import (
     raise_for_extension_status,
     wake_poll,
 )
-from agentenv_protocol.a2a_agent import TaskResult, Usage
+from agentenv_protocol.a2a_agent import (
+    TRAJECTORY_V1,
+    AgentEnvAgent,
+    AgentIdentity,
+    TaskRequest,
+    TaskResult,
+    TextPart,
+    Usage,
+    a2a_agent,
+    enable,
+)
 from agentenv_protocol.a2a_agent.framework import _to_a2a_parts
 
 
@@ -54,6 +65,29 @@ def test_extension_http_error_names_the_sdk_error_code_only():
 
     assert str(raised.value) == "snapshot save failed with HTTP 410: grant_expired"
     assert raised.value.response is response
+
+
+def test_a_trajectory_read_naming_an_unoffered_format_names_the_sdks_code():
+    @a2a_agent(
+        identity=AgentIdentity(name="formats", description="test", version="1"),
+        extensions=(enable(TRAJECTORY_V1, native="test-events/1"),),
+    )
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("done")
+
+    with TestClient(Agent().create_app()) as client:
+        answer = client.post("/ext/trajectory", json={"task_id": "task-1", "format": "atif/1"})
+    response = httpx.Response(
+        answer.status_code,
+        content=answer.content,
+        request=httpx.Request("POST", "https://agent.test/ext/trajectory"),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        raise_for_extension_status(response, operation="trajectory read")
+
+    assert str(raised.value) == "trajectory read failed with HTTP 400: format_not_offered"
 
 
 def test_extension_http_error_keeps_only_a_code_shaped_error_code():
@@ -98,6 +132,26 @@ def test_extension_http_error_for_a_request_without_grants_keeps_the_body():
     )
 
 
+def test_a_refused_control_token_is_named_and_logged_without_the_body(caplog):
+    response = httpx.Response(
+        401,
+        json={"detail": "this route takes the agent's control token"},
+        request=httpx.Request("GET", "https://agent.test/ext/trajectory"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=protocol.__name__), pytest.raises(httpx.HTTPStatusError) as raised:
+        raise_for_extension_status(response, operation="trajectory read", include_body=True)
+
+    assert str(raised.value) == (
+        'trajectory read failed with HTTP 401: {"detail":"this route takes the agent\'s control token"}'
+        " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
+    )
+    assert [record.getMessage() for record in caplog.records] == [
+        "trajectory read failed with HTTP 401"
+        " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
+    ]
+
+
 def test_sdk_success_round_trips_through_platform_parser():
     result = (
         TaskResult.builder()
@@ -113,6 +167,27 @@ def test_sdk_success_round_trips_through_platform_parser():
     assert parsed.response_text == "done"
     assert parsed.structured_output == {"answer": 42}
     assert parsed.tool_call_count == 3
+
+
+def test_a_terminal_message_with_cache_usage_parses_and_its_usage_reads_back_whole():
+    usage = Usage(tool_call_count=2, input_tokens=120, output_tokens=7, cache_read_tokens=100, cache_write_tokens=20,
+                  input_includes_cache=True)
+    message = _sdk_terminal_message(TaskResult.success(parts=(TextPart(text="done"),), usage=usage))
+
+    parsed = TerminalResponse.from_message(message)
+
+    assert (parsed.response_text, parsed.tool_call_count) == ("done", 2)
+    [sent] = [part["data"]["usage"] for part in message["parts"] if part.get("kind") == "data"]
+    assert Usage.from_dict(sent) == usage
+
+
+def test_a_failed_turn_sends_its_usage():
+    usage = Usage(input_tokens=5, output_tokens=2, input_includes_cache=False)
+    message = _sdk_terminal_message(TaskResult.failure("agent.boom", "it broke", usage=usage))
+
+    [sent] = [part["data"]["usage"] for part in message["parts"] if part.get("kind") == "data"]
+    assert Usage.from_dict(sent) == usage
+    assert TerminalResponse.from_message(message).error_code == "agent.boom"
 
 
 def test_sdk_failure_round_trips_through_platform_parser():

@@ -163,6 +163,22 @@ def test_a_bundle_runs_from_its_folder_and_a_rerun_writes_only_what_changed(bund
     assert [(result["criterion"], result["result"]) for result in results] == [("greets", False), ("check passes", False)]
 
 
+def test_a_task_file_naming_its_headline_verifiers_runs_and_its_stored_task_keeps_them(bundle, quiet_logs):
+    steps = json.loads((bundle / "tasks/hello.json").read_text())
+    (bundle / "tasks/hello.json").write_text(json.dumps({"headline_verifiers": ["hello"], "steps": steps}))
+
+    assert "tasks/hello.json v1: passed (hello: 1)" in _run(bundle)
+    assert "tasks/hello.json: v1, unchanged" in _run(bundle)
+    with namespace_routing():
+        assert Task.get("@local/~/my-hello/hello").headline_verifiers == ["hello"]
+
+    (bundle / "tasks/hello.json").write_text(json.dumps(steps))
+    assert "tasks/hello.json: v2 (no headline_verifiers)" in _run(bundle)
+    with namespace_routing():
+        assert Task.get("@local/~/my-hello/hello").headline_verifiers is None
+        assert Task.get("@local/~/my-hello/hello", 1).headline_verifiers == ["hello"]
+
+
 @skip_without_gnu_stat()
 def test_a_bundle_task_collects_from_its_sandbox_into_a_universe_named_after_the_run(bundle, quiet_logs):
     steps = json.loads((bundle / "tasks/hello.json").read_text())
