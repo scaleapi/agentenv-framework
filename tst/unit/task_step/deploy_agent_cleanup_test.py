@@ -22,6 +22,9 @@ class _Agent:
             instance_id="i-1", network_policy=None, control_token=None, control_headers={},
         )
 
+    def model_base_url(self, env_vars, config):
+        return None
+
     async def close(self) -> None:
         self.closed += 1
 
