@@ -1,6 +1,7 @@
 """computer_exec against a computer at its driver's boundary (``tst.unit.computer_home``): a command run in its home as
 given or through ``sh -c``, in a folder and with variables of its own, its run recorded; a failure or a timeout failing
-the step unless ``check`` is off; a ``background`` command started and left running; a multi env's computer found by
+the step unless ``check`` is off; a ``background`` command started and left running, and failing when its program
+isn't there or it exits non-zero right after starting, a string command's included; a multi env's computer found by
 name; and the configs it refuses."""
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from agent_env.env.envs.multi_env import MultiEnv, WebsiteBrowser
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_steps.computer import computer_exec
 from agent_env.task_step.task_steps.computer.computer_exec import RECORDS_KEY, ComputerExecTaskStep
 from tst.unit.computer_home import TOKEN, Computer
 
@@ -82,20 +84,47 @@ async def test_a_command_that_times_out_fails_the_step(computer):
         await _step("sleep 5", timeout_s=0.2).execute(_context(computer.deployed()))
 
 
+@pytest.fixture
+def short_start(monkeypatch):
+    monkeypatch.setattr(computer_exec, "START_WINDOW_S", 0.3)
+
+
 @pytest.mark.asyncio
-async def test_a_background_command_is_started_and_left_running(computer):
+async def test_a_background_command_is_started_and_left_running(computer, short_start):
     started = time.monotonic()
 
-    ctx = await _step("sleep 1; echo done > late.txt", background=True).execute(_context(computer.deployed()))
+    ctx = await _step("sleep 3; echo done > late.txt", background=True).execute(_context(computer.deployed()))
 
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < 2.5
     assert not (computer.home / "late.txt").exists()
-    assert ctx.metadata[RECORDS_KEY]["exec"]["argv"][3:] == ["computer_exec", "sh", "-c", "sleep 1; echo done > late.txt"]
-    for _ in range(50):
+    assert ctx.metadata[RECORDS_KEY]["exec"]["argv"][3:] == ["computer_exec", "sh", "-c", "sleep 3; echo done > late.txt"]
+    for _ in range(60):
         if (computer.home / "late.txt").exists():
             break
         time.sleep(0.1)
     assert (computer.home / "late.txt").read_text() == "done\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command, exit_code, stderr", [
+    ("thunarr-xyz Desktop", 127, "not found"),
+    (["sh", "-c", "echo 'unknown option --bad' >&2; exit 2"], 2, "unknown option --bad"),
+])
+async def test_a_background_app_that_exits_non_zero_right_after_starting_fails_with_its_stderr(
+        computer, short_start, command, exit_code, stderr):
+    ctx = _context(computer.deployed())
+
+    with pytest.raises(RuntimeError, match=rf"(?s)^computer_exec 'exec': sh -c .{{0,80}} exited {exit_code} in env "
+                                           rf"'desk': .*right after starting.*{stderr}"):
+        await _step(command, background=True).execute(ctx)
+
+    assert ctx.metadata[RECORDS_KEY]["exec"]["exit_code"] == exit_code
+
+
+@pytest.mark.asyncio
+async def test_a_background_app_that_hands_off_and_exits_0_has_started(computer, short_start):
+    ctx = await _step("echo handed off >&2; exit 0", background=True).execute(_context(computer.deployed()))
+    assert ctx.metadata[RECORDS_KEY]["exec"]["exit_code"] == 0
 
 
 @pytest.mark.parametrize("command", [["no-such-app-xyz", "a.txt"], ["./missing.sh"]])
@@ -183,6 +212,7 @@ def test_preflight_finds_a_multi_envs_computers_and_its_browser_computer(monkeyp
     ({"command": "true", "env": {"A": 1}}, "env maps variable names to string values"),
     ({"command": "true", "timeout_s": 0}, "timeout_s must be a number of seconds above 0"),
     ({"command": "true", "background": "yes"}, "background must be true or false"),
+    ({"command": "true", "background": True, "timeout_s": 4}, "timeout_s must be at least 5"),
 ])
 def test_bad_configs_are_named(fields, problem):
     assert any(problem in p for p in _step(**fields).config_problems())

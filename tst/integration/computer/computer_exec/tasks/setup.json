@@ -9,5 +9,9 @@
   {"id": "tolerated", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["window"],
    "command": "echo nope >&2; exit 7", "check": false},
   {"id": "missing", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["tolerated"],
-   "command": ["no-such-app", "Desktop"], "background": true, "check": false}
+   "command": ["no-such-app", "Desktop"], "background": true, "check": false},
+  {"id": "missing-string", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["missing"],
+   "command": "thunarr Desktop", "background": true, "check": false},
+  {"id": "bad-flag", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["missing-string"],
+   "command": ["ls", "--no-such-flag"], "background": true, "check": false}
 ]

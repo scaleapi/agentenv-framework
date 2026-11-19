@@ -28,11 +28,34 @@ DEFAULT_TIMEOUT_S = 120.0
 #: The most of each stream the record keeps, and the most of stderr a failure says: the end of it.
 RECORDED_CHARS = 4000
 FAILURE_CHARS = 300
-#: How a ``background`` command starts: its program found and executable, else it fails as the shell does with 127,
-#: then detached from the run's pipes, so the run returns as the shell does.
-_BACKGROUND = ('case "$1" in */*) [ -f "$1" ] && [ -x "$1" ] ;; *) command -v "$1" >/dev/null ;; esac'
-               ' || { echo "computer_exec: $1: not found or not executable" >&2; exit 127; }; '
-               '"$@" </dev/null >/dev/null 2>&1 &')
+#: How long a ``background`` app is watched after it starts: one that exits non-zero within it fails the step.
+START_WINDOW_S = 2.0
+#: How much longer than its start window a ``background`` start may take, for the shell and the stderr it reads.
+START_MARGIN_S = 3.0
+#: The most of a failed start's stderr the launcher keeps: the end of it.
+START_STDERR_BYTES = 4096
+
+
+def background_script() -> str:
+    """How a ``background`` command starts, as ``sh -c`` runs it with the command as its arguments: its program found
+    and executable, else it fails as the shell does with 127; then started detached from the run's pipes, its stdout
+    discarded and the end of its stderr kept, and watched for ``START_WINDOW_S``. One that exits non-zero in that window
+    fails with its exit status and its stderr, which also catches a string command (whose program is ``sh``) naming a
+    program that isn't there; one that exits 0, as ``xdg-open`` and single-instance apps do once they hand off, or is
+    still running, has started."""
+    ticks = max(1, round(START_WINDOW_S * 10))
+    return (
+        'case "$1" in */*) [ -f "$1" ] && [ -x "$1" ] ;; *) command -v "$1" >/dev/null ;; esac'
+        ' || { echo "computer_exec: $1: not found or not executable" >&2; exit 127; }; '
+        'd=$(mktemp -d) || exit 1; '
+        f'( {{ "$@" 2>&1 >/dev/null; echo $? > "$d/rc"; }} | tail -c {START_STDERR_BYTES} > "$d/err" ) '
+        '</dev/null >/dev/null 2>&1 & '
+        f'n=0; while [ ! -s "$d/rc" ] && [ $n -lt {ticks} ]; do sleep 0.1; n=$((n+1)); done; '
+        '[ -s "$d/rc" ] || exit 0; '
+        'rc=$(cat "$d/rc"); [ "$rc" = 0 ] && { rm -rf "$d"; exit 0; }; '
+        'n=0; while [ ! -s "$d/err" ] && [ $n -lt 10 ]; do sleep 0.1; n=$((n+1)); done; '
+        'echo "computer_exec: $* exited $rc right after starting" >&2; cat "$d/err" >&2; rm -rf "$d"; exit "$rc"')
+
 
 Command = Union[list[str], str]
 
@@ -46,8 +69,9 @@ class ComputerExecTaskStep(TaskStep):
     The run is recorded in ``context.metadata["computer_exec"][step_id]``: its exit code, the end of its stdout and
     stderr, and whether it timed out or was cut. A run that exits non-zero or times out fails the step, unless
     ``check`` is false. With ``background``, the command is started and left running, its output discarded, as an app
-    launched for the agent is: the step waits for the start alone, and fails as a run does when its program isn't
-    there to start."""
+    launched for the agent is: the step watches it for ``START_WINDOW_S`` and fails as a run does when its program
+    isn't there to start, or when it exits non-zero in that window, with the end of its stderr; an exit of 0 counts as
+    started, since ``xdg-open`` and single-instance apps hand off to another process and exit."""
 
     type: ClassVar[str] = "computer_exec"
     entity_refs = (EntityRef.env("env_id"),)
@@ -87,6 +111,10 @@ class ComputerExecTaskStep(TaskStep):
         for name in ("background", "check"):
             if not isinstance(getattr(self, name), bool):
                 problems.append(f"step {self.id!r}: {name} must be true or false")
+        if (self.background is True and isinstance(self.timeout_s, (int, float))
+                and self.timeout_s < (least := START_WINDOW_S + START_MARGIN_S)):
+            problems.append(f"step {self.id!r}: a background start is watched for {START_WINDOW_S:g} s, so its "
+                            f"timeout_s must be at least {least:g}")
         return problems
 
     def preflight(self) -> list[str]:
@@ -110,11 +138,14 @@ class ComputerExecTaskStep(TaskStep):
                    timeout_s=data.get("timeout_s", DEFAULT_TIMEOUT_S), background=data.get("background", False),
                    check=data.get("check", True))
 
+    def command_argv(self) -> list[str]:
+        """The command as a program and its arguments: through ``sh -c`` when it's a string."""
+        return ["sh", "-c", self.command] if isinstance(self.command, str) else list(self.command)
+
     def argv(self) -> list[str]:
-        """What the driver runs: the command, through ``sh -c`` when it's a string, started detached with
-        ``background``."""
-        argv = ["sh", "-c", self.command] if isinstance(self.command, str) else list(self.command)
-        return ["sh", "-c", _BACKGROUND, "computer_exec", *argv] if self.background else argv
+        """What the driver runs: the command, started by ``background_script`` with ``background``."""
+        argv = self.command_argv()
+        return ["sh", "-c", background_script(), "computer_exec", *argv] if self.background else argv
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = find_computer(context, self.env_id, self.computer)
@@ -131,7 +162,7 @@ class ComputerExecTaskStep(TaskStep):
                   "stdout": _tail(answer.get("stdout") or "", RECORDED_CHARS),
                   "stderr": _tail(answer.get("stderr") or "", RECORDED_CHARS)}
         context.metadata.setdefault(RECORDS_KEY, {})[self.id] = record
-        shown = shlex.join(argv)
+        shown = shlex.join(self.command_argv())  # the task's command; the record keeps the launcher around it
         if record["timed_out"]:
             outcome = f"timed out after {self.timeout_s} s"
         elif record["exit_code"] != 0:

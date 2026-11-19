@@ -27,3 +27,9 @@ def test_commands_run_in_a_computer_and_an_app_started_in_the_background_stays_u
     assert records["window"]["exit_code"] == 0 and "thunar" in records["window"]["stdout"].lower(), records["window"]
     assert records["tolerated"]["exit_code"] == 7 and records["tolerated"]["stderr"] == "nope\n", records["tolerated"]
     assert records["missing"]["exit_code"] == 127 and "not found" in records["missing"]["stderr"], records["missing"]
+    # A string command's program is sh, so it's caught when sh exits right after starting; so is a program given a bad
+    # flag. (A second thunar would exit 0: it hands off to the one running, which counts as started.)
+    assert records["missing-string"]["exit_code"] == 127, records["missing-string"]
+    assert "right after starting" in records["missing-string"]["stderr"], records["missing-string"]
+    assert records["bad-flag"]["exit_code"] not in (0, None), records["bad-flag"]
+    assert "right after starting" in records["bad-flag"]["stderr"], records["bad-flag"]
