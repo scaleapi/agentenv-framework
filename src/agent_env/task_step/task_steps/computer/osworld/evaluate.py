@@ -163,18 +163,20 @@ class OSWorldEvaluateTaskStep(TaskStep):
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         if self.osworld_v2_task_path:
             raise ValueError(f"osworld_evaluate '{self.verifier_id}': {V2_UNSUPPORTED}")
+        prompt_response = context.prompt_responses[-1] if context.prompt_responses else None
+        budget = budget_exhaustion(prompt_response)
+        # A turn that failed is recorded as skipped before the computer is touched, so a computer the failure left
+        # unreachable still gets its zero-score verification.
+        if prompt_response is not None and prompt_response.error_type and budget is None:
+            return self._skipped(context, prompt_response)
         guest_url, headers = await guest.guest_access(deployed)
         await self._stage_result_files(guest_url, headers, context)
-        prompt_response = context.prompt_responses[-1] if context.prompt_responses else None
         if postconfig := self.evaluator.get("postconfig"):
             try:
                 await run_setup(guest_url, headers, postconfig, what=f"osworld_evaluate '{self.verifier_id}' postconfig")
             except Exception as e:
                 logger.warning(f"osworld_evaluate '{self.verifier_id}': postconfig failed, grading anyway: "
                                f"{type(e).__name__}: {str(e)[:SETUP_ERROR_CHARS]}")
-        budget = budget_exhaustion(prompt_response)
-        if prompt_response is not None and prompt_response.error_type and budget is None:
-            return self._skipped(context, prompt_response)
         run_judge_model = (context.metadata.get("user_overrides") or {}).get("judge_model")
         judge_models = [self._judge_model(options, run_judge_model)
                         for func, _, _, options in self._funcs() if is_judge(func)]

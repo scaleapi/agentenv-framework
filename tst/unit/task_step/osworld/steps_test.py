@@ -170,6 +170,22 @@ async def test_evaluate_skips_a_turn_that_errored(rt):
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_errored_is_skipped_before_an_unreachable_computer_is_contacted(rt, monkeypatch):
+    get_card = AsyncMock(side_effect=RuntimeError("the computer is gone"))
+    monkeypatch.setattr(guest.protocol_v1, "get_card", get_card)
+    context = _context(computer({}), _prompt(error_type="INFRA_ERROR", error_message="sandbox gone"))
+    context.metadata["user_overrides"] = {"step_params": {"e": {"stage_files": [
+        {"url": "https://x/a", "path": "/home/user/a"}]}}}
+
+    await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v",
+                                  evaluator={"funcs": "compare_table"}).execute(context)
+
+    assert context.metadata["verifications"]["v"]["results"][0]["id"] == "prompt_error"
+    get_card.assert_not_called()
+    assert rt.checks == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("conj, scores, expected", [
     # OSWorld's DesktopEnv.evaluate: ``and`` 0 when any func scores 0, else their mean; ``or`` their max.
     ("and", (1, 1), 1.0), ("and", (1, 0), 0.0), ("and", (1, 0.5), 0.75), ("or", (0, 1), 1.0), ("or", (0, 0), 0.0),
