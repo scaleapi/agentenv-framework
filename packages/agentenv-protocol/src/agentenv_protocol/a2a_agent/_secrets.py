@@ -37,8 +37,10 @@ _CREDENTIAL_WORDS = frozenset({
 })
 _CREDENTIAL_ENDINGS = ("key", "token", "secret", "password", "signature", "credential")
 _NAME_WORD = re.compile(r"[a-z0-9]+")
-#: A path segment a URL with no query can carry its credential in, as a grant server's signed token.
-_TOKEN_SEGMENT = re.compile(r"[A-Za-z0-9_.=~+-]{16,}")
+#: How long a path segment of a URL with no query must be to be taken as its credential, as a grant server's signed
+#: token is: longer than an ordinary path's words, unlike ``MIN_SECRET_LENGTH``, which bounds what is scrubbed at all.
+MIN_TOKEN_SEGMENT_LENGTH = 16
+_TOKEN_SEGMENT = re.compile(rf"[A-Za-z0-9_.=~+-]{{{MIN_TOKEN_SEGMENT_LENGTH},}}")
 
 T = TypeVar("T")
 
