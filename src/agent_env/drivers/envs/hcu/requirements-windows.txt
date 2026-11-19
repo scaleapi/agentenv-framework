@@ -1,0 +1,1 @@
+agentenv-framework-protocol[computer,windows]>=0.1.503

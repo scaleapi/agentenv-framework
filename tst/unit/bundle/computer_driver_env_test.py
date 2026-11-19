@@ -269,3 +269,31 @@ def test_a_run_naming_the_reference_driver_writes_the_shipped_one(tmp_path, monk
             "urn:agentenv:computer-exec/v1"} <= set(env.declaration.platforms[0].provides)
     assert (env.port, env.install["linux"].python) == (18765, "requirements.txt")
     assert env.install["linux"].services[0].command.endswith("agentenv_protocol.computer.serve driver.py:ReferenceDriver")
+
+
+def test_the_hcu_alias_registers_linux_and_windows_contracts_and_installations(tmp_path, monkeypatch, local_stores,
+                                                                            cli_routing):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    layout(tmp_path / "uses", {"tasks/t.json": json.dumps([
+        {"id": "agent", "type": "deploy_agent", "env_ids": ["hcu"]}])})
+    plan = plan_bundle(resolve_bundle(parse_bundle(tmp_path / "uses")), installed=installed_bundles)
+
+    written = {done.write.id for done in materialize(plan).writes}
+    env = Env.get("@local/agentenv-framework/drivers/hcu")
+
+    assert env.id in written and env.declaration.name == "hcu"
+    platforms = {declared.platform.os: declared for declared in env.declaration.platforms}
+    assert {name: (declared.platform.arch, declared.platform.display) for name, declared in platforms.items()} == {
+        "linux": ("amd64", "x11"), "windows": ("amd64", "dwm")}
+    assert set(env.install) == {"linux", "windows"}
+    for name, declared in platforms.items():
+        assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-keyboard/v1",
+                "urn:agentenv:computer-exec/v1"} <= set(declared.provides)
+        assert {"AX", "GUI"} <= set(declared.tools)
+        install = env.install[name]
+        assert install.python == ("requirements-windows.txt" if name == "windows" else "requirements.txt")
+        assert install.run[0].script == ("install-windows.ps1" if name == "windows" else "install.sh")
+        assert all(download.arch == "amd64" for download in install.downloads or [])
+    assert {"mcp.json", "mcp-windows.json", "install-windows.ps1", "requirements-windows.txt"} <= set(
+        env.files.file_artifact_ids)
+    assert ComputerDriverEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()

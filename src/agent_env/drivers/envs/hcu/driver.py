@@ -1,5 +1,5 @@
-"""Hybrid Computer Use (HCU) on an X11 desktop on Linux: the pinned server's instructions and AX and GUI tools,
-beside X11Driver's computer_* tools. One stdio server retains its snapshots, refs and layout lease for the driver's
+"""Hybrid Computer Use (HCU) on Linux and Windows: the pinned server's instructions and AX and GUI tools,
+beside the protocol driver's computer_* tools. One stdio server retains its snapshots, refs and layout lease for the driver's
 lifetime; calls reach it in order. A server that stops fails its pending calls, and the next call starts a fresh one."""
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import functools
 import hashlib
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -17,22 +18,36 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 
-from agentenv_protocol import ForwardedTool, server_instructions
-from agentenv_protocol.computer import ReadyCheck, X11Driver, computer_driver
+from agentenv_protocol import ForwardedTool, computer, server_instructions
+from agentenv_protocol.computer import ReadyCheck, computer_driver
 
 HERE = Path(__file__).resolve().parent
 VERSION = "1.0.1"
-EXECUTABLE = HERE / "bin" / "computer-use"
-EXECUTABLES = {"linux/amd64": "3a4243b3801b4e49c3fb50d0191e31be5bcc590cc700d2c921c3ff864a7f3923"}
-MANIFEST = HERE / "mcp.json"
+WINDOWS = sys.platform == "win32"
+OSDriver = getattr(computer, "WindowsDriver" if WINDOWS else "X11Driver")
+EXECUTABLE = HERE / "bin" / ("computer-use.exe" if WINDOWS else "computer-use")
+EXECUTABLES = {"linux/amd64": "3a4243b3801b4e49c3fb50d0191e31be5bcc590cc700d2c921c3ff864a7f3923",
+               "windows/amd64": "76bfd73ba9a0a783b018a782df5d8638d3a6411a5e45068973ab86786fab8d08"}
+PROVIDER = HERE / "bin" / "computer-use-windows-provider.exe"
+PROVIDER_SHA256 = "0f41f120ee1e042b3a0b1a311443caecc7c38066e8cb933c083297f1a7a53f35"
+INPUT_ACK = HERE / "bin" / "computer-use-input-ack.dll"
+INPUT_ACK_SHA256 = "6d4b4384fec3ed49447e807c1566ee616731b7f600f2950bf967c8888fff63f4"
+MANIFEST = HERE / ("mcp-windows.json" if WINDOWS else "mcp.json")
 KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
         "XDG_RUNTIME_DIR", "GTK_IM_MODULE", "QT_IM_MODULE", "XMODIFIERS")
 PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+WINDOWS_KEPT = ("USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+                "TEMP", "TMP", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "PROGRAMDATA",
+                "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "PUBLIC",
+                "ALLUSERSPROFILE", "COMPUTERNAME", "PROCESSOR_ARCHITECTURE")
+WINDOWS_PATH = (r"{SYSTEMROOT}\System32;{SYSTEMROOT};{SYSTEMROOT}\System32\Wbem;"
+                r"{SYSTEMROOT}\System32\WindowsPowerShell\v1.0")
 SESSION_BUS = Path("/run/agentenv/bus")
 
 
-@computer_driver(name="hcu", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}])
-class HybridComputerUse(X11Driver):
+@computer_driver(name="hcu", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]},
+                                     {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
+class HybridComputerUse(OSDriver):
     def __init__(self) -> None:
         super().__init__()
         self._pinned: list[ReadyCheck] | None = None
@@ -47,7 +62,7 @@ class HybridComputerUse(X11Driver):
         return _manifest()["instructions"]
 
     async def ready_checks(self) -> list[ReadyCheck]:
-        """Cache successful pin checks; run X11Driver's checks every time."""
+        """Cache successful pin checks; run the desktop driver's checks every time."""
         if self._pinned is None or not all(check.ok for check in self._pinned):
             self._pinned = await self._pinned_checks()
         return [*self._pinned, *await super().ready_checks()]
@@ -64,8 +79,17 @@ class HybridComputerUse(X11Driver):
         digest = await asyncio.to_thread(_digest)
         matches = pinned is not None and digest == pinned
         checks = [ReadyCheck("hcu", matches, "the pinned computer-use" if matches else
-                             f"bin/computer-use is {digest}, not the pinned {pinned}")]
-        if not matches:
+                             f"bin/{EXECUTABLE.name} is {digest}, not the pinned {pinned}")]
+        if WINDOWS:
+            provider_digest = await asyncio.to_thread(_digest, PROVIDER)
+            checks.append(ReadyCheck("hcu provider", provider_digest == PROVIDER_SHA256,
+                                     "the pinned Windows provider" if provider_digest == PROVIDER_SHA256 else
+                                     f"bin/{PROVIDER.name} is {provider_digest}, not the pinned {PROVIDER_SHA256}"))
+            ack_digest = await asyncio.to_thread(_digest, INPUT_ACK)
+            checks.append(ReadyCheck("hcu input acknowledgement", ack_digest == INPUT_ACK_SHA256,
+                                     "the pinned input acknowledgement helper" if ack_digest == INPUT_ACK_SHA256 else
+                                     f"bin/{INPUT_ACK.name} is {ack_digest}, not the pinned {INPUT_ACK_SHA256}"))
+        if not all(check.ok for check in checks):
             return checks
         try:
             async with _session() as (session, initialized):
@@ -128,10 +152,13 @@ async def _session():
     The MCP client inherits extra environment variables; env -i gives HCU only the kept values."""
     environment = _environment()
     with contextlib.ExitStack() as resources:
-        if "XDG_RUNTIME_DIR" not in environment:
-            environment["XDG_RUNTIME_DIR"] = resources.enter_context(tempfile.TemporaryDirectory(prefix="hcu-runtime-"))
-        server = StdioServerParameters(command="/usr/bin/env", args=[
-            "-i", *(f"{name}={value}" for name, value in environment.items()), str(EXECUTABLE), "mcp"], env={})
+        if WINDOWS:
+            server = StdioServerParameters(command=str(EXECUTABLE), args=["mcp"], env=environment)
+        else:
+            if "XDG_RUNTIME_DIR" not in environment:
+                environment["XDG_RUNTIME_DIR"] = resources.enter_context(tempfile.TemporaryDirectory(prefix="hcu-runtime-"))
+            server = StdioServerParameters(command="/usr/bin/env", args=[
+                "-i", *(f"{name}={value}" for name, value in environment.items()), str(EXECUTABLE), "mcp"], env={})
         async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
             yield session, await session.initialize()
 
@@ -144,15 +171,19 @@ def _reason(error: BaseException) -> str:
 
 @functools.cache
 def _manifest() -> dict:
-    return json.loads(MANIFEST.read_text())
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
 def _environment() -> dict[str, str]:
+    if WINDOWS:
+        environment = {name: os.environ[name] for name in WINDOWS_KEPT if name in os.environ}
+        return {**environment, "PATH": WINDOWS_PATH.format_map(environment)}
     environment = {**{name: os.environ[name] for name in KEPT if name in os.environ}, "PATH": PATH}
     if "DBUS_SESSION_BUS_ADDRESS" not in environment and SESSION_BUS.exists():
         environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={SESSION_BUS}"
     return environment
 
 
-def _digest() -> str | None:
-    return hashlib.sha256(EXECUTABLE.read_bytes()).hexdigest() if EXECUTABLE.is_file() else None
+def _digest(path: Path | None = None) -> str | None:
+    path = EXECUTABLE if path is None else path
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None

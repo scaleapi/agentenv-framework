@@ -175,34 +175,51 @@ server lists the tools `mcp.json` pins, and the TCC permissions on macOS, the in
 pin each tarball's URL and sha256 in `env.toml` and the executables' in `driver.py`'s `EXECUTABLES`, and take `mcp.json`
 again from what that version's server says at connect and lists. Name it as `agent-desktop`, the alias `aliases.toml` gives it.
 
-`envs/hcu/` is [Hybrid Computer Use (HCU)](https://github.com/microsoft/Hybrid-Computer-Use) 1.0.1 as a driver,
-for an X11 desktop on Linux (`amd64` only). The install checks the pinned
+`envs/hcu/` is [Hybrid Computer Use (HCU)](https://github.com/microsoft/Hybrid-Computer-Use) as a driver
+for Linux X11 and Windows desktops (`amd64` only). Windows installation awaits a published, pinned archive.
+The Linux install checks the pinned 1.0.1
 [release tarball](https://github.com/microsoft/Hybrid-Computer-Use/releases/download/v1.0.1/computer-use-1.0.1-linux-amd64.tar.gz)
 by sha256 and places the extracted executable at `bin/computer-use` beside the driver.
 Agents get HCU's own accessibility (AX) and graphical user interface (GUI) tools, with their instructions and schemas
-pinned in `mcp.json`. The `computer_*` tools, display, input and recording come from `X11Driver`, as the reference
-driver's do. Each driver instance keeps one HCU stdio process and serializes calls to that process.
+pinned in `mcp.json` on Linux and `mcp-windows.json` on Windows. The `computer_*` tools, display, input and recording
+come from `X11Driver` on Linux and `WindowsDriver` on Windows. Each driver instance keeps one HCU stdio process and
+serializes calls to that process.
 `computer-ready` checks the executable's sha256 against `EXECUTABLES` and the server's instructions and tools against
-the manifest, alongside the X11 readiness checks. Name it as `hcu`, the alias `aliases.toml` gives it.
+the manifest, alongside the desktop driver's readiness checks. Name it as `hcu`, the alias `aliases.toml` gives it.
 
-The HCU process inherits only the variables in `driver.py`'s `KEPT` and receives a fixed `PATH`.
+On Linux, the HCU process inherits only the variables in `driver.py`'s `KEPT` and receives a fixed `PATH`.
 If `XDG_RUNTIME_DIR` is unset, the driver creates a private directory with mode `0700` for HCU.
 If `DBUS_SESSION_BUS_ADDRESS` is unset and `/run/agentenv/bus` exists, HCU uses that session bus.
 The install sets the dconf system default `org.gnome.desktop.interface toolkit-accessibility=true` so applications
 started before the first HCU call can expose their accessibility trees.
 
+On Windows, the adapter uses `computer = "windows-11"` and `driver = "hcu"`.
+No public Windows download is configured yet. Development bundles must supply `computer-use.zip`
+through their file collection, matching the installer's SHA256 pin; the installer refuses a missing or different archive.
+`install-windows.ps1` extracts `computer-use.exe`, `computer-use-windows-provider.exe`,
+`computer-use-input-ack.dll` and their licenses into `bin`. The three runtime files must stay together.
+The provider includes its .NET runtime; HCU needs no Python provider.
+The driver's venv installs the protocol's `computer` and `windows` extras.
+`agentenv-session` starts the driver in the signed-in desktop session. HCU receives the session and system variables
+in `WINDOWS_KEPT` and a fixed system `PATH`, without deployment credentials or provider overrides.
+`computer-ready` checks all three runtime hashes, the Windows MCP contract and access to the session's input desktop.
+
 To move it to another HCU version:
 
 1. Set `VERSION` in `envs/hcu/driver.py` to the new version.
-2. Pin the release archive URL and sha256 in `envs/hcu/env.toml`.
-3. Set `EXECUTABLES` in `envs/hcu/driver.py` to the sha256 of the extracted executable, `bin/computer-use`.
-4. Regenerate `mcp.json` from the local executable with `scripts/dump_hcu_mcp.py BINARY OUT`.
+2. Pin each platform's release archive URL and sha256 in `envs/hcu/env.toml`.
+3. Update `EXECUTABLES`, `PROVIDER_SHA256` and `INPUT_ACK_SHA256` in `envs/hcu/driver.py`.
+   Update the Windows archive pin in `install-windows.ps1` as well.
+4. Check the manifest on each platform with `scripts/dump_hcu_mcp.py BINARY OUT --version VERSION`.
    The helper starts the executable, sends MCP `initialize` and `tools/list`, and writes the manifest.
    From the repository root, run:
 
    ```bash
-   .venv/bin/python scripts/dump_hcu_mcp.py /path/to/computer-use src/agent_env/drivers/envs/hcu/mcp.json
+   .venv/bin/python scripts/dump_hcu_mcp.py /path/to/computer-use src/agent_env/drivers/envs/hcu/mcp.json --version 1.0.1
    ```
+
+   On Windows, use the driver's Python, pass `bin/computer-use.exe` and write `mcp-windows.json`.
+   The helper writes UTF-8 with LF line endings on both platforms and refuses a different server version.
 
 `envs/macos-harness/` is browser-use's [macOS harness](https://github.com/browser-use/macos-harness) as a driver, for
 the same macOS computers. macos-harness 0.2.1, from PyPI into the driver's venv, reads an app as numbered text and acts
