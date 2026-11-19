@@ -76,6 +76,24 @@ def test_a_dependency_outside_a_split_file_or_on_an_unknown_name_links_nothing()
     assert shards.dependency_groups(linked, table) == {}
 
 
+def test_a_file_named_in_split_in_runs_as_that_many_runs_of_neighbours_each_charged_the_files_setup_but_the_first():
+    path = "tst/integration/heavy_test.py"
+    nodeids = [f"{path}::test_{n}" for n in range(5)]
+    seconds = {nodeids[0]: 100, **{nodeid: 10 for nodeid in nodeids[1:]}, "tst/integration/other_test.py": 105}
+    table = {"split_by_test": [SPLIT], "split_in": {path: 2}, "seconds": seconds}
+    groups = _groups([*nodeids, "tst/integration/other_test.py::test"], 3, table)
+    # setup 90 (100 over the others' 10): the first run is tests 0-2 (120), the second 3-4 and its setup (110)
+    assert sorted(groups) == sorted([nodeids[:3], nodeids[3:], ["tst/integration/other_test.py::test"]])
+
+
+def test_a_file_split_in_runs_refuses_tests_a_dependency_links():
+    path = "tst/integration/heavy_test.py"
+    nodeids = [f"{path}::test_{n}" for n in range(3)]
+    table = {"split_in": {path: 2}, "seconds": {nodeid: 10 for nodeid in nodeids}}
+    with pytest.raises(ValueError, match="dependency"):
+        shards.select(nodeids, 1, 2, table, {nodeids[0]: nodeids[1], nodeids[1]: nodeids[1]})
+
+
 def test_a_unit_the_table_does_not_know_weighs_the_median_of_the_known_ones():
     seconds = {"tst/integration/a_test.py": 10, "tst/integration/b_test.py": 20, "tst/integration/c_test.py": 900,
                "tst/integration/skipped_test.py": 0}
@@ -95,6 +113,8 @@ def test_the_committed_table_names_a_file_for_every_slow_tier_unit_it_splits():
     table = shards.load_table()
     assert SPLIT in table["split_by_test"]
     assert all((ROOT / path).is_file() for path in table["split_by_test"]), "split_by_test names a test file that is gone"
+    assert all((ROOT / path).is_file() and parts >= 2 for path, parts in table.get("split_in", {}).items()), (
+        "split_in names a test file that is gone, or splits one in fewer than 2")
     assert all((ROOT / unit.split("::")[0]).is_file() for unit in table["seconds"]), "the table names a test file that is gone"
 
 
