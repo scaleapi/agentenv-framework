@@ -15,6 +15,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -196,8 +197,10 @@ def model_headers(raw: str | None) -> dict[str, str]:
 
 def _api_root(url: str) -> str:
     """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
-    codex is given LiteLLM's ``/openai/v1`` route under it."""
-    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+    codex is given LiteLLM's ``/openai/v1`` route under it. Core's ``api_root``, copied since this image can't
+    import core; a unit test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
 
 
 def write_base_config(environ: Mapping[str, str]) -> None:

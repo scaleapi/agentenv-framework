@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from a2a.types import AgentSkill
@@ -145,9 +146,11 @@ _LITELLM_ROUTE_HEADERS = ("x-litellm-model-id", "x-litellm-model-api-base", "x-l
 
 
 def _api_root(url: str) -> str:
-    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and the
-    proxy appends LiteLLM's ``/gemini/...`` and ``/v1/chat/completions`` routes to it."""
-    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the proxy appends LiteLLM's ``/gemini/...`` and ``/v1/chat/completions`` routes to it. Core's ``api_root``,
+    copied since this image can't import core; a unit test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
 
 
 def _describe_transport_error(exc: Exception) -> str:

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -178,9 +178,11 @@ def _model_headers(raw: str | None) -> dict[str, str]:
 #: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
 #: while the agent follows an armed clock.
 def _api_root(url: str) -> str:
-    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and the
-    CLI appends its own ``/v1/messages``."""
-    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the CLI appends its own ``/v1/messages``. Core's ``api_root``, copied since this image can't import core; a unit
+    test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
 
 
 EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"

@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 from anthropic import AsyncAnthropic
@@ -40,8 +41,10 @@ _CHECKPOINT = TypeAdapter(ModelRequest | None)
 
 def _api_root(url: str) -> str:
     """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
-    Anthropic's client appends its own ``/v1/messages``."""
-    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+    Anthropic's client appends its own ``/v1/messages``. Core's ``api_root``, copied since this image can't import
+    core; a unit test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
 
 
 def model(turn: dict):
