@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 
-from tst.unit.agents.gemini.agent import AGENT_DIR, a2a_server
+from tst.unit.agents.gemini.agent import AGENT_DIR, PYTHONPATH, a2a_server
 from tst.unit.agents.gemini.support import card
 
 _GEMINI_SKILL = {
@@ -232,7 +232,7 @@ def test_install_mode_reads_the_card_by_importing_agent_card():
         "from a2a_server import AGENT_CARD; "
         "print(json.dumps(AGENT_CARD.model_dump()))"
     )
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LITELLM_")}
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("LITELLM_")}, "PYTHONPATH": PYTHONPATH}
     out = subprocess.run([sys.executable, "-c", script], cwd=AGENT_DIR, env=env, capture_output=True, text=True,
                          check=True)
     exported = json.loads(out.stdout)
