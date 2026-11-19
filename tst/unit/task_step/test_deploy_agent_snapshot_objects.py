@@ -107,7 +107,7 @@ async def test_load_prefers_objects_for_a_portable_snapshot(monkeypatch, store):
     )
     context = TaskStepContext()
 
-    await _step()._load_snapshot("https://agent", _card(), "agent-1", context, sandbox_type="local")
+    await _step()._load_snapshot("https://agent", _card(), "agent-1", context, sandbox_type="local", headers={})
 
     sent = requests[0]
     assert sent["url"] == "https://agent/custom/snapshot"
@@ -136,7 +136,7 @@ async def test_load_reads_object_metadata_off_the_event_loop(monkeypatch, store)
 
     monkeypatch.setattr(store, "get_object_metadata_at", recording)
 
-    await _step()._load_snapshot("https://agent", _card(), "agent-1", TaskStepContext(), sandbox_type="local")
+    await _step()._load_snapshot("https://agent", _card(), "agent-1", TaskStepContext(), sandbox_type="local", headers={})
 
     assert loop_threads == [False, False]
 
@@ -155,7 +155,7 @@ async def test_a_legacy_snapshot_cannot_be_restored(monkeypatch, store, card, fi
     requests = _install(monkeypatch, _Universe(store, files), {"context_id": "wrong"})
 
     with pytest.raises(RuntimeError, match="is not a portable snapshot, so it cannot be restored"):
-        await _step()._load_snapshot("https://agent", card, "agent-1", TaskStepContext(), sandbox_type="local")
+        await _step()._load_snapshot("https://agent", card, "agent-1", TaskStepContext(), sandbox_type="local", headers={})
 
     assert not store.granted
     assert not requests
@@ -167,7 +167,7 @@ async def test_load_validates_the_object_response(monkeypatch, store):
 
     with pytest.raises(RuntimeError, match="invalid object response"):
         await _step()._load_snapshot(
-            "https://agent", _card(), "agent-1", TaskStepContext(), sandbox_type="local"
+            "https://agent", _card(), "agent-1", TaskStepContext(), sandbox_type="local", headers={}
         )
 
 
@@ -180,7 +180,7 @@ async def test_load_ignores_response_fields_it_does_not_know(monkeypatch, store)
     )
     context = TaskStepContext()
 
-    await _step()._load_snapshot("https://agent", _card(), "agent-1", context, sandbox_type="local")
+    await _step()._load_snapshot("https://agent", _card(), "agent-1", context, sandbox_type="local", headers={})
 
     assert context.metadata["agent_loaded_snapshots"][0]["context_id"] == (
         "restored-context"
@@ -203,7 +203,7 @@ async def test_a_portable_snapshot_loads_through_objects_or_not_at_all(
     requests = _install(monkeypatch, _Universe(store, PORTABLE[:1]), {"context_id": "wrong"})
 
     with pytest.raises(RuntimeError, match=refusal):
-        await _step()._load_snapshot("https://agent", card, "agent-1", TaskStepContext(), sandbox_type="local")
+        await _step()._load_snapshot("https://agent", card, "agent-1", TaskStepContext(), sandbox_type="local", headers={})
 
     assert not store.granted
     assert not requests

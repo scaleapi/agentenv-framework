@@ -2,8 +2,9 @@
 
 This project is licensed under the Apache License, Version 2.0, but depends on third-party
 software identified below. These dependencies are installed separately from the Python Package
-Index and imported at runtime. Apart from agent-env's changes to libfaketime, described below, third-party
-source code is not incorporated into or statically linked with the source repository.
+Index and imported at runtime. Apart from agent-env's changes to libfaketime and the protocol package's copy of
+Harbor's ATIF models, both described below, third-party source code is not incorporated into or statically linked with
+the source repository.
 
 Each third-party component remains subject to its applicable license. Copyright notices, license
 files, source-code offers, and other materials accompanying each component form part of its
@@ -2546,7 +2547,7 @@ Platform-specific native binaries that npm installs for the machine running the 
 
 ## libfaketime
 
-`src/agent_env/computers/artifacts/ubuntu-24.04/clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
+`src/agent_env/utils/faketime_clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
 0.9.12: `libfaketime.patch`, `agentenv_clock_page.c` and `agentenv_clock_waits.c`. Being derived from libfaketime,
 those three files are licensed as it is, under the GNU General Public License version 2 (`GPL-2.0-only`); the folder's
 `COPYING` is that license's text. libfaketime's own source is not in the repository: the folder's `build.sh` downloads
@@ -2556,9 +2557,21 @@ The folder's other files, like the rest of the repository, are licensed under th
 - Source: <https://github.com/wolfcw/libfaketime/tree/v0.9.12>
 - License: GPL-2.0-only
 
+## Harbor's ATIF models
+
+`packages/agentenv-protocol/src/agentenv_protocol/atif/models/` holds the trajectory models of [Harbor](https://github.com/harbor-framework/harbor) 0.26.0, the 11 modules
+of its `harbor/models/trajectories/`, copied from Harbor's wheel on PyPI. Each copy's first line says where it's from
+and that it was changed; the only change is its import paths. They are licensed as Harbor is, under the Apache License,
+Version 2.0: the folder's `LICENSE` is the license file Harbor's wheel ships, which has no NOTICE file. The folder's
+`VENDORED.md` records the wheel's sha256 and each upstream file's.
+
+- Source: <https://github.com/harbor-framework/harbor> (`harbor` 0.26.0 on PyPI)
+- Author: Alex Shaw
+- License: Apache-2.0
+
 ## The egress proxy's Go modules
 
-`src/agent_env/computers/artifacts/ubuntu-24.04/egress/` is agent-env's egress proxy, a Go program the base
+`src/agent_env/utils/egress_proxy/` is agent-env's egress proxy, a Go program the base
 computer's Dockerfile builds, statically linked with the Go standard library and the modules below. Their source is
 not in the repository: the folder's `go.sum` pins each, the build downloads them, and the program runs inside
 computers.

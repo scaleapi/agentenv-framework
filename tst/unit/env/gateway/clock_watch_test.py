@@ -79,12 +79,15 @@ def test_the_card_offers_every_clock_method_with_the_waits_bound_and_the_watchs_
     assert {name: (m["method"], m["endpoint"]) for name, m in methods.items()} == {
         "get_time": ("GET", "/clock/time"), "set_time": ("PUT", "/clock/set-time"), "set_rate": ("PUT", "/clock/set-rate"),
         "advance": ("PUT", "/clock/advance"), "clear": ("POST", "/clock/clear"), "state": ("GET", "/clock/state"),
+        "declare_follower": ("PUT", "/clock/followers"), "retire_follower": ("DELETE", "/clock/followers"),
         "watch": ("GET", "/clock/watch")}
     assert all(methods[name]["request"]["properties"]["wait_followers_s"] == wait
                for name in ("set_time", "set_rate", "advance", "clear"))
     assert methods["set_rate"]["request"]["required"] == ["virtual_seconds_per_real_second"]
     assert methods["set_time"]["request"]["required"] == ["virtual_time"]
     assert set(methods["watch"]["request"]["properties"]) == {"after", "follower"}
+    assert methods["declare_follower"]["request"]["required"] == ["name", "read_token"]
+    assert methods["retire_follower"]["request"]["required"] == ["name"]
     assert methods["watch"]["hold_s"] == CLOCK_WATCH_HOLD_S == ClockFollowers.WATCH_S == 25.0
 
 
@@ -432,3 +435,111 @@ async def test_a_write_stops_waiting_for_a_computer_when_it_goes_quiet_during_th
         waited = time.monotonic() - started
     assert answer.status_code == 504 and answer.json()["stale"] == ["laptop"], answer.text
     assert 0.5 <= waited < 3, waited
+
+
+@pytest.mark.asyncio
+async def test_an_agent_declared_after_the_gateway_started_is_waited_for_by_its_own_token(gateway):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        declared = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "token-agent"})
+        assert declared.status_code == 200 and declared.json()["followers"] == {
+            "agent-solver": {"version": None, "seen_s_ago": None}}
+        follower = asyncio.create_task(_follow(client, "agent-solver", "token-agent", applies_after_s=0.05))
+        try:
+            await _until_shown(gw, "agent-solver")
+            written = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 2})
+        finally:
+            follower.cancel()
+    assert written.status_code == 200
+    assert gw._clock_followers.state()["agent-solver"]["version"] == gw._clock.version
+
+
+@pytest.mark.asyncio
+async def test_an_agent_declared_again_takes_its_new_token_and_its_old_one_acknowledges_nothing(gateway):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "first"})
+        await client.put("/clock/set-time", json={"virtual_time": T0, "virtual_seconds_per_real_second": 0})
+        await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "second"})
+        old = asyncio.create_task(_watch(client, gw._clock.version, "agent-solver", "first"))
+        await asyncio.sleep(0.2)
+        by_the_old_token = gw._clock_followers.state()["agent-solver"]["version"]
+        new = asyncio.create_task(_watch(client, gw._clock.version, "agent-solver", "second"))
+        try:
+            await _until_shown(gw, "agent-solver")
+        finally:
+            old.cancel()
+            new.cancel()
+    assert by_the_old_token is None
+
+
+@pytest.mark.parametrize("body", [{"name": "agent-solver"}, {"read_token": "t"}, {"name": "", "read_token": "t"}, [1]])
+@pytest.mark.asyncio
+async def test_declaring_a_follower_takes_a_name_and_a_read_token(gateway, body):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        answer = await client.put("/clock/followers", json=body)
+    assert answer.status_code == 400 and gw._clock_followers.state() == {}
+
+
+@pytest.mark.asyncio
+async def test_only_the_envs_control_token_declares_or_retires_a_follower(gateway):
+    gw = gateway(followers={}, control_token="control")
+    control = {"Authorization": "Bearer control"}
+    async with _client(gw) as client:
+        refused = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t"})
+        taken = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t"}, headers=control)
+        kept = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"})
+        retired = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"}, headers=control)
+    assert (refused.status_code, taken.status_code, kept.status_code, retired.status_code) == (401, 200, 401, 200)
+
+
+@pytest.mark.asyncio
+async def test_a_retired_agent_is_no_longer_waited_for_or_named_and_its_token_acknowledges_nothing(gateway):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "token-agent"})
+        retired = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"})
+        started = time.monotonic()
+        written = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 5})
+        waited = time.monotonic() - started
+        assert gw._clock_followers.follower_for("agent-solver", "token-agent") is None
+    assert retired.status_code == 200 and retired.json() == {"ok": True, "retired": True, "followers": {}}
+    assert written.status_code == 200 and waited < 1, (written.text, waited)
+
+
+@pytest.mark.asyncio
+async def test_a_follower_the_gateway_started_with_is_neither_retired_nor_redeclared(gateway):
+    gw = gateway(followers={"laptop": "token-laptop"})
+    async with _client(gw) as client:
+        retired = await client.request("DELETE", "/clock/followers", json={"name": "laptop"})
+        redeclared = await client.put("/clock/followers", json={"name": "laptop", "read_token": "mine"})
+        unknown = await client.request("DELETE", "/clock/followers", json={"name": "agent-gone"})
+    assert retired.json()["retired"] is False and unknown.json()["retired"] is False
+    assert redeclared.status_code == 400 and "started with" in redeclared.text
+    assert gw._clock_followers.follower_for("laptop", "token-laptop") == "laptop"
+
+
+@pytest.mark.asyncio
+async def test_a_write_waiting_for_an_agent_answers_once_the_agent_is_retired(gateway):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "token-agent"})
+        started = time.monotonic()
+        write = asyncio.create_task(client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 20}))
+        await asyncio.sleep(0.3)
+        await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"})
+        written = await asyncio.wait_for(write, 5)
+        waited = time.monotonic() - started
+    assert written.status_code == 200 and waited < 3, (written.text, waited)
+
+
+@pytest.mark.asyncio
+async def test_a_watch_by_a_follower_retired_meanwhile_acknowledges_nothing(gateway):
+    gw = gateway(followers={})
+    gw._clock_followers.declare("agent-solver", "token-agent")
+    named = gw._clock_followers.follower_for("agent-solver", "token-agent")
+    await gw._clock_followers.retire("agent-solver")
+    gw._clock_followers.WATCH_S = 0.05
+    await gw._clock_followers.watch("", named)
+    assert gw._clock_followers.state() == {}

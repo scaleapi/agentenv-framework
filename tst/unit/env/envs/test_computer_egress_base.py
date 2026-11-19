@@ -1,5 +1,6 @@
 """The ubuntu-24.04 base's egress proxy agrees with the rest of the base and with site routing: its certificates span
-the window routed sites' do, root's supervisord runs it as its own user, init boots it before that supervisord starts,
+the window routed sites' do, root's supervisord runs it as its own user, the root start boots it before that
+supervisord starts,
 every session program trusts its CA through agentenv's trust files as the local provider names them, the session's
 proxy is the address it listens on, a login shell gets the session's settings, and the clock pages its Go reader is
 tested on are the bytes the follower's writer writes."""
@@ -17,9 +18,10 @@ from urllib.parse import urlsplit
 import agent_env
 from agent_env.env.envs.computer.utils import site_proxy, sites
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
+from tst.util.build_context import sent
 
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
-EGRESS = BASE / "egress"
+EGRESS = sent(BASE, "egress/main.go").parent
 
 
 def _go_date(name: str) -> datetime:
@@ -55,7 +57,7 @@ def test_the_egress_ca_spans_the_window_routed_sites_certificates_do():
 def test_roots_supervisord_runs_the_proxy_as_its_own_user_and_init_boots_it_first():
     root = configparser.ConfigParser(interpolation=None)
     root.read_string((BASE / "root.conf").read_text())
-    init = (BASE / "start-desktop").read_text()
+    init = (BASE / "root" / "init").read_text()
 
     assert (root["program:egress"]["command"], root["program:egress"]["user"]) == (
         "/usr/local/lib/agentenv-egress/egress serve", "agentenv-egress")
@@ -79,7 +81,7 @@ def test_the_session_goes_out_through_the_address_the_proxy_listens_on():
 
 
 def test_the_pages_the_proxy_is_tested_on_are_the_ones_the_followers_writer_writes():
-    spec = importlib.util.spec_from_file_location("clockpage_written", BASE / "clock" / "clockpage.py")
+    spec = importlib.util.spec_from_file_location("clockpage_written", sent(BASE, "clock/clockpage.py"))
     page = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(page)
     golden = {name: bytes.fromhex((EGRESS / "testdata" / f"page-{name}.hex").read_text().strip())

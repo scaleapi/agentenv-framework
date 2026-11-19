@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -67,6 +67,7 @@ async def follow_trajectory(
     poll_interval_seconds: float,
     stop: asyncio.Event,
     client: httpx.AsyncClient | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> None:
     """Read task ``task_id``'s trajectory from its first event, handing ``sink`` each page that has
     events and the last one, until the task has ended and every event is read.
@@ -80,7 +81,8 @@ async def follow_trajectory(
         while True:
             try:
                 response = await http.post(
-                    endpoint, json={"task_id": task_id, "after": after}, timeout=_READ_TIMEOUT_SECONDS
+                    endpoint, json={"task_id": task_id, "after": after}, headers=headers,
+                    timeout=_READ_TIMEOUT_SECONDS,
                 )
                 if response.status_code == 404:
                     logger.warning("Agent no longer knows task %s; stopped following its trajectory", task_id)

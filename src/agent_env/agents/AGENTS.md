@@ -52,6 +52,11 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   Its parts become the task's status message, with `usage` as a data part; a failure adds
   `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
   text part, so add one.
+- **Usage:** when the runtime counts prompt-cache tokens, put them in `Usage`'s `cache_read_tokens` and
+  `cache_write_tokens`, not `provider_details`, and set `input_includes_cache` to whether `input_tokens` counts them
+  (`None` when it can't tell). Set it per call: through a gateway it depends on the model behind it. Where the runtime
+  hands back a model response's own usage, `Usage.from_model_response` reads it. Code that sets these fields needs a
+  `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
   never sent.
@@ -134,6 +139,10 @@ every exception.
 agent-env reads what the agent did, and verifiers grade it. Call `request.trajectory.set_format(...)`, then append
 each native event as it happens; with `enable(TRAJECTORY_V1, live=True)` it can be read while the turn runs. The SDK
 serves the reads; bind `get.context` and `get.context_objects` to serve a whole conversation from your own record.
+`native="<format id>"` in that `enable` declares the format: the card lists it as `formats`, `native` and `default`,
+a read naming any other format is refused before your handlers run, and the log and a returned `native_trajectory`
+must be in it. It needs a protocol floor that has `native`. A context read you bind names the format it serves as
+`format` in its response.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime

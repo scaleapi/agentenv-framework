@@ -10,17 +10,21 @@ import os
 import posixpath
 import stat
 import tarfile
+import tomllib
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from modal import FilePatternMatcher
 
-from agent_env.utils.paths import LEAVINGS
+from agent_env.utils.paths import LEAVINGS, SOURCES, in_sources
 
 # Bumped when what source_digest covers changes, so a digest is never compared across meanings.
 _DIGEST_SCHEME = 1
 _READ_CHUNK_BYTES = 1 << 20
+# Names what a context takes from agent-env's own sources, and at which name: the images agent-env ships share sources
+# (``utils/faketime_clock``, ``utils/egress_proxy``) this way and still build from one self-contained context.
+SHARED_SOURCES_FILE = "shared_sources.toml"
 
 
 @dataclass(frozen=True)
@@ -40,8 +44,11 @@ class _Entry:
 @dataclass(frozen=True)
 class BuildContext:
     """The files ``docker build`` sends from a folder: all but what its ignore file excludes, the Dockerfile and the
-    ignore file always kept, and what the OS or Python leaves behind always dropped. A link is sent as a link, never
-    followed, as docker sends it. Modes are git's two: 0755 when the owner may execute, else 0644."""
+    ignore file always kept, and what the OS or Python leaves behind always dropped, and what its
+    ``shared_sources.toml`` takes from agent-env's own sources, each at the name it gives, in place of the file itself,
+    which says how to make the context and isn't sent: a context written out and unpacked builds as it is. A link is
+    sent as a link, never followed, as docker sends it. Modes are git's two: 0755 when the owner may execute, else
+    0644."""
 
     dockerfile: str | None  # its path in the context, None when it's outside it
     entries: tuple[_Entry, ...]
@@ -63,6 +70,7 @@ class BuildContext:
         matcher = ignore_matcher(ignores.read_text(encoding="utf-8")) if ignores else None
         walk = _Walk(top, matcher, kept)
         walk.run()
+        walk.take(top / SHARED_SOURCES_FILE)
         if walk.problems:
             raise ValueError(f"build context {root}: " + "; ".join(walk.problems))
         return cls(dockerfile=named, entries=walk.entries())
@@ -100,6 +108,15 @@ class BuildContext:
                     raise RuntimeError(f"{entry.name} changed while its build context was being written")
 
 
+def shared_files(folder: Path) -> dict[str, Path]:
+    """Each file ``folder``'s ``shared_sources.toml`` takes from agent-env's sources, by its name in the build context,
+    the ignore file aside: what a build of the folder is made from beyond its own files. What it can't take is left for
+    ``BuildContext.of`` to refuse."""
+    walk = _Walk(Path(os.path.realpath(folder)), None, set())
+    walk.take(walk.top / SHARED_SOURCES_FILE)
+    return {entry.name: entry.path for entry in walk.entries() if entry.path is not None}
+
+
 def extract(archive: Path, out: Path) -> None:
     """Unpack a build context's tar.gz into the folder ``out``: its files, folders, links and hard links. A link that
     leads out of ``out`` is left out, as nothing there is the build's. Raises ValueError on anything else, which no
@@ -120,8 +137,8 @@ class _Walk:
         self.names: set[str] = set()
         self.problems: list[str] = []
 
-    def run(self) -> None:
-        pending = [(self.top, ())]
+    def run(self, start: Path | None = None, parts: tuple[str, ...] = ()) -> None:
+        pending = [(start or self.top, parts)]
         while pending:
             folder, parts = pending.pop()
             try:
@@ -131,7 +148,7 @@ class _Walk:
                 self.problems.append(f"{_show(parts)}: {e.strerror or e}")
                 continue
             for child in children:
-                if child.name in LEAVINGS:
+                if child.name in LEAVINGS or (not parts and child.name == SHARED_SOURCES_FILE):
                     continue
                 child_parts = (*parts, unicodedata.normalize("NFC", child.name))
                 name = "/".join(child_parts)
@@ -150,6 +167,32 @@ class _Walk:
                     self._file(name, Path(child.path))
                 else:
                     self.problems.append(f"{name}: neither a regular file, a folder nor a link")
+
+    def take(self, declared: Path) -> None:
+        """What ``declared`` (``SHARED_SOURCES_FILE``), when the folder has one, takes from agent-env's sources: each
+        folder or file at the name it gives, which the folder mustn't have itself."""
+        if not declared.is_file():
+            return
+        try:
+            taken = tomllib.loads(declared.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            self.problems.append(f"{SHARED_SOURCES_FILE}: {e}")
+            return
+        for name, source in sorted(taken.items()):
+            path = Path(os.path.realpath(os.path.join(SOURCES, source))) if isinstance(source, str) else None
+            excluded = name not in self.kept and self._excluded(name)
+            if path is None or not in_sources(path) or not path.exists():
+                self.problems.append(f"{SHARED_SOURCES_FILE}: {name} = {source!r} names nothing in agent-env's sources")
+            elif name in self.names:
+                self.problems.append(f"{name}: the folder has it and {SHARED_SOURCES_FILE} takes it too; keep one")
+            elif path.is_dir():
+                if (excluded and self._prunable(name)) or not self._claim(name):
+                    continue
+                if not excluded:
+                    self.folders.add(name)
+                self.run(path, (name,))
+            elif not excluded:
+                self._file(name, path)
 
     def entries(self) -> tuple[_Entry, ...]:
         folders = set(self.folders)

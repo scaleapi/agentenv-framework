@@ -55,7 +55,7 @@ def _judge(monkeypatch, verifier, outcomes: list) -> list[str]:
 async def _grade(verifier):
     return await verifier._run_judge_with_output_retries(
         eval_prompt="grade it", criteria=CRITERIA, context=TaskStepContext(), model="m",
-        judge_a2a_url="http://judge.test", judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None),
+        judge_a2a_url="http://judge.test", judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
         judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True)
 
 
@@ -115,7 +115,7 @@ async def test_a_judge_task_that_fails_before_the_deadline_is_not_retried_whatev
 async def test_with_retries_the_judge_is_allowed_a_margin_past_the_poll_s_deadline(monkeypatch, retries, sent):
     posted: list[dict] = []
 
-    async def post(url, payload):
+    async def post(url, payload, headers=None):
         posted.append(payload)
 
     monkeypatch.setattr(protocol, "post_agent_config", post)
@@ -123,7 +123,7 @@ async def test_with_retries_the_judge_is_allowed_a_margin_past_the_poll_s_deadli
         "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": ["model", "timeout_seconds"]}}}}}]}}
     await _verifier(judge_timeout_retries=retries)._configure_judge_a2a(
         judge_a2a_url="http://judge.test", judge_agent_card=card, model="m", judge_effort=None,
-        judge_max_thinking_tokens=None, context=TaskStepContext())
+        judge_max_thinking_tokens=None, context=TaskStepContext(), headers={})
 
     assert posted == [{"model": "m", "timeout_seconds": sent}]
 
@@ -143,7 +143,7 @@ def test_judge_timeout_retries_and_max_turns_round_trip_and_are_left_out_unset()
 async def test_judge_agent_config_extras_go_to_a_judge_that_takes_them(monkeypatch, caplog):
     posted: list[dict] = []
 
-    async def post(url, payload):
+    async def post(url, payload, headers=None):
         posted.append(payload)
 
     monkeypatch.setattr(protocol, "post_agent_config", post)
@@ -157,7 +157,7 @@ async def test_judge_agent_config_extras_go_to_a_judge_that_takes_them(monkeypat
             "model", "builtin_tools", "max_turns"]}}}}}]}}
     verifier = Extra(id="verify", version=1, criteria=CRITERIA, prompt_id="p", verifier_id="vt", judge_max_turns=300)
     await verifier._configure_judge_a2a(judge_a2a_url="http://judge.test", judge_agent_card=card, model="m",
-                                        judge_effort=None, judge_max_thinking_tokens=None, context=TaskStepContext())
+                                        judge_effort=None, judge_max_thinking_tokens=None, context=TaskStepContext(), headers={})
 
     assert posted == [{"model": "m", "max_turns": 300, "builtin_tools": {"disable": ["Agent"]}}]
     assert "doesn't take ['effort_level']" in caplog.text
@@ -165,5 +165,5 @@ async def test_judge_agent_config_extras_go_to_a_judge_that_takes_them(monkeypat
     posted.clear()
     plain = RubricsVerifierTaskStep(id="verify", version=1, criteria=CRITERIA, prompt_id="p", verifier_id="vt")
     await plain._configure_judge_a2a(judge_a2a_url="http://judge.test", judge_agent_card=card, model="m",
-                                     judge_effort=None, judge_max_thinking_tokens=None, context=TaskStepContext())
+                                     judge_effort=None, judge_max_thinking_tokens=None, context=TaskStepContext(), headers={})
     assert posted == [{"model": "m"}]

@@ -31,7 +31,8 @@ from websockets.exceptions import InvalidStatus
 from agent_env.env.envs.computer.utils import site_proxy, sites
 from agent_env.env.envs.computer.utils.params import Site as SiteParams
 from agent_env.env.envs.computer.utils.site_proxy import Config, Site, SiteProxy
-from agent_env.env.gateway.constants import AGENT_ENV_SITE_ROOT_HEADER
+from agent_env.env.gateway.constants import (AGENT_ENV_COMPUTER_HEADER, AGENT_ENV_ROLE_HEADER,
+                                          AGENT_ENV_SITE_ROOT_HEADER)
 from agent_env.env.gateway.gateway import Gateway
 from tst.unit.env.envs.test_computer_stand_in_proxy import _ask, _logged
 from tst.unit.env.envs.test_computer_stand_in_proxy import _serving as _stand_in_serving
@@ -178,6 +179,22 @@ async def test_the_providers_headers_go_upstream_in_place_of_the_browsers_and_ne
     ((_, sent, _),) = upstream.requests
     assert sent["cf-access-client-secret"] == "s3cret"
     assert "s3cret" not in json.dumps(headers) and body == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_a_request_names_its_computer_and_no_page_names_a_role_or_another_computer(tmp_path):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        config.sites[0].upstream_headers = {"AgentEnv-Computer": "desktop"}
+        async with _proxy(config) as port:
+            _, _, body, conn = await _exchange(
+                port, b"GET / HTTP/1.1\r\nHost: notes.test\r\nAgentEnv-Role: admin\r\nAgentEnv-Computer: laptop\r\n\r\n",
+                server_hostname="notes.test", cadata=issued.ca_pem)
+            conn[1].close()
+
+    ((_, sent, _),) = upstream.requests
+    assert sent["agentenv-computer"] == "desktop" and "agentenv-role" not in sent and body == b"hello"
+    assert (site_proxy.ROLE_HEADER, site_proxy.COMPUTER_HEADER) == (AGENT_ENV_ROLE_HEADER, AGENT_ENV_COMPUTER_HEADER)
 
 
 async def _serve(app) -> tuple[uvicorn.Server, int]:
@@ -441,6 +458,82 @@ async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sen
     assert [(entry["host"], entry["port"], entry["address"]) for entry in logged] == [
         ("github.githubassets.com", 8443, "127.0.0.1"), ("github.com", 80, "127.0.0.1")]
     assert all(entry["bytes_sent"] > 0 and entry["bytes_received"] > 0 and entry["duration_s"] >= 0 for entry in logged)
+
+
+class Egress:
+    """The base's egress proxy as the site proxy sees it: each ``CONNECT`` head it reads recorded, then refused with a
+    403, or established and the request inside answered with ``hello``."""
+
+    def __init__(self, refuse=False):
+        self.heads, self.refuse = [], refuse
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.url = f"http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+        return self
+
+    async def __aexit__(self, *exc):
+        self.server.close()
+
+    async def _handle(self, reader, writer):
+        self.heads.append(await reader.readuntil(b"\r\n\r\n"))
+        if self.refuse:
+            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        else:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+        await writer.drain()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_with_an_egress_proxy_a_public_live_host_goes_through_it_and_a_private_one_straight_to_it(
+        tmp_path, monkeypatch, capsys):
+    addresses = {"github.com": ["140.82.112.3"], "intranet.example": ["10.0.0.5"]}
+
+    async def resolve(host, port):
+        return addresses[host]
+
+    monkeypatch.setattr(site_proxy, "resolve", resolve)
+    async with Upstream() as upstream, Upstream() as live, Egress() as egress:
+        monkeypatch.setenv(site_proxy.EGRESS_PROXY_ENV, egress.url)
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com", "intranet.example"]
+        with _live_hosts_at(monkeypatch, live.port) as opened:
+            async with _forward_port(config) as port:
+                public = await _exchange(port, b"GET http://github.com/a HTTP/1.1\r\nHost: github.com\r\n\r\n")
+                public[3][1].close()
+                private = await _exchange(port, b"GET http://intranet.example/b HTTP/1.1\r\n"
+                                                b"Host: intranet.example\r\n\r\n")
+                private[3][1].close()
+                await asyncio.sleep(0.3)  # each connection is logged as it ends
+
+    assert (public[0], public[2], private[0], private[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
+    assert [head.split(b"\r\n")[0] for head in egress.heads] == [b"CONNECT github.com:80 HTTP/1.1"]
+    assert opened == [("intranet.example", 80)] and [request[0] for request in live.requests] == ["GET /b HTTP/1.1"]
+    logged = _logged(capsys.readouterr().err, "connection")
+    # Through the egress proxy a connection names the proxy, which decides which of the site's addresses it dials.
+    assert [(entry["host"], entry["address"], entry.get("via")) for entry in logged] == [
+        ("github.com", "127.0.0.1", "egress"), ("intranet.example", "127.0.0.1", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_the_egress_proxy_refuses_is_a_502_naming_its_answer(tmp_path, monkeypatch, capsys):
+    async def resolve(host, port):
+        return ["140.82.112.3"]
+
+    monkeypatch.setattr(site_proxy, "resolve", resolve)
+    async with Upstream() as upstream, Egress(refuse=True) as egress:
+        monkeypatch.setenv(site_proxy.EGRESS_PROXY_ENV, egress.url)
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com"]
+        async with _forward_port(config) as port:
+            answer = await _exchange(port, b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+
+    assert answer[0] == "HTTP/1.1 502 Bad Gateway" and answer[2] == b"github.com:443 didn't answer\n"
+    [failed] = _logged(capsys.readouterr().err, "failed")
+    assert failed["reason"] == "no answer" and "403 Forbidden" in failed["error"], failed
 
 
 @pytest.mark.asyncio

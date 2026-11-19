@@ -9,7 +9,9 @@ checks, as the session user, that each name loads. ``serve`` listens on loopback
 on 80 to redirect those to HTTPS and to serve ``.localhost`` names over HTTP, on 53 for DNS, over UDP and TCP, when a
 name is a wildcard, which a hosts file can't list, and, on a browser computer, on ``proxy_port`` (3129) as a forward
 proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs,
-takes a live site's hosts (``direct``) straight to them, and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
+takes a live site's hosts (``direct``) straight to them, or, when every address of one is public and the base names
+an egress proxy (``AGENTENV_EGRESS_PROXY``), through that, so it loads at any universe date, and refuses any other
+host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
 which runs as the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees
 itself at ``/`` under its own name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and
 ``X-Forwarded-Proto`` say the name and scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no
@@ -58,11 +60,17 @@ HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "proxy-a
 SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 FORWARDED = frozenset({"x-forwarded-host", "x-forwarded-proto", "x-forwarded-for", "x-forwarded-port",
                        "x-forwarded-prefix", "forwarded", SITE_ROOT_HEADER.lower()})
+#: Who a request is the gateway's to say: the computer it came from goes upstream from the config alone, and no page
+#: names a role, so its request takes the role driving the computer.
+ROLE_HEADER, COMPUTER_HEADER = "AgentEnv-Role", "AgentEnv-Computer"
+AGENTENV_IDENTITY = frozenset({ROLE_HEADER.lower(), COMPUTER_HEADER.lower()})
 RESPONSE_DROP = frozenset({"connection", "keep-alive", "proxy-connection", "alt-svc"})
 UPSTREAM_HEADERS_FILE = "upstream_headers.json"
 HEAD_LIMIT = 1 << 20
 CHUNK = 1 << 16
 UPSTREAM_TIMEOUT_S = 30.0
+#: The variable naming a base's egress proxy, which a browser computer's live sites go out through when it has one.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
 DNS_TIMEOUT_S = 4.0
 NAMESERVER_PORT = 53
 DATAGRAM_MAX = 65535
@@ -442,12 +450,69 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
         parts = urlsplit(target)
         target = urlunsplit(("", "", parts.path or "/", parts.query, ""))
     provided = {key.lower() for key in site.upstream_headers}
-    kept = [(key, value) for key, value in headers if key.lower() not in HOP_BY_HOP | FORWARDED | provided]
+    kept = [(key, value) for key, value in headers
+            if key.lower() not in HOP_BY_HOP | FORWARDED | AGENTENV_IDENTITY | provided]
     kept += [("Host", site.netloc), ("X-Forwarded-Host", host), ("X-Forwarded-Proto", scheme),
              ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, f"{scheme}://{host}"), *site.upstream_headers.items()]
     kept += [("Connection", "Upgrade"), ("Upgrade", upgrade)] if upgrade else [("Connection", "close")]
     lines = [f"{method} {site.prefix}{target} HTTP/1.1", *(f"{key}: {value}" for key, value in kept)]
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
+async def resolve(host: str, port: int) -> list[str]:
+    """The addresses ``host`` resolves to, each once, in the resolver's order."""
+    found = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(info[4][0] for info in found))
+
+
+class EgressRefused(ConnectionError):
+    """The egress proxy's answer to a ``CONNECT`` that isn't established, as it gave it."""
+
+
+def egress_proxy() -> Optional[tuple[str, int]]:
+    """The egress proxy's address, as ``AGENTENV_EGRESS_PROXY`` names it, or None in a base with none."""
+    url = urlsplit(os.environ.get(EGRESS_PROXY_ENV) or "")
+    return (url.hostname, url.port or 80) if url.hostname else None
+
+
+def public(addresses: list[str]) -> bool:
+    """Whether every one of ``addresses`` is public, the only destinations the egress proxy takes."""
+    return bool(addresses) and all(ipaddress.ip_address(address.split("%", 1)[0]).is_global for address in addresses)
+
+
+async def through_egress(egress: tuple[str, int], host: str,
+                         port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A ``CONNECT`` tunnel to ``host`` at ``port`` through the egress proxy at ``egress``, established; it raises
+    ``EgressRefused`` with the proxy's status line when the proxy won't open one."""
+    authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    reader, writer = await asyncio.open_connection(*egress, limit=HEAD_LIMIT)
+    try:
+        writer.write(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("latin-1"))
+        await writer.drain()
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError as e:
+            raise EgressRefused("the egress proxy closed the tunnel before answering it") from e
+        except asyncio.LimitOverrunError as e:
+            raise EgressRefused("the egress proxy's answer has no end to its head") from e
+        status = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        if status.split(" ", 2)[1:2] != ["200"]:
+            raise EgressRefused(f"the egress proxy answered {status!r}")
+    except BaseException:
+        writer.close()
+        raise
+    return reader, writer
+
+
+async def open_live(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str, Optional[str]]:
+    """A connection to ``host``, a live site's, at ``port``, the address it reached and what it went through: the
+    base's egress proxy (``"egress"``, the address the proxy's own) when there is one and every address of ``host`` is
+    public, else nothing (None)."""
+    if (egress := egress_proxy()) is not None and public(await resolve(host, port)):
+        reader, writer = await through_egress(egress, host, port)
+        return reader, writer, (writer.get_extra_info("peername") or egress)[0], "egress"
+    reader, writer = await asyncio.open_connection(host, port, limit=HEAD_LIMIT)
+    return reader, writer, (writer.get_extra_info("peername") or ("",))[0], None
 
 
 def direct_head(start: str, headers: list[tuple[str, str]]) -> bytes:
@@ -682,8 +747,7 @@ class SiteProxy:
         attempt together, which is logged (``log_event``) and ends ``record`` in the network log."""
         asked = time.time()
         try:
-            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port, limit=HEAD_LIMIT),
-                                                          UPSTREAM_TIMEOUT_S)
+            up_reader, up_writer, address, via = await asyncio.wait_for(open_live(host, port), UPSTREAM_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError) as e:
             unresolved = isinstance(e, socket.gaierror)
             reason = "doesn't resolve" if unresolved else "no answer"
@@ -694,7 +758,9 @@ class SiteProxy:
             writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n" if unresolved else
                                          f"{host}:{port} didn't answer\n", FAILED))
             return None
-        return up_reader, up_writer, (up_writer.get_extra_info("peername") or ("",))[0]
+        if via:
+            record["via"] = via
+        return up_reader, up_writer, address
 
     async def _direct(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int) -> None:
         """A ``CONNECT`` to ``host``, a live site's, tunnelled straight to it at ``port`` and answered as established;
@@ -713,7 +779,8 @@ class SiteProxy:
             await asyncio.gather(splice(reader, up_writer, sent), splice(up_reader, writer, received))
         finally:
             self._note("end", {"id": key, "ended": stamp(), "bytes_sent": sent.bytes, "bytes_received": received.bytes})
-            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
+            log_event(connection={"host": host, "port": port, "address": address,
+                                  **({"via": tunnel["via"]} if "via" in tunnel else {}), "bytes_sent": sent.bytes,
                                   "bytes_received": received.bytes, "started": when(wall),
                                   "duration_s": round(time.monotonic() - began, 3)})
 
@@ -799,7 +866,8 @@ class SiteProxy:
                 ended["response"]["body"] = kept.record()
             alone = {} if noted else {**record, "request": sent_request(), "started": started, "address": address}
             self._note("end", {**ended, "ended": stamp(), **alone})
-            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
+            log_event(connection={"host": host, "port": port, "address": address,
+                                  **({"via": record["via"]} if "via" in record else {}), "bytes_sent": sent.bytes,
                                   "bytes_received": received.bytes, "started": when(wall),
                                   "duration_s": round(time.monotonic() - began, 3)})
             up_writer.close()

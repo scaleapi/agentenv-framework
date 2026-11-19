@@ -86,7 +86,7 @@ from agent_env.env.gateway.constants import EXT_STEP_URI
 from agent_env.store.ids import derive_path_id, is_local_id, validate_local_id
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.thread_work import finish_on_thread
 
@@ -227,6 +227,7 @@ def _upload_file(store, file_path: str, artifact_id: str, version: int, object_n
 
 class CollectArtifactsTaskStep(TaskStep):
     type: ClassVar[str] = "collect_artifacts"
+    step_role = StepRole.EVIDENCE
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(

@@ -3,13 +3,18 @@
 import gzip
 import io
 import os
+import shutil
 import tarfile
 import unicodedata
 from pathlib import Path
 
 import pytest
 
-from agent_env.utils.docker.context import BuildContext, extract, ignore_file
+import agent_env
+from agent_env.utils.docker.context import SHARED_SOURCES_FILE, BuildContext, extract, ignore_file
+from tst.util.scripts import load_script
+
+SOURCES = Path(agent_env.__file__).parent
 
 
 def _tree(root: Path, files: dict[str, str], executable: tuple[str, ...] = ()) -> Path:
@@ -121,6 +126,68 @@ def test_a_link_the_dockerignore_excludes_is_left_out(tmp_path):
     (root / ".venv" / "python").symlink_to("/usr/bin/python3")
 
     assert not any(entry.name.startswith(".venv") for entry in BuildContext.of(root, root / "Dockerfile").entries)
+
+
+def test_what_shared_sources_toml_takes_from_agent_envs_sources_is_sent_at_the_name_it_gives(tmp_path):
+    taking = 'clock = "utils/faketime_clock"\nfollower = "utils/faketime_clock/clock-follower"\n'
+    root = _tree(tmp_path / "ctx", {**SERVER, SHARED_SOURCES_FILE: taking})
+    held = _tree(tmp_path / "held", SERVER)
+    shutil.copytree(SOURCES / "utils" / "faketime_clock", held / "clock")
+    shutil.copy2(SOURCES / "utils" / "faketime_clock" / "clock-follower", held / "follower")
+
+    taken = BuildContext.of(root, root / "Dockerfile")
+    members = {m.name: m for m in _members(_written(taken, tmp_path))}
+
+    assert members["clock/build.sh"].isreg() and members["follower"].mode == 0o755
+    assert SHARED_SOURCES_FILE not in members
+    assert taken.source_digest(None) == BuildContext.of(held, held / "Dockerfile").source_digest(None)
+
+
+def test_the_ignore_file_applies_to_what_shared_sources_toml_takes_as_to_the_folders_own(tmp_path):
+    ignore = "clock\n!clock/clock.conf\n"
+    root = _tree(tmp_path / "ctx", {**SERVER, ".dockerignore": ignore,
+                                    SHARED_SOURCES_FILE: 'clock = "utils/faketime_clock"\n'})
+    held = _tree(tmp_path / "held", {**SERVER, ".dockerignore": ignore})
+    shutil.copytree(SOURCES / "utils" / "faketime_clock", held / "clock")
+
+    taken = BuildContext.of(root, root / "Dockerfile")
+
+    assert [entry.name for entry in taken.entries if entry.name.startswith("clock")] == ["clock", "clock/clock.conf"]
+    assert taken.source_digest(None) == BuildContext.of(held, held / "Dockerfile").source_digest(None)
+
+
+@pytest.mark.parametrize(("folder", "taken", "problem"), [
+    ({"clock/own.txt": ""}, 'clock = "utils/faketime_clock"\n',
+     "clock: the folder has it and shared_sources.toml takes it too"),
+    ({}, 'clock = "../../../etc"\n', "names nothing in agent-env's sources"),
+    ({}, 'clock = "utils/nowhere"\n', "names nothing in agent-env's sources"),
+], ids=["a-name-the-folder-has", "a-path-outside-the-sources", "a-path-that-isnt-there"])
+def test_shared_sources_toml_takes_only_whats_in_agent_envs_sources_at_a_name_the_folder_doesnt_have(
+        tmp_path, folder, taken, problem):
+    root = _tree(tmp_path / "ctx", {**SERVER, **folder, SHARED_SOURCES_FILE: taken})
+
+    with pytest.raises(ValueError, match=problem):
+        BuildContext.of(root, root / "Dockerfile")
+
+
+@pytest.mark.parametrize("base", ["ubuntu-24.04", "ubuntu-24.04-browser"])
+def test_a_shipped_base_context_written_out_and_unpacked_is_the_same_context(tmp_path, base):
+    folder = SOURCES / "computers" / "artifacts" / base
+    sent = BuildContext.of(folder, folder / "Dockerfile")
+    sent.write(tmp_path / "ctx.tar.gz")
+    extract(tmp_path / "ctx.tar.gz", tmp_path / "out")
+
+    assert BuildContext.of(tmp_path / "out", tmp_path / "out" / "Dockerfile").source_digest(None) == sent.source_digest(None)
+
+
+@pytest.mark.parametrize("base", ["ubuntu-24.04", "ubuntu-24.04-browser"])
+def test_release_ci_stages_a_shipped_base_with_what_its_build_context_sends(tmp_path, base):
+    folder, staged = SOURCES / "computers" / "artifacts" / base, tmp_path / base
+    load_script("infra_build.py")._staged(str(folder), str(staged))
+    (staged / SHARED_SOURCES_FILE).unlink()
+
+    assert (BuildContext.of(folder, folder / "Dockerfile").source_digest(None)
+            == BuildContext.of(staged, staged / "Dockerfile").source_digest(None))
 
 
 def test_a_special_file_is_named(tmp_path):

@@ -26,7 +26,7 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
-  # The base computer's egress proxy (src/agent_env/computers/artifacts/ubuntu-24.04/egress/): gofmt, go vet and its
+  # The base computer's egress proxy (src/agent_env/utils/egress_proxy/): gofmt, go vet and its
   # tests under the race detector, in the Go image its Dockerfile builds with, so a failing Go test fails here rather
   # than as a broken base image in the slow tier.
   egress:
@@ -251,7 +251,7 @@ jobs:
         run: |
           .venv/bin/python .github/scripts/check_skip_policy.py junit-integration-slow.xml \
             --allow model_endpoint_configured remote_sandbox default_a2a_agent mcp_server_sources windows_media \
-              omarchy_image
+              omarchy_image agent_clock_image
       # The tests' times, for .github/scripts/slow_test_durations.py to rebalance the shards with.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

@@ -8,6 +8,7 @@ from a2a.types import TaskState
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent import protocol
+from agent_env.config.model import resolve_model
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import prompt_agent as pa_mod
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
@@ -24,13 +25,13 @@ def posted(monkeypatch):
     """Mocks the conversation's HTTP and store boundary, and collects each agent config posted, by URL."""
     cfg = MagicMock()
     cfg.get_model_params.return_value = {}
-    cfg.get_model_for_role.return_value = None
+    cfg.resolve_model.side_effect = lambda role, **layers: resolve_model(role, **layers)
     monkeypatch.setattr(pa_mod, "get_config", lambda: cfg)
     for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task", "mark_closed", "get_conversation"):
         monkeypatch.setattr(pa_mod.conversation_store, fn, lambda *a, **kw: None)
     configs = {}
 
-    async def post_agent_config(url, fields):
+    async def post_agent_config(url, fields, headers=None):
         configs[url] = fields
 
     async def send(url, parts, message_id, context_id, timeout):
@@ -89,13 +90,13 @@ def _judge() -> RubricsVerifierTaskStep:
                                                 (_card("output_format"), None), ({}, None)],
                          ids=["takes a model", "takes no model", "takes no config"])
 async def test_an_agent_judge_records_the_model_it_took(monkeypatch, card, recorded):
-    async def post_agent_config(url, fields):
+    async def post_agent_config(url, fields, headers=None):
         pass
 
     monkeypatch.setattr(protocol, "post_agent_config", post_agent_config)
     context = TaskStepContext(metadata={"task_id": "t"})
 
     await _judge()._configure_judge_a2a(judge_a2a_url="http://judge", judge_agent_card=card, model="flag-judge",
-                                        judge_effort=None, judge_max_thinking_tokens=None, context=context)
+                                        judge_effort=None, judge_max_thinking_tokens=None, context=context, headers={})
 
     assert context.metadata["models"] == {"judge": {"judge": recorded}}

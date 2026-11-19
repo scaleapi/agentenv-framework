@@ -161,7 +161,9 @@ def _resolved(value):
 
 
 @pytest.mark.asyncio
-async def test_install_logs_show_the_command_template_not_the_model_key_or_headers(monkeypatch, caplog, local_stores):
+async def test_install_logs_show_the_command_template_not_the_model_key_headers_or_control_token(
+    monkeypatch, caplog, local_stores,
+):
     monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000/v1")
     monkeypatch.setenv("LITELLM_API_KEY", "sk-never-logged")
     monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(headers={"X-Bill-To": "org-never-logged"}))
@@ -174,9 +176,12 @@ async def test_install_logs_show_the_command_template_not_the_model_key_or_heade
     step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
     monkeypatch.setattr(step, "_extract_install_extension", _resolved({"params": {
         "install_commands_host": ["start --key {litellm_api_key} --headers {litellm_extra_headers}"],
-        "required_params_host": ["litellm_api_key", "litellm_extra_headers"], "a2a_port": 8000}}))
+        "required_params_host": ["litellm_api_key", "litellm_extra_headers"],
+        "optional_params_host": ["control_token", "a-param-this-runner-doesnt-know"], "a2a_port": 8000}}))
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    recorded: list[str] = []
+    monkeypatch.setattr(step, "_register_instance", lambda agent, url, ds, card, token: recorded.append(token)
+                        or SimpleNamespace(instance_id="solver-1", control_token=token))
     context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
         sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
         tunnel_urls={"8000": "http://127.0.0.1:8000"})])
@@ -184,10 +189,12 @@ async def test_install_logs_show_the_command_template_not_the_model_key_or_heade
     with caplog.at_level(logging.INFO, logger="agent_env.task_step.task_steps.install_agent"):
         await step.execute(context)
 
-    [command] = [s for s in sandbox.scripts if s.startswith("start ")]
-    assert "sk-never-logged" in command and "org-never-logged" in command
+    [token] = recorded
+    [script] = [s for s in sandbox.scripts if "start " in s]
+    assert script.startswith(f"export AGENTENV_CONTROL_TOKEN={token}\nstart --key sk-never-logged --headers ")
+    assert "org-never-logged" in script and context.deployed_agents[0].control_token == token
     assert "start --key {litellm_api_key} --headers {litellm_extra_headers}" in caplog.text
-    assert "never-logged" not in caplog.text
+    assert "never-logged" not in caplog.text and token not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -205,7 +212,7 @@ async def test_a_per_run_key_given_by_reference_is_resolved_through_the_secret_s
         "install_commands_host": ["start --key {litellm_api_key}"],
         "required_params_host": ["litellm_api_key"], "a2a_port": 8000}}))
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="local",
@@ -341,7 +348,7 @@ def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, cont
     monkeypatch.setattr(step, "_extract_install_extension",
                         lambda sandbox, image: _resolved(cards[image.image_name])())
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
-    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
+    monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1", control_token=None))
     context = TaskStepContext(
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="modal_vm",

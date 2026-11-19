@@ -134,16 +134,35 @@ class BundleSkillRequest(ExtensionRequest):
     skill_bundle: SkillBundle
 
 
+class ClockSyncTimeRequest(ExtensionRequest):
+    """clock/v1's ``sync_time`` on an agent: what every server's takes, ``env_get_time_url`` and ``timezone``, and the
+    config of the follower an agent runs itself, the gateway's watch URL as its sandbox reaches it, the name the
+    gateway knows it by and its read token."""
+
+    env_get_time_url: str
+    timezone: str | None = None
+    watch_url: str | None = None
+    name: str | None = None
+    read_token: str | None = None
+
+
 class SkillAddResponse(ExtensionResponse):
     name: str
 
 
+MAX_TRAJECTORY_FORMAT_LENGTH = 128
+#: A trajectory format id a read may name, such as ``my-cli-events/1``; the card's trajectory ``formats`` lists them.
+TrajectoryFormat = Annotated[str, Field(min_length=1, max_length=MAX_TRAJECTORY_FORMAT_LENGTH, pattern=r"\S")]
+
+
 class TaskTrajectoryRequest(ExtensionRequest):
     task_id: str
+    format: TrajectoryFormat | None = None
 
 
 class ContextTrajectoryRequest(ExtensionRequest):
     context_id: str
+    format: TrajectoryFormat | None = None
 
 
 class TrajectoryWriteObjects(ExtensionRequest):
@@ -159,11 +178,13 @@ class TrajectoryWriteObjects(ExtensionRequest):
 class TaskObjectTrajectoryRequest(ExtensionRequest):
     task_id: str
     objects: TrajectoryWriteObjects
+    format: TrajectoryFormat | None = None
 
 
 class ContextObjectTrajectoryRequest(ExtensionRequest):
     context_id: str
     objects: TrajectoryWriteObjects
+    format: TrajectoryFormat | None = None
 
 
 class TrajectoryUploadedObjects(ExtensionResponse):
@@ -172,6 +193,7 @@ class TrajectoryUploadedObjects(ExtensionResponse):
 
 class TrajectoryObjectsResponse(ExtensionResponse):
     objects: TrajectoryUploadedObjects
+    format: str | None = None
 
 
 class TrajectoryState(str, Enum):
@@ -192,12 +214,14 @@ class TaskEventsTrajectoryRequest(ExtensionRequest):
     task_id: str
     after: StrictInt = Field(ge=0)
     limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
+    format: TrajectoryFormat | None = None
 
 
 class ContextEventsTrajectoryRequest(ExtensionRequest):
     context_id: str
     after: StrictInt = Field(ge=0)
     limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
+    format: TrajectoryFormat | None = None
 
 
 class TrajectoryEventsResponse(ExtensionResponse):
@@ -424,6 +448,13 @@ class ProxyToolResult(ExtensionResponse):
 class ProxyActionState(ExtensionResponse):
     done: bool
     result: Annotated[ProxyBashResult | ProxyToolResult, Field(discriminator="kind")] | None = None
+
+
+# The key under which a record's ``usage`` carries a ``Usage`` its driver reported, as ``Usage.to_dict`` wrote it; any
+# other ``usage`` is a model response's own, which the proxy reads with ``Usage.from_model_response``. It rides in
+# ``usage`` rather than a field of its own so a proxy on an earlier protocol, whose request refuses unknown fields,
+# still takes the record.
+REPORTED_USAGE_KEY = "agentenv_usage"
 
 
 class ProxyRecordRequest(ExtensionRequest):
@@ -1080,15 +1111,23 @@ def _configure_install(**declaration: Any) -> ExtensionConfiguration:
     return ExtensionConfiguration(wire_params=declaration)
 
 
-def _configure_trajectory(*, live: bool = False) -> ExtensionConfiguration:
+def _configure_trajectory(*, live: bool = False, native: str | None = None) -> ExtensionConfiguration:
     """``live=True`` advertises the cursor reads, which serve the framework's log while a
-    task runs, and the context reads the framework answers when the agent binds none."""
+    task runs, and the context reads the framework answers when the agent binds none.
+    ``native`` names the native log's format: the card offers it as ``formats``, ``native`` and
+    ``default``, and the log, a returned native trajectory and every read hold to it."""
     if not isinstance(live, bool):
         raise TypeError("live must be a boolean")
-    if not live:
-        return ExtensionConfiguration()
+    if native is not None and not isinstance(native, str):
+        raise TypeError("native must be a format id string")
+    if native is not None and (not native.strip() or len(native) > MAX_TRAJECTORY_FORMAT_LENGTH):
+        raise ValueError(f"native must be a format id of 1 to {MAX_TRAJECTORY_FORMAT_LENGTH} characters")
     return ExtensionConfiguration(
-        variants={"get": {"task_events", "context_events", "context", "context_objects"}}
+        wire_params={"formats": [native], "native": native, "default": native} if native else {},
+        options={"native": native} if native else {},
+        variants=(
+            {"get": {"task_events", "context_events", "context", "context_objects"}} if live else {}
+        ),
     )
 
 
@@ -1345,6 +1384,25 @@ TRIGGERS_V1 = ExtensionDefinition(
     },
 )
 
+CLOCK_V1 = ExtensionDefinition(
+    uri="urn:agentenv:clock/v1",
+    description=(
+        "Follow the env's clock: the agent's image runs the clock follower, so every program the agent runs reads "
+        "the env's time. Served where the image has the follower."
+    ),
+    endpoint="/ext/clock",
+    core_operations={
+        "sync_time": _op(
+            "sync_time",
+            "POST",
+            "/ext/clock/sync-time",
+            SDK,
+            request_model=ClockSyncTimeRequest,
+            response_required=("synced", "timezone", "follower"),
+        ),
+    },
+)
+
 INSTALL_V1 = ExtensionDefinition(
     uri="urn:agentenv:install/v1",
     description="Declare commands for installing the agent into an existing target.",
@@ -1392,6 +1450,7 @@ STANDARD_EXTENSIONS: Mapping[str, ExtensionDefinition] = MappingProxyType(
             PEER_AGENTS_V1,
             ATTRIBUTION_PROBE_V1,
             TRIGGERS_V1,
+            CLOCK_V1,
             INSTALL_V1,
             PROXY_V1,
         )

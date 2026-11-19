@@ -111,6 +111,11 @@ INSTALL_COMMANDS = [
     "LITELLM_API_KEY={litellm_api_key}\n"
     "LITELLM_BASE_URL={litellm_base_url}\n"
     "PI_A2A_ENV",
+    # agent-env's control token for the agent, which the runner exports when it has one (install/v1 optional_params),
+    # the same way: expanded by the install's shell into the heredoc, empty without one, which leaves the agent open.
+    f"{_DOCKER} exec -i {{container}} sh -c 'cat >> {INSTALL_DIR}/{ENV_FILE}' <<PI_A2A_TOKEN\n"
+    "AGENTENV_CONTROL_TOKEN=${{AGENTENV_CONTROL_TOKEN:-}}\n"
+    "PI_A2A_TOKEN",
     f"{_DOCKER} exec -d -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
 ]
 
@@ -363,7 +368,8 @@ def _unpack(archive: Path, directory: Path) -> None:
     config_description="Configure the pi runtime: model, effort, system prompt and tool allowlist.",
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, description="The pi JSON-mode event stream of a completed task."),
+        enable(TRAJECTORY_V1, native=TRAJECTORY_FORMAT,
+               description="The pi JSON-mode event stream of a completed task."),
         enable(
             SNAPSHOT_V1,
             description=(
@@ -378,6 +384,7 @@ def _unpack(archive: Path, directory: Path) -> None:
         enable(
             INSTALL_V1,
             install_commands=INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=["container", "agent_ctx_tar", "a2a_port", "litellm_api_key", "litellm_base_url"],
             a2a_port=8000,
         ),

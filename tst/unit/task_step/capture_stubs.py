@@ -197,6 +197,7 @@ class _StubAgent:
         self.sandbox_id = "sb-agent"
         self.sandbox_type = None
         self.role = None
+        self.control_headers = {}
 
 
 def context(*, agent: Optional[_StubAgent] = None, env_id: Optional[str] = None) -> TaskStepContext:
