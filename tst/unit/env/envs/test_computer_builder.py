@@ -257,6 +257,32 @@ def test_a_download_its_connection_drops_is_tried_again_and_one_that_never_comes
     assert len(attempts) == builder._DOWNLOAD_RETRIES + 1
 
 
+def test_a_download_dropped_mid_read_is_written_afresh_by_its_next_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    local = builder.LocalBuilder("LocalSandboxProvider", tmp_path, SimpleNamespace(
+        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/amd64")
+    monkeypatch.setattr(builder.time, "sleep", lambda seconds: None)
+    attempts = []
+
+    class Dropped:
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, size):
+            yield b"the first bytes of a body whose connection then drops"
+            raise httpx.ReadError("connection dropped mid-read")
+
+    @contextlib.contextmanager
+    def stream(method, url, **kwargs):
+        attempts.append(url)
+        yield Dropped() if len(attempts) == 1 else httpx.Response(200, content=b"ok", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(builder.httpx, "stream", stream)
+    local.download("https://files.test/dropped", hashlib.sha256(b"ok").hexdigest(), "fetched/dropped")
+
+    assert (tmp_path / "fetched" / "dropped").read_bytes() == b"ok" and len(attempts) == 2
+
+
 def test_the_packages_a_build_installed_are_read_from_its_image_without_running_it(monkeypatch):
     listed = json.dumps([{"name": "mss", "version": "10.2.0"},
                          {"name": "agentenv-framework-protocol", "version": "0.1.382"}]).encode()
