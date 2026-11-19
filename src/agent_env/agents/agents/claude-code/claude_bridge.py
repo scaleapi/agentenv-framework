@@ -225,12 +225,12 @@ def model_direct_hosts(base_url: str | None) -> list[str]:
 
 def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
     """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
-    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
-    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
-    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
-    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
-    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
-    ``no_proxy``) stay direct."""
+    they read the env's time, so a client checking a certificate against it, a live site's or an env MCP server's,
+    would refuse it once the clock is before its issue date, and the proxy, on real time, hands it a certificate that
+    holds then. The image's proxy reaches private addresses too (``AGENTENV_EGRESS_PRIVATE``) but refuses loopback, so
+    loopback hosts, the peer-agents MCP server's among them, and ``direct`` stay direct. Unarmed, the CLI reads real
+    time and goes out directly, as an image without the proxy does. Hosts the agent was deployed to reach directly
+    (``NO_PROXY``, ``no_proxy``) stay direct."""
     proxy = environ.get(EGRESS_PROXY_ENV)
     if not proxy or not armed:
         return {}
@@ -242,7 +242,7 @@ def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed:
 
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
             task_id: str | None = None, max_thinking_tokens: int | None = None,
-            direct_hosts: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
+            clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
     token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
     aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
@@ -272,7 +272,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
     model_hosts = model_direct_hosts(env.get("ANTHROPIC_BASE_URL")) if clock_armed else []
-    env.update(egress_env(environ, [*direct_hosts, *model_hosts], armed=clock_armed))
+    env.update(egress_env(environ, model_hosts, armed=clock_armed))
     return env
 
 
@@ -752,9 +752,7 @@ async def _spawn_claude(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
-                    max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed(),
-                    direct_hosts=[urlsplit(str(entry.get("url") or "")).hostname or ""
-                                  for entry in (mcp_servers or {}).values()]),
+                    max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed()),
         cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))
