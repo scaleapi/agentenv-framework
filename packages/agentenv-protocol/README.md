@@ -1680,8 +1680,8 @@ what they serve. The SDK knows:
   CDP endpoint's header values and the token in its URLs;
 - every transfer grant an extension call hands the agent: the parts of its URL
   that carry the credential (a presigned URL's credential-like query values,
-  `X-Amz-Signature` but not `X-Amz-Algorithm`; a token-like path segment of a
-  URL with no query; a password), its headers other than `Content-Type` and the
+  `X-Amz-Signature` but not `X-Amz-Algorithm`, decoded and as the URL writes
+  them; else a token-like path segment; a password), its headers other than `Content-Type` and the
   like, and a signed upload form's signing fields. Every copy of the URL holds
   those parts, so a URL an agent prints keeps its host and path and loses its
   signature;
