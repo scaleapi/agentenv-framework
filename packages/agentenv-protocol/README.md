@@ -755,7 +755,7 @@ class MyDriver(ComputerDriverEnvironment):
   of its own, the latest 8 frames wait for the encoder, and it is closed when the recording stops. A
   driver without `@record` records by the base class polling `@capture`, with a pointer drawn at
   `@pointer_position`: the slow path, at most 15 fps.
-- **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
+- **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?, annotate?}` returns
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
   and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
   grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
@@ -768,6 +768,14 @@ class MyDriver(ComputerDriverEnvironment):
   `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
   grant they stay under `~/.agentenv-recordings/`. An ended recording's manifest uploads beside its
   segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
+- **Annotations.** `start` with `annotate`, an object of options (`{}` for none; the card lists those a
+  driver takes under its params' `annotate.options`), draws each input over the frames captured while it
+  shows, in the colour of the role that sent it (the agent's first): a ring where a click landed (a
+  square for the right button, a ring for each click of a double or triple), a trail for a drag, an
+  arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
+  each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
+  main argument. Every `computer_*` input is marked as `act` delivers it; a segment a native recorder
+  finished is kept as it came. The manifest's `annotate` is the object the recording drew with.
 - **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
   `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
   SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,

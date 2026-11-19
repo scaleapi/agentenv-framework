@@ -1,0 +1,215 @@
+"""computer-recording/v1 ``annotate``: a recording started with it draws each input where it landed, in the colour
+of the role that sent it, on the frames captured after it; a call to the driver's own or forwarded tool that acts
+shows as a chip; a plain recording draws nothing."""
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("PIL")
+av = pytest.importorskip("av")
+
+from computer_fake import FakeDriver, http_client, mcp_session  # noqa: E402
+from mcp.types import CallToolResult, TextContent  # noqa: E402
+from PIL import Image as PILImage  # noqa: E402
+
+from agentenv_protocol import EnvironmentTool, ForwardedTool  # noqa: E402
+from agentenv_protocol.computer import COMPUTER_RECORDING, Recording  # noqa: E402
+from agentenv_protocol.computer.annotate import (  # noqa: E402
+    COLOURS,
+    Annotations,
+    draw,
+    input_marks,
+    tool_mark,
+)
+from agentenv_protocol.tool_context import ROLE_META_KEY  # noqa: E402
+
+START, END = "/agentenv/ext/computer-recording/start", "/agentenv/ext/computer-recording/end"
+T0 = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
+CLICK = (400, 300)
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+class Recorded(FakeDriver):
+    recording = Recording(max_segment_s=60)
+
+
+class Forwarding(Recorded):
+    """A driver serving two tools of another server's: one that acts, one its annotations say only reads."""
+
+    def forwarded_tools(self):
+        schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+        return [ForwardedTool(EnvironmentTool(name="click", description="Click an element.", inputSchema=schema),
+                              self.answer),
+                ForwardedTool(EnvironmentTool(name="get_window_state", description="Read a window.",
+                                              inputSchema=schema), self.answer, {"readOnlyHint": True})]
+
+    async def answer(self, **arguments):
+        return CallToolResult(content=[TextContent(type="text", text="done")])
+
+
+async def _clicked(driver, start: dict, meta: dict | None = None) -> tuple[datetime, dict, list]:
+    """A recording started with ``start`` around one click at CLICK: when the click was sent, the manifest, and each
+    frame with its capture time."""
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, **start})).json()
+        await asyncio.sleep(0.5)
+        shot = await session.call_tool("computer_screenshot", {})
+        sent = datetime.now(timezone.utc)
+        await session.call_tool("computer_click", {"x": CLICK[0], "y": CLICK[1],
+                                                   "frame_id": shot.structuredContent["frame_id"]}, meta=meta)
+        await asyncio.sleep(0.5)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
+    return sent, manifest, _timed_frames(manifest)
+
+
+def _timed_frames(manifest: dict) -> list[tuple[datetime, PILImage.Image]]:
+    frames = []
+    for segment in manifest["segments"]:
+        started = datetime.fromisoformat(segment["started_at"].replace("Z", "+00:00"))
+        path = f"{os.environ['HOME']}/.agentenv-recordings/{segment['path']}"
+        with av.open(path) as container:
+            decoded = list(container.decode(container.streams.video[0]))
+        for frame in decoded:
+            frames.append((started + timedelta(seconds=frame.time - decoded[0].time), frame.to_image()))
+    return frames
+
+
+def _marked(image: PILImage.Image, point: tuple[int, int], colour: tuple[int, int, int], reach: int = 40) -> int:
+    """How many pixels within ``reach`` of ``point`` are near ``colour``, as an encoded frame keeps it."""
+    x, y = point
+    near = 0
+    for px in range(max(0, x - reach), min(image.width, x + reach)):
+        for py in range(max(0, y - reach), min(image.height, y + reach)):
+            if sum(abs(a - b) for a, b in zip(image.getpixel((px, py)), colour)) < 90:
+                near += 1
+    return near
+
+
+def _split(frames: list, sent: datetime) -> tuple[list, list]:
+    """The frames captured before the click was sent, and those while its mark shows."""
+    before = [image for at, image in frames if at < sent - timedelta(milliseconds=50)]
+    after = [image for at, image in frames if sent + timedelta(milliseconds=150) <= at <= sent + timedelta(seconds=0.5)]
+    assert before and after, f"{len(frames)} frames, {len(before)} before the click and {len(after)} after it"
+    return before, after
+
+
+@pytest.mark.asyncio
+async def test_an_annotated_recording_draws_a_click_where_it_landed_on_the_frames_after_it():
+    sent, manifest, frames = await _clicked(Recorded(), {"annotate": {}})
+
+    before, after = _split(frames, sent)
+    assert manifest["annotate"] == {}
+    assert not any(_marked(image, CLICK, COLOURS[0]) for image in before)
+    assert all(_marked(image, CLICK, COLOURS[0]) > 20 for image in after)
+
+
+@pytest.mark.asyncio
+async def test_a_plain_recording_draws_nothing_and_its_manifest_names_no_annotate():
+    sent, manifest, frames = await _clicked(Recorded(), {})
+
+    _before, after = _split(frames, sent)
+    assert "annotate" not in manifest
+    assert not any(_marked(image, CLICK, COLOURS[0]) for image in after)
+
+
+@pytest.mark.asyncio
+async def test_each_role_draws_in_its_own_colour():
+    sent, _manifest, frames = await _clicked(Recorded(), {"annotate": {}}, meta={ROLE_META_KEY: "user"})
+
+    _before, after = _split(frames, sent)
+    assert all(_marked(image, CLICK, COLOURS[1]) > 20 and not _marked(image, CLICK, COLOURS[0]) for image in after)
+
+
+@pytest.mark.asyncio
+async def test_a_driver_tool_that_acts_shows_as_a_chip_and_one_that_only_reads_or_the_sdks_own_does_not():
+    driver = Forwarding()
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        recording = driver._computer.recordings.running[started["recording_id"]]
+        await session.call_tool("click", {"text": "Save"})
+        await session.call_tool("get_window_state", {"text": "Notes"})
+        await session.call_tool("computer_screenshot", {})
+        labels = [mark.label for mark in recording.annotations.marks]
+        await http.post(END, json={"recording_id": started["recording_id"]})
+
+    assert labels == ['click "Save"']
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_an_annotate_that_isnt_an_object_or_names_an_option_it_doesnt_take():
+    async with http_client(Recorded()) as http:
+        option = await http.post(START, json={"request_id": "a", "annotate": {"events": True}})
+        scalar = await http.post(START, json={"request_id": "b", "annotate": True})
+
+    assert option.status_code == scalar.status_code == 400
+    assert option.json()["error"]["code"] == scalar.json()["error"]["code"] == "invalid_argument"
+    assert "takes no options yet, got ['events']" in option.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_the_card_lists_annotate_and_its_options_with_the_recording_params():
+    async with http_client(Recorded()) as http:
+        card = (await http.get("/.well-known/agent-env.json")).json()
+
+    [extension] = [e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING]
+    assert extension["params"]["annotate"] == {"options": []}
+
+
+def test_each_input_is_marked_by_what_it_did_and_who_did_it():
+    def labels(operation, args, role=None, **kw):
+        return [(m.kind, m.label) for m in input_marks(operation, args, role=role, at=T0, size=(1000, 500), **kw)]
+
+    assert labels("click", (500, 250, "left", 2, ["Shift"])) == [("click", ""), ("chip", "Shift + click")]
+    assert labels("type_text", ("Q4  165\n",)) == [("chip", 'type "Q4  165[Enter]"')]
+    assert labels("press", (["Control", "s"],), repeat=3) == [("chip", "key Ctrl+S x3")]
+    assert labels("key_down", (["Shift"],), hold_ms=500) == [("chip", "hold Shift 500 ms")]
+    assert labels("pointer_down", ("left",)) == [("chip", "press left")]
+    assert labels("pointer_down", ("left",), point=(10, 20)) == [("down", "")]
+    assert labels("navigate", ("https://example.com",), role="user") == [("chip", "user: open https://example.com")]
+    assert labels("tabs", ("list", None, None)) == []
+    [click] = input_marks("click", (500, 250, "right", 1, []), role=None, at=T0, size=(1000, 500))
+    assert (click.points, click.button, click.role) == (((0.5, 0.5),), "right", "default")
+    [drag] = input_marks("drag", ([(0, 0), (1000, 500)], "left", 400, []), role=None, at=T0, size=(1000, 500))
+    assert drag.moving_s == 0.4 and drag.until - drag.at == timedelta(seconds=1.2)
+
+
+def test_a_tools_chip_shows_its_main_argument():
+    def label(arguments):
+        return tool_mark("hotkey", arguments, role=None, at=T0).label
+
+    assert label({"keys": ["cmd", "s"]}) == "hotkey cmd+S"
+    assert label({"text": "x" * 100}) == 'hotkey "' + "x" * 59 + '…"'
+    assert label({"window_id": 4}) == "hotkey"
+    assert tool_mark("click", {"element": 7}, role="executor", at=T0).label == "executor: click 7"
+
+
+def test_a_mark_shows_from_its_input_until_it_ends_and_is_then_forgotten():
+    annotations = Annotations()
+    annotations.add(input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100)))
+
+    assert annotations.showing(T0 - timedelta(milliseconds=10)) == []
+    assert len(annotations.showing(T0 + timedelta(milliseconds=500))) == 1
+    assert annotations.showing(T0 + timedelta(seconds=1)) == [] and annotations.marks == []
+
+
+def test_a_mark_lands_at_its_point_on_a_frame_of_any_size():
+    """A frame scaled down by max_edge, or captured at a HiDPI scale, keeps the point where the input landed."""
+    annotations = Annotations()
+    annotations.add(input_marks("click", (500, 250, "left", 1, []), role=None, at=T0, size=(1000, 500)))
+    at = T0 + timedelta(milliseconds=400)
+
+    for size in ((1000, 500), (400, 200), (2000, 1000)):
+        image = draw(PILImage.new("RGB", size, (255, 255, 255)), annotations.showing(at), at)
+        cx, cy = size[0] // 2, size[1] // 2
+        assert any(image.getpixel((cx + dx, cy + dy)) == COLOURS[0] for dx in range(-3, 4) for dy in range(-3, 4)), size
+        assert image.getpixel((5, 5)) == (255, 255, 255)

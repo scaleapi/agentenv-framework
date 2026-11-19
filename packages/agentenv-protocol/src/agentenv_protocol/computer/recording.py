@@ -28,6 +28,7 @@ from PIL import ImageDraw
 from pydantic import ValidationError
 
 from ..transfers import NamespaceUploader, WriteNamespaceGrant
+from . import annotate as annotating
 from .errors import InvalidArgument, LimitExceeded, Unsupported
 from .frames import to_pil
 from .manifest import ManifestSegment, RecordingManifest
@@ -126,7 +127,8 @@ def recording_params(recording: Recording, streams: bool) -> dict:
     most = recording.max_fps if streams else min(recording.max_fps, MAX_POLLED_FPS)
     return {"formats": [MP4], "scopes": ["display"], "fps": {"default": min(DEFAULT_FPS, most), "max": most},
             "cursor": True, "source": "stream" if streams else "capture", "max_segment_s": recording.max_segment_s,
-            "max_concurrent": recording.max_concurrent, "max_duration_s": recording.max_duration_s}
+            "max_concurrent": recording.max_concurrent, "max_duration_s": recording.max_duration_s,
+            "annotate": {"options": list(annotating.OPTIONS)}}
 
 
 class Recordings:
@@ -142,7 +144,8 @@ class Recordings:
         self._lock = asyncio.Lock()
 
     async def start(self, request_id: str, scope: str, window: Optional[str], fps: Optional[int],
-                    max_edge: Optional[int], cursor: bool, upload: Optional[dict]) -> dict:
+                    max_edge: Optional[int], cursor: bool, upload: Optional[dict],
+                    annotate: Optional[dict] = None) -> dict:
         features: Recording = self.runtime.driver.recording
         if not (isinstance(request_id, str) and request_id):
             raise InvalidArgument("request_id is a non-empty string")
@@ -152,6 +155,7 @@ class Recordings:
                 await self._live(self.running.get(answer["recording_id"]))
                 return answer
             hints, grant = self._hints(features, scope, window, fps, max_edge, cursor, upload)
+            annotate = annotating.check_annotate(annotate)
             stopped = [rid for rid, r in self.running.items() if r.done]
             for rid in stopped[:max(0, len(stopped) - KEEP_ENDED)]:  # stopped by itself and never ended
                 self.running.pop(rid)
@@ -166,7 +170,8 @@ class Recordings:
             cursor = hints.cursor if streams else hints.cursor and runtime.has("pointer")
             source = (lambda hints: runtime.stream(hints)) if streams else \
                 (lambda hints: _poll(runtime, hints, cursor))
-            recording = Video(recording_id, hints, features, root, grant, source, streams=streams, cursor=cursor)
+            recording = Video(recording_id, hints, features, root, grant, source, streams=streams, cursor=cursor,
+                              annotate=annotate)
             self.running[recording_id] = recording
             recording.begin()
             answer = {"recording_id": recording_id, "started_at": _iso(recording.requested_at), "format": MP4}
@@ -203,6 +208,16 @@ class Recordings:
             return [{"recording_id": rid, "started_at": _iso(r.requested_at)}
                     for rid, r in self.running.items() if not r.done]
 
+    def annotating(self) -> bool:
+        """Whether any recording still recording draws its inputs."""
+        return any(r.annotations is not None and not r.done for r in self.running.values())
+
+    def note(self, marks: list[annotating.Mark]) -> None:
+        """Draw ``marks`` on every recording still recording that draws its inputs."""
+        for recording in self.running.values():
+            if recording.annotations is not None and not recording.done:
+                recording.annotations.add(marks)
+
     async def end_all(self, reason: str) -> list[dict]:
         """End every recording not yet ended, each uploading under the grant it was started with; their manifests."""
         return [await self.end(recording_id, None, reason) for recording_id in list(self.running)]
@@ -227,11 +242,14 @@ class Video:
     """One recording's video: frames or segments from ``source(hints)``, encoded as H.264 segments in
     ``hints.directory``, each uploaded under ``grant`` as it closes, at ``<prefix>/<index>.mp4``, ``prefix`` its id by
     default; sealed by ``end``, which answers its manifest and, with ``manifest``, uploads it beside the segments.
-    ``streams`` says the source streams rather than polls, ``cursor`` that its frames draw the pointer."""
+    ``streams`` says the source streams rather than polls, ``cursor`` that its frames draw the pointer, and
+    ``annotate``, when given, that each frame draws the inputs it shows (``annotate.Annotations``); a segment a native
+    recorder finished is kept as it came."""
 
     def __init__(self, recording_id: str, hints: RecordHints, features: Recording, root: Path,
                  grant: Optional[WriteNamespaceGrant], source: Callable[[RecordHints], AsyncIterator], *,
-                 streams: bool, cursor: bool, prefix: Optional[str] = None, manifest: bool = True) -> None:
+                 streams: bool, cursor: bool, prefix: Optional[str] = None, manifest: bool = True,
+                 annotate: Optional[dict] = None) -> None:
         self.id = recording_id
         self.hints = hints
         self.features = features
@@ -243,6 +261,8 @@ class Video:
         self.requested_at = datetime.now(timezone.utc)
         self.streams = streams
         self.cursor = cursor
+        self.annotate = annotate
+        self.annotations = annotating.Annotations() if annotate is not None else None
         self.segments: list[_Segment] = []
         self.encoder: Optional[_Encoder] = None
         self.ended_by: Optional[str] = None
@@ -341,15 +361,16 @@ class Video:
             recording_id=self.id, scope=self.hints.scope, format=MP4, fps=self.hints.fps, cursor=self.cursor,
             source="stream" if self.streams else "capture", started_at=entries[0].started_at if entries else None,
             ended_at=entries[-1].ended_at if entries else None, ended_by=self.ended_by, segments=entries,
-            error=self.error if self.ended_by == "error" else None).wire()
+            error=self.error if self.ended_by == "error" else None, annotate=self.annotate).wire()
         if uploader is not None and self.uploads_manifest:  # beside the segments, so a reader who didn't end the
             with contextlib.suppress(Exception):  # recording finds it
                 await uploader.upload(f"{self.prefix}/{MANIFEST}", json.dumps(manifest).encode())
         return manifest
 
     async def _add_frame(self, item: RecordedFrame) -> None:
-        frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge)
         at = item.captured_at
+        marks = self.annotations.showing(at) if self.annotations is not None else []
+        frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge, marks, at)
         if self.encoder is not None and ((frame.width, frame.height) != self.encoder.size
                                          or (at - self.encoder.last_at).total_seconds() > GAP_S
                                          or (at - self.encoder.started_at).total_seconds() >= self.hints.max_segment_s):
@@ -528,8 +549,11 @@ def _draw_pointer(image: PILImage.Image, x: float, y: float) -> None:
     ImageDraw.Draw(image).polygon([(x + dx, y + dy) for dx, dy in arrow], fill=(0, 0, 0), outline=(255, 255, 255))
 
 
-def _video_frame(image: Any, max_edge: Optional[int]) -> Any:
-    """``image`` as a ``yuv420p`` frame of even size, its longer edge at most ``max_edge``."""
+def _video_frame(image: Any, max_edge: Optional[int], marks: list = (), at: Optional[datetime] = None) -> Any:
+    """``image`` as a ``yuv420p`` frame of even size, its longer edge at most ``max_edge``, with ``marks`` drawn as a
+    frame captured ``at`` shows them."""
+    if marks:
+        image = annotating.draw(image, marks, at)
     frame = image if isinstance(image, av.VideoFrame) else av.VideoFrame.from_image(image.convert("RGB"))
     width, height = frame.width, frame.height
     if max_edge is not None and max(width, height) > max_edge:

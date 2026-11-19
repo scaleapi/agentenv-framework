@@ -341,3 +341,37 @@ async def test_a_start_without_a_child_env_reads_the_envs_own_card_as_before(sto
     assert entry["error"].startswith("EnvCapabilityUnsupported: env 'shop' does not offer 'start' on ")
     context = await _start().execute(_context(_Computer(store)))
     assert "environment_name" not in context.metadata[RECORDINGS_KEY]["desk"]
+
+
+_ANNOTATING = {**_CARD, "capabilities": {"extensions": [{**_CARD["capabilities"]["extensions"][0], "params": {
+    **_CARD["capabilities"]["extensions"][0]["params"], "annotate": {"options": []}}}]}}
+
+
+@pytest.mark.asyncio
+async def test_annotate_reaches_the_driver_only_when_a_step_asks_for_it(store):
+    computer, plain = _Computer(store), _Computer(store)
+    computer.environment_card = plain.environment_card = _ANNOTATING
+    await _start(annotate={}).execute(_context(computer))
+    await _start().execute(_context(plain))
+
+    [(_, annotated)], [(_, unannotated)] = computer.calls, plain.calls
+    assert annotated["annotate"] == {} and "annotate" not in unannotated
+
+
+@pytest.mark.asyncio
+async def test_annotating_on_a_driver_whose_card_lists_no_annotate_fails_the_start_best_effort_or_fatally(store):
+    computer = _Computer(store)
+    context = await _start(annotate={}).execute(_context(computer))
+    entry = context.metadata[RECORDINGS_KEY]["desk"]
+
+    assert entry["state"] == "failed" and "can't annotate a recording" in entry["error"] and computer.calls == []
+    with pytest.raises(RuntimeError, match="lists no annotate"):
+        await _start(annotate={}, fail_task_on_error=True).execute(_context(_Computer(store)))
+
+
+def test_annotate_round_trips_only_when_set_and_is_an_object():
+    annotated = _start(annotate={})
+    assert StartComputerRecordingTaskStep.from_dict(annotated.to_dict()).annotate == {}
+    assert "annotate" not in _start().to_dict()
+    with pytest.raises(ValueError, match="annotate is an object of options"):
+        _start(annotate=True)

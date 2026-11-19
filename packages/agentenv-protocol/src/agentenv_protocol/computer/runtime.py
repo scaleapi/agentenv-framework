@@ -7,13 +7,14 @@ import asyncio
 import contextlib
 from collections import OrderedDict
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from mcp.types import CallToolResult
 
 from ..errors import AgentEnvError
 from ..tool_context import ToolContext
-from . import apps
+from . import annotate, apps
 from .errors import DeliveryFailed, DeviceUnavailable, DialogOpen, InputBusy, Internal
 from .frames import Frame, FrameStore, to_pil
 from .operations import DIALOG_BLOCKS, GROUPS, INPUT, Display, Image, PageState, ReadyCheck, resolve
@@ -124,6 +125,8 @@ class ComputerRuntime:
                 args, summary = (sx, sy, *args), f"{summary} at the pointer, screen ({sx}, {sy})"
             others = self.queue.others_since(frame.inputs, identity) if frame is not None else 0
             effect = None
+            if self.recordings.annotating():
+                await self._annotate(ctx, operation, args, move_to, repeat, hold)
             try:
                 if move_to is not None:
                     await self.call("pointer_move", *move_to)
@@ -155,6 +158,18 @@ class ComputerRuntime:
             return send(result)
         result.summary, result.frame = f"{result.summary}, then captured {new.id}{new.note()}", new.result()
         return send(result, new.encode(), new.captured_at)
+
+    async def _annotate(self, ctx: ToolContext, operation: str, args: tuple, move_to: tuple | None, repeat: int,
+                        hold: tuple | None) -> None:
+        """Mark an input on the recordings that draw them, as it is about to be delivered: on the display it acts on,
+        at its point, or for a press or release with none at the pointer."""
+        display = await self.display_now()
+        point = move_to
+        if point is None and operation in ("pointer_down", "pointer_up") and self.has("pointer"):
+            point = await self.pointer()
+        self.recordings.note(annotate.input_marks(
+            operation, args, role=ctx.role, at=datetime.now(timezone.utc), size=(display.width, display.height),
+            point=point, repeat=repeat, hold_ms=hold[0] if hold is not None else None))
 
     async def _hold_for(self, ms: int, keys: list[str]) -> None:
         """Keep ``keys`` down for ``ms``, then release them, also when the call is cancelled meanwhile."""

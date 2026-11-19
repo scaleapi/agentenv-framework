@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -14,12 +15,12 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
 
-from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
-                                     AgentEnvError, _error_response, _marked_members, add_websocket_route,
-                                     control_check, environment_card)
+from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, _TOOL_OPTIONS_ATTR, AgentEnvEnvironment,
+                                     AgentEnvFastMCPApplication, AgentEnvError, _error_response, _marked_members,
+                                     add_websocket_route, control_check, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import _linux, apps, card, svc
+from . import _linux, annotate, apps, card, svc
 from .checks import check_features, check_names
 from .dataplane import DataPlane
 from .errors import TargetUnavailable
@@ -127,10 +128,28 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return AgentEnvFastMCPApplication(card, driver).environment_card
 
     def on_tool_call(self, context: ToolContext) -> Any:
-        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has: a
-        subclass that has its own calls this one too."""
+        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has, and
+        draw a call to one of the driver's own or forwarded tools that may act on the recordings that draw inputs,
+        since it acts without ``act``, which marks the SDK's: a subclass that has its own calls this one too."""
         apps.note_agent_acted(self._computer.apps)
+        if self._computer.recordings.annotating():
+            name = self._computer_prefix.own(context.tool)
+            if name not in COMPUTER_TOOLS and self._computer_tool_acts(name):
+                self._computer.recordings.note([annotate.tool_mark(name, context.arguments, role=context.role,
+                                                                   at=datetime.now(timezone.utc))])
         return None
+
+    def _computer_tool_acts(self, name: str) -> bool:
+        """Whether the driver's own or forwarded tool ``name`` may act: its annotations don't say it only reads."""
+        acting = self.__dict__.get("_computer_acting")
+        if acting is None:
+            acting = {forwarded.tool.name: not _reads_only(forwarded.annotations)
+                      for forwarded in self.forwarded_tools()}
+            for member, marker in _marked_members(self, _TOOL_ATTR):
+                options = getattr(member, _TOOL_OPTIONS_ATTR, None)
+                acting[marker.name] = not _reads_only(options.annotations if options is not None else None)
+            self._computer_acting = acting
+        return acting.get(name, True)
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
@@ -259,3 +278,9 @@ def computer_driver(name: str | None = None, *, supports: list | None = None) ->
             cls.supports = list(supports)
         return environment_card(name=name)(cls) if name else cls
     return deco
+
+
+def _reads_only(annotations: Any) -> bool:
+    """Whether a tool's MCP annotations, as a dict or a ``ToolAnnotations``, say it only reads."""
+    hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else getattr(annotations, "readOnlyHint", None)
+    return hint is True
