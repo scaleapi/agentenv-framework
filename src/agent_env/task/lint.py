@@ -13,7 +13,7 @@ from agent_env.entity.refs import RefRole, ref_sites
 from agent_env.store.ids import is_local_id
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_step import TaskStep, attach_base_fields
+from agent_env.task_step.task_step import StepRole, TaskStep, attach_base_fields
 from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, trajectory_mistakes_key
@@ -65,9 +65,22 @@ def errors(findings: Iterable[Finding]) -> list[Finding]:
 
 
 def is_verifier(step: TaskStep) -> bool:
-    """A step that grades: one on the VerifierTaskStep base, or one that still writes a legacy entry under its
-    ``verifier_id`` itself, as agentenvhub-sdk's do until they move onto the base."""
-    return isinstance(step, VerifierTaskStep) or bool(getattr(step, "verifier_id", None))
+    """A step that grades: one on the VerifierTaskStep base, or one that still writes its own legacy entry, a grader (as
+    agent-env's validators are) or a step with a ``verifier_id`` (as agentenvhub-sdk's are)."""
+    return (isinstance(step, VerifierTaskStep) or step.step_role is StepRole.GRADER
+            or bool(getattr(step, "verifier_id", None)))
+
+
+def _own(step: TaskStep) -> bool:
+    """One of agent-env's own steps, whose behaviour lint knows."""
+    return type(step).__module__.partition(".")[0] == "agent_env"
+
+
+def _seen_into(step: TaskStep) -> bool:
+    """A step whose verification writes lint knows: one on the base writes under its ``verifier_id``, and another of
+    agent-env's own writes none unless it's a grader, whose keys are its own. An outside step off the base may write
+    any key, as agentenvhub-sdk's ``run_lighthouse_audit`` writes under its ``verification_id``."""
+    return isinstance(step, VerifierTaskStep) or (_own(step) and step.step_role is not StepRole.GRADER)
 
 
 class _Reads(dict):
@@ -152,20 +165,23 @@ def _headlines(task: Task) -> Iterator[Finding]:
         step = by_id.get(headline)
         if step is None:
             continue  # Task refuses it when it's built
-        if not is_verifier(step):
+        if isinstance(step, VerifierTaskStep):
+            continue
+        if _own(step) and not is_verifier(step):
             yield Finding(Severity.ERROR, "headline-not-a-verifier",
                           f"headline_verifiers names {headline!r}, a {step.type} step, which grades nothing")
-        elif not isinstance(step, VerifierTaskStep):
+        else:
             yield Finding(Severity.WARNING, "headline-without-grade",
-                          f"headline_verifiers names {headline!r}, a {step.type} step that writes no named grade yet, "
+                          f"headline_verifiers names {headline!r}, a {step.type} step that writes no named grade, "
                           "so a run's result will read it as ungraded")
 
 
 def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
-    """An aggregate source that no verifier in the task writes, which fails the aggregate when it grades."""
-    written = set()
+    """An aggregate source that no verifier in the task writes, which fails the aggregate when it grades: an error when
+    lint sees every key the task's steps write, else a warning naming the steps it can't see into."""
+    written, unseen = set(), [step.id for step in steps if not _seen_into(step)]
     for step in steps:
-        if is_verifier(step) and isinstance(step.verifier_id, str):
+        if isinstance(getattr(step, "verifier_id", None), str):
             written.add(step.verifier_id)
             if (isinstance(step, RubricsVerifierTaskStep)
                     and step.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES):
@@ -173,10 +189,15 @@ def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
     for step in steps:
         if isinstance(step, AggregateVerifiersTaskStep):
             missing = [source for source in step.verifier_ids if source not in written]
-            if missing:
+            if missing and not unseen:
                 yield Finding(Severity.ERROR, "aggregate-source",
                               f"verifier_ids names {missing!r}, which no verifier in this task writes (it has "
                               f"{sorted(written)})", step.id)
+            elif missing:
+                yield Finding(Severity.WARNING, "aggregate-source",
+                              f"verifier_ids names {missing!r}, which no verifier in this task names as its "
+                              f"verifier_id; unless {unseen!r} write it, under keys lint can't see, the aggregate fails "
+                              "when it grades", step.id)
 
 
 def _unpinned(steps: Sequence[TaskStep]) -> Iterator[Finding]:
@@ -193,7 +214,7 @@ def _unpinned(steps: Sequence[TaskStep]) -> Iterator[Finding]:
 
 def _coverage(task: Task) -> Iterator[Finding]:
     verifiers = [step for step in task.steps if is_verifier(step)]
-    if not verifiers:
+    if not verifiers and all(_own(step) for step in task.steps):
         yield Finding(Severity.WARNING, "no-verifier", "no step grades this task, so a run has no score")
     elif len(verifiers) > 1 and not task.headline_verifiers:
         yield Finding(Severity.WARNING, "no-headlines", _no_headlines(verifiers))
@@ -202,7 +223,7 @@ def _coverage(task: Task) -> Iterator[Finding]:
 def _no_headlines(verifiers: list[TaskStep]) -> str:
     """Several verifiers and no headline: every grade is top-line. Name the aggregate that covers the others, if one
     does."""
-    ids = {step.verifier_id for step in verifiers if isinstance(step.verifier_id, str)}
+    ids = {step.verifier_id for step in verifiers if isinstance(getattr(step, "verifier_id", None), str)}
     covering = [step.id for step in verifiers if isinstance(step, AggregateVerifiersTaskStep)
                 and ids - {step.verifier_id} <= set(step.verifier_ids)]
     suggestion = (f"; {covering[0]!r} aggregates the others, so name it in headline_verifiers" if covering

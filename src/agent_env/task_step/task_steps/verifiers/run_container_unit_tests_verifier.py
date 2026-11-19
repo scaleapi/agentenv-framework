@@ -146,11 +146,14 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
                              f"to its session user's home, not {absolute}")
 
     def config_problems(self) -> list[str]:
-        """A negative ``timeout_sec``, which ``timeout`` refuses, so the tests never run."""
+        """A ``command`` or ``timeout_sec`` a run can't use, and a negative ``timeout_sec``, which ``timeout``
+        refuses, so the tests never run."""
         problems = super().config_problems()
         if not isinstance(self.command, str):
             problems.append(f"command must be a string, not {type(self.command).__name__}")
-        if self.timeout_sec < 0:
+        if not isinstance(self.timeout_sec, (int, float)) or isinstance(self.timeout_sec, bool):
+            problems.append(f"timeout_sec must be a number of seconds, not {self.timeout_sec!r}")
+        elif self.timeout_sec < 0:
             problems.append(f"timeout_sec {self.timeout_sec} is negative; give the tests at least 1 s")
         return problems
 

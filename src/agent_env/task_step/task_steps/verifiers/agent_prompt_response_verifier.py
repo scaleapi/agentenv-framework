@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStepDependency
@@ -153,17 +153,24 @@ class AgentPromptResponseVerifierTaskStep(VerifierTaskStep):
         raise RuntimeError(f"unhandled criterion type {rtype}")
 
 
-def _criterion_problems(criterion: dict) -> list[str]:
+def _criterion_problems(criterion: Any) -> list[str]:
+    if not isinstance(criterion, dict):
+        return [f"must be an object, not {type(criterion).__name__}"]
     rtype = criterion.get("type")
-    if rtype not in _HANDLED_TYPES:
+    if not isinstance(rtype, str) or rtype not in _HANDLED_TYPES:
         return [f"unknown type {rtype!r}; handled types: {sorted(_HANDLED_TYPES)}"]
     if rtype == "response_contains":
-        return [] if criterion.get("needles") else ["response_contains needs non-empty needles"]
+        needles = criterion.get("needles")
+        if isinstance(needles, list) and needles and all(isinstance(needle, str) for needle in needles):
+            return []
+        return [f"response_contains needs non-empty needles, a list of strings, not {needles!r}"]
     pattern = criterion.get("pattern")
-    if not pattern:
-        return ["response_regex_present needs a non-empty pattern"]
+    if not (isinstance(pattern, str) and pattern):
+        return [f"response_regex_present needs a non-empty pattern, a string, not {pattern!r}"]
     names = criterion.get("flags")
-    if names is not None and (unknown := [n for n in names if not isinstance(getattr(re, str(n), None), re.RegexFlag)]):
+    if names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)):
+        return [f"flags must be a list of re flag names, not {names!r}"]
+    if unknown := [name for name in names or () if not isinstance(getattr(re, name, None), re.RegexFlag)]:
         return [f"flags {unknown!r} aren't re flags"]
     flags = re.DOTALL if names is None else 0
     for name in names or ():

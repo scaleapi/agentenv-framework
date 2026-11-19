@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from agent_env.bundle import BundleKind, parse_bundle
 from agent_env.bundle.installed import CORE, installed_bundles
 from agent_env.bundle.plan import plan_bundle
-from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.resolve import build_step, resolve_bundle
 from agent_env.cli import cli
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
@@ -31,6 +31,8 @@ TESTS = {"id": "tests", "type": "verify_sandbox", "sandbox_name": "box", "verifi
 MORE = {**TESTS, "id": "more", "verifier_id": "more"}
 FINAL = {"id": "final", "type": "aggregate_verifiers", "verifier_id": "final", "verifier_ids": ["tests", "more"]}
 NOTES = {"id": "notes", "type": "load_artifact", "sandbox_name": "box", "artifact_id": "shared-notes"}
+# A validator: it grades, under a key of its own, with no verifier_id.
+ASSESS = {"id": "assess", "type": "verify_mcp_env_assessment", "env_id": "mcp", "prompt_id": "ask"}
 
 
 def _task(*steps, **fields) -> Task:
@@ -55,7 +57,7 @@ def test_a_verifier_config_that_fails_when_it_grades_is_an_error_and_one_a_run_s
     unknown = {**TESTS, "criteria": [{"type": "probe_file_smells", "criterion": "has it"}]}
 
     assert _found(_task(BOX, no_paths)) == [("error", "step-config", "step 'tests': criterion #0: probe_file_exists "
-                                                                       "needs paths")]
+                                             "needs paths, a non-empty list of strings, not None")]
     assert _found(_task(BOX, unknown)) == [("warning", "step-config", "step 'tests': criterion #0: type "
                                             "'probe_file_smells' isn't one verify_sandbox checks, so a run skips it; it "
                                             "checks ['bash_cmd_succeeds', 'probe_dir_exists', 'probe_file_contains', "
@@ -81,14 +83,73 @@ def test_an_agent_prompt_response_criterion_a_run_would_refuse_is_a_config_probl
     assert fine.config_problems() == []
 
 
+@pytest.mark.parametrize(("criterion", "problem"), [
+    (None, "must be an object, not NoneType"),
+    ({"type": ["response_contains"]}, "unknown type ['response_contains']"),
+    ({"type": "response_contains", "needles": "abc"}, "response_contains needs non-empty needles, a list of strings"),
+    ({"type": "response_contains", "needles": [7]}, "response_contains needs non-empty needles, a list of strings"),
+    ({"type": "response_regex_present", "pattern": 7}, "response_regex_present needs a non-empty pattern, a string"),
+    ({"type": "response_regex_present", "pattern": "x", "flags": "IGNORECASE"}, "flags must be a list of re flag"),
+])
+def test_an_agent_prompt_response_criterion_of_the_wrong_type_is_a_config_problem(criterion, problem):
+    step = AgentPromptResponseVerifierTaskStep(id="check", version=1, prompt_id="ask", criteria=[criterion])
+
+    (found,) = step.config_problems()
+    assert found.startswith(f"criterion #0: {problem}")
+
+
+@pytest.mark.parametrize(("criterion", "problem"), [
+    ({"type": ["probe_file_exists"], "criterion": "x"}, "type must be a string, not ['probe_file_exists']"),
+    ({"type": "probe_file_exists", "criterion": "x", "paths": "a.txt"},
+     "probe_file_exists needs paths, a non-empty list of strings, not 'a.txt'"),
+    ({"type": "probe_file_contains", "criterion": "x", "paths": ["a.txt"], "expected": 7},
+     "expected must be a string, not 7"),
+    ({"type": "bash_cmd_succeeds", "criterion": "x", "bash_cmd": ["make"]},
+     "bash_cmd_succeeds needs a bash_cmd, a non-empty string, not ['make']"),
+])
+def test_a_verify_sandbox_criterion_of_the_wrong_type_is_a_config_problem_and_no_warning(criterion, problem):
+    step = build_step({**TESTS, "criteria": [criterion]})
+
+    assert (step.config_problems(), step.config_warnings()) == ([f"criterion #0: {problem}"], [])
+
+
+@pytest.mark.parametrize(("timeout", "problems"), [
+    ("300", ["timeout_sec must be a number of seconds, not '300'"]),
+    (None, ["timeout_sec must be a number of seconds, not None"]),
+    (True, ["timeout_sec must be a number of seconds, not True"]),
+    (1.5, []),
+])
+def test_a_unit_test_timeout_is_a_number_of_seconds(timeout, problems):
+    tests = RunContainerUnitTestsVerifierTaskStep(id="tests", version=1, sandbox_name="b", container_name="c",
+                                                  command="pytest", timeout_sec=timeout)
+
+    assert tests.config_problems() == problems
+
+
+def test_the_cli_names_each_value_of_the_wrong_type_in_a_task_file_and_exits_1(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps([BOX, {**TESTS, "criteria": [None, {"type": "probe_file_exists", "paths": "a.txt"}]},
+                                {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask",
+                                 "criteria": [{"type": "response_regex_present", "pattern": 7}]}]))
+
+    result = CliRunner().invoke(cli, ["task", "lint", str(path)])
+
+    assert result.exit_code == 1, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert [line.split(": ", 1)[1] for line in result.output.splitlines() if line.startswith("  - ")] == [
+        "step 'tests': criterion #0: must be an object, not NoneType",
+        "step 'tests': criterion #1: probe_file_exists needs paths, a non-empty list of strings, not 'a.txt'",
+        "step 'check': criterion #0: response_regex_present needs a non-empty pattern, a string, not 7"]
+
+
 def test_a_value_of_the_wrong_type_a_verifier_would_trip_on_is_a_config_problem():
     criteria = [{"type": "probe_file_exists", "criterion": "has it", "paths": ["a.txt"]}, None, "probe"]
     tests = RunContainerUnitTestsVerifierTaskStep(id="tests", version=1, sandbox_name="b", container_name="c",
                                                   command=["pytest"], verifier_id=["tests"])
 
     assert _found(_task(BOX, {**TESTS, "criteria": criteria})) == [
-        ("error", "step-config", "step 'tests': criterion #1 must be an object, not NoneType"),
-        ("error", "step-config", "step 'tests': criterion #2 must be an object, not str")]
+        ("error", "step-config", "step 'tests': criterion #1: must be an object, not NoneType"),
+        ("error", "step-config", "step 'tests': criterion #2: must be an object, not str")]
     assert tests.config_problems() == ["verifier_id must be a string, not list", "command must be a string, not list"]
     assert tests.config_warnings() == []
     assert _found(Task(id="t", version=1, steps=[*_task(BOX).steps, tests])) == [
@@ -124,23 +185,50 @@ class _Legacy(TaskStep):
         return context
 
 
+class _Outside(TaskStep):
+    """An outside step off the base with no verifier_id, as agentenvhub-sdk's run_lighthouse_audit, which writes its
+    entry under a verification_id: lint can't tell what it writes."""
+
+    type: ClassVar[str] = "outside_lint_test"
+    entity_refs = ()
+
+    def __init__(self, id):
+        super().__init__(id, 1)
+
+    async def execute(self, context):
+        return context
+
+
 def test_a_headline_that_grades_nothing_is_an_error_and_one_that_writes_no_named_grade_a_warning():
     built = _task(BOX, TESTS).steps
     legacy = Task(id="t", version=1, steps=[*built, _Legacy("cua")], headline_verifiers=["cua"])
+    outside = Task(id="t", version=1, steps=[*built, _Outside("audit")], headline_verifiers=["audit"])
 
     assert ("error", "headline-not-a-verifier",
             "headline_verifiers names 'box', a deploy_sandbox step, which grades nothing") in _found(
         _task(BOX, TESTS, headline_verifiers=["box"]))
-    assert ("warning", "headline-without-grade",
-            "headline_verifiers names 'cua', a legacy_lint_test step that writes no named grade yet, so a run's result "
-            "will read it as ungraded") in _found(legacy)
+    for task, (name, kind) in [(legacy, ("cua", "legacy_lint_test")), (outside, ("audit", "outside_lint_test")),
+                               (_task(BOX, ASSESS, headline_verifiers=["assess"]),
+                                ("assess", "verify_mcp_env_assessment"))]:
+        assert ("warning", "headline-without-grade",
+                f"headline_verifiers names {name!r}, a {kind} step that writes no named grade, so a run's result will "
+                "read it as ungraded") in _found(task)
     assert _found(_task(BOX, TESTS, headline_verifiers=["tests"])) == []
 
 
-def test_an_aggregate_source_no_verifier_writes_is_an_error():
+def test_an_aggregate_source_no_verifier_writes_is_an_error_unless_a_step_lint_cant_see_into_may_write_it():
+    on_assessment = {**FINAL, "verifier_ids": ["tests", "mcp_tool_correctness"]}
+
     assert _found(_task(BOX, TESTS, FINAL, headline_verifiers=["final"])) == [(
         "error", "aggregate-source", "step 'final': verifier_ids names ['more'], which no verifier in this task writes "
                                      "(it has ['final', 'tests'])")]
+    assert ("warning", "aggregate-source",
+            "step 'final': verifier_ids names ['mcp_tool_correctness'], which no verifier in this task names as its "
+            "verifier_id; unless ['assess'] write it, under keys lint can't see, the aggregate fails when it grades"
+            ) in _found(_task(BOX, ASSESS, TESTS, on_assessment, headline_verifiers=["final"]))
+    outside = Task(id="t", version=1, steps=[*_task(BOX, TESTS, FINAL).steps, _Outside("audit")],
+                   headline_verifiers=["final"])
+    assert [f.severity for f in lint(outside) if f.rule == "aggregate-source"] == [Severity.WARNING]
     assert _found(_task(BOX, TESTS, MORE, FINAL, headline_verifiers=["final"])) == []
 
 
@@ -157,6 +245,8 @@ def test_a_store_entity_read_with_no_version_warns_and_a_pinned_or_local_one_doe
 
 def test_a_task_that_grades_nothing_warns_and_several_grades_without_a_headline_name_the_covering_aggregate():
     assert _found(_task(BOX)) == [("warning", "no-verifier", "no step grades this task, so a run has no score")]
+    assert _found(_task(BOX, ASSESS)) == []
+    assert _found(Task(id="t", version=1, steps=[*_task(BOX).steps, _Outside("audit")])) == []
     assert _found(_task(BOX, TESTS, MORE, FINAL)) == [(
         "warning", "no-headlines", "3 verifiers and no headline_verifiers, so every grade is top-line and anything that "
                                    "needs one number must name one; 'final' aggregates the others, so name it in "
