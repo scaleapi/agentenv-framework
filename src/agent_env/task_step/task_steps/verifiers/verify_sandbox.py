@@ -36,9 +36,10 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.task_step.context import StepContextError, TaskStepContext
-from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierTaskStep
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,8 @@ def _outcome(passed: bool, justification: str) -> dict:
     return {"score": 1.0 if passed else 0.0, "passed": passed, "justification": justification}
 
 
-class VerifySandboxTaskStep(TaskStep):
+class VerifySandboxTaskStep(VerifierTaskStep):
     type: ClassVar[str] = "verify_sandbox"
-    step_role = StepRole.GRADER
     entity_refs = ()
 
     def __init__(
@@ -70,10 +70,11 @@ class VerifySandboxTaskStep(TaskStep):
         sandbox_name: Optional[str] = None,
         base_dir: str = _DEFAULT_BASE_DIR,
         shell_timeout_seconds: int = _DEFAULT_SHELL_TIMEOUT_S,
-        score_aggregator: Optional[ScoreAggregator] = None,
+        score_aggregator: Optional[ScoreAggregator | str] = None,
         verifier_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        min_passing_score: Optional[float] = None,
     ):
         # A blank sandbox_name counts as unset, like a blank agent_name: forms and TOML can't send null.
         if isinstance(sandbox_name, str) and not sandbox_name.strip():
@@ -81,16 +82,14 @@ class VerifySandboxTaskStep(TaskStep):
         # A defaulted agent_name is tolerated: every step serialized before `sandbox_name` carries one.
         if sandbox_name is not None and agent_name and agent_name != TaskStep.DEFAULT_AGENT_NAME:
             raise ValueError("verify_sandbox: set either `agent_name` or `sandbox_name`, not both")
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id or uuid.uuid4().hex, score_aggregator=score_aggregator,
+                         min_passing_score=min_passing_score)
         self.criteria = list(criteria or [])
         self.sandbox_name = sandbox_name
         self.agent_name = None if sandbox_name is not None else agent_name or TaskStep.DEFAULT_AGENT_NAME
         self.base_dir = base_dir
         self.shell_timeout_seconds = shell_timeout_seconds
-        if isinstance(score_aggregator, str):
-            score_aggregator = ScoreAggregator(score_aggregator)
-        self.score_aggregator = score_aggregator or ScoreAggregator.ALL_PASS
-        self.verifier_id = verifier_id or uuid.uuid4().hex
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -106,7 +105,6 @@ class VerifySandboxTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> "VerifySandboxTaskStep":
-        raw_agg = data.get("score_aggregator")
         return cls(
             **cls._base_from_dict(data),
             criteria=data.get("criteria"),
@@ -114,11 +112,9 @@ class VerifySandboxTaskStep(TaskStep):
             sandbox_name=data.get("sandbox_name"),
             base_dir=data.get("base_dir", _DEFAULT_BASE_DIR),
             shell_timeout_seconds=data.get("shell_timeout_seconds", _DEFAULT_SHELL_TIMEOUT_S),
-            score_aggregator=ScoreAggregator(raw_agg) if raw_agg else None,
-            verifier_id=data.get("verifier_id"),
         )
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def verify(self, context: TaskStepContext) -> Verification:
         on_agent = self.sandbox_name is None
         if on_agent:
             agent, sandbox = await self._agent_sandbox(context)
@@ -176,18 +172,11 @@ class VerifySandboxTaskStep(TaskStep):
         # Aggregate over only the rows we actually evaluated.
         non_skipped = [r for r in results if not r.get("skipped")]
         score = aggregate_score(non_skipped, self.score_aggregator)
-
-        if "verifications" not in context.metadata:
-            context.metadata["verifications"] = {}
-        context.metadata["verifications"][self.verifier_id] = {
-            "results": results,
-            "score": score,
-        }
         logger.info(
             f"Verification '{self.verifier_id}': "
             f"{len(non_skipped)}/{len(self.criteria)} criteria evaluated, score={score}"
         )
-        return context
+        return Verification(criteria=results, score=score)
 
     async def _agent_sandbox(self, context: TaskStepContext):
         agent = next(

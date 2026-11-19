@@ -39,6 +39,36 @@ def store(monkeypatch):
     yield put_step, put_task
 
 
+def _object_file(tmp_path, **fields):
+    path = tmp_path / "task.json"
+    path.write_text(json.dumps({"steps": json.loads(_task_file(tmp_path).read_text()), **fields}))
+    return path
+
+
+def test_an_object_file_saves_its_headline_verifiers_with_the_task(tmp_path, store):
+    _, put_task = store
+    with patch("agent_env.artifact.Artifact.get", side_effect=NotFoundError("nope")):
+        result = CliRunner().invoke(create, [str(_object_file(tmp_path, headline_verifiers=["c1"])), "--id", "t",
+                                             "--skip-validation"])
+
+    assert result.exit_code == 0, result.output
+    assert put_task.call_args.kwargs["headline_verifiers"] == ["c1"]
+
+
+@pytest.mark.parametrize(("fields", "message"), [
+    ({"headline": ["c1"]}, "unknown key 'headline'; a task file's object takes steps and headline_verifiers"),
+    ({"headline_verifiers": ["final"]}, "headline_verifiers names no step in this task: ['final']"),
+], ids=["unknown-key", "unknown-headline"])
+def test_an_object_file_that_is_refused_persists_nothing(tmp_path, store, fields, message):
+    put_step, put_task = store
+
+    result = CliRunner().invoke(create, [str(_object_file(tmp_path, **fields)), "--id", "t", "--skip-validation"])
+
+    assert result.exit_code == 1 and message in result.output
+    put_step.assert_not_called()
+    put_task.assert_not_called()
+
+
 def _run(tmp_path, *extra):
     return CliRunner().invoke(create, [
         str(_task_file(tmp_path)), "--id", "t", *extra,

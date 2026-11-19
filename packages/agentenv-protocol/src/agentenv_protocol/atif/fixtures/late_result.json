@@ -1,0 +1,145 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-7f3a",
+ "agent": {
+  "name": "toy",
+  "version": "1.0",
+  "model_name": "claude-opus-5-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-04T17:00:00.000Z",
+   "source": "user",
+   "message": "Run the slow suite and check src/app.py meanwhile.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-7f3a",
+     "task_id": "task-l1",
+     "message_id": "msg-l1",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_07",
+     "function_name": "Task",
+     "arguments": {
+      "description": "run the slow suite",
+      "run_in_background": true
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_07",
+      "content": "312 passed",
+      "extra": {
+       "agentenv": {
+        "arrived": {
+         "at": "2026-11-04T17:09:12.004Z",
+         "step_id": 3
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 1000,
+    "cached_tokens": 800,
+    "completion_tokens": 50,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 100
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_08",
+     "function_name": "Read",
+     "arguments": {
+      "file_path": "src/app.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_08",
+      "content": "def main(): ..."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 1100,
+    "cached_tokens": 900,
+    "completion_tokens": 40,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 100
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "The suite passes and app.py looks fine.",
+   "metrics": {
+    "prompt_tokens": 1200,
+    "cached_tokens": 1000,
+    "completion_tokens": 30,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 100
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 3300,
+  "total_completion_tokens": 120,
+  "total_cached_tokens": 2700,
+  "total_steps": 4,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 300
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "toy-events/1",
+   "adapter": {
+    "name": "toy-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

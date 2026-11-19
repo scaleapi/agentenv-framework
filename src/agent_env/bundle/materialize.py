@@ -48,7 +48,7 @@ from .authoring import AuthoringContext, staged_build_context
 from .ledger import Ledger, locked_ids, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, artifact_writer, env_writer, unpinned_store_refs
-from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
+from .resolve import BuiltImage, BundleImage, ReferencedImage, ResolvedEntry, build_step
 
 #: How much of each build's reason the problem naming a computer env no deploy can boot quotes: a failed build's reason
 #: holds the build's error, which can run to pages.
@@ -112,10 +112,11 @@ def materialize(
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
     reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
 
-    Each computer env written is composed as ``composing`` says, and so is what one reused has left, as ``agent-env
-    env build`` does; ``on_progress``, when given, is told how each goes, a line at a time with its write. With
-    ``bootable``, as a registration has it, a computer env written or reused whose compose left no build a deploy can
-    boot stops it once every entity is written, before any task or eval, raising BundleError naming each such env.
+    Each computer env written that the run or registration composes (``_composed_envs``) is composed as ``composing``
+    says, and so is what one reused has left, as ``agent-env env build`` does; any other is written uncomposed and
+    composes at its first deploy. ``on_progress``, when given, is told how each goes, a line at a time with its write.
+    With ``bootable``, as a registration has it, a computer env written or reused whose compose left no build a deploy
+    can boot stops it once every entity is written, before any task or eval, raising BundleError naming each such env.
 
     ``ledger`` keeps the rows, this run's in the ``@local`` namespace's store unless given; it also says whether each
     task and eval names the versions it reads (``Ledger.pins_references``) and whether each image the bundle builds is
@@ -130,6 +131,10 @@ def materialize(
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
     done: dict[tuple[str, str], Materialized] = {}
     left: list[str] = []
+    composed = _composed_envs(plan)
+
+    def composes(write: Write) -> bool:
+        return composed is None or write.id in composed
     unbootable: list[str] = []
 
     def through_ledger(write: Write, write_fn: Callable[[], int]) -> None:
@@ -154,13 +159,13 @@ def materialize(
                 through_ledger(write, lambda: _write_pushed_image(plan, write, on_build))
             else:
                 through_ledger(write, lambda: _write_entity(plan, write, here, on_build,
-                                                            _composing(composing, on_progress, write)))
+                                                            _composing(composing, on_progress, write), composes(write)))
             if here and done[_key(write)].reused:
                 _build_reused(plan, write, done[_key(write)].version, on_build)
-            if write.kind is BundleKind.ENV and done[_key(write)].reused and _compose_reused(
+            if write.kind is BundleKind.ENV and composes(write) and done[_key(write)].reused and _compose_reused(
                     write, done[_key(write)].version, _composing(composing, on_progress, write), dry_run):
                 left.append(write.id)
-            if bootable and not dry_run and write.kind is BundleKind.ENV and (
+            if bootable and not dry_run and write.kind is BundleKind.ENV and composes(write) and (
                     why := _unbootable(plan, write, done[_key(write)].version, composing)):
                 unbootable.append(why)
         if unbootable:
@@ -179,7 +184,8 @@ def materialize(
         for write in tasks:
             through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps,
                                                    requires=write.requires,
-                                                   entity_ids=built[write.id].entity_ids).version)
+                                                   entity_ids=built[write.id].entity_ids,
+                                                   headline_verifiers=built[write.id].headline_verifiers).version)
         for write in evals:
             through_ledger(write, lambda: _write_eval(plan, write, written))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked), tuple(left))
@@ -191,7 +197,7 @@ def _composing(composing: Composing, on_progress: Callable[[Write, str], None] |
 
 
 def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Write], None] | None,
-                  composing: Composing) -> int:
+                  composing: Composing, compose: bool = True) -> int:
     if isinstance(write.source, ReferencedImage):
         return _write_referenced_image(plan, write)
     if isinstance(write.source, BuiltImage):
@@ -199,7 +205,7 @@ def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Writ
             return _write_published_image(plan, write)
         return _write_build_context(plan, write, here, on_build)
     if write.kind is BundleKind.ENV:
-        return _write_env(plan, write, composing)
+        return _write_env(plan, write, composing, compose)
     return _WRITERS[write.kind](plan, write)
 
 
@@ -373,11 +379,34 @@ def _unbootable(plan: Plan, write: Write, version: int, composing: Composing) ->
             f"{write.id} --version {version}{how}, and then register again")
 
 
-def _write_env(plan: Plan, write: Write, composing: Composing = Composing()) -> int:
+def _write_env(plan: Plan, write: Write, composing: Composing = Composing(), compose: bool = True) -> int:
     entry = write.source.entry
     cls = get_env_registry()[entry.type]
     return cls.from_toml(_pinned(plan, write, cls.toml_refs),
-                         AuthoringContext(plan.bundle_of(entry), entry, composing=composing)).version
+                         AuthoringContext(plan.bundle_of(entry), entry, composing=composing, compose=compose)).version
+
+
+def _composed_envs(plan: Plan) -> frozenset[str] | None:
+    """The envs a run or registration of ``plan`` composes: each its tasks deploy, and each those hold but not a
+    computer env's own apps and driver, which run inside it; and each it pulls in from an installed bundle, whose one
+    write every bundle shares. None, every env, for a plan with no tasks, which writes its envs for others to deploy,
+    each alone."""
+    tasks = [write.source for write in plan.writes if write.kind is BundleKind.TASK]
+    if not tasks:
+        return None
+    envs = {write.id: write.source for write in plan.writes
+            if write.kind is BundleKind.ENV and isinstance(write.source, ResolvedEntry)}
+    named = [ref.id for task in tasks for ref in task.references if ref.kind is EntityKind.ENV]
+    deployed: set[str] = set()
+    while named:
+        if (env_id := named.pop()) in deployed:
+            continue
+        deployed.add(env_id)
+        source = envs.get(env_id)
+        cls = get_env_registry().get(source.entry.type) if source is not None else None
+        if source is not None and not (cls is not None and issubclass(cls, ComputerEnv)):
+            named += [ref.id for ref in source.references if ref.kind is EntityKind.ENV]
+    return frozenset(deployed | {env_id for env_id, source in envs.items() if source.entry in plan.origins})
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
@@ -455,7 +484,7 @@ def _build(write: Write, plan: Plan, written: Mapping[tuple[str, str], Materiali
     naming the one it reads."""
     steps = write.source.config if written is None else pinned_steps(plan, write, written)
     return Task(id=write.id, version=None, steps=[build_step(step) for step in steps],
-                entity_ids=write.source.entity_ids)
+                entity_ids=write.source.entity_ids, headline_verifiers=write.source.entry.headline_verifiers)
 
 
 def pinned_steps(plan: Plan, write: Write, written: Mapping[tuple[str, str], Materialized]) -> list[dict]:

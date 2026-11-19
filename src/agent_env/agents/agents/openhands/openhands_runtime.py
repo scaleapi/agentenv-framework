@@ -15,14 +15,13 @@ from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import ActionEvent, Event
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.event.error_classification import FailureKind
-from openhands.sdk.llm.utils.metrics import Metrics
 from openhands.sdk.mcp import MCPServer
 from openhands.sdk.skills.skill import load_skills_from_dir
 from openhands.tools.preset.default import get_default_condenser, get_default_tools
 from pydantic import PrivateAttr
 
 from conversation_run import ConversationRun
-from openhands_agent import Outcome, Turn
+from openhands_agent import Outcome, Turn, turn_usage
 
 # The AgentEnv endpoint is a LiteLLM gateway; this provider prefix sends LiteLLM's requests to it as is.
 _PROVIDER: Final[str] = "litellm_proxy"
@@ -88,29 +87,13 @@ def _agent(turn: Turn) -> Agent:
 
 
 def _usage(agent: Agent, tool_calls: int) -> Usage:
-    """What the turn's LLMs have spent: they are made for the turn, so they start at nothing."""
-    llms = (agent.llm, getattr(agent.condenser, "llm", None))
-    metrics = Metrics()
-    for each in {id(llm.metrics): llm.metrics for llm in llms if llm is not None}.values():
-        metrics.merge(each)
-
-    def spent(name: str) -> int:
-        return getattr(metrics.accumulated_token_usage, name, 0) or 0
-
-    input_tokens, output_tokens = spent("prompt_tokens"), spent("completion_tokens")
-    cost = metrics.accumulated_cost
-    return Usage(
-        tool_call_count=tool_calls,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        cost_usd=cost or None,
-        provider_details={
-            "cache_read_tokens": spent("cache_read_tokens"),
-            "cache_write_tokens": spent("cache_write_tokens"),
-            "reasoning_tokens": spent("reasoning_tokens"),
-        },
-    )
+    """What the turn's LLMs have spent, call by call: they are made for the turn, so they start at nothing. Each
+    response they got has a latency recorded, with or without usage."""
+    llms = {id(llm.metrics): llm for llm in (agent.llm, getattr(agent.condenser, "llm", None)) if llm is not None}
+    calls = [(usage, llm.uses_responses_api()) for llm in llms.values() for usage in llm.metrics.token_usages]
+    responses = sum(len(llm.metrics.response_latencies) for llm in llms.values())
+    cost = sum(llm.metrics.accumulated_cost for llm in llms.values())
+    return turn_usage(calls, responses=responses, tool_calls=tool_calls, cost=cost or None)
 
 
 def _unstarted(exc: Exception) -> Outcome:

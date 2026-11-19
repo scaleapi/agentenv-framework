@@ -93,7 +93,8 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
     url = (agent.a2a_url or agent.api_url).rstrip("/") + path
     try:
         async with httpx.AsyncClient() as client:
-            answer = await client.post(url, json=body, timeout=timeout, headers=sandbox_request_headers_for_url(url))
+            answer = await client.post(url, json=body, timeout=timeout,
+                                       headers={**sandbox_request_headers_for_url(url), **agent.control_headers})
     except httpx.HTTPError as e:
         why = f"({type(e).__name__}): {e}"
     else:
