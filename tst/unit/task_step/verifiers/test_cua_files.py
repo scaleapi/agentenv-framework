@@ -2,12 +2,14 @@
 dumped as text, text as it is and cut at the limit, anything else by its size and digest, and a format whose library
 isn't installed, a file its library can't read, or an Office file that expands past the limit, named as not rendered;
 a long PDF read up to its page limit; a damaged one named as unreadable; and a rendering in its own process, killed when
-it runs too long and named as not rendered when it fails."""
+it runs too long or its grade is cancelled, and named as not rendered when it fails."""
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import io
+import os
 import zipfile
 
 import docx
@@ -179,3 +181,21 @@ async def test_a_rendering_that_runs_too_long_or_fails_is_named_not_rendered(mon
     shown = await render_isolated("memo.docx", _docx(), 1000)
 
     assert shown.kind == "unrendered" and problem in shown.text
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_rendering_kills_its_process(monkeypatch, tmp_path):
+    pid_file = tmp_path / "pid"
+    monkeypatch.setattr(cua_files, "RENDER_COMMAND", ("sh", "-c", f"echo $$ > {pid_file}; exec sleep 30"))
+
+    rendering = asyncio.ensure_future(render_isolated("memo.docx", b"x", 1000))
+    for _ in range(100):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.02)
+    rendering.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await rendering
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)

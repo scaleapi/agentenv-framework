@@ -100,17 +100,20 @@ def _check_expansion(data: bytes) -> None:
 
 async def render_isolated(name: str, data: bytes, max_chars: int) -> Rendered:
     """``render`` in a child process (``RENDER_COMMAND``) held to ``RENDER_MEMORY_BYTES`` and killed after
-    ``RENDER_TIMEOUT_S``; a file whose rendering ran out of either is named as not rendered."""
+    ``RENDER_TIMEOUT_S``; a file whose rendering ran out of either is named as not rendered. The child is killed
+    whenever the wait ends early, a cancelled grade included, so none outlives its rendering."""
     child = await asyncio.create_subprocess_exec(
         *RENDER_COMMAND, name, str(max_chars), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, preexec_fn=_hold_memory)
     try:
         out, _ = await asyncio.wait_for(child.communicate(data), RENDER_TIMEOUT_S)
     except TimeoutError:
-        child.kill()
-        await child.wait()
         return Rendered("unrendered", f"(file of {len(data)} bytes, not rendered: rendering it took over "
                                       f"{RENDER_TIMEOUT_S:g} s)")
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await asyncio.shield(child.wait())
     if child.returncode != 0:
         return Rendered("unrendered", f"(file of {len(data)} bytes, not rendered: rendering it ran out of memory or "
                                       f"failed, exit {child.returncode})")
