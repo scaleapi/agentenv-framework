@@ -163,17 +163,17 @@ class HookEnv:
 class _Answer:
     """The user side's answer this turn: asked at most once, then the same for every later call."""
 
-    def __init__(self, ask_user: Callable[[], Awaitable[Answer]],
+    def __init__(self, ask_user: Callable[..., Awaitable[Answer]],
                  user_triggers: Callable[[], Awaitable[Optional[Answer]]]) -> None:
         self.value: Optional[Answer] = None
         self._ask_user = ask_user
         self._user_triggers = user_triggers
         self._asking = asyncio.Lock()
 
-    async def ask_user(self) -> Answer:
+    async def ask_user(self, note: Optional[str] = None) -> Answer:
         async with self._asking:
             if self.value is None:
-                self.value = await self._ask_user()
+                self.value = await (self._ask_user(note=note) if note is not None else self._ask_user())
             return self.value
 
     async def user_triggers(self) -> Optional[Answer]:
@@ -204,9 +204,14 @@ class Turn:
         """A read-only copy of the run's metadata, its secret keys stripped."""
         return MappingProxyType(_strip_redacted_keys(self._context.metadata))
 
-    async def ask_user(self) -> Answer:
-        """Today's user side: agent triggers, then a human or the LLM user sim, which sees only replies sent here."""
-        return await self._answer.ask_user()
+    async def ask_user(self, note: Optional[str] = None) -> Answer:
+        """Today's user side: agent triggers, then a human or the LLM user sim, which sees only replies sent here.
+
+        ``note`` is shown to an LLM user sim with the agent's reply, as something only it sees (what the person would
+        find by checking the work themselves); the agent never sees it. A human peer gets no note."""
+        if note is not None and (not isinstance(note, str) or not note.strip()):
+            raise ValueError("a note for the user side is non-empty text")
+        return await self._answer.ask_user(note)
 
     async def user_triggers(self) -> Optional[Answer]:
         """Agent triggers alone; None, leaving no trace, when none fires."""
@@ -263,7 +268,7 @@ def _parts(message: Any, hook: PostTurnHook) -> list[dict]:
 
 async def run_post_turn_hooks(hooks: PostTurnHooks, *, context: TaskStepContext, step_id: str, number: int, last: bool,
                               agent_reply: str, agent_parts: list[dict],
-                              ask_user: Callable[[], Awaitable[Answer]],
+                              ask_user: Callable[..., Awaitable[Answer]],
                               user_triggers: Callable[[], Awaitable[Optional[Answer]]]) -> Optional[Answer]:
     """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that."""
     answer = _Answer(ask_user, user_triggers)
