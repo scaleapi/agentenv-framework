@@ -74,6 +74,8 @@ from .constants import (
     WILDCARD,
     PGWEB_CONSOLE,
     GatewayMode,
+    LEGACY_STATE_ROUTES,
+    SITE_LEGACY_STATE_ROUTES,
     tool_name_clashes_text,
 )
 from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
@@ -692,9 +694,9 @@ class Gateway:
 
     def _takes_control_token(self, scope: dict) -> bool:
         """Whether a request takes the deploy's control token: a control route, the env's data plane, any path of a SQL
-        console behind /svc, or one of ``token_paths`` behind /svc, by the path as routed or by the one the backing
-        server receives (``reaches``), after dot-segment normalisation. A site's /website route never reaches its data
-        plane."""
+        console behind /svc, or one of ``token_paths`` behind /svc (a backing server's data plane, its MCP endpoint and
+        its LEGACY_STATE_ROUTES), by the path as routed or by the one the backing server receives (``reaches``), after
+        dot-segment normalisation. A site's /website route never reaches its data plane."""
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
@@ -970,12 +972,13 @@ class Gateway:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
         A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
         never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
-        reaches them through /svc/<name>/."""
+        reaches them through /svc/<name>/. On a gateway with a token, neither is SITE_LEGACY_STATE_ROUTES
+        (``_site_reserved``)."""
         app = request.path_params["service_name"]
         card = await self._site_card(app)
         if card is None:
             return self._json_response({"error": "website card unavailable"}, 503)
-        if reserved_site_request(request, card.reserved):
+        if reserved_site_request(request, self._site_reserved(card)):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls, site_names=self._names(app, card))
         engine = self._trigger_engine
@@ -993,14 +996,14 @@ class Gateway:
 
     async def _proxy_website_socket(self, websocket: WebSocket) -> None:
         """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
-        every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
-        the role, role key and forwarded address an HTTP request would carry."""
+        every path its card advertises for agentenv (``site_reserved_paths``), are refused, as ``_site_reserved``
+        says, and it goes upstream with the role, role key and forwarded address an HTTP request would carry."""
         service_name = websocket.path_params["service_name"]
         card = await self._site_card(service_name)
         if card is None:
             await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
             return
-        if reserved_site_request(websocket, card.reserved):
+        if reserved_site_request(websocket, self._site_reserved(card)):
             await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
             return
         base_url = self.website_urls.get(service_name)
@@ -1010,6 +1013,11 @@ class Gateway:
         await relay_websocket(websocket, base_url, role=self._request_role(websocket),
                               open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld,
                               site_names=self._names(service_name, card))
+
+    def _site_reserved(self, card: SiteCard) -> frozenset[str]:
+        """The paths a site's route never reaches: those its card advertises for agentenv, and on a gateway with a
+        token SITE_LEGACY_STATE_ROUTES, which an older site's frontend passes on to its backend."""
+        return card.reserved | SITE_LEGACY_STATE_ROUTES if self._control_bearer else card.reserved
 
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
@@ -1942,10 +1950,11 @@ def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str]
 def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
                 rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
     """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
-    extensions included, and an MCP server's own endpoint (``mcp_endpoints``), which skips the gateway's trajectory and
-    triggers. A child env registered under its own name, a computer, takes its own token, so none of its paths are here."""
+    extensions included, its LEGACY_STATE_ROUTES, and an MCP server's own endpoint (``mcp_endpoints``), which skips
+    the gateway's trajectory and triggers. A child env registered under its own name, a computer, takes its own token,
+    so none of its paths are here."""
     endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
-    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()))
+    return {key: (RPC_PATH, *LEGACY_STATE_ROUTES, *((endpoints[key],) if key in endpoints else ()))
             for key, base in rest_proxy_urls.items()
             if key in website_urls or route_environment_name(key, base, servers, website=False) != key
             or not any(server.name == key for server in servers)}

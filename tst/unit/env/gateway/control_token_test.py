@@ -1,5 +1,6 @@
-"""The gateway's control routes, the data plane and an MCP server's own endpoint behind its proxy take the deploy's
-control token when it has one; every other route stays open."""
+"""The gateway's control routes, and behind its proxy the data plane, an MCP server's own endpoint and the older REST
+routes that reset, load or export state, take the deploy's control token when it has one; every other route stays
+open."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,7 @@ from starlette.responses import JSONResponse
 
 from agent_env.env.gateway import InternalMCPServer
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
-from agent_env.env.gateway.constants import CONTROL_ROUTES, WELL_KNOWN_PATH
+from agent_env.env.gateway.constants import CONTROL_ROUTES, LEGACY_STATE_ROUTES, WELL_KNOWN_PATH
 from agent_env.env.gateway.gateway import Gateway
 
 TOKEN = "s3cret"
@@ -27,17 +28,37 @@ OPEN = {"/state": "GET", "/step": "POST", "/clock/time": "GET", "/clock/state": 
         "/clock/set-time": "PUT", "/clock/advance": "PUT", "/clock/clear": "POST"}
 
 
-# Behind the proxy: the data plane, its extensions, each service's included, and an MCP server's own endpoint, however
-# the path is spelt on its way to the gateway.
+LEGACY = {"/api/reset": "POST", "/api/add": "POST", "/api/bridge/apply": "POST", "/export-state": "GET",
+          "/export-snapshot": "GET", "/snapshot-dirty": "GET", "/reset-memory": "POST", "/validate-rows": "POST",
+          "/api/_state": "GET", "/api/_reset": "POST", "/api/debug/seed": "POST"}
+
+# Behind the proxy: the data plane, its extensions, each service's included, an MCP server's own endpoint, and the
+# older REST routes on an MCP server's route and a site's, however the path is spelt on its way to the gateway.
 GUARDED = [("POST", "/agentenv"), ("POST", "/svc/mcp-svc/agentenv"), ("POST", "/svc/mcp-svc/agentenv/ext/grant"),
            ("POST", "/svc/mcp-svc/x/../agentenv"), ("POST", "/svc/mcp-svc/%61gentenv"), ("POST", "/svc/shop/agentenv"),
            ("POST", "/svc/mcp-svc/mcp"), ("GET", "/svc/mcp-svc/mcp/"),
            ("DELETE", "/svc/mcp-svc/./mcp"), ("POST", "/svc/mcp-svc//mcp"), ("POST", "/svc/mcp-svc/public%2Fx/../agentenv"),
            ("POST", "/svc/mcp-svc/public%2Fx/../mcp"), ("POST", "/svc/mcp-svc/public%2Fx/../agentenv/ext/set_acting_user"),
-           ("POST", "/svc/mcp-svc/AgentEnv"), ("POST", "/svc/mcp-svc/MCP")]
+           ("POST", "/svc/mcp-svc/AgentEnv"), ("POST", "/svc/mcp-svc/MCP"),
+           *((method, f"/svc/{key}{path}") for key in ("mcp-svc", "shop") for path, method in LEGACY.items()),
+           ("GET", "/svc/mcp-svc/export-snapshot?stream=1"), ("POST", "/svc/shop/api/reset/x"),
+           ("GET", "/svc/mcp-svc/x/../export-state"), ("GET", "/svc/mcp-svc/%65xport-state"),
+           ("POST", "/svc/mcp-svc/public%2Fx/../api/reset"), ("POST", "/svc/shop/public%2Fx/../api/add"),
+           ("POST", "/svc/mcp-svc/API/Reset"), ("GET", "/svc/shop/Export-Snapshot"), ("POST", "/svc/mcp-svc/api//reset"),
+           ("POST", "/svc/mcp-svc/api/bridge/../bridge/apply"), ("GET", "/svc/shop/api/_state/"),
+           ("GET", "/svc/shop/API/_State"), ("GET", "/svc/shop/x/../api/_state"), ("GET", "/svc/shop/api/%5Fstate")]
 PROXIED_OPEN = [("GET", "/svc/mcp-svc/.well-known/agent-env.json"), ("GET", "/svc/mcp-svc/openapi.yaml"),
-                ("GET", "/svc/mcp-svc/export-state"), ("POST", "/svc/shop/api/orders"), ("POST", "/svc/shop/mcp"),
-                ("GET", "/website/shop/index.html")]
+                ("POST", "/svc/shop/api/orders"), ("POST", "/svc/shop/mcp"), ("GET", "/website/shop/index.html"),
+                ("GET", "/svc/mcp-svc/export-statex"), ("POST", "/svc/mcp-svc/api/resetx"),
+                ("POST", "/svc/shop/api/address"), ("GET", "/svc/mcp-svc/x/export-state"),
+                ("POST", "/svc/mcp-svc/api/bridge"), ("GET", "/website/shop/export-statex"),
+                ("GET", "/svc/shop/api/_statex"), ("GET", "/svc/shop/api/state"), ("GET", "/website/shop/api/state"),
+                ("GET", "/website/shop/api/_statex"), ("GET", "/svc/shop/api/debug/inspect")]
+# A site's route never reaches these on a gateway with a token, however they are spelt, with the token or without.
+SITE_REFUSED = [*(f"/website/shop{path}" for path in LEGACY), "/website/shop/api/reset/x",
+                "/website/shop/export-snapshot?stream=1", "/website/shop/x/../export-state",
+                "/website/shop/x/../api/add", "/website/shop/public%2Fx/../api/reset",
+                "/website/shop/x/../api/_state", "/website/shop/api/%5Fstate"]
 _RealAsyncClient = httpx.AsyncClient
 
 
@@ -48,6 +69,7 @@ def _client(token: str | None) -> httpx.AsyncClient:
 
 def test_the_routes_under_test_are_the_ones_the_gateway_covers():
     assert set(CONTROL) == CONTROL_ROUTES
+    assert set(LEGACY) == set(LEGACY_STATE_ROUTES)
 
 
 @pytest.mark.asyncio
@@ -151,7 +173,7 @@ async def _proxied(token: str | None, method: str, path: str, headers: dict[str,
         "website_urls": {"shop": "http://shop-backend"}, **children})
     url = urlsplit(path)
     scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": method,
-             "scheme": "http", "path": unquote(url.path), "raw_path": url.path.encode(), "query_string": b"",
+             "scheme": "http", "path": unquote(url.path), "raw_path": url.path.encode(), "query_string": url.query.encode(),
              "root_path": "", "server": ("gateway", 80), "client": ("agent", 1),
              "headers": [(b"content-type", b"application/json"),
                          *((name.lower().encode(), value.encode()) for name, value in headers.items())]}
@@ -182,7 +204,8 @@ async def test_the_data_plane_and_a_servers_own_endpoint_behind_the_proxy_refuse
     caplog.set_level(logging.WARNING, logger="agent_env.env.gateway.gateway")
     assert await _proxied(TOKEN, method, path, headers) == 401
     assert backing.paths == []
-    assert [r.getMessage() for r in caplog.records] == [f"refused {method} {unquote(path)}: it takes the env's control token"]
+    assert [r.getMessage() for r in caplog.records] == [
+        f"refused {method} {unquote(urlsplit(path).path)}: it takes the env's control token"]
 
 
 @pytest.mark.asyncio
@@ -206,6 +229,23 @@ async def test_the_rest_of_the_proxy_stays_open(monkeypatch, method, path):
 async def test_a_gateway_started_without_a_token_guards_nothing_behind_its_proxy(monkeypatch, method, path):
     _Backing(monkeypatch)
     assert await _proxied(None, method, path, {}) != 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", SITE_REFUSED)
+@pytest.mark.parametrize("headers", [{}, {"Authorization": f"Bearer {TOKEN}"}], ids=["none", "token"])
+async def test_a_sites_route_never_reaches_its_reset_or_add_on_a_gateway_with_a_token(monkeypatch, path, headers):
+    backing = _Backing(monkeypatch)
+    assert await _proxied(TOKEN, "POST", path, headers) == 404
+    assert [at for at in backing.paths if at != WELL_KNOWN_PATH] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", SITE_REFUSED)
+async def test_a_sites_route_passes_its_reset_and_add_on_a_gateway_without_a_token(monkeypatch, path):
+    backing = _Backing(monkeypatch)
+    assert await _proxied(None, "POST", path, {}) == 200
+    assert [at for at in backing.paths if at != WELL_KNOWN_PATH]
 
 
 @pytest.mark.asyncio
