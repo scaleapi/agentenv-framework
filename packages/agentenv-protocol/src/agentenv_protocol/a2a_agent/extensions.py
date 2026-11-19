@@ -290,12 +290,18 @@ def _opaque_snapshot_objects(
         descriptor = getattr(objects, name)
         if descriptor is not None and descriptor.media_type != "application/octet-stream":
             raise ValueError(f"snapshot {name} media_type must be application/octet-stream")
+    if objects.state is not None and objects.state.media_type != "application/json":
+        raise ValueError("snapshot state media_type must be application/json")
     return objects
 
 
 class SnapshotWriteObjects(ExtensionRequest):
+    """Where a snapshot is saved: the agent's ``trajectory`` and ``workspace``, and ``state``, the SDK's own (an agent
+    that serves atif/1 keeps its turn count there), which the SDK writes after the agent's handler."""
+
     trajectory: WriteObject
     workspace: WriteObject | None = None
+    state: WriteObject | None = None
 
     _opaque_media_types = model_validator(mode="after")(_opaque_snapshot_objects)
 
@@ -306,8 +312,11 @@ class ObjectSnapshotSaveRequest(ExtensionRequest):
 
 
 class SnapshotReadObjects(ExtensionRequest):
+    """What a snapshot is loaded from; ``state`` is the SDK's, read before the agent's handler runs."""
+
     trajectory: ReadObject
     workspace: ReadObject | None = None
+    state: ReadObject | None = None
 
     _opaque_media_types = model_validator(mode="after")(_opaque_snapshot_objects)
 
@@ -320,6 +329,7 @@ class ObjectSnapshotLoadRequest(ExtensionRequest):
 class SnapshotUploadedObjects(ExtensionResponse):
     trajectory: Uploaded
     workspace: Uploaded | None = None
+    state: Uploaded | None = None
 
 
 class ObjectSnapshotSaveResponse(ExtensionResponse):
