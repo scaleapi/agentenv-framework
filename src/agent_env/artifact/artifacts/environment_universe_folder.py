@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
-from agent_env.store.ids import derive_id, validate_local_id
+from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 
 # What a universe's metadata is called: the folder its files go in, and the segment of the ids they're written under.
 METADATA = "metadata"
@@ -123,7 +123,7 @@ def read_folder(universe_id: str, files: Mapping[str, Path],
         try:
             for id in (env_id, file_id):
                 if id is not None:
-                    validate_local_id(id)
+                    _check(id)
         except ValueError as e:
             problems.append(f"{folder}: can't name the artifacts written from it ({e}); give the universe a shorter "
                             "name")
@@ -144,11 +144,18 @@ def _child_id(derive: Callable[[str], str], name: str, *, environment: bool) -> 
         id = derive(name)
         try:
             for derived in (id, EnvironmentArtifact.derived_file_id(id)) if environment else (id,):
-                validate_local_id(derived)
+                _check(derived)
             return id
         except ValueError:
             pass
     return derive(f"sha256__{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}")
+
+
+def _check(id: str) -> None:
+    """Raise ValueError when ``id`` is a local id an id can't be; a registry id, as ``bundle register`` writes a universe
+    under, takes the folder's names as they are."""
+    if is_local_id(id):
+        validate_local_id(id)
 
 
 def _fold(name: str) -> str:

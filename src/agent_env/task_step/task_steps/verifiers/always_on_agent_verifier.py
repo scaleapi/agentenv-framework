@@ -63,6 +63,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     RUN_CONTEXT_PARTS,
+    RubricsVerdict,
     RubricsVerifierTaskStep,
     StagedTrajectory,
 )
@@ -233,35 +234,31 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                     f"'{prompts[0].id}', which isn't an always_on step; grade it with rubrics_verifier"]
         return []
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
+        """rubrics_verifier's verdict, refused for a run whose overrides cut the prompt or take the wakes from its judge;
+        then, for a staged run, what each judge call read of it (``judge_reads``); for a run with agent labels (the PSI
+        harness's), how many failed criteria the judge traced to a compaction (``context_loss``); and for every run,
+        the assistant's harness as the run records it (``assistant_harness``)."""
         if "grade_up_to_turn" in self.step_param_overrides(context):
             raise RuntimeError(f"Verifier '{self.verifier_id}': grade_up_to_turn can't cut an always_on step's "
                                "prompt, whose conversation turns are not its wakes.")
         if self.use_trajectory and (context.metadata.get("user_overrides") or {}).get("use_agent_judge") is False:
             raise RuntimeError(f"Verifier '{self.verifier_id}': use_trajectory needs the agent judge; this run's "
                                "use_agent_judge=False would grade without the wakes it was set to read.")
-        return await super().execute(context)
-
-    async def _grade(self, context: TaskStepContext) -> TaskStepContext:
-        """rubrics_verifier's grade; then, for a staged run, what each judge call read of it (``judge_reads``); for a
-        run with agent labels (the PSI harness's), how many failed criteria the judge traced to a compaction (``context_loss``); and
-        for every run, the assistant's harness as the run records it (``assistant_harness``)."""
         token = _CONTEXT_LOSS_RUN.set(False)
         try:
-            context = await super()._grade(context)
+            verdict = await super()._judged(context)
             asked = _CONTEXT_LOSS_RUN.get()
         finally:
             _CONTEXT_LOSS_RUN.reset(token)
-        entry = (context.metadata.get("verifications") or {}).get(self.verifier_id)
-        if entry is None:
-            return context
-        if "trajectory_staging" in entry:
-            entry["trajectory_staging"]["judge_reads"] = await self._judge_reads(entry)
+        output = dict(verdict.output)
+        if "trajectory_staging" in output:
+            output["trajectory_staging"]["judge_reads"] = await self._judge_reads(output)
         if asked:
-            entry["context_loss"] = context_loss(entry.get("results") or [])
-        if harness := await self._assistant_harness(context, staged="trajectory_staging" in entry):
-            entry["assistant_harness"] = harness
-        return context
+            output["context_loss"] = context_loss(verdict.criteria)
+        if harness := await self._assistant_harness(context, staged="trajectory_staging" in output):
+            output["assistant_harness"] = harness
+        return dataclasses.replace(verdict, output=output)
 
     def _spec(self) -> JudgeOutputFormatSpec:
         """rubrics_verifier's format; for a run with agent labels (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and

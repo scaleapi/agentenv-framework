@@ -18,8 +18,8 @@ import os
 import shutil
 import signal
 from collections import defaultdict
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException
 from .extensions import (
     MCP_CONFIG_V1,
     PROXY_V1,
+    REPORTED_USAGE_KEY,
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
     BundleSkillRequest,
@@ -111,6 +112,7 @@ class _Turn:
     pending: list[tuple[str, str]] = field(default_factory=list)  # (tool, its canonical arguments) not yet run
     last_event: str = field(default_factory=lambda: _now())
     model: str | None = None
+    model_usage: list[Usage] = field(default_factory=list)  # each recorded model call's, its input counting the cache
 
 
 @contextlib.asynccontextmanager
@@ -128,7 +130,7 @@ IDENTITY = AgentIdentity(
     description="An agent played from outside AgentEnv: a driver answers its turns.",
     version="1.0.0",
 )
-EXTENSIONS = (MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), PROXY_V1)
+EXTENSIONS = (MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT), PROXY_V1)
 
 
 @a2a_agent(identity=IDENTITY, config=ProxyConfig, extensions=EXTENSIONS, lifespan=stopping_actions)
@@ -151,7 +153,6 @@ class ProxyAgent(AgentEnvAgent):
     async def run(self, request: TaskRequest[ProxyConfig]) -> TaskResult:
         if any(not isinstance(part, TextPart) for part in request.parts):
             return TaskResult.failure("proxy.unsupported_part", "the proxy passes on text parts only")
-        request.trajectory.set_format(TRAJECTORY_FORMAT)
         turn = _Turn(
             task_id=request.task_id,
             context_id=request.context_id,
@@ -175,11 +176,11 @@ class ProxyAgent(AgentEnvAgent):
         if reply.error is not None:
             turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt,
                                          completion={"error": reply.error}, failed=True))
-            return TaskResult.failure("proxy.driver_error", reply.error)
+            return TaskResult.failure("proxy.driver_error", reply.error, usage=_turn_usage(turn))
         turn.trajectory.append(_span("turn", "chain", turn.started, turn.model, prompt=prompt, completion={
             "content": [{"type": "text", "text": part.text} for part in reply.parts]}))
         return TaskResult.success(parts=tuple(TextPart(text=part.text) for part in reply.parts),
-                                  usage=Usage(tool_call_count=len(turn.actions)))
+                                  usage=_turn_usage(turn))
 
     @extension(PROXY_V1.claim)
     async def claim(self, request: ProxyClaimRequest) -> None:
@@ -239,6 +240,7 @@ class ProxyAgent(AgentEnvAgent):
     @extension(PROXY_V1.record)
     async def record(self, request: ProxyRecordRequest) -> None:
         content, calls = _read_message(request.message)
+        usage = _counting_cache(_recorded_usage(request.usage))
         offered = await self._tools(self._open_turn(request.token, request.task_id))
         turn = self._open_turn(request.token, request.task_id)
         if turn.pending:
@@ -248,10 +250,9 @@ class ProxyAgent(AgentEnvAgent):
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
-        usage = request.usage or {}
-        for key, names in (("input_tokens", ("input_tokens", "prompt_tokens")),
-                           ("output_tokens", ("output_tokens", "completion_tokens"))):
-            if (count := next((usage[name] for name in names if name in usage), None)) is not None:
+        turn.model_usage.append(usage)
+        for key in ("input_tokens", "output_tokens"):
+            if (count := getattr(usage, key)) is not None:
                 span["attributes"][f"gen_ai.usage.{key}"] = count
         turn.trajectory.append(span)
         turn.last_event = span["end_time"]
@@ -518,6 +519,69 @@ def _whole(value: Any) -> Any:
 
 def _tool_error(message: str) -> ProxyToolResult:
     return ProxyToolResult(content=[{"type": "text", "text": f"error: {message}"}], is_error=True)
+
+
+_USAGE_SUMS = (*(f.name for f in fields(Usage) if f.name.endswith("_tokens")), "cost_usd")
+# Each provider's split of its cache writes by how long they're kept, which ``Usage.from_model_response`` keeps.
+_CACHE_WRITE_SPLITS = ("cache_creation", "cache_write_tokens_details")
+
+
+def _recorded_usage(usage: dict[str, Any] | None) -> Usage:
+    """A recorded call's usage: the ``Usage`` its driver reported under ``REPORTED_USAGE_KEY``, taken as given, or
+    else read from the model response's own by ``Usage.from_model_response``."""
+    if usage is None:
+        return Usage()
+    if REPORTED_USAGE_KEY not in usage:
+        return Usage.from_model_response(usage)
+    try:
+        return Usage.from_dict(usage[REPORTED_USAGE_KEY])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"usage[{REPORTED_USAGE_KEY!r}]: {e}") from e
+
+
+def _counting_cache(usage: Usage) -> Usage:
+    """``usage`` with its ``input_tokens`` counting the cache, as its span shows it and its turn sums it: one that
+    leaves the cache out has it added, to its total too, and one with no cache to count counts it. One whose flag is
+    unknown while it has cache counts stays as given."""
+    cache = (usage.cache_read_tokens or 0) + (usage.cache_write_tokens or 0)
+    if usage.input_tokens is None or usage.input_includes_cache is True:
+        return usage
+    if usage.input_includes_cache is False:
+        total = None if usage.total_tokens is None else usage.total_tokens + cache
+        return replace(usage, input_tokens=usage.input_tokens + cache, total_tokens=total, input_includes_cache=True)
+    return replace(usage, input_includes_cache=True) if cache == 0 else usage
+
+
+def _turn_usage(turn: _Turn) -> Usage:
+    """The turn's usage: the calls to its tools, and each count summed over the recorded model calls that gave it,
+    None when none did, with ``input_tokens`` counting the cache. ``provider_details`` says how many calls were
+    recorded (``model_calls``); for a count only some gave, how many left it out (``unreported``), so the sum reads
+    as the lower bound it is; how many had cache counts with no word on whether their input held them
+    (``cache_unsettled``), which leaves the turn's flag unknown; how many usages were in a shape none of the readers
+    know (``unrecognized``); and each provider's split of the cache writes, summed, a reported ``Usage``'s split
+    counted only where it holds counts, as its ``provider_details`` may hold anything."""
+    calls = turn.model_usage
+    sums, unreported = {}, {}
+    for name in _USAGE_SUMS:
+        values = [value for call in calls if (value := getattr(call, name)) is not None]
+        sums[name] = sum(values) if values else None
+        if values and len(values) < len(calls):
+            unreported[name] = len(calls) - len(values)
+    unsettled = sum(call.input_tokens is not None and call.input_includes_cache is None for call in calls)
+    unrecognized = sum("unrecognized" in call.provider_details for call in calls)
+    splits: dict[str, dict[str, int]] = {}
+    for call in calls:
+        for name in _CACHE_WRITE_SPLITS:
+            if isinstance(split := call.provider_details.get(name), Mapping):
+                for part, count in split.items():
+                    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                        splits.setdefault(name, {})[part] = splits.get(name, {}).get(part, 0) + count
+    details = {"model_calls": len(calls), **({"unreported": unreported} if unreported else {}),
+               **({"cache_unsettled": unsettled} if unsettled else {}),
+               **({"unrecognized": unrecognized} if unrecognized else {}), **splits}
+    return Usage(tool_call_count=len(turn.actions), **sums,
+                 input_includes_cache=True if sums["input_tokens"] is not None and not unsettled else None,
+                 provider_details=details if calls else {})
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,

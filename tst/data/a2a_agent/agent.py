@@ -2,7 +2,8 @@
 
 Deterministic: it echoes the prompt and records the echo in the framework's trajectory log, which a
 reader can follow while the turn runs; a ``live-steps <n>`` in its prompt has it first append ``n`` step
-events (at most ``MAX_LIVE_STEPS``), a second apart. Agent-config, mcp-config, trajectory and triggers
+events (at most ``MAX_LIVE_STEPS``), a second apart. Its ATIF adapter, ``EchoAtif``, has the framework serve
+the log as atif/1 too, each event a step. Agent-config, mcp-config, trajectory and triggers
 come from the agentenv-protocol framework. ``model_params`` is a write-only config field so the
 agent-config negotiation and its redaction on read-back can be observed.
 
@@ -56,6 +57,7 @@ from agentenv_protocol.a2a_agent import (
     enable,
     extension,
 )
+from agentenv_protocol.atif import Adapter, atif_adapter, native
 from websockets.asyncio.client import connect
 
 SEND_FILE = "send-file "
@@ -161,6 +163,22 @@ def _skills() -> list[str]:
         for path in sorted(folder.rglob("*")) if path.is_file()) for folder in sorted(SKILLS_DIR.iterdir())]
 
 
+@atif_adapter(native_format=TRAJECTORY_FORMAT, version="1.0.0", input_includes_cache=None)
+class EchoAtif(Adapter):
+    """The echo agent's events in ATIF: each live step and the echo, a step with no model call."""
+
+    @native(type="step")
+    def step(self, record: dict[str, Any], turn: Any) -> None:
+        key = f"step-{record['step']}"
+        turn.message(step=key, text=f"step {record['step']}")
+        turn.step(key=key, llm_call_count=0)
+
+    @native(type="echo")
+    def echo(self, record: dict[str, Any], turn: Any) -> None:
+        turn.message(step="echo", text=record["output"])
+        turn.step(key="echo", llm_call_count=0)
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="agentenv-echo-agent",
@@ -168,7 +186,10 @@ def _skills() -> list[str]:
         version="1.0.0",
     ),
     config=EchoAgentConfig,
-    extensions=(MCP_CONFIG_V1, CDP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), TRIGGERS_V1),
+    extensions=(
+        MCP_CONFIG_V1, CDP_CONFIG_V1, enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=EchoAtif),
+        TRIGGERS_V1,
+    ),
 )
 class EchoAgent(AgentEnvAgent):
     async def run(self, request: TaskRequest[EchoAgentConfig]) -> TaskResult:

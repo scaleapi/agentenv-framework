@@ -122,6 +122,7 @@ chmod 0755 "$stage/letta"
     printf '%s=%s\n' "$name" "$(quoted "${!name:-}")"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
+  [ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\n' "$(quoted "$AGENTENV_CONTROL_TOKEN")"
   # Letta Code's state, its sessions and skills, as the image keeps it under /data.
   printf 'A2A_PORT=%s\nLETTA_CODE_WORKSPACE_DIR=%s\nHOME=%s\n' \
     "$(quoted "$port")" "$(quoted "$workspace")" "$(quoted "$root/data")"

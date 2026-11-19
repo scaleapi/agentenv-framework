@@ -1,5 +1,7 @@
 """The core side of object transfer: choosing a form from the card, descriptors, responses."""
 
+import json
+
 import httpx
 import pytest
 from agentenv_protocol.a2a_agent import TrajectoryObjectsResponse
@@ -218,6 +220,29 @@ async def test_fetch_trajectory_waits_for_the_agent_upload_it_granted(tmp_path, 
         object_transfer.TRANSFER_TIMEOUT_SECONDS,
         5,
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_upload_grants_only_the_trajectory_so_a_pinned_agent_accepts_it(tmp_path, monkeypatch):
+    sent = []
+    real_client = httpx.AsyncClient
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"objects": {"trajectory": {"size_bytes": 2}}})
+
+    monkeypatch.setattr(
+        object_transfer.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(answer), **kwargs),
+    )
+    store = GrantingObjectStore(str(tmp_path))
+    upload = TrajectoryUpload.to(store, store.object_url("t/trajectory.json"))
+
+    await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"}, upload=upload)
+
+    [request] = sent
+    assert set(request["objects"]) == {"trajectory"}
 
 
 def _answering(monkeypatch, body: dict) -> None:

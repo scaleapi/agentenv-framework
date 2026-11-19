@@ -58,7 +58,8 @@ def test_a_turn_returns_the_answer_and_a_context_keeps_one_conversation(client: 
     assert (task["status"]["state"], text) == ("completed", "The top story.")
     usage = data["usage"]
     assert (usage["tool_call_count"], usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (2, 100, 20, 120)
-    assert usage["provider_details"]["cache_read_tokens"] == 60 and usage["provider_details"]["requests"] == 3
+    assert (usage["cache_read_tokens"], usage["cache_write_tokens"], usage["input_includes_cache"]) == (60, 10, True)
+    assert usage["provider_details"]["requests"] == 3 and "cost_usd" not in usage
     turn = json.loads(record.read_text())
     assert (turn["prompt"], turn["model"], turn["effort"], turn["systemPrompt"]) == ("top story?", "gpt-test", "low", "Be brief.")
     # Unset, browser-use's own step budget and mode; its run ends before the turn's deadline, leaving it to deliver.
