@@ -588,18 +588,19 @@ class _SdkServices:
         self.trajectory_formats: tuple[str, ...] = (
             (native, ATIF_FORMAT) if atif is not None else (native,) if native else ()
         )
-        self.task_trajectories = TaskTrajectories(native=native, atif=atif)
+        #: The secrets the agent's atif/1 reads leave out; an agent that serves none has none to scrub.
+        self.secrets = Secrets.for_agent(
+            write_only={field: wire for field, wire in _config_wire_names(self.config_model).items()
+                        if wire in self._write_only_config_fields},
+            defaults=self.config_defaults,
+        ) if atif is not None else None
+        self.task_trajectories = TaskTrajectories(
+            native=native, atif=atif, scrub=self.secrets.scrub if self.secrets is not None else None
+        )
         #: Whether the card offers atif/1, served from the copy an adapter builds.
         self.serves_atif = atif is not None
         #: The SDK's state in the agent's snapshots, which only an agent that serves atif/1 keeps.
         self.snapshot_states = SnapshotStates(self.task_trajectories) if atif is not None else None
-        #: The secrets the agent's atif/1 reads leave out; an agent that serves none has none to scrub.
-        self.secrets = Secrets() if atif is not None else None
-        if self.secrets is not None:
-            self.secrets.add_environment()
-            for name, value in self.config_defaults.items():
-                if name in self._write_only_config_fields:
-                    self.secrets.add_values(value, source="a write-only agent-config default")
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -743,19 +744,6 @@ class _SdkServices:
             if "description" in provided_fields:
                 self.card.description = validated.description
         return {"status": "updated"}
-
-    def note_secrets(self, request: Any) -> None:
-        """Keep the secrets an extension call hands the agent out of its atif/1 reads, whichever handler takes it:
-        its grants and registrations' credentials, and a write-only agent-config value."""
-        if self.secrets is None:
-            return
-        self.secrets.add_request(request)
-        if isinstance(request, AgentConfig):
-            wire_names = _config_wire_names(type(request))
-            write_only = _config_write_only_wire_names(type(request))
-            for name in request.model_fields_set:
-                if wire_names[name] in write_only:
-                    self.secrets.add_values(getattr(request, name), source="a write-only agent-config value")
 
     async def agent_config_get(self) -> dict[str, Any]:
         config = _thaw(self.config)
@@ -907,12 +895,12 @@ class _SdkServices:
         try:
             if isinstance(request, TaskEventsTrajectoryRequest):
                 cursor = self.task_trajectories.atif_task_page(
-                    request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES, scrub=self.secrets.scrub
+                    request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
                 )
                 unknown = f"Unknown task '{request.task_id}'"
             else:
                 cursor = self.task_trajectories.atif_context_page(
-                    request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES, scrub=self.secrets.scrub
+                    request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
                 )
                 unknown = f"Unknown context '{request.context_id}'"
         except ValueError as exc:
@@ -941,7 +929,7 @@ class _SdkServices:
     ) -> dict[str, Any]:
         """A whole atif/1 document: a task read's as it stood when the task ended, with the
         task's aux log and turn context, or a context read's live page; inline, or uploaded
-        through the request's grants, its secrets scrubbed either way."""
+        through the request's grants, as the copy serves it, its secrets scrubbed."""
         served: dict[str, Any] = {}
         if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
             read = self.task_trajectories.atif_task(request.task_id)
@@ -951,7 +939,7 @@ class _SdkServices:
                     detail=f"No completed trajectory available for task '{request.task_id}'",
                 )
             document = read.document
-            served = {"aux": [entry.wire() for entry in read.aux], "turn_context": read.turn.wire()}
+            served = {"aux": read.aux, "turn_context": read.turn}
         else:
             if isinstance(request, ContextObjectTrajectoryRequest):
                 _refuse_turn_objects(request)
@@ -961,7 +949,6 @@ class _SdkServices:
                     status_code=404,
                     detail=f"Context '{request.context_id}' has no {ATIF_FORMAT} step to serve yet",
                 )
-        document, served = self.secrets.scrub(document), self.secrets.scrub(served)
         versions = _atif_versions(document)
         if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
             return {"trajectory": document, "format": ATIF_FORMAT, **versions, **served}
@@ -1365,7 +1352,8 @@ class A2AAgentApplication:
                     extension_request = None
                 else:
                     extension_request = request_model.model_validate(payload)
-                    self.services.note_secrets(extension_request)
+                    if self.services.secrets is not None:
+                        self.services.secrets.add_request(extension_request)
                 if extension_uri == TRAJECTORY_V1.uri:
                     self.services.check_trajectory_format(extension_request.format)
                     if extension_request.format == ATIF_FORMAT:

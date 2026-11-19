@@ -18,6 +18,7 @@ from pydantic import BaseModel, SecretStr
 
 from ..transfers import HttpGetGrant, HttpPostPolicyGrant, HttpPutGrant
 from .extensions import CdpAddRequest, ClockSyncTimeRequest, McpAddRequest
+from .tasks.v1 import AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,11 @@ MIN_SECRET_LENGTH = 8
 #: The model credentials an agent's environment holds, which a tool can echo.
 MODEL_KEY_ENV = "LITELLM_API_KEY"
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
-#: Header names whose values describe a request rather than authorize it.
+# Two rules tell a credential by its name. A header is one unless it plainly describes the request, since a header an
+# agent is handed is there to authorize it. A query parameter, a signed form's field or a write-only mapping's key is
+# one only when named like one, since most of them aren't: X-Amz-Algorithm, a key path, a sampling parameter.
 _PLAIN_HEADERS = frozenset({"accept", "content-encoding", "content-length", "content-type", "user-agent"})
-#: The words of a name (a query parameter, a signed form's field, a key in a write-only mapping) that mark its value as a
-#: credential, and the endings that do: ``X-Amz-Signature`` and Azure's ``sig`` are, ``X-Amz-Algorithm``, ``X-Amz-Date``
+#: The words of such a name that mark its value as a credential, and the endings that do: ``X-Amz-Signature`` and Azure's ``sig`` are, ``X-Amz-Algorithm``, ``X-Amz-Date``
 #: and ``X-Amz-SignedHeaders`` aren't, so ``AWS4-HMAC-SHA256`` is left in an agent's text.
 _CREDENTIAL_WORDS = frozenset({
     "auth", "authorization", "bearer", "cookie", "credential", "credentials", "jwt", "key", "passwd", "password",
@@ -52,7 +54,9 @@ class Secrets:
     agent a grant per file, or a run that accumulates thousands, costs neither a rebuild per secret nor a slower
     scan."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, write_only: Mapping[str, str] | None = None) -> None:
+        #: The agent's write-only config fields, each to its wire name, whose values an agent-config call hands it.
+        self._write_only = dict(write_only or {})
         self._lock = threading.Lock()
         self._forms: set[str] = set()
         self._pattern: re.Pattern[str] | None = None
@@ -71,11 +75,25 @@ class Secrets:
                 logger.warning("a secret from %s is shorter than %d characters, so atif/1 reads don't scrub it",
                                source, MIN_SECRET_LENGTH)
             return
-        forms = {text, json.dumps(text)[1:-1], json.dumps(text, ensure_ascii=False)[1:-1], quote(text, safe="")}
+        forms = _forms(text)
         with self._lock:
             if not forms <= self._forms:
                 self._forms |= forms
                 self._stale = True
+
+    @classmethod
+    def for_agent(cls, *, write_only: Mapping[str, str], defaults: Mapping[str, Any],
+                  environ: Mapping[str, str] | None = None) -> Secrets:
+        """What an agent's SDK knows from the start: the model credentials in its environment, and its write-only
+        config's defaults (``defaults`` by wire name). Its control token comes when it's served, the rest with each
+        extension call (``add_request``) and from the agent (``add``)."""
+        secrets = cls(write_only=write_only)
+        secrets.add_environment(environ)
+        wire_names = set(write_only.values())
+        for name, value in defaults.items():
+            if name in wire_names:
+                secrets.add_values(value, source="a write-only agent-config default")
+        return secrets
 
     def add_all(self, values: Iterable[str | SecretStr | None], *, source: str, warn: bool = True) -> None:
         for value in values:
@@ -93,9 +111,12 @@ class Secrets:
             self.add_all(_header_values(headers), source=MODEL_HEADERS_ENV)
 
     def add_request(self, request: BaseModel | None) -> None:
-        """Every secret an extension call hands the agent: the parts of its grants' URLs that carry their credentials,
-        their headers and signing fields,
-        an MCP or CDP registration's credentials and a clock follower's read token, wherever the request holds them."""
+        """Every secret an extension call hands the agent, whichever handler takes it: the parts of its grants' URLs
+        that carry their credentials, their headers and signing fields, an MCP or CDP registration's credentials, a clock
+        follower's read token, wherever the request holds them, and an agent-config call's write-only values."""
+        if isinstance(request, AgentConfig):
+            for name in request.model_fields_set & self._write_only.keys():
+                self.add_values(getattr(request, name), source="a write-only agent-config value")
         for item in _models(request):
             if isinstance(item, (HttpGetGrant, HttpPutGrant, HttpPostPolicyGrant)):
                 self.add_all(_url_secrets(str(item.url)), source="a transfer grant", warn=False)
@@ -127,6 +148,12 @@ class Secrets:
                 self._pattern = re.compile(_trie(self._forms))
                 self._stale = False
             return self._pattern
+
+
+def _forms(text: str) -> set[str]:
+    """How a secret can appear in a served string: raw, JSON-escaped with and without ASCII escapes (inbound DataParts
+    are written without), and percent-encoded, as in another URL's query."""
+    return {text, json.dumps(text)[1:-1], json.dumps(text, ensure_ascii=False)[1:-1], quote(text, safe="")}
 
 
 def _scrub(value: Any, pattern: re.Pattern[str]) -> Any:

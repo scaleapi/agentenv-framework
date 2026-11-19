@@ -112,14 +112,21 @@ def _native(client: TestClient, task_id: str) -> Any:
     return client.post("/ext/trajectory", json={"task_id": task_id}).json()["trajectory"]
 
 
-def _strings(value: Any) -> list[str]:
+def _map_strings(value: Any, change: Callable[[str], str]) -> Any:
+    """``value`` with ``change`` applied to every string it holds, mapping keys included."""
     if isinstance(value, str):
-        return [value]
+        return change(value)
     if isinstance(value, dict):
-        return [s for item in value.values() for s in _strings(item)]
+        return {_map_strings(key, change): _map_strings(item, change) for key, item in value.items()}
     if isinstance(value, list):
-        return [s for item in value for s in _strings(item)]
-    return []
+        return [_map_strings(item, change) for item in value]
+    return value
+
+
+def _strings(value: Any) -> list[str]:
+    found: list[str] = []
+    _map_strings(value, lambda text: found.append(text) or text)
+    return found
 
 
 def _turn(client: TestClient, prompt: str) -> str:
@@ -350,28 +357,23 @@ def test_a_short_secret_is_left_with_one_warning_per_source(caplog: pytest.LogCa
     assert "short" not in [record.args for record in caplog.records]
 
 
-def test_a_cursor_page_counts_its_bytes_as_it_serves_them() -> None:
-    copy = AtifCopy(Echoes, "ctx-1")
+def _three_steps(**scrub: Any) -> AtifCopy:
+    copy = AtifCopy(Echoes, "ctx-1", **scrub)
     copy.start("t1", 0, TurnStart(message_id=None, parts=(TextPart(text="hi"),), agent_name="toy", agent_version="1",
                                   agent_model=None))
     for text in ("one", "two", "three"):
         copy.native("t1", {"type": "say", "text": text})
     copy.end("t1", state=TrajectoryState.COMPLETED.value, final=(TextPart(text="done"),))
-    plain = copy.page(0, 10, 10_000)
-    budget = sum(len(json.dumps(step)) for step in plain.steps[:2])
-    assert len(copy.page(0, 10, budget).steps) == 2
-    padded = copy.page(0, 10, budget, scrub=lambda value: _pad(value))
+    return copy
+
+
+def test_a_cursor_page_counts_its_bytes_as_it_serves_them() -> None:
+    plain = _three_steps()
+    budget = sum(len(json.dumps(step)) for step in plain.page(0, 10, 10_000).steps[:2])
+    assert len(plain.page(0, 10, budget).steps) == 2
+    # A scrub that lengthens every string, as a redaction longer than its secret does.
+    padded = _three_steps(scrub=lambda value: _map_strings(value, lambda text: text + "x" * 200)).page(0, 10, budget)
     assert len(padded.steps) == 1 and padded.has_more
-
-
-def _pad(value: Any) -> Any:
-    if isinstance(value, str):
-        return value + "x" * 200
-    if isinstance(value, dict):
-        return {key: _pad(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_pad(item) for item in value]
-    return value
 
 
 def test_an_agent_that_serves_no_atif_registers_nothing_and_registering_before_its_app_is_refused() -> None:

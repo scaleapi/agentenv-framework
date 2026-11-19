@@ -8,7 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from ..atif import Adapter, AuxEntry, ServedTurn
+from ..atif import Adapter
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
 from ._turn_index import TurnIndex
 from .extensions import TrajectoryState
@@ -60,8 +60,8 @@ class AtifTaskRead:
     """An ended task's atif/1 document as it stood when the task ended, its aux log and its served turn context."""
 
     document: dict[str, Any]
-    aux: list[AuxEntry]
-    turn: ServedTurn
+    aux: list[dict[str, Any]]
+    turn: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +87,7 @@ class TaskTrajectories:
         *,
         native: str | None = None,
         atif: type[Adapter] | None = None,
+        scrub: Callable[[Any], Any] | None = None,
     ) -> None:
         if max_contexts < 1:
             raise ValueError("max_contexts must be positive")
@@ -95,6 +96,8 @@ class TaskTrajectories:
         self._atif = atif
         #: Each context's count of started tasks, kept only for an agent that serves atif/1.
         self._turns = TurnIndex() if atif is not None else None
+        #: What every atif/1 read goes through: the agent's secrets redacted.
+        self._scrub = scrub
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
         self._copies: dict[str, AtifCopy] = {}
@@ -129,7 +132,9 @@ class TaskTrajectories:
         if self._atif is not None and turn is not None:
             copy = self._copies.get(record.context_id)
             if copy is None:
-                copy = self._copies[record.context_id] = AtifCopy(self._atif, record.context_id)
+                copy = self._copies[record.context_id] = AtifCopy(
+                    self._atif, record.context_id, **({"scrub": self._scrub} if self._scrub is not None else {})
+                )
             copy.start(task_id, self._turns.next(record.context_id), turn)
             record.log._atif = _CopySink(copy, task_id)
         self._touch(record.context_id)
@@ -287,29 +292,29 @@ class TaskTrajectories:
         return copy.context_read()
 
     def atif_task_page(
-        self, task_id: str, after: int, max_steps: int, max_bytes: int, *, scrub: Callable[[Any], Any]
+        self, task_id: str, after: int, max_steps: int, max_bytes: int
     ) -> AtifCursor | None:
-        """A cursor page of the task's closed atif/1 steps, in the task's state, served through ``scrub``."""
+        """A cursor page of the task's closed atif/1 steps, in the task's state."""
         record = self._tasks.get(task_id)
         copy = self._copies.get(record.context_id) if record is not None else None
         if copy is None:
             return None
         self._touch(record.context_id)
         state = record.state
-        page = copy.page(after, max_steps, max_bytes, task_id=task_id, scrub=scrub)
+        page = copy.page(after, max_steps, max_bytes, task_id=task_id)
         return AtifCursor(page=page, context_id=record.context_id, task_id=task_id, state=state)
 
     def atif_context_page(
-        self, context_id: str, after: int, max_steps: int, max_bytes: int, *, scrub: Callable[[Any], Any]
+        self, context_id: str, after: int, max_steps: int, max_bytes: int
     ) -> AtifCursor | None:
         """A cursor page of the context's closed atif/1 steps, on the task the context is on and in
-        the context's state, served through ``scrub``."""
+        the context's state."""
         copy = self._copies.get(context_id)
         records = self._context_records(context_id) if copy is not None else None
         if copy is None or records is None:
             return None
         task_id, state = self._context_progress(context_id, records)
-        page = copy.page(after, max_steps, max_bytes, scrub=scrub)
+        page = copy.page(after, max_steps, max_bytes)
         return AtifCursor(page=page, context_id=context_id, task_id=task_id, state=state)
 
     def _context_progress(
