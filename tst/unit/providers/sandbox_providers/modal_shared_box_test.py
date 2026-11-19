@@ -4,6 +4,7 @@ terminate reads whether its sandbox is one, unless this process made it, and ref
 from __future__ import annotations
 
 import ast
+import re
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -251,9 +252,14 @@ _CREATE_CLEANUPS = {"create_container", "_created"}
 
 def test_every_modal_terminate_goes_through_the_check_point_but_a_failed_creates_cleanup():
     """``terminate.aio(`` is called only in ``_terminate``, or where a create that failed ends its sandbox: the cancelled
-    create's cleanup, or an ``except`` in a create."""
+    create's cleanup, or an ``except`` in a create. Every module of agent_env that uses the Modal SDK is checked, and no
+    module calls Modal's terminate RPC directly."""
     stray = []
-    sources = Path(modal_sandbox.__file__).parent.glob("modal_*.py")
+    package = Path(modal_sandbox.__file__).parents[2]
+    sources = [p for p in package.rglob("*.py") if re.search(r"^\s*(import modal|from modal)", p.read_text(), re.M)]
+    assert Path(modal_sandbox.__file__) in sources
+    for source in package.rglob("*.py"):
+        assert "SandboxTerminate" not in source.read_text(), f"{source} calls Modal's terminate RPC directly"
     for source in sources:
         tree = ast.parse(source.read_text())
         for function in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
@@ -267,3 +273,15 @@ def test_every_modal_terminate_goes_through_the_check_point_but_a_failed_creates
                     continue
                 stray.append(f"{source.name}:{call.lineno} in {function.name}")
     assert stray == []
+
+
+@pytest.mark.asyncio
+async def test_a_shared_box_is_never_rebooted_under_its_slots(modal_api):
+    modal_api.sb = modal_sb()
+    vm_provider = provider(ModalVmSandboxProvider)
+    box = await vm_provider.create_shared_box("box-1", setup_for_gateway=False)
+    box._exec_with_stdin = AsyncMock()
+
+    with pytest.raises(SharedBoxTerminateRefused):
+        await vm_provider.reset_vm(box, image="disk", env={})
+    box._exec_with_stdin.assert_not_called()

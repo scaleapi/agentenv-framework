@@ -38,6 +38,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
     SHARED_BOX_TAG,
     UNREAD,
     SharedBox,
+    SharedBoxTerminateRefused,
     _ModalProcessAdapter,
     _attribution_tags,
     _ended_output,
@@ -433,7 +434,10 @@ class ModalVmSandboxProvider(SandboxProvider):
         await _terminate_by_id(await self._get_client(), sandbox_id, ending_box=box_id)
 
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
-        """The launcher in the sandbox booting its disk afresh with ``env``, at the same URLs."""
+        """The launcher in the sandbox booting its disk afresh with ``env``, at the same URLs. Refused for a shared box,
+        whose reboot would end every slot on it."""
+        if isinstance(getattr(sandbox, "shared_box_id", None), str):
+            raise SharedBoxTerminateRefused(sandbox.sandbox_id, sandbox.shared_box_id)
         code, _, stderr = await sandbox._exec_with_stdin(shlex.join(RESET), _chunks(reset_input(env)))
         if code:
             raise RuntimeError(f"the launcher in Modal sandbox {sandbox.sandbox_id} didn't boot its disk afresh "
