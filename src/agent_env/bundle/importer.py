@@ -527,6 +527,9 @@ class _Importer:
             if fold(name) in self.taken[BundleKind.ARTIFACT.value]:
                 raise Unwritable(f"a skill's folder takes its skill's name, {name!r}, which another artifact in the "
                                  "folder already has")
+            if fold(name) in self.reserved.get(EntityKind.ARTIFACT, set()):
+                raise Unwritable(f"a skill's folder takes its skill's name, {name!r}, which the export names as an "
+                                 "installed alias of an artifact, so the folder would take the alias's place in a run")
             self.taken[BundleKind.ARTIFACT.value].add(fold(name))
             return BundleKind.SKILL, name
         bundle_kind = _FOLDERS[kind]
