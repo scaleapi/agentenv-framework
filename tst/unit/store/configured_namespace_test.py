@@ -324,6 +324,33 @@ def test_a_run_updates_its_own_entities_in_place(stores):
     assert team.find_one("envs", Filter.of(id="ti_1__env"))["metadata"] == {"checked": True, "seen": True}
 
 
+def test_an_id_a_run_created_takes_later_versions_only_in_that_run_namespace(stores):
+    router, shared, team = stores
+    with run_scope(TEAM_TASK):
+        router.insert("artifacts", {"id": "ti_1__recording", "version": 1})
+        router.insert("artifacts", {"id": "ti_1__recording", "version": 2})
+    with pytest.raises(NamespaceWriteError, match="in 'team-a'"):
+        router.insert("artifacts", {"id": "ti_1__recording", "version": 3})
+    with reading_namespaces("team-a"), pytest.raises(NamespaceWriteError, match="in 'team-a'"):
+        router.replace("artifacts", Filter.of(id="ti_1__recording", version=3), {"id": "ti_1__recording", "version": 3},
+                       upsert=True)
+    with run_scope(OTHER_ENV), pytest.raises(NamespaceWriteError, match="in 'team-a'"):
+        router.insert("artifacts", {"id": "ti_1__recording", "version": 3})
+
+    assert {doc["version"] for doc in team.query("artifacts", Filter.of(id="ti_1__recording"))} == {1, 2}
+    assert _ids(shared, "artifacts") == set()
+    assert _ids(router.namespaces["team-b"], "artifacts") == set()
+
+
+def test_no_bytes_go_out_of_the_namespace_for_an_id_a_run_created(configured, tmp_path):
+    with run_scope(TEAM_TASK):
+        FileArtifact.put_bytes("ti_1__f", description="d", filename="first.txt", content=b"x")
+    with pytest.raises(NamespaceWriteError, match="in 'team-a'"):
+        FileArtifact.put_bytes("ti_1__f", description="d", filename="later.txt", content=b"y")
+    assert list(tmp_path.rglob("later.txt")) == []
+    assert len(list((tmp_path / "restricted").rglob("first.txt"))) == 1
+
+
 def test_a_run_cannot_update_a_shared_run_record(stores):
     router, shared, _ = stores
     shared.insert("task_instances", {"instance_id": "ti_shared", "status": "running"})

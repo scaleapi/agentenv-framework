@@ -33,7 +33,8 @@ _NON_SLUG_RUN = re.compile(r"[^a-z0-9]+")
 _ENCODED_LOCAL_ID = re.compile(
     rf"{LOCAL_NAMESPACE}(?:/|-(?:[a-z0-9]+(?:-[a-z0-9]+)*-)?[0-9a-f]{{{_HASH_LENGTH}}}(?:/|$))"
 )
-_NAMESPACE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
+MAX_NAMESPACE_NAME_LENGTH = 64
+_NAMESPACE_NAME = re.compile(rf"[a-z0-9](?:[a-z0-9-]{{0,{MAX_NAMESPACE_NAME_LENGTH - 2}}}[a-z0-9])?")
 _ID_PUNCTUATION = frozenset(" ._-~/@()+,&")
 _ID_CATEGORIES = frozenset("LNM")
 _INVISIBLE = re.compile(
@@ -94,12 +95,14 @@ def validate_local_id(entity_id: str) -> None:
 
 
 def validate_namespace_name(namespace: str) -> None:
-    """Raise ValueError unless ``namespace`` can name a configured namespace: 1 to 64 lowercase letters, digits and
-    inner ``-``, and not a local namespace."""
+    """Raise ValueError unless ``namespace`` can name a configured namespace: 1 to ``MAX_NAMESPACE_NAME_LENGTH``
+    lowercase letters, digits and inner ``-``, and not a local namespace."""
     if namespace in LOCAL_NAMESPACES:
         raise ValueError(f"@{namespace} is a local namespace, so it can't be configured")
     if not isinstance(namespace, str) or not _NAMESPACE_NAME.fullmatch(namespace):
-        raise ValueError(f"namespace {namespace!r} must be 1 to 64 lowercase letters, digits and inner '-'")
+        raise ValueError(
+            f"namespace {namespace!r} must be 1 to {MAX_NAMESPACE_NAME_LENGTH} lowercase letters, digits and inner '-'"
+        )
 
 
 def _allowed_in_id(character: str) -> bool:

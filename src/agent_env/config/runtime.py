@@ -591,12 +591,18 @@ class Config:
 
     def _writing_namespace(self, entity_id: str) -> Optional[str]:
         """The namespace ``entity_id``'s objects are written to: its own, else the running task's. A run in one
-        namespace may not write another's, so this refuses before any bytes are uploaded."""
+        namespace may not write another's, and only a run in a namespace writes an id a run created there, so this
+        refuses before any bytes are uploaded."""
         from agent_env.store import routing
+        from agent_env.store.document_store.document_store import entity_collections
 
         placed, run = self.namespace_of(entity_id, fresh=True), self.run_namespace()
         if placed is not None and run is not None and placed != run:
             raise routing.NamespaceWriteError(f"a run in {run!r} can't write {entity_id!r}, which is in {placed!r}")
+        if placed is None and self.configured_namespaces():
+            stores = {name: self.namespace_document_store(name) for name in self.configured_namespaces()}
+            held = routing.namespace_holding(stores, entity_id, entity_collections())
+            routing.refuse_outside_holder(entity_id, held, run)
         return placed or run
 
     def _checked(self, namespace: Optional[str], what: str) -> Optional[str]:

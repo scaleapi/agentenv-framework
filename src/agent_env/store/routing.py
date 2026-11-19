@@ -27,7 +27,7 @@ import json
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -632,7 +632,8 @@ class NamespaceDocumentStore(RoutingDocumentStore):
     namespace, else by an owner field; and every entity a run in a namespace writes. A read no id places sees the
     running task's namespace, the configured store and the namespaces ``reading_namespaces`` opens. A write asks
     the resolver fresh, and is refused when it can't answer. A run in a namespace never writes a new version of a
-    configured entity, so no entity id is in two stores, nor changes one in place, as a local run can't."""
+    configured entity, so no entity id is in two stores, nor changes one in place, as a local run can't. An id a run
+    created that the resolver places nowhere takes later versions only from a run in its namespace."""
 
     def __init__(self, configured: DocumentStore, namespaces: Mapping[str, DocumentStore], resolver: Any) -> None:
         self.configured = configured
@@ -725,6 +726,8 @@ class NamespaceDocumentStore(RoutingDocumentStore):
                     f"a run in {run!r} can't write a new version of {entity_id!r}: it is in the configured store, "
                     f"which a run in {run!r} writes no new entities to"
                 )
+            if placed is None:
+                refuse_outside_holder(entity_id, namespace_holding(self.namespaces, entity_id, [collection]), namespace)
         else:
             namespace = run or next(
                 (found for field in _NAMESPACE_OWNER_FIELDS
@@ -745,6 +748,23 @@ class NamespaceDocumentStore(RoutingDocumentStore):
                 raise NamespaceWriteError(f"a run in {run!r} can't update {collection!r}: its record is in the configured store")
             return
         yield from self._visible()
+
+
+def namespace_holding(stores: Mapping[str, DocumentStore], entity_id: object,
+                      collections: Iterable[str]) -> Optional[str]:
+    """The configured namespace whose store, of ``stores`` by name, holds ``entity_id`` in one of ``collections``, or
+    None: an id a run created, which the resolver places nowhere, keeps every later version in its run's namespace."""
+    if not isinstance(entity_id, str):
+        return None
+    return next((name for name, store in stores.items()
+                 if any(store.find_one(collection, Filter.of(id=entity_id)) is not None for collection in collections)),
+                None)
+
+
+def refuse_outside_holder(entity_id: object, held: Optional[str], namespace: Optional[str]) -> None:
+    if held not in (None, namespace):
+        who = f"a run in {namespace!r} can't" if namespace is not None else "only a run in it can"
+        raise NamespaceWriteError(f"{entity_id!r} is in {held!r}, whose run created it, so {who} write it")
 
 
 def object_store_holding(object_url: str, configured: ObjectStore, local: ObjectStore) -> ObjectStore:
