@@ -1,8 +1,8 @@
 """computer_exec on a computer env, end to end: the ubuntu-24.04 base with the reference driver deployed, a command run
 in the session user's home to its end, its output recorded; Thunar started with ``background`` on the folder that wrote,
 as a task opens a file in an app for the agent, and its window then found on the display, so the app outlived the run
-that started it; and a failing command, and a background one whose program isn't there, recorded, not failing the
-task, with ``check`` off."""
+that started it; a failing command, and a background one whose program isn't there, recorded, not failing the task,
+with ``check`` off; and a ``system`` command run as root in the session user's home, which the session user can't do."""
 
 from pathlib import Path
 
@@ -33,3 +33,7 @@ def test_commands_run_in_a_computer_and_an_app_started_in_the_background_stays_u
     assert "right after starting" in records["missing-string"]["stderr"], records["missing-string"]
     assert records["bad-flag"]["exit_code"] not in (0, None), records["bad-flag"]
     assert "right after starting" in records["bad-flag"]["stderr"], records["bad-flag"]
+    uid, home, tilde = records["root"]["stdout"].split()
+    assert records["root"]["exit_code"] == 0 and uid == "0" and home == tilde != "/root", records["root"]
+    assert records["owner"]["stdout"] == "root\n", records["owner"]
+    assert records["denied"]["exit_code"] != 0 and "Permission denied" in records["denied"]["stderr"], records["denied"]

@@ -13,5 +13,11 @@
   {"id": "missing-string", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["missing"],
    "command": "thunarr Desktop", "background": true, "check": false},
   {"id": "bad-flag", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["missing-string"],
-   "command": ["ls", "--no-such-flag"], "background": true, "check": false}
+   "command": ["ls", "--no-such-flag"], "background": true, "check": false},
+  {"id": "root", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["bad-flag"], "scope": "system",
+   "command": "id -u; pwd; echo ~; touch /etc/computer-exec-root"},
+  {"id": "owner", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["root"],
+   "command": ["stat", "-c", "%U", "/etc/computer-exec-root"]},
+  {"id": "denied", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["owner"],
+   "command": "touch /etc/computer-exec-denied", "check": false}
 ]

@@ -1,12 +1,15 @@
 """computer_exec against a computer at its driver's boundary (``tst.unit.computer_home``): a command run in its home as
 given or through ``sh -c``, in a folder and with variables of its own, its run recorded; a failure or a timeout failing
 the step unless ``check`` is off; a ``background`` command started and left running, and failing when its program
-isn't there or it exits non-zero right after starting, a string command's included; a multi env's computer found by
-name; and the configs it refuses."""
+isn't there or it exits non-zero right after starting, a string command's included; a ``system`` command run as root
+through the computer's sandbox, in the session user's folder; a multi env's computer found by name; and the configs it
+refuses."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import subprocess
 import time
 from types import SimpleNamespace
 
@@ -34,6 +37,35 @@ def _context(*deployed) -> TaskStepContext:
 
 def _step(command, **fields) -> ComputerExecTaskStep:
     return ComputerExecTaskStep(id="exec", version=None, env_id=fields.pop("env_id", "desk"), command=command, **fields)
+
+
+class _Sandbox:
+    """A computer's sandbox whose exec is ``uid``'s, running what it's given on this machine."""
+
+    type = "fake"
+
+    def __init__(self):
+        self.uid = "0"
+        self.calls: list[list[str]] = []
+
+    async def exec_with_output(self, *argv):
+        self.calls.append(list(argv))
+        if list(argv) == ["id", "-u"]:
+            return 0, f"{self.uid}\n", ""
+        done = await asyncio.to_thread(subprocess.run, list(argv), capture_output=True, text=True)
+        return done.returncode, done.stdout, done.stderr
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    held = _Sandbox()
+
+    async def get_sandbox(sandbox_id):
+        return held
+
+    monkeypatch.setattr(computer_exec, "build_sandbox_provider",
+                        lambda sandbox_type: SimpleNamespace(get_sandbox=get_sandbox))
+    return held
 
 
 @pytest.mark.asyncio
@@ -140,6 +172,44 @@ async def test_a_background_command_whose_program_isnt_there_fails_the_step(comp
 
 
 @pytest.mark.asyncio
+async def test_a_system_command_runs_as_root_through_the_sandbox_in_the_session_users_folder_and_home(
+        computer, sandbox):
+    (computer.home / "work").mkdir()
+
+    ctx = await _step('pwd; echo "$HOME $GREETING"', scope="system", cwd="work", env={"GREETING": "hi"}).execute(
+        _context(computer.deployed()))
+
+    record = ctx.metadata[RECORDS_KEY]["exec"]
+    assert record["exit_code"] == 0 and record["scope"] == "system"
+    assert record["stdout"] == f"{computer.home}/work\n{computer.home} hi\n"
+    assert sandbox.calls[-1][:4] == ["timeout", "-k", "5", "120"]
+    assert [params["argv"] for _, params, _ in computer.calls] == [["pwd"]]
+
+
+@pytest.mark.asyncio
+async def test_a_system_command_that_times_out_or_cant_start_fails_unless_check_is_off_and_is_recorded(
+        computer, sandbox):
+    with pytest.raises(RuntimeError, match=r"sh -c 'sleep 5' as root timed out after 0.5 s"):
+        await _step("sleep 5", scope="system", timeout_s=0.5).execute(_context(computer.deployed()))
+
+    ctx = await _step(["no-such-app-xyz"], scope="system", check=False).execute(_context(computer.deployed()))
+    assert ctx.metadata[RECORDS_KEY]["exec"]["exit_code"] == 127
+    ctx = await _step("true", scope="system", cwd="missing", check=False).execute(_context(computer.deployed()))
+    assert ctx.metadata[RECORDS_KEY]["exec"]["exit_code"] == 125
+
+
+@pytest.mark.asyncio
+async def test_a_system_command_is_refused_on_a_disk_computer_and_on_a_sandbox_whose_exec_isnt_roots(
+        computer, sandbox):
+    with pytest.raises(RuntimeError, match="boots from a disk"):
+        await _step("true", scope="system").execute(_context(computer.deployed(form="disk")))
+
+    sandbox.uid = "1000"
+    with pytest.raises(RuntimeError, match="as uid 1000; deploy it on a VM sandbox"):
+        await _step("true", scope="system").execute(_context(computer.deployed()))
+
+
+@pytest.mark.asyncio
 async def test_a_timeout_above_what_the_computer_allows_is_refused_before_anything_runs(computer):
     with pytest.raises(ValueError, match="above the 3600 s"):
         await _step("true", timeout_s=4000).execute(_context(computer.deployed()))
@@ -213,6 +283,8 @@ def test_preflight_finds_a_multi_envs_computers_and_its_browser_computer(monkeyp
     ({"command": "true", "timeout_s": 0}, "timeout_s must be a number of seconds above 0"),
     ({"command": "true", "background": "yes"}, "background must be true or false"),
     ({"command": "true", "background": True, "timeout_s": 4}, "timeout_s must be at least 5"),
+    ({"command": "true", "scope": "root"}, "scope is 'session', the session user's, or 'system', root's"),
+    ({"command": "true", "scope": "system", "background": True}, "a 'system' command runs to its end"),
 ])
 def test_bad_configs_are_named(fields, problem):
     assert any(problem in p for p in _step(**fields).config_problems())
@@ -223,3 +295,5 @@ def test_it_round_trips_through_the_registry():
                  check=False)
     again = get_task_step_registry()["computer_exec"].from_dict(step.to_dict())
     assert again.to_dict() == step.to_dict()
+    root = _step("apt-get install -y jq", scope="system")
+    assert get_task_step_registry()["computer_exec"].from_dict(root.to_dict()).scope == "system"

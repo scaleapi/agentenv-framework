@@ -1,10 +1,13 @@
 """computer_exec: a command run inside a deployed computer as its session user, through its driver's computer-exec/v1
-``run``, a control route the agent can't call, as a task sets a computer up: a program run to its end, its exit status
-and output recorded, or with ``background`` an app started and left running."""
+``run``, a control route the agent can't call, or with ``scope: "system"`` as root, through the computer's sandbox, as a
+task sets a computer up: a program run to its end, its exit status and output recorded, or with ``background`` an app
+started and left running."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import posixpath
 import shlex
 from typing import ClassVar, Optional, Union
 
@@ -14,7 +17,9 @@ from agent_env.entity.refs import EntityRef
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import inside
+from agent_env.env.envs.computer.utils.sites import RootChannel
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -34,6 +39,16 @@ START_WINDOW_S = 2.0
 START_MARGIN_S = 3.0
 #: The most of a failed start's stderr the launcher keeps: the end of it.
 START_STDERR_BYTES = 4096
+#: Who a command runs as: the session user, through the driver, or for ``system``, root, through the sandbox.
+SCOPES = ("session", "system")
+#: How long the session user's home takes to find, which a ``system`` command runs in.
+HOME_TIMEOUT_S = 30.0
+#: How much longer than ``timeout_s`` a ``system`` command's exec may take before the step stops waiting for it.
+SYSTEM_MARGIN_S = 30.0
+#: How long ``timeout`` gives a ``system`` command after its stop signal before it kills it.
+SYSTEM_KILL_AFTER_S = 5
+#: What ``timeout`` exits with when it stopped the command.
+TIMED_OUT_EXIT = 124
 
 
 def background_script() -> str:
@@ -66,6 +81,9 @@ class ComputerExecTaskStep(TaskStep):
     its arguments, or a string run by ``sh -c``. For a multi env, ``computer`` names the computer, by its environment
     name, and may be left out when the env has one.
 
+    With ``scope: "system"`` it runs as root instead, through the computer's sandbox rather than its driver, in the
+    same folder and with the session user's ``HOME``; a computer booted from a disk has no such route.
+
     The run is recorded in ``context.metadata["computer_exec"][step_id]``: its exit code, the end of its stdout and
     stderr, and whether it timed out or was cut. A run that exits non-zero or times out fails the step, unless
     ``check`` is false. With ``background``, the command is started and left running, its output discarded, as an app
@@ -79,7 +97,8 @@ class ComputerExecTaskStep(TaskStep):
     def __init__(self, id: str, version: Optional[int], env_id: str, command: Command,
                  computer: Optional[str] = None, cwd: Optional[str] = None, env: Optional[dict[str, str]] = None,
                  timeout_s: float = DEFAULT_TIMEOUT_S, background: bool = False, check: bool = True,
-                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
+                 scope: str = "session", depends_on: Optional[list[TaskStepDependency]] = None,
+                 fail_task_on_error: bool = True):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.command = command
@@ -89,6 +108,7 @@ class ComputerExecTaskStep(TaskStep):
         self.timeout_s = timeout_s
         self.background = background
         self.check = check
+        self.scope = scope
 
     def config_problems(self) -> list[str]:
         problems = []
@@ -115,6 +135,12 @@ class ComputerExecTaskStep(TaskStep):
                 and self.timeout_s < (least := START_WINDOW_S + START_MARGIN_S)):
             problems.append(f"step {self.id!r}: a background start is watched for {START_WINDOW_S:g} s, so its "
                             f"timeout_s must be at least {least:g}")
+        if self.scope not in SCOPES:
+            problems.append(f"step {self.id!r}: scope is 'session', the session user's, or 'system', root's, "
+                            f"not {self.scope!r}")
+        elif self.scope == "system" and self.background is True:
+            problems.append(f"step {self.id!r}: background runs as the session user; a 'system' command runs to its "
+                            "end")
         return problems
 
     def preflight(self) -> list[str]:
@@ -129,14 +155,14 @@ class ComputerExecTaskStep(TaskStep):
     def to_dict(self) -> dict:
         return {**super().to_dict(), "env_id": self.env_id, "command": self.command, "computer": self.computer,
                 "cwd": self.cwd, "env": self.env, "timeout_s": self.timeout_s, "background": self.background,
-                "check": self.check}
+                "check": self.check, "scope": self.scope}
 
     @classmethod
     def from_dict(cls, data: dict) -> ComputerExecTaskStep:
         return cls(**cls._base_from_dict(data), env_id=data["env_id"], command=data["command"],
                    computer=data.get("computer"), cwd=data.get("cwd"), env=data.get("env"),
                    timeout_s=data.get("timeout_s", DEFAULT_TIMEOUT_S), background=data.get("background", False),
-                   check=data.get("check", True))
+                   check=data.get("check", True), scope=data.get("scope", "session"))
 
     def command_argv(self) -> list[str]:
         """The command as a program and its arguments: through ``sh -c`` when it's a string."""
@@ -155,14 +181,18 @@ class ComputerExecTaskStep(TaskStep):
             raise ValueError(f"{self.type} {self.id!r}: timeout_s {self.timeout_s} is above the {limit} s the computer "
                              f"of env {self.env_id!r} lets a command run")
         argv = self.argv()
-        answer = await inside.run(deployed, argv, timeout_s=self.timeout_s, env=self.env, cwd=self.cwd)
-        record = {"env_id": self.env_id, "computer": self.computer, "argv": argv, "background": self.background,
+        if self.scope == "system":
+            answer = await self._as_root(deployed, argv)
+        else:
+            answer = await inside.run(deployed, argv, timeout_s=self.timeout_s, env=self.env, cwd=self.cwd)
+        record = {"env_id": self.env_id, "computer": self.computer, "argv": argv, "scope": self.scope,
+                  "background": self.background,
                   "exit_code": answer.get("exit_code"), "timed_out": bool(answer.get("timed_out")),
                   "truncated": bool(answer.get("truncated")),
                   "stdout": _tail(answer.get("stdout") or "", RECORDED_CHARS),
                   "stderr": _tail(answer.get("stderr") or "", RECORDED_CHARS)}
         context.metadata.setdefault(RECORDS_KEY, {})[self.id] = record
-        shown = shlex.join(self.command_argv())  # the task's command; the record keeps the launcher around it
+        shown = shlex.join(self.command_argv()) + (" as root" if self.scope == "system" else "")
         if record["timed_out"]:
             outcome = f"timed out after {self.timeout_s} s"
         elif record["exit_code"] != 0:
@@ -177,6 +207,22 @@ class ComputerExecTaskStep(TaskStep):
             raise RuntimeError(message)
         logger.warning(f"{message} (check is off)")
         return context
+
+    async def _as_root(self, deployed: DeployedSandboxEnv, argv: list[str]) -> dict:
+        """``argv`` run as root through the computer's sandbox (``RootChannel``), in the folder and with the ``HOME`` a
+        session run has, so ``cwd`` and ``~`` name the same files, under ``timeout``; answered as ``run`` answers."""
+        if (deployed.metadata.get("computer") or {}).get("form") == "disk":
+            raise RuntimeError(f"{self.type} {self.id!r}: a 'system' command runs through the computer's container, "
+                               f"and env {self.env_id!r}'s computer boots from a disk, which core can't reach as root")
+        home = (await inside.run(deployed, ["pwd"], timeout_s=HOME_TIMEOUT_S))["stdout"].strip()
+        variables = [f"{name}={value}" for name, value in (self.env or {}).items()]
+        command = ["timeout", "-k", str(SYSTEM_KILL_AFTER_S), f"{self.timeout_s:g}", "env", "-C",
+                   posixpath.join(home, self.cwd) if self.cwd else home, f"HOME={home}", *variables, *argv]
+        sandbox = await build_sandbox_provider(deployed.sandbox_type).get_sandbox(deployed.sandbox_id)
+        code, stdout, stderr = await asyncio.wait_for(RootChannel(sandbox).exec(command),
+                                                      self.timeout_s + SYSTEM_MARGIN_S)
+        return {"exit_code": None if code == TIMED_OUT_EXIT else code, "timed_out": code == TIMED_OUT_EXIT,
+                "stdout": stdout, "stderr": stderr}
 
 
 def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]) -> DeployedSandboxEnv:
