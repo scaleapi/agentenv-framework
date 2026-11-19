@@ -15,6 +15,9 @@ It installs skills under ``~/skills/<name>/``, a bundle's files downloaded throu
 ``list-skills`` line in its prompt adds a ``skill <name>: <path>=<sha256 prefix>, ...`` line for each one.
 A ``run <command>`` line has it run that command in its container and add a ``ran <command>: <output>`` line.
 
+Its snapshot holds the context's id as its trajectory and a fixed workspace, and a load restores into the context it is
+asked for, so the SDK's own snapshot state, the atif/1 copy's turn count, is what a restore carries.
+
 A ``cdp <name> <url>`` line has it open the URL in a new tab of the browser its cdp-config names so, over raw CDP, and
 add a ``cdp <name> <digest>: <title>`` line, ``<digest>`` the first 12 hex digits of its address's sha256, so a
 reader can tell one address from another without the address. With no endpoint by that name the turn fails.
@@ -39,6 +42,7 @@ from agentenv_protocol.a2a_agent import (
     CDP_CONFIG_V1,
     MCP_CONFIG_V1,
     SKILL_CONFIG_V1,
+    SNAPSHOT_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
     AgentConfig,
@@ -47,6 +51,11 @@ from agentenv_protocol.a2a_agent import (
     BundleSkillRequest,
     FilePart,
     InlineSkillRequest,
+    ObjectSnapshotLoadRequest,
+    ObjectSnapshotLoadResponse,
+    ObjectSnapshotSaveRequest,
+    ObjectSnapshotSaveResponse,
+    SnapshotUploadedObjects,
     TaskRequest,
     TaskResult,
     TextPart,
@@ -56,6 +65,7 @@ from agentenv_protocol.a2a_agent import (
     download,
     enable,
     extension,
+    upload,
 )
 from agentenv_protocol.atif import Adapter, atif_adapter, native
 from websockets.asyncio.client import connect
@@ -67,6 +77,8 @@ CDP = "cdp "
 CDP_LOAD_SECONDS = 30
 RUN_TIMEOUT_SECONDS = 60
 SKILLS_DIR = Path.home() / "skills"
+SNAPSHOT_DIR = Path.home() / "snapshot"
+WORKSPACE = b"echo agent workspace"
 LIVE_STEPS = re.compile(r"live-steps (\d+)")
 LIVE_STEP_SECONDS = 1
 # Bounds how long a prompt can hold up a turn.
@@ -229,6 +241,20 @@ class EchoAgent(AgentEnvAgent):
         for item in request.skill_bundle.files:
             await download(item.object, SKILLS_DIR / request.name / item.path)
         return {"name": request.name}
+
+    @extension(SNAPSHOT_V1.save)
+    async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> ObjectSnapshotSaveResponse:
+        trajectory = await upload(request.objects.trajectory, json.dumps({"context_id": request.context_id}).encode())
+        workspace = await upload(request.objects.workspace, WORKSPACE) if request.objects.workspace else None
+        return ObjectSnapshotSaveResponse(
+            context_id=request.context_id, objects=SnapshotUploadedObjects(trajectory=trajectory, workspace=workspace)
+        )
+
+    @extension(SNAPSHOT_V1.load)
+    async def load_snapshot(self, request: ObjectSnapshotLoadRequest) -> ObjectSnapshotLoadResponse:
+        await download(request.objects.trajectory, SNAPSHOT_DIR / "trajectory")
+        saved = json.loads((SNAPSHOT_DIR / "trajectory").read_text())["context_id"]
+        return ObjectSnapshotLoadResponse(context_id=request.target_context_id or saved)
 
 
 if __name__ == "__main__":

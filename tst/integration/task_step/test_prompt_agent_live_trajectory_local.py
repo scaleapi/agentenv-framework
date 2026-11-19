@@ -4,7 +4,8 @@ turn runs for a few seconds; over a two-turn conversation with a user-sim, each 
 in more than one chunk, and its chunks join to that turn's final trajectory; each turn names the one after it, and
 the last none. The echo agent declares its native format and an ATIF adapter, so its card offers both; its native reads
 name their format, its atif/1 reads are valid ATIF, and a read naming another format is refused with a code agent-env
-reads. Needs Docker and a throwaway local registry."""
+reads. A snapshot of it carries its atif/1 copy's turn count to the fresh agent it is restored into. Needs Docker and a
+throwaway local registry."""
 
 import json
 import re
@@ -21,6 +22,7 @@ from agentenv_protocol.atif import FORMAT as ATIF, PROFILE_VERSION, SCHEMA_VERSI
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent.protocol import raise_for_extension_status
+from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, reset_config, set_image_store
 from agent_env.store.image_store import LocalRegistryImageStore
@@ -28,6 +30,7 @@ from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import Task
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
 from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.a2a_test_agent import put_test_agent
 
@@ -90,11 +93,28 @@ def local_registry(monkeypatch, tmp_path):
         reset_config()
 
 
-def _deploy(agent, name: str) -> DeployAgentTaskStep:
+def _deploy(agent, name: str, **snapshot) -> DeployAgentTaskStep:
     return DeployAgentTaskStep(
         id=f"deploy-{name}", version=None, env_ids=[], a2a_agent_id=agent.id, a2a_agent_version=agent.version,
-        agent_name=name, sandbox_type="local",
+        agent_name=name, sandbox_type="local", **snapshot,
     )
+
+
+def _prompt(step_id: str, agent_name: str, context_id: str) -> PromptAgentTaskStep:
+    return PromptAgentTaskStep(
+        id=step_id, version=None, prompt_id=step_id, agent_name=agent_name, prompt=step_id, context_id=context_id,
+    )
+
+
+async def _atif_users(deployed, context_id: str) -> tuple[dict, list[dict]]:
+    """The atif/1 document of the context's latest task, and its user steps' profile records."""
+    url = deployed.a2a_url + A2AAgent.find_extension(deployed.a2a_card, A2AAgent.EXT_TRAJECTORY)["params"]["endpoint"]
+    async with httpx.AsyncClient(timeout=30, headers=deployed.control_headers) as client:
+        page = (await client.post(url, json={"context_id": context_id, "after": 0})).json()
+        read = (await client.post(url, json={"task_id": page["task_id"], "format": ATIF})).json()
+    document = read["trajectory"]
+    assert errors_in(validate(document)) == []
+    return document, [step["extra"]["agentenv"] for step in document["steps"] if step["source"] == "user"]
 
 
 def _json_lines(store, key: str) -> list:
@@ -175,3 +195,34 @@ async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_an
     with pytest.raises(httpx.HTTPStatusError, match="HTTP 400: format_not_offered"):
         raise_for_extension_status(refused, operation="trajectory read")
 
+
+@pytest.mark.asyncio
+async def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_into(local_registry):
+    suffix = uuid.uuid4().hex[:8]
+    source, restored, snapshot_id = f"turns-{suffix}", f"restored-{suffix}", f"turns-snapshot-{suffix}"
+    agent = put_test_agent(f"turn-count-agent-{suffix}")
+    task = Task.put(id=f"turn-count-{suffix}", steps=[
+        _deploy(agent, "solver"),
+        _prompt("one", "solver", source),
+        _prompt("two", "solver", source),
+        SnapshotAgentStateTaskStep(id="snapshot", version=None, artifact_id=snapshot_id, prompt_id="two",
+                                   agent_name="solver"),
+        _deploy(agent, "restored", agent_snapshot_files_artifact_id=snapshot_id,
+                agent_snapshot_target_context_id=restored),
+        _prompt("three", "restored", restored),
+    ])
+
+    context = await task.run()
+
+    assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
+    store = get_config().get_object_store()
+    universe = FileArtifactUniverse.get(snapshot_id)
+    state = store.get(store.object_url(store.get_object_key(universe.bundle_object_url).rstrip("/") + "/state"))
+    assert json.loads(state) == {"turns": 2}
+    agents = {deployed.agent_name: deployed for deployed in context.deployed_agents}
+    before, before_users = await _atif_users(agents["solver"], source)
+    after, after_users = await _atif_users(agents["restored"], restored)
+    assert [(user["turn"], user["context_id"]) for user in before_users] == [(0, source), (1, source)]
+    assert [(user["turn"], user["context_id"]) for user in after_users] == [(2, restored)]
+    assert (after["session_id"], [step["message"] for step in after["steps"]]) == (restored, ["three", "Echo: three"])
+    assert after["trajectory_id"] != before["trajectory_id"]
