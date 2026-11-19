@@ -32,9 +32,9 @@ _NO_SUCH_PATH = ("Could not find the file", "No such container:path")
 
 
 def kvm_platforms() -> frozenset[str]:
-    """This machine's platform when its Docker can pass KVM to a container: /dev/kvm here, readable and writable; and
-    windows/amd64 on an amd64 machine, whose launcher boots a Windows guest too."""
-    if not os.access(KVM, os.R_OK | os.W_OK):
+    """Disk platforms when this machine has a KVM device. Docker opens it for the launcher, so the client's user
+    need not have device access. A daemon that cannot pass the device fails when it starts the launcher."""
+    if not Path(KVM).is_char_device():
         return frozenset()
     here = host_platform()
     return frozenset({here, "windows/amd64"} if here == "linux/amd64" else {here})
