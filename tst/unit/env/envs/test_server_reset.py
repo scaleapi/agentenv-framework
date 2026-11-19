@@ -96,6 +96,17 @@ async def test_an_older_server_is_emptied_through_its_api_reset_and_one_answerin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("token, sent", [("s3cret", "Bearer s3cret"), (None, None)], ids=["token", "no-token"])
+async def test_an_older_servers_api_reset_sends_its_records_control_token_when_it_has_one(server, token, sent):
+    env = _server(None)
+    env._deployed.control_token = token
+    with patch("agent_env.env.legacy_protocol.v1_base_url", AsyncMock(return_value=None)):
+        assert await _deployment.reset_server_data(env, mcp=True) is True
+    assert [(request.url.path, request.headers.get("authorization")) for request in server.requests] == [
+        ("/svc/mcp-email/api/reset", sent)]
+
+
+@pytest.mark.asyncio
 async def test_an_older_server_answering_404_resets_through_its_tool_with_no_seed_to_the_data_it_boots_with(server):
     server.status = 404
     tool = AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text="Data reset for email.")]))

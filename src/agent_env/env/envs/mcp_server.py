@@ -294,9 +294,9 @@ class MCPServerEnv(Env):
 
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:
         container_path = await self._copy_artifact_into_container(file_artifact, file_artifact.filename)
-        await legacy_protocol.reset(
-            self._gateway_url, self.environment_name, container_path, max_retries=self._MCP_MAX_RETRIES
-        )
+        base_url = legacy_protocol.environment_base_url(self._gateway_url, self.environment_name, mcp=True)
+        await legacy_protocol.reset(self._gateway_url, self.environment_name, container_path,
+                                    max_retries=self._MCP_MAX_RETRIES, headers=data_plane_headers(self, base_url))
 
     async def validate(self, on_progress: Optional[Callable[[str], None]] = None) -> str:
         """Run the env validator task and return the task instance ID.
