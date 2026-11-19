@@ -94,12 +94,12 @@ def get_last_attribution_snapshot() -> dict[str, str | None]:
 
 
 def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
-            task_id: str | None = None, clock_armed: bool = False) -> dict[str, str]:
+            task_id: str | None = None, mcp_urls: Sequence[str] = (), clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment: this process's, with the endpoint's key also under the name codex's own precheck
     reads, and the run's attribution, which config.toml's env_http_headers sends as headers on each model call. The
     run's tags join the x-litellm-tags [model.headers] names. On an armed clock (``clock_armed``) the CLI goes out through the
-    egress proxy (``egress_env``) for the model endpoint; mcp-remote, which codex hands only the trust variables, isn't
-    given the proxy."""
+    egress proxy (``egress_env``) for the model endpoint and the env's MCP servers (``mcp_urls``), which mcp-remote,
+    handed the proxy's variables (codex_config._PROXY_ENV), reaches through it too."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("OPENAI_API_KEY"):
         env["OPENAI_API_KEY"] = env["LITELLM_API_KEY"]
@@ -113,7 +113,7 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
                        if name.lower() == _TAGS_HEADER), "")
     if joined := _join_tags(configured, ",".join(tags)):
         env["LITELLM_TAGS"] = joined
-    env.update(egress_env(environ, [env.get("LITELLM_BASE_URL", "")], armed=clock_armed))
+    env.update(egress_env(environ, [env.get("LITELLM_BASE_URL", ""), *mcp_urls], armed=clock_armed))
     return env
 
 
@@ -730,6 +730,7 @@ async def _run_codex_once(
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
     prior_tool_calls: int = 0,
+    mcp_urls: Sequence[str] = (),
 ) -> CodexResult:
     # JSON Schema: codex's `--output-schema` flag takes a FILE PATH (unlike
     # claude-code's inline-JSON `--json-schema`). Write the inner schema to a
@@ -778,7 +779,8 @@ async def _run_codex_once(
         f"inactivity_watchdog={inactivity_s}s)"
     )
 
-    subprocess_env = cli_env(os.environ, project_id=project_id, task_id=task_id, clock_armed=clock_armed())
+    subprocess_env = cli_env(os.environ, project_id=project_id, task_id=task_id, mcp_urls=mcp_urls,
+                             clock_armed=clock_armed())
     if project_id or task_id:
         _record_attribution(project_id=project_id, task_id=task_id)
         logger.info(
@@ -904,6 +906,7 @@ async def run_codex(
     event_callback: Callable[[dict], None] | None = None,
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
+    mcp_urls: Sequence[str] = (),
 ) -> CodexResult:
     """Run one logical turn with bounded transient recovery.
 
@@ -943,6 +946,7 @@ async def run_codex(
             event_callback=event_callback,
             config_overrides=config_overrides,
             max_turns=max_turns,
+            mcp_urls=mcp_urls,
             prior_tool_calls=tool_call_count,
         )
         failure = _resumable_api_failure(result)

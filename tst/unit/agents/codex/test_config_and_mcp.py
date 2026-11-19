@@ -149,7 +149,9 @@ def test_turns_of_different_roles_share_one_config_and_each_cli_gets_its_own_rol
         "command": "mcp-remote",
         "args": ["https://gw/mcp", "--allow-http", "--header", "X-Tenant: t", "--header", "AgentEnv-Role: ${AGENTENV_ROLE}"],
         "env": {"AGENTENV_ROLE": ""},
-        "env_vars": ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"],
+        "env_vars": ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE",
+                     "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+                     "NODE_USE_ENV_PROXY"],
         "startup_timeout_sec": 60,
         "required": True,
     }

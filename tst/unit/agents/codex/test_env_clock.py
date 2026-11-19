@@ -1,5 +1,5 @@
 """Codex on the env's clock: its bridge hands the shared egress rule (tst/unit/agents/test_agent_egress.py) the model
-endpoint's URL, so on an armed clock the CLI goes out through the image's egress proxy, and to loopback, the hosts
+endpoint's URL and every MCP server's, which mcp-remote reaches with the proxy's variables, so on an armed clock the CLI goes out through the image's egress proxy, and to loopback, the hosts
 NO_PROXY names and a plain-HTTP model endpoint directly; unarmed, it goes out as before. What every clocked image shares
 is checked in tst/unit/agents/test_agent_clock_images.py."""
 
@@ -31,6 +31,18 @@ def test_without_the_proxy_or_an_armed_clock_the_cli_goes_out_directly_as_before
 def test_a_model_endpoint_over_plain_http_is_reached_directly_on_an_armed_clock(base_url, direct):
     env = codex_bridge.cli_env({agent_egress.EGRESS_PROXY_ENV: PROXY, "LITELLM_BASE_URL": base_url}, clock_armed=True)
     assert (base_url.split("//")[1].split(":")[0] in env["NO_PROXY"].split(",")) is direct
+
+
+def test_the_envs_plain_http_mcp_servers_are_reached_directly_and_https_ones_through_the_proxy_on_an_armed_clock():
+    """mcp-remote, a Node client, checks an HTTPS server's certificate against the env's date, which the proxy, on real
+    time, doesn't."""
+    env = codex_bridge.cli_env({agent_egress.EGRESS_PROXY_ENV: PROXY},
+                               mcp_urls=["http://gateway:8080/mcp", "https://abc-123.w.modal.host/mcp"],
+                               clock_armed=True)
+    direct = set(env["NO_PROXY"].split(","))
+
+    assert "gateway" in direct and "abc-123.w.modal.host" not in direct
+    assert env["NODE_USE_ENV_PROXY"] == "1"
 
 
 def test_start_agent_keeps_a_providers_ca_bundle_trusted_by_the_server_and_the_proxy(tmp_path):
