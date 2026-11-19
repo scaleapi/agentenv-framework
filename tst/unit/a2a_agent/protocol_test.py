@@ -29,6 +29,7 @@ from agentenv_protocol.a2a_agent import (
     AgentIdentity,
     TaskRequest,
     TaskResult,
+    TextPart,
     Usage,
     a2a_agent,
     enable,
@@ -166,6 +167,27 @@ def test_sdk_success_round_trips_through_platform_parser():
     assert parsed.response_text == "done"
     assert parsed.structured_output == {"answer": 42}
     assert parsed.tool_call_count == 3
+
+
+def test_a_terminal_message_with_cache_usage_parses_and_its_usage_reads_back_whole():
+    usage = Usage(tool_call_count=2, input_tokens=120, output_tokens=7, cache_read_tokens=100, cache_write_tokens=20,
+                  input_includes_cache=True)
+    message = _sdk_terminal_message(TaskResult.success(parts=(TextPart(text="done"),), usage=usage))
+
+    parsed = TerminalResponse.from_message(message)
+
+    assert (parsed.response_text, parsed.tool_call_count) == ("done", 2)
+    [sent] = [part["data"]["usage"] for part in message["parts"] if part.get("kind") == "data"]
+    assert Usage.from_dict(sent) == usage
+
+
+def test_a_failed_turn_sends_its_usage():
+    usage = Usage(input_tokens=5, output_tokens=2, input_includes_cache=False)
+    message = _sdk_terminal_message(TaskResult.failure("agent.boom", "it broke", usage=usage))
+
+    [sent] = [part["data"]["usage"] for part in message["parts"] if part.get("kind") == "data"]
+    assert Usage.from_dict(sent) == usage
+    assert TerminalResponse.from_message(message).error_code == "agent.boom"
 
 
 def test_sdk_failure_round_trips_through_platform_parser():
