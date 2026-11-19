@@ -16,6 +16,7 @@ export type VerifierKind = 'aggregate' | 'sandbox' | 'rubric' | 'other';
 const RUBRICS_VERIFIER_STEP_TYPES: ReadonlySet<string> = new Set([
   'rubrics_verifier',
   'always_on_agent_verifier',
+  'cua_verifier',
 ]);
 
 export function isRubricsVerifierStep(

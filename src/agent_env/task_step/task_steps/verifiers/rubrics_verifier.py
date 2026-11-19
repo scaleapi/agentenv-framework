@@ -675,9 +675,15 @@ class RubricsVerifierTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> RubricsVerifierTaskStep:
+        return cls(**cls._rubrics_fields(data))
+
+    @classmethod
+    def _rubrics_fields(cls, data: dict) -> dict:
+        """The constructor's arguments a stored step holds, as ``from_dict`` reads them: a subclass reads its own beside
+        them."""
         raw_agg = data.get("score_aggregator")
         raw_tf = data.get("trajectory_filter")
-        return cls(
+        return dict(
             **cls._base_from_dict(data),
             criteria=data["criteria"],
             prompt_id=data["prompt_id"],
@@ -726,6 +732,15 @@ class RubricsVerifierTaskStep(TaskStep):
         with an id no criterion has. None here."""
         return []
 
+    def graded_response(self, context: TaskStepContext) -> Optional[PromptResponse]:
+        """The prompt response this step grades: an override point. Here, the run's response to ``prompt_id``."""
+        return next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
+
+    def score_rows(self, rows: list[dict]) -> float:
+        """The rubric entry's score from its rows, the judge's and the unjudged ones, each carrying its criterion's
+        fields: an override point. Here, ``score_aggregator``'s."""
+        return aggregate_score(rows, self.score_aggregator)
+
     def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
         """The judge calls ``criteria`` are graded in, one batch per call: ``size`` at a time in order, or all in one
         call when ``size`` is None. An override point: a subclass may group them otherwise, putting every criterion
@@ -764,7 +779,7 @@ class RubricsVerifierTaskStep(TaskStep):
         return context
 
     async def _grade(self, context: TaskStepContext) -> TaskStepContext:
-        prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
+        prompt_response = self.graded_response(context)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         overrides_for_step = self.step_param_overrides(context)
@@ -1133,7 +1148,7 @@ class RubricsVerifierTaskStep(TaskStep):
                     f"({type(verification_results).__name__})")
             mistake_rows = trajectory_mistakes_rows_from_evidence(verification_results)
         verification_results.extend(unjudged)  # in place, so a ResultRows keeps its reasoning and checks
-        score = aggregate_score(verification_results, self.score_aggregator)
+        score = self.score_rows(verification_results)
         verifications = context.metadata.setdefault("verifications", {})
         verification_entry = {
             **self._entry_format_fields(),

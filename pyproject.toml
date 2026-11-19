@@ -54,6 +54,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# cua_verifier renders a CUA task's spreadsheets, documents, slides and PDFs as text for its judge; without them it names
+# each such file as not rendered.
+cua = [
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "python-pptx>=1.0",
+    "pypdf>=4",
+]
 # agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor release a week.
 openenv = [
     "openenv>=0.9",
@@ -152,7 +160,7 @@ coreweave = [
     "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
 ]
 dev = [
-    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,cua,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with

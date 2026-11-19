@@ -94,7 +94,7 @@ class ComputerExecTaskStep(TaskStep):
         problems = super().preflight()
         if not isinstance(self.env_id, str) or not self.env_id or (env := stored_env(self.env_id)) is None:
             return problems
-        if problem := _computer_problem(env, self.computer):
+        if problem := computer_problem(env, self.computer):
             problems.append(f"step {self.id!r}: {problem}")
         return problems
 
@@ -169,7 +169,7 @@ def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]
     return computers[0]
 
 
-def _computer_problem(env: object, computer: Optional[str]) -> Optional[str]:
+def computer_problem(env: object, computer: Optional[str]) -> Optional[str]:
     if isinstance(env, ComputerEnv):
         return None if computer is None else f"env {env.id!r} is a computer env, so it takes no computer name"
     if not isinstance(env, MultiEnv):
