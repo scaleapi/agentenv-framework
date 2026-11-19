@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .validator import errors, parse, validate
+from .validator import errors_in, parse, validate
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -31,7 +31,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         findings = validate(document, reader=args.reader, media=args.media)
     for finding in findings:
         print(finding)
-    failed = errors(findings)
+    failed = errors_in(findings)
     print(f"{args.file}: {'invalid' if failed else 'valid'}, {len(failed)} errors, "
           f"{len(findings) - len(failed)} warnings")
     return 1 if failed else 0

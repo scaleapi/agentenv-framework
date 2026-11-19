@@ -12,7 +12,7 @@ from .adapter import Adapter, Native
 from .profile import profile_of
 from .reader import strip_profile
 from .runner import AdapterRun, RecordedTask
-from .validator import ERROR, WARNING, Finding, Rule, _difference, errors, validate_live
+from .validator import ERROR, WARNING, Finding, Rule, _difference, errors_in, validate_live
 
 KIT_RULES: dict[str, Rule] = {rule.id: rule for rule in (
     Rule("kit-run", ERROR, None, "The adapter takes every recorded record without raising"),
@@ -33,7 +33,7 @@ class KitResult:
 
     @property
     def errors(self) -> list[Finding]:
-        return errors(self.findings)
+        return errors_in(self.findings)
 
     def raise_for_errors(self) -> None:
         """Raise AssertionError listing every finding when any is an error."""

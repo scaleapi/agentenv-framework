@@ -114,7 +114,7 @@ class _Findings:
             self.items.append(Finding(rule, severity, f"{self.prefix}{where}", message))
 
 
-def errors(findings: Sequence[Finding]) -> list[Finding]:
+def errors_in(findings: Sequence[Finding]) -> list[Finding]:
     """The findings that fail a check."""
     return [finding for finding in findings if finding.severity == ERROR]
 
@@ -179,10 +179,12 @@ def validate_live(pages: Sequence[Mapping[str, Any] | None], final: Mapping[str,
                   media: Path | Mapping[str, bytes] | None = None) -> list[Finding]:
     """The live rule, for a producer: each page a reader was served, in order, validates, is a prefix of the next and
     of the final read, and serves no step whose call is unanswered before its task ends. The final read is checked
-    too."""
+    too. A page equal to the one before it is checked once, since most records close no step."""
     findings: list[Finding] = []
     served: tuple[int, Mapping[str, Any]] | None = None
     for index, page in enumerate(pages):
+        if served is not None and page == served[1]:
+            continue
         if page is None:
             if served is not None:
                 findings.append(Finding("live-prefix", ERROR, f"page {index}: ",

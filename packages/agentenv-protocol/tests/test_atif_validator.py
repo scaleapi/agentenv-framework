@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import pytest
 
-from agentenv_protocol.atif import KIT_RULES, RULES, errors, validate, validate_live
+from agentenv_protocol.atif import KIT_RULES, RULES, errors_in, validate, validate_live
 from agentenv_protocol.atif.__main__ import main
 from atif_cases import CASES, FIXTURES, build
 
@@ -110,7 +110,7 @@ def test_every_rule_has_a_negative_fixture():
 @pytest.mark.parametrize("rule", sorted(NEGATIVE))
 def test_a_negative_fixture_fails_with_its_rules_id_and_the_cli_reports_it(rule, tmp_path, capsys):
     document = _negative(rule)
-    assert rule in _rules(errors(validate(document)))
+    assert rule in _rules(errors_in(validate(document)))
     path = tmp_path / "trajectory.json"
     path.write_text(json.dumps(document), encoding="utf-8")
     assert main(["validate", str(path)]) == 1
@@ -138,8 +138,8 @@ def test_media_bytes_are_checked_against_their_name_and_profile():
     document = _fixture("computer_use")
     path = _parts(document)[0]["source"]["path"]
     assert validate(document, media=FIXTURES) == []
-    assert "media-bytes" in _rules(errors(validate(document, media={})))
-    assert "media-bytes" in _rules(errors(validate(document, media={path: b"not the screenshot"})))
+    assert "media-bytes" in _rules(errors_in(validate(document, media={})))
+    assert "media-bytes" in _rules(errors_in(validate(document, media={path: b"not the screenshot"})))
 
 
 def test_totals_sum_the_sub_agents_steps_and_skip_a_count_a_step_lacks():
@@ -162,7 +162,7 @@ def test_a_count_given_as_a_numeric_string_is_read_as_the_models_read_it():
     metrics["prompt_tokens"] = str(metrics["prompt_tokens"])
     assert _rules(validate(document)) == {"harbor-save"}
     metrics["cached_tokens"] = str(int(metrics["prompt_tokens"]) + 1)
-    assert "usage" in _rules(errors(validate(document)))
+    assert "usage" in _rules(errors_in(validate(document)))
 
 
 def test_a_sub_agent_embedded_in_a_sub_agent_is_checked_at_its_full_path():
@@ -178,7 +178,7 @@ def test_a_sub_agent_embedded_in_a_sub_agent_is_checked_at_its_full_path():
     nested["steps"][0].setdefault("extra", {}).setdefault("agentenv", {})["turn"] = "zero"
     sub["subagent_trajectories"] = [nested]
     assert ("profile", "subagent_trajectories[0].subagent_trajectories[0].steps[0].extra.agentenv.turn") in {
-        (f.rule, f.where) for f in errors(validate(document))}
+        (f.rule, f.where) for f in errors_in(validate(document))}
 
 
 def test_a_reference_resolves_to_a_sub_agent_embedded_around_it():
@@ -189,7 +189,7 @@ def test_a_reference_resolves_to_a_sub_agent_embedded_around_it():
     result["subagent_trajectory_ref"] = [{"trajectory_id": sub["trajectory_id"]}]
     assert "reference" not in _rules(validate(document))
     result["subagent_trajectory_ref"] = [{"trajectory_id": "nobody"}]
-    assert "reference" in _rules(errors(validate(document)))
+    assert "reference" in _rules(errors_in(validate(document)))
 
 
 def _open_page(name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
@@ -203,14 +203,17 @@ def test_the_live_check_flags_a_page_that_differs_from_the_final_read_by_one_ste
     document, page, media = _open_page("coding")
     assert validate_live([page], document, media=media) == []
     page["steps"][1]["message"] = "a step served, then changed"
-    assert [(f.rule, f.where) for f in errors(validate_live([page], document, media=media))] == [
+    assert [(f.rule, f.where) for f in errors_in(validate_live([page], document, media=media))] == [
         ("live-prefix", "final: ")]
 
 
 def test_the_live_check_flags_a_page_serving_a_call_with_no_result_before_its_task_ends():
     document, page, media = _open_page("coding")
     del page["steps"][1]["observation"]
-    assert "live-unanswered" in _rules(errors(validate_live([page], document, media=media)))
+    assert "live-unanswered" in _rules(errors_in(validate_live([page], document, media=media)))
+    repeated = [f.where for f in validate_live([page, copy.deepcopy(page)], document, media=media)
+                if f.rule == "live-unanswered"]
+    assert repeated == ["page 0: steps[1].tool_calls[0]"]
 
 
 def _agent(step_id: int, call: str, *, result: bool = True, spawns: str | None = None,
@@ -251,7 +254,7 @@ def test_children_that_share_an_id_under_different_parents_keep_their_own_tasks(
 
 def test_a_page_that_serves_nothing_after_serving_steps_breaks_the_live_rule():
     document, page, media = _open_page("coding")
-    assert "live-prefix" in _rules(errors(validate_live([page, None], document, media=media)))
+    assert "live-prefix" in _rules(errors_in(validate_live([page, None], document, media=media)))
 
 
 def test_python_m_runs_the_cli(tmp_path):
