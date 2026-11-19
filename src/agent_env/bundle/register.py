@@ -115,8 +115,6 @@ def register_bundle(
             raise BundleError(problems)
         requires = tuple(declare(resolved, declaring or declaring_for(bundle.root, installed=False, dry_run=dry_run)))
         say = on_progress or (lambda line: None)
-        for warning in plan.lint_warnings:
-            say(f"  {warning}")
         materialization = materialize(
             registered, dry_run=dry_run, ledger=ledger,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),

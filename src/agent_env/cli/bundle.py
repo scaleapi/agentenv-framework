@@ -126,6 +126,8 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
             if not dry_run:
                 offer_to_install(e)
             raise
+    for line in planned.plan.lint_warnings:
+        click.echo(f"  {line}")
     for line in planned.floating:
         click.echo(f"  floating, since its field takes no version: {line}")
     for line in planned.requires:
