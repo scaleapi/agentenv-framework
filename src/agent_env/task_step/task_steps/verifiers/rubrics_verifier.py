@@ -757,52 +757,61 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         return {}
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
-        """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
+        """The criteria this run asks (``_run_values``): an override point, which user_sim_judge's plan replaces."""
+        return list(self._run_values(context)["criteria"])
 
-        Replace-on-presence, like ``load_artifact`` — an explicit ``[]`` replaces rather
-        than reverting (presence check, not truthiness). Returns a copy; never mutates
-        ``self``, which is shared across concurrent rollouts.
-        """
-        step_overrides = self.step_param_overrides(context)
-        return list(step_overrides["criteria"]) if "criteria" in step_overrides else self.criteria
+    def _run_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """Each setting a run's ``step_params`` or ``user_overrides`` can change, by the step's own field name, at the
+        value this run judges with: the judge reads these and ``verifier_settings`` records them, so the two can't
+        disagree. Unvalidated; the judge checks them as it reads them. Never mutates ``self``, which concurrent runs
+        share. A ``step_params`` ``criteria`` replaces on presence, so ``[]`` replaces too; effort and the thinking
+        budget reach only an agent judge, and the agent sandbox only a judge the step deploys."""
+        step_params = self.step_param_overrides(context)
+        overrides = context.metadata.get("user_overrides") or {}
+        use_agent_judge = self.use_agent_judge if overrides.get("use_agent_judge") is None else overrides["use_agent_judge"]
+        apply_filter = overrides.get("apply_trajectory_filter")
+        trajectory_filter = (None if apply_filter is False
+                             else self.trajectory_filter or TrajectoryFilter() if apply_filter is True
+                             else self.trajectory_filter)
+        return {
+            "criteria": list(step_params["criteria"]) if "criteria" in step_params else self.criteria,
+            "grade_up_to_turn": step_params["grade_up_to_turn"] if "grade_up_to_turn" in step_params
+            else self.grade_up_to_turn,
+            "use_agent_judge": use_agent_judge,
+            "trajectory_filter": trajectory_filter,
+            "effort": (overrides.get("judge_effort") or self.effort) if use_agent_judge else self.effort,
+            "max_thinking_tokens": (overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens)
+            if use_agent_judge else self.max_thinking_tokens,
+            "judge_batch_size": _override_or(overrides, "judge_batch_size", self.judge_batch_size),
+            "judge_batch_concurrency": _override_or(overrides, "judge_batch_concurrency", self.judge_batch_concurrency),
+            "judge_sandbox_type": (overrides.get("agent_sandbox") or self.judge_sandbox_type)
+            if use_agent_judge and self.agent_name is None else self.judge_sandbox_type,
+        }
+
+    def _recorded_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """``_run_values`` as ``verifier_settings`` records them, the trajectory filter as its dict; a subclass leaves
+        out the ones its judge never uses."""
+        values = self._run_values(context)
+        trajectory_filter = values["trajectory_filter"]
+        return {**values, "trajectory_filter": trajectory_filter.to_dict() if trajectory_filter is not None else None}
 
     def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
-        """The step's fields as this run grades with them: each run override it applies in place of the stored value,
-        the judge model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys
-        one, and ``overridden``, the settings the run's overrides changed. Never a key, header or base URL."""
+        """The step's fields as this run judges with them (``_recorded_values`` in place of the stored ones), the judge
+        model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys one, and
+        ``overridden``, the settings this run's overrides changed. Never a key, header or base URL."""
         settings = super().verifier_settings(context)
         settings.pop("default_model_api_base", None)
-        applied = self._run_overrides(context)
+        values, stored = self._recorded_values(context), self._recorded_values(TaskStepContext())
+        overridden = [key for key, value in values.items() if value != stored[key]]
+        settings.update({key: values[key] for key in overridden})
         overrides = context.metadata.get("user_overrides") or {}
-        overridden = [key for key, value in applied.items() if settings.get(key) != value]
         if overrides.get("judge_model") and overrides["judge_model"] != self.default_model:
             overridden.append("judge_model")
-        settings.update(applied)
         if settings.get("use_agent_judge") and self.agent_name is None and not self.judge_a2a_agent_id:
             settings["judge_a2a_agent_id"] = get_config().get_default_a2a_agent_id()
         recorded = (context.metadata.get("models") or {}).get(ModelRole.JUDGE.record_key) or {}
         settings["judge_model"] = recorded[self.id] if self.id in recorded else self._judge_model(context)
         return {**settings, "overridden": overridden}
-
-    def _run_overrides(self, context: TaskStepContext) -> dict[str, Any]:
-        """The settings this run's ``step_params`` and ``user_overrides`` set, by the step's own field names, with the
-        values it grades with: what ``verifier_settings`` records in place of the stored ones."""
-        step_params = self.step_param_overrides(context)
-        overrides = context.metadata.get("user_overrides") or {}
-        applied: dict[str, Any] = {key: step_params[key] for key in ("criteria", "grade_up_to_turn") if key in step_params}
-        if overrides.get("use_agent_judge") is not None:
-            applied["use_agent_judge"] = overrides["use_agent_judge"]
-        if (apply_filter := overrides.get("apply_trajectory_filter")) is not None:
-            applied["trajectory_filter"] = (self.trajectory_filter or TrajectoryFilter()).to_dict() if apply_filter else None
-        for override, key in (("judge_effort", "effort"), ("judge_max_thinking_tokens", "max_thinking_tokens")):
-            if overrides.get(override):
-                applied[key] = overrides[override]
-        for key in ("judge_batch_size", "judge_batch_concurrency"):
-            if overrides.get(key) is not None:
-                applied[key] = overrides[key]
-        if overrides.get("agent_sandbox") and self.agent_name is None:
-            applied["judge_sandbox_type"] = overrides["agent_sandbox"]
-        return applied
 
     async def verify(self, context: TaskStepContext) -> Verification:
         verdict = self._gated(await self._judged(context))
@@ -826,11 +835,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
-        overrides_for_step = self.step_param_overrides(context)
-        grade_up_to_turn = (
-            _validated_turn(overrides_for_step["grade_up_to_turn"])
-            if "grade_up_to_turn" in overrides_for_step else self.grade_up_to_turn
-        )
+        run = self._run_values(context)
+        grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
             # A cut copy's reply only points at turn k's trajectory, which use_trajectory=False never loads.
@@ -856,20 +862,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
 
         overrides = context.metadata.get("user_overrides", {})
-        # Resolved into a local, not onto self: one step instance is shared across
-        # concurrent rollouts, so mutating self would leak the override between them.
-        use_agent_judge_override = overrides.get("use_agent_judge")
-        use_agent_judge = use_agent_judge_override if use_agent_judge_override is not None else self.use_agent_judge
+        use_agent_judge = run["use_agent_judge"]
         criteria = self._resolved_criteria(context)
         # The judge sees/echoes short keys (c1..cN), not UUIDs; frame labels use them too, hence before compaction.
         criteria_for_judge, real_by_short = _to_short_keyed_criteria(criteria)
-        apply_filter_override = overrides.get("apply_trajectory_filter")
-        if apply_filter_override is False:
-            filter_to_apply = None
-        elif apply_filter_override is True:
-            filter_to_apply = self.trajectory_filter or TrajectoryFilter()
-        else:
-            filter_to_apply = self.trajectory_filter
+        filter_to_apply = run["trajectory_filter"]
 
         # Multi-turn: judge every turn (fed from the per-turn URIs already on the
         # PromptResponse), not just the last. DEFAULT compaction runs per turn; SCREENSHOT
@@ -975,9 +972,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         raise
                     raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
                 deploy_kwargs = {"env_vars": env_vars}
-                resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
-                if resolved_sandbox_type:
-                    deploy_kwargs["sandbox_type"] = resolved_sandbox_type
+                if run["judge_sandbox_type"]:
+                    deploy_kwargs["sandbox_type"] = run["judge_sandbox_type"]
                 auto_deployed_judge = await a2a_agent.deploy(**deploy_kwargs)
                 judge_a2a_url = auto_deployed_judge.a2a_url
                 judge_sandbox_id = auto_deployed_judge.sandbox_id
@@ -1010,12 +1006,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             model = self._judge_model(context)
             context.record_model(ModelRole.JUDGE.record_key, self.id, model)
             agent_prompt_text = prompt_response.prompt_text or ""
-            judge_effort = overrides.get("judge_effort") or self.effort
-            judge_max_thinking_tokens = overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens
-            batch_size = _validated_batch_option("judge_batch_size", _override_or(
-                overrides, "judge_batch_size", self.judge_batch_size))
-            batch_concurrency = _validated_batch_option("judge_batch_concurrency", _override_or(
-                overrides, "judge_batch_concurrency", self.judge_batch_concurrency))
+            judge_effort, judge_max_thinking_tokens = run["effort"], run["max_thinking_tokens"]
+            batch_size = _validated_batch_option("judge_batch_size", run["judge_batch_size"])
+            batch_concurrency = _validated_batch_option("judge_batch_concurrency", run["judge_batch_concurrency"])
             if batch_size is not None and not self._spec().batchable:
                 raise RuntimeError(f"Verifier '{self.verifier_id}': {_unbatchable_format_message(self.output_format)}")
             loaded_for_judge: list[dict] = []

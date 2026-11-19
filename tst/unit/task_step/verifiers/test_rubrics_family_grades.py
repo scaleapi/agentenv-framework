@@ -42,11 +42,30 @@ async def test_the_settings_are_what_the_run_graded_with_and_say_what_its_overri
     grade = await _grade(step, context)
 
     settings = grade["verifier_settings"]
-    assert (settings["criteria"], settings["judge_model"], settings["effort"], settings["judge_batch_size"]) == (
-        OVERRIDE, "judge-x", "high", 1)
+    assert (settings["criteria"], settings["judge_model"], settings["judge_batch_size"]) == (OVERRIDE, "judge-x", 1)
     assert settings["trajectory_filter"] is None and settings["default_model"] == "judge-model"
-    assert settings["overridden"] == ["criteria", "effort", "judge_batch_size", "judge_model"]
+    assert settings["effort"] is None
+    assert settings["overridden"] == ["criteria", "judge_batch_size", "judge_model"]
     assert "sk-run-key" not in json.dumps(grade) and "llm.example.test" not in json.dumps(grade)
+
+
+@pytest.mark.asyncio
+async def test_the_judge_batches_by_the_batch_size_its_settings_record():
+    step = _direct_judge(_step(criteria=_criteria(2)), lambda ids, n: _binary(ids))
+    context = _context({"judge_batch_size": 1})
+
+    grade = await _grade(step, context)
+
+    assert grade["verifier_settings"]["judge_batch_size"] == 1
+    assert context.metadata["verifications"]["vid"]["judge_batches"] == 2
+
+
+def test_an_agent_judge_records_the_effort_and_thinking_budget_a_run_gives_it():
+    settings = _step(use_agent_judge=True).verifier_settings(
+        _context({"judge_effort": "high", "judge_max_thinking_tokens": 4000}))
+
+    assert (settings["effort"], settings["max_thinking_tokens"]) == ("high", 4000)
+    assert {"effort", "max_thinking_tokens"} <= set(settings["overridden"])
 
 
 @pytest.mark.asyncio
@@ -96,6 +115,12 @@ def test_a_judge_the_step_deploys_is_recorded_by_the_agent_and_sandbox_it_runs_o
     assert settings["judge_sandbox_type"] == "modal" and settings["overridden"] == ["judge_sandbox_type"]
 
 
+def test_a_direct_judge_records_no_agent_sandbox_it_never_deploys_on():
+    settings = _step().verifier_settings(_context({"agent_sandbox": "modal"}))
+
+    assert settings["judge_sandbox_type"] is None and settings["overridden"] == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("min_passing_score", "raises"), [(None, True), (0.5, False), (0.75, True)])
 async def test_the_gate_fails_a_score_under_the_steps_min_passing_score(min_passing_score, raises):
@@ -140,16 +165,17 @@ def test_the_user_sim_judge_takes_its_pinned_aggregator_and_refuses_a_min_passin
         _user_sim_judge(min_passing_score=0.5)
 
 
-def test_the_user_sim_judges_settings_are_only_the_overrides_it_applies():
+def test_the_user_sim_judges_settings_leave_out_what_its_judge_never_uses():
     context = TaskStepContext(metadata={"user_overrides": {
         "judge_model": "judge-x", "judge_effort": "high", "apply_trajectory_filter": True, "judge_batch_size": 2,
         "judge_batch_concurrency": 3, "step_params": {"judge_user_sim": {"criteria": OVERRIDE}}}})
 
     settings = _user_sim_judge().verifier_settings(context)
 
-    assert settings["judge_model"] == "judge-x" and settings["judge_batch_size"] == 2
-    assert not {"criteria", "trajectory_filter", "effort", "judge_batch_concurrency"} & set(settings)
-    assert settings["overridden"] == ["judge_batch_size", "judge_model"]
+    assert (settings["judge_model"], settings["judge_batch_size"], settings["judge_batch_concurrency"]) == (
+        "judge-x", 2, 3)
+    assert not {"criteria", "trajectory_filter", "effort"} & set(settings)
+    assert settings["overridden"] == ["judge_batch_size", "judge_batch_concurrency", "judge_model"]
 
 
 @pytest.mark.asyncio

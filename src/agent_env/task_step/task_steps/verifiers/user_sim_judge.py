@@ -321,16 +321,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
                    fail_task_when_not_passing=data.get("fail_task_when_not_passing", True),
                    judge_timeout_seconds=data.get("judge_timeout_seconds"))
 
-    def _run_overrides(self, context: TaskStepContext) -> dict[str, Any]:
-        """The run overrides the judge applies: rubrics_verifier's but the criteria, which the plan replaces, the
-        trajectory filter, which reads no trajectory, and the batch concurrency and sandbox, which never change a
-        verdict; effort and thinking only for an agent judge, which alone takes them."""
-        applied = {k: v for k, v in super()._run_overrides(context).items()
-                   if k not in ("criteria", "trajectory_filter", "judge_batch_concurrency", "judge_sandbox_type")}
-        if not applied.get("use_agent_judge"):
-            applied.pop("effort", None)
-            applied.pop("max_thinking_tokens", None)
-        return applied
+    def _recorded_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """rubrics_verifier's, but the criteria, which each run's plan replaces, and the trajectory filter: its judge
+        reads no trajectory."""
+        return {k: v for k, v in super()._recorded_values(context).items() if k not in ("criteria", "trajectory_filter")}
 
     # ---- the run -----------------------------------------------------------------------------------------------
     async def verify(self, context: TaskStepContext) -> Verification:
