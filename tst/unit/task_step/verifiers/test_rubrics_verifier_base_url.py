@@ -65,9 +65,9 @@ def endpoint():
         server.server_close()
 
 
-def _judge(monkeypatch, base_url: str) -> RubricsVerifierTaskStep:
+def _judge(monkeypatch, base_url: str, params: dict | None = None) -> RubricsVerifierTaskStep:
     config = cfg_mod.Config()
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url=base_url, api_key="k"))
+    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url=base_url, api_key="k", params=params or {}))
     monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
@@ -99,8 +99,21 @@ async def test_the_direct_judge_reaches_the_endpoint_however_its_base_url_ends(
     assert json.loads(out["response"]) == json.loads(_VERDICT)
 
 
-def _provider(name: str):
+@pytest.mark.asyncio
+async def test_a_judge_whose_params_name_its_provider_keeps_that_providers_url(monkeypatch, endpoint):
+    """``custom_llm_provider = "openai"`` in ``[model] params`` sends even a Claude name through the OpenAI route,
+    whose base keeps its ``/v1``."""
+    judge = _judge(monkeypatch, endpoint + "/v1", params={"custom_llm_provider": "openai"})
+
+    await judge._prompt_llm_judge("grade it", model="claude-sonnet-4-6", context=TaskStepContext())
+
+    assert _Endpoint.calls == [("/v1/chat/completions", "claude-sonnet-4-6")]
+
+
+def _provider(name: str, custom_llm_provider: str | None = None):
     providers = {"claude-sonnet-4-6": "anthropic", "gpt-4.1-mini": "openai"}
+    if custom_llm_provider:
+        return name, custom_llm_provider, None, None
     if name not in providers:
         print("Provider List")
         raise ValueError(name)
@@ -113,4 +126,7 @@ def test_the_route_keeps_a_native_name_and_sends_an_unknown_one_as_openai(capsys
     assert _judge_route("gpt-4.1-mini", "https://gw.example/v1", _provider) == ("gpt-4.1-mini", "https://gw.example/v1")
     assert _judge_route("qwen3:8b", "https://gw.example", _provider) == ("openai/qwen3:8b", "https://gw.example")
     assert _judge_route("qwen3:8b", None, _provider) == ("qwen3:8b", None)
+    assert _judge_route("claude-sonnet-4-6", "https://gw.example/v1", _provider, "openai") == (
+        "claude-sonnet-4-6", "https://gw.example/v1")
+    assert _judge_route("qwen3:8b", "https://gw.example", _provider, "hosted_vllm") == ("qwen3:8b", "https://gw.example")
     assert capsys.readouterr().out == ""
