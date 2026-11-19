@@ -231,6 +231,32 @@ def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(o
     assert [user["turn"] for user in _users(document)] == [0, 1, 2]
 
 
+def test_a_load_into_a_context_waits_for_its_save_so_the_save_keeps_its_count(objects: dict[str, bytes]) -> None:
+    objects["trajectory"], objects["older-state"] = b"conversation", b'{"turns": 0}'
+    paused = _Hold()
+    with TestClient(_snapshotting(save_hold=paused).create_app()) as client:
+        for tag in ("t1", "t2"):
+            _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            saving = pool.submit(client.post, "/ext/snapshot", json={"context_id": "ctx-1", "objects": {
+                "trajectory": _grant("http-put", "saved-trajectory", "application/octet-stream"),
+                "state": _grant("http-put", "state", "application/json")}})
+            paused.reached()
+            loading = pool.submit(client.put, "/ext/snapshot", json={"target_context_id": "ctx-1", "objects": {
+                "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
+                "state": _grant("http-get", "older-state", "application/json")}})
+            time.sleep(0.3)
+            paused.resume.set()
+            saved, loaded = saving.result(timeout=10), loading.result(timeout=10)
+        task_id = _send(client, "work t3", "m-t3")
+        _ended(client, task_id)
+        document = _atif(client, task_id=task_id)["trajectory"]
+    assert (saved.status_code, loaded.status_code) == (200, 200), (saved.text, loaded.text)
+    # The save ran first and kept its count; the load then restored the older snapshot's.
+    assert json.loads(objects["state"]) == {"turns": 2}
+    assert [user["turn"] for user in _users(document)] == [0]
+
+
 def test_a_save_while_a_task_runs_is_answered_without_waiting_for_it(objects: dict[str, bytes]) -> None:
     running = _Hold()
     with TestClient(_snapshotting(run_hold=running).create_app()) as client:

@@ -252,12 +252,14 @@ class _BoundedContextLocks:
 @dataclass(slots=True)
 class _InFlight:
     count: int = 0
+    turn: asyncio.Lock = field(default_factory=asyncio.Lock)
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class _SnapshotsInFlight:
-    """Each context's snapshots in flight that carry the SDK's state: a task of the context waits to start until none
-    is, so the turn count a snapshot saves or restores is its conversation's. A running task isn't held."""
+    """Each context's snapshots in flight that carry the SDK's state, taken one at a time: a task of the context waits
+    to start until none is, so the turn count a snapshot saves or restores is its conversation's, and a load can't
+    change the count a save is about to read. A running task isn't held."""
 
     def __init__(self) -> None:
         self._contexts: dict[str, _InFlight] = {}
@@ -270,7 +272,8 @@ class _SnapshotsInFlight:
         entry = self._contexts.setdefault(context_id, _InFlight())
         entry.count += 1
         try:
-            yield
+            async with entry.turn:
+                yield
         finally:
             entry.count -= 1
             if not entry.count:
