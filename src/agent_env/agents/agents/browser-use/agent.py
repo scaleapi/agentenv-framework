@@ -38,12 +38,18 @@ TOOL_NAME = re.compile(r"[^a-zA-Z0-9_-]")
 _CHECKPOINT = TypeAdapter(ModelRequest | None)
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    Anthropic's client appends its own ``/v1/messages``."""
+    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+
+
 def model(turn: dict):
     """The turn's model on agent-env's endpoint, with the endpoint's headers."""
     name, base_url, key = turn["model"], os.environ["LITELLM_BASE_URL"], os.environ["LITELLM_API_KEY"]
     headers = json.loads(os.environ.get("LITELLM_EXTRA_HEADERS") or "{}")
     if "claude" in name.lower():
-        client = AsyncAnthropic(auth_token=key, base_url=base_url, default_headers=headers)
+        client = AsyncAnthropic(auth_token=key, base_url=_api_root(base_url), default_headers=headers)
         return AnthropicModel(name, provider=AnthropicProvider(anthropic_client=client),
                               profile=anthropic_model_profile(name.rsplit("/", 1)[-1]))
     client = AsyncOpenAI(api_key=key, base_url=base_url, default_headers=headers)

@@ -229,7 +229,9 @@ Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/e
    `request.config.timeout_seconds` with `request.mcp_servers` connected, records the trajectory, and returns a
    `TaskResult` with a `session_ref`. Replace `claude_bridge.py` with your runtime's bridge.
 4. **Map the model endpoint**: read `LITELLM_BASE_URL`, `LITELLM_API_KEY` and `LITELLM_EXTRA_HEADERS` and hand them
-   to your runtime, as `claude_bridge.py` `cli_env` does.
+   to your runtime, as `claude_bridge.py` `cli_env` does. `LITELLM_BASE_URL` comes as configured and may end in `/v1`
+   or not: a client that appends its own versioned path (Anthropic's `/v1/messages`) strips one trailing `/v1` first,
+   and one that wants the `/v1` root adds it unless it's there.
 5. **Add extensions** (Extensions): `mcp-config` and `trajectory` first, then every other one your runtime can
    honour. Keep `AGENT_CARD = app.state.agentenv_a2a.card` at the end of `a2a_server.py`.
 6. **Test it offline** with Starlette's `TestClient` and your runtime faked, as `tst/unit/agents/claude_code/` does:

@@ -144,6 +144,12 @@ _PROXY_DROP_RESP_HEADERS = {"content-length", "transfer-encoding", "content-enco
 _LITELLM_ROUTE_HEADERS = ("x-litellm-model-id", "x-litellm-model-api-base", "x-litellm-model-group")
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and the
+    proxy appends LiteLLM's ``/gemini/...`` and ``/v1/chat/completions`` routes to it."""
+    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+
+
 def _describe_transport_error(exc: Exception) -> str:
     """Name the exception class: many httpx errors (ReadTimeout, RemoteProtocolError) stringify to ''."""
     text = str(exc)
@@ -747,7 +753,7 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         if route is None:
             raise HTTPException(status_code=404, detail="no running turn has this proxy route")
         rest = request.path_params["rest"]
-        base = (os.environ.get("LITELLM_BASE_URL") or "").rstrip("/")
+        base = _api_root(os.environ.get("LITELLM_BASE_URL") or "")
         if not base:
             raise HTTPException(status_code=503, detail="LITELLM_BASE_URL not set; cannot forward gemini model calls")
         # Provider-prefixed route models (vertex_ai/...) can't traverse the /gemini

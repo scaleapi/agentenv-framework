@@ -194,6 +194,12 @@ def model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    codex is given LiteLLM's ``/openai/v1`` route under it."""
+    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+
+
 def write_base_config(environ: Mapping[str, str]) -> None:
     """The settings every turn shares: the collaboration tools, and the model endpoint agent-env configured as a
     Responses API provider, with its headers and the run's attribution on each call."""
@@ -206,7 +212,7 @@ def write_base_config(environ: Mapping[str, str]) -> None:
         cfg["model_provider"] = "litellm"
         provider = {
             "name": "LiteLLM proxy",
-            "base_url": base_url.rstrip("/") + "/openai/v1",
+            "base_url": _api_root(base_url) + "/openai/v1",
             "env_key": "LITELLM_API_KEY",
             "wire_api": "responses",
             # Bound codex retry/idle behavior so a hung stream fails fast

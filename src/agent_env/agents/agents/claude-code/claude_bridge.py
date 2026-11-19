@@ -177,6 +177,12 @@ def _model_headers(raw: str | None) -> dict[str, str]:
 
 #: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
 #: while the agent follows an armed clock.
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and the
+    CLI appends its own ``/v1/messages``."""
+    return url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+
+
 EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
 #: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
 #: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
@@ -251,7 +257,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if not env.get("ANTHROPIC_AUTH_TOKEN") and env.get("LITELLM_API_KEY"):
         env["ANTHROPIC_AUTH_TOKEN"] = env["LITELLM_API_KEY"]
     if not env.get("ANTHROPIC_BASE_URL") and env.get("LITELLM_BASE_URL"):
-        env["ANTHROPIC_BASE_URL"] = env["LITELLM_BASE_URL"]
+        env["ANTHROPIC_BASE_URL"] = _api_root(env["LITELLM_BASE_URL"])
     if env.get("ANTHROPIC_AUTH_TOKEN"):
         env["ANTHROPIC_API_KEY"] = ""
     if model and env.get("ANTHROPIC_BASE_URL"):

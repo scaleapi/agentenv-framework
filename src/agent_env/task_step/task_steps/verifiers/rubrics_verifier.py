@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import logging
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
@@ -20,7 +22,7 @@ from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ModelParam, ModelRole, no_key_for
+from agent_env.config.model import ModelParam, ModelRole, api_root, no_key_for
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -279,6 +281,21 @@ def _looks_like_response_format_error(exc: Exception) -> bool:
 def _caches_prompts(model: str) -> bool:
     """Whether a judge call to ``model`` marks its shared prefix for the prompt cache: Claude models, by any route."""
     return "claude" in model.lower()
+
+
+def _judge_route(model: str, api_base: Optional[str], provider_of: Callable[[str], Any]) -> tuple[str, Optional[str]]:
+    """The model name and base a direct judge call hands litellm; what it records stays ``model``. Through an
+    endpoint, a name litellm can't place goes as ``openai/<name>``, and an Anthropic one, whose client appends
+    ``/v1/messages``, gets the base without a trailing ``/v1``. ``provider_of`` is litellm's ``get_llm_provider``,
+    which prints a banner before refusing a name it can't place."""
+    if api_base is None:
+        return model, None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            provider = provider_of(model)[1]
+    except Exception:
+        return f"openai/{model}", api_base
+    return model, api_root(api_base) if provider == "anthropic" else api_base
 
 
 def _usage_and_cost(response: Any) -> dict:
@@ -1389,6 +1406,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         if base and not api_key and not config.is_model_endpoint(base):
             raise ConfigError(f"{self.type} '{self.id}': {no_key_for(base, _JUDGE_KEY_HOW)}")
         call_config = config.resolve_model_call(model, default_api_key=api_key, base_override=base)
+        route_model, route_base = _judge_route(model, call_config.api_base, litellm.get_llm_provider)
+        call_config = replace(call_config, api_base=route_base)
         text_blocks: list[dict] = [{"type": "text", "text": eval_prompt}]
         cached = bool(cached_prefix) and eval_prompt.startswith(cached_prefix or "") and _caches_prompts(model)
         if cached:
@@ -1414,7 +1433,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
                 request_kwargs: dict = dict(
-                    model=model,
+                    model=route_model,
                     messages=messages,
                     timeout=self.judge_timeout_seconds,
                     **call_config.client_kwargs(),
