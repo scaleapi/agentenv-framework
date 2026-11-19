@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from ..atif import FORMAT, Adapter, AdapterRun, AuxEntry, Media, ServedTurn, TurnContext
@@ -143,11 +143,13 @@ class AtifCopy:
             self._check()
             return self._run.page()
 
-    def page(self, after: int, max_steps: int, max_bytes: int, *, task_id: str | None = None) -> AtifPage:
+    def page(self, after: int, max_steps: int, max_bytes: int, *, task_id: str | None = None,
+             scrub: Callable[[Any], Any] = lambda served: served) -> AtifPage:
         """The closed steps after step ``after``, of the whole context or of task ``task_id``, within both budgets; the
         first is always returned, so one larger than ``max_bytes`` can't stall a reader. With them, the sub-agents of
         every task they belong to, as far as each is served: a sub-agent can gain steps while its task runs, and the
-        page that serves a task's last step, which closes only as the task ends, carries them whole."""
+        page that serves a task's last step, which closes only as the task ends, carries them whole. Everything is
+        served through ``scrub``, and the byte budget counts what it serves."""
         with self._lock:
             self._check()
             document = self._run.page()
@@ -163,6 +165,7 @@ class AtifCopy:
         tasks: set[str | None] = set()
         used = 0
         for step, owner in pending[:max_steps]:
+            step = scrub(step)
             size = len(json.dumps(step))
             if served and used + size > max_bytes:
                 break
@@ -172,9 +175,10 @@ class AtifCopy:
         header = None
         subagents: list[dict[str, Any]] = []
         if document is not None:
-            header = {key: value for key, value in document.items() if key not in ("steps", "subagent_trajectories")}
-            subagents = [sub for sub in document.get("subagent_trajectories", [])
-                         if sub_tasks.get(sub["trajectory_id"]) in tasks]
+            header = scrub({key: value for key, value in document.items()
+                            if key not in ("steps", "subagent_trajectories")})
+            subagents = scrub([sub for sub in document.get("subagent_trajectories", [])
+                               if sub_tasks.get(sub["trajectory_id"]) in tasks])
         return AtifPage(header=header, subagents=subagents, steps=served,
                         next=served[-1]["step_id"] if served else after, has_more=len(served) < len(pending))
 

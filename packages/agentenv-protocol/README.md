@@ -1666,6 +1666,31 @@ extension names the state the SDK keeps (`"state": ["turns"]` in its params,
 `SNAPSHOT_STATE_PARAM`), and agent-env grants the object only to an agent whose
 card has it, since an SDK from before it refuses the object.
 
+Every `atif/1` read leaves out the secrets the SDK knows, each written
+`[redacted:<length>]` wherever it occurs: in the document, the aux log and the
+turn context, inline, uploaded and in cursor pages, whose byte budget counts
+what they serve. The SDK knows:
+
+- its control token, and the model credentials in its environment:
+  `LITELLM_API_KEY` and the values of `LITELLM_EXTRA_HEADERS`;
+- write-only agent-config values;
+- an MCP registration's header and query values, and a CDP endpoint's header
+  values and its URLs, unless one is a bare origin;
+- every transfer grant an extension call hands the agent: its URL whole, its
+  path and query as a request line names them, its query values, its headers
+  other than `Content-Type` and the like, and a signed upload form's signing
+  fields;
+- a clock follower's read token;
+- whatever the agent registers with `self.register_secret(value)`, once its app
+  exists (in `run`, say).
+
+They're taken from each extension call before any handler runs, the agent's own
+included. A value under 8 characters isn't scrubbed, with a warning naming where
+it came from. Each is matched raw, JSON-escaped and percent-encoded, the longest
+first, and a read scrubs as it serves, so a secret learned after a step was
+written is left out too. Native reads keep every secret byte for byte, so a
+replay of the served inputs holds what the served copy redacts.
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic

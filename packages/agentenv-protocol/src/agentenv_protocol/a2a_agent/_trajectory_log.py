@@ -6,7 +6,7 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from ..atif import Adapter, AuxEntry, ServedTurn
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
@@ -287,29 +287,29 @@ class TaskTrajectories:
         return copy.context_read()
 
     def atif_task_page(
-        self, task_id: str, after: int, max_steps: int, max_bytes: int
+        self, task_id: str, after: int, max_steps: int, max_bytes: int, *, scrub: Callable[[Any], Any]
     ) -> AtifCursor | None:
-        """A cursor page of the task's closed atif/1 steps, in the task's state."""
+        """A cursor page of the task's closed atif/1 steps, in the task's state, served through ``scrub``."""
         record = self._tasks.get(task_id)
         copy = self._copies.get(record.context_id) if record is not None else None
         if copy is None:
             return None
         self._touch(record.context_id)
         state = record.state
-        page = copy.page(after, max_steps, max_bytes, task_id=task_id)
+        page = copy.page(after, max_steps, max_bytes, task_id=task_id, scrub=scrub)
         return AtifCursor(page=page, context_id=record.context_id, task_id=task_id, state=state)
 
     def atif_context_page(
-        self, context_id: str, after: int, max_steps: int, max_bytes: int
+        self, context_id: str, after: int, max_steps: int, max_bytes: int, *, scrub: Callable[[Any], Any]
     ) -> AtifCursor | None:
         """A cursor page of the context's closed atif/1 steps, on the task the context is on and in
-        the context's state."""
+        the context's state, served through ``scrub``."""
         copy = self._copies.get(context_id)
         records = self._context_records(context_id) if copy is not None else None
         if copy is None or records is None:
             return None
         task_id, state = self._context_progress(context_id, records)
-        page = copy.page(after, max_steps, max_bytes)
+        page = copy.page(after, max_steps, max_bytes, scrub=scrub)
         return AtifCursor(page=page, context_id=context_id, task_id=task_id, state=state)
 
     def _context_progress(

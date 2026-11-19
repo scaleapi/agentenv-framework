@@ -4,8 +4,9 @@ turn runs for a few seconds; over a two-turn conversation with a user-sim, each 
 in more than one chunk, and its chunks join to that turn's final trajectory; each turn names the one after it, and
 the last none. The echo agent declares its native format and an ATIF adapter, so its card offers both; its native reads
 name their format, its atif/1 reads are valid ATIF, and a read naming another format is refused with a code agent-env
-reads. A snapshot of it carries its atif/1 copy's turn count to the fresh agent it is restored into. Needs Docker and a
-throwaway local registry."""
+reads. A snapshot of it carries its atif/1 copy's turn count to the fresh agent it is restored into, and its atif/1
+reads leave out the model key a command it runs prints, which its native read keeps. Needs Docker and a throwaway local
+registry."""
 
 import json
 import re
@@ -226,3 +227,32 @@ async def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restor
     assert [(user["turn"], user["context_id"]) for user in after_users] == [(2, restored)]
     assert (after["session_id"], [step["message"] for step in after["steps"]]) == (restored, ["three", "Echo: three"])
     assert after["trajectory_id"] != before["trajectory_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_model_key_a_command_prints_is_redacted_in_atif_and_kept_in_the_native_log(local_registry):
+    suffix = uuid.uuid4().hex[:8]
+    context_id = f"scrub-{suffix}"
+    agent = put_test_agent(f"scrub-agent-{suffix}", env={"LITELLM_API_KEY": f"sk-echo-{uuid.uuid4().hex}"})
+    task = Task.put(id=f"scrub-{suffix}", steps=[
+        _deploy(agent, "solver"),
+        PromptAgentTaskStep(id="ask", version=None, prompt_id="ask", agent_name="solver",
+                            prompt="run printenv LITELLM_API_KEY", context_id=context_id),
+    ])
+
+    context = await task.run()
+
+    assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
+    [deployed] = context.deployed_agents
+    url = deployed.a2a_url + A2AAgent.find_extension(deployed.a2a_card, A2AAgent.EXT_TRAJECTORY)["params"]["endpoint"]
+    async with httpx.AsyncClient(timeout=30, headers=deployed.control_headers) as client:
+        page = (await client.post(url, json={"context_id": context_id, "after": 0})).json()
+        native = (await client.post(url, json={"task_id": page["task_id"]})).json()["trajectory"]
+        atif = (await client.post(url, json={"task_id": page["task_id"], "format": ATIF})).json()
+    # The key the agent's sandbox holds, as the command printed it: the deploy may resolve one of its own.
+    [echo] = [event for event in native if event["type"] == "echo"]
+    key = re.search(r"ran printenv LITELLM_API_KEY: (\S+)", echo["output"]).group(1)
+    assert len(key) >= 8
+    served = json.dumps(atif)
+    assert key not in served and f"[redacted:{len(key)}]" in served
+    assert errors_in(validate(atif["trajectory"])) == []
