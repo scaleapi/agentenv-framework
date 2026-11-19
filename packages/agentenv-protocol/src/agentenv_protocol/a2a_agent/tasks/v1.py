@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
+from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union, get_args
 
 from a2a.types import TaskStatusUpdateEvent
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -278,15 +278,21 @@ class TaskOutcome(str, Enum):
     FAILED = "failed"
 
 
+# model_key_budget and model_key_auth: the model endpoint refused the run's key, as out of budget or not
+# authorized. Neither is the agent's fault, and a retry with the same key fails the same way.
+TaskErrorType: TypeAlias = Literal["agent_error", "infra_error", "model_key_budget", "model_key_auth"]
+TASK_ERROR_TYPES: frozenset[str] = frozenset(get_args(TaskErrorType))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TaskError:
     code: str
     message: str
-    error_type: Literal["agent_error", "infra_error"] = "agent_error"
+    error_type: TaskErrorType = "agent_error"
 
     def __post_init__(self) -> None:
-        if self.error_type not in {"agent_error", "infra_error"}:
-            raise ValueError("error_type must be 'agent_error' or 'infra_error'")
+        if self.error_type not in TASK_ERROR_TYPES:
+            raise ValueError(f"error_type must be one of {sorted(TASK_ERROR_TYPES)}")
 
 
 class _TaskFailed(Exception):
@@ -297,7 +303,7 @@ class _TaskFailed(Exception):
         code: str,
         message: str,
         *,
-        error_type: Literal["agent_error", "infra_error"] = "agent_error",
+        error_type: TaskErrorType = "agent_error",
     ) -> None:
         super().__init__(message)
         self.error = TaskError(code=code, message=message, error_type=error_type)
@@ -436,7 +442,7 @@ class TaskResult:
         code: str,
         message: str,
         *,
-        error_type: Literal["agent_error", "infra_error"] = "agent_error",
+        error_type: TaskErrorType = "agent_error",
         parts: Iterable[TaskPart] | None = None,
     ) -> "TaskResult":
         return (
@@ -468,7 +474,7 @@ class TaskResultBuilder:
         code: str,
         message: str,
         *,
-        error_type: Literal["agent_error", "infra_error"] = "agent_error",
+        error_type: TaskErrorType = "agent_error",
     ) -> "TaskResultBuilder":
         self._outcome = TaskOutcome.FAILED
         self._error = TaskError(code=code, message=message, error_type=error_type)

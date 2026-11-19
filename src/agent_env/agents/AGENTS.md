@@ -53,7 +53,8 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
   text part, so add one.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
-  happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
+  happen, and agent-env may retry it; `model_key_budget` and `model_key_auth` mean the model endpoint refused the
+  run's key as out of budget or not authorized, which a retry with that key doesn't fix. An exception that escapes `run()` becomes an opaque `infra_error`, its text
   never sent.
 - **Context and sessions:** turns of one `context_id` run one at a time; different contexts run concurrently, and the
   validator relies on it, so don't serialize them. Return your runtime's conversation id as `session_ref` and the next
