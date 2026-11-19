@@ -1,5 +1,5 @@
-"""The egress rule every agent on the env's clock goes out by (utils/faketime_clock/agent_egress.py), imported by its
-own name with clockpage beside it, as each clocked agent's image copies them beside its bridge: on an armed clock, every
+"""The egress rule every agent on the env's clock goes out by (utils/agent_clock/agent_egress.py), imported by its own
+name with clockpage beside it, as each clocked agent's image copies them beside its bridge: on an armed clock, every
 host but loopback, the deploy's NO_PROXY hosts and plain-HTTP hosts goes through the proxy; unarmed, nothing changes."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytest
 
 import agent_env
 
-sys.path.insert(0, str(Path(agent_env.__file__).parent / "utils" / "faketime_clock"))
+sys.path[:0] = [str(Path(agent_env.__file__).parent / "utils" / folder) for folder in ("agent_clock", "faketime_clock")]
 agent_egress = importlib.import_module("agent_egress")
 clockpage = importlib.import_module("clockpage")
 
@@ -86,7 +86,8 @@ def _torn(page: bytes) -> bytes:
     pytest.param(_page(1), True, id="armed"),
     pytest.param(_page(0), False, id="unarmed"),
     pytest.param(_page(1, seq=3), True, id="its-writer-died-mid-write"),
-    pytest.param(_torn(_page(1)), False, id="torn"),
+    pytest.param(_torn(_page(1)), True, id="torn-armed"),
+    pytest.param(_torn(_page(0)), False, id="torn-unarmed"),
     pytest.param(_page(1)[:40], False, id="short"),
     pytest.param(b"\0" * 80, False, id="no-magic"),
     pytest.param(bytes(range(80)), False, id="garbage"),

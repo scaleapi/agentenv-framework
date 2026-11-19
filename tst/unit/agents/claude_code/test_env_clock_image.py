@@ -98,5 +98,5 @@ def test_while_the_follower_reconnects_or_restarts_the_page_still_routes_the_cli
 def test_an_installed_agent_has_the_egress_rule_beside_its_bridge_as_the_image_does():
     listed = re.search(r'^AGENT_FILES="(.+)"$', (AGENT_DIR / "install.sh").read_text(), re.MULTILINE).group(1).split()
 
-    assert {"clock/agent_egress.py", "clock/clockpage.py"} <= set(listed)
+    assert {"agent_clock/agent_egress.py", "clock/clockpage.py"} <= set(listed)
     assert all(sent(AGENT_DIR, name).is_file() for name in listed)

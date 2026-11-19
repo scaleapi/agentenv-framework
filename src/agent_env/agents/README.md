@@ -49,9 +49,11 @@ working at any date the clock shows, a live site's, an env MCP server's or the m
 (the peer-agents MCP server's), the hosts the agent's `NO_PROXY` names and plain-HTTP hosts, which have no certificate
 to check, go direct. The image's proxy reaches private networks too (`AGENTENV_EGRESS_PRIVATE`), so a host over TLS at
 a private address works at any date as well. Unarmed, the page holds real time and the CLI goes out directly, as
-before. That rule is `utils/faketime_clock/agent_egress.py`, which the bridge imports and the image copies beside it
-with the `clockpage.py` whose page it reads (`install.sh` too), so every agent put on the clock goes out the same way.
-Started as a user other than root, the image runs the A2A server alone, on real time, as before.
+before. That rule is `agent_egress.py` in `utils/agent_clock`, which only agent images take (`agent_clock` in
+`shared_sources.toml`), so changing it rebuilds no computer base. The bridge imports it, and the image and `install.sh`
+copy it beside the bridge with the clock's `clockpage.py`, whose layout and check it reads the page by, so every agent
+put on the clock goes out the same way. Started as a user other than root, the image runs the A2A server alone, on real
+time, as before.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements

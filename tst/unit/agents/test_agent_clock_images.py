@@ -2,8 +2,8 @@
 clock takes the computer bases' clock library and egress proxy from agent-env's one copy, whose libfaketime patch has
 the init guard; runs the follower and the proxy, each as its own user, and the A2A server as the agent's user on real
 time, under root's supervisord; preloads agent-env's libfaketime for the agent's user alone; starts as another user as
-it did before; and its bridge takes ``clock_armed`` and ``egress_env`` from the one shared ``agent_egress``, which its
-image copies beside it."""
+it did before; and its bridge takes ``clock_armed`` and ``egress_env`` from the one shared ``agent_egress``, in a folder
+only agent images take, which its image copies beside it."""
 
 from __future__ import annotations
 
@@ -33,6 +33,17 @@ def test_the_clock_pieces_are_taken_from_the_one_copy_the_computer_bases_take(ag
 
     assert taken[part] == shared
     assert not (AGENTS_DIR / agent / part).exists(), f"{agent}/{part} is a copy: take it in shared_sources.toml instead"
+
+
+@pytest.mark.parametrize("agent", CLOCKED)
+def test_the_egress_rule_is_taken_from_the_one_copy_only_agent_images_take(agent):
+    """A computer base that took it would be rebuilt, and every computer composed on it, whenever the rule changes."""
+    taken = tomllib.loads((AGENTS_DIR / agent / "shared_sources.toml").read_text())
+    others = [p for p in SOURCES.glob("*/*/*/shared_sources.toml") if AGENTS_DIR not in p.parents]
+
+    assert taken["agent_clock"] == "utils/agent_clock"
+    assert not (AGENTS_DIR / agent / "agent_clock").exists()
+    assert others and not [p for p in others if "utils/agent_clock" in tomllib.loads(p.read_text()).values()]
 
 
 def test_the_libfaketime_every_clocked_image_builds_has_the_init_guard():
@@ -89,7 +100,7 @@ def test_started_as_another_user_the_image_runs_the_server_alone_as_before(agent
 
 
 SHARED = ("clock_armed", "egress_env")
-SHARED_FILES = ("clock/agent_egress.py", "clock/clockpage.py")
+SHARED_FILES = ("agent_clock/agent_egress.py", "clock/clockpage.py")
 
 
 def _modules(agent: str) -> dict[str, ast.Module]:

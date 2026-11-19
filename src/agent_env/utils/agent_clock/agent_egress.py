@@ -1,6 +1,6 @@
 """How an agent on the env's clock goes out, imported by every clocked agent's bridge, whose image copies it and
-``clockpage`` beside it: the agent's CLI checks certificates against the env's date, which can be before their issue,
-so every TLS host goes through the image's egress proxy, on real time, and only hosts with nothing to check go direct."""
+``clockpage`` beside it: the agent's CLI checks certificates against the env's date, which can be before their issue, so
+every TLS host goes through the image's egress proxy, on real time, and only hosts with nothing to check go direct."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ _READ_TRIES, _RETRY_S = 50, 0.001
 
 
 def clock_armed(page_path: str | None = None) -> bool:
-    """Whether the clock page holds an armed clock, so a CLI started now reads the env's time: the page libfaketime
-    reads, which keeps the last clock while the follower reconnects. A write under way is waited out, a page whose writer
-    died mid-write is taken at its armed flag, and one that is torn, isn't a page or isn't there reads as unarmed."""
+    """Whether the clock page libfaketime reads, which keeps the last clock while the follower reconnects, holds an
+    armed clock, so a CLI started now reads the env's time. A page mid-write or torn through every retry is taken at its
+    armed flag, as the proxy relays untouched when unarmed; one that isn't a page or isn't there reads as unarmed."""
     try:
         with open(page_path or clockpage.PAGE, "rb") as page:
             for _ in range(_READ_TRIES):
@@ -36,7 +36,7 @@ def clock_armed(page_path: str | None = None) -> bool:
                 time.sleep(_RETRY_S)
     except OSError:
         return False
-    return bool(seq % 2 and armed)
+    return bool(armed)
 
 
 def egress_env(environ: Mapping[str, str], urls: Iterable[str] = (), *, armed: bool) -> dict[str, str]:

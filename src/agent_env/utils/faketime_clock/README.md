@@ -52,10 +52,9 @@ What follows the universe, and what doesn't:
 | `COPYING` | the GNU General Public License version 2, libfaketime's license | |
 | `build.sh` | builds `libfaketimeMT.so.1` from upstream's sha256-pinned tarball and the files above, and the shim's `libtls_realtime.so` | Apache-2.0 |
 | `tls_realtime.c` | the TLS shim: OpenSSL's certificate checks on real time, preloaded after the library | Apache-2.0 |
-| `clockpage.py` | the clock page's writer, which the follower uses, and its layout and check, by which `agent_egress.py` reads it | Apache-2.0 |
+| `clockpage.py` | the clock page's writer, which the follower uses | Apache-2.0 |
 | `clock-follower` | the follower: the gateway's watch, the page written, the status reported | Apache-2.0 |
 | `clock.conf` | the library's default settings | Apache-2.0 |
-| `agent_egress.py` | how an agent on the clock goes out: whether the page is armed, and then every TLS host, an env MCP server's included, through the egress proxy, and only loopback, the deploy's `NO_PROXY` hosts and plain-HTTP hosts direct; each clocked agent's bridge imports it, and its image copies it and `clockpage.py` beside the bridge | Apache-2.0 |
 
 Build it on x86_64 or aarch64 Linux with a C toolchain, make, patch and curl:
 
