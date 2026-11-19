@@ -97,6 +97,21 @@ class SandboxProvider(ABC):
         channel."""
         raise NotImplementedError(f"{type(self).__name__} does not support create_vm")
 
+    async def create_shared_box(
+        self,
+        box_id: str,
+        *,
+        cpu: float = 1.0,
+        memory: int = 8192,
+        timeout: int = 3600 * 2,
+        exposed_ports: Optional[list[int]] = None,
+        setup_for_gateway: bool = True,
+        attribution: Optional[Attribution] = None,
+        network_policy: Optional[NetworkPolicy] = None,
+    ) -> VmSandbox:
+        """A VM for several tasks' slots, shared box ``box_id``, which no single task's terminate ends."""
+        raise NotImplementedError(f"{type(self).__name__} does not support shared boxes")
+
     async def create_container(
         self,
         *,

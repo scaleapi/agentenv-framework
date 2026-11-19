@@ -463,6 +463,7 @@ async def test_write_file_from_object_reads_a_url_from_the_store_that_holds_it(c
 async def test_terminate_sandbox_terminates_by_id_without_reading_its_tunnels(_patched_provider):
     sb = MagicMock()
     sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.get_tags.aio = AsyncMock(return_value={})
     sb.terminate.aio = AsyncMock()
     with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
         from_id.aio = AsyncMock(return_value=sb)

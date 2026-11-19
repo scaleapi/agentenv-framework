@@ -312,6 +312,7 @@ def test_a_record_that_names_its_backend_is_terminated_by_id_and_one_that_doesnt
 def test_a_modal_sandbox_that_already_finished_is_counted_down_not_reported_up(monkeypatch):
     sb = MagicMock()
     sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.get_tags.aio = AsyncMock(return_value={})
     sb.terminate.aio = AsyncMock()
     monkeypatch.setattr(modal.Sandbox, "from_id", MagicMock(aio=AsyncMock(return_value=sb)))
     monkeypatch.setattr(ModalSandboxProvider, "_get_client", AsyncMock(return_value=MagicMock()))

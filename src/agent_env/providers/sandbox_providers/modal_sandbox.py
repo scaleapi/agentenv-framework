@@ -6,6 +6,7 @@ import asyncio
 import base64
 import collections
 import contextlib
+import enum
 import functools
 import hashlib
 import logging
@@ -30,6 +31,7 @@ from agent_env.providers.sandbox_providers.modal_image_build import context_imag
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+    from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +97,84 @@ def _tunnel_url(t) -> str:
     return f"https://{t.host}" + (f":{t.port}" if t.port != 443 else "")
 
 
-async def _terminate_by_id(client, sandbox_id: str) -> None:
+#: The Modal sandbox tag that marks a VM as a shared box, several tasks' slots on one VM; its value is the box's id.
+SHARED_BOX_TAG = "agent_env_shared_box"
+SHARED_BOX_TAG_READ_FAILED_EVENT = "agent_env.modal_shared_box_tag_read_failed"
+_TAG_READ_ATTEMPTS, _TAG_READ_BACKOFF_SECONDS = 3, 1.0
+
+
+class _Unread(enum.Enum):
+    UNREAD = "unread"
+
+
+#: A handle's ``shared_box_id`` before its tags are read: one this process reattached to by id.
+UNREAD = _Unread.UNREAD
+SharedBox = Optional[str] | _Unread
+
+
+class SharedBoxTerminateRefused(Exception):
+    """A terminate that would have ended a shared box, or a ``terminate_shared_box`` naming a box the sandbox isn't;
+    the sandbox was left running."""
+
+    def __init__(self, sandbox_id: str, box_id: Optional[str], ending_box: Optional[str] = None):
+        self.sandbox_id, self.box_id = sandbox_id, box_id
+        if ending_box is None:
+            why = f"is shared box {box_id!r}, which only terminate_shared_box ends"
+        else:
+            why = f"is {f'shared box {box_id!r}' if box_id else 'no shared box'}, not shared box {ending_box!r}"
+        super().__init__(f"Modal sandbox {sandbox_id} {why}; it was not terminated")
+
+
+async def _read_shared_box(sb: modal.Sandbox) -> Optional[str]:
+    """The shared box ``sb`` is tagged as, if any. A read that keeps failing raises, so a terminate fails closed;
+    NotFoundError raises at once."""
+    attempt = 1
+    while True:
+        try:
+            return (await sb.get_tags.aio()).get(SHARED_BOX_TAG)
+        except modal.exception.NotFoundError:
+            raise
+        except Exception as e:
+            if attempt == _TAG_READ_ATTEMPTS:
+                logger.warning(f"Modal sandbox {sb.object_id} was not terminated: its tags, which say whether it's a "
+                               f"shared box, couldn't be read: {fmt_exc(e)}",
+                               extra={"event": SHARED_BOX_TAG_READ_FAILED_EVENT, "modal_sandbox_id": sb.object_id})
+                raise
+        await asyncio.sleep(_TAG_READ_BACKOFF_SECONDS * 2 ** (attempt - 1))
+        attempt += 1
+
+
+async def _terminate(sb: modal.Sandbox, box: SharedBox, *, ending_box: Optional[str] = None) -> None:
+    """Terminate ``sb`` when it is the shared box ``ending_box``, or, with none, when it is no shared box; else raise
+    SharedBoxTerminateRefused. Every Modal terminate goes through here but the cleanup of a create that failed, whose
+    sandbox holds no slots yet. ``box`` is what the caller knows of ``sb``; UNREAD reads its tags, and one gone already
+    counts as terminated."""
+    if box is UNREAD:
+        try:
+            box = await _read_shared_box(sb)
+        except modal.exception.NotFoundError:
+            logger.info("Modal sandbox %s was already gone at terminate", sb.object_id)
+            return
+    if box != ending_box:
+        raise SharedBoxTerminateRefused(sb.object_id, box, ending_box)
+    await sb.terminate.aio()
+
+
+async def _terminate_by_id(client, sandbox_id: str, *, ending_box: Optional[str] = None) -> None:
     try:
         sb = await modal.Sandbox.from_id.aio(sandbox_id, client=client)
-        await sb.terminate.aio()
+        await _terminate(sb, UNREAD, ending_box=ending_box)
     except modal.exception.NotFoundError:
         logger.info("Modal sandbox %s was already gone at terminate", sandbox_id)
+
+
+async def _terminate_handle(handle: ModalSandbox | ModalVmSandbox) -> None:
+    """Terminate a handle's sandbox through ``_terminate``, keeping the shared box a refusal found on the handle."""
+    try:
+        await _terminate(handle._sb, handle.shared_box_id)
+    except SharedBoxTerminateRefused as refused:
+        handle.shared_box_id = refused.box_id
+        raise
 
 
 def _modal_network_kwargs(policy: NetworkPolicy) -> dict:
@@ -194,8 +268,9 @@ class ModalSandbox(Sandbox):
     type = "modal"
 
     def __init__(self, sb: modal.Sandbox, tunnel_urls: dict[int, str], i6pn_address: Optional[str] = None,
-                 network_policy: NetworkPolicy | None = None):
+                 network_policy: NetworkPolicy | None = None, shared_box_id: SharedBox = UNREAD):
         self._sb = sb
+        self.shared_box_id = shared_box_id
         self.sandbox_id = sb.object_id
         self.tunnel_urls = tunnel_urls
         self.i6pn_address = i6pn_address
@@ -210,7 +285,7 @@ class ModalSandbox(Sandbox):
         return f"[{self.i6pn_address}]" if self.i6pn_address else None
 
     async def terminate(self) -> None:
-        await self._sb.terminate.aio()
+        await _terminate_handle(self)
 
     async def exit_status(self) -> Optional[int]:
         return await self._sb.poll.aio()
@@ -511,6 +586,7 @@ class ModalSandboxProvider(SandboxProvider):
                 tunnel_urls,
                 i6pn_address=i6pn_address,
                 network_policy=effective,
+                shared_box_id=None,
             )
             if vnc_port in tunnel_urls:
                 sandbox.vnc_url = f"{tunnel_urls[vnc_port]}/vnc.html"
@@ -589,6 +665,8 @@ def _attribution_tags(attribution: Attribution) -> dict[str, str]:
             continue
         if not _MODAL_TAG_KEY.fullmatch(key):
             raise ValueError(f"attribution key {key!r} can't be a Modal tag: use 1-63 of a-z A-Z 0-9 . _ -")
+        if key == SHARED_BOX_TAG:
+            raise ValueError(f"attribution key {key!r} is the tag that marks a shared box; only create_shared_box sets it")
         tags[key] = _modal_tag_value(value)
     return tags
 

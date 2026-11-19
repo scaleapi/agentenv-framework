@@ -34,6 +34,10 @@ from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, ClassVar, 
 import modal
 
 from agent_env.providers.sandbox_providers.modal_sandbox import (
+    _MODAL_TAG_KEY,
+    SHARED_BOX_TAG,
+    UNREAD,
+    SharedBox,
     _ModalProcessAdapter,
     _attribution_tags,
     _ended_output,
@@ -41,6 +45,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
     _log_sandbox_started,
     _resolve_app_base_name,
     _terminate_by_id,
+    _terminate_handle,
     _tunnel_url,
     _modal_network_kwargs,
 )
@@ -144,8 +149,9 @@ class ModalVmSandbox(VmSandbox):
     _WFT_CHUNK_BYTES = 32 * 1024
 
     def __init__(self, sb: modal.Sandbox, tunnel_urls: dict[int, str],
-                 network_policy: NetworkPolicy | None = None):
+                 network_policy: NetworkPolicy | None = None, shared_box_id: SharedBox = UNREAD):
         self._sb = sb
+        self.shared_box_id = shared_box_id
         self.sandbox_id = sb.object_id
         self.tunnel_urls = tunnel_urls
         self.vnc_url = None
@@ -155,7 +161,7 @@ class ModalVmSandbox(VmSandbox):
         self._ended: Optional[tuple[list[str], list[str]]] = None
 
     async def terminate(self) -> None:
-        await self._sb.terminate.aio()
+        await _terminate_handle(self)
 
     async def exit_status(self) -> Optional[int]:
         return await self._sb.poll.aio()
@@ -399,6 +405,33 @@ class ModalVmSandboxProvider(SandboxProvider):
             experimental_options={"enable_nested_virt": True}, secrets=[modal.Secret.from_dict(variables)],
             idle_timeout=self._idle_timeout or _DISK_IDLE_TIMEOUT_S)
 
+    async def create_shared_box(
+        self,
+        box_id: str,
+        *,
+        cpu: float = 0.5,
+        memory: int = 8192,
+        timeout: int = 3600 * 2,
+        exposed_ports: Optional[list[int]] = None,
+        setup_for_gateway: bool = True,
+        attribution: Optional[Attribution] = None,
+        network_policy: Optional[NetworkPolicy] = None,
+    ) -> ModalVmSandbox:
+        """A VM running Docker, as ``create_vm`` makes, tagged as shared box ``box_id`` at create, since a later
+        ``set_tags`` would replace its attribution tags. Its handle's terminate, and ``terminate_sandbox``, refuse to end
+        it: only ``terminate_shared_box`` does."""
+        if not _MODAL_TAG_KEY.fullmatch(box_id):
+            raise ValueError(f"shared box id {box_id!r} can't be a Modal tag: use 1-63 of a-z A-Z 0-9 . _ -")
+        return await self._created(_KEEPALIVE_CMD, _VM_IMAGE, cpu=cpu, memory=memory, timeout=timeout,
+                                   ports=list(exposed_ports or []), attribution=attribution,
+                                   network_policy=network_policy, setup_for_gateway=setup_for_gateway,
+                                   idle_timeout=self._idle_timeout, runtime="vm", shared_box_id=box_id)
+
+    async def terminate_shared_box(self, sandbox_id: str, box_id: str) -> None:
+        """End shared box ``box_id``, the sandbox ``sandbox_id``, and every slot on it. A sandbox tagged as another box,
+        or as none, raises SharedBoxTerminateRefused, and one whose tags can't be read raises; neither is terminated."""
+        await _terminate_by_id(await self._get_client(), sandbox_id, ending_box=box_id)
+
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
         """The launcher in the sandbox booting its disk afresh with ``env``, at the same URLs."""
         code, _, stderr = await sandbox._exec_with_stdin(shlex.join(RESET), _chunks(reset_input(env)))
@@ -408,13 +441,16 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     async def _created(self, command: tuple[str, ...], image: modal.Image, *, cpu: float, memory: int, timeout: int,
                        ports: list[int], attribution: Optional[Attribution], network_policy: Optional[NetworkPolicy],
-                       setup_for_gateway: bool, idle_timeout: Optional[int], **create) -> ModalVmSandbox:
+                       setup_for_gateway: bool, idle_timeout: Optional[int], shared_box_id: Optional[str] = None,
+                       **create) -> ModalVmSandbox:
         """A sandbox of ``image`` running ``command``, in the configured region, its ports' tunnels up, ended once idle
-        ``idle_timeout`` seconds when given, set up for a gateway when ``setup_for_gateway``; one that fails before
-        it's returned is terminated."""
+        ``idle_timeout`` seconds when given, set up for a gateway when ``setup_for_gateway``, tagged as shared box
+        ``shared_box_id`` when given; one that fails before it's returned is terminated."""
         attribution = dict(attribution or {})
         app_tags = _attribution_tags({})
         sandbox_tags = _attribution_tags(attribution)
+        if shared_box_id is not None:
+            sandbox_tags[SHARED_BOX_TAG] = shared_box_id
         app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
         client = await self._get_client()
@@ -449,7 +485,7 @@ class ModalVmSandboxProvider(SandboxProvider):
             for p in ports:
                 if p not in tunnel_urls:
                     raise RuntimeError(f"No Modal tunnel for exposed port {p}; got {sorted(tunnel_urls)}")
-            sandbox = ModalVmSandbox(sb, tunnel_urls, network_policy=effective)
+            sandbox = ModalVmSandbox(sb, tunnel_urls, network_policy=effective, shared_box_id=shared_box_id)
             logger.info(f"Modal VM sandbox created: {sb.object_id} (tunnels={tunnel_urls})")
             await _log_sandbox_started(
                 sb, app_name=app_name, sandbox_tags=sandbox_tags,
