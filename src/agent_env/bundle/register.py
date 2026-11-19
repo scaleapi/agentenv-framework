@@ -97,8 +97,7 @@ def register_bundle(
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse. So does
     a computer env whose compose left no build a deploy can boot, once every entity is written and before any task:
     registering again composes what it has left."""
-    composing = (Composing.for_run(build_sandbox_provider(sandbox), emulate, apps_alone=True) if sandbox
-                 else Composing(None, emulate))
+    composing = Composing.for_run(build_sandbox_provider(sandbox), emulate) if sandbox else Composing(None, emulate)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
         resolved = resolve_bundle(bundle)
