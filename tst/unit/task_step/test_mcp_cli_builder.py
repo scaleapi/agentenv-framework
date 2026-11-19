@@ -207,7 +207,7 @@ async def test_build_mcp_cli_uploads_the_bundle_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(build_mcp_cli.Env, "get", staticmethod(lambda id, version=None: SimpleNamespace(environment_name="slack")))
     monkeypatch.setattr(build_mcp_cli, "fetch_interface_manifest", no_manifest)
     monkeypatch.setattr(build_mcp_cli.CliArtifact, "put", staticmethod(put))
-    record = DeployedGatewayEnv(env_id="slack-mcp", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None, sandbox_id="sb")
+    record = DeployedGatewayEnv(env_id="slack-mcp", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", sandbox_id="sb")
 
     await BuildMcpCliTaskStep(id="s1", version=None, env_id="slack-mcp", command_name="slack").execute(
         TaskStepContext(deployed_envs=[record])
@@ -217,7 +217,7 @@ async def test_build_mcp_cli_uploads_the_bundle_off_the_event_loop(monkeypatch):
 
 
 def _gateway_record(env_id: str = "slack-mcp") -> DeployedGatewayEnv:
-    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None, sandbox_id="sb")
+    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", sandbox_id="sb")
 
 
 def _no_gateway(monkeypatch) -> None:

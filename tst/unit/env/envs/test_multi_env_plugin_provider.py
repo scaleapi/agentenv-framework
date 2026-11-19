@@ -374,7 +374,7 @@ async def test_a_failed_second_deploy_of_a_gateway_multi_env_does_not_terminate_
         if len(calls) > 1:
             raise RuntimeError("second boom")
         self._sandbox = vm
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None)
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp")
 
     env = _multi("gateway", websites=())
     with patch.object(EnvironmentGatewayProvider, "_deploy_gateway", deploy_gateway), \
@@ -434,7 +434,7 @@ async def test_close_after_two_successful_gateway_deploys_terminates_both_vms():
 
     async def deploy_gateway(self, sandbox_provider, **kwargs):
         self._sandbox = next(created)
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None)
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp")
 
     env = _multi("gateway", websites=())
     with patch.object(EnvironmentGatewayProvider, "_deploy_gateway", deploy_gateway), \

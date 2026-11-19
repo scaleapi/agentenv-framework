@@ -210,7 +210,6 @@ def context(*, agent: Optional[_StubAgent] = None, env_id: Optional[str] = None)
                 env_version=1,
                 gateway_url="https://gw",
                 mcp_url="https://gw/mcp",
-                db_web_url=None,
                 sandbox_id="sb-env",
             )
         ]

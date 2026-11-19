@@ -85,8 +85,7 @@ async def test_snapshot_capture_gated_off_for_remote_backend():
     early with a clear error — not a cryptic 'servicedb container not found' deep in the capture."""
     from agent_env.env.snapshot_store import EnvSnapshot
 
-    deployed = DeployedGatewayEnv(env_id="env-1", env_version=1, sandbox_id="sb-1", gateway_url="https://gw", mcp_url="https://gw/mcp",
-                                  db_web_url=None)
+    deployed = DeployedGatewayEnv(env_id="env-1", env_version=1, sandbox_id="sb-1", gateway_url="https://gw", mcp_url="https://gw/mcp")
     inst_store = MagicMock()
     inst_store.get.return_value = deployed
     inst_store.get_environment_universe.return_value = {"id": "universe-1", "version": 1}

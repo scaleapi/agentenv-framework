@@ -292,7 +292,7 @@ def reattach_for_snapshot(monkeypatch, env_id: str, env_version: int, universe_i
     """Make ``EnvSnapshot.create`` find ``env_id`` deployed with ``universe_id`` loaded, and reconnect to a
     ``SnapshotSandbox``, which it returns."""
     deployed = DeployedGatewayEnv(env_id=env_id, env_version=env_version, sandbox_id="sb-1", gateway_url="https://gw",
-                                  mcp_url="https://gw/mcp", db_web_url=None)
+                                  mcp_url="https://gw/mcp")
     instances = SimpleNamespace(get=lambda instance_id: deployed,
                                 get_environment_universe=lambda instance_id: {"id": universe_id, "version": universe_version})
     provider = EnvironmentGatewayProvider()

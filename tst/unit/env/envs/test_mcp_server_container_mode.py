@@ -392,7 +392,7 @@ async def _deploy(env: MCPServerEnv, sandboxes: dict[str, MagicMock], seen: dict
             gp._environment_sandboxes = {"email": sandboxes["srv"]}
             gp._db_sandbox, gp._pgweb_sandbox, gp._db_mcp_sandbox = sandboxes.get("db"), sandboxes.get("pg"), sandboxes.get("dm")
             gp._container_sandboxes = [sandboxes[i] for i in ("db", "srv", "pg", "dm", "gw") if i in sandboxes]
-        return DeployedGateway(gateway_url=_GW, mcp_url=f"{_GW}/mcp", db_web_url=None, db_mcp_url=None, mcp_server_name=kwargs["mcp_server_name"],
+        return DeployedGateway(gateway_url=_GW, mcp_url=f"{_GW}/mcp", mcp_server_name=kwargs["mcp_server_name"],
                                env_state_instance_ids=["st-1"], environment_card=_CARD, environment_card_read_at_utc="2026-09-26T00:00:00+00:00")
 
     async def server_path(env, sandbox_provider, **kwargs):

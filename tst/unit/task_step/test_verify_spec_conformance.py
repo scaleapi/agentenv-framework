@@ -622,7 +622,7 @@ class TestSpecAddress:
             sent.append((request.method, str(request.url)))
             return httpx.Response(200, json={"name": "items"}) if request.url.path.endswith(WELL_KNOWN_PATH) else httpx.Response(404)
 
-        record = DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url=gateway_url, mcp_url="", db_web_url=None, sandbox_id="sb",
+        record = DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url=gateway_url, mcp_url="", sandbox_id="sb",
                              environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}", environment_card=card)
         env = MagicMock(environment_name="items")
         with patch.object(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle))), \

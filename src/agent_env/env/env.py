@@ -228,6 +228,8 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     env_provider_type: Optional[str] = "gateway"
     gateway_url: str
     gateway_mode: str = GatewayMode.PERFORMANCE.value
+    # pgweb's and db-mcp's direct URLs, which only a record an older deploy wrote carries; nothing writes them now.
+    # Kept for one release so a consumer can still read an env deployed before then. Remove in the release after.
     db_web_url: Optional[str] = None
     db_mcp_url: Optional[str] = None
     # pgweb and db-mcp behind the gateway, which take the control token (``control_headers_for``); None when its image

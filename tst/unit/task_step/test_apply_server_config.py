@@ -56,7 +56,7 @@ def _ext(uri: str, endpoint: str, method: str = "POST") -> dict:
 def _make_context(*, env_id="env-x", gateway_url=_GATEWAY, metadata=None):
     env = DeployedGatewayEnv(
         env_id=env_id, env_version=1, gateway_url=gateway_url, mcp_url="",
-        db_web_url=None, sandbox_id="sb-env",
+        sandbox_id="sb-env",
     )
     return TaskStepContext(deployed_envs=[env], metadata={} if metadata is None else metadata)
 

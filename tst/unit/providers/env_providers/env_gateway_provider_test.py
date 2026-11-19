@@ -434,8 +434,8 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeyp
     gp._wait_for_tunnel.assert_awaited_once_with("https://agent-gateway.modal.host", timeout=120)
     assert result.environment_card == _CARD
     assert datetime.fromisoformat(result.environment_card_read_at_utc).utcoffset().total_seconds() == 0
-    assert result.db_web_url is None
-    assert result.db_mcp_url is None
+    assert result.db_web_gateway_url is None
+    assert result.db_mcp_gateway_url is None
 
 
 @pytest.mark.asyncio
@@ -1490,6 +1490,8 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
     sandbox.load_docker_images.assert_awaited_once()
     loaded = sandbox.load_docker_images.call_args.args[0]
     assert sidecar_art in loaded, "sidecar image_artifact was not side-loaded onto the VM"
+    # The VM exposes the gateway and the sidecars, and no port of pgweb's or db-mcp's: the gateway serves both.
+    assert sandbox_provider.create_vm.call_args.kwargs["exposed_ports"] == [18765, 18768]
 
 
 # --- name injection: SERVICE_NAME + ENVIRONMENT_NAME --------------------------
@@ -1875,7 +1877,7 @@ _PROBE_CARD = {"name": "env1234", "children_environments": [
 
 
 def _probed(mcp_url: str = "https://gw.example/mcp") -> DeployedGateway:
-    return DeployedGateway(gateway_url="https://gw.example", mcp_url=mcp_url, db_web_url=None, environment_card=_PROBE_CARD)
+    return DeployedGateway(gateway_url="https://gw.example", mcp_url=mcp_url, environment_card=_PROBE_CARD)
 
 
 def _probe_records(caplog) -> list[logging.LogRecord]:
@@ -2103,9 +2105,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
     assert re.fullmatch(r"env\d{4}", compose.call_args.kwargs["mcp_server_name"])
     assert compose.call_args.kwargs["host_ips"] == ()
     assert dataclasses.asdict(record) == dataclasses.asdict(DeployedGatewayEnv(
-        env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", db_web_url=None,
-        sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, db_mcp_url=None,
-        environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
+        env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
         environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"],
         control_token=record.control_token))
     assert len(record.control_token) >= 43 and compose.call_args.kwargs["control_token"] == record.control_token
@@ -2160,8 +2160,8 @@ async def test_deploy_records_the_gateways_sidecar_urls_and_its_containers():
     async def deploy_gateway(sandbox_provider, **kwargs):
         gp._sandbox, gp._environment_sandboxes = sandboxes["gw"], {"slack": sandboxes["srv"]}
         gp._db_sandbox, gp._pgweb_sandbox, gp._db_mcp_sandbox = sandboxes["db"], sandboxes["pg"], sandboxes["dm"]
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url="https://pg/", db_mcp_url="https://dm/mcp",
-                               environment_card={"name": "env1234"}, env_state_instance_ids=["st-1"])
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_gateway_url="https://gw/svc/pgweb/",
+                               db_mcp_gateway_url="https://gw/svc/db-mcp/mcp", environment_card={"name": "env1234"}, env_state_instance_ids=["st-1"])
 
     with patch.object(gp, "_deploy_gateway", side_effect=deploy_gateway), \
          patch("agent_env.env.env.Env.get", MagicMock()), \
@@ -2169,7 +2169,8 @@ async def test_deploy_records_the_gateways_sidecar_urls_and_its_containers():
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value={"slack_send"})):
         record = await gp.deploy(env, ModalSandboxProvider())
 
-    assert (record.gateway_url, record.db_web_url, record.db_mcp_url, record.env_state_instance_ids) == ("https://gw", "https://pg/", "https://dm/mcp", ["st-1"])
+    assert (record.gateway_url, record.db_web_gateway_url, record.db_mcp_gateway_url, record.env_state_instance_ids) == (
+        "https://gw", "https://gw/svc/pgweb/", "https://gw/svc/db-mcp/mcp", ["st-1"])
     assert (record.sandbox_id, record.sandbox_type, record.website_frontend_urls, record.mcp_server_name) == ("gw", "modal", None, "env1234")
     assert record.sandbox_ids == {
         "gateway_server": "gw", "mcp_server": {"slack": "srv"}, "service_db": {"servicedb": "db", "pgweb": "pg", "db-mcp": "dm"}}
@@ -2200,7 +2201,7 @@ async def test_a_deploy_on_an_external_state_store_needs_no_servicedb_env(make):
 
     async def deploy_gateway(sandbox_provider, **kwargs):
         gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None, env_state_instance_ids=["st-ext"])
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", env_state_instance_ids=["st-ext"])
 
     external = MagicMock(state_type="remote", instance_id="st-ext")
     with _deploying(gp, deploy_gateway) as deploying, \
@@ -2238,7 +2239,8 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
     async def deploy_gateway(sandbox_provider, **kwargs):
         seen.update(kwargs)
         gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url="https://pg/", website_frontend_urls={"shop": "https://shop"},
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_gateway_url="https://gw/svc/pgweb/",
+                               website_frontend_urls={"shop": "https://shop"},
                                environment_card={"name": "crm"}, env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway) as deploying:
@@ -2251,9 +2253,8 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
     assert [i.image_name for i in seen["website_images"]] == ["shop-be", "shop-fe", "blog-be", "blog-fe"] and seen["mcp_server_name"] == "crm"
     deploying.acquire.assert_awaited_once_with(env_state_type=None, ttl_seconds=60, name_hint="crm-suite", env_state_instance_id="st-1")
     assert dataclasses.asdict(record) == dataclasses.asdict(DeployedGatewayEnv(
-        env_id="crm-suite", env_version=2, env_provider_type="gateway", gateway_url="https://gw", db_web_url="https://pg/",
-        sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={"gateway_server": "vm-1"}, db_mcp_url=None,
-        environment_card_url="https://gw/.well-known/agent-env.json", environment_card={"name": "crm"}, environment_card_read_at_utc=None,
+        env_id="crm-suite", env_version=2, env_provider_type="gateway", gateway_url="https://gw", db_web_gateway_url="https://gw/svc/pgweb/",
+        sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={"gateway_server": "vm-1"}, environment_card_url="https://gw/.well-known/agent-env.json", environment_card={"name": "crm"}, environment_card_read_at_utc=None,
         website_frontend_urls={"shop": "https://shop"}, gateway_mode="performance", env_state_instance_ids=["st-1"]))
     assert (record.mcp_url, record.mcp_server_name, deploying.tool_names.await_count) == ("https://gw/mcp", "crm", 1)
 
@@ -2270,7 +2271,7 @@ async def test_a_container_multi_env_record_names_its_gateway_servers_and_databa
         gp._sandbox = _FakeSandbox("gw", 18765, "https://gw")
         gp._environment_sandboxes = {name: _FakeSandbox(f"srv-{name}", 18765, "https://srv") for name in servers}
         gp._db_sandbox = _FakeSandbox("db", SERVICE_DB_PORT, "https://db")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None)
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp")
 
     with _deploying(gp, deploy_gateway):
         record = await gp.deploy(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp(n) for n in servers]), ModalSandboxProvider())
@@ -2284,7 +2285,7 @@ async def test_deploy_fronts_a_website_env():
     async def deploy_gateway(sandbox_provider, **kwargs):
         seen.update(kwargs)
         gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None, website_frontend_urls={"shop": "https://shop"},
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", website_frontend_urls={"shop": "https://shop"},
                                env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway):
@@ -2296,8 +2297,7 @@ async def test_deploy_fronts_a_website_env():
 
 
 def _multi_record(env_state_instance_ids: list[str]) -> DeployedGatewayEnv:
-    return DeployedGatewayEnv(env_id="crm-suite", env_version=2, gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None,
-                              sandbox_id="gw", sandbox_type="modal", env_state_instance_ids=env_state_instance_ids,
+    return DeployedGatewayEnv(env_id="crm-suite", env_version=2, gateway_url="https://gw", mcp_url="https://gw/mcp", sandbox_id="gw", sandbox_type="modal", env_state_instance_ids=env_state_instance_ids,
                               sandbox_ids={"gateway_server": "gw", "mcp_server": {"slack": "srv"}, "service_db": {"servicedb": "db", "pgweb": "pg"}})
 
 
@@ -3205,6 +3205,8 @@ async def test_container_mode_hands_the_gateway_its_consoles_on_the_private_netw
         del gp._served_consoles  # the real check, asking the gateway
         deployed = await gp._deploy_via_containers(sandbox_provider=provider, control_token="t0k", **args)
     pgweb, db_mcp = made["pgweb"][0], made["db-mcp"][0]
+    assert {name: kwargs.get("expose_externally", True) for name, (_, kwargs) in made.items()
+            if name in ("pgweb", "db-mcp")} == {"pgweb": False, "db-mcp": False}
     assert made["agent-gateway"][1]["env"]["CONSOLE_URLS"] == (
         f"pgweb=http://{pgweb.private_host}:8081,db-mcp=http://{db_mcp.private_host}:8000")
     assert (deployed.db_web_gateway_url, deployed.db_mcp_gateway_url) == (

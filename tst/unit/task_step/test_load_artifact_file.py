@@ -134,7 +134,7 @@ async def test_into_a_deployed_env(monkeypatch):
     context = TaskStepContext()
     context.deployed_envs = [DeployedGatewayEnv(
         env_id="tickets", env_version=1, gateway_url="https://gw", mcp_url="https://gw/mcp",
-        db_web_url=None, sandbox_id="sb-env",
+        sandbox_id="sb-env",
     )]
     step = LoadArtifactTaskStep(id="stage", version=None, env_id="tickets", artifact_id="check", destination_path="/data")
     context = await step.execute(context)
