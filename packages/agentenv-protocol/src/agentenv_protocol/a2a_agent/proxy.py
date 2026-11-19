@@ -248,11 +248,10 @@ class ProxyAgent(AgentEnvAgent):
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
-        usage = request.usage or {}
-        turn.model_usage.append(Usage.from_model_response(usage))
-        for key, names in (("input_tokens", ("input_tokens", "prompt_tokens")),
-                           ("output_tokens", ("output_tokens", "completion_tokens"))):
-            if (count := next((usage[name] for name in names if name in usage), None)) is not None:
+        usage = Usage.from_model_response(request.usage or {})
+        turn.model_usage.append(usage)
+        for key in ("input_tokens", "output_tokens"):
+            if (count := getattr(usage, key)) is not None:
                 span["attributes"][f"gen_ai.usage.{key}"] = count
         turn.trajectory.append(span)
         turn.last_event = span["end_time"]
@@ -526,11 +525,18 @@ _USAGE_SUMS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_toke
 
 def _turn_usage(turn: _Turn) -> Usage:
     """The turn's usage: the calls to its tools, and each count summed over the recorded model calls that gave it,
-    None when none did."""
-    sums = {name: sum(values) if (values := [v for c in turn.model_usage if (v := getattr(c, name)) is not None])
-            else None for name in _USAGE_SUMS}
+    None when none did. ``provider_details`` says how many calls were recorded and, for a count only some of them
+    gave, how many left it out, so a sum short of some calls reads as the lower bound it is."""
+    sums, unreported = {}, {}
+    for name in _USAGE_SUMS:
+        values = [value for call in turn.model_usage if (value := getattr(call, name)) is not None]
+        sums[name] = sum(values) if values else None
+        if values and len(values) < len(turn.model_usage):
+            unreported[name] = len(turn.model_usage) - len(values)
+    details = {"model_calls": len(turn.model_usage), **({"unreported": unreported} if unreported else {})}
     return Usage(tool_call_count=len(turn.actions), **sums,
-                 input_includes_cache=True if sums["input_tokens"] is not None else None)
+                 input_includes_cache=True if sums["input_tokens"] is not None else None,
+                 provider_details=details if turn.model_usage else {})
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,

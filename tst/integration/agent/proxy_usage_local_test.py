@@ -64,4 +64,5 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
     [usage] = _stored_usage(play["a2a_context_id"])
     assert Usage.from_dict(usage) == Usage(tool_call_count=0, input_tokens=120 + 3 + 100 + 20, output_tokens=16,
                                            total_tokens=127 + 123 + 9, cache_read_tokens=200, cache_write_tokens=20,
-                                           input_includes_cache=True)
+                                           input_includes_cache=True,
+                                           provider_details={"model_calls": 2, "unreported": {"cache_write_tokens": 1}})

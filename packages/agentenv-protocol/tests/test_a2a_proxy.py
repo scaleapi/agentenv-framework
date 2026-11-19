@@ -598,7 +598,9 @@ def test_a_turns_usage_sums_its_recorded_calls_with_input_counting_the_cache(cli
 
     assert _usage(_settled(client, task_id)) == {
         "tool_call_count": 0, "input_tokens": 120 + 123 + 100, "output_tokens": 17, "total_tokens": 127 + 132 + 101,
-        "cache_read_tokens": 240, "cache_write_tokens": 30, "input_includes_cache": True}
+        "cache_read_tokens": 240, "cache_write_tokens": 30, "input_includes_cache": True,
+        "provider_details": {"model_calls": 4, "unreported": {
+            "input_tokens": 1, "output_tokens": 1, "total_tokens": 1, "cache_read_tokens": 1, "cache_write_tokens": 2}}}
 
 
 def test_counts_a_recorded_call_doesnt_give_or_cant_be_read_are_left_out(client):
@@ -608,7 +610,8 @@ def test_counts_a_recorded_call_doesnt_give_or_cant_be_read_are_left_out(client)
         assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage).status_code == 200
     _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
 
-    assert _usage(_settled(client, task_id)) == {"tool_call_count": 0, "output_tokens": 4}
+    assert _usage(_settled(client, task_id)) == {"tool_call_count": 0, "output_tokens": 4, "provider_details": {
+        "model_calls": 2, "unreported": {"output_tokens": 1}}}
 
 
 def test_an_error_reply_keeps_the_usage_recorded_before_it(client):
@@ -619,7 +622,26 @@ def test_an_error_reply_keeps_the_usage_recorded_before_it(client):
     task = _settled(client, task_id)
     assert task["status"]["state"] == "failed"
     assert _usage(task) == {"tool_call_count": 0, "input_tokens": 5, "output_tokens": 2, "total_tokens": 7,
-                            "input_includes_cache": True}
+                            "input_includes_cache": True, "provider_details": {"model_calls": 1}}
+
+
+def test_a_chat_spans_counts_are_the_ones_the_turns_usage_sums(client):
+    task_id = _send(client, "go")
+    _proxy(client, "record", task_id=task_id, message="Thinking.", usage={
+        "prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14, "cache_read_input_tokens": 7809})
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    usage = _usage(_settled(client, task_id))
+    [chat, _] = _trajectory(client, task_id)
+    assert (chat["attributes"]["gen_ai.usage.input_tokens"], chat["attributes"]["gen_ai.usage.output_tokens"]) == (
+        usage["input_tokens"], usage["output_tokens"]) == (7818, 5)
+
+
+def test_a_turn_with_no_recorded_calls_reports_only_its_tool_calls(client):
+    task_id = _send(client, "go")
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    assert _usage(_settled(client, task_id)) == {"tool_call_count": 0}
 
 
 def test_an_env_tool_named_bash_is_held_to_all_its_recorded_arguments(terminal, monkeypatch, tmp_path):

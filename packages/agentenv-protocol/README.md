@@ -1887,8 +1887,11 @@ operations:
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
   Calls to tools the turn doesn't offer aren't checked. `usage` is the call's, as the
-  model's response carried it, read by `Usage.from_model_response`. The turn's `Usage`, on
-  its reply or its error, sums each count over the calls that gave it.
+  model's response carried it, read by `Usage.from_model_response`, and its `chat` span takes
+  its token counts from that reading. The turn's `Usage`, on its reply or its error, sums each
+  count over the calls that gave it; its `provider_details` give `model_calls`, how many were
+  recorded, and `unreported`, how many left out each count only some gave, so such a sum reads
+  as a lower bound.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 
