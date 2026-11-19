@@ -659,7 +659,8 @@ async def fetch_trajectory(
     payload: dict[str, Any] = dict(selector)
     if upload is not None:
         objects = TrajectoryWriteObjects(trajectory=upload.write)
-        payload["objects"] = objects.model_dump(mode="json")
+        # Only the grants given: a pinned agent's request model forbids the optional ones newer SDKs take.
+        payload["objects"] = objects.model_dump(mode="json", exclude_none=True)
     call = TransferCall("objects" if upload is not None else "legacy", payload)
     if timeout is None:
         timeout = TRANSFER_TIMEOUT_SECONDS if upload is not None else REPLY_TIMEOUT_SECONDS

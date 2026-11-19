@@ -175,6 +175,7 @@ def test_context_trajectory_endpoint_reports_complete_live_session(monkeypatch, 
                 "session_id": "session-1",
             }
         ],
+        "format": a2a_server.SESSION_TRAJECTORY_FORMAT,
         "session_lines": 2,
         "is_live": True,
         "session_id": "session-1",

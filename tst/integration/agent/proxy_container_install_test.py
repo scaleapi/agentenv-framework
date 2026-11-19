@@ -1,7 +1,8 @@
 """The proxy's folder installed into a running container by its own install.sh, as install_agent installs it there. It
 brings its own Python and serves; its bash runs commands with bash, or with sh in a container that has only sh (Alpine,
-musl), and says which. The container installs this checkout's protocol, so the test covers the code beside it, and its
-extension routes take the control token the install was handed, as install_agent hands it."""
+musl), and says which. The container installs this checkout's protocol, so the test covers the code beside it; its
+extension routes take the control token the install was handed, as install_agent hands it; and its card offers its
+native trajectory format, which its reads name, refusing any other."""
 
 import os
 import shutil
@@ -23,6 +24,7 @@ pytestmark = [pytest.mark.integration]
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "proxy"
 PROTOCOL_DIR = Path(agent_env.__file__).parents[2] / "packages" / "agentenv-protocol"
 PORT = 8000
+NATIVE = "agentenv-proxy/v1"
 TOKEN = "t" * 32
 CONTROL_TOKEN = "c" * 32
 
@@ -57,17 +59,25 @@ def test_installed_into_a_container_the_proxy_serves_and_its_bash_runs_the_shell
     base_url = f"http://{_published(name)}"
     with httpx.Client(base_url=base_url, timeout=30, headers=control_token_headers(CONTROL_TOKEN)) as client:
         _serving(client)
+        card = client.get("/.well-known/agent.json").json()
         assert httpx.post(f"{base_url}/ext/proxy/claim", json={"token": TOKEN}, timeout=30).status_code == 401
         assert client.post("/ext/proxy/claim", json={"token": TOKEN}).status_code == 200
         task_id = _send(client, "go")
         tools = _proxy(client, "tools", task_id=task_id).json()["tools"]
         result = _done(client, task_id, {"kind": "bash", "command": "echo $0; echo out"})
+        page = client.post("/ext/trajectory", json={"task_id": task_id, "after": 0, "format": NATIVE})
+        refused = client.post("/ext/trajectory", json={"task_id": task_id, "after": 0, "format": "atif/1"})
 
     assert [tool["name"] for tool in tools] == ["bash"]
     assert tools[0]["description"].startswith(
         "Run a bash command where" if shell == "bash" else "Run a command where the agent works, as its user, in its "
                                                            "folder, with POSIX sh: this place has no bash")
     assert (result["exit_code"], result["stdout"]) == (0, f"{shell}\nout\n")
+    (trajectory,) = [e for e in card["capabilities"]["extensions"] if e["uri"] == "urn:agentenv:trajectory/v1"]
+    assert {k: trajectory["params"][k] for k in ("formats", "native", "default")} == {
+        "formats": [NATIVE], "native": NATIVE, "default": NATIVE}
+    assert (page.status_code, page.json()["format"]) == (200, NATIVE)
+    assert (refused.status_code, refused.json()["error"]["code"]) == (400, "format_not_offered")
 
 
 def _published(container: str) -> str:

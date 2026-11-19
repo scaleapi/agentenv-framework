@@ -24,6 +24,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..atif import FORMAT as ATIF_FORMAT
+from ..atif import Adapter, AdapterSpec
 from ._triggers import MAX_SOLVER_MESSAGE_LENGTH
 from .tasks.v1 import AgentConfig
 from ..transfers import (
@@ -166,12 +168,19 @@ class ContextTrajectoryRequest(ExtensionRequest):
 
 
 class TrajectoryWriteObjects(ExtensionRequest):
+    """Where the agent uploads what it serves. An atif/1 task read may also grant ``aux``, the task's aux log, and
+    ``turn_context``, its TurnContext and how it ended, so the turn can be replayed offline."""
+
     trajectory: WriteObject
+    aux: WriteObject | None = None
+    turn_context: WriteObject | None = None
 
     @model_validator(mode="after")
     def _json_trajectory(self) -> TrajectoryWriteObjects:
-        if self.trajectory.media_type != "application/json":
-            raise ValueError("trajectory object media_type must be application/json")
+        for name in ("trajectory", "aux", "turn_context"):
+            granted = getattr(self, name)
+            if granted is not None and granted.media_type != "application/json":
+                raise ValueError(f"{name} object media_type must be application/json")
         return self
 
 
@@ -194,6 +203,22 @@ class TrajectoryUploadedObjects(ExtensionResponse):
 class TrajectoryObjectsResponse(ExtensionResponse):
     objects: TrajectoryUploadedObjects
     format: str | None = None
+
+
+class AtifUploadedObjects(ExtensionResponse):
+    trajectory: Uploaded
+    aux: Uploaded | None = None
+    turn_context: Uploaded | None = None
+
+
+class AtifObjectsResponse(ExtensionResponse):
+    """An atif/1 read's answer in objects form: what it uploaded, the format, and the ATIF and profile versions of the
+    document it uploaded."""
+
+    objects: AtifUploadedObjects
+    format: Literal["atif/1"] = ATIF_FORMAT
+    schema_version: str
+    profile_version: str
 
 
 class TrajectoryState(str, Enum):
@@ -232,6 +257,27 @@ class TrajectoryEventsResponse(ExtensionResponse):
     task_id: str
     state: TrajectoryState
     format: str | None = None
+    events: list[Any]
+    next: int
+    has_more: bool
+
+
+class AtifEventsResponse(ExtensionResponse):
+    """An atif/1 cursor page: the document's closed steps after step ``after``, ``next`` the last one's ``step_id``.
+    ``header`` is the document's root without its steps and sub-agents (``final_metrics`` once no task is open), and
+    ``subagents`` the embedded sub-agent trajectories of the
+    tasks these steps belong to, as far as each is served, so the page stands alone. A sub-agent can gain steps while
+    its task runs; a reader keeps each sub-agent's latest copy, and the page that serves a task's last step carries
+    them whole. The last page's header with every page's steps and the latest sub-agents is the document."""
+
+    context_id: str
+    task_id: str
+    state: TrajectoryState
+    format: Literal["atif/1"] = ATIF_FORMAT
+    schema_version: str
+    profile_version: str
+    header: dict[str, Any] | None = None
+    subagents: list[dict[str, Any]] = Field(default_factory=list)
     events: list[Any]
     next: int
     has_more: bool
@@ -448,6 +494,13 @@ class ProxyToolResult(ExtensionResponse):
 class ProxyActionState(ExtensionResponse):
     done: bool
     result: Annotated[ProxyBashResult | ProxyToolResult, Field(discriminator="kind")] | None = None
+
+
+# The key under which a record's ``usage`` carries a ``Usage`` its driver reported, as ``Usage.to_dict`` wrote it; any
+# other ``usage`` is a model response's own, which the proxy reads with ``Usage.from_model_response``. It rides in
+# ``usage`` rather than a field of its own so a proxy on an earlier protocol, whose request refuses unknown fields,
+# still takes the record.
+REPORTED_USAGE_KEY = "agentenv_usage"
 
 
 class ProxyRecordRequest(ExtensionRequest):
@@ -1104,20 +1157,33 @@ def _configure_install(**declaration: Any) -> ExtensionConfiguration:
     return ExtensionConfiguration(wire_params=declaration)
 
 
-def _configure_trajectory(*, live: bool = False, native: str | None = None) -> ExtensionConfiguration:
+def _configure_trajectory(
+    *, live: bool = False, native: str | None = None, atif: type[Adapter] | None = None
+) -> ExtensionConfiguration:
     """``live=True`` advertises the cursor reads, which serve the framework's log while a
     task runs, and the context reads the framework answers when the agent binds none.
     ``native`` names the native log's format: the card offers it as ``formats``, ``native`` and
-    ``default``, and the log, a returned native trajectory and every read hold to it."""
+    ``default``, and the log, a returned native trajectory and every read hold to it. ``atif``
+    names the ``@atif_adapter`` class for that format: the card then offers atif/1 too, and the
+    SDK serves it from one document per context, built as the agent writes its log."""
     if not isinstance(live, bool):
         raise TypeError("live must be a boolean")
     if native is not None and not isinstance(native, str):
         raise TypeError("native must be a format id string")
     if native is not None and (not native.strip() or len(native) > MAX_TRAJECTORY_FORMAT_LENGTH):
         raise ValueError(f"native must be a format id of 1 to {MAX_TRAJECTORY_FORMAT_LENGTH} characters")
+    if atif is not None:
+        spec = vars(atif).get("spec") if isinstance(atif, type) and issubclass(atif, Adapter) else None
+        if not isinstance(spec, AdapterSpec):
+            raise TypeError("atif must be an Adapter subclass declared with @atif_adapter")
+        if native is None:
+            raise ValueError("atif needs native, the format the adapter reads")
+        if spec.native_format != native:
+            raise ValueError(f"{atif.__name__} reads {spec.native_format!r}, not {native!r}, the native format")
+    formats = [native, ATIF_FORMAT] if atif is not None else [native]
     return ExtensionConfiguration(
-        wire_params={"formats": [native], "native": native, "default": native} if native else {},
-        options={"native": native} if native else {},
+        wire_params={"formats": formats, "native": native, "default": native} if native else {},
+        options={"native": native, **({"atif": atif} if atif is not None else {})} if native else {},
         variants=(
             {"get": {"task_events", "context_events", "context", "context_objects"}} if live else {}
         ),

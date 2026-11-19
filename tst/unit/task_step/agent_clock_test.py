@@ -8,6 +8,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from agentenv_protocol import CONTROL_TOKEN_HEADER
 
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
@@ -17,6 +18,7 @@ from tst.unit.task_step.sync_env_clock_test import (CLOCK_URL, T0, _CARD, _CLOCK
                                                     _step)
 
 AGENT_URL = "http://solver:8000"
+AGENT_CONTROL_TOKEN = "the-agents-control-token"
 SYNC_TIME = {"method": "POST", "endpoint": "/ext/clock/sync-time",
              "request": {"required": ["env_get_time_url"], "optional": ["timezone", "watch_url", "name", "read_token"]}}
 
@@ -25,7 +27,8 @@ def _agent(name="solver", sync_time=SYNC_TIME, env_ids=("e1",), env_step_id=None
     extensions = [{"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock", "methods": {"sync_time": sync_time}}}]
     return DeployedAgent(agent_name=name, api_url=AGENT_URL, a2a_url=AGENT_URL, env_ids=list(env_ids),
                          env_bindings={env_id: env_step_id for env_id in env_ids} if env_step_id else {},
-                         a2a_card={"capabilities": {"extensions": extensions if sync_time else []}})
+                         a2a_card={"capabilities": {"extensions": extensions if sync_time else []}},
+                         control_token=AGENT_CONTROL_TOKEN)
 
 
 async def _context(*agents) -> TaskStepContext:
@@ -51,6 +54,7 @@ async def test_an_agent_is_declared_a_follower_then_handed_its_config_with_the_s
     declared, synced = sent[3], sent[4]
     assert (declared.method, str(declared.url)) == ("PUT", f"{_CARD}/clock/followers")
     assert (synced.method, str(synced.url)) == ("POST", f"{AGENT_URL}/ext/clock/sync-time")
+    assert synced.headers[CONTROL_TOKEN_HEADER] == AGENT_CONTROL_TOKEN
     declaration, config = json.loads(declared.content), json.loads(synced.content)
     assert declaration == {"name": "agent-solver", "read_token": config["read_token"]} and len(config["read_token"]) > 30
     assert config == {"env_get_time_url": CLOCK_URL, "watch_url": "http://gw/clock/watch", "name": "agent-solver",

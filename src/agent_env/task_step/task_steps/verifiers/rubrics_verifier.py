@@ -48,9 +48,10 @@ from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
-from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context, render_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.verifier import VERIFICATIONS_KEY, Verification, VerifierTaskStep
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -342,6 +343,14 @@ class StagedTrajectory:
     record: dict = field(default_factory=dict)
 
 
+@dataclass
+class RubricsVerdict(Verification):
+    """A rubrics verdict, and for rubric_evidence_with_mistakes the trajectory_mistakes-shaped entry ``verify`` writes
+    under ``trajectory_mistakes_key`` beside it."""
+
+    mistakes_entry: Optional[dict] = None
+
+
 class JudgeTimeoutError(TimeoutError):
     """An agent judge ran out of ``judge_timeout_seconds``; ``trajectory_object_url`` is what it had done by then, when
     its trajectory could be fetched."""
@@ -450,9 +459,8 @@ def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptR
     )
 
 
-class RubricsVerifierTaskStep(TaskStep):
+class RubricsVerifierTaskStep(VerifierTaskStep):
     type: ClassVar[str] = "rubrics_verifier"
-    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("judge_a2a_agent_id"),)
     context_paths = ("context_facts_for_judge{}",)
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
@@ -518,14 +526,17 @@ class RubricsVerifierTaskStep(TaskStep):
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         fail_task_when_not_passing: bool = False,
+        min_passing_score: Optional[float] = None,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id or uuid.uuid4().hex, score_aggregator=score_aggregator,
+                         min_passing_score=min_passing_score)
         if fail_task_when_not_passing and not fail_task_on_error:
             raise ValueError(
                 "fail_task_when_not_passing needs fail_task_on_error: a tolerated failure lets the steps after it "
                 "run and score the run."
             )
-        # A verdict below 1.0 fails the step with VerifierNotPassingError once the verdict is recorded.
+        # A verdict below min_passing_score fails the step with VerifierNotPassingError once the verdict is recorded.
         self.fail_task_when_not_passing = fail_task_when_not_passing
         # RUN_CONTEXT_PARTS the judge also sees, cut at grade_up_to_turn like the trajectory.
         self.run_context_for_judge = _validated_run_context_parts(run_context_for_judge)
@@ -564,16 +575,12 @@ class RubricsVerifierTaskStep(TaskStep):
         if isinstance(output_format, str):
             output_format = JudgeOutputFormat(output_format)
         self.output_format = output_format
-        self.verifier_id = verifier_id or uuid.uuid4().hex
         self.criteria = criteria
         self.prompt_id = prompt_id
         # The author's model, or None to judge with the run's config when the step runs (``_judge_model``), so a
         # stored task never carries the config of whoever wrote it.
         self.default_model = default_model
         self.default_model_api_base = default_model_api_base
-        if isinstance(score_aggregator, str):
-            score_aggregator = ScoreAggregator(score_aggregator)
-        self.score_aggregator = score_aggregator or ScoreAggregator.ALL_PASS
         self.agent_name = agent_name
         if isinstance(trajectory_filter, dict):
             trajectory_filter = TrajectoryFilter.from_dict(trajectory_filter)
@@ -612,7 +619,7 @@ class RubricsVerifierTaskStep(TaskStep):
     def _writes_mistakes_entry(self) -> bool:
         """rubric_evidence_with_mistakes: the same judge call also detects trajectory mistakes and a second entry,
         shaped and scored as a standalone trajectory_mistakes step's, is written under
-        ``trajectory_mistakes_key(self.verifier_id)`` (see ``_write_entries``)."""
+        ``trajectory_mistakes_key(self.verifier_id)`` (see ``_entries``)."""
         return self.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES
 
     def _entry_format_fields(self) -> dict:
@@ -627,19 +634,14 @@ class RubricsVerifierTaskStep(TaskStep):
         """``format`` / ``source_verifier_id`` of the second entry written under ``trajectory_mistakes_key``."""
         return {"format": JudgeOutputFormat.TRAJECTORY_MISTAKES.value, "source_verifier_id": self.verifier_id}
 
-    def _write_skipped_entries(self, context: TaskStepContext, row_id: str, message: str) -> None:
-        """Store a zero-score entry with one row saying why the run was not judged — under ``verifier_id``
-        and, for rubric_evidence_with_mistakes, ``trajectory_mistakes_key(verifier_id)``."""
-        def skipped(fields: dict) -> dict:
-            return {
-                **fields,
-                "results": [{"id": row_id, "score": 0, "result": False, "message": message}],
-                "score": 0,
-            }
-        verifications = context.metadata.setdefault("verifications", {})
-        verifications[self.verifier_id] = skipped(self._entry_format_fields())
-        if self._writes_mistakes_entry:
-            verifications[trajectory_mistakes_key(self.verifier_id)] = skipped(self._mistakes_entry_fields())
+    def _skipped(self, row_id: str, message: str) -> RubricsVerdict:
+        """A zero score with one row saying why the run was not judged, graded rather than skipped so the score stays
+        where readers count it; for rubric_evidence_with_mistakes the second entry says the same."""
+        def rows() -> list[dict]:
+            return [{"id": row_id, "score": 0, "result": False, "message": message}]
+        mistakes = ({**self._mistakes_entry_fields(), "results": rows(), "score": 0}
+                    if self._writes_mistakes_entry else None)
+        return RubricsVerdict(criteria=rows(), score=0, output=self._entry_format_fields(), mistakes_entry=mistakes)
 
     def _judge_model(self, context: TaskStepContext) -> str:
         """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
@@ -685,7 +687,6 @@ class RubricsVerifierTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> RubricsVerifierTaskStep:
-        raw_agg = data.get("score_aggregator")
         raw_tf = data.get("trajectory_filter")
         return cls(
             **cls._base_from_dict(data),
@@ -693,8 +694,6 @@ class RubricsVerifierTaskStep(TaskStep):
             prompt_id=data["prompt_id"],
             default_model=data.get("default_model"),
             default_model_api_base=data.get("default_model_api_base"),
-            score_aggregator=ScoreAggregator(raw_agg) if raw_agg else None,
-            verifier_id=data.get("verifier_id"),
             agent_name=data.get("agent_name"),
             trajectory_filter=TrajectoryFilter.from_dict(raw_tf) if raw_tf else None,
             max_thinking_tokens=data.get("max_thinking_tokens"),
@@ -758,30 +757,86 @@ class RubricsVerifierTaskStep(TaskStep):
         return {}
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
-        """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
+        """The criteria this run asks (``_run_values``): an override point, which user_sim_judge's plan replaces."""
+        return list(self._run_values(context)["criteria"])
 
-        Replace-on-presence, like ``load_artifact`` — an explicit ``[]`` replaces rather
-        than reverting (presence check, not truthiness). Returns a copy; never mutates
-        ``self``, which is shared across concurrent rollouts.
-        """
-        step_overrides = self.step_param_overrides(context)
-        return list(step_overrides["criteria"]) if "criteria" in step_overrides else self.criteria
+    def _run_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """Each setting a run's ``step_params`` or ``user_overrides`` can change, by the step's own field name, at the
+        value this run judges with: the judge reads these and ``verifier_settings`` records them, so the two can't
+        disagree. Unvalidated; the judge checks them as it reads them. Never mutates ``self``, which concurrent runs
+        share. A ``step_params`` ``criteria`` replaces on presence, so ``[]`` replaces too; effort and the thinking
+        budget reach only an agent judge, and the agent sandbox only a judge the step deploys."""
+        step_params = self.step_param_overrides(context)
+        overrides = context.metadata.get("user_overrides") or {}
+        use_agent_judge = self.use_agent_judge if overrides.get("use_agent_judge") is None else overrides["use_agent_judge"]
+        apply_filter = overrides.get("apply_trajectory_filter")
+        trajectory_filter = (None if apply_filter is False
+                             else self.trajectory_filter or TrajectoryFilter() if apply_filter is True
+                             else self.trajectory_filter)
+        return {
+            "criteria": list(step_params["criteria"]) if "criteria" in step_params else self.criteria,
+            "grade_up_to_turn": step_params["grade_up_to_turn"] if "grade_up_to_turn" in step_params
+            else self.grade_up_to_turn,
+            "use_agent_judge": use_agent_judge,
+            "trajectory_filter": trajectory_filter,
+            "effort": (overrides.get("judge_effort") or self.effort) if use_agent_judge else self.effort,
+            "max_thinking_tokens": (overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens)
+            if use_agent_judge else self.max_thinking_tokens,
+            "judge_batch_size": _override_or(overrides, "judge_batch_size", self.judge_batch_size),
+            "judge_batch_concurrency": _override_or(overrides, "judge_batch_concurrency", self.judge_batch_concurrency),
+            "judge_sandbox_type": (overrides.get("agent_sandbox") or self.judge_sandbox_type)
+            if use_agent_judge and self.agent_name is None else self.judge_sandbox_type,
+        }
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        context = await self._grade(context)
-        if self.fail_task_when_not_passing:
-            _raise_unless_passing(self.verifier_id, context.metadata["verifications"][self.verifier_id])
-        return context
+    def _recorded_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """``_run_values`` as ``verifier_settings`` records them, the trajectory filter as its dict; a subclass leaves
+        out the ones its judge never uses."""
+        values = self._run_values(context)
+        trajectory_filter = values["trajectory_filter"]
+        return {**values, "trajectory_filter": trajectory_filter.to_dict() if trajectory_filter is not None else None}
 
-    async def _grade(self, context: TaskStepContext) -> TaskStepContext:
+    def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
+        """The step's fields as this run judges with them (``_recorded_values`` in place of the stored ones), the judge
+        model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys one, and
+        ``overridden``, the settings this run's overrides changed. Never a key, header or base URL."""
+        settings = super().verifier_settings(context)
+        settings.pop("default_model_api_base", None)
+        values, stored = self._recorded_values(context), self._recorded_values(TaskStepContext())
+        overridden = [key for key, value in values.items() if value != stored[key]]
+        settings.update({key: values[key] for key in overridden})
+        overrides = context.metadata.get("user_overrides") or {}
+        if overrides.get("judge_model") and overrides["judge_model"] != self.default_model:
+            overridden.append("judge_model")
+        if settings.get("use_agent_judge") and self.agent_name is None and not self.judge_a2a_agent_id:
+            settings["judge_a2a_agent_id"] = get_config().get_default_a2a_agent_id()
+        recorded = (context.metadata.get("models") or {}).get(ModelRole.JUDGE.record_key) or {}
+        settings["judge_model"] = recorded[self.id] if self.id in recorded else self._judge_model(context)
+        return {**settings, "overridden": overridden}
+
+    async def verify(self, context: TaskStepContext) -> Verification:
+        verdict = self._gated(await self._judged(context))
+        if verdict.mistakes_entry is not None:
+            context.metadata.setdefault(VERIFICATIONS_KEY, {})[trajectory_mistakes_key(self.verifier_id)] = (
+                verdict.mistakes_entry)
+        return verdict
+
+    def _gated(self, verdict: RubricsVerdict) -> RubricsVerdict:
+        """``verdict``, failing its step once recorded when ``fail_task_when_not_passing`` and it scores under
+        ``min_passing_score``, naming the rows that weren't met."""
+        if not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
+            return verdict
+        unmet = [str(row.get("id")) for row in verdict.criteria
+                 if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
+        return replace(verdict, raise_after=VerifierNotPassingError(
+            f"Verifier '{self.verifier_id}' isn't passing (score {verdict.score}); rows not met: {unmet}"))
+
+    async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
+        """What the judge found in this run, written by nothing: an override point, whose result ``verify`` gates."""
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
-        overrides_for_step = self.step_param_overrides(context)
-        grade_up_to_turn = (
-            _validated_turn(overrides_for_step["grade_up_to_turn"])
-            if "grade_up_to_turn" in overrides_for_step else self.grade_up_to_turn
-        )
+        run = self._run_values(context)
+        grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
             # A cut copy's reply only points at turn k's trajectory, which use_trajectory=False never loads.
@@ -793,9 +848,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
         if prompt_response.error_type:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
-            self._write_skipped_entries(
-                context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
-            return context
+            return self._skipped("prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
         run_context = None
         if self.run_context_for_judge:
             # The stored response, not the cut copy: the loader finds the prompt's place among the run's by identity.
@@ -809,20 +862,11 @@ class RubricsVerifierTaskStep(TaskStep):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
 
         overrides = context.metadata.get("user_overrides", {})
-        # Resolved into a local, not onto self: one step instance is shared across
-        # concurrent rollouts, so mutating self would leak the override between them.
-        use_agent_judge_override = overrides.get("use_agent_judge")
-        use_agent_judge = use_agent_judge_override if use_agent_judge_override is not None else self.use_agent_judge
+        use_agent_judge = run["use_agent_judge"]
         criteria = self._resolved_criteria(context)
         # The judge sees/echoes short keys (c1..cN), not UUIDs; frame labels use them too, hence before compaction.
         criteria_for_judge, real_by_short = _to_short_keyed_criteria(criteria)
-        apply_filter_override = overrides.get("apply_trajectory_filter")
-        if apply_filter_override is False:
-            filter_to_apply = None
-        elif apply_filter_override is True:
-            filter_to_apply = self.trajectory_filter or TrajectoryFilter()
-        else:
-            filter_to_apply = self.trajectory_filter
+        filter_to_apply = run["trajectory_filter"]
 
         # Multi-turn: judge every turn (fed from the per-turn URIs already on the
         # PromptResponse), not just the last. DEFAULT compaction runs per turn; SCREENSHOT
@@ -864,10 +908,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     f"Skipping verification '{self.verifier_id}': output_format={fmt} needs "
                     "per-criterion frames, but the trajectory holds no screenshots."
                 )
-                self._write_skipped_entries(
-                    context, "no_screenshots",
-                    f"Skipped: {fmt} needs per-criterion frames, but the trajectory holds no screenshots")
-                return context
+                return self._skipped(
+                    "no_screenshots", f"Skipped: {fmt} needs per-criterion frames, but the trajectory holds no screenshots")
             # The constructor checked the stored filter; a run-time override can still drop it, leaving a
             # prompt that demands `frame` / `evidence_status` with nothing to cite.
             raise RuntimeError(
@@ -930,9 +972,8 @@ class RubricsVerifierTaskStep(TaskStep):
                         raise
                     raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
                 deploy_kwargs = {"env_vars": env_vars}
-                resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
-                if resolved_sandbox_type:
-                    deploy_kwargs["sandbox_type"] = resolved_sandbox_type
+                if run["judge_sandbox_type"]:
+                    deploy_kwargs["sandbox_type"] = run["judge_sandbox_type"]
                 auto_deployed_judge = await a2a_agent.deploy(**deploy_kwargs)
                 judge_a2a_url = auto_deployed_judge.a2a_url
                 judge_sandbox_id = auto_deployed_judge.sandbox_id
@@ -965,12 +1006,9 @@ class RubricsVerifierTaskStep(TaskStep):
             model = self._judge_model(context)
             context.record_model(ModelRole.JUDGE.record_key, self.id, model)
             agent_prompt_text = prompt_response.prompt_text or ""
-            judge_effort = overrides.get("judge_effort") or self.effort
-            judge_max_thinking_tokens = overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens
-            batch_size = _validated_batch_option("judge_batch_size", _override_or(
-                overrides, "judge_batch_size", self.judge_batch_size))
-            batch_concurrency = _validated_batch_option("judge_batch_concurrency", _override_or(
-                overrides, "judge_batch_concurrency", self.judge_batch_concurrency))
+            judge_effort, judge_max_thinking_tokens = run["effort"], run["max_thinking_tokens"]
+            batch_size = _validated_batch_option("judge_batch_size", run["judge_batch_size"])
+            batch_concurrency = _validated_batch_option("judge_batch_concurrency", run["judge_batch_concurrency"])
             if batch_size is not None and not self._spec().batchable:
                 raise RuntimeError(f"Verifier '{self.verifier_id}': {_unbatchable_format_message(self.output_format)}")
             loaded_for_judge: list[dict] = []
@@ -1128,16 +1166,14 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
         if staged is not None:
             judge_call_fields["trajectory_staging"] = staged.record
-        self._write_entries(context, verification_results, judge_call_fields, unjudged=unjudged)
-        return context
+        return self._entries(verification_results, judge_call_fields, unjudged=unjudged)
 
-    def _write_entries(self, context: TaskStepContext, verification_results: list[dict], judge_call_fields: dict,
-                       *, unjudged: Sequence[dict] = ()) -> None:
-        """Store the rubric entry under ``verifier_id`` and, for rubric_evidence_with_mistakes, the
-        trajectory-mistakes entry under ``trajectory_mistakes_key(verifier_id)``; ``judge_call_fields`` (URIs,
-        retries) go on both. The mistake rows are built before either entry is written, so a response they
-        cannot be derived from leaves neither behind. ``unjudged`` rows (``unjudged_rows``) join the rubric
-        entry's, after the judge's, and its score; the mistakes entry is the judge's alone."""
+    def _entries(self, verification_results: list[dict], judge_call_fields: dict, *,
+                 unjudged: Sequence[dict] = ()) -> RubricsVerdict:
+        """The rubric verdict and, for rubric_evidence_with_mistakes, the trajectory-mistakes entry;
+        ``judge_call_fields`` (URIs, retries) go on both. The mistake rows are built first, so a response they cannot
+        be derived from leaves neither. ``unjudged`` rows (``unjudged_rows``) join the rubric verdict's, after the
+        judge's, and its score; the mistakes entry is the judge's alone."""
         mistake_rows: Optional[list[dict]] = None
         if self._writes_mistakes_entry:
             if not isinstance(verification_results, ResultRows):
@@ -1147,32 +1183,22 @@ class RubricsVerifierTaskStep(TaskStep):
             mistake_rows = trajectory_mistakes_rows_from_evidence(verification_results)
         verification_results.extend(unjudged)  # in place, so a ResultRows keeps its reasoning and checks
         score = aggregate_score(verification_results, self.score_aggregator)
-        verifications = context.metadata.setdefault("verifications", {})
-        verification_entry = {
-            **self._entry_format_fields(),
-            "results": list(verification_results),
-            "score": score,
-            **judge_call_fields,
-        }
+        output = {**self._entry_format_fields(), **judge_call_fields}
         if isinstance(verification_results, ResultRows):
             # rubric_evidence: the judge's `reasoning` and policy `checks` ride on the entry, not the rows.
-            verification_entry["reasoning"] = verification_results.reasoning
-            verification_entry["checks"] = verification_results.checks
-        verifications[self.verifier_id] = verification_entry
+            output["reasoning"] = verification_results.reasoning
+            output["checks"] = verification_results.checks
         logger.info(f"Verification '{self.verifier_id}' complete: {len(verification_results)} criteria, score={score}")
 
+        mistakes: Optional[dict] = None
         if mistake_rows is not None:
             mistakes_score = aggregate_score(mistake_rows, ScoreAggregator.WEIGHTED_AVERAGE)
-            mistakes_key = trajectory_mistakes_key(self.verifier_id)
-            verifications[mistakes_key] = {
-                **self._mistakes_entry_fields(),
-                "results": mistake_rows,
-                "score": mistakes_score,
-                **judge_call_fields,
-            }
+            mistakes = {**self._mistakes_entry_fields(), "results": mistake_rows, "score": mistakes_score,
+                        **judge_call_fields}
             logger.info(
-                f"Verification '{mistakes_key}' complete (from '{self.verifier_id}'): "
+                f"Verification '{trajectory_mistakes_key(self.verifier_id)}' complete (from '{self.verifier_id}'): "
                 f"{len(mistake_rows)} rows, score={mistakes_score}")
+        return RubricsVerdict(criteria=list(verification_results), score=score, output=output, mistakes_entry=mistakes)
 
     def _compact_trajectory(
         self,
@@ -1832,13 +1858,3 @@ def is_rubrics_verifier(step_or_config: TaskStep | dict[str, Any]) -> bool:
     else:
         cls = type(step_or_config)
     return isinstance(cls, type) and issubclass(cls, RubricsVerifierTaskStep)
-
-
-def _raise_unless_passing(verifier_id: str, entry: dict) -> None:
-    """Raise VerifierNotPassingError when the recorded verdict scores below 1.0, naming the rows that weren't met."""
-    if entry["score"] >= 1:
-        return
-    unmet = [str(row.get("id")) for row in entry["results"] if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
-    raise VerifierNotPassingError(
-        f"Verifier '{verifier_id}' isn't passing (score {entry['score']}); rows not met: {unmet}"
-    )

@@ -118,6 +118,10 @@ CARD_FETCH_TIMEOUT_S = 5.0
 # here fails the whole discovery, to be retried on the next connect.
 CHILD_DISCOVERY_TIMEOUT_S = 30.0
 
+# How long the gateway keeps an idle connection open (uvicorn's default is 5 s). A request a client sends on a pooled
+# connection as the server closes it is reset unread, so this outlasts any pause between an agent's tool calls.
+IDLE_CONNECTION_TIMEOUT_S = 3600
+
 # The GET /state field naming each tool name more than one source serves, with its sources: backing servers by name,
 # `gateway` for the gateway's own tools. Empty unless discovery found such a clash, which leaves the env serving none
 # of its servers' tools; a deploy reads it to fail with the clash instead.

@@ -1388,6 +1388,39 @@ Extensions come from explicit definitions, configured activations, and
 decorated handlers in one validated registry, so routes and card advertisement
 cannot drift.
 
+`Usage` reports what a task used: `tool_call_count`, `input_tokens`,
+`output_tokens`, `total_tokens`, `cost_usd`, the prompt-cache counts
+`cache_read_tokens` and `cache_write_tokens`, and `input_includes_cache`, which
+says whether `input_tokens` counts both cache counts (`True`), neither
+(`False`), or is unknown (`None`, the default). Set the flag whenever you set
+the cache counts: a price can't read them without it. Runtime-specific counts go
+in `provider_details`, but cache counts go in their own fields. `Usage.from_dict`
+reads what `to_dict` wrote under any protocol version, a field it leaves out
+being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
+usage=...)` carries usage on a failure as `success` does.
+
+Whoever makes a model call knows what its counts hold, so an agent builds its own
+`Usage`. `Usage.from_model_response(usage)` is the default reader for a model
+response's own usage, with `input_tokens` counting the cache
+(`input_includes_cache` true), for OpenAI's Chat Completions (`prompt_tokens`)
+and Responses (`input_tokens`) shapes and Anthropic's:
+
+- An OpenAI count, or a LiteLLM client's, counts the cache its
+  `prompt_tokens_details` or `input_tokens_details` names: `cached_tokens`, and
+  `cache_write_tokens` beside it.
+- Anthropic's `input_tokens` counts neither `cache_read_input_tokens` nor
+  `cache_creation_input_tokens`, and neither does the `prompt_tokens` a LiteLLM
+  proxy sends with those two beside it, so they're added, to `total_tokens` too.
+- A provider's split of its cache writes by how long they're kept, priced apart
+  (Anthropic's `cache_creation`, OpenAI's `cache_write_tokens_details`), is kept
+  in `provider_details`, and so are the keys of a usage in none of these shapes,
+  as `unrecognized`. A value that isn't a count is left out.
+
+Through a gateway, whether a response's input counts the cache depends on the
+model behind it: a LiteLLM proxy's Claude answers through Chat Completions leave
+it out, its GPT answers don't. Set `input_includes_cache` per call, never once
+per agent.
+
 `run(request)` is the required execution contract. It is an ordinary method
 and needs no decorator.
 
@@ -1564,6 +1597,56 @@ Every read the framework answers names the format it served: `{trajectory, forma
 the most recent format its tasks set. Readers trust a response's `format` over
 the card. An agent that binds its own context reads should name, in their
 responses, the format it serves.
+
+#### Serving ATIF (`atif/1`)
+
+`atif` names the agent's ATIF adapter, an `@atif_adapter` class from
+`agentenv_protocol.atif` that reads the `native` format:
+
+```python
+enable(TRAJECTORY_V1, live=True, native="my-cli-events/1", atif=MyCliAtif)
+```
+
+The card then lists `atif/1` in `formats` too; `default` stays `native`. The
+SDK keeps one ATIF document per A2A context, run through one adapter instance,
+and feeds it every event the agent appends, as it appends it. A native
+trajectory returned at task end runs through the adapter then. The agent's own
+code feeds the adapter's aux files, records that aren't in the native log such
+as a hook's notes, with `request.trajectory.aux(name, record)`, where they
+happened among the events. An agent with an adapter that both appends events and
+returns a native trajectory fails the turn with code
+`framework.trajectory_appended_and_returned`, since its ATIF copy would come
+from one of them and its native record from the other.
+
+The SDK writes each task's user step from the inbound message and its final
+response from the result, both as [PROFILE.md](src/agentenv_protocol/atif/PROFILE.md)
+says, stamped on the clock the agent's programs read: the universe's when the
+agent follows the env's clock, though the server itself stays on real time. `session_id` is the A2A context id, and `trajectory_id` names the document.
+Reads naming `atif/1` are served by the SDK, context reads an agent binds
+included:
+
+- A task read returns the context's document as it stood when the task ended,
+  with `aux`, the task's aux log (each record with `after`, the number of events
+  before it), and `turn_context`, its TurnContext and how it ended: an
+  `AuxEntry` each and a `ServedTurn`, both in `agentenv_protocol.atif`. With
+  those and the native events, `RecordedTask.from_served` and `replay` rebuild
+  the document offline. In the objects form, `aux` and `turn_context` are optional
+  grants beside `trajectory`, uploaded only when given; other reads refuse them.
+- A context read returns the live page: every step that has closed and whose
+  calls are all answered, up to the first that isn't.
+- A cursor read pages those closed steps by `step_id`: `after` is the last
+  `step_id` read, and `next` is the last one served. Each page carries `header`,
+  the document's root without its steps (with `final_metrics` once no task is
+  open), and `subagents`, the embedded
+  sub-agent trajectories of the tasks its steps belong to, as far as each is
+  served. A sub-agent can gain steps while its task runs, so keep each one's
+  latest copy; the page that serves a task's last step, which closes only as the
+  task ends, carries them whole.
+
+Every `atif/1` answer names `schema_version` and `profile_version` beside
+`format`. An adapter that raises stops its context's copy, never the turn: the
+copy's reads then answer HTTP 409 with code `atif_unavailable`, and native reads
+are unaffected.
 
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
@@ -1866,7 +1949,18 @@ operations:
   records a call, each action must be one the last recorded call made, by name and
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
-  Calls to tools the turn doesn't offer aren't checked.
+  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's: a `Usage` the
+  driver reports under `REPORTED_USAGE_KEY` (`{"agentenv_usage": usage.to_dict()}`), taken as
+  given, or else the model response's own, read by `Usage.from_model_response`. It rides in
+  `usage` rather than a field of its own, so a proxy on an earlier protocol still takes the
+  record. A reported `Usage` that isn't one gets 400 and leaves the turn as it was. The call's
+  input is made to count the cache, its `chat` span shows that reading, and its turn sums it.
+  The turn's `Usage`, on its reply or its error, sums each count over the calls that gave it,
+  `cost_usd` included. Its `provider_details` give `model_calls`, how many were recorded;
+  `unreported`, how many left out each count only some gave, so such a sum reads as a lower
+  bound; `cache_unsettled`, how many had cache counts with no word on whether their input held
+  them, which leaves the turn's flag unknown; `unrecognized`, how many usages were in no shape
+  the reader knows; and each provider's cache-write split, summed.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 

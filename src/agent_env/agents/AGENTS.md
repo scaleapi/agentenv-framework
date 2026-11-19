@@ -52,6 +52,13 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   Its parts become the task's status message, with `usage` as a data part; a failure adds
   `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
   text part, so add one.
+- **Usage:** when the runtime counts prompt-cache tokens, put them in `Usage`'s `cache_read_tokens` and
+  `cache_write_tokens`, not `provider_details`, and set `input_includes_cache` to whether `input_tokens` counts them
+  (`None` when it can't tell). Set it per call: through a gateway it depends on the model behind it. Where the runtime
+  hands back a model response's own usage, `Usage.from_model_response` reads it. A call that came back with no usage,
+  as a streamed answer through some gateways does, leaves the counts unset rather than zero and is counted in
+  `provider_details.unreported_calls`. Code that sets these fields needs a
+  `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
   never sent.
@@ -137,7 +144,10 @@ serves the reads; bind `get.context` and `get.context_objects` to serve a whole 
 `native="<format id>"` in that `enable` declares the format: the card lists it as `formats`, `native` and `default`,
 a read naming any other format is refused before your handlers run, and the log and a returned `native_trajectory`
 must be in it. It needs a protocol floor that has `native`. A context read you bind names the format it serves as
-`format` in its response.
+`format` in its response. `atif=<adapter class>` there, an `@atif_adapter` class for that native format, has the SDK
+serve `atif/1` too, built from your log as you append it: write the adapter (`agentenv_protocol.atif`, its
+`PROFILE.md`), feed records that aren't in the native log, such as hooks' notes, with
+`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime

@@ -35,6 +35,7 @@ from .profile import (
     MetricsProfile,
     ObservationResultProfile,
     ReasoningBlock,
+    StepData,
     StepError,
     StepProfile,
     SubagentTrajectoryRefProfile,
@@ -44,16 +45,21 @@ from .profile import (
     profile_of,
     read_profile,
 )
+from .kit import KIT_RULES, KitResult, check_adapter
 from .reader import Task, check, is_prefix, load, media_paths, strip_profile, tasks
 from .runner import AdapterRun, Fed, RecordedTask, replay
+from .served import AuxEntry, ContentItem, MediaItem, ServedData, ServedError, ServedMedia, ServedTurn
+from .validator import RULES, Finding, Rule, errors_in, validate, validate_live
 
 __all__ = [
-    "Adapter", "AdapterRef", "AdapterRun", "AdapterSpec", "Agent", "AgentProfile", "Arrival", "AtifError", "AtifTurn",
-    "AudioSource", "ContentPart", "Document", "FORMAT", "Fed", "FinalMetrics", "FinalMetricsProfile", "ImageSource",
-    "Media", "MediaInfo", "Metrics", "MetricsProfile", "Native", "Observation", "ObservationResult",
-    "ObservationResultProfile", "PROFILES", "PROFILE_KEY", "PROFILE_VERSION", "RAW_ARGUMENTS", "ReasoningBlock",
-    "RecordedTask", "SCHEMA_VERSION", "Selector", "Step", "StepError", "StepProfile", "SubagentTrajectoryRef",
-    "SubagentTrajectoryRefProfile", "Task", "ToolCall", "ToolCallProfile", "Trajectory", "TrajectoryProfile",
-    "TurnContext", "VOCABULARIES", "atif_adapter", "aux", "check", "dump_profile", "finish", "is_prefix", "load",
-    "media_paths", "native", "profile_of", "read_profile", "replay", "strip_profile", "tasks", "timestamp",
+    "Adapter", "AdapterRef", "AdapterRun", "AdapterSpec", "Agent", "AgentProfile", "Arrival", "atif_adapter",
+    "AtifError", "AtifTurn", "AudioSource", "aux", "AuxEntry", "check", "check_adapter", "ContentItem", "ContentPart",
+    "Document", "dump_profile", "errors_in", "Fed", "FinalMetrics", "FinalMetricsProfile", "Finding", "finish",
+    "FORMAT", "ImageSource", "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "media_paths", "MediaInfo",
+    "MediaItem", "Metrics", "MetricsProfile", "Native", "native", "Observation", "ObservationResult",
+    "ObservationResultProfile", "PROFILE_KEY", "profile_of", "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS",
+    "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",
+    "ServedData", "ServedError", "ServedMedia", "ServedTurn", "Step", "StepData", "StepError", "StepProfile",
+    "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "tasks", "timestamp", "ToolCall",
+    "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "VOCABULARIES",
 ]
