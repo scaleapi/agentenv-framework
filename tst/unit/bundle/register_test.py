@@ -519,6 +519,30 @@ def test_chromium_registers_into_a_shared_store_with_its_driver_and_base_compute
     assert (chromium.type, chromium.computer.id, chromium.driver.id) == ("computer_app", "ubuntu-24.04-browser", "page")
 
 
+def test_the_installed_chromium_registers_over_its_own_driver_though_the_store_holds_another_under_the_alias(
+        home, composed, monkeypatch):
+    """As a later promotion registers it into the hub: the store's `page` is no longer the installed driver, and
+    the installed chromium, named by its own id, still binds its own, written again under the alias."""
+    for module in (register_module, env_store_module):
+        monkeypatch.setattr(module, "shared_store", lambda store: True)
+    bases = {image.ref() for image in COMPUTER_IMAGES}
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in bases else None)
+    monkeypatch.setattr(computer_artifact_module, "_inspect",
+                        lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
+    files = {"tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env",
+                                          "env_id": "@local/agentenv-framework/browsers/chromium"}])}
+    register_bundle(layout(home / "first", files))
+    edited = Env.get("page")
+    edited.description, edited.version = "edited in the store", None
+    env_store_module.get_env_store().put_document(edited)
+
+    registered = register_bundle(layout(home / "second", files))
+
+    versions = {done.write.id: done.version for done in registered.materialization.writes}
+    assert versions["page"] == 3 and Env.get("page").description != "edited in the store"
+    assert Env.get("chromium", versions["chromium"]).driver.version == 3
+
+
 def _desktop(home, monkeypatch, compose):
     """A bundle of a computer env on the shipped base and driver, registered into a shared store as the hub is, under
     their aliases, ``compose`` standing in for the composer."""

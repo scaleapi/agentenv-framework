@@ -2,6 +2,7 @@
 
 import json
 import os
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -478,3 +479,15 @@ def test_every_problem_is_reported_together(make):
         "tasks/t.json: step 'deploy': env_id: there is no env 'missing-env' in the store",
         "tasks/w.json: step 'snap': '@local/s' is also written by step 'snap' of tasks/u.json; give each its own id",
     )
+
+
+def test_pointing_an_alias_rewrites_only_the_fields_naming_it_unpinned():
+    """A pinned field keeps naming the store's entity, as its reference does; only an unpinned one is pointed."""
+    steps = [{"id": "a", "type": "deploy_env", "env_id": "crm-x"},
+             {"id": "b", "type": "deploy_env", "env_id": "crm-x", "env_version": 2}]
+    entry = SimpleNamespace(entry=SimpleNamespace(kind=BundleKind.TASK, config=steps), config=steps)
+
+    renamed = plan_module._renamed(entry, {(EntityKind.ENV, "crm-x"): "@local/acme/envs/crm-x"})
+
+    assert [(step["env_id"], step.get("env_version")) for step in renamed] == [
+        ("@local/acme/envs/crm-x", None), ("crm-x", 2)]

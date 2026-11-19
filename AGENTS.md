@@ -280,7 +280,11 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   store (`store.routing.shared_store`), such as the hub's, may hold one, as the hub holds `chromium` for the tasks that
   name it, which `bundle register` writes. That env shadows the alias wherever that store is read, routing on or off
   (`Env.get` and the planner read the store first), so a deployment recorded under the alias there before it was written
-  reattaches to it from then on, or isn't found when it lacks that deployment's version.
+  reattaches to it from then on, or isn't found when it lacks that deployment's version. An installed bundle's entity
+  the planner pulls in is the exception: its own references to aliases bind what its installed bundles give them,
+  pulled in too, whatever the store holds of the alias's id (`_Planner._installed_alias`), so registering the installed
+  chromium writes it over the installed `page` and `ubuntu-24.04-browser` even where the store holds older ones. Such a
+  reference isn't one of `Plan.alias_uses`, which are the aliases the bundle itself names.
 - `aliases.toml` gives artifacts aliases too (`[artifacts] "<folder>" = ["<alias>", ...]`; the `computers` bundle
   names its base `ubuntu-24.04`), resolved by the planner wherever env aliases are, as a computer env's `computer` names
   its base. `Artifact.get` reads no alias: the planner rewrites every alias an entry or a task names to its id. An alias may
