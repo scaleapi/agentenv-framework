@@ -60,7 +60,7 @@ cua = [
     "openpyxl>=3.1",
     "python-docx>=1.1",
     "python-pptx>=1.0",
-    "pypdf>=4",
+    "pypdf>=6",
 ]
 # agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor release a week.
 openenv = [

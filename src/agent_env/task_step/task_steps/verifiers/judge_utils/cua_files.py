@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import io
 import posixpath
+import zipfile
 from dataclasses import dataclass
 from typing import Callable
 
@@ -23,6 +24,13 @@ MAX_CELLS = 6000
 MAX_VISITED_CELLS = 200_000
 #: How much of a file without an extension is sampled to tell whether it's text.
 TEXT_SAMPLE_BYTES = 4096
+#: The most an Office file (a zip package) may expand to before it's opened: a small file can hold members that
+#: decompress to far more, which its library would read into memory.
+MAX_EXPANDED_BYTES = 128 * 1024 * 1024
+#: How much of a package member is decompressed at a time while it's measured.
+EXPAND_CHUNK_BYTES = 1024 * 1024
+#: The most pages of a PDF a rendering reads.
+MAX_PDF_PAGES = 200
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,9 @@ def render(name: str, data: bytes, max_chars: int) -> Rendered:
     renderer = _RENDERERS.get(extension)
     if renderer is not None:
         kind, library, read = renderer
+        if kind != "pdf" and (expanded := _expands_past_limit(data)) is not None:
+            return Rendered("unrendered", f"({extension} file of {len(data)} bytes, not rendered: it {expanded}, over "
+                                          f"the {MAX_EXPANDED_BYTES} bytes a rendering opens)")
         try:
             text = read(data)
         except ImportError:
@@ -56,6 +67,24 @@ def render(name: str, data: bytes, max_chars: int) -> Rendered:
     kind = "image" if extension in IMAGE_EXTENSIONS else "binary"
     return Rendered(kind, f"({kind} file of {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}; its content "
                           "isn't shown)")
+
+
+def _expands_past_limit(data: bytes) -> str | None:
+    """None when the zip package ``data`` decompresses within ``MAX_EXPANDED_BYTES``, counted by decompressing it a
+    chunk at a time rather than by its headers, which can lie; else how far it was seen to expand. A file that isn't a
+    readable zip is left to its library, which names it as unreadable."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as package:
+            total = 0
+            for member in package.infolist():
+                with package.open(member) as stream:
+                    while chunk := stream.read(EXPAND_CHUNK_BYTES):
+                        total += len(chunk)
+                        if total > MAX_EXPANDED_BYTES:
+                            return f"expands past {MAX_EXPANDED_BYTES} bytes"
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, OSError, EOFError):
+        return None
+    return None
 
 
 def _cut(kind: str, text: str, max_chars: int) -> Rendered:
@@ -150,11 +179,15 @@ def _pptx(data: bytes) -> str:
 
 
 def _pdf(data: bytes) -> str:
-    """Each page's text."""
+    """Each page's text, up to ``MAX_PDF_PAGES`` pages; pypdf bounds each stream it decompresses."""
     import pypdf
 
     pages = pypdf.PdfReader(io.BytesIO(data)).pages
-    return "\n".join(f"## Page {number}\n{page.extract_text() or ''}" for number, page in enumerate(pages, start=1))
+    lines = [f"## Page {number}\n{page.extract_text() or ''}"
+             for number, page in enumerate(pages[:MAX_PDF_PAGES], start=1)]
+    if len(pages) > MAX_PDF_PAGES:
+        lines.append(f"… (stopped at {MAX_PDF_PAGES} of {len(pages)} pages)")
+    return "\n".join(lines)
 
 
 _RENDERERS: dict[str, tuple[str, str, Callable[[bytes], str]]] = {

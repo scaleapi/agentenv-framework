@@ -7,8 +7,9 @@ out), each a ``must-pass`` gate, a ``negative`` one (a failure mode, its weight 
 ``result_files``, read through the computer's driver (computer-exec/v1 ``run``, the control route the agent can't call)
 and rendered as text (``judge_utils/cua_files.py``), a file that isn't there named as one the agent did not produce; the
 golden files of ``expected_artifact_id``, for reference only; the output of each of ``state_commands`` run in the
-computer, such as a mock website's state; and ``instruction``, the task as the agent was given it. With no
-``prompt_id`` the judge grades those alone; with one it also sees that prompt's response.
+computer, such as a mock website's state, marked incomplete when it was cut; and ``instruction``, the task as the agent
+was given it. With no ``prompt_id`` the judge grades those alone; with one it also sees that prompt's response. Files
+and state are read through ``sh`` and POSIX tools, so a Windows computer is refused, at preflight and before any read.
 
 How the judge grades is ``guidance``, and how it treats the golden files ``golden_note``: the caller's own wording, or
 short defaults of the framework's. The score: each criterion 1 or 0; the regular and passed must-pass criteria's weights
@@ -19,16 +20,20 @@ absent, and keeps its penalty as a negative weight.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
 from typing import Any, ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.computer import COMPUTER
+
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_steps.computer.computer_exec import computer_problem, find_computer
-from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render
+from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import Rendered, render
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -52,6 +57,10 @@ DEFAULT_GOLDEN_NOTE = ("Reference files: use one only for a criterion that refer
 READ_TIMEOUT_S = 120.0
 #: The most of one file's rendering, and of one command's output, the judge reads.
 MAX_FILE_CHARS = 40_000
+#: How long rendering one file may take before it's named as not rendered.
+RENDER_TIMEOUT_S = 60.0
+#: Computers the step can't read: it reads files and runs state commands through ``sh`` and POSIX tools.
+UNSUPPORTED_OS = frozenset({"windows"})
 #: The most of a file one read returns: its base64 well within the 1 MiB a driver returns of a command's output.
 READ_CHUNK_BYTES = 512 * 1024
 #: The largest file the judge is shown; a larger one is named as too large.
@@ -116,6 +125,39 @@ def cua_rubric_score(rows: list[dict]) -> float:
     return aggregate_score(binary, ScoreAggregator.WEIGHTED_AVERAGE)
 
 
+async def _render(name: str, data: bytes) -> Rendered:
+    """``render`` off the event loop, named as not rendered when it takes over ``RENDER_TIMEOUT_S``."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(render, name, data, MAX_FILE_CHARS), RENDER_TIMEOUT_S)
+    except TimeoutError:
+        return Rendered("unrendered", f"(file of {len(data)} bytes, not rendered: rendering it took over "
+                                      f"{RENDER_TIMEOUT_S:g} s)")
+
+
+def _deployed_os(deployed: Any) -> Optional[str]:
+    """The OS a deployed computer's card names (computer/v1's ``platform``), None when it names none."""
+    return (protocol_v1.extension_params(deployed.environment_card or {}, COMPUTER).get("platform") or {}).get("os")
+
+
+def _stored_os_problem(env: Any, computer: Optional[str]) -> Optional[str]:
+    """Why the stored env's computer is one the step can't read, else None."""
+    from agent_env.env.envs.computer.env import ComputerEnv
+    from agent_env.env.envs.multi_env import MultiEnv
+
+    target = env
+    if isinstance(env, MultiEnv):
+        browser = env.website_browser().computer
+        candidates = [*env.computer_envs, *([browser] if browser else [])]
+        target = next((c for c in candidates if computer is None or c.environment_name == computer), None)
+    if not isinstance(target, ComputerEnv):
+        return None
+    os_type = getattr(getattr(target.computer, "os", None), "type", None)
+    if os_type in UNSUPPORTED_OS:
+        return (f"env {env.id!r}'s computer is {os_type}, which cua_verifier can't read: it reads files and runs state "
+                "commands through sh and POSIX tools")
+    return None
+
+
 def _passed(row: dict) -> bool:
     score = row.get("score")
     return isinstance(score, (int, float)) and not isinstance(score, bool) and score >= 1.0 - SCORE_TOLERANCE
@@ -174,7 +216,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         """rubrics_verifier's, and the env this step reads: a computer env, or a multi env with that computer."""
         problems = super().preflight()
         if isinstance(self.env_id, str) and self.env_id and (env := stored_env(self.env_id)) is not None:
-            if problem := computer_problem(env, self.computer):
+            if problem := computer_problem(env, self.computer) or _stored_os_problem(env, self.computer):
                 problems.append(f"step {self.id!r}: {problem}")
         return problems
 
@@ -225,6 +267,9 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         """The files and state the agent left in the computer, the golden files, the instruction and how to grade;
         what was read is recorded under ``cua_verifier``."""
         deployed = find_computer(context, self.env_id, self.computer)
+        if (os_type := _deployed_os(deployed)) in UNSUPPORTED_OS:
+            raise RuntimeError(f"cua_verifier '{self.id}': env {self.env_id!r} is a {os_type} computer, which it can't "
+                               "read: it reads files and runs state commands through sh and POSIX tools")
         record: dict = {"files": [], "golden_files": [], "state": []}
         sections = []
         produced, missing = [], []
@@ -239,7 +284,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
                 produced.append(f"### File {number}: {path}\n(a file of {data} bytes, too large to show: over "
                                 f"{MAX_READ_BYTES} bytes)")
                 continue
-            shown = render(path, data, MAX_FILE_CHARS)
+            shown = await _render(path, data)
             record["files"].append({"path": path, "bytes": len(data), "rendered_as": shown.kind, "cut": shown.cut})
             produced.append(f"### File {number}: {path} ({shown.kind})\n<file path=\"{path}\">\n{shown.text}\n</file>")
         sections.append("## Files under evaluation\nWhat the agent left at each path in its computer, rendered as "
@@ -250,7 +295,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         if golden := self._golden_files():
             shown_golden = []
             for name, data in golden.items():
-                shown = render(name, data, MAX_FILE_CHARS)
+                shown = await _render(name, data)
                 record["golden_files"].append({"name": name, "bytes": len(data), "rendered_as": shown.kind})
                 shown_golden.append(f"### Golden: {name} ({shown.kind})\n<golden name=\"{name}\">\n{shown.text}\n"
                                     "</golden>")
@@ -259,8 +304,14 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         state = []
         for command in self.state_commands:
             output = await self._state(deployed, command)
-            record["state"].append({"name": command["name"], **{k: output[k] for k in ("exit_code", "timed_out")}})
-            text = (output.get("stdout") or "")[:MAX_FILE_CHARS]
+            stdout = output.get("stdout") or ""
+            cut, truncated = len(stdout) > MAX_FILE_CHARS, bool(output.get("truncated"))
+            record["state"].append({"name": command["name"], **{k: output[k] for k in ("exit_code", "timed_out")},
+                                    "cut": cut, "truncated": truncated})
+            text = stdout[:MAX_FILE_CHARS]
+            if why := " and ".join([*([f"cut after {MAX_FILE_CHARS} characters"] if cut else []),
+                                     *(["cut short by the computer's driver"] if truncated else [])]):
+                text += f"\n… (INCOMPLETE: {why}. What isn't shown can't support a criterion.)"
             state.append(f"### {command['name']}\n<state name=\"{command['name']}\" exit_code=\"{output['exit_code']}\">"
                          f"\n{text}\n</state>")
         if state:

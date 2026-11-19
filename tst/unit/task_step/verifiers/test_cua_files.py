@@ -1,17 +1,20 @@
 """cua_files: each format a CUA task's agent leaves as the judge reads it: documents, slides, spreadsheets and PDFs
 dumped as text, text as it is and cut at the limit, anything else by its size and digest, and a format whose library
-isn't installed, or a file its library can't read, named as not rendered."""
+isn't installed, a file its library can't read, or an Office file that expands past the limit, named as not rendered;
+a long PDF read up to its page limit."""
 
 from __future__ import annotations
 
 import builtins
 import io
+import zipfile
 
 import docx
 import pptx
 import pypdf
 import pytest
 
+from agent_env.task_step.task_steps.verifiers.judge_utils import cua_files
 from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render
 
 
@@ -116,3 +119,32 @@ def test_grouped_slide_text_is_shown():
     deck.save(out)
 
     assert "Revenue up 12%" in render("deck.pptx", out.getvalue(), 10_000).text
+
+
+def test_an_office_file_that_expands_past_the_limit_is_named_not_opened(monkeypatch):
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("word/document.xml", b"\0" * (4 * 1024 * 1024))
+    bomb, memo = out.getvalue(), _docx()
+    monkeypatch.setattr(cua_files, "MAX_EXPANDED_BYTES", 1024 * 1024)
+    assert render("memo.docx", memo, 1000).kind == "docx"
+    opened = []
+    monkeypatch.setattr(docx, "Document", lambda *a: opened.append(a))
+
+    shown = render("memo.docx", bomb, 1000)
+
+    assert shown.kind == "unrendered" and "expands past 1048576 bytes" in shown.text and len(bomb) < 64 * 1024
+    assert opened == []
+
+
+def test_a_long_pdf_is_read_up_to_its_page_limit(monkeypatch):
+    writer = pypdf.PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=200, height=200)
+    out = io.BytesIO()
+    writer.write(out)
+    monkeypatch.setattr(cua_files, "MAX_PDF_PAGES", 2)
+
+    shown = render("long.pdf", out.getvalue(), 10_000)
+
+    assert "## Page 2" in shown.text and "## Page 3" not in shown.text and "stopped at 2 of 3 pages" in shown.text

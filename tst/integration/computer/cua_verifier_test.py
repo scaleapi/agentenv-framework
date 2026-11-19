@@ -49,7 +49,8 @@ def test_a_cua_rubric_is_graded_on_what_the_agent_left_in_the_computer(state, mo
     files = metadata["cua_verifier"]["grade"]["files"]
     assert [(f["path"], f["rendered_as"]) for f in files] == [("~/Desktop/budget.csv", "text"),
                                                               ("~/notes.txt", "text")], files
-    assert metadata["cua_verifier"]["grade"]["state"] == [{"name": "mailbox", "exit_code": 0, "timed_out": False}]
+    assert metadata["cua_verifier"]["grade"]["state"] == [
+        {"name": "mailbox", "exit_code": 0, "timed_out": False, "cut": False, "truncated": False}]
     graded = metadata["verifications"]["cua"]
     assert graded["score"] == 1.0 and graded["gate_passed"], graded["results"]
     gated = metadata["verifications"]["cua-gate"]

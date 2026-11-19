@@ -2,29 +2,37 @@
 negative penalties, must-pass gates), and a run against a computer at its driver's boundary (``tst.unit.computer_home``)
 with the judge faked: the files the agent left read through the driver and rendered into the judge's prompt, a missing
 one named, the golden files and the state commands' output beside them, the caller's guidance or the default, and the
-files graded alone when no prompt step names them."""
+files graded alone when no prompt step names them; state output that was cut marked incomplete, a Windows computer
+refused, and a file too slow to render named as not rendered."""
 
 from __future__ import annotations
 
 import io
 import json
 import re
+import time
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
+from agentenv_protocol.computer import COMPUTER
 
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.task_steps.verifiers import cua_verifier
 from agent_env.task_step.task_steps.verifiers.cua_verifier import (
     DEFAULT_GOLDEN_NOTE,
     DEFAULT_GUIDANCE,
+    MAX_FILE_CHARS,
     RECORDS_KEY,
     CuaVerifierTaskStep,
     criteria_from_rubric,
     cua_rubric_score,
 )
-from tst.unit.computer_home import Computer
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.unit.computer_home import CARD, Computer
 
 RUBRIC = {"criteria": [
     {"id": "sheet-exists", "title": "Provides report.xlsx.", "weight": 8,
@@ -162,7 +170,7 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
         (f"{computer.home}/Desktop/report.xlsx", "xlsx", False), ("~/notes.txt", "text", False),
         ("~/missing.pdf", None, True)]
     assert record["golden_files"] == [{"name": "report.csv", "bytes": 10, "rendered_as": "text"}]
-    assert record["state"] == [{"name": "mailbox", "exit_code": 0, "timed_out": False}]
+    assert record["state"] == [{"name": "mailbox", "exit_code": 0, "timed_out": False, "cut": False, "truncated": False}]
 
 
 @pytest.mark.asyncio
@@ -267,3 +275,66 @@ def test_it_round_trips_through_the_registry_keeping_a_files_only_grade():
 def test_bad_configs_are_refused(fields, problem):
     with pytest.raises(ValueError, match=problem):
         _step(**fields)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stdout, truncated, why", [
+    ("x" * (MAX_FILE_CHARS + 5), False, f"cut after {MAX_FILE_CHARS} characters"),
+    ("short", True, "cut short by the computer's driver"),
+])
+async def test_state_output_that_was_cut_is_marked_incomplete(computer, stdout, truncated, why):
+    step = _step(result_files=["~/notes.txt"], state_commands=[{"name": "mailbox", "command": "cat /tmp/m.json"}])
+    prompts: list[str] = []
+    _judge(step, prompts)
+
+    async def state(deployed, command):
+        return {"exit_code": 0, "timed_out": False, "stdout": stdout, "truncated": truncated}
+
+    step._state = state
+    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+
+    await step.execute(ctx)
+
+    assert f"INCOMPLETE: {why}. What isn't shown can't support a criterion." in prompts[0]
+    [record] = ctx.metadata[RECORDS_KEY]["grade"]["state"]
+    assert record["cut"] == (len(stdout) > MAX_FILE_CHARS) and record["truncated"] == truncated
+
+
+@pytest.mark.asyncio
+async def test_a_windows_computer_is_refused_before_anything_is_read(computer):
+    card = {**CARD, "capabilities": {**CARD["capabilities"], "extensions": [
+        *CARD["capabilities"]["extensions"], {"uri": COMPUTER, "params": {"platform": {"os": "windows"}}}]}}
+    step = _step(result_files=["~/notes.txt"])
+    _judge(step, [])
+
+    with pytest.raises(RuntimeError, match="is a windows computer, which it can't read"):
+        await step.execute(TaskStepContext(deployed_envs=[computer.deployed(card=card)]))
+    assert computer.calls == []
+
+
+def test_preflight_refuses_a_stored_windows_computer(monkeypatch):
+    desk = ComputerEnv.__new__(ComputerEnv)
+    desk.id, desk.environment_name = "desk", "desk"
+    desk.computer = SimpleNamespace(os=SimpleNamespace(type="windows"))
+    monkeypatch.setattr(cua_verifier, "stored_env", lambda env_id: desk)
+    monkeypatch.setattr(RubricsVerifierTaskStep, "preflight", lambda self: [])
+
+    assert _step(result_files=["~/a.txt"]).preflight() == [
+        "step 'grade': env 'desk''s computer is windows, which cua_verifier can't read: it reads files and runs state "
+        "commands through sh and POSIX tools"]
+    desk.computer = SimpleNamespace(os=SimpleNamespace(type="linux"))
+    assert _step(result_files=["~/a.txt"]).preflight() == []
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_takes_too_long_to_render_is_named_not_rendered(computer, monkeypatch):
+    (computer.home / "notes.txt").write_text("done\n")
+    monkeypatch.setattr(cua_verifier, "RENDER_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(cua_verifier, "render", lambda *a: time.sleep(0.5))
+    step = _step(result_files=["~/notes.txt"])
+    prompts: list[str] = []
+    _judge(step, prompts)
+
+    await step.execute(TaskStepContext(deployed_envs=[computer.deployed()]))
+
+    assert "not rendered: rendering it took over 0.05 s" in prompts[0]
