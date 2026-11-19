@@ -1257,8 +1257,9 @@ def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:
 
 
 def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) -> Any:
-    """A copy of ``entry``'s config with each field naming an alias in ``ids``, by kind, naming what it names instead:
-    a task's steps by their types' refs, any other entry's toml by its class's ``toml_refs``."""
+    """A copy of ``entry``'s config with each unpinned field naming an alias in ``ids``, by kind, naming what it names
+    instead: a task's steps by their types' refs, any other entry's toml by its class's ``toml_refs``. A pinned field
+    is left as it is, since only an unpinned reference is ever pointed at an alias's entity."""
     if not ids:
         return entry.config
     config = copy.deepcopy(entry.config)
@@ -1270,7 +1271,7 @@ def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) ->
     else:
         sites = list(ref_sites(getattr(entity_class(entry.entry), "toml_refs", ()), config, inline_pins=True))
     for site in sites:
-        if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
+        if site.ref.role is RefRole.INPUT and site.version is None and (site.ref.kind, site.value) in ids:
             site.rewrite(ids[site.ref.kind, site.value])
     if entry.entry.kind is BundleKind.TASK:
         sync_context_paths(entry.entry.config, config)
