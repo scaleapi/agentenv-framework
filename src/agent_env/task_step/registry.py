@@ -105,6 +105,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
     from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
     from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
+    from agent_env.task_step.task_steps.computer.computer_exec import ComputerExecTaskStep
     from agent_env.task_step.task_steps.peer_agents import PeerAgentsTaskStep
     from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
     from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
@@ -175,6 +176,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(SnapshotAgentStateTaskStep): SnapshotAgentStateTaskStep,
         _get_type(SnapshotEnvTaskStep): SnapshotEnvTaskStep,
         _get_type(SnapshotComputerEnvTaskStep): SnapshotComputerEnvTaskStep,
+        _get_type(ComputerExecTaskStep): ComputerExecTaskStep,
         _get_type(RunCodeTaskStep): RunCodeTaskStep,
         _get_type(PeerAgentsTaskStep): PeerAgentsTaskStep,
         _get_type(VerifyA2ASnapshotStep): VerifyA2ASnapshotStep,
