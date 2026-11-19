@@ -104,6 +104,17 @@ async def _forward_port(config, network=None):
         server.close()
 
 
+async def _until_logged(capsys, count: int) -> str:
+    """What the proxy has written to stderr once it holds ``count`` records: each connection is logged as it ends, so a
+    test waits for the records rather than for a fixed time a loaded runner can outlast."""
+    log = ""
+    async with asyncio.timeout(10):
+        while len(_logged(log)) < count:
+            await asyncio.sleep(0.02)
+            log += capsys.readouterr().err
+    return log
+
+
 async def _exchange(port, request: bytes, *, server_hostname=None, cadata=None, reader_writer=None):
     if reader_writer is None:
         context = None
@@ -447,14 +458,14 @@ async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sen
                 plain = await _exchange(port, b"GET http://github.com/a?b=1 HTTP/1.1\r\nHost: github.com\r\n"
                                               b"Proxy-Connection: keep-alive\r\n\r\n")
                 plain[3][1].close()
-                await asyncio.sleep(0.3)  # each connection is logged as it ends
+                log = await _until_logged(capsys, 2)
 
     assert established.startswith(b"HTTP/1.1 200 ") and opened == [("github.githubassets.com", 8443), ("github.com", 80)]
     assert (tunnelled[0], tunnelled[2], plain[0], plain[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
     assert [request[0] for request in live.requests] == ["GET /x HTTP/1.1", "GET /a?b=1 HTTP/1.1"]
     assert live.requests[1][1]["connection"] == "close" and "proxy-connection" not in live.requests[1][1]
     assert live.requests[1][1]["host"] == "github.com" and upstream.requests == []
-    logged = _logged(capsys.readouterr().err, "connection")
+    logged = _logged(log + capsys.readouterr().err, "connection")
     assert [(entry["host"], entry["port"], entry["address"]) for entry in logged] == [
         ("github.githubassets.com", 8443, "127.0.0.1"), ("github.com", 80, "127.0.0.1")]
     assert all(entry["bytes_sent"] > 0 and entry["bytes_received"] > 0 and entry["duration_s"] >= 0 for entry in logged)
@@ -507,12 +518,12 @@ async def test_with_an_egress_proxy_a_public_live_host_goes_through_it_and_a_pri
                 private = await _exchange(port, b"GET http://intranet.example/b HTTP/1.1\r\n"
                                                 b"Host: intranet.example\r\n\r\n")
                 private[3][1].close()
-                await asyncio.sleep(0.3)  # each connection is logged as it ends
+                log = await _until_logged(capsys, 2)
 
     assert (public[0], public[2], private[0], private[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
     assert [head.split(b"\r\n")[0] for head in egress.heads] == [b"CONNECT github.com:80 HTTP/1.1"]
     assert opened == [("intranet.example", 80)] and [request[0] for request in live.requests] == ["GET /b HTTP/1.1"]
-    logged = _logged(capsys.readouterr().err, "connection")
+    logged = _logged(log + capsys.readouterr().err, "connection")
     # Through the egress proxy a connection names the proxy, which decides which of the site's addresses it dials.
     assert [(entry["host"], entry["address"], entry.get("via")) for entry in logged] == [
         ("github.com", "127.0.0.1", "egress"), ("intranet.example", "127.0.0.1", None)]
@@ -595,8 +606,8 @@ async def test_both_proxies_log_a_connection_and_each_way_one_fails_in_the_same_
             for request in requests:
                 answer = await _exchange(port, request)
                 answer[3][1].close()
-            await asyncio.sleep(0.3)  # each connection is logged as it ends
-    shared_log = capsys.readouterr().err
+            log = await _until_logged(capsys, 3)
+    shared_log = log + capsys.readouterr().err
 
     def shape(log: str) -> list:
         return [(kind, sorted(record), record.get("reason")) for entry in _logged(log) for kind, record in entry.items()]
