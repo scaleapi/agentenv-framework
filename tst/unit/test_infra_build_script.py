@@ -515,7 +515,7 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
 def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm, machine,
                                                                            how):
     console = "".join(f"success: {program} entered RUNNING\n"
-                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop"))
+                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop", "clock-panel"))
     calls, logs = [], iter(["agentenv-init: starting", console])
 
     def run(command, **kw):
