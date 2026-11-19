@@ -536,7 +536,7 @@ class SnapshotEnvTaskStep(TaskStep):
         if base_url is None and not mcp:
             return None
         if base_url is not None:
-            headers = deployed.control_headers_for(base_url) if deployed is not None else None
+            headers = (deployed.control_headers_for(base_url) or None) if deployed is not None else None
             if returns_file_tree(card or {}):
                 upload = await asyncio.to_thread(_snapshot_upload, card or {}, timeout_seconds,
                                                  getattr(deployed, "sandbox_type", None), FILE_TREE_LIMITS)
@@ -582,6 +582,8 @@ class SnapshotEnvTaskStep(TaskStep):
                         raise ValueError(
                             f"FilePart for '{environment_name}' names {uri!r}, which is not on its service's address {base_url}"
                         )
+                    # The service names this url, so it gets the token only where it resolves under the service.
+                    uri_headers = protocol_v1.granted_headers(uri, {base_url: protocol_v1.request_headers(base_url, headers)})
                     async with httpx.AsyncClient() as client:
                         async with client.stream(
                             "GET",
@@ -589,6 +591,7 @@ class SnapshotEnvTaskStep(TaskStep):
                             timeout=httpx.Timeout(
                                 timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS
                             ),
+                            headers=uri_headers,
                         ) as resp_file:
                             resp_file.raise_for_status()
                             with open(tmp_path, "wb") as f:
@@ -601,11 +604,13 @@ class SnapshotEnvTaskStep(TaskStep):
             return ".json"
 
         legacy_url = f"{legacy_protocol.environment_base_url(gateway_url, environment_name, mcp=True)}/export-state"
+        legacy_headers = (deployed.control_headers_for(legacy_url) or None) if deployed is not None else None
         async with httpx.AsyncClient() as client:
             async with client.stream(
                 "GET",
                 legacy_url,
                 timeout=httpx.Timeout(timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS),
+                headers=protocol_v1.request_headers(legacy_url, legacy_headers),
             ) as resp:
                 resp.raise_for_status()
                 seen_first_bytes = False
