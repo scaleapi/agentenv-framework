@@ -3,14 +3,13 @@ negative penalties, must-pass gates), and a run against a computer at its driver
 with the judge faked: the files the agent left read through the driver and rendered into the judge's prompt, a missing
 one named, the golden files and the state commands' output beside them, the caller's guidance or the default, and the
 files graded alone when no prompt step names them; state output that was cut marked incomplete, a Windows computer
-refused, and a file too slow to render named as not rendered."""
+refused."""
 
 from __future__ import annotations
 
 import io
 import json
 import re
-import time
 from types import SimpleNamespace
 
 import openpyxl
@@ -324,17 +323,3 @@ def test_preflight_refuses_a_stored_windows_computer(monkeypatch):
         "commands through sh and POSIX tools"]
     desk.computer = SimpleNamespace(os=SimpleNamespace(type="linux"))
     assert _step(result_files=["~/a.txt"]).preflight() == []
-
-
-@pytest.mark.asyncio
-async def test_a_file_that_takes_too_long_to_render_is_named_not_rendered(computer, monkeypatch):
-    (computer.home / "notes.txt").write_text("done\n")
-    monkeypatch.setattr(cua_verifier, "RENDER_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(cua_verifier, "render", lambda *a: time.sleep(0.5))
-    step = _step(result_files=["~/notes.txt"])
-    prompts: list[str] = []
-    _judge(step, prompts)
-
-    await step.execute(TaskStepContext(deployed_envs=[computer.deployed()]))
-
-    assert "not rendered: rendering it took over 0.05 s" in prompts[0]

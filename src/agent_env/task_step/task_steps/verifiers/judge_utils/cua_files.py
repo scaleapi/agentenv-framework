@@ -1,13 +1,18 @@
 """Files a CUA task's agent produced, and their golden counterparts, as text a rubric judge reads in its prompt
 (``cua_verifier``): text formats as they are; spreadsheets, documents, slides and PDFs dumped by the libraries the
 ``cua`` extra installs (openpyxl, python-docx, python-pptx, pypdf), or named as not rendered without them; anything else
-by its size and digest. Each rendering is cut at ``max_chars``."""
+by its size and digest. Each rendering is cut at ``max_chars``. ``render_isolated`` renders in a child process held to
+``RENDER_MEMORY_BYTES`` and killed after ``RENDER_TIMEOUT_S``, since a crafted file can make a library's work large."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import json
 import posixpath
+import resource
+import sys
 import zipfile
 from dataclasses import dataclass
 from typing import Callable
@@ -31,6 +36,12 @@ MAX_EXPANDED_BYTES = 128 * 1024 * 1024
 EXPAND_CHUNK_BYTES = 1024 * 1024
 #: The most pages of a PDF a rendering reads.
 MAX_PDF_PAGES = 200
+#: The most memory (address space) a rendering's child process may take.
+RENDER_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
+#: How long a rendering's child process may run before it's killed.
+RENDER_TIMEOUT_S = 60.0
+#: The child process ``render_isolated`` runs: this module's ``main``.
+RENDER_COMMAND = (sys.executable, "-m", __name__)
 
 
 @dataclass(frozen=True)
@@ -50,11 +61,11 @@ def render(name: str, data: bytes, max_chars: int) -> Rendered:
     renderer = _RENDERERS.get(extension)
     if renderer is not None:
         kind, library, read = renderer
-        if kind != "pdf" and (expanded := _expands_past_limit(data)) is not None:
-            return Rendered("unrendered", f"({extension} file of {len(data)} bytes, not rendered: it {expanded}, over "
-                                          f"the {MAX_EXPANDED_BYTES} bytes a rendering opens)")
         try:
             text = read(data)
+        except _TooLarge:
+            return Rendered("unrendered", f"({extension} file of {len(data)} bytes, not rendered: it expands past "
+                                          f"{MAX_EXPANDED_BYTES} bytes, more than a rendering opens)")
         except ImportError:
             return Rendered("unrendered", f"({extension} file of {len(data)} bytes, not rendered: {library} isn't "
                                           "installed; install agentenv-framework[cua])")
@@ -69,22 +80,58 @@ def render(name: str, data: bytes, max_chars: int) -> Rendered:
                           "isn't shown)")
 
 
-def _expands_past_limit(data: bytes) -> str | None:
-    """None when the zip package ``data`` decompresses within ``MAX_EXPANDED_BYTES``, counted by decompressing it a
-    chunk at a time rather than by its headers, which can lie; else how far it was seen to expand. A file that isn't a
-    readable zip is left to its library, which names it as unreadable."""
+class _TooLarge(Exception):
+    """An Office package that decompresses past ``MAX_EXPANDED_BYTES``."""
+
+
+def _check_expansion(data: bytes) -> None:
+    """Raises ``_TooLarge`` when the zip package ``data`` decompresses past ``MAX_EXPANDED_BYTES``, counted by
+    decompressing it a chunk at a time rather than by its headers, which can lie. A package that can't be read raises
+    as its library would, for ``render`` to name it unreadable."""
+    total = 0
+    with zipfile.ZipFile(io.BytesIO(data)) as package:
+        for member in package.infolist():
+            with package.open(member) as stream:
+                while chunk := stream.read(EXPAND_CHUNK_BYTES):
+                    total += len(chunk)
+                    if total > MAX_EXPANDED_BYTES:
+                        raise _TooLarge
+
+
+async def render_isolated(name: str, data: bytes, max_chars: int) -> Rendered:
+    """``render`` in a child process (``RENDER_COMMAND``) held to ``RENDER_MEMORY_BYTES`` and killed after
+    ``RENDER_TIMEOUT_S``; a file whose rendering ran out of either is named as not rendered."""
+    child = await asyncio.create_subprocess_exec(
+        *RENDER_COMMAND, name, str(max_chars), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL, preexec_fn=_hold_memory)
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as package:
-            total = 0
-            for member in package.infolist():
-                with package.open(member) as stream:
-                    while chunk := stream.read(EXPAND_CHUNK_BYTES):
-                        total += len(chunk)
-                        if total > MAX_EXPANDED_BYTES:
-                            return f"expands past {MAX_EXPANDED_BYTES} bytes"
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, OSError, EOFError):
-        return None
-    return None
+        out, _ = await asyncio.wait_for(child.communicate(data), RENDER_TIMEOUT_S)
+    except TimeoutError:
+        child.kill()
+        await child.wait()
+        return Rendered("unrendered", f"(file of {len(data)} bytes, not rendered: rendering it took over "
+                                      f"{RENDER_TIMEOUT_S:g} s)")
+    if child.returncode != 0:
+        return Rendered("unrendered", f"(file of {len(data)} bytes, not rendered: rendering it ran out of memory or "
+                                      f"failed, exit {child.returncode})")
+    shown = json.loads(out)
+    return Rendered(shown["kind"], shown["text"], shown["cut"])
+
+
+def _hold_memory() -> None:
+    """In the child, before it runs: its address space capped at ``RENDER_MEMORY_BYTES`` where the OS enforces it."""
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (RENDER_MEMORY_BYTES, RENDER_MEMORY_BYTES))
+    except (ValueError, OSError):  # macOS doesn't enforce RLIMIT_AS; the time limit still holds
+        pass
+
+
+def main() -> None:
+    """The child ``render_isolated`` runs: the file's bytes on stdin, its name and ``max_chars`` as arguments, its
+    rendering as JSON on stdout."""
+    name, max_chars = sys.argv[1], int(sys.argv[2])
+    shown = render(name, sys.stdin.buffer.read(), max_chars)
+    json.dump({"kind": shown.kind, "text": shown.text, "cut": shown.cut}, sys.stdout)
 
 
 def _cut(kind: str, text: str, max_chars: int) -> Rendered:
@@ -111,6 +158,7 @@ def _xlsx(data: bytes) -> str:
     import openpyxl
     from openpyxl.utils import get_column_letter
 
+    _check_expansion(data)
     formulas = openpyxl.load_workbook(io.BytesIO(data), data_only=False, read_only=True)
     values = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     lines, listed, visited = [], 0, 0
@@ -145,6 +193,7 @@ def _docx(data: bytes) -> str:
     """Each paragraph with its style, then each table's rows, cells split by `` | ``."""
     import docx
 
+    _check_expansion(data)
     document = docx.Document(io.BytesIO(data))
     lines = [f"[{paragraph.style.name}] {paragraph.text}" for paragraph in document.paragraphs if paragraph.text.strip()]
     for number, table in enumerate(document.tables, start=1):
@@ -156,6 +205,8 @@ def _docx(data: bytes) -> str:
 def _pptx(data: bytes) -> str:
     """Each slide's shapes' text and tables, a group's shapes within it included, and its notes."""
     import pptx
+
+    _check_expansion(data)
 
     def shape_lines(shapes) -> list[str]:
         lines = []
@@ -193,3 +244,7 @@ def _pdf(data: bytes) -> str:
 _RENDERERS: dict[str, tuple[str, str, Callable[[bytes], str]]] = {
     ".xlsx": ("xlsx", "openpyxl", _xlsx), ".xlsm": ("xlsx", "openpyxl", _xlsx),
     ".docx": ("docx", "python-docx", _docx), ".pptx": ("pptx", "python-pptx", _pptx), ".pdf": ("pdf", "pypdf", _pdf)}
+
+
+if __name__ == "__main__":
+    main()

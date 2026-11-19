@@ -20,7 +20,6 @@ absent, and keeps its penalty as a negative weight.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import logging
@@ -33,7 +32,7 @@ from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_steps.computer.computer_exec import computer_problem, find_computer
-from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import Rendered, render
+from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render_isolated
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -57,8 +56,6 @@ DEFAULT_GOLDEN_NOTE = ("Reference files: use one only for a criterion that refer
 READ_TIMEOUT_S = 120.0
 #: The most of one file's rendering, and of one command's output, the judge reads.
 MAX_FILE_CHARS = 40_000
-#: How long rendering one file may take before it's named as not rendered.
-RENDER_TIMEOUT_S = 60.0
 #: Computers the step can't read: it reads files and runs state commands through ``sh`` and POSIX tools.
 UNSUPPORTED_OS = frozenset({"windows"})
 #: The most of a file one read returns: its base64 well within the 1 MiB a driver returns of a command's output.
@@ -123,15 +120,6 @@ def cua_rubric_score(rows: list[dict]) -> float:
                       if float(row.get("weight", 0)) < 0)
         return max(0.0, 1.0 - penalty)
     return aggregate_score(binary, ScoreAggregator.WEIGHTED_AVERAGE)
-
-
-async def _render(name: str, data: bytes) -> Rendered:
-    """``render`` off the event loop, named as not rendered when it takes over ``RENDER_TIMEOUT_S``."""
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(render, name, data, MAX_FILE_CHARS), RENDER_TIMEOUT_S)
-    except TimeoutError:
-        return Rendered("unrendered", f"(file of {len(data)} bytes, not rendered: rendering it took over "
-                                      f"{RENDER_TIMEOUT_S:g} s)")
 
 
 def _deployed_os(deployed: Any) -> Optional[str]:
@@ -284,7 +272,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
                 produced.append(f"### File {number}: {path}\n(a file of {data} bytes, too large to show: over "
                                 f"{MAX_READ_BYTES} bytes)")
                 continue
-            shown = await _render(path, data)
+            shown = await render_isolated(path, data, MAX_FILE_CHARS)
             record["files"].append({"path": path, "bytes": len(data), "rendered_as": shown.kind, "cut": shown.cut})
             produced.append(f"### File {number}: {path} ({shown.kind})\n<file path=\"{path}\">\n{shown.text}\n</file>")
         sections.append("## Files under evaluation\nWhat the agent left at each path in its computer, rendered as "
@@ -295,7 +283,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         if golden := self._golden_files():
             shown_golden = []
             for name, data in golden.items():
-                shown = await _render(name, data)
+                shown = await render_isolated(name, data, MAX_FILE_CHARS)
                 record["golden_files"].append({"name": name, "bytes": len(data), "rendered_as": shown.kind})
                 shown_golden.append(f"### Golden: {name} ({shown.kind})\n<golden name=\"{name}\">\n{shown.text}\n"
                                     "</golden>")

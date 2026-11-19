@@ -1,7 +1,8 @@
 """cua_files: each format a CUA task's agent leaves as the judge reads it: documents, slides, spreadsheets and PDFs
 dumped as text, text as it is and cut at the limit, anything else by its size and digest, and a format whose library
 isn't installed, a file its library can't read, or an Office file that expands past the limit, named as not rendered;
-a long PDF read up to its page limit."""
+a long PDF read up to its page limit; a damaged one named as unreadable; and a rendering in its own process, killed when
+it runs too long and named as not rendered when it fails."""
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import pypdf
 import pytest
 
 from agent_env.task_step.task_steps.verifiers.judge_utils import cua_files
-from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render
+from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render, render_isolated
 
 
 def _docx() -> bytes:
@@ -148,3 +149,33 @@ def test_a_long_pdf_is_read_up_to_its_page_limit(monkeypatch):
     shown = render("long.pdf", out.getvalue(), 10_000)
 
     assert "## Page 2" in shown.text and "## Page 3" not in shown.text and "stopped at 2 of 3 pages" in shown.text
+
+
+def test_a_document_with_damaged_compressed_data_is_named_as_unreadable():
+    memo = bytearray(_docx())
+    start = memo.find(b"word/document.xml") + len("word/document.xml")
+    memo[start + 20:start + 60] = b"\xff" * 40  # inside the member's deflate stream
+
+    shown = render("memo.docx", bytes(memo), 1000)
+
+    assert shown.kind == "unrendered" and "couldn't read" in shown.text
+
+
+@pytest.mark.asyncio
+async def test_a_rendering_runs_in_its_own_process():
+    shown = await render_isolated("memo.docx", _docx(), 1000)
+    assert shown.kind == "docx" and "The figures are corrected." in shown.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command, problem", [
+    (("sh", "-c", "sleep 5"), "rendering it took over 0.2 s"),
+    (("sh", "-c", "exit 9"), "ran out of memory or failed, exit 9"),
+])
+async def test_a_rendering_that_runs_too_long_or_fails_is_named_not_rendered(monkeypatch, command, problem):
+    monkeypatch.setattr(cua_files, "RENDER_COMMAND", command)
+    monkeypatch.setattr(cua_files, "RENDER_TIMEOUT_S", 0.2)
+
+    shown = await render_isolated("memo.docx", _docx(), 1000)
+
+    assert shown.kind == "unrendered" and problem in shown.text
