@@ -286,10 +286,12 @@ def _caches_prompts(model: str) -> bool:
 def _judge_route(model: str, api_base: Optional[str], provider_of: Callable[..., Any],
                  custom_provider: Optional[str] = None) -> tuple[str, Optional[str]]:
     """The model name and base a direct judge call hands litellm; what it records stays ``model``. Through an
-    endpoint, a name litellm can't place goes as ``openai/<name>``, and an Anthropic one, whose client appends
-    ``/v1/messages``, gets the base without a trailing ``/v1``. A ``custom_llm_provider`` among the call's params
-    decides the provider as it does for litellm. ``provider_of`` is litellm's ``get_llm_provider``, which prints a
-    banner before refusing a name it can't place."""
+    endpoint, a bare name goes by what litellm makes of it: an Anthropic one keeps that route, with the base's
+    trailing ``/v1`` dropped since its client appends ``/v1/messages``; an OpenAI one goes as configured; any other,
+    which litellm would send to that provider's own API (``gemini-*`` to Vertex), or one it can't place, goes
+    through the endpoint as ``openai/<name>``. A provider prefix in the name, or a ``custom_llm_provider`` among the
+    call's params, keeps the route it names. ``provider_of`` is litellm's ``get_llm_provider``, which prints a banner
+    before refusing a name it can't place."""
     if api_base is None:
         return model, None
     try:
@@ -297,7 +299,11 @@ def _judge_route(model: str, api_base: Optional[str], provider_of: Callable[...,
             provider = provider_of(model, custom_llm_provider=custom_provider)[1]
     except Exception:
         return f"openai/{model}", api_base
-    return model, api_root(api_base) if provider == "anthropic" else api_base
+    if provider == "anthropic":
+        return model, api_root(api_base)
+    if provider == "openai" or custom_provider or "/" in model:
+        return model, api_base
+    return f"openai/{model}", api_base
 
 
 def _usage_and_cost(response: Any) -> dict:

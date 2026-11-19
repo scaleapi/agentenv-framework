@@ -1,8 +1,9 @@
-"""The direct judge reaches the configured endpoint whether its base URL ends in ``/v1`` or not, and with a model name
-litellm can't place: the real litellm calls a loopback server that records each call's path and model name. A
-Claude name keeps Anthropic's Messages route, its ``/v1`` not doubled; an OpenAI name gets the URL as configured; a
-name litellm can't place goes through the endpoint as ``openai/<name>``. The rows without ``/v1`` on Claude, and every
-OpenAI row, called these same paths before."""
+"""The direct judge reaches the configured endpoint whether its base URL ends in ``/v1`` or not, whatever bare model
+name it's given: the real litellm calls a loopback server that records each call's path and model name. A Claude
+name keeps Anthropic's Messages route, its ``/v1`` not doubled; an OpenAI name gets the URL as configured; any other
+bare name, one litellm can't place or one it would send to another provider's own API (``gemini-*`` to Vertex), goes
+through the endpoint as ``openai/<name>``. A prefixed name keeps its provider's route. The rows without ``/v1`` on
+Claude, every OpenAI row and the prefixed DeepSeek row called these same paths before."""
 from __future__ import annotations
 
 import json
@@ -87,6 +88,10 @@ def _judge(monkeypatch, base_url: str, params: dict | None = None) -> RubricsVer
     ("qwen3:8b", "", "/chat/completions", "qwen3:8b"),
     ("qwen3:8b", "/v1", "/v1/chat/completions", "qwen3:8b"),
     ("Qwen/Qwen3-8B", "/v1", "/v1/chat/completions", "Qwen/Qwen3-8B"),
+    ("gemini-2.5-flash", "", "/chat/completions", "gemini-2.5-flash"),
+    ("gemini-2.5-flash", "/v1", "/v1/chat/completions", "gemini-2.5-flash"),
+    ("command-a-03-2025", "/v1", "/v1/chat/completions", "command-a-03-2025"),
+    ("deepseek/deepseek-chat", "/v1", "/v1/chat/completions", "deepseek-chat"),
 ])
 async def test_the_direct_judge_reaches_the_endpoint_however_its_base_url_ends(
     monkeypatch, endpoint, model, suffix, path, sent,
@@ -111,7 +116,8 @@ async def test_a_judge_whose_params_name_its_provider_keeps_that_providers_url(m
 
 
 def _provider(name: str, custom_llm_provider: str | None = None):
-    providers = {"claude-sonnet-4-6": "anthropic", "gpt-4.1-mini": "openai"}
+    providers = {"claude-sonnet-4-6": "anthropic", "gpt-4.1-mini": "openai", "gemini-2.5-flash": "vertex_ai",
+                 "deepseek/deepseek-chat": "deepseek"}
     if custom_llm_provider:
         return name, custom_llm_provider, None, None
     if name not in providers:
@@ -129,4 +135,10 @@ def test_the_route_keeps_a_native_name_and_sends_an_unknown_one_as_openai(capsys
     assert _judge_route("claude-sonnet-4-6", "https://gw.example/v1", _provider, "openai") == (
         "claude-sonnet-4-6", "https://gw.example/v1")
     assert _judge_route("qwen3:8b", "https://gw.example", _provider, "hosted_vllm") == ("qwen3:8b", "https://gw.example")
+    assert _judge_route("gemini-2.5-flash", "https://gw.example/v1", _provider) == (
+        "openai/gemini-2.5-flash", "https://gw.example/v1")
+    assert _judge_route("deepseek/deepseek-chat", "https://gw.example/v1", _provider) == (
+        "deepseek/deepseek-chat", "https://gw.example/v1")
+    assert _judge_route("gemini-2.5-flash", "https://gw.example", _provider, "vertex_ai") == (
+        "gemini-2.5-flash", "https://gw.example")
     assert capsys.readouterr().out == ""
