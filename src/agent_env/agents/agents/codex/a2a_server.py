@@ -592,6 +592,7 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
         enable(
             TRAJECTORY_V1,
             live=True,
+            native=TRAJECTORY_FORMAT,
             description="Retrieve a task's Codex --json trajectory, also while it runs.",
         ),
         enable(
@@ -806,6 +807,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             )
         return {
             "trajectory": trajectory,
+            "format": TRAJECTORY_FORMAT,
             "is_live": is_live,
             "session_id": self.session_ref_for_context(context_id),
             "harness": HARNESS,
@@ -821,7 +823,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
     async def upload_context_trajectory(self, request: ContextObjectTrajectoryRequest) -> dict[str, Any]:
         trajectory = (await self._context_trajectory(request.context_id))["trajectory"]
         body = json.dumps(trajectory, separators=(",", ":"), default=str).encode()
-        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))}}
+        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))},
+                "format": TRAJECTORY_FORMAT}
 
     @extension(SNAPSHOT_V1.save)
     async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> dict[str, Any]:

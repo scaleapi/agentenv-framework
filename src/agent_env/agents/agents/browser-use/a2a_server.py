@@ -33,6 +33,8 @@ PYTHON = os.environ.get("BROWSER_USE_PYTHON", "/opt/browser-use/bin/python")
 #: How much of the turn's deadline browser-use's own run leaves: its forced delivery when it runs out, and its stop.
 DELIVERY_SECONDS = 100
 STOP_SECONDS = 5
+#: The native trajectory: browser-use's messages, each turn's when it ends.
+TRAJECTORY_FORMAT = "browser-use-messages/1"
 #: browser-use and its browser daemon report usage to their makers unless told not to.
 _PRIVATE_ENV = {"ANONYMIZED_TELEMETRY": "false", "BH_TELEMETRY": "0"}
 
@@ -65,7 +67,8 @@ class BrowserUseConfig(AgentConfig):
     extensions=(
         MCP_CONFIG_V1,
         CDP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=False, description="browser-use's messages, each turn's when it ends."),
+        enable(TRAJECTORY_V1, live=False, native=TRAJECTORY_FORMAT,
+               description="browser-use's messages, each turn's when it ends."),
     ),
 )
 class BrowserUseAgent(AgentEnvAgent):
@@ -103,7 +106,7 @@ class BrowserUseAgent(AgentEnvAgent):
             "historyFile": str(HOME / "sessions" / f"{session}-{hashlib.sha256(model.encode()).hexdigest()[:8]}.json"),
         }
         (HOME / "sessions").mkdir(parents=True, exist_ok=True)
-        request.trajectory.set_format("browser-use-messages/1")
+        request.trajectory.set_format(TRAJECTORY_FORMAT)
 
         process = await asyncio.create_subprocess_exec(
             *self.command,
