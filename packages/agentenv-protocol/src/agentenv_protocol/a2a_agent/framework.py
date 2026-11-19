@@ -833,7 +833,9 @@ class _SdkServices:
         | ContextEventsTrajectoryRequest,
     ) -> Any:
         if request.format == ATIF_FORMAT:
-            return await self._atif_get(request)
+            if isinstance(request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)):
+                return self._atif_events(request)
+            return await self._atif_document(request)
         if isinstance(
             request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)
         ):
@@ -862,67 +864,64 @@ class _SdkServices:
             objects=TrajectoryUploadedObjects(trajectory=uploaded), format=trajectory.format
         )
 
-    async def _atif_get(
+    def _atif_events(
+        self, request: TaskEventsTrajectoryRequest | ContextEventsTrajectoryRequest
+    ) -> dict[str, Any]:
+        """An atif/1 cursor page: the copy's closed steps after step ``after``, of the task or of
+        the whole context."""
+        max_steps = request.limit or MAX_TRAJECTORY_READ_EVENTS
+        try:
+            if isinstance(request, TaskEventsTrajectoryRequest):
+                cursor = self.task_trajectories.atif_task_page(
+                    request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                )
+                unknown = f"Unknown task '{request.task_id}'"
+            else:
+                cursor = self.task_trajectories.atif_context_page(
+                    request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                )
+                unknown = f"Unknown context '{request.context_id}'"
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if cursor is None:
+            raise HTTPException(status_code=404, detail=unknown)
+        page = cursor.page
+        return AtifEventsResponse(
+            context_id=cursor.context_id,
+            task_id=cursor.task_id,
+            state=cursor.state,
+            **_atif_versions(page.header),
+            header=page.header,
+            subagents=page.subagents,
+            events=page.steps,
+            next=page.next,
+            has_more=page.has_more,
+        ).model_dump(mode="json", exclude_none=True)
+
+    async def _atif_document(
         self,
         request: TaskTrajectoryRequest
         | TaskObjectTrajectoryRequest
-        | TaskEventsTrajectoryRequest
         | ContextTrajectoryRequest
-        | ContextObjectTrajectoryRequest
-        | ContextEventsTrajectoryRequest,
+        | ContextObjectTrajectoryRequest,
     ) -> dict[str, Any]:
-        """An atif/1 read, served from the context's copy: a task read is the document as it
-        stood when the task ended, with its aux log and turn context; a context read is the live
-        page; a cursor read pages closed steps by ``step_id``."""
-        trajectories = self.task_trajectories
-        if isinstance(request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)):
-            max_steps = request.limit or MAX_TRAJECTORY_READ_EVENTS
-            try:
-                if isinstance(request, TaskEventsTrajectoryRequest):
-                    found = trajectories.atif_task_page(
-                        request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
-                    )
-                    unknown = f"Unknown task '{request.task_id}'"
-                else:
-                    found = trajectories.atif_context_page(
-                        request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
-                    )
-                    unknown = f"Unknown context '{request.context_id}'"
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if found is None:
-                raise HTTPException(status_code=404, detail=unknown)
-            if isinstance(request, TaskEventsTrajectoryRequest):
-                page, context_id, state = found
-                task_id = request.task_id
-            else:
-                page, task_id, state = found
-                context_id = request.context_id
-            return AtifEventsResponse(
-                context_id=context_id,
-                task_id=task_id,
-                state=state,
-                **_atif_versions(page.header),
-                header=page.header,
-                subagents=page.subagents,
-                events=page.steps,
-                next=page.next,
-                has_more=page.has_more,
-            ).model_dump(mode="json", exclude_none=True)
-        aux: list[dict[str, Any]] | None = None
-        turn: dict[str, Any] | None = None
+        """A whole atif/1 document: a task read's as it stood when the task ended, with the
+        task's aux log and turn context, or a context read's live page; inline, or uploaded
+        through the request's grants."""
+        served: dict[str, Any] = {}
         if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
-            found_task = trajectories.atif_task(request.task_id)
-            if found_task is None:
+            read = self.task_trajectories.atif_task(request.task_id)
+            if read is None:
                 raise HTTPException(
                     status_code=404,
                     detail=f"No completed trajectory available for task '{request.task_id}'",
                 )
-            document, aux, turn = found_task
+            document = read.document
+            served = {"aux": [entry.wire() for entry in read.aux], "turn_context": read.turn.wire()}
         else:
             if isinstance(request, ContextObjectTrajectoryRequest):
                 _refuse_turn_objects(request)
-            document = trajectories.atif_context(request.context_id)
+            document = self.task_trajectories.atif_context(request.context_id)
             if document is None:
                 raise HTTPException(
                     status_code=404,
@@ -930,16 +929,15 @@ class _SdkServices:
                 )
         versions = _atif_versions(document)
         if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
-            answer: dict[str, Any] = {"trajectory": document, "format": ATIF_FORMAT, **versions}
-            if turn is not None:
-                answer.update(aux=aux, turn_context=turn)
-            return answer
+            return {"trajectory": document, "format": ATIF_FORMAT, **versions, **served}
         objects = request.objects
         uploaded = AtifUploadedObjects(
             trajectory=await upload(objects.trajectory, _json_bytes(document)),
-            aux=None if objects.aux is None else await upload(objects.aux, _json_bytes(aux)),
+            aux=None if objects.aux is None else await upload(objects.aux, _json_bytes(served["aux"])),
             turn_context=(
-                None if objects.turn_context is None else await upload(objects.turn_context, _json_bytes(turn))
+                None
+                if objects.turn_context is None
+                else await upload(objects.turn_context, _json_bytes(served["turn_context"]))
             ),
         )
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)

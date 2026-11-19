@@ -4,14 +4,14 @@ runs it live and the adapter kit replays it offline, so the same records, fed in
 document."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .adapter import Adapter, AdapterSpec
-from .builder import AtifTurn, Document, Media, TurnContext, timestamp
+from .builder import AtifTurn, Document, Media, TurnContext
 from .profile import AtifError
+from .served import AuxEntry, ServedTurn
 
 
 @dataclass(frozen=True)
@@ -36,59 +36,24 @@ class RecordedTask:
     error: Mapping[str, Any] | None = None
 
     @classmethod
-    def from_served(cls, turn: Mapping[str, Any], native: Sequence[Any],
-                    aux: Sequence[Mapping[str, Any]] = ()) -> RecordedTask:
+    def from_served(cls, turn: ServedTurn | Mapping[str, Any], native: Sequence[Any],
+                    aux: Sequence[AuxEntry | Mapping[str, Any]] = ()) -> RecordedTask:
         """The task an atif/1 final read describes: its ``turn_context``, its native records (the native final read's
-        events) and its ``aux`` log, each aux record placed after the native records fed before it."""
+        events) and its ``aux`` log, each aux record placed after the native records fed before it. The served forms
+        are checked against their models."""
+        served = turn if isinstance(turn, ServedTurn) else ServedTurn.model_validate(turn)
         records: list[Fed] = []
         fed = 0
-        for entry in aux:
-            while fed < entry["after"]:
+        for entry in (item if isinstance(item, AuxEntry) else AuxEntry.model_validate(item) for item in aux):
+            while fed < entry.after:
                 records.append(Fed(native[fed]))
                 fed += 1
-            records.append(Fed(entry["record"], aux=entry["name"]))
+            records.append(Fed(entry.record, aux=entry.name))
         records.extend(Fed(record) for record in native[fed:])
-        context = TurnContext(**{key: turn.get(key) for key in _CONTEXT_FIELDS},
-                              inbound=_content_from_json(turn.get("inbound") or ()))
-        return cls(context=context, records=records, state=turn["state"],
-                   final=_content_from_json(turn["final"]) if turn.get("final") is not None else None,
-                   ended_at=turn.get("ended_at"), data=turn.get("data"), error=turn.get("error"))
-
-
-_CONTEXT_FIELDS = ("index", "context_id", "task_id", "message_id", "agent_name", "agent_version", "agent_model",
-                   "started_at")
-
-
-def served_turn(context: TurnContext, *, state: str, final: Sequence[Any] | None = None,
-                ended_at: str | datetime | None = None, data: Sequence[Mapping[str, Any]] | None = None,
-                error: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """A task's TurnContext and how it ended, as JSON: what an atif/1 final read serves as ``turn_context``, so an
-    offline replay has everything but the records. Media in the content are named by path, their bytes stored apart."""
-    turn: dict[str, Any] = {}
-    for key in _CONTEXT_FIELDS:
-        value = getattr(context, key)
-        if key == "started_at":
-            value = timestamp(value)
-        if value is not None:
-            turn[key] = value
-    turn["inbound"] = _content_json(context.inbound)
-    turn["state"] = state
-    for key, value in (("final", None if final is None else _content_json(final)), ("ended_at", timestamp(ended_at)),
-                       ("data", None if data is None else [dict(entry) for entry in data]),
-                       ("error", None if error is None else dict(error))):
-        if value is not None:
-            turn[key] = value
-    return json.loads(json.dumps(turn, allow_nan=False))
-
-
-def _content_json(content: Sequence[Any]) -> list[Any]:
-    return [{"media": {"path": item.path, "media_type": item.media_type, "info": dict(item.info)}}
-            if isinstance(item, Media) else item for item in content]
-
-
-def _content_from_json(content: Sequence[Any]) -> list[Any]:
-    return [Media(item["media"]["path"], item["media"]["media_type"], item["media"]["info"])
-            if isinstance(item, Mapping) and set(item) == {"media"} else item for item in content]
+        return cls(context=served.turn_context(), records=records, state=served.state, final=served.final_content(),
+                   ended_at=served.ended_at,
+                   data=None if served.data is None else [entry.wire() for entry in served.data],
+                   error=None if served.error is None else served.error.wire())
 
 
 class AdapterRun:
@@ -124,6 +89,10 @@ class AdapterRun:
 
     def page(self) -> dict[str, Any] | None:
         return self._doc.page()
+
+    def step_tasks(self) -> list[int]:
+        """Each root step's task, in step order, by its 0-based place among this run's tasks."""
+        return self._doc.step_tasks()
 
     def subagent_tasks(self) -> dict[str, int]:
         """Each declared sub-agent's task, by its 0-based place among this run's tasks."""

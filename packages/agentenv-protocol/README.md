@@ -1626,9 +1626,10 @@ included:
 
 - A task read returns the context's document as it stood when the task ended,
   with `aux`, the task's aux log (each record with `after`, the number of events
-  before it), and `turn_context`, its TurnContext and how it ended. With those
-  and the native events, `RecordedTask.from_served` and `replay` rebuild the
-  document offline. In the objects form, `aux` and `turn_context` are optional
+  before it), and `turn_context`, its TurnContext and how it ended: an
+  `AuxEntry` each and a `ServedTurn`, both in `agentenv_protocol.atif`. With
+  those and the native events, `RecordedTask.from_served` and `replay` rebuild
+  the document offline. In the objects form, `aux` and `turn_context` are optional
   grants beside `trajectory`, uploaded only when given; other reads refuse them.
 - A context read returns the live page: every step that has closed and whose
   calls are all answered, up to the first that isn't.

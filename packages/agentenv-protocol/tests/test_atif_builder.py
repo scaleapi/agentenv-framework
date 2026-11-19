@@ -4,6 +4,7 @@ in ATIF's terms, and a live view that only ever grows."""
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from agentenv_protocol.atif import (
     Adapter,
@@ -20,8 +21,8 @@ from agentenv_protocol.atif import (
     is_prefix,
     native,
     profile_of,
+    ServedTurn,
     replay,
-    served_turn,
     timestamp,
 )
 
@@ -658,11 +659,22 @@ def test_a_served_turn_gives_the_recorded_task_back():
     context = TurnContext(index=3, context_id="ctx", task_id="t1", message_id="m1", inbound=["look", shot],
                           agent_name="toy", agent_version="1.0", started_at="2026-11-18T10:00:00.5Z")
     records = [{"type": "say", "step": "a", "text": "a picture"}]
-    turn = served_turn(context, state="completed", final=["a picture"], ended_at="2026-11-18T10:00:01Z",
-                       data=[{"data": {"n": 1}}])
+    turn = ServedTurn.of(context, state="completed", final=["a picture"], ended_at="2026-11-18T10:00:01Z",
+                         data=[{"data": {"n": 1}}]).wire()
     assert turn["started_at"] == "2026-11-18T10:00:00.500Z"
     assert turn["inbound"][1] == {"media": {"path": shot.path, "media_type": "image/png", "info": dict(shot.info)}}
-    recorded = RecordedTask.from_served(turn, records, [{"name": "hooks", "record": {"x": 1}, "after": 1}])
-    assert recorded.context.inbound[1] == shot
-    assert recorded.records == [Fed(records[0]), Fed({"x": 1}, aux="hooks")]
+    assert "message_id" in turn and "error" not in turn
+    recorded = RecordedTask.from_served(turn, records, [{"name": "hooks", "record": None, "after": 1}])
+    assert recorded.context.inbound == ("look", shot)
+    assert recorded.records == [Fed(records[0]), Fed(None, aux="hooks")]
     assert (recorded.state, recorded.final, recorded.data) == ("completed", ["a picture"], [{"data": {"n": 1}}])
+
+
+@pytest.mark.parametrize("turn, aux", [
+    ({"index": -1, "context_id": "ctx", "task_id": "t1", "state": "completed"}, []),
+    ({"index": 0, "context_id": "ctx", "task_id": "t1", "state": "completed", "surprise": 1}, []),
+    ({"index": 0, "context_id": "ctx", "task_id": "t1", "state": "completed"}, [{"name": "hooks", "after": -1}]),
+])
+def test_a_served_turn_or_aux_log_that_breaks_its_shape_is_refused(turn, aux):
+    with pytest.raises(ValidationError):
+        RecordedTask.from_served(turn, [], aux)

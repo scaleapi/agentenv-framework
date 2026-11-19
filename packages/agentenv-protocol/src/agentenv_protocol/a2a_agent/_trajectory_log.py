@@ -8,7 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from ..atif import Adapter
+from ..atif import Adapter, AuxEntry, ServedTurn
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
 from .extensions import TrajectoryState
 from .tasks.v1 import TaskError, TrajectoryLog
@@ -54,6 +54,25 @@ class TrajectoryPage:
     total: int
 
 
+@dataclass(frozen=True, slots=True)
+class AtifTaskRead:
+    """An ended task's atif/1 document as it stood when the task ended, its aux log and its served turn context."""
+
+    document: dict[str, Any]
+    aux: list[AuxEntry]
+    turn: ServedTurn
+
+
+@dataclass(frozen=True, slots=True)
+class AtifCursor:
+    """A cursor page of a context's atif/1 copy, with the context, the task a read of it is on and its state."""
+
+    page: AtifPage
+    context_id: str
+    task_id: str
+    state: TrajectoryState
+
+
 class TaskTrajectories:
     """Each task's log and final record, grouped by context in execution order.
 
@@ -82,8 +101,7 @@ class TaskTrajectories:
         record = self._tasks.get(task_id)
         if record is None:
             log = TrajectoryLog(
-                native=self._native,
-                aux=frozenset(self._atif.spec.aux) if self._atif is not None else None,
+                native=self._native, adapter=self._atif.spec if self._atif is not None else None
             )
             log._task_id = task_id
             record = self._tasks[task_id] = _TaskRecord(context_id=context_id, log=log)
@@ -234,9 +252,7 @@ class TaskTrajectories:
             total=sum(lengths),
         )
 
-    def atif_task(
-        self, task_id: str
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | None:
+    def atif_task(self, task_id: str) -> AtifTaskRead | None:
         """The ended task's atif/1 document as it stood when it ended, with its aux log and served
         turn context, or None when there is none."""
         record = self._tasks.get(task_id)
@@ -244,7 +260,8 @@ class TaskTrajectories:
         if copy is None:
             return None
         self._touch(record.context_id)
-        return copy.task_read(task_id)
+        read = copy.task_read(task_id)
+        return None if read is None else AtifTaskRead(*read)
 
     def atif_context(self, context_id: str) -> dict[str, Any] | None:
         """The context's atif/1 live page, or None when it has no closed step yet."""
@@ -256,27 +273,29 @@ class TaskTrajectories:
 
     def atif_task_page(
         self, task_id: str, after: int, max_steps: int, max_bytes: int
-    ) -> tuple[AtifPage, str, TrajectoryState] | None:
-        """A cursor page of the task's closed atif/1 steps, its context id and the task's state."""
+    ) -> AtifCursor | None:
+        """A cursor page of the task's closed atif/1 steps, in the task's state."""
         record = self._tasks.get(task_id)
         copy = self._copies.get(record.context_id) if record is not None else None
         if copy is None:
             return None
         self._touch(record.context_id)
         state = record.state
-        return copy.page(after, max_steps, max_bytes, task_id=task_id), record.context_id, state
+        page = copy.page(after, max_steps, max_bytes, task_id=task_id)
+        return AtifCursor(page=page, context_id=record.context_id, task_id=task_id, state=state)
 
     def atif_context_page(
         self, context_id: str, after: int, max_steps: int, max_bytes: int
-    ) -> tuple[AtifPage, str, TrajectoryState] | None:
-        """A cursor page of the context's closed atif/1 steps, the current task's id and the
-        context's state."""
+    ) -> AtifCursor | None:
+        """A cursor page of the context's closed atif/1 steps, on the task the context is on and in
+        the context's state."""
         copy = self._copies.get(context_id)
         records = self._context_records(context_id) if copy is not None else None
         if copy is None or records is None:
             return None
         task_id, state = self._context_progress(context_id, records)
-        return copy.page(after, max_steps, max_bytes), task_id, state
+        page = copy.page(after, max_steps, max_bytes)
+        return AtifCursor(page=page, context_id=context_id, task_id=task_id, state=state)
 
     def _context_progress(
         self, context_id: str, records: list[_TaskRecord]

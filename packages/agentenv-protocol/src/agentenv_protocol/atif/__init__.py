@@ -47,17 +47,19 @@ from .profile import (
 )
 from .kit import KIT_RULES, KitResult, check_adapter
 from .reader import Task, check, is_prefix, load, media_paths, strip_profile, tasks
-from .runner import AdapterRun, Fed, RecordedTask, replay, served_turn
+from .runner import AdapterRun, Fed, RecordedTask, replay
+from .served import AuxEntry, ContentItem, MediaItem, ServedData, ServedError, ServedMedia, ServedTurn
 from .validator import RULES, Finding, Rule, errors_in, validate, validate_live
 
 __all__ = [
     "Adapter", "AdapterRef", "AdapterRun", "AdapterSpec", "Agent", "AgentProfile", "Arrival", "atif_adapter",
-    "AtifError", "AtifTurn", "AudioSource", "aux", "check", "check_adapter", "ContentPart", "Document", "dump_profile",
-    "errors_in", "Fed", "FinalMetrics", "FinalMetricsProfile", "Finding", "finish", "FORMAT", "ImageSource",
-    "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "media_paths", "MediaInfo", "Metrics", "MetricsProfile",
-    "Native", "native", "Observation", "ObservationResult", "ObservationResultProfile", "PROFILE_KEY", "profile_of",
-    "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS", "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule",
-    "RULES", "SCHEMA_VERSION", "Selector", "served_turn", "Step", "StepData", "StepError", "StepProfile",
+    "AtifError", "AtifTurn", "AudioSource", "aux", "AuxEntry", "check", "check_adapter", "ContentItem", "ContentPart",
+    "Document", "dump_profile", "errors_in", "Fed", "FinalMetrics", "FinalMetricsProfile", "Finding", "finish",
+    "FORMAT", "ImageSource", "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "media_paths", "MediaInfo",
+    "MediaItem", "Metrics", "MetricsProfile", "Native", "native", "Observation", "ObservationResult",
+    "ObservationResultProfile", "PROFILE_KEY", "profile_of", "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS",
+    "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",
+    "ServedData", "ServedError", "ServedMedia", "ServedTurn", "Step", "StepData", "StepError", "StepProfile",
     "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "tasks", "timestamp", "ToolCall",
     "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "VOCABULARIES",
 ]

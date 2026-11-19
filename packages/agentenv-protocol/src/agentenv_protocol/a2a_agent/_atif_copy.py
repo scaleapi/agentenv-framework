@@ -10,12 +10,13 @@ import json
 import logging
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from ..atif import FORMAT, PROFILE_KEY, Adapter, AdapterRun, Media, TurnContext, served_turn
+from ..atif import FORMAT, Adapter, AdapterRun, AuxEntry, Media, ServedTurn, TurnContext
 from ..errors import AgentEnvError
 from .tasks.v1 import DataPart, FilePart, TaskError, TextPart, _thaw
 
@@ -43,8 +44,8 @@ class _Task:
     place: int
     context: TurnContext
     natives: int = 0
-    aux: list[dict[str, Any]] = field(default_factory=list)
-    turn: dict[str, Any] | None = None
+    aux: list[AuxEntry] = field(default_factory=list)
+    turn: ServedTurn | None = None
     ended: bool = False
 
 
@@ -75,22 +76,20 @@ class AtifCopy:
         with self._lock:
             if self._failed is not None:
                 return
-            try:
+            with self._guarded():
                 context = TurnContext(
                     index=index, context_id=self._context_id, task_id=task_id, message_id=turn.message_id,
-                    inbound=tuple(_content(turn.parts, self._run)[0]), agent_name=turn.agent_name,
+                    inbound=tuple(_inbound(turn.parts, self._run)), agent_name=turn.agent_name,
                     agent_version=turn.agent_version, agent_model=turn.agent_model, started_at=_now())
                 self._run.start_task(context)
-            except Exception as exc:
-                self._fail(exc)
-                return
-            self._tasks[task_id] = _Task(place=len(self._tasks), context=context)
+                self._tasks[task_id] = _Task(place=len(self._tasks), context=context)
 
     def native(self, task_id: str, record: Any) -> None:
         with self._lock:
             task = self._open(task_id)
             if task is not None:
-                self._feed(task, record)
+                with self._guarded():
+                    self._feed(task, record)
 
     def aux(self, task_id: str, name: str, record: Any) -> None:
         with self._lock:
@@ -98,11 +97,9 @@ class AtifCopy:
             if task is None:
                 return
             # A copy: an adapter may change the record it's handed, and the log is replay's input.
-            task.aux.append({"name": name, "record": json.loads(json.dumps(record)), "after": task.natives})
-            try:
+            task.aux.append(AuxEntry(name=name, record=json.loads(json.dumps(record)), after=task.natives))
+            with self._guarded():
                 self._run.aux(name, record)
-            except Exception as exc:
-                self._fail(exc)
 
     def end(self, task_id: str, *, state: str, final: Sequence[Any] = (), error: TaskError | None = None,
             native: Any = None) -> None:
@@ -111,25 +108,20 @@ class AtifCopy:
             task = self._open(task_id)
             if task is None:
                 return
-            try:
+            with self._guarded():
                 for record in (native if isinstance(native, list) else [native]) if native is not None else ():
                     self._feed(task, record)
-                    if self._failed is not None:
-                        return
-                content, data = _content(final, self._run, answer=True)
-                failure = None if error is None else {"kind": error.error_type, "message": error.message,
-                                                      "code": error.code}
-                ended = _now()
-                ending = {"state": state, "final": content or None, "ended_at": ended, "data": data or None,
-                          "error": failure}
+                content, data = _final(final, self._run)
+                ending = {
+                    "state": state, "final": content or None, "ended_at": _now(), "data": data or None,
+                    "error": None if error is None else {"kind": error.error_type, "message": error.message,
+                                                         "code": error.code},
+                }
                 self._run.end_task(**ending)
-                task.turn = served_turn(task.context, **ending)
-            except Exception as exc:
-                self._fail(exc)
-            finally:
-                task.ended = True
+                task.turn = ServedTurn.of(task.context, **ending)
+            task.ended = True
 
-    def task_read(self, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | None:
+    def task_read(self, task_id: str) -> tuple[dict[str, Any], list[AuxEntry], ServedTurn] | None:
         """An ended task's document as it stood when the task ended, its aux log and its served turn context."""
         with self._lock:
             self._check()
@@ -138,7 +130,7 @@ class AtifCopy:
                 return None
             document = self._run.document(through=task.place)
             assert document is not None
-            return document, json.loads(json.dumps(task.aux)), dict(task.turn)
+            return document, list(task.aux), task.turn
 
     def context_read(self) -> dict[str, Any] | None:
         """The context's live page: every closed step a reader may be served, or None before the first."""
@@ -154,15 +146,14 @@ class AtifCopy:
         with self._lock:
             self._check()
             document = self._run.page()
-            places = {place: task_id for task_id, place in
-                      ((task_id, task.place) for task_id, task in self._tasks.items())}
-            sub_tasks = {agent_id: places.get(place) for agent_id, place in self._run.subagent_tasks().items()}
+            by_place = {task.place: task_id for task_id, task in self._tasks.items()}
+            step_tasks = [by_place.get(place) for place in self._run.step_tasks()]
+            sub_tasks = {agent_id: by_place.get(place) for agent_id, place in self._run.subagent_tasks().items()}
         steps = document["steps"] if document is not None else []
         if after > len(steps):
             raise ValueError(f"after={after} is past the document's {len(steps)} closed steps")
-        owners = _owners(steps)
-        scope = [(step, owner) for step, owner in zip(steps, owners) if task_id is None or owner == task_id]
-        pending = [(step, owner) for step, owner in scope if step["step_id"] > after]
+        pending = [(step, owner) for step, owner in zip(steps, step_tasks)
+                   if (task_id is None or owner == task_id) and step["step_id"] > after]
         served: list[dict[str, Any]] = []
         tasks: set[str | None] = set()
         used = 0
@@ -189,16 +180,18 @@ class AtifCopy:
         return task if task is not None and not task.ended else None
 
     def _feed(self, task: _Task, record: Any) -> None:
-        try:
-            self._run.native(record)
-        except Exception as exc:
-            self._fail(exc)
+        self._run.native(record)
         task.natives += 1
 
-    def _fail(self, exc: Exception) -> None:
-        self._failed = f"{type(exc).__name__}: {exc}"
-        logger.warning("the atif/1 copy of context %s stopped at an error in %s: %s", self._context_id, self._adapter,
-                       self._failed)
+    @contextmanager
+    def _guarded(self) -> Iterator[None]:
+        """Run a step of the copy: an error there stops the copy, and never reaches the agent's turn."""
+        try:
+            yield
+        except Exception as exc:
+            self._failed = f"{type(exc).__name__}: {exc}"
+            logger.warning("the atif/1 copy of context %s stopped at an error in %s: %s", self._context_id,
+                           self._adapter, self._failed)
 
     def _check(self) -> None:
         if self._failed is not None:
@@ -214,10 +207,23 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _content(parts: Iterable[Any], run: AdapterRun, *, answer: bool = False) -> tuple[list[Any], list[dict[str, Any]]]:
-    """A2A parts as ATIF content: text as text, a DataPart as its compact JSON, a file's bytes as media and a file by
-    URI as a note naming it. In a final response (``answer``), a DataPart other than a structured output is the
-    harness's diagnostics, so it goes to the data list for the profile instead."""
+def _inbound(parts: Iterable[Any], run: AdapterRun) -> list[Any]:
+    """An inbound message as ATIF content: text as text, a DataPart as its compact JSON, a file's bytes as media and a
+    file by URI as a note naming it."""
+    content: list[Any] = []
+    for part in parts:
+        if isinstance(part, TextPart):
+            content.append(part.text)
+        elif isinstance(part, DataPart):
+            content.append(_compact(_thaw(part.data)))
+        elif isinstance(part, FilePart):
+            content.append(_file(part, run))
+    return content
+
+
+def _final(parts: Iterable[Any], run: AdapterRun) -> tuple[list[Any], list[dict[str, Any]]]:
+    """A final response as ATIF content and its diagnostics: text, files and a structured output (the task's answer,
+    as compact JSON) are content; any other DataPart is the harness's diagnostics, for the last step's ``data``."""
     content: list[Any] = []
     data: list[dict[str, Any]] = []
     for part in parts:
@@ -225,15 +231,10 @@ def _content(parts: Iterable[Any], run: AdapterRun, *, answer: bool = False) -> 
             content.append(part.text)
         elif isinstance(part, DataPart):
             value = _thaw(part.data)
-            if answer and set(value) == {STRUCTURED_OUTPUT}:
+            if set(value) == {STRUCTURED_OUTPUT}:
                 content.append(_compact(value[STRUCTURED_OUTPUT]))
-            elif answer:
-                entry: dict[str, Any] = {"data": value}
-                if part.metadata:
-                    entry["metadata"] = _thaw(part.metadata)
-                data.append(entry)
             else:
-                content.append(_compact(value))
+                data.append({"data": value, **({"metadata": _thaw(part.metadata)} if part.metadata else {})})
         elif isinstance(part, FilePart):
             content.append(_file(part, run))
     return content, data
@@ -255,14 +256,3 @@ def _file(part: FilePart, run: AdapterRun) -> Media | str:
 
 def _compact(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
-def _owners(steps: Sequence[dict[str, Any]]) -> list[str | None]:
-    """The task each step belongs to: the one whose user step opened the run of steps it's in."""
-    owners: list[str | None] = []
-    owner = None
-    for step in steps:
-        if step.get("source") == "user":
-            owner = ((step.get("extra") or {}).get(PROFILE_KEY) or {}).get("task_id", owner)
-        owners.append(owner)
-    return owners

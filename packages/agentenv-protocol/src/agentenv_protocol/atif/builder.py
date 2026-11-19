@@ -470,6 +470,10 @@ class Document:
         still waiting on a result, or None while there are none."""
         return self._render(closed_only=True)
 
+    def step_tasks(self) -> list[int]:
+        """Each root step's task, in step order: the 0-based place in this document of the task it belongs to."""
+        return [step.task for step in self._root.steps] if self._root is not None else []
+
     def subagent_tasks(self) -> dict[str, int]:
         """Each declared sub-agent's task: the 0-based place in this document of the task whose call spawned it."""
         return {agent_id: trajectory.task for agent_id, trajectory in self._subs.items()}

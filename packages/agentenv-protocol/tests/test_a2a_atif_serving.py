@@ -8,7 +8,7 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pytest
 from atif_cases import Toy
@@ -21,6 +21,7 @@ from agentenv_protocol.a2a_agent import (
     ContextTrajectoryRequest,
     TaskRequest,
     TaskResult,
+    TrajectoryLog,
     Uploaded,
     a2a_agent,
     enable,
@@ -90,90 +91,150 @@ class _Hold:
             time.sleep(0.01)
 
 
-async def _turn(request: TaskRequest, hold: _Hold) -> TaskResult:
-    """The toy agent's turn: its message names a scenario and a tag unique in the context."""
-    scenario, tag = request.parts[0].text.split()
-    log = request.trajectory
+#: What a toy agent's turn does, by the scenario its message names first; the message's second word is a tag unique in
+#: the context, so the turn's call ids and step keys are too.
+SCENARIOS: dict[str, Callable[[TrajectoryLog, str, _Hold], Awaitable[TaskResult]]] = {}
+
+
+def _scenario(name: str) -> Callable[[Callable], Callable]:
+    def register(play: Callable) -> Callable:
+        SCENARIOS[name] = play
+        return play
+    return register
+
+
+def _append(log: TrajectoryLog, records: list[dict[str, Any]]) -> None:
+    for record in records:
+        log.append(record)
+
+
+def _spawning(tag: str) -> list[dict[str, Any]]:
+    """A Task call that spawns a sub-agent, and the sub-agent's first step."""
+    return [{"type": "call", "step": f"{tag}-1", "id": f"{tag}-task", "name": "Task", "args": {"goal": "ls"}},
+            {"type": "spawn", "id": f"{tag}-task", "agent": f"{tag}-sub", "name": "explorer"},
+            {"type": "say", "step": f"{tag}-s1", "text": "sub: listing", "agent": f"{tag}-sub"}]
+
+
+@_scenario("work")
+async def _works(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Lists the files and answers with its last message."""
+    _append(log, _work(tag))
+    return TaskResult.text(f"{tag}: two files")
+
+
+@_scenario("hooks")
+async def _hooks(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Feeds a hook's note after its first event, and a note no handler takes at the end."""
     records = _work(tag)
-    if scenario == "work":
-        for record in records:
-            log.append(record)
-        return TaskResult.text(f"{tag}: two files")
-    if scenario == "hooks":
-        log.append(records[0])
-        log.aux("hooks", {"type": "note", "step": f"{tag}-h", "text": "the pre-tool hook allowed ls"})
-        for record in records[1:]:
-            log.append(record)
-        log.aux("hooks", {"type": "other", "step": f"{tag}-x", "text": "no handler takes this one"})
-        return TaskResult.text(f"{tag}: two files")
-    if scenario == "late":
-        for record in records[:3]:
-            log.append(record)
-        log.append({"type": "say", "step": f"{tag}-w", "text": f"{tag}: waiting on ls"})
-        await hold.wait()
-        log.append(records[3])
-        log.append({"type": "say", "step": f"{tag}-3", "text": f"{tag}: got it"})
-        log.append({"type": "say", "step": f"{tag}-4", "text": f"{tag}: two files"})
-        await hold.wait()
-        return TaskResult.text(f"{tag}: two files")
-    if scenario == "failed":
-        for record in records:
-            log.append(record)
-        return TaskResult.failure("toy.failed", "ls found nothing to fix")
-    if scenario == "raised":
-        for record in records[:2]:
-            log.append(record)
-        raise RuntimeError("the toy CLI crashed")
-    if scenario == "canceled":
-        for record in records[:3]:
-            log.append(record)
-        await hold.wait()
-        return TaskResult.text("never reached")
-    if scenario == "data":
-        for record in records:
-            log.append(record)
-        return (TaskResult.builder().succeeded().add_text(f"{tag}: two files")
-                .add_structured_output({"files": ["a.txt", "b.txt"]})
-                .add_data({"tool_call_count": 1, "cli_attempts": 2}).build())
-    if scenario == "returned":
-        return (TaskResult.builder().succeeded().add_text(f"{tag}: two files")
-                .native_trajectory(format=NATIVE, payload=records).build())
-    if scenario == "both":
-        log.append(records[0])
-        return (TaskResult.builder().succeeded().add_text("done")
-                .native_trajectory(format=NATIVE, payload=records).build())
-    if scenario == "broken":
-        log.append(records[0])
-        log.append({"type": "result", "id": "no-such-call", "out": "x"})
-        log.append(records[1])
-        return TaskResult.text("done anyway")
-    if scenario == "spawn":
-        log.append({"type": "call", "step": f"{tag}-1", "id": f"{tag}-task", "name": "Task", "args": {"goal": "ls"}})
-        log.append({"type": "spawn", "id": f"{tag}-task", "agent": f"{tag}-sub", "name": "explorer"})
-        log.append({"type": "say", "step": f"{tag}-s1", "text": "sub: listing", "agent": f"{tag}-sub"})
-        log.append({"type": "say", "step": f"{tag}-s2", "text": "sub: two files", "agent": f"{tag}-sub"})
-        log.append({"type": "result", "id": f"{tag}-task", "out": "two files"})
-        log.append({"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer found two files"})
-        return TaskResult.text(f"{tag}: the explorer found two files")
-    if scenario == "grow":
-        log.append({"type": "call", "step": f"{tag}-1", "id": f"{tag}-task", "name": "Task", "args": {"goal": "ls"}})
-        log.append({"type": "spawn", "id": f"{tag}-task", "agent": f"{tag}-sub", "name": "explorer"})
-        log.append({"type": "say", "step": f"{tag}-s1", "text": "sub: listing", "agent": f"{tag}-sub"})
-        log.append({"type": "say", "step": f"{tag}-s2", "text": "sub: still listing", "agent": f"{tag}-sub"})
-        log.append({"type": "result", "id": f"{tag}-task", "out": "listing"})
-        log.append({"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer is listing"})
-        log.append({"type": "say", "step": f"{tag}-3", "text": f"{tag}: waiting"})
-        await hold.wait()
-        log.append({"type": "say", "step": f"{tag}-s3", "text": "sub: two files", "agent": f"{tag}-sub"})
-        log.append({"type": "say", "step": f"{tag}-4", "text": f"{tag}: two files"})
-        return TaskResult.text(f"{tag}: two files")
-    if scenario == "orphan":
-        log.append({"type": "call", "step": f"{tag}-1", "id": f"{tag}-task", "name": "Task", "args": {"goal": "ls"}})
-        log.append({"type": "spawn", "id": f"{tag}-task", "agent": f"{tag}-sub", "name": "explorer"})
-        log.append({"type": "say", "step": f"{tag}-s1", "text": "sub: listing", "agent": f"{tag}-sub"})
-        await hold.wait()
-        return TaskResult.text("never reached")
-    raise AssertionError(f"no scenario {scenario!r}")
+    log.append(records[0])
+    log.aux("hooks", {"type": "note", "step": f"{tag}-h", "text": "the pre-tool hook allowed ls"})
+    _append(log, records[1:])
+    log.aux("hooks", {"type": "other", "step": f"{tag}-x", "text": "no handler takes this one"})
+    return TaskResult.text(f"{tag}: two files")
+
+
+@_scenario("late")
+async def _late(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Moves on before its call's result comes, holding there, and holds again once it has."""
+    records = _work(tag)
+    _append(log, records[:3])
+    log.append({"type": "say", "step": f"{tag}-w", "text": f"{tag}: waiting on ls"})
+    await hold.wait()
+    _append(log, [records[3], {"type": "say", "step": f"{tag}-3", "text": f"{tag}: got it"},
+                  {"type": "say", "step": f"{tag}-4", "text": f"{tag}: two files"}])
+    await hold.wait()
+    return TaskResult.text(f"{tag}: two files")
+
+
+@_scenario("failed")
+async def _fails(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Works, then fails the task."""
+    _append(log, _work(tag))
+    return TaskResult.failure("toy.failed", "ls found nothing to fix")
+
+
+@_scenario("raised")
+async def _raises(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Raises with its call unanswered."""
+    _append(log, _work(tag)[:2])
+    raise RuntimeError("the toy CLI crashed")
+
+
+@_scenario("canceled")
+async def _waits(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Holds after its first step, for a test to cancel it or let it answer."""
+    _append(log, _work(tag)[:3])
+    await hold.wait()
+    return TaskResult.text("never reached")
+
+
+@_scenario("data")
+async def _answers_with_data(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Answers with a structured output and the harness's diagnostics beside its text."""
+    _append(log, _work(tag))
+    return (TaskResult.builder().succeeded().add_text(f"{tag}: two files")
+            .add_structured_output({"files": ["a.txt", "b.txt"]})
+            .add_data({"tool_call_count": 1, "cli_attempts": 2}).build())
+
+
+@_scenario("returned")
+async def _returns(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Appends nothing and returns its native trajectory at the end."""
+    return (TaskResult.builder().succeeded().add_text(f"{tag}: two files")
+            .native_trajectory(format=NATIVE, payload=_work(tag)).build())
+
+
+@_scenario("both")
+async def _appends_and_returns(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Appends an event and returns a native trajectory too."""
+    records = _work(tag)
+    log.append(records[0])
+    return TaskResult.builder().succeeded().add_text("done").native_trajectory(format=NATIVE, payload=records).build()
+
+
+@_scenario("broken")
+async def _breaks_its_adapter(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Appends a result for a call it never made, which its adapter refuses."""
+    records = _work(tag)
+    _append(log, [records[0], {"type": "result", "id": "no-such-call", "out": "x"}, records[1]])
+    return TaskResult.text("done anyway")
+
+
+@_scenario("spawn")
+async def _spawns(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Spawns a sub-agent that works and answers."""
+    _append(log, [*_spawning(tag),
+                  {"type": "say", "step": f"{tag}-s2", "text": "sub: two files", "agent": f"{tag}-sub"},
+                  {"type": "result", "id": f"{tag}-task", "out": "two files"},
+                  {"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer found two files"}])
+    return TaskResult.text(f"{tag}: the explorer found two files")
+
+
+@_scenario("grow")
+async def _sub_agent_grows(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Spawns a sub-agent that goes on writing steps after its call's result, holding in between."""
+    _append(log, [*_spawning(tag),
+                  {"type": "say", "step": f"{tag}-s2", "text": "sub: still listing", "agent": f"{tag}-sub"},
+                  {"type": "result", "id": f"{tag}-task", "out": "listing"},
+                  {"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer is listing"},
+                  {"type": "say", "step": f"{tag}-3", "text": f"{tag}: waiting"}])
+    await hold.wait()
+    _append(log, [{"type": "say", "step": f"{tag}-s3", "text": "sub: two files", "agent": f"{tag}-sub"},
+                  {"type": "say", "step": f"{tag}-4", "text": f"{tag}: two files"}])
+    return TaskResult.text(f"{tag}: two files")
+
+
+@_scenario("orphan")
+async def _spawn_never_answered(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Spawns a sub-agent and holds before its call's result, for a test to cancel it."""
+    _append(log, _spawning(tag))
+    await hold.wait()
+    return TaskResult.text("never reached")
+
+
+async def _turn(request: TaskRequest, hold: _Hold) -> TaskResult:
+    scenario, tag = request.parts[0].text.split()
+    return await SCENARIOS[scenario](request.trajectory, tag, hold)
 
 
 def _toy(hold: _Hold | None = None, *, live: bool = True, atif: Any = Hooks, bind_context: bool = False) -> AgentEnvAgent:
