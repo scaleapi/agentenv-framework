@@ -14,6 +14,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from agentenv_protocol.computer import COMPUTER
 
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -23,7 +24,7 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.computer import computer_exec
 from agent_env.task_step.task_steps.computer.computer_exec import RECORDS_KEY, ComputerExecTaskStep
-from tst.unit.computer_home import TOKEN, Computer
+from tst.unit.computer_home import CARD, TOKEN, Computer
 
 
 @pytest.fixture
@@ -129,7 +130,8 @@ async def test_a_background_command_is_started_and_left_running(computer, short_
 
     assert time.monotonic() - started < 2.5
     assert not (computer.home / "late.txt").exists()
-    assert ctx.metadata[RECORDS_KEY]["exec"]["argv"][3:] == ["computer_exec", "sh", "-c", "sleep 3; echo done > late.txt"]
+    assert ctx.metadata[RECORDS_KEY]["exec"]["argv"][3:] == ["computer_exec", "sh", "-c",
+                                                             "sleep 3; echo done > late.txt"]
     for _ in range(60):
         if (computer.home / "late.txt").exists():
             break
@@ -182,7 +184,7 @@ async def test_a_system_command_runs_as_root_through_the_sandbox_in_the_session_
     record = ctx.metadata[RECORDS_KEY]["exec"]
     assert record["exit_code"] == 0 and record["scope"] == "system"
     assert record["stdout"] == f"{computer.home}/work\n{computer.home} hi\n"
-    assert sandbox.calls[-1][:4] == ["timeout", "-k", "5", "120"]
+    assert sandbox.calls[-1][4:9] == ["65536", "timeout", "-k", "5", "120"]
     assert [params["argv"] for _, params, _ in computer.calls] == [["pwd"]]
 
 
@@ -199,6 +201,34 @@ async def test_a_system_command_that_times_out_or_cant_start_fails_unless_check_
 
 
 @pytest.mark.asyncio
+async def test_a_system_command_timed_out_when_the_deadline_stopped_or_killed_it_not_when_it_exits_so_itself(
+        computer, sandbox, monkeypatch):
+    monkeypatch.setattr(computer_exec, "SYSTEM_KILL_AFTER_S", 1)
+
+    ctx = await _step("exit 124", scope="system", check=False).execute(_context(computer.deployed()))
+    record = ctx.metadata[RECORDS_KEY]["exec"]
+    assert (record["exit_code"], record["timed_out"]) == (124, False)
+
+    # It ignores the stop signal, so timeout kills it, and exits 137 rather than 124.
+    ctx = await _step("trap '' TERM; sleep 30", scope="system", timeout_s=0.5, check=False).execute(
+        _context(computer.deployed()))
+    record = ctx.metadata[RECORDS_KEY]["exec"]
+    assert (record["exit_code"], record["timed_out"]) == (None, True)
+
+
+@pytest.mark.asyncio
+async def test_a_system_commands_output_is_capped_in_the_computer_and_any_bytes_decode(computer, sandbox, monkeypatch):
+    monkeypatch.setattr(computer_exec, "SYSTEM_OUTPUT_BYTES", 1000)
+
+    ctx = await _step("yes 0123456789 | head -c 55000; printf 'bad \\377\\376 bytes' >&2", scope="system").execute(
+        _context(computer.deployed()))
+
+    record = ctx.metadata[RECORDS_KEY]["exec"]
+    assert record["truncated"] and len(record["stdout"]) == 1000 and record["stdout"].endswith("0123456789\n")
+    assert record["stderr"] == "bad \ufffd\ufffd bytes"
+
+
+@pytest.mark.asyncio
 async def test_a_system_command_is_refused_on_a_disk_computer_and_on_a_sandbox_whose_exec_isnt_roots(
         computer, sandbox):
     with pytest.raises(RuntimeError, match="boots from a disk"):
@@ -207,6 +237,31 @@ async def test_a_system_command_is_refused_on_a_disk_computer_and_on_a_sandbox_w
     sandbox.uid = "1000"
     with pytest.raises(RuntimeError, match="as uid 1000; deploy it on a VM sandbox"):
         await _step("true", scope="system").execute(_context(computer.deployed()))
+
+
+@pytest.mark.asyncio
+async def test_on_a_windows_computer_a_string_or_background_command_is_refused_and_a_program_runs(computer):
+    windows = {**CARD, "capabilities": {**CARD["capabilities"], "extensions": [
+        *CARD["capabilities"]["extensions"], {"uri": COMPUTER, "params": {"platform": {"os": "windows"}}}]}}
+
+    for step in (_step("echo hi"), _step(["notepad.exe"], background=True)):
+        with pytest.raises(RuntimeError, match="runs Windows, which has no sh"):
+            await step.execute(_context(computer.deployed(card=windows)))
+    assert computer.calls == []
+
+    ctx = await _step(["echo", "hi"]).execute(_context(computer.deployed(card=windows)))
+    assert ctx.metadata[RECORDS_KEY]["exec"]["stdout"] == "hi\n"
+
+
+@pytest.mark.asyncio
+async def test_a_background_start_still_running_when_its_window_ends_leaves_no_files(computer, tmp_path, monkeypatch):
+    monkeypatch.setattr(computer_exec, "START_WINDOW_S", 0.3)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    await _step(["sleep", "3"], background=True, env={"TMPDIR": str(scratch)}).execute(_context(computer.deployed()))
+
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.asyncio

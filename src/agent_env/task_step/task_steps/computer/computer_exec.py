@@ -6,12 +6,16 @@ started and left running."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import posixpath
 import shlex
+import time
 from typing import ClassVar, Optional, Union
 
-from agentenv_protocol.computer import COMPUTER_EXEC
+from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.computer import COMPUTER, COMPUTER_EXEC
 
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
@@ -39,6 +43,9 @@ START_WINDOW_S = 2.0
 START_MARGIN_S = 3.0
 #: The most of a failed start's stderr the launcher keeps: the end of it.
 START_STDERR_BYTES = 4096
+#: How often the launcher checks a ``background`` start, and how long it waits for a failed start's stderr.
+START_POLL_S = 0.1
+START_STDERR_WAIT_S = 1.0
 #: Who a command runs as: the session user, through the driver, or for ``system``, root, through the sandbox.
 SCOPES = ("session", "system")
 #: How long the session user's home takes to find, which a ``system`` command runs in.
@@ -47,8 +54,22 @@ HOME_TIMEOUT_S = 30.0
 SYSTEM_MARGIN_S = 30.0
 #: How long ``timeout`` gives a ``system`` command after its stop signal before it kills it.
 SYSTEM_KILL_AFTER_S = 5
-#: What ``timeout`` exits with when it stopped the command.
+#: What ``timeout`` exits with when it stopped the command, and when it had to kill it (128 + SIGKILL).
 TIMED_OUT_EXIT = 124
+KILLED_EXIT = 137
+#: The most of each stream a ``system`` command keeps in the computer, the end of it, so a command that prints without
+#: end can't fill the task runner's memory; the record keeps less still.
+SYSTEM_OUTPUT_BYTES = 65536
+#: How a ``system`` command runs, given that cap and then the command: the end of each stream kept and base64'd, so
+#: whatever bytes it printed decode, and the command's exit status passed on as its own.
+_CAPPED = """cap=$1; shift
+d=$(mktemp -d) || exit 125
+{ { "$@"; echo $? >"$d/rc"; } 2>&1 >&3 3>&- | tail -c "$cap" >"$d/err"; } 3>&1 | tail -c "$cap" | base64 -w0
+base64 -w0 "$d/err" >&2
+rc=$(cat "$d/rc" 2>/dev/null)
+rm -rf "$d"
+exit "${rc:-125}"
+"""
 
 
 def background_script() -> str:
@@ -57,18 +78,20 @@ def background_script() -> str:
     discarded and the end of its stderr kept, and watched for ``START_WINDOW_S``. One that exits non-zero in that window
     fails with its exit status and its stderr, which also catches a string command (whose program is ``sh``) naming a
     program that isn't there; one that exits 0, as ``xdg-open`` and single-instance apps do once they hand off, or is
-    still running, has started."""
-    ticks = max(1, round(START_WINDOW_S * 10))
+    still running, has started. Its folder goes either way: an app still running keeps the stderr file it writes open,
+    so removing the folder takes nothing from it."""
+    window = max(1, round(START_WINDOW_S / START_POLL_S))
+    stderr_wait = max(1, round(START_STDERR_WAIT_S / START_POLL_S))
     return (
         'case "$1" in */*) [ -f "$1" ] && [ -x "$1" ] ;; *) command -v "$1" >/dev/null ;; esac'
         ' || { echo "computer_exec: $1: not found or not executable" >&2; exit 127; }; '
         'd=$(mktemp -d) || exit 1; '
         f'( {{ "$@" 2>&1 >/dev/null; echo $? > "$d/rc"; }} | tail -c {START_STDERR_BYTES} > "$d/err" ) '
         '</dev/null >/dev/null 2>&1 & '
-        f'n=0; while [ ! -s "$d/rc" ] && [ $n -lt {ticks} ]; do sleep 0.1; n=$((n+1)); done; '
-        '[ -s "$d/rc" ] || exit 0; '
+        f'n=0; while [ ! -s "$d/rc" ] && [ $n -lt {window} ]; do sleep {START_POLL_S:g}; n=$((n+1)); done; '
+        '[ -s "$d/rc" ] || { rm -rf "$d"; exit 0; }; '
         'rc=$(cat "$d/rc"); [ "$rc" = 0 ] && { rm -rf "$d"; exit 0; }; '
-        'n=0; while [ ! -s "$d/err" ] && [ $n -lt 10 ]; do sleep 0.1; n=$((n+1)); done; '
+        f'n=0; while [ ! -s "$d/err" ] && [ $n -lt {stderr_wait} ]; do sleep {START_POLL_S:g}; n=$((n+1)); done; '
         'echo "computer_exec: $* exited $rc right after starting" >&2; cat "$d/err" >&2; rm -rf "$d"; exit "$rc"')
 
 
@@ -180,6 +203,10 @@ class ComputerExecTaskStep(TaskStep):
         if self.timeout_s > (limit := inside.max_timeout_s(deployed)):
             raise ValueError(f"{self.type} {self.id!r}: timeout_s {self.timeout_s} is above the {limit} s the computer "
                              f"of env {self.env_id!r} lets a command run")
+        if (self.background or isinstance(self.command, str)) and _os(deployed) == "windows":
+            raise RuntimeError(f"{self.type} {self.id!r}: env {self.env_id!r}'s computer runs Windows, which has no sh "
+                               "to run a string or start an app in the background: give the command as a program and "
+                               "its arguments, without background")
         argv = self.argv()
         if self.scope == "system":
             answer = await self._as_root(deployed, argv)
@@ -210,19 +237,26 @@ class ComputerExecTaskStep(TaskStep):
 
     async def _as_root(self, deployed: DeployedSandboxEnv, argv: list[str]) -> dict:
         """``argv`` run as root through the computer's sandbox (``RootChannel``), in the folder and with the ``HOME`` a
-        session run has, so ``cwd`` and ``~`` name the same files, under ``timeout``; answered as ``run`` answers."""
+        session run has, so ``cwd`` and ``~`` name the same files, under ``timeout``, its output capped in the computer
+        (``_CAPPED``); answered as ``run`` answers. It timed out when ``timeout`` stopped or killed it past the
+        deadline, which a command exiting with that status of its own, earlier, didn't."""
         if (deployed.metadata.get("computer") or {}).get("form") == "disk":
             raise RuntimeError(f"{self.type} {self.id!r}: a 'system' command runs through the computer's container, "
                                f"and env {self.env_id!r}'s computer boots from a disk, which core can't reach as root")
         home = (await inside.run(deployed, ["pwd"], timeout_s=HOME_TIMEOUT_S))["stdout"].strip()
         variables = [f"{name}={value}" for name, value in (self.env or {}).items()]
-        command = ["timeout", "-k", str(SYSTEM_KILL_AFTER_S), f"{self.timeout_s:g}", "env", "-C",
+        command = ["sh", "-c", _CAPPED, "computer_exec", str(SYSTEM_OUTPUT_BYTES),
+                   "timeout", "-k", str(SYSTEM_KILL_AFTER_S), f"{self.timeout_s:g}", "env", "-C",
                    posixpath.join(home, self.cwd) if self.cwd else home, f"HOME={home}", *variables, *argv]
         sandbox = await build_sandbox_provider(deployed.sandbox_type).get_sandbox(deployed.sandbox_id)
+        started = time.monotonic()
         code, stdout, stderr = await asyncio.wait_for(RootChannel(sandbox).exec(command),
                                                       self.timeout_s + SYSTEM_MARGIN_S)
-        return {"exit_code": None if code == TIMED_OUT_EXIT else code, "timed_out": code == TIMED_OUT_EXIT,
-                "stdout": stdout, "stderr": stderr}
+        timed_out = code in (TIMED_OUT_EXIT, KILLED_EXIT) and time.monotonic() - started >= self.timeout_s
+        out, err = _unpacked(stdout), _unpacked(stderr)
+        return {"exit_code": None if timed_out else code, "timed_out": timed_out,
+                "truncated": max(len(out), len(err)) >= SYSTEM_OUTPUT_BYTES,
+                "stdout": out.decode("utf-8", errors="replace"), "stderr": err.decode("utf-8", errors="replace")}
 
 
 def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]) -> DeployedSandboxEnv:
@@ -231,7 +265,8 @@ def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
         raise RuntimeError(f"env {env_id!r} isn't in context.deployed_envs")
-    children = {name: DeployedEnv.from_dict(data) for name, data in (getattr(deployed, "child_envs", None) or {}).items()}
+    children = {name: DeployedEnv.from_dict(data)
+                for name, data in (getattr(deployed, "child_envs", None) or {}).items()}
     if computer is not None:
         found = children.get(computer)
         if found is None:
@@ -259,6 +294,19 @@ def _computer_problem(env: object, computer: Optional[str]) -> Optional[str]:
         return (f"env {env.id!r} has {len(names) or 'no'} computers" +
                 (f": name one as computer, of {names}" if names else ""))
     return None
+
+
+def _os(deployed: DeployedSandboxEnv) -> Optional[str]:
+    """The computer's OS, as its card's computer/v1 platform says."""
+    return (protocol_v1.extension_params(deployed.environment_card or {}, COMPUTER).get("platform") or {}).get("os")
+
+
+def _unpacked(text: str) -> bytes:
+    """A stream ``_CAPPED`` base64'd, as bytes; what the sandbox said in its place, as it said it."""
+    try:
+        return base64.b64decode(text.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        return text.encode()
 
 
 def _tail(text: str, chars: int) -> str:
