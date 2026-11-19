@@ -11,9 +11,8 @@ import click
 def get(task_id: str, task_version: int | None):
     """Get a task and output its step definitions as JSON, as task create takes them: an object with its steps and
     headline_verifiers when it has them."""
+    from agent_env.bundle.parse import task_file_body
     from agent_env.task import Task
 
     task = Task.get(task_id, task_version)
-    steps = task.to_dict()["steps"]
-    body = {"headline_verifiers": task.headline_verifiers, "steps": steps} if task.headline_verifiers else steps
-    click.echo(json.dumps(body, indent=2))
+    click.echo(json.dumps(task_file_body(task.to_dict()["steps"], task.headline_verifiers), indent=2))

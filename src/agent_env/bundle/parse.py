@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Sequence
 
 from packaging.requirements import InvalidRequirement, Requirement
 
@@ -83,6 +83,12 @@ def task_file_parts(data: Any) -> tuple[list[dict], list[str] | None]:
         raise ValueError("a task file must be a JSON array of step objects, or an object whose steps is one and whose "
                          "headline_verifiers lists step ids")
     return steps, headlines
+
+
+def task_file_body(steps: list[dict], headlines: Sequence[str] | None) -> list[dict] | dict[str, Any]:
+    """A task file holding ``steps`` and ``headlines``, as ``task_file_parts`` reads it back: the bare array when there
+    are no headlines."""
+    return {"headline_verifiers": list(headlines), "steps": steps} if headlines else steps
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ import pytest
 from agent_env.plugins import _requirements
 from agent_env.task import Task
 from agent_env.task.task import UnknownStepTypeError
+from tst.unit.bundle._support import GRADED_STEPS
 
 
 def test_a_stored_task_document_with_an_unread_project_id_still_loads():
@@ -66,13 +67,8 @@ def test_a_record_that_isnt_a_list_is_read_as_none():
         is None
 
 
-_GRADED = [{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
-           {"id": "tests", "type": "verify_sandbox", "sandbox_name": "box", "verifier_id": "tests", "criteria": []},
-           {"id": "final", "type": "aggregate_verifiers", "verifier_id": "final", "verifier_ids": ["tests"]}]
-
-
 def _graded(**fields) -> dict:
-    return {"id": "t", "type": "task", "version": 1, "steps": [dict(step) for step in _GRADED], **fields}
+    return {"id": "t", "type": "task", "version": 1, "steps": [dict(step) for step in GRADED_STEPS], **fields}
 
 
 @pytest.mark.parametrize("headlines", [["final"], ["tests", "final"], ["final", "tests"]])

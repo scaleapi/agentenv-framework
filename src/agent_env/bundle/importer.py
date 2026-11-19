@@ -50,6 +50,7 @@ from agent_env.bundle.parse import (
     parse_bundle,
     root_problems,
     segment_problem,
+    task_file_body,
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.register import REGISTRATIONS
@@ -278,8 +279,8 @@ class _Importer:
                     self._ref(site, f"{where}: {site.path}", pins)
             self._default_agents(step, cls.entity_refs or (), where)
         sync_context_paths(stored, steps)
-        body = {"headline_verifiers": list(task.headline_verifiers), "steps": steps} if task.headline_verifiers else steps
-        self.files[path] = json.dumps(body, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        self.files[path] = json.dumps(task_file_body(steps, task.headline_verifiers), indent=2, ensure_ascii=False,
+                                      allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
         self.declared += task.requires or ()
         return name

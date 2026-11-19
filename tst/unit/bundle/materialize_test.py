@@ -38,7 +38,8 @@ from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.context import BuildContext
 from agent_env.env.published_images import EXAMPLE_IMAGES
-from tst.unit.bundle._support import CLAUDE_CODE_IMAGE, DIGEST, RefusingStore, layout, local_builds, local_store, plan_of, shipped_agent
+from tst.unit.bundle._support import (CLAUDE_CODE_IMAGE, DIGEST, GRADED_STEPS, RefusingStore, layout, local_builds,
+                                      local_store, plan_of, shipped_agent)
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -377,13 +378,9 @@ def test_the_written_task_records_the_ids_its_bundle_gave_what_it_names(bundle_d
     assert Task.get(f"{ROOT}/t").entity_ids == {"solver": f"{ROOT}/solver"}
 
 
-_GRADED = [{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
-           {"id": "tests", "type": "verify_sandbox", "sandbox_name": "box", "verifier_id": "tests", "criteria": []},
-           {"id": "final", "type": "aggregate_verifiers", "verifier_id": "final", "verifier_ids": ["tests"]}]
-
-
 def _task_file(root, **fields):
-    (root / "tasks/t.json").write_text(json.dumps({**fields, "steps": _GRADED} if fields else _GRADED))
+    steps = list(GRADED_STEPS)
+    (root / "tasks/t.json").write_text(json.dumps({**fields, "steps": steps} if fields else steps))
 
 
 def test_a_task_files_headline_verifiers_are_written_and_changing_them_writes_a_new_version(bundle_dir):
