@@ -69,8 +69,8 @@ def test_run_returns_final_text_usage_and_trajectory(client: TestClient, record:
     assert task["status"]["state"] == "completed"
     assert text == "Done."
     assert data["usage"] == {
-        "tool_call_count": 1, "input_tokens": 200, "output_tokens": 40, "total_tokens": 252, "cost_usd": 0.5,
-        "provider_details": {"cache_read_tokens": 10, "cache_write_tokens": 2},
+        "tool_call_count": 1, "input_tokens": 212, "output_tokens": 40, "total_tokens": 252, "cache_read_tokens": 10,
+        "cache_write_tokens": 2, "input_includes_cache": True, "cost_usd": 0.5,
     }
     invocation = json.loads(record.read_text())
     assert invocation["stdin"] == 'fix the bug\n\n{\n  "k": 1\n}'
@@ -90,6 +90,34 @@ def test_run_returns_final_text_usage_and_trajectory(client: TestClient, record:
     kinds = [event["type"] for event in trajectory]
     assert kinds[0] == "session" and "tool_execution_end" in kinds
     assert "message_update" not in kinds
+
+
+def _message(input: int, output: int, read: int, total: int) -> dict[str, Any]:
+    return {"role": "assistant", "usage": {"input": input, "output": output, "cacheRead": read, "cacheWrite": 0,
+                                           "totalTokens": total, "cost": {"total": 0}}}
+
+
+def test_usage_adds_the_cache_back_to_the_input() -> None:
+    """GPT's two calls of a smoke run through a LiteLLM proxy, as pi recorded them: the second read 1,024 cached tokens
+    of its 1,139-token prompt, which pi's ``input`` leaves out."""
+    run = pi_agent._Run(assistant_messages=[_message(1109, 21, 0, 1130), _message(115, 2, 1024, 1141)], tool_calls=1)
+
+    assert pi_agent._usage(run).to_dict() == {
+        "tool_call_count": 1, "input_tokens": 2248, "output_tokens": 23, "total_tokens": 2271,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0, "input_includes_cache": True,
+    }
+
+
+def test_a_call_that_reported_no_usage_is_unknown_not_zero() -> None:
+    """Claude's streamed answers through a LiteLLM proxy carry no usage, so pi records zeros for them."""
+    unreported = pi_agent._Run(assistant_messages=[_message(0, 0, 0, 0), _message(0, 0, 0, 0)], tool_calls=1)
+    partly = pi_agent._Run(assistant_messages=[_message(0, 0, 0, 0), _message(115, 2, 1024, 1141)])
+
+    assert pi_agent._usage(unreported).to_dict() == {
+        "tool_call_count": 1, "provider_details": {"unreported_calls": 2}}
+    assert pi_agent._usage(partly).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 1139, "output_tokens": 2, "total_tokens": 1141, "cache_read_tokens": 1024,
+        "cache_write_tokens": 0, "input_includes_cache": True, "provider_details": {"unreported_calls": 1}}
 
 
 def test_a_context_keeps_one_pi_session(client: TestClient, record: Path) -> None:

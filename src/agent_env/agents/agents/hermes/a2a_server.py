@@ -519,7 +519,10 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
 
 
 def _usage(result) -> Usage:
-    """The turn's tool calls and the token counts and cost Hermes reported for its main model calls."""
+    """The turn's tool calls and the token counts and cost Hermes reported for its main model calls, with
+    ``input_tokens`` counting the cache: Hermes' ``input_tokens`` is the prompt less its cache reads and writes, so
+    they're added back. Calls that reported no counts at all got none from their endpoint, as streamed Claude answers
+    through a LiteLLM proxy, so the turn's counts are unknown rather than nothing."""
     report = result.usage or {}
 
     def count(name: str) -> int | None:
@@ -527,13 +530,23 @@ def _usage(result) -> Usage:
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
     cost = report.get("estimated_cost_usd")
-    details = {key: report[key] for key in ("api_calls", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
-                                             "cost_status", "turn_exit_reason") if report.get(key) is not None}
+    details = {key: report[key] for key in ("api_calls", "reasoning_tokens", "cost_status", "turn_exit_reason")
+               if report.get(key) is not None}
+    counts = {name: count(name) for name in ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
+                                              "cache_write_tokens")}
+    if (count("api_calls") or 0) > 0 and not any(counts.values()):
+        return Usage(tool_call_count=result.tool_call_count,
+                     provider_details={**details, "unreported_calls": details["api_calls"]})
+    read, write = counts["cache_read_tokens"], counts["cache_write_tokens"]
+    input_tokens = counts["input_tokens"]
     return Usage(
         tool_call_count=result.tool_call_count,
-        input_tokens=count("input_tokens"),
-        output_tokens=count("output_tokens"),
-        total_tokens=count("total_tokens"),
+        input_tokens=None if input_tokens is None else input_tokens + (read or 0) + (write or 0),
+        output_tokens=counts["output_tokens"],
+        total_tokens=counts["total_tokens"],
+        cache_read_tokens=read,
+        cache_write_tokens=write,
+        input_includes_cache=None if input_tokens is None else True,
         cost_usd=cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0 else None,
         provider_details=details,
     )

@@ -240,3 +240,25 @@ async def test_a_snapshot_restores_the_conversation_and_workspace_into_another_c
     assert not (target / "config.yaml").exists()
     assert (folders / "result.txt").read_text() == "42"
     assert turns.calls[-1]["session_id"] == "s-ctx-src"
+
+
+def test_a_turns_usage_adds_the_cache_back_to_the_input():
+    """GPT's two calls of a smoke run through a LiteLLM proxy, as Hermes reported them: its input leaves out the 10,496
+    cached tokens the second call read."""
+    report = {"input_tokens": 10750, "output_tokens": 48, "total_tokens": 21294, "cache_read_tokens": 10496,
+              "cache_write_tokens": 0, "reasoning_tokens": 0, "api_calls": 2, "estimated_cost_usd": 0.0,
+              "cost_status": "unknown"}
+
+    assert a2a_server._usage(result(usage=report, tool_call_count=1)).to_dict() == {
+        "tool_call_count": 1, "input_tokens": 21246, "output_tokens": 48, "total_tokens": 21294,
+        "cache_read_tokens": 10496, "cache_write_tokens": 0, "input_includes_cache": True, "cost_usd": 0.0,
+        "provider_details": {"api_calls": 2, "reasoning_tokens": 0, "cost_status": "unknown"}}
+
+
+def test_a_turn_whose_calls_reported_no_usage_has_unknown_counts():
+    """Claude's streamed answers through a LiteLLM proxy carry no usage, so Hermes reports zeros for them."""
+    report = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_read_tokens": 0,
+              "cache_write_tokens": 0, "api_calls": 3}
+
+    assert a2a_server._usage(result(usage=report, tool_call_count=2)).to_dict() == {
+        "tool_call_count": 2, "provider_details": {"api_calls": 3, "unreported_calls": 3}}

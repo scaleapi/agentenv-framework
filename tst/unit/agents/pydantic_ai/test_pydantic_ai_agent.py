@@ -13,6 +13,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 
 import httpx
@@ -697,3 +698,38 @@ def test_a_threaded_write_cancelled_midway_finishes_before_the_cancel_reaches_it
 
     assert asyncio.run(cancel_midway())
     assert finished.is_set()
+
+
+def _response(input: int, output: int, read: int = 0, write: int = 0, **details: int) -> SimpleNamespace:
+    """A ``ModelResponse``'s ``RequestUsage``: its cache counts, and the usage keys it doesn't read in ``details``."""
+    return SimpleNamespace(input_tokens=input, output_tokens=output, cache_read_tokens=read, cache_write_tokens=write,
+                           details=details)
+
+
+def test_a_turns_usage_counts_the_cache_in_its_input() -> None:
+    """GPT's two calls of a smoke run through a LiteLLM proxy, whose prompt counts the cache, and Claude's, whose prompt
+    a LiteLLM proxy sends without it, with Anthropic's keys beside it, which Pydantic AI keeps in ``details``."""
+    gpt = pydantic_ai_agent.turn_usage([_response(2169, 20), _response(2303, 2, read=2048)], tool_calls=1, requests=2)
+    claude = pydantic_ai_agent.turn_usage(
+        [_response(10, 129, cache_creation_input_tokens=10363, cache_read_input_tokens=0),
+         _response(13, 43, cache_creation_input_tokens=199, cache_read_input_tokens=10363)], tool_calls=1, requests=2)
+
+    assert gpt == Usage(tool_call_count=1, input_tokens=4472, output_tokens=22, total_tokens=4494,
+                        cache_read_tokens=2048, cache_write_tokens=0, input_includes_cache=True,
+                        provider_details={"requests": 2})
+    assert claude == Usage(tool_call_count=1, input_tokens=20948, output_tokens=172, total_tokens=21120,
+                           cache_read_tokens=10363, cache_write_tokens=10562, input_includes_cache=True,
+                           provider_details={"requests": 2})
+
+
+def test_a_turns_usage_is_unknown_where_no_usage_came_back() -> None:
+    """Claude's streamed answers through a LiteLLM proxy carry no usage, which Pydantic AI records as zeros; and a
+    prompt as large as the cache beside it may or may not have counted it."""
+    unreported = pydantic_ai_agent.turn_usage([_response(0, 0), _response(0, 0)], tool_calls=1, requests=2)
+    ambiguous = pydantic_ai_agent.turn_usage(
+        [_response(0, 0), _response(5000, 10, cache_read_input_tokens=4000)], tool_calls=0, requests=2)
+
+    assert unreported == Usage(tool_call_count=1, provider_details={"requests": 2, "unreported_calls": 2})
+    assert ambiguous == Usage(tool_call_count=0, input_tokens=5000, output_tokens=10, total_tokens=5010,
+                              cache_read_tokens=4000, cache_write_tokens=0, input_includes_cache=None,
+                              provider_details={"requests": 2, "unreported_calls": 1})

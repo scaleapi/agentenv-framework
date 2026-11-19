@@ -255,20 +255,35 @@ def _record(run: _Run, event: dict[str, Any]) -> None:
 
 
 def _usage(run: _Run) -> Usage:
+    """The turn's usage, summed over its assistant messages, with ``input_tokens`` counting the cache: pi's ``input``
+    is the prompt less its cache reads and writes, so they're added back. A message whose usage is all zero got none
+    from its endpoint, as a streamed Claude answer through a LiteLLM proxy, and is counted in ``unreported_calls``
+    instead of as nothing used."""
     totals = {"input": 0, "output": 0, "totalTokens": 0, "cacheRead": 0, "cacheWrite": 0}
-    cost = 0.0
+    cost, reported, unreported = 0.0, 0, 0
     for message in run.assistant_messages:
         usage = message.get("usage") or {}
+        counts = {key: int(usage.get(key) or 0) for key in totals}
+        if not any(counts.values()):
+            unreported += 1
+            continue
+        reported += 1
         for key in totals:
-            totals[key] += int(usage.get(key) or 0)
+            totals[key] += counts[key]
         cost += float((usage.get("cost") or {}).get("total") or 0)
+    details = {"unreported_calls": unreported} if unreported else {}
+    if not reported:
+        return Usage(tool_call_count=run.tool_calls, provider_details=details)
     return Usage(
         tool_call_count=run.tool_calls,
-        input_tokens=totals["input"],
+        input_tokens=totals["input"] + totals["cacheRead"] + totals["cacheWrite"],
         output_tokens=totals["output"],
         total_tokens=totals["totalTokens"],
+        cache_read_tokens=totals["cacheRead"],
+        cache_write_tokens=totals["cacheWrite"],
+        input_includes_cache=True,
         cost_usd=cost or None,
-        provider_details={"cache_read_tokens": totals["cacheRead"], "cache_write_tokens": totals["cacheWrite"]},
+        provider_details=details,
     )
 
 

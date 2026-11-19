@@ -17,7 +17,7 @@ import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, Self
 from urllib.parse import urlsplit
@@ -155,6 +155,42 @@ class Outcome:
     usage: Usage
     error_code: str | None = None
     error_type: Literal["agent_error", "infra_error"] = "agent_error"
+
+
+def turn_usage(calls: list[tuple[Any, bool]], *, responses: int, tool_calls: int, cost: float | None) -> Usage:
+    """A turn's usage from the ``TokenUsage`` OpenHands recorded for each model call, beside whether its LLM speaks
+    OpenAI's Responses API, with ``input_tokens`` counting the cache. A Responses call's input counts it. A Chat
+    Completions call's may or may not: LiteLLM reads cached tokens from OpenAI's ``prompt_tokens_details``, whose
+    prompt counts them, and from Anthropic's keys beside a prompt that doesn't, as a LiteLLM proxy sends Claude's.
+    The cache is added when the prompt is smaller than it, and the turn's flag is left unknown when the counts can't
+    say. OpenHands records no ``TokenUsage`` for a response without tokens, so the turn's ``responses`` beyond its
+    calls are counted in ``unreported_calls``."""
+    counted = [_counted(usage.prompt_tokens, usage.completion_tokens, usage.cache_read_tokens,
+                        usage.cache_write_tokens, True if responses_api else None) for usage, responses_api in calls]
+    unreported = responses - len(calls)
+    details = {"reasoning_tokens": sum(usage.reasoning_tokens or 0 for usage, _ in calls),
+               **({"unreported_calls": unreported} if unreported else {})}
+    return replace(_summed(counted, tool_calls, details), cost_usd=cost)
+
+
+def _counted(prompt: int, output: int, read: int, write: int, counts_cache: bool | None) -> tuple[int, ...]:
+    """A call's input counting its cache, its output, cache read, cache write, and 1 when whether its prompt held the
+    cache is known (said so, ``counts_cache``; nothing cached; or a prompt smaller than the cache), else 0."""
+    if counts_cache or read + write == 0:
+        return prompt, output, read, write, 1
+    if prompt < read + write:
+        return prompt + read + write, output, read, write, 1
+    return prompt, output, read, write, 0
+
+
+def _summed(calls: list[tuple[int, ...]], tool_calls: int, details: dict[str, Any]) -> Usage:
+    """The calls' counts summed: none at all when no call reported usage, the flag unknown when a call's can't be."""
+    if not calls:
+        return Usage(tool_call_count=tool_calls, provider_details=details)
+    input_tokens, output_tokens, read, write, settled = (sum(column) for column in zip(*calls))
+    return Usage(tool_call_count=tool_calls, input_tokens=input_tokens, output_tokens=output_tokens,
+                 total_tokens=input_tokens + output_tokens, cache_read_tokens=read, cache_write_tokens=write,
+                 input_includes_cache=True if settled == len(calls) else None, provider_details=details)
 
 
 @dataclass(slots=True)

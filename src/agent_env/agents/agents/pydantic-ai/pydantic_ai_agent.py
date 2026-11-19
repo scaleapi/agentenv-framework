@@ -14,7 +14,7 @@ import shutil
 import tarfile
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -163,6 +163,50 @@ class Outcome:
     usage: Usage
     error_code: str | None = None
     error_type: Literal["agent_error", "infra_error"] = "agent_error"
+
+
+def turn_usage(responses: Iterable[Any], *, tool_calls: int, requests: int) -> Usage:
+    """A turn's usage from the usage Pydantic AI kept of each model response (its ``RequestUsage``), with
+    ``input_tokens`` counting the cache. Pydantic AI reads its cache counts from OpenAI's ``prompt_tokens_details``,
+    whose prompt counts them; a LiteLLM proxy's Claude answers send Anthropic's ``cache_read_input_tokens`` and
+    ``cache_creation_input_tokens`` beside a prompt that doesn't, which Pydantic AI keeps in ``details``. Those are
+    added when the prompt is smaller than them, and leave the turn's flag unknown otherwise, since the counts can't say.
+    A response that kept no usage at all, as a streamed Claude answer through that proxy, is counted in
+    ``unreported_calls`` instead of as nothing used."""
+    calls, unreported = [], 0
+    for usage in responses:
+        if not (usage.input_tokens or usage.output_tokens):
+            unreported += 1
+            continue
+        details = usage.details or {}
+        if usage.cache_read_tokens or usage.cache_write_tokens:
+            read, write, counts_cache = usage.cache_read_tokens, usage.cache_write_tokens, True
+        else:
+            read = details.get("cache_read_input_tokens", 0)
+            write = details.get("cache_creation_input_tokens", 0)
+            counts_cache = None
+        calls.append(_counted(usage.input_tokens, usage.output_tokens, read, write, counts_cache))
+    return _summed(calls, tool_calls, {"requests": requests, **({"unreported_calls": unreported} if unreported else {})})
+
+
+def _counted(prompt: int, output: int, read: int, write: int, counts_cache: bool | None) -> tuple[int, ...]:
+    """A call's input counting its cache, its output, cache read, cache write, and 1 when whether its prompt held the
+    cache is known (said so, ``counts_cache``; nothing cached; or a prompt smaller than the cache), else 0."""
+    if counts_cache or read + write == 0:
+        return prompt, output, read, write, 1
+    if prompt < read + write:
+        return prompt + read + write, output, read, write, 1
+    return prompt, output, read, write, 0
+
+
+def _summed(calls: list[tuple[int, ...]], tool_calls: int, details: dict[str, Any]) -> Usage:
+    """The calls' counts summed: none at all when no call reported usage, the flag unknown when a call's can't be."""
+    if not calls:
+        return Usage(tool_call_count=tool_calls, provider_details=details)
+    input_tokens, output_tokens, read, write, settled = (sum(column) for column in zip(*calls))
+    return Usage(tool_call_count=tool_calls, input_tokens=input_tokens, output_tokens=output_tokens,
+                 total_tokens=input_tokens + output_tokens, cache_read_tokens=read, cache_write_tokens=write,
+                 input_includes_cache=True if settled == len(calls) else None, provider_details=details)
 
 
 @dataclass(slots=True)
