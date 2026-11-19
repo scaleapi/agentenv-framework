@@ -74,8 +74,9 @@ class Computer:
 
     def _run(self, params: dict) -> dict:
         try:
-            done = subprocess.run(params["argv"], cwd=self.home, env={**os.environ, **(params.get("env") or {})},
-                                  capture_output=True, text=True, timeout=params["timeout_s"])
+            done = subprocess.run(params["argv"], cwd=self.home / (params.get("cwd") or ""),
+                                  env={**os.environ, **(params.get("env") or {})}, capture_output=True, text=True,
+                                  timeout=params["timeout_s"])
         except subprocess.TimeoutExpired:
             return {"exit_code": None, "stdout": "", "stderr": "", "truncated": False, "timed_out": True}
         return {"exit_code": done.returncode, "stdout": done.stdout, "stderr": done.stderr, "truncated": False,

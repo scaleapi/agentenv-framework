@@ -156,7 +156,7 @@ UNAFFECTED = frozenset({
     "aggregate_verifiers", "apply_server_config", "browser_activate_tab", "browser_clear_local_storage",
     "browser_close_tab", "browser_delete_cookies", "browser_lease_context", "browser_open_tab",
     "browser_release_context", "browser_set_cookies", "browser_sign_in", "browser_set_local_storage", "build_mcp_cli",
-    "combine_universe_verdicts", "configure_scheduled_checks", "deploy_env", "deploy_sandbox", "end_browser_recording",
+    "combine_universe_verdicts", "computer_exec", "configure_scheduled_checks", "deploy_env", "deploy_sandbox", "end_browser_recording",
     "end_computer_recording", "start_browser_recording", "start_computer_recording", "env_outcome_verifier",
     "modify_env_tool_access", "reset_env", "review", "user_sim_judge",
     "run_container_unit_tests_verifier", "run_docker_container", "set_env_clock_rate", "snapshot_env", "snapshot_computer_env",
