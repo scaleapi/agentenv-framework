@@ -244,7 +244,7 @@ class Video:
     default; sealed by ``end``, which answers its manifest and, with ``manifest``, uploads it beside the segments.
     ``streams`` says the source streams rather than polls, ``cursor`` that its frames draw the pointer, and
     ``annotate``, when given, that each frame draws the inputs it shows (``annotate.Annotations``); a segment a native
-    recorder finished is kept as it came."""
+    recorder finished is kept as it came, so a recording that took one names no ``annotate`` in its manifest."""
 
     def __init__(self, recording_id: str, hints: RecordHints, features: Recording, root: Path,
                  grant: Optional[WriteNamespaceGrant], source: Callable[[RecordHints], AsyncIterator], *,
@@ -263,6 +263,7 @@ class Video:
         self.cursor = cursor
         self.annotate = annotate
         self.annotations = annotating.Annotations() if annotate is not None else None
+        self.native = False
         self.segments: list[_Segment] = []
         self.encoder: Optional[_Encoder] = None
         self.ended_by: Optional[str] = None
@@ -361,7 +362,8 @@ class Video:
             recording_id=self.id, scope=self.hints.scope, format=MP4, fps=self.hints.fps, cursor=self.cursor,
             source="stream" if self.streams else "capture", started_at=entries[0].started_at if entries else None,
             ended_at=entries[-1].ended_at if entries else None, ended_by=self.ended_by, segments=entries,
-            error=self.error if self.ended_by == "error" else None, annotate=self.annotate).wire()
+            error=self.error if self.ended_by == "error" else None,
+            annotate=None if self.native else self.annotate).wire()
         if uploader is not None and self.uploads_manifest:  # beside the segments, so a reader who didn't end the
             with contextlib.suppress(Exception):  # recording finds it
                 await uploader.upload(f"{self.prefix}/{MANIFEST}", json.dumps(manifest).encode())
@@ -370,7 +372,7 @@ class Video:
     async def _add_frame(self, item: RecordedFrame) -> None:
         at = item.captured_at
         marks = self.annotations.showing(at) if self.annotations is not None else []
-        frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge, marks, at)
+        frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge, marks)
         if self.encoder is not None and ((frame.width, frame.height) != self.encoder.size
                                          or (at - self.encoder.last_at).total_seconds() > GAP_S
                                          or (at - self.encoder.started_at).total_seconds() >= self.hints.max_segment_s):
@@ -383,6 +385,7 @@ class Video:
         self._check_disk()
 
     async def _add_segment(self, item: RecordedSegment) -> None:
+        self.native = True
         index = len(self.segments)
         target = self.hints.directory / f"{index:04d}.mp4"
         if Path(item.path) != target:
@@ -549,11 +552,10 @@ def _draw_pointer(image: PILImage.Image, x: float, y: float) -> None:
     ImageDraw.Draw(image).polygon([(x + dx, y + dy) for dx, dy in arrow], fill=(0, 0, 0), outline=(255, 255, 255))
 
 
-def _video_frame(image: Any, max_edge: Optional[int], marks: list = (), at: Optional[datetime] = None) -> Any:
-    """``image`` as a ``yuv420p`` frame of even size, its longer edge at most ``max_edge``, with ``marks`` drawn as a
-    frame captured ``at`` shows them."""
+def _video_frame(image: Any, max_edge: Optional[int], marks: list = ()) -> Any:
+    """``image`` as a ``yuv420p`` frame of even size, its longer edge at most ``max_edge``, with ``marks`` drawn."""
     if marks:
-        image = annotating.draw(image, marks, at)
+        image = annotating.draw(image, marks)
     frame = image if isinstance(image, av.VideoFrame) else av.VideoFrame.from_image(image.convert("RGB"))
     width, height = frame.width, frame.height
     if max_edge is not None and max(width, height) > max_edge:

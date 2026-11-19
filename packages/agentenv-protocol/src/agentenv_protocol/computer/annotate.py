@@ -25,12 +25,20 @@ DEFAULT_ROLE = "default"
 COLOURS = ((255, 138, 0), (0, 184, 148), (175, 82, 222), (255, 59, 105), (52, 120, 246), (250, 204, 21))
 #: How long a mark shows from its input, in seconds; a drag's, after its moves.
 SHOW_S = {"click": 0.8, "down": 0.8, "up": 0.8, "move": 0.5, "scroll": 0.9, "drag": 0.8, "chip": 1.6}
+#: The last part of a mark's time, in seconds, over which it fades out.
+FADE_S = 0.3
+#: How long a mark no frame has drawn is kept, in seconds: past it, the recording's frames have stopped coming.
+KEEP_S = 30.0
+#: The inputs whose marks are drawn at a point of the display.
+POINTED = ("click", "drag", "scroll", "pointer_move", "pointer_down", "pointer_up")
 #: The most a chip of typed text shows, which grows with its length from the chip's own time.
 MOST_TEXT_S = 4.0
 #: The most of a chip's text it shows; the rest is cut with an ellipsis.
 CHIP_CHARS = 60
 #: The most chips shown at once, the newest lowest.
 MOST_CHIPS = 4
+#: How far above the bottom edge, as a fraction of the frame's height, the lowest chip ends.
+CHIPS_ABOVE = 0.1
 #: A frame's longer edge that marks are sized for; on a larger or smaller frame they scale with it.
 UNIT_EDGE = 1280
 #: Arguments a tool's chip shows, the first one a call has.
@@ -70,22 +78,43 @@ def check_annotate(annotate: object) -> Optional[dict]:
 
 
 class Annotations:
-    """One annotated recording's marks, from their inputs until they stop showing, and the colour of each role."""
+    """One annotated recording's marks, from their inputs until they stop showing, and the colour of each role. Each
+    mark shows on every frame captured while it lasts, and on the first one after its input however late that comes,
+    as at a low fps or from a slow capture."""
 
     def __init__(self) -> None:
         self.marks: list[Mark] = []
+        self.drawn: set[int] = set()
         self.colours: dict[str, tuple[int, int, int]] = {DEFAULT_ROLE: COLOURS[0]}
 
     def add(self, marks: Sequence[Mark]) -> None:
         for mark in marks:
             self.colours.setdefault(mark.role, COLOURS[len(self.colours) % len(COLOURS)])
+            stale = mark.at - timedelta(seconds=KEEP_S)
+            self._keep([kept for kept in self.marks if kept.until > stale])
             self.marks.append(mark)
 
-    def showing(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int]]]:
-        """The marks a frame captured ``at`` shows, with their colours. A stream's frames come in the order they were
-        captured, so a mark over by then is over for every later frame too."""
-        self.marks = [mark for mark in self.marks if mark.until > at]
-        return [(mark, self.colours[mark.role]) for mark in self.marks if mark.at <= at]
+    def showing(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
+        """The marks a frame captured ``at`` shows, each with its colour and the age, in seconds, it is drawn at: a
+        mark over by then that no frame has drawn yet is drawn once, at the age it is last fully shown. A stream's
+        frames come in the order they were captured, so a mark that is over and drawn is over for every later one."""
+        shown = []
+        for mark in self.marks:
+            if mark.at > at:
+                continue
+            age = (at - mark.at).total_seconds()
+            if at >= mark.until:
+                if id(mark) in self.drawn:
+                    continue
+                age = max(0.0, (mark.until - mark.at).total_seconds() - FADE_S)
+            shown.append((mark, self.colours[mark.role], age))
+            self.drawn.add(id(mark))
+        self._keep([mark for mark in self.marks if mark.until > at or id(mark) not in self.drawn])
+        return shown
+
+    def _keep(self, marks: list[Mark]) -> None:
+        self.marks = marks
+        self.drawn &= {id(mark) for mark in marks}
 
 
 def input_marks(operation: str, args: tuple, *, role: Optional[str], at: datetime, size: tuple[int, int],
@@ -170,20 +199,19 @@ def tool_mark(tool: str, arguments: Mapping[str, Any], *, role: Optional[str], a
                 label=label if role == DEFAULT_ROLE else f"{role}: {label}")
 
 
-def draw(image: Any, marks: Sequence[tuple[Mark, tuple[int, int, int]]], at: datetime) -> PILImage.Image:
-    """``image``, a Pillow image or a PyAV frame, with ``marks`` drawn as a frame captured ``at`` shows them."""
+def draw(image: Any, marks: Sequence[tuple[Mark, tuple[int, int, int], float]]) -> PILImage.Image:
+    """``image``, a Pillow image or a PyAV frame, with ``marks`` drawn, each in its colour at its age."""
     base = (image.to_image() if isinstance(image, av.VideoFrame) else image).convert("RGBA")
     overlay = PILImage.new("RGBA", base.size, (0, 0, 0, 0))
     pen = ImageDraw.Draw(overlay)
     unit = max(base.size) / UNIT_EDGE
     chips = []
-    for mark, colour in marks:
-        age = (at - mark.at).total_seconds()
+    for mark, colour, age in marks:
         span = max((mark.until - mark.at).total_seconds(), 1e-3)
         if mark.kind == "chip":
             chips.append((mark, colour))
             continue
-        fade = 1.0 - max(0.0, (age - span * 0.6) / (span * 0.4))
+        fade = 1.0 - max(0.0, min(1.0, (age - (span - FADE_S)) / FADE_S))
         points = [(fx * base.width, fy * base.height) for fx, fy in mark.points]
         _DRAWERS[mark.kind](pen, mark, points, colour, unit, age, span, fade)
     if chips:
@@ -257,10 +285,10 @@ _DRAWERS = {"click": _draw_click, "down": _draw_press, "up": _draw_press, "move"
 
 
 def _draw_chips(pen, chips, size, unit) -> None:
-    """Chips stacked above the bottom edge, centred, the newest lowest."""
+    """Chips stacked centred above the bottom edge, clear of a panel or dock there, the newest lowest."""
     font = _font(max(10, round(20 * unit)))
     pad, gap = unit * 10, unit * 8
-    y = size[1] - unit * 48
+    y = size[1] - max(unit * 48, size[1] * CHIPS_ABOVE)
     for mark, colour in reversed(chips):
         left, top, right, bottom = pen.textbbox((0, 0), mark.label, font=font)
         w, h = right - left + 2 * pad, bottom - top + 2 * pad * 0.7

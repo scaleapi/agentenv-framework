@@ -33,6 +33,7 @@ from .prefix import ToolPrefix
 from .settings import TOOL_PREFIX_ENV, ComputerSettings, load_settings, tool_prefix_problem
 from .tools import COMPUTER_TOOLS, Tools
 
+_log = logging.getLogger(__name__)
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
 
@@ -133,10 +134,13 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         since it acts without ``act``, which marks the SDK's: a subclass that has its own calls this one too."""
         apps.note_agent_acted(self._computer.apps)
         if self._computer.recordings.annotating():
-            name = self._computer_prefix.own(context.tool)
-            if name not in COMPUTER_TOOLS and self._computer_tool_acts(name):
-                self._computer.recordings.note([annotate.tool_mark(name, context.arguments, role=context.role,
-                                                                   at=datetime.now(timezone.utc))])
+            try:
+                name = self._computer_prefix.own(context.tool)
+                if name not in COMPUTER_TOOLS and self._computer_tool_acts(name):
+                    self._computer.recordings.note([annotate.tool_mark(name, context.arguments, role=context.role,
+                                                                       at=datetime.now(timezone.utc))])
+            except Exception as e:  # a mark is best effort: the call goes ahead without one
+                _log.warning("couldn't mark %s on an annotated recording: %s: %s", context.tool, type(e).__name__, e)
         return None
 
     def _computer_tool_acts(self, name: str) -> bool:

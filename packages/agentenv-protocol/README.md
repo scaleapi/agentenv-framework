@@ -774,8 +774,10 @@ class MyDriver(ComputerDriverEnvironment):
   square for the right button, a ring for each click of a double or triple), a trail for a drag, an
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
   each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
-  main argument. Every `computer_*` input is marked as `act` delivers it; a segment a native recorder
-  finished is kept as it came. The manifest's `annotate` is the object the recording drew with.
+  main argument. Every `computer_*` input is marked as `act` delivers it, best effort, and shows on
+  every frame while it lasts and on the first one after it however late, as at a low fps. A segment a
+  native recorder finished is kept as it came. The manifest's `annotate` is the object the recording
+  drew with, and is left out for one that took a native recorder's segments.
 - **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
   `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
   SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,

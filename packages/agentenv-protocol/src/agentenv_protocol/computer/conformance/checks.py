@@ -1102,7 +1102,7 @@ class Probe:
 
         async def annotated() -> str | None:
             """A recording with annotate draws the probe's click where it landed, from no later than the frame that
-            first shows the click's effect, and no frame before the click draws it."""
+            first shows the click's effect, and its first frame, captured before the click, draws none."""
             if "annotate" not in params:
                 raise NotApplicable("the card lists no annotate in computer-recording/v1's params")
             started = await self.driver.invoke(COMPUTER_RECORDING, "start", {
@@ -1192,20 +1192,10 @@ class Probe:
         """What is wrong with an annotated recording of one click at frame pixel ``point`` of a frame ``size``, the
         clicked cell showing ``was`` at ``inside`` before it, or None. All its times are the computer's own."""
         manifest = RecordingManifest.model_validate(wire)
+        if manifest.annotate is None:
+            return "its manifest names no annotate: a recorder that hands over finished segments isn't drawn on"
         if manifest.annotate != {}:
             return f"its manifest's annotate is {manifest.annotate!r}, not the {{}} it was started with"
-        frames: list[tuple[datetime, Any, tuple[int, int]]] = []
-        for segment in manifest.segments:
-            data = await self._read_back(segment)
-            if isinstance(data, str):
-                return data
-            with av.open(io.BytesIO(data)) as container:
-                decoded = list(container.decode(container.streams.video[0]))
-            for f in decoded:
-                frames.append((_when(segment.started_at) + timedelta(seconds=f.time - decoded[0].time), f.to_image(),
-                               (f.width, f.height)))
-        if not frames:
-            return "it kept no frames"
 
         def at(xy: tuple[int, int], shape: tuple[int, int]) -> tuple[int, int]:
             return (min(shape[0] - 1, xy[0] * shape[0] // size[0]), min(shape[1] - 1, xy[1] * shape[1] // size[1]))
@@ -1221,8 +1211,22 @@ class Probe:
         def changed(picture: Any, shape: tuple[int, int]) -> bool:
             return _distance(picture.getpixel(at(inside, shape)), was) >= NEAR_COLOUR
 
-        first_marked = next((i for i, (_, picture, shape) in enumerate(frames) if marked(picture, shape)), None)
-        first_changed = next((i for i, (_, picture, shape) in enumerate(frames) if changed(picture, shape)), None)
+        frames: list[tuple[datetime, bool, bool]] = []  # each frame's capture time, whether it draws the mark and
+        for segment in manifest.segments:  # whether it shows the click's effect; not the frames, which run large
+            data = await self._read_back(segment)
+            if isinstance(data, str):
+                return data
+            with av.open(io.BytesIO(data)) as container:
+                first: float | None = None
+                for f in container.decode(container.streams.video[0]):
+                    first = f.time if first is None else first
+                    picture, shape = f.to_image(), (f.width, f.height)
+                    frames.append((_when(segment.started_at) + timedelta(seconds=f.time - first),
+                                   marked(picture, shape), changed(picture, shape)))
+        if not frames:
+            return "it kept no frames"
+        first_marked = next((i for i, (_, mark, _) in enumerate(frames) if mark), None)
+        first_changed = next((i for i, (_, _, change) in enumerate(frames) if change), None)
         if first_changed is None:
             return f"the clicked cell never changed in its {len(frames)} frames, so the click can't be placed on them"
         if first_marked is None:

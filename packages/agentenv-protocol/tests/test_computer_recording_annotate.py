@@ -18,9 +18,17 @@ from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
 from agentenv_protocol import EnvironmentTool, ForwardedTool  # noqa: E402
-from agentenv_protocol.computer import COMPUTER_RECORDING, Recording  # noqa: E402
+from agentenv_protocol.computer import (  # noqa: E402
+    COMPUTER_RECORDING,
+    DeviceUnavailable,
+    RecordedSegment,
+    Recording,
+    record,
+)
 from agentenv_protocol.computer.annotate import (  # noqa: E402
     COLOURS,
+    FADE_S,
+    KEEP_S,
     Annotations,
     draw,
     input_marks,
@@ -41,6 +49,29 @@ def home(tmp_path, monkeypatch):
 
 class Recorded(FakeDriver):
     recording = Recording(max_segment_s=60)
+
+
+class Segmented(FakeDriver):
+    """A native recorder that hands over a finished segment, which the base class keeps as it came."""
+    recording = Recording(max_segment_s=60)
+
+    @record
+    async def segments(self, hints):
+        path = hints.directory / "0000.mp4"
+        start = datetime.now(timezone.utc)
+        out = av.open(str(path), "w", format="mp4")
+        stream = out.add_stream("libx264", rate=10)
+        stream.width, stream.height, stream.pix_fmt = 160, 100, "yuv420p"
+        for i in range(3):
+            frame = av.VideoFrame.from_image(PILImage.new("RGB", (160, 100))).reformat(format="yuv420p")
+            frame.pts = i
+            for packet in stream.encode(frame):
+                out.mux(packet)
+        for packet in stream.encode():
+            out.mux(packet)
+        out.close()
+        yield RecordedSegment(path, start, start + timedelta(seconds=0.2), 160, 100, 3)
+        await asyncio.sleep(3600)
 
 
 class Forwarding(Recorded):
@@ -209,7 +240,55 @@ def test_a_mark_lands_at_its_point_on_a_frame_of_any_size():
     at = T0 + timedelta(milliseconds=400)
 
     for size in ((1000, 500), (400, 200), (2000, 1000)):
-        image = draw(PILImage.new("RGB", size, (255, 255, 255)), annotations.showing(at), at)
+        image = draw(PILImage.new("RGB", size, (255, 255, 255)), annotations.showing(at))
         cx, cy = size[0] // 2, size[1] // 2
         assert any(image.getpixel((cx + dx, cy + dy)) == COLOURS[0] for dx in range(-3, 4) for dy in range(-3, 4)), size
         assert image.getpixel((5, 5)) == (255, 255, 255)
+
+
+def test_a_mark_no_frame_caught_while_it_lasted_shows_fully_on_the_first_frame_after_it_once():
+    """At a low fps, or after a slow capture, the next frame may come after a click's mark is over."""
+    annotations = Annotations()
+    [click] = input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100))
+    annotations.add([click])
+
+    [(mark, _colour, age)] = annotations.showing(T0 + timedelta(seconds=3))
+    span = (click.until - click.at).total_seconds()
+    assert mark is click and age == pytest.approx(span - FADE_S)
+    assert annotations.showing(T0 + timedelta(seconds=4)) == [] and annotations.marks == []
+
+
+def test_marks_no_frame_draws_are_kept_only_so_long():
+    annotations = Annotations()
+    annotations.add(input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100)))
+    later = T0 + timedelta(seconds=KEEP_S + 1)
+    annotations.add(input_marks("click", (20, 20, "left", 1, []), role=None, at=later, size=(100, 100)))
+
+    assert [mark.at for mark in annotations.marks] == [later]
+
+
+@pytest.mark.asyncio
+async def test_an_input_goes_ahead_when_its_mark_cant_be_made():
+    """Reading the display for a mark fails: the scroll is still delivered, unmarked."""
+    driver = Recorded()
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        recording = driver._computer.recordings.running[started["recording_id"]]
+        await session.call_tool("computer_screenshot", {})
+        driver.fail["display"] = DeviceUnavailable("the display went away")
+        scrolled = await session.call_tool("computer_scroll", {"direction": "down"})
+        marks = list(recording.annotations.marks)
+        await http.post(END, json={"recording_id": started["recording_id"]})
+
+    assert not scrolled.isError and driver.screen.log[-1][0] == "scroll" and marks == []
+
+
+@pytest.mark.asyncio
+async def test_a_recording_of_a_native_recorders_finished_segments_names_no_annotate():
+    driver = Segmented()
+    async with http_client(driver) as http:
+        started = (await http.post(START, json={"request_id": "r", "annotate": {}})).json()
+        await asyncio.sleep(0.3)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
+
+    assert manifest["segments"] and "annotate" not in manifest
