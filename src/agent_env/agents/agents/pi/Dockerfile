@@ -17,6 +17,8 @@ FROM mirror.gcr.io/library/ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34
 WORKDIR /app
 # Named sources: agent-env packs the build context install/v1 copies from the COPY sources.
 COPY a2a_server.py changelog.py install.sh peers.py pi_agent.py requirements.txt start.sh ./
+# Every clocked agent's egress rule, which the bridge imports, and the clock page's format it reads (shared_sources.toml).
+COPY agent_clock/agent_egress.py clock/clockpage.py ./
 RUN sh install.sh \
     && useradd --create-home agent \
     && mkdir /workspace \
