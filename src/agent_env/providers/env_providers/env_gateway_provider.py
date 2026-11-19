@@ -1230,7 +1230,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 return False
             return True
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=_CONSOLE_PROBE_TIMEOUT_S) as client:
             found = await asyncio.gather(*(served(client, key) for key in keys))
         return {key: f"{gateway_url}/svc/{key}{_CONSOLE_PATHS[key]}" for key, ok in zip(keys, found) if ok}
 
@@ -1883,6 +1883,8 @@ def _seconds(seconds: float) -> str:
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
 # time, if startup's didn't complete.
 _STATE_READ_TIMEOUT_S = 60.0
+# Asking the gateway for each SQL console at deploy: each request's budget, and how often and how far apart it asks.
+_CONSOLE_PROBE_TIMEOUT_S = 30.0
 _CONSOLE_RETRY_PAUSE_S = 5.0
 _CONSOLE_ATTEMPTS = 4
 
