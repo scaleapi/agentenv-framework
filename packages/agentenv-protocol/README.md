@@ -1677,12 +1677,14 @@ what they serve. The SDK knows:
   credential-like key names (`Authorization`, `api_key`, `token`, `password`,
   ...), so a mapping of sampling parameters keeps its ordinary words;
 - an MCP registration's header values and credential-like query values, and a
-  CDP endpoint's header values and its URLs, unless one is a bare origin;
-- every transfer grant an extension call hands the agent: its URL whole, its
-  path and query as a request line names them, its credential-like query
-  values (`X-Amz-Signature` is one, `X-Amz-Algorithm` isn't), its headers
-  other than `Content-Type` and the like, and a signed upload form's signing
-  fields;
+  CDP endpoint's header values and the token in its URLs;
+- every transfer grant an extension call hands the agent: the parts of its URL
+  that carry the credential (a presigned URL's credential-like query values,
+  `X-Amz-Signature` but not `X-Amz-Algorithm`; a token-like path segment of a
+  URL with no query; a password), its headers other than `Content-Type` and the
+  like, and a signed upload form's signing fields. Every copy of the URL holds
+  those parts, so a URL an agent prints keeps its host and path and loses its
+  signature;
 - a clock follower's read token;
 - whatever the agent registers with `self.register_secret(value)`, once its app
   exists (in `run`, say).

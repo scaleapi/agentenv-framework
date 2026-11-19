@@ -184,7 +184,7 @@ def _cdp_url(monkeypatch: pytest.MonkeyPatch, client: Callable[[], TestClient]) 
     added = opened.post("/ext/cdp-config", json={"name": "web", "http_url": "https://gateway.example.test",
                                                  "ws_url": ws_url})
     assert added.status_code == 200, added.text
-    return opened, ws_url
+    return opened, "cdp-token-0123456789"
 
 
 @pytest.mark.parametrize("handed", [_model_key, _model_headers, _control_token, _write_only_config, _mcp_headers,
@@ -209,7 +209,7 @@ def test_a_secret_the_sdk_holds_or_is_handed_is_redacted(monkeypatch: pytest.Mon
     _assert_redacted(reads, secret)
 
 
-def test_a_presigned_grant_is_redacted_whole_as_a_request_line_names_it_and_by_its_signature() -> None:
+def test_a_presigned_grant_is_redacted_by_its_signature_wherever_it_is_printed() -> None:
     secrets = Secrets()
     url = ("https://bucket.example.test/runs/1/trajectory.json?X-Amz-Algorithm=AWS4-HMAC-SHA256"
            "&X-Amz-Date=20261119T204500Z&X-Amz-Signature=abcdef0123456789&X-Amz-Expires=900")
@@ -217,10 +217,8 @@ def test_a_presigned_grant_is_redacted_whole_as_a_request_line_names_it_and_by_i
         kind="http-get", url=url, expires_at=datetime.now(timezone.utc) + timedelta(hours=1))))
     target = url.removeprefix("https://bucket.example.test")
     plain = "signed with AWS4-HMAC-SHA256 at 20261119T204500Z"
-    assert secrets.scrub([url, f"GET {target} HTTP/1.1", "sig abcdef0123456789", plain,
-                          f"wrapped {quote(url, safe='')}"]) == [
-        f"[redacted:{len(url)}]", f"GET [redacted:{len(target)}] HTTP/1.1", "sig [redacted:16]", plain,
-        f"wrapped [redacted:{len(quote(url, safe=''))}]"]
+    printed = [url, f"GET {target} HTTP/1.1", "sig abcdef0123456789", plain, f"wrapped {quote(url, safe='')}"]
+    assert secrets.scrub(printed) == [text.replace("abcdef0123456789", "[redacted:16]") for text in printed]
 
 
 def test_a_tokened_url_is_redacted_by_its_token_and_plain_paths_and_values_are_left_unwarned(
@@ -250,6 +248,20 @@ def test_a_write_only_mapping_is_redacted_by_its_credentials_alone(monkeypatch: 
         document = client.post("/ext/trajectory", json={"task_id": task_id, "format": FORMAT}).json()["trajectory"]
     assert document["steps"][0]["message"] == "priority enabled toy agent app [redacted:24] [redacted:15]"
     assert not [record for record in caplog.records if "shorter than" in record.message]
+
+
+def test_a_roles_grants_add_their_signatures_alone() -> None:
+    """Every grant a role signs carries the same session token and access key: each is one secret, so a grant's share of
+    the match is its signature, however long its URL."""
+    secrets = Secrets()
+    token = "IQoJb3JpZ2luX2VjEJr" + "x" * 800
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    for n in range(200):
+        secrets.add_request(HttpPutGrant(kind="http-put", expires_at=expires, url=(
+            f"https://store.s3.ca-central-1.amazonaws.com/runs/{n}/trajectory.json?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+            "&X-Amz-Credential=ASIAEXAMPLE0123%2F20261119%2Fca-central-1%2Fs3%2Faws4_request"
+            f"&X-Amz-Security-Token={token}&X-Amz-Signature={n:064x}")))
+    assert sum(map(len, secrets._forms)) < 200 * 64 + 5 * (len(token) + 80)
 
 
 def test_a_signed_upload_form_is_redacted_by_its_signing_fields_alone() -> None:
@@ -324,7 +336,7 @@ def test_many_grants_compile_once_when_a_read_needs_them(monkeypatch: pytest.Mon
         secrets.add_request(HttpGetGrant(kind="http-get", url=url, expires_at=expires))
     assert compiled == []
     text = " ".join(["fetched", urls[1234], "and", "x" * 50_000])
-    assert secrets.scrub(text).startswith(f"fetched [redacted:{len(urls[1234])}] and")
+    assert secrets.scrub(text).startswith(f"fetched {urls[1234].replace(f'{1234:024d}', '[redacted:24]')} and")
     assert secrets.scrub("again") == "again" and len(compiled) == 1
 
 

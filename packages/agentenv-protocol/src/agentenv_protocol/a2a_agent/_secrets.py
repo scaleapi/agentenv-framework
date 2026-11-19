@@ -93,7 +93,8 @@ class Secrets:
             self.add_all(_header_values(headers), source=MODEL_HEADERS_ENV)
 
     def add_request(self, request: BaseModel | None) -> None:
-        """Every secret an extension call hands the agent: its grants' URLs, query values, headers and signing fields,
+        """Every secret an extension call hands the agent: the parts of its grants' URLs that carry their credentials,
+        their headers and signing fields,
         an MCP or CDP registration's credentials and a clock follower's read token, wherever the request holds them."""
         for item in _models(request):
             if isinstance(item, (HttpGetGrant, HttpPutGrant, HttpPostPolicyGrant)):
@@ -209,18 +210,17 @@ def _grant_secrets(grant: HttpGetGrant | HttpPutGrant | HttpPostPolicyGrant) -> 
 
 
 def _url_secrets(url: str) -> list[str]:
-    """A URL that can carry a credential, in its path, query or user info: whole, and the part that carries it. A
-    presigned URL keeps its signature in its query, so its credential-like query values and its path and query as a
-    request line names them (``curl -v`` prints that); a URL with no query keeps its token in a long path segment. A
-    bare origin carries none."""
+    """The parts of a URL that carry its credential: a presigned URL's credential-like query values, the token-like path
+    segments of a URL with no query, as a grant server's, and its password. Every copy of the URL, whole or as a
+    request line, holds them, so redacting them is enough; the rest (its host, its path, ``X-Amz-Algorithm``) isn't
+    secret, and leaving it keeps each grant's share of the match to its signature: the session token and access key a
+    role signs every grant with are each one secret."""
     parts = urlsplit(url)
-    if not parts.path.strip("/") and not parts.query and parts.password is None:
-        return []
     if parts.query:
-        carried = [f"{parts.path}?{parts.query}", *_query_values(url)]
+        carried = _query_values(url)
     else:
         carried = [segment for segment in parts.path.split("/") if _TOKEN_SEGMENT.fullmatch(segment)]
-    return [url, *carried, *([parts.password] if parts.password else [])]
+    return [*carried, *([parts.password] if parts.password else [])]
 
 
 def _query_values(url: str) -> list[str]:
