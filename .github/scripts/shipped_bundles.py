@@ -27,6 +27,9 @@ PROTOCOL = "agentenv-framework-protocol"
 _PINNED_KINDS = ("envs", "artifacts")
 # The shipped env folders whose images a release publishes, as agent_env.env.published_images.EXAMPLE_IMAGES lists them.
 PUBLISHED_ENVS = ("src/agent_env/examples/mail-mcp/envs/mail",)
+# The shipped folders whose requirements don't install the protocol, so a release has nothing to pin in them: the
+# osworld-server app's, which runs upstream OSWorld's guest server.
+PROTOCOL_FREE = ("src/agent_env/task_step/task_steps/computer/osworld/envs/osworld-server",)
 # A requirement on the protocol, with its extras, and not on a package whose name starts with the protocol's.
 _PROTOCOL_REQUIREMENT = re.compile(rf"^{PROTOCOL}(\[[^\]]*\])?(?![\w.-])")
 # The quoted requirement in pyproject.toml, with its extras: the directory name in the sdist include list and the uv
@@ -42,9 +45,9 @@ def bundle_roots(repo: Path = REPO) -> dict[str, Path]:
 
 
 def requirements_files(repo: Path = REPO) -> list[Path]:
-    """Every ``<bundle>/<envs|artifacts>/<name>/requirements*.txt`` a shipped bundle holds but a ``PUBLISHED_ENVS``
-    folder's: those a release pins."""
-    published = {repo / folder for folder in PUBLISHED_ENVS}
+    """Every ``<bundle>/<envs|artifacts>/<name>/requirements*.txt`` a shipped bundle holds but a ``PUBLISHED_ENVS`` or
+    ``PROTOCOL_FREE`` folder's: those a release pins."""
+    published = {repo / folder for folder in (*PUBLISHED_ENVS, *PROTOCOL_FREE)}
     return sorted(path for root in bundle_roots(repo).values() for kind in _PINNED_KINDS
                   for path in root.glob(f"{kind}/*/requirements*.txt") if path.parent not in published)
 

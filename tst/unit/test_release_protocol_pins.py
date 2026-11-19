@@ -126,6 +126,14 @@ def test_each_shipped_requirements_file_the_release_pins_holds_one_protocol_line
     assert all(len(lines) == 1 for lines in pinned.values()), pinned
 
 
+def test_the_protocol_free_folders_name_no_protocol_and_the_release_leaves_them_alone():
+    files = [path for folder in shipped_bundles.PROTOCOL_FREE for path in (REPO / folder).glob("requirements*.txt")]
+
+    assert len(files) == len(shipped_bundles.PROTOCOL_FREE)
+    assert not [path for path in files if "agentenv-framework-protocol" in path.read_text()]
+    assert not set(files) & set(shipped_bundles.requirements_files())
+
+
 def test_each_shipped_agent_and_published_env_requires_the_protocol_by_a_floor():
     """Nothing pins theirs at release, so an exact version there would hold the image to that protocol."""
     files = [path for root in shipped_bundles.bundle_roots().values()

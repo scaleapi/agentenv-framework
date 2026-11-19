@@ -1,0 +1,38 @@
+# What upstream OSWorld's setup, getters and metrics import, which the osworld_* steps run in the worker: install it
+# where they run, `pip install -r <this file>`. Left out: easyocr (it pulls torch in for compare_image_text alone,
+# which fails without it), gymnasium (DesktopEnv isn't imported), and upstream's agent, model and cloud SDKs. dev in
+# pyproject.toml carries the same lines, for the e2e test.
+requests>=2.31
+requests-toolbelt>=1.0
+websocket-client>=1.8.0
+python-dotenv>=1.0
+playwright>=1.40
+pydrive>=1.3
+numpy>=1.26
+Pillow>=11
+pandas>=2.2
+pytz>=2024.1
+opencv-python-headless>=4.8
+openpyxl>=3.1
+lxml>=5
+cssselect>=1.2
+xmltodict>=0.13
+rapidfuzz>=3
+python-docx>=1.1
+python-pptx>=1.0
+odfpy>=1.4
+pypdf>=4
+PyPDF2>=3
+pdfplumber>=0.11
+pymupdf>=1.24
+borb<3
+beautifulsoup4>=4.12
+scikit-image>=0.22
+scipy>=1.11
+ImageHash>=4.3
+librosa>=0.10
+pyacoustid>=1.3
+fastdtw>=0.3
+mutagen>=1.47
+formulas>=1.2
+tldextract>=5

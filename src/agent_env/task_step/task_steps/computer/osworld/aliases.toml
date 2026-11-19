@@ -1,0 +1,3 @@
+# Ids a task can name this bundle's app by; a store's entity of the id wins over an alias.
+[envs]
+osworld-server = ["osworld-server"]

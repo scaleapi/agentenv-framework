@@ -73,7 +73,8 @@ def test_the_gate_checks_the_folder_of_every_shipped_bundle():
                      "desktop": "src/agent_env/examples/desktop", "drivers": "src/agent_env/drivers",
                      "echo-mcp": "src/agent_env/examples/echo-mcp", "hello": "src/agent_env/examples/hello",
                      "mail-mcp": "src/agent_env/examples/mail-mcp",
-                     "next-env-event": "src/agent_env/examples/next-env-event"}
+                     "next-env-event": "src/agent_env/examples/next-env-event",
+                     "osworld": "src/agent_env/task_step/task_steps/computer/osworld"}
 
 
 def test_the_checkout_makes_each_published_image_as_the_installed_sources_do_when_they_are_its_own(monkeypatch):

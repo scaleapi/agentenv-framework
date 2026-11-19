@@ -130,7 +130,7 @@ def test_the_plugin_report_counts_the_bundles_agent_env_ships(monkeypatch, quiet
         (BUNDLES, "advance-to-next-event", "active"), (BUNDLES, "agents", "active"), (BUNDLES, "browsers", "active"),
         (BUNDLES, "computers", "active"), (BUNDLES, "desktop", "active"), (BUNDLES, "drivers", "active"),
         (BUNDLES, "echo-mcp", "active"), (BUNDLES, "hello", "active"), (BUNDLES, "mail-mcp", "active"),
-        (BUNDLES, "next-env-event", "active")]
+        (BUNDLES, "next-env-event", "active"), (BUNDLES, "osworld", "active")]
     assert "\n  agent-env itself\n" in shown and "requires:" not in shown
 
 
