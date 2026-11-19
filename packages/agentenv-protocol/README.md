@@ -1532,6 +1532,39 @@ are dropped, least recently used first; a context with a task still pending or
 running is never dropped, nor is the one whose task has just ended. A running
 task's log is logged as a warning once it passes 100 MiB.
 
+#### Trajectory formats
+
+`native` declares the format of the agent's native trajectory:
+
+```python
+enable(TRAJECTORY_V1, live=True, native="my-cli-events/1")
+```
+
+The card then lists three fields in the trajectory extension's `params`, beside
+`methods`:
+
+- `formats`: the formats a read may name.
+- `native`: the native trajectory's format, which never changes.
+- `default`: the format a read that names none gets; for now it is `native`.
+
+A card without `formats` predates them, so send its reads no `format`. With
+`native` declared, the log starts in that format and `set_format` is optional.
+A `set_format` or a returned `native_trajectory` in another format fails the
+turn as an `agent_error` with code `framework.trajectory_format_mismatch`, whose
+message names both formats.
+
+Every trajectory read takes an optional `format`. A read naming none gets the
+default. A read naming a format the card doesn't list is HTTP 400 with the error
+code `format_not_offered`, and its message lists the formats the card offers.
+That check comes before any handler runs, the agent's own included.
+
+Every read the framework answers names the format it served: `{trajectory, format}`,
+`{objects, format}`, and the cursor reads' `format`. A task whose result carries a
+`native_trajectory` is served in that trajectory's `format`. A context read names
+the most recent format its tasks set. Readers trust a response's `format` over
+the card. An agent that binds its own context reads should name, in their
+responses, the format it serves.
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic
@@ -1552,8 +1585,11 @@ configuration keywords, and third-party definitions use the same public API as
 the built-ins.
 
 Extension request parsing and schema validation failures return HTTP 400.
-Unhandled exceptions raised by an implementation handler return HTTP 500;
-handlers use `HTTPException` when they intentionally need another status.
+An `AgentEnvError` raised by a handler answers with its `status` and the body
+`{"ok": false, "error": {code, message, retryable, applied, hint?}}`, as it does
+from an env (see [Errors](#errors)). Other unhandled exceptions raised by an
+implementation handler return HTTP 500 with a correlation ID; handlers use
+`HTTPException` when they intentionally need another status.
 
 Passing `config=MyAgentConfig` automatically enables `AGENT_CONFIG_V1`; direct
 `enable(AGENT_CONFIG_V1, ...)` declarations are rejected. The model's fields become the Agent Card's
@@ -1882,9 +1918,9 @@ optional field, `|` an alternative request):
 | Operation | Request | Response |
 | --- | --- | --- |
 | skill `add` | `{name, description, skill_md}` \| `{name, description, skill_bundle: {max_total_bytes, files: [{path, object: ReadObject}]}}` | `{name}` |
-| trajectory `get` | `{task_id}` \| `{context_id}` | `{trajectory}` |
-| | `{task_id \| context_id, objects: {trajectory: WriteObject}}` | `{objects: {trajectory: Uploaded}}` |
-| | `{task_id \| context_id, after, limit?}` | `{context_id, task_id, state, format, events, next, has_more}` |
+| trajectory `get` | `{task_id, format?}` \| `{context_id, format?}` | `{trajectory, format}` |
+| | `{task_id \| context_id, objects: {trajectory: WriteObject}, format?}` | `{objects: {trajectory: Uploaded}, format}` |
+| | `{task_id \| context_id, after, limit?, format?}` | `{context_id, task_id, state, format, events, next, has_more}` |
 | snapshot `save` | `{context_id, objects: {trajectory: WriteObject, workspace?: WriteObject}}` | `{context_id, objects: {trajectory: Uploaded, workspace?: Uploaded}}` |
 | snapshot `load` | `{objects: {trajectory: ReadObject, workspace?: ReadObject}, target_context_id?}` | `{context_id}` |
 | `enable-changelog` | `{write_namespace: WriteNamespaceGrant, roots?}` | `{roots}` |

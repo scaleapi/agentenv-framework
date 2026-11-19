@@ -18,7 +18,9 @@ from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task
 from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
+from agent_env.bundle import register as register_module
 from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.register import register_bundle
 from agent_env.bundle.requires import Provider
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
@@ -33,7 +35,7 @@ from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
-from tst.unit.bundle._support import context_image, fake_plugins
+from tst.unit.bundle._support import context_image, fake_plugins, layout
 
 STEPS = [
     {"id": "env", "type": "deploy_env", "env_id": "crm-env"},
@@ -745,3 +747,70 @@ def test_an_installed_bundles_entity_floats_unpinned_so_the_import_runs_it_from_
     assert ("dropped" in imported.floating[0].why) == (pin is not None) and imported.pinned == ()
     assert _steps(imported.root, "t")[0]["a2a_agent_version"] is None
 
+
+
+AGENT_NAMED_BY_ALIAS = [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "claude-code"}]
+
+
+@pytest.fixture
+def registry(local_stores, tmp_path, monkeypatch, agents_published):
+    """A registry of bare ids, with ``register`` registering a bundle into it, outside git."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(register_module, "_git", lambda root, *args: None)
+    return lambda name, steps: register_bundle(layout(tmp_path / name, {"tasks/t.json": json.dumps(steps)}))
+
+
+def test_an_agent_registered_from_an_installed_bundle_under_its_alias_floats_by_the_alias(registry, tmp_path):
+    registry("triage", AGENT_NAMED_BY_ALIAS)
+
+    imported = import_task("triage-t", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    assert [(ref.where, ref.id) for ref in imported.floating] == [
+        ("tasks/triage-t.json: step 'agent': a2a_agent_id", "claude-code")]
+    assert "registered from the installed bundle agentenv-framework" in imported.floating[0].why
+    assert "the stored pin to v1 is dropped" in imported.floating[0].why
+    assert imported.written == () and not (imported.root / "agents").exists()
+    step = _steps(imported.root, "triage-t")[0]
+    assert (step["a2a_agent_id"], step["a2a_agent_version"]) == ("claude-code", None)
+
+
+@pytest.mark.parametrize("registered_first", [False, True])
+def test_an_agent_stored_under_an_installed_alias_by_anything_else_is_written_into_the_folder(registry, tmp_path,
+                                                                                             registered_first):
+    if registered_first:
+        registry("triage", AGENT_NAMED_BY_ALIAS)
+    A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _task("own", AGENT_NAMED_BY_ALIAS)
+
+    imported = import_task("own", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    assert "claude-code" not in [ref.id for ref in imported.floating]
+    assert [(entity.folder, entity.id, entity.version) for entity in imported.written] == [
+        ("agents/claude-code-2", "claude-code", 2 if registered_first else 1)]
+    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == "claude-code-2"
+
+
+def test_a_folder_never_takes_an_alias_a_step_floats_so_each_version_keeps_its_own(registry, tmp_path):
+    registry("triage", AGENT_NAMED_BY_ALIAS)
+    A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _task("both", [{**AGENT_NAMED_BY_ALIAS[0], "id": "own", "a2a_agent_version": 2},
+                   {**AGENT_NAMED_BY_ALIAS[0], "id": "registered", "a2a_agent_version": 1}])
+
+    imported = import_task("both", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    steps = _steps(imported.root, "both")
+    assert [step["a2a_agent_id"] for step in steps] == ["claude-code-2", "claude-code"]
+    assert [(entity.folder, entity.version) for entity in imported.written] == [("agents/claude-code-2", 2)]
+    assert [(ref.where, ref.id) for ref in imported.floating if ref.id == "claude-code"] == [
+        ("tasks/both.json: step 'registered': a2a_agent_id", "claude-code")]
+
+
+def test_an_export_whose_steps_name_no_installed_alias_never_reads_the_registration_ledger(store, monkeypatch):
+    def unreachable(*args, **kwargs):
+        raise AssertionError("the registration ledger was read")
+
+    monkeypatch.setattr(importer_module, "configured_store", unreachable)
+
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
+
+    assert [entity.folder for entity in imported.written] == ["envs/crm-env", "artifacts/crm-data", "agents/solver"]
