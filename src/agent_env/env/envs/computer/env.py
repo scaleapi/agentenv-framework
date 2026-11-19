@@ -395,7 +395,18 @@ class ComputerEnv(Env):
         """Write each file of ``file_artifact_universe`` under ``destination_path``, a folder relative to the session
         user's home (``Downloads`` by default), through the driver's ``data/add``, as that user; the result's paths are
         relative to the home too, since the home's path differs by OS."""
-        return await load_files(self._deployed, file_artifact_universe, destination_path, name=self.id)
+        if destination_path is not None and posixpath.isabs(destination_path):
+            raise ValueError(f"{self.id}: a computer's destination_path is relative to its session user's home, not "
+                             f"{destination_path!r}")
+        destination = posixpath.normpath(destination_path or DEFAULT_DESTINATION)
+        validate_relative_filename(destination)
+        files = file_artifact_universe.get_file_artifacts()
+        for filename in files:
+            validate_relative_filename(filename)
+        paths = {filename: posixpath.normpath(posixpath.join(destination, filename)) for filename in files}
+        await inside.add_artifacts(self._deployed, {paths[filename]: artifact for filename, artifact in files.items()})
+        logger.info(f"Loaded {len(files)} file(s) of '{file_artifact_universe.id}' into {self.id}'s ~/{destination}")
+        return LoadFileArtifactUniverseResult(destination_path=destination, files=paths)
 
     async def load_environment_artifact(self, environment_artifact: EnvironmentArtifact) -> None:
         """Write the files of ``environment_artifact`` at their paths through the data plane its name reaches: the
@@ -564,23 +575,3 @@ def _waiting(awaited: dict[tuple[str, str], str | None], seconds: float) -> str:
 def _tools_problems(tools: Any) -> list[str]:
     return [] if tools is None or tools in TOOLS else [
         f"tools is {', '.join(map(repr, list(TOOLS)[:-1]))} or {list(TOOLS)[-1]!r}, not {tools!r}"]
-
-
-async def load_files(deployed: DeployedEnv, file_artifact_universe: Any, destination_path: Optional[str] = None,
-                     name: Optional[str] = None) -> LoadFileArtifactUniverseResult:
-    """``ComputerEnv.load_file_artifact_universe`` on the computer ``deployed`` records, which may be one of a multi
-    env's computers (its ``child_envs``): each file written under ``destination_path``, relative to the session user's
-    home, through the driver's ``data/add``."""
-    name = name or deployed.env_id
-    if destination_path is not None and posixpath.isabs(destination_path):
-        raise ValueError(f"{name}: a computer's destination_path is relative to its session user's home, not "
-                         f"{destination_path!r}")
-    destination = posixpath.normpath(destination_path or DEFAULT_DESTINATION)
-    validate_relative_filename(destination)
-    files = file_artifact_universe.get_file_artifacts()
-    for filename in files:
-        validate_relative_filename(filename)
-    paths = {filename: posixpath.normpath(posixpath.join(destination, filename)) for filename in files}
-    await inside.add_artifacts(deployed, {paths[filename]: artifact for filename, artifact in files.items()})
-    logger.info(f"Loaded {len(files)} file(s) of '{file_artifact_universe.id}' into {name}'s ~/{destination}")
-    return LoadFileArtifactUniverseResult(destination_path=destination, files=paths)

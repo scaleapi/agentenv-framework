@@ -1,7 +1,6 @@
 [
   {"id": "env", "type": "deploy_env", "env_id": "office"},
-  {"id": "files", "type": "load_artifact", "env_id": "office", "computer": "desk", "artifact_id": "setup_files",
-   "destination_path": ".", "depends_on": ["env"]},
+  {"id": "files", "type": "load_artifact", "env_id": "office", "artifact_id": "desk_files", "depends_on": ["env"]},
   {"id": "read", "type": "computer_exec", "env_id": "office", "depends_on": ["files"],
    "command": "cat Desktop/a.csv notes/b.txt"}
 ]
