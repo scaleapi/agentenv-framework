@@ -29,6 +29,11 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ..atif import FORMAT as ATIF_FORMAT
+from ..atif import PROFILE_KEY as ATIF_PROFILE_KEY
+from ..atif import PROFILE_VERSION as ATIF_PROFILE_VERSION
+from ..atif import SCHEMA_VERSION as ATIF_SCHEMA_VERSION
+from ._atif_copy import TurnStart
 from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
@@ -56,6 +61,9 @@ from .extensions import (
     TaskEventsTrajectoryRequest,
     TaskObjectTrajectoryRequest,
     TaskTrajectoryRequest,
+    AtifEventsResponse,
+    AtifObjectsResponse,
+    AtifUploadedObjects,
     TrajectoryEventsResponse,
     TrajectoryObjectsResponse,
     TrajectoryState,
@@ -563,9 +571,14 @@ class _SdkServices:
         self.cdp_endpoints: dict[str, dict[str, Any]] = {}
         trajectory = self._activations.get(TRAJECTORY_V1.uri)
         native = trajectory.options.get("native") if trajectory is not None else None
+        atif = trajectory.options.get("atif") if trajectory is not None else None
         #: What a trajectory read may name, as the card's trajectory ``formats`` lists them.
-        self.trajectory_formats: tuple[str, ...] = (native,) if native else ()
-        self.task_trajectories = TaskTrajectories(native=native)
+        self.trajectory_formats: tuple[str, ...] = (
+            (native, ATIF_FORMAT) if atif is not None else (native,) if native else ()
+        )
+        self.task_trajectories = TaskTrajectories(native=native, atif=atif)
+        #: Whether the card offers atif/1, served from the copy an adapter builds.
+        self.serves_atif = atif is not None
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -819,10 +832,14 @@ class _SdkServices:
         | ContextObjectTrajectoryRequest
         | ContextEventsTrajectoryRequest,
     ) -> Any:
+        if request.format == ATIF_FORMAT:
+            return await self._atif_get(request)
         if isinstance(
             request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)
         ):
             return self._trajectory_events(request)
+        if isinstance(request, (TaskObjectTrajectoryRequest, ContextObjectTrajectoryRequest)):
+            _refuse_turn_objects(request)
         if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
             trajectory = self.task_trajectories.final(request.task_id)
             if trajectory is None:
@@ -844,6 +861,88 @@ class _SdkServices:
         return TrajectoryObjectsResponse(
             objects=TrajectoryUploadedObjects(trajectory=uploaded), format=trajectory.format
         )
+
+    async def _atif_get(
+        self,
+        request: TaskTrajectoryRequest
+        | TaskObjectTrajectoryRequest
+        | TaskEventsTrajectoryRequest
+        | ContextTrajectoryRequest
+        | ContextObjectTrajectoryRequest
+        | ContextEventsTrajectoryRequest,
+    ) -> dict[str, Any]:
+        """An atif/1 read, served from the context's copy: a task read is the document as it
+        stood when the task ended, with its aux log and turn context; a context read is the live
+        page; a cursor read pages closed steps by ``step_id``."""
+        trajectories = self.task_trajectories
+        if isinstance(request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)):
+            max_steps = request.limit or MAX_TRAJECTORY_READ_EVENTS
+            try:
+                if isinstance(request, TaskEventsTrajectoryRequest):
+                    found = trajectories.atif_task_page(
+                        request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                    )
+                    unknown = f"Unknown task '{request.task_id}'"
+                else:
+                    found = trajectories.atif_context_page(
+                        request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                    )
+                    unknown = f"Unknown context '{request.context_id}'"
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if found is None:
+                raise HTTPException(status_code=404, detail=unknown)
+            if isinstance(request, TaskEventsTrajectoryRequest):
+                page, context_id, state = found
+                task_id = request.task_id
+            else:
+                page, task_id, state = found
+                context_id = request.context_id
+            return AtifEventsResponse(
+                context_id=context_id,
+                task_id=task_id,
+                state=state,
+                **_atif_versions(page.header),
+                header=page.header,
+                subagents=page.subagents,
+                events=page.steps,
+                next=page.next,
+                has_more=page.has_more,
+            ).model_dump(mode="json", exclude_none=True)
+        aux: list[dict[str, Any]] | None = None
+        turn: dict[str, Any] | None = None
+        if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
+            found_task = trajectories.atif_task(request.task_id)
+            if found_task is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No completed trajectory available for task '{request.task_id}'",
+                )
+            document, aux, turn = found_task
+        else:
+            if isinstance(request, ContextObjectTrajectoryRequest):
+                _refuse_turn_objects(request)
+            document = trajectories.atif_context(request.context_id)
+            if document is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Context '{request.context_id}' has no {ATIF_FORMAT} step to serve yet",
+                )
+        versions = _atif_versions(document)
+        if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
+            answer: dict[str, Any] = {"trajectory": document, "format": ATIF_FORMAT, **versions}
+            if turn is not None:
+                answer.update(aux=aux, turn_context=turn)
+            return answer
+        objects = request.objects
+        uploaded = AtifUploadedObjects(
+            trajectory=await upload(objects.trajectory, _json_bytes(document)),
+            aux=None if objects.aux is None else await upload(objects.aux, _json_bytes(aux)),
+            turn_context=(
+                None if objects.turn_context is None else await upload(objects.turn_context, _json_bytes(turn))
+            ),
+        )
+        return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
 
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
@@ -1232,6 +1331,9 @@ class A2AAgentApplication:
                     extension_request = request_model.model_validate(payload)
                 if extension_uri == TRAJECTORY_V1.uri:
                     self.services.check_trajectory_format(extension_request.format)
+                    if extension_request.format == ATIF_FORMAT:
+                        # The SDK serves atif/1 from its own copy, context reads an agent binds included.
+                        handler = self.services.trajectory_get
             except HTTPException:
                 raise
             except AgentEnvError as exc:
@@ -1343,13 +1445,22 @@ class _StandardExecutor:
                 **({"role": task_config.role} if task_config.role is not None else {}),
             }
             async with self._context_locks.acquire(task.context_id):
-                trajectories.start(task.id)
+                parts = tuple(_from_a2a_part(part) for part in (context.message.parts or []))
+                turn = None
+                if self._services.serves_atif:
+                    card = self._services.card
+                    turn = TurnStart(
+                        message_id=getattr(context.message, "message_id", None),
+                        parts=parts,
+                        agent_name=card.name,
+                        agent_version=card.version,
+                        agent_model=_config_model(task_config),
+                    )
+                trajectories.start(task.id, turn)
                 request = TaskRequest(
                     task_id=task.id,
                     context_id=task.context_id,
-                    parts=tuple(
-                        _from_a2a_part(part) for part in (context.message.parts or [])
-                    ),
+                    parts=parts,
                     config=task_config,
                     mcp_servers=self._services.task_mcp_servers(),
                     cdp_endpoints=self._services.cdp_endpoints,
@@ -1365,7 +1476,7 @@ class _StandardExecutor:
                     else:
                         result = await self._handler(request)
                     if isinstance(result, TaskResult) and result.native_trajectory is not None:
-                        trajectory._hold_to_native(result.native_trajectory.format)
+                        trajectory._hold_returned(result.native_trajectory.format)
                 except _TaskFailed as failed:
                     result = TaskResult.failure(
                         failed.error.code, failed.error.message, error_type=failed.error.error_type
@@ -1387,6 +1498,8 @@ class _StandardExecutor:
                 else TrajectoryState.COMPLETED,
                 native=None if native is None else _encode_trajectory(native.payload),
                 native_format=None if native is None else native.format,
+                final=result.parts,
+                error=result.error,
             )
             message = updater.new_agent_message(parts=parts)
             if result.outcome is TaskOutcome.FAILED:
@@ -1397,17 +1510,17 @@ class _StandardExecutor:
             trajectories.seal(task.id, TrajectoryState.CANCELED)
             raise
         except Exception:
-            trajectories.seal(task.id, TrajectoryState.FAILED)
             correlation_id = uuid.uuid4().hex
-            logger.exception(
-                "unhandled task execution error (correlation_id=%s)",
-                correlation_id,
-            )
             failure = TaskResult.failure(
                 "framework.unhandled_exception",
                 "An unexpected framework error occurred. "
                 f"Correlation ID: {correlation_id}",
                 error_type="infra_error",
+            )
+            trajectories.seal(task.id, TrajectoryState.FAILED, error=failure.error)
+            logger.exception(
+                "unhandled task execution error (correlation_id=%s)",
+                correlation_id,
             )
             await updater.failed(
                 message=updater.new_agent_message(parts=_to_a2a_parts(failure))
@@ -1485,6 +1598,39 @@ class _StandardExecutor:
 
         self._services.task_trajectories.request_cancel(context.task_id)
         await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
+
+
+def _refuse_turn_objects(
+    request: TaskObjectTrajectoryRequest | ContextObjectTrajectoryRequest,
+) -> None:
+    """``aux`` and ``turn_context`` grants ride only an atif/1 task read, which has them to upload."""
+    if request.objects.aux is not None or request.objects.turn_context is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"aux and turn_context objects go with an {ATIF_FORMAT} task read only",
+        )
+
+
+def _atif_versions(document: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What every atif/1 answer names beside its format: the served document's ATIF and profile
+    versions."""
+    if document is None:
+        return {"schema_version": ATIF_SCHEMA_VERSION, "profile_version": ATIF_PROFILE_VERSION}
+    profile = (document.get("extra") or {}).get(ATIF_PROFILE_KEY) or {}
+    return {
+        "schema_version": document.get("schema_version", ATIF_SCHEMA_VERSION),
+        "profile_version": profile.get("version", ATIF_PROFILE_VERSION),
+    }
+
+
+def _config_model(config: AgentConfig) -> str | None:
+    """The model an agent's own config names, for the atif/1 copy's agent; the base config has none."""
+    model = getattr(config, "model", None)
+    return model if isinstance(model, str) and model else None
+
+
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(value, separators=(",", ":"), allow_nan=False).encode()
 
 
 def _from_a2a_part(part: Any) -> Any:

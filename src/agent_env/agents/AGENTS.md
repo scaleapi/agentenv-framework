@@ -142,7 +142,10 @@ serves the reads; bind `get.context` and `get.context_objects` to serve a whole 
 `native="<format id>"` in that `enable` declares the format: the card lists it as `formats`, `native` and `default`,
 a read naming any other format is refused before your handlers run, and the log and a returned `native_trajectory`
 must be in it. It needs a protocol floor that has `native`. A context read you bind names the format it serves as
-`format` in its response.
+`format` in its response. `atif=<adapter class>` there, an `@atif_adapter` class for that native format, has the SDK
+serve `atif/1` too, built from your log as you append it: write the adapter (`agentenv_protocol.atif`, its
+`PROFILE.md`), feed records that aren't in the native log, such as hooks' notes, with
+`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime

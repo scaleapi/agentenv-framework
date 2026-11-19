@@ -35,6 +35,7 @@ from .profile import (
     MetricsProfile,
     ObservationResultProfile,
     ReasoningBlock,
+    StepData,
     StepError,
     StepProfile,
     SubagentTrajectoryRefProfile,
@@ -46,7 +47,7 @@ from .profile import (
 )
 from .kit import KIT_RULES, KitResult, check_adapter
 from .reader import Task, check, is_prefix, load, media_paths, strip_profile, tasks
-from .runner import AdapterRun, Fed, RecordedTask, replay
+from .runner import AdapterRun, Fed, RecordedTask, replay, served_turn
 from .validator import RULES, Finding, Rule, errors_in, validate, validate_live
 
 __all__ = [
@@ -56,7 +57,7 @@ __all__ = [
     "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "media_paths", "MediaInfo", "Metrics", "MetricsProfile",
     "Native", "native", "Observation", "ObservationResult", "ObservationResultProfile", "PROFILE_KEY", "profile_of",
     "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS", "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule",
-    "RULES", "SCHEMA_VERSION", "Selector", "Step", "StepError", "StepProfile", "strip_profile", "SubagentTrajectoryRef",
-    "SubagentTrajectoryRefProfile", "Task", "tasks", "timestamp", "ToolCall", "ToolCallProfile", "Trajectory",
-    "TrajectoryProfile", "TurnContext", "validate", "validate_live", "VOCABULARIES",
+    "RULES", "SCHEMA_VERSION", "Selector", "served_turn", "Step", "StepData", "StepError", "StepProfile",
+    "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "tasks", "timestamp", "ToolCall",
+    "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "VOCABULARIES",
 ]

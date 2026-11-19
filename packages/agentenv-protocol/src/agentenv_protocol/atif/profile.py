@@ -95,6 +95,13 @@ class AgentProfile(_Profile):
     pass
 
 
+class StepData(_Profile):
+    """A DataPart of a task's final response that isn't its answer, such as a harness's diagnostics, kept whole."""
+
+    data: Any = None
+    metadata: dict[str, Any] | None = None
+
+
 class StepProfile(_Profile):
     context_id: str | None = None
     task_id: str | None = None
@@ -105,6 +112,7 @@ class StepProfile(_Profile):
     error: StepError | None = None
     reasoning: list[ReasoningBlock] | None = None
     media: dict[str, MediaInfo] | None = None
+    data: list[StepData] | None = None
 
 
 class ToolCallProfile(_Profile):
