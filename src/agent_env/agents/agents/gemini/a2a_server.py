@@ -452,6 +452,7 @@ async def _vertex_openai_bridge(
         enable(
             TRAJECTORY_V1,
             live=True,
+            native=TRAJECTORY_FORMAT,
             description="Retrieve a task's Gemini stream-json trajectory, also while it runs.",
         ),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Gemini CLI should connect to."),

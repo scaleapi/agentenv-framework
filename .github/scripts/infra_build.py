@@ -268,11 +268,9 @@ def _publish(missing: str) -> int:
             continue
         if code != 1:
             return 1
+        # No --annotation: buildx refuses annotations on a Docker list; each platform build carries the same --labels.
         created = _tried_again(lambda: _streamed([
-            "docker", "buildx", "imagetools", "create", "-t", ref,
-            "--annotation", f"index:org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
-            "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
-            f"{ref}-amd64", f"{ref}-arm64"]))
+            "docker", "buildx", "imagetools", "create", "-t", ref, f"{ref}-amd64", f"{ref}-arm64"]))
         if created.returncode:
             return created.returncode
     return 0

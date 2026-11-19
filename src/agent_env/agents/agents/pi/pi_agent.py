@@ -368,7 +368,8 @@ def _unpack(archive: Path, directory: Path) -> None:
     config_description="Configure the pi runtime: model, effort, system prompt and tool allowlist.",
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, description="The pi JSON-mode event stream of a completed task."),
+        enable(TRAJECTORY_V1, native=TRAJECTORY_FORMAT,
+               description="The pi JSON-mode event stream of a completed task."),
         enable(
             SNAPSHOT_V1,
             description=(

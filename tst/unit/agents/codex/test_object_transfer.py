@@ -268,7 +268,7 @@ def test_a_context_trajectory_is_uploaded_through_its_grant(codex, monkeypatch, 
     assert result == {"objects": {"trajectory": {
         "size_bytes": len(store.objects["traj/ctx.json"]),
         "sha256": hashlib.sha256(store.objects["traj/ctx.json"]).hexdigest(),
-    }}}
+    }}, "format": a2a_server.TRAJECTORY_FORMAT}
     assert (inline["trajectory"], inline["is_live"]) == (events, live)
 
 

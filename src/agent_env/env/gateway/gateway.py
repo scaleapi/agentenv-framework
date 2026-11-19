@@ -58,6 +58,7 @@ from .constants import (
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
+    IDLE_CONNECTION_TIMEOUT_S,
     MCP_TRANSPORT,
     METHOD_ADD,
     METHOD_GET,
@@ -565,15 +566,7 @@ class Gateway:
 
     def run(self) -> None:
         logger.info(f"Starting Gateway on {self.host}:{self.port} (mode={self.gateway_mode.value})")
-        config = uvicorn.Config(
-            self._asgi_app(),
-            host=self._mcp.settings.host,
-            port=self._mcp.settings.port,
-            log_level=self._mcp.settings.log_level.lower(),
-            ws_ping_interval=PING_INTERVAL_S,
-            ws_ping_timeout=PING_INTERVAL_S,
-        )
-        server = uvicorn.Server(config)
+        server = uvicorn.Server(self._server_config())
         if self._resolve_i6pn_host():
             # On Modal's i6pn, serve both families: IPv4 for the orchestrator's HTTPS tunnel and
             # IPv6 for backing servers reaching the gateway over the i6pn mesh. A lone `::` bind
@@ -582,6 +575,17 @@ class Gateway:
                                      self._listen_socket(socket.AF_INET6, "::")])
         else:
             anyio.run(server.serve)
+
+    def _server_config(self) -> uvicorn.Config:
+        return uvicorn.Config(
+            self._asgi_app(),
+            host=self._mcp.settings.host,
+            port=self._mcp.settings.port,
+            log_level=self._mcp.settings.log_level.lower(),
+            ws_ping_interval=PING_INTERVAL_S,
+            ws_ping_timeout=PING_INTERVAL_S,
+            timeout_keep_alive=IDLE_CONNECTION_TIMEOUT_S,
+        )
 
     # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
     # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
