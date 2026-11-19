@@ -381,8 +381,6 @@ def test_publish_computers_joins_each_apps_platform_manifests_into_one_index_and
     assert _run(script, monkeypatch, "publish-computers", str(folder)) == 0
 
     assert created == [["docker", "buildx", "imagetools", "create", "-t", _COMPUTER_INDEX,
-                        "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
-                        "--annotation", "index:org.opencontainers.image.revision=c0ffee",
                         f"{_LOCAL}@{_AMD64}", f"{_LOCAL}@{_ARM64}"]]
     computers = json.loads((folder / "computers.json").read_text())
     assert computers == [{"env": CHROMIUM, "form": "container", "index": f"{_COMPUTER_INDEX}@{_INDEX}", "arches": {
