@@ -8,10 +8,9 @@ import inspect
 import json
 import logging
 import os
-import tempfile
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +34,7 @@ from ..atif import PROFILE_KEY as ATIF_PROFILE_KEY
 from ..atif import PROFILE_VERSION as ATIF_PROFILE_VERSION
 from ..atif import SCHEMA_VERSION as ATIF_SCHEMA_VERSION
 from ._atif_copy import TurnStart
-from ._turn_index import SNAPSHOT_STATE_PARAM, SnapshotState
+from ._snapshot_state import SnapshotStates
 from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
@@ -101,7 +100,7 @@ from .tasks.v1 import (
 from .tasks.v1 import (
     TextPart as TaskTextPart,
 )
-from ..transfers import TransferError, download, serving_on, upload
+from ..transfers import TransferError, serving_on, upload
 
 logger = logging.getLogger(__name__)
 
@@ -144,21 +143,6 @@ def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
             raise TypeError(f"AgentConfig fields have duplicate alias {wire_name!r}")
         result[field_name] = wire_name
     return result
-
-
-async def _read_snapshot_state(grant: Any) -> SnapshotState:
-    """The SDK's state a snapshot carries, read through its ``state`` grant."""
-    with tempfile.TemporaryDirectory() as folder:
-        path = Path(folder) / "state.json"
-        await download(grant, path)
-        try:
-            return SnapshotState.model_validate_json(path.read_bytes())
-        except ValidationError as exc:
-            raise AgentEnvError(
-                "snapshot_state_invalid",
-                f"the snapshot's state object isn't the SDK's snapshot state: {exc.errors()[0]['msg']}",
-                status=400,
-            ) from exc
 
 
 def _config_write_only_wire_names(config: type[AgentConfig]) -> set[str]:
@@ -247,42 +231,6 @@ class _BoundedContextLocks:
                 # The temporary excess is proportional only to live work; it
                 # is removed as soon as one of those contexts becomes idle.
                 return
-
-
-@dataclass(slots=True)
-class _InFlight:
-    count: int = 0
-    turn: asyncio.Lock = field(default_factory=asyncio.Lock)
-    done: asyncio.Event = field(default_factory=asyncio.Event)
-
-
-class _SnapshotsInFlight:
-    """Each context's snapshots in flight that carry the SDK's state, taken one at a time: a task of the context waits
-    to start until none is, so the turn count a snapshot saves or restores is its conversation's, and a load can't
-    change the count a save is about to read. A running task isn't held."""
-
-    def __init__(self) -> None:
-        self._contexts: dict[str, _InFlight] = {}
-
-    @asynccontextmanager
-    async def holding(self, context_id: str | None) -> AsyncIterator[None]:
-        if context_id is None:
-            yield
-            return
-        entry = self._contexts.setdefault(context_id, _InFlight())
-        entry.count += 1
-        try:
-            async with entry.turn:
-                yield
-        finally:
-            entry.count -= 1
-            if not entry.count:
-                del self._contexts[context_id]
-                entry.done.set()
-
-    async def wait(self, context_id: str) -> None:
-        while (entry := self._contexts.get(context_id)) is not None:
-            await entry.done.wait()
 
 
 class AgentEnvAgent:
@@ -633,7 +581,8 @@ class _SdkServices:
         self.task_trajectories = TaskTrajectories(native=native, atif=atif)
         #: Whether the card offers atif/1, served from the copy an adapter builds.
         self.serves_atif = atif is not None
-        self.snapshots_in_flight = _SnapshotsInFlight()
+        #: The SDK's state in the agent's snapshots, which only an agent that serves atif/1 keeps.
+        self.snapshot_states = SnapshotStates(self.task_trajectories) if atif is not None else None
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -997,34 +946,6 @@ class _SdkServices:
         )
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
 
-    def card_extension(self, item: dict[str, Any]) -> dict[str, Any]:
-        """An extension's card entry, with what the SDK adds: an agent that serves atif/1 names the state its SDK
-        keeps in each snapshot, so a caller grants the object only to an SDK that takes it."""
-        if self.serves_atif and item.get("uri") == SNAPSHOT_V1.uri:
-            return {**item, "params": {**item.get("params", {}), SNAPSHOT_STATE_PARAM: list(SnapshotState.model_fields)}}
-        return item
-
-    async def snapshot(self, name: str, request: Any, invoke: Callable[[], Awaitable[Any]]) -> Any:
-        """An agent's snapshot ``save`` or ``load``, with the SDK's state, the context's turn count, uploaded after a
-        save and read before a load through the request's ``state`` grant. While one is in flight no task of its
-        context starts, so the count is the conversation's the agent captured; a running task goes on, as a capture
-        mid-task expects."""
-        grant = getattr(getattr(request, "objects", None), "state", None)
-        if not self.serves_atif or grant is None:
-            return await invoke()
-        if name == "save":
-            async with self.snapshots_in_flight.holding(request.context_id):
-                answer = await invoke()
-                state = SnapshotState(turns=self.task_trajectories.turns(request.context_id))
-            uploaded = await upload(grant, state.model_dump_json().encode())
-            return {**answer, "objects": {**answer["objects"],
-                                          "state": uploaded.model_dump(mode="json", exclude_none=True)}}
-        state = await _read_snapshot_state(grant)
-        async with self.snapshots_in_flight.holding(request.target_context_id):
-            answer = await invoke()
-            self.task_trajectories.restored(str(answer["context_id"]), state.turns)
-        return answer
-
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
         runs, the agent's own included."""
@@ -1359,8 +1280,9 @@ class A2AAgentApplication:
             skill if isinstance(skill, AgentSkill) else AgentSkill.model_validate(skill)
             for skill in identity.skills
         ]
+        states = self.services.snapshot_states
         extensions = [
-            AgentExtension.model_validate(self.services.card_extension(item))
+            AgentExtension.model_validate(states.card_extension(item) if states is not None else item)
             for item in self.registry.card_extensions()
         ]
         if self.staging.max_bytes:
@@ -1464,10 +1386,13 @@ class A2AAgentApplication:
                 ):
                     async with self.services.skill_registration(input_payload):
                         result = await invoke_and_validate()
-                elif extension_uri == SNAPSHOT_V1.uri and operation.definition.name in ("save", "load"):
-                    result = await self.services.snapshot(
-                        operation.definition.name, extension_request, invoke_and_validate
-                    )
+                elif (
+                    (states := self.services.snapshot_states) is not None
+                    and extension_uri == SNAPSHOT_V1.uri
+                    and operation.definition.name in ("save", "load")
+                ):
+                    take = states.save if operation.definition.name == "save" else states.load
+                    result = await take(extension_request, invoke_and_validate)
                 else:
                     result = await invoke_and_validate()
                 return JSONResponse(result)
@@ -1541,7 +1466,8 @@ class _StandardExecutor:
                         agent_version=card.version,
                         agent_model=_config_model(task_config),
                     )
-                await self._services.snapshots_in_flight.wait(task.context_id)
+                if self._services.snapshot_states is not None:
+                    await self._services.snapshot_states.task_may_start(task.context_id)
                 trajectories.start(task.id, turn)
                 request = TaskRequest(
                     task_id=task.id,

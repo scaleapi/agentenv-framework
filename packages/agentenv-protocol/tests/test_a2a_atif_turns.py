@@ -33,9 +33,8 @@ from agentenv_protocol.a2a_agent import (
     a2a_agent,
     enable,
     extension,
-    framework,
 )
-from agentenv_protocol.a2a_agent import _turn_index
+from agentenv_protocol.a2a_agent import _snapshot_state, _turn_index
 from agentenv_protocol.a2a_agent._atif_copy import TurnStart
 from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
 from agentenv_protocol.atif import errors_in, validate
@@ -74,6 +73,20 @@ def _grant(kind: str, name: str, media_type: str) -> dict[str, Any]:
             access: {"kind": kind, "url": f"https://objects.example.test/{name}", "expires_at": expires}}
 
 
+def _save(client: TestClient, *, state_type: str = "application/json") -> Any:
+    """A snapshot save of ``ctx-1`` granting its trajectory and the SDK's state, which lands at ``state``."""
+    return client.post("/ext/snapshot", json={"context_id": "ctx-1", "objects": {
+        "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
+        "state": _grant("http-put", "state", state_type)}})
+
+
+def _load(client: TestClient, target: str, *, state: str = "state") -> Any:
+    """A snapshot load into ``target`` from the stored trajectory and the SDK's state stored at ``state``."""
+    return client.put("/ext/snapshot", json={"target_context_id": target, "objects": {
+        "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
+        "state": _grant("http-get", state, "application/json")}})
+
+
 def _users(document: dict[str, Any]) -> list[dict[str, Any]]:
     return [step["extra"]["agentenv"] for step in document["steps"] if step["source"] == "user"]
 
@@ -90,8 +103,8 @@ def objects(monkeypatch: pytest.MonkeyPatch) -> dict[str, bytes]:
     async def download(source, destination: Path) -> None:
         destination.write_bytes(stored[source.read.url.rsplit("/", 1)[-1]])
 
-    monkeypatch.setattr(framework, "upload", upload)
-    monkeypatch.setattr(framework, "download", download)
+    monkeypatch.setattr(_snapshot_state, "upload", upload)
+    monkeypatch.setattr(_snapshot_state, "download", download)
     return stored
 
 
@@ -138,18 +151,14 @@ def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_int
     with TestClient(_snapshotting().create_app()) as client:
         for tag in ("t1", "t2"):
             _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
-        saved = client.post("/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-            "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
-            "state": _grant("http-put", "state", "application/json")}})
+        saved = _save(client)
     assert saved.status_code == 200, saved.text
     assert saved.json()["objects"]["state"]["size_bytes"] == len(objects["state"])
     assert json.loads(objects["state"]) == {"turns": 2}
     # Another container: none of the first one's counts.
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "fresh-agent"))
     with TestClient(_snapshotting().create_app()) as client:
-        loaded = client.put("/ext/snapshot", json={"target_context_id": "ctx-restored", "objects": {
-            "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
-            "state": _grant("http-get", "state", "application/json")}})
+        loaded = _load(client, "ctx-restored")
         assert loaded.status_code == 200, loaded.text
         task_id = _send(client, "work t3", "m-t3", context_id="ctx-restored")
         _ended(client, task_id)
@@ -162,15 +171,11 @@ def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_int
 def test_a_restore_into_a_context_the_agent_holds_starts_a_new_document(objects: dict[str, bytes]) -> None:
     with TestClient(_snapshotting().create_app()) as client:
         _ended(client, _send(client, "work t1", "m-t1"))
-        client.post("/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-            "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
-            "state": _grant("http-put", "state", "application/json")}})
+        _save(client)
         task_id = _send(client, "work t2", "m-t2")
         _ended(client, task_id)
         before = _atif(client, task_id=task_id)["trajectory"]
-        client.put("/ext/snapshot", json={"target_context_id": "ctx-1", "objects": {
-            "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
-            "state": _grant("http-get", "state", "application/json")}})
+        _load(client, "ctx-1")
         task_id = _send(client, "work t3", "m-t3")
         _ended(client, task_id)
         after = _atif(client, task_id=task_id)["trajectory"]
@@ -181,19 +186,15 @@ def test_a_restore_into_a_context_the_agent_holds_starts_a_new_document(objects:
 
 
 def test_a_snapshot_state_that_isnt_the_sdks_is_refused(objects: dict[str, bytes]) -> None:
-    objects["trajectory"], objects["state"] = b"conversation", b'{"turns": -1}'
+    objects["state"] = b'{"turns": -1}'
     with TestClient(_snapshotting().create_app()) as client:
-        refused = client.put("/ext/snapshot", json={"target_context_id": "ctx-restored", "objects": {
-            "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
-            "state": _grant("http-get", "state", "application/json")}})
+        refused = _load(client, "ctx-restored")
     assert refused.status_code == 400 and refused.json()["error"]["code"] == "snapshot_state_invalid", refused.text
 
 
 def test_an_agent_that_serves_no_atif_writes_no_state(objects: dict[str, bytes]) -> None:
     with TestClient(_snapshotting(atif=None).create_app()) as client:
-        saved = client.post("/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-            "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
-            "state": _grant("http-put", "state", "application/json")}})
+        saved = _save(client)
     assert saved.status_code == 200, saved.text
     assert "state" not in saved.json()["objects"] and "state" not in objects
 
@@ -214,9 +215,7 @@ def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(o
         for tag in ("t1", "t2"):
             _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
         with concurrent.futures.ThreadPoolExecutor(1) as pool:
-            saving = pool.submit(client.post, "/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-                "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
-                "state": _grant("http-put", "state", "application/json")}})
+            saving = pool.submit(_save, client)
             paused.reached()
             task_id = _send(client, "work t3", "m-t3")
             time.sleep(0.3)
@@ -232,19 +231,15 @@ def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(o
 
 
 def test_a_load_into_a_context_waits_for_its_save_so_the_save_keeps_its_count(objects: dict[str, bytes]) -> None:
-    objects["trajectory"], objects["older-state"] = b"conversation", b'{"turns": 0}'
+    objects["older-state"] = b'{"turns": 0}'
     paused = _Hold()
     with TestClient(_snapshotting(save_hold=paused).create_app()) as client:
         for tag in ("t1", "t2"):
             _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
-            saving = pool.submit(client.post, "/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-                "trajectory": _grant("http-put", "saved-trajectory", "application/octet-stream"),
-                "state": _grant("http-put", "state", "application/json")}})
+            saving = pool.submit(_save, client)
             paused.reached()
-            loading = pool.submit(client.put, "/ext/snapshot", json={"target_context_id": "ctx-1", "objects": {
-                "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
-                "state": _grant("http-get", "older-state", "application/json")}})
+            loading = pool.submit(_load, client, "ctx-1", state="older-state")
             time.sleep(0.3)
             paused.resume.set()
             saved, loaded = saving.result(timeout=10), loading.result(timeout=10)
@@ -264,9 +259,7 @@ def test_a_save_while_a_task_runs_is_answered_without_waiting_for_it(objects: di
         task_id = _send(client, "late t2", "m-t2")
         running.reached()
         with concurrent.futures.ThreadPoolExecutor(1) as pool:
-            saving = pool.submit(client.post, "/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-                "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
-                "state": _grant("http-put", "state", "application/json")}})
+            saving = pool.submit(_save, client)
             try:
                 saved = saving.result(timeout=5)
             finally:
@@ -307,9 +300,7 @@ def test_a_count_that_cant_be_read_starts_again_with_a_warning(tmp_path: Path, c
 
 def test_a_snapshot_state_grant_names_json() -> None:
     with TestClient(_snapshotting().create_app()) as client:
-        refused = client.post("/ext/snapshot", json={"context_id": "ctx-1", "objects": {
-            "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
-            "state": _grant("http-put", "state", "application/octet-stream")}})
+        refused = _save(client, state_type="application/octet-stream")
     assert refused.status_code == 400 and "state media_type" in refused.text
 
 

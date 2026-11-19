@@ -87,14 +87,14 @@ class TaskTrajectories:
         *,
         native: str | None = None,
         atif: type[Adapter] | None = None,
-        turns: TurnIndex | None = None,
     ) -> None:
         if max_contexts < 1:
             raise ValueError("max_contexts must be positive")
         self._max_contexts = max_contexts
         self._native = native
         self._atif = atif
-        self._turns = turns if turns is not None else TurnIndex() if atif is not None else None
+        #: Each context's count of started tasks, kept only for an agent that serves atif/1.
+        self._turns = TurnIndex() if atif is not None else None
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
         self._copies: dict[str, AtifCopy] = {}
@@ -126,7 +126,7 @@ class TaskTrajectories:
         started = sum(1 for other in order if self._tasks[other].started)
         order.insert(started, task_id)
         record.started = True
-        if self._atif is not None and self._turns is not None and turn is not None:
+        if self._atif is not None and turn is not None:
             copy = self._copies.get(record.context_id)
             if copy is None:
                 copy = self._copies[record.context_id] = AtifCopy(self._atif, record.context_id)
@@ -135,15 +135,15 @@ class TaskTrajectories:
         self._touch(record.context_id)
 
     def turns(self, context_id: str) -> int:
-        """How many tasks the context has started, the count a snapshot of it carries."""
-        return self._turns.count(context_id) if self._turns is not None else 0
+        """How many tasks the context has started, the count a snapshot of it carries; an agent that serves atif/1
+        only."""
+        return self._turns.count(context_id)
 
     def restored(self, context_id: str, turns: int) -> None:
         """A snapshot was restored into the context: its count goes on from the snapshot's, and its next task starts a
-        new document, since the conversation is the snapshot's now."""
-        if self._turns is not None:
-            self._turns.set(context_id, turns)
-            self._copies.pop(context_id, None)
+        new document, since the conversation is the snapshot's now; an agent that serves atif/1 only."""
+        self._turns.set(context_id, turns)
+        self._copies.pop(context_id, None)
 
     def request_cancel(self, task_id: str) -> None:
         """Make ``canceled`` the outcome the task is sealed with, whatever ``run`` returns."""

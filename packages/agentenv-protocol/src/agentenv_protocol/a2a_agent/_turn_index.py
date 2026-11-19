@@ -1,11 +1,10 @@
 """Each A2A context's turn count, kept on disk by the SDK, so a restarted server, or a context evicted from memory, goes
-on counting where it was, and a snapshot carries it to the context it is restored into. Only an agent that serves
-atif/1 keeps one: the count is its ATIF copy's turn index."""
+on counting where it was. Only an agent that serves atif/1 keeps one: the count is its ATIF copy's turn index, which a
+snapshot carries too (``_snapshot_state``)."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 from pathlib import Path
@@ -14,17 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-#: The snapshot extension's card param naming the fields of the state an SDK keeps in each snapshot: a caller grants
-#: the ``state`` object only to an agent whose card has it, since an SDK from before it refuses the object.
-SNAPSHOT_STATE_PARAM = "state"
-
-
-class SnapshotState(BaseModel):
-    """What the SDK keeps in a snapshot beside the agent's own objects: the context's turn count. A newer SDK may add
-    fields, which an older one reading the snapshot leaves alone."""
+class _CountFile(BaseModel):
+    """One context's count on disk, named by the context id's sha256; the id is kept for whoever reads the folder."""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
+    context_id: str
     turns: int = Field(ge=0)
 
 
@@ -55,7 +49,7 @@ class TurnIndex:
         if context_id in self._unwritten:
             return self._unwritten[context_id]
         try:
-            return SnapshotState.model_validate_json(self._path(context_id).read_bytes()).turns
+            return _CountFile.model_validate_json(self._path(context_id).read_bytes()).turns
         except FileNotFoundError:
             return 0
         except (OSError, ValueError) as exc:
@@ -67,7 +61,7 @@ class TurnIndex:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             part = path.with_suffix(".part")
-            part.write_text(json.dumps({"context_id": context_id, "turns": count}))
+            part.write_text(_CountFile(context_id=context_id, turns=count).model_dump_json())
             os.replace(part, path)
         except OSError as exc:
             self._warn("turn counts are kept in memory only, so a restart starts them again: %s", exc)

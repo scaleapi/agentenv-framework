@@ -93,7 +93,7 @@ from .extensions import (
     request_fields,
 )
 from .control_token import ControlTokenMiddleware
-from ._turn_index import SNAPSHOT_STATE_PARAM
+from ._snapshot_state import SNAPSHOT_STATE_PARAM
 from .framework import (
     A2AAgentApplication,
     AgentEnvAgent,
