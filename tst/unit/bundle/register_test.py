@@ -24,10 +24,15 @@ from agent_env.env.envs.computer.utils import composer as composer_module
 from agent_env.env.envs.computer.utils.composed import composition
 from agent_env.env.published_images import COMPUTER_IMAGES
 from agent_env.bundle.register import REGISTRATIONS, _remote_name, register_bundle
+from agent_env.bundle.importer import import_task
+from agent_env.bundle.installed import installed_bundles
+from agent_env.artifact.store import reset_artifact_store
+from agent_env.config import configure
+from agent_env.store.routing import namespace_routing
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
-from agent_env.entity.refs import EntityRef, RefRole
+from agent_env.entity.refs import EntityKind, EntityRef, RefRole
 from agent_env.env.env import Env
 from agent_env.eval import Eval
 from agent_env.bundle.parse import BundleKind, parse_bundle
@@ -591,6 +596,33 @@ def test_a_registration_for_deploys_that_boot_containers_fails_on_a_failed_conta
     result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes", "--sandbox", "docker"])
 
     assert result.exit_code == 1 and "has no build a deploy can boot (container/amd64 failed), so" in result.output
+
+
+def test_a_desktop_on_the_shipped_base_and_driver_exports_naming_them_by_their_aliases(home, composed, monkeypatch):
+    """As a hub's computer task exports: the base and driver it registered from the installed bundles aren't copied, and
+    a fresh store plans the export from the installed bundles."""
+    def compose(env, pairs=None, composing=None):
+        env.update_metadata({**env.metadata, "composed": {"container": {
+            "amd64": {"status": "ready", "image": "desktop", "composer": composition()}}}})
+
+    register_bundle(_desktop(home, monkeypatch, compose))
+    imported = import_task("desk-t", home / "imported")
+
+    assert sorted(entity.folder for entity in imported.written) == ["envs/desk-desktop"]
+    desktop = (imported.root / "envs/desk-desktop/env.toml").read_text()
+    assert 'computer = "ubuntu-24.04"' in desktop and 'driver = "reference"' in desktop
+    assert sorted((ref.where, ref.id) for ref in imported.floating) == [
+        ("envs/desk-desktop", "reference"), ("envs/desk-desktop", "ubuntu-24.04")]
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / "elsewhere"))
+    configure()
+    reset_artifact_store()
+    with namespace_routing():
+        plan = plan_bundle(resolve_bundle(parse_bundle(imported.root)), installed=installed_bundles)
+    assert {alias: use.target_id for alias, use in plan.alias_uses[EntityKind.ARTIFACT].items()} == {
+        "ubuntu-24.04": "@local/agentenv-framework/computers/ubuntu-24.04"}
+    assert {alias: use.target_id for alias, use in plan.alias_uses[EntityKind.ENV].items()} == {
+        "reference": "@local/agentenv-framework/drivers/reference"}
 
 
 def test_a_write_that_fails_leaves_no_pending_row(home, monkeypatch):
