@@ -104,13 +104,18 @@ async def _forward_port(config, network=None):
         server.close()
 
 
+# How long a test waits for the proxy to log the connections it checks, and how often it looks.
+LOG_WAIT_S = 10.0
+LOG_POLL_S = 0.02
+
+
 async def _until_logged(capsys, count: int) -> str:
     """What the proxy has written to stderr once it holds ``count`` records: each connection is logged as it ends, so a
     test waits for the records rather than for a fixed time a loaded runner can outlast."""
     log = ""
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(LOG_WAIT_S):
         while len(_logged(log)) < count:
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(LOG_POLL_S)
             log += capsys.readouterr().err
     return log
 
