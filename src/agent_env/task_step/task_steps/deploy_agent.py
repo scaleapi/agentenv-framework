@@ -551,6 +551,8 @@ class DeployAgentTaskStep(TaskStep):
             role=self.role,
             network_policy=deployed.network_policy,
             env_ids=list(self.env_ids),
+            env_bindings={env_id: (d.metadata or {}).get("deploy_step_id")
+                          for env_id, d in env_deployments.items() if d is not None},
             control_token=deployed.control_token,
         ))
         # An agent deployed while a clock is armed follows it, as sync_env_clock had every agent then.
