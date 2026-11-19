@@ -322,3 +322,18 @@ def test_a_message_level_signature_goes_only_to_the_first_parallel_call(vertex, 
     parts = client.post(GENERATE, json=_GREQ).json()["candidates"][0]["content"]["parts"]
 
     assert [p.get("thoughtSignature") for p in parts] == ["sig-a", None]
+
+
+def test_an_endpoint_ending_in_v1_gets_litellms_routes_once(upstream, agent, client, monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", BASE + "/v1/")
+    upstream.response = httpx.Response(200, json={"candidates": []})
+    _route(agent, model="gemini-2.5-flash", project_id="p-1")
+    client.post(GENERATE + "?alt=json", content=b'{"contents":[]}', headers={"content-type": "application/json"})
+    upstream.response = httpx.Response(200, json={
+        "model": "gemini-3.1-pro-preview", "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}})
+    _route(agent, model="vertex_ai/global/gemini-3.1-pro-preview", project_id="p-1")
+    client.post(GENERATE, json=_GREQ)
+
+    assert [str(request.url) for request in upstream.requests] == [
+        f"{BASE}/gemini/v1beta/models/gemini-3.1-pro-preview:generateContent?alt=json", f"{BASE}/v1/chat/completions"]

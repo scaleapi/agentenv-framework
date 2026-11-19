@@ -113,7 +113,7 @@ def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed:
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 

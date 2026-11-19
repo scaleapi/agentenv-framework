@@ -186,7 +186,9 @@ def test_a_unit_test_verifier_gets_the_model_endpoint_its_container_reaches(
 ):
     run = _run_verifier(monkeypatch, sandbox_type)
 
-    assert f"-e LITELLM_BASE_URL={expected} " in run and f"-e ANTHROPIC_BASE_URL={expected} " in run
+    # Anthropic's clients append their own /v1/messages, so their variable is the endpoint without its /v1.
+    anthropic = expected.removesuffix("/v1")
+    assert f"-e LITELLM_BASE_URL={expected} " in run and f"-e ANTHROPIC_BASE_URL={anthropic} " in run
 
 
 def test_a_model_endpoint_the_verifier_sets_itself_is_reached_through_the_host(monkeypatch, local_stores, model_endpoint):

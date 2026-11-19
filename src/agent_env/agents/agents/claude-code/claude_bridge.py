@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -174,6 +175,14 @@ def _model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the CLI appends its own ``/v1/messages``. Core's ``api_root``, copied since this image can't import core; a unit
+    test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
+
+
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
             task_id: str | None = None, max_thinking_tokens: int | None = None,
             clock_armed: bool = False, mcp_urls: Iterable[str] = ()) -> dict[str, str]:
@@ -185,7 +194,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if not env.get("ANTHROPIC_AUTH_TOKEN") and env.get("LITELLM_API_KEY"):
         env["ANTHROPIC_AUTH_TOKEN"] = env["LITELLM_API_KEY"]
     if not env.get("ANTHROPIC_BASE_URL") and env.get("LITELLM_BASE_URL"):
-        env["ANTHROPIC_BASE_URL"] = env["LITELLM_BASE_URL"]
+        env["ANTHROPIC_BASE_URL"] = _api_root(env["LITELLM_BASE_URL"])
     if env.get("ANTHROPIC_AUTH_TOKEN"):
         env["ANTHROPIC_API_KEY"] = ""
     if model and env.get("ANTHROPIC_BASE_URL"):
