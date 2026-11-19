@@ -15,14 +15,15 @@ from scipy import stats
 
 OUT = Path(__file__).with_name("stats_v1.json")
 
-T_PS = (0.8, 0.9, 0.95, 0.975, 0.99, 0.995)
-T_DFS = [*range(1, 301), 400, 499, 500, 501, 750, 1000, 2000, 5000, 10_000, 100_000, 1_000_000, 100_000_000]
+T_PS = (0.8, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9999, 0.999999, 0.9999999)
+T_DFS = [*range(1, 301), 400, 499, 500, 501, 750, 1000, 2000, 5000, 9999, 10_000, 100_000, 1_000_000, 100_000_000]
+T_DFS_SPARSE = [*range(1, 31), 50, 100, 200, 499, 500, 1000, 5000, 9999, 10_000, 100_000, 100_000_000]
 
 
 def t_quantiles():
     rows = []
     for p in T_PS:
-        dfs = T_DFS if p in (0.8, 0.975) else [*range(1, 31), 50, 100, 200, 499, 500, 1000, 10_000]
+        dfs = T_DFS if p in (0.8, 0.975) else T_DFS_SPARSE
         rows += [[p, df, float(stats.t.ppf(p, df))] for df in dfs]
     return rows
 

@@ -241,6 +241,11 @@ def test_t_quantile_is_symmetric_and_tends_to_the_normal():
     assert stats.t_quantile(0.975, 10**8) == pytest.approx(1.959963984540054, rel=1e-7)
 
 
+@pytest.mark.parametrize("df", [3, 10, 499, 500, 9_999, 10_000])
+def test_t_quantile_converges_at_extreme_probabilities(df):
+    assert stats.t_quantile(1 - 1e-12, df) > stats.t_quantile(0.9999999, df) > stats.t_quantile(0.999, df) > 0
+
+
 @pytest.mark.parametrize("p,df", [(0.0, 5), (1.0, 5), (0.975, 0)])
 def test_t_quantile_refuses_arguments_outside_its_domain(p, df):
     with pytest.raises(ValueError):

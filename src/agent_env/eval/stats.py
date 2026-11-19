@@ -16,7 +16,12 @@ STATS_VERSION = 1
 
 _Z975 = 1.959963984540054
 _NO_SPREAD = 1e-12
-_CORNISH_FISHER_DF = 500
+_CORNISH_FISHER_DF = 10_000
+_NEWTON_STEPS = 200
+_NEWTON_TOLERANCE = 1e-13
+_FRACTION_TERMS = 10_000
+_FRACTION_TOLERANCE = 1e-16
+_TINY = 1e-300
 _HALF_LN_PI = 0.5 * log(math.pi)
 
 TaskKey = Tuple[str, int]
@@ -275,8 +280,8 @@ def wilson(successes: float, n: int) -> Tuple[float, float]:
 
 
 def t_quantile(p: float, df: int) -> float:
-    """Student's t quantile: exact at 1 and 2 degrees of freedom, Newton's method on the t tail below 500, and the
-    Cornish-Fisher expansion (Abramowitz and Stegun 26.7.5) from 500 up, each within about 1e-13."""
+    """Student's t quantile: exact at 1 and 2 degrees of freedom, the Cornish-Fisher expansion (Abramowitz and Stegun
+    26.7.5) from 10,000 up, and Newton's method on the t tail otherwise, each within about 1e-13 of scipy."""
     if not 0.0 < p < 1.0:
         raise ValueError(f"p must be in (0, 1), got {p!r}")
     if df < 1:
@@ -290,17 +295,34 @@ def t_quantile(p: float, df: int) -> float:
         return 1.0 / math.tan(math.pi * tail)
     if df == 2:
         return (2.0 * p - 1.0) / sqrt(2.0 * p * tail)
-    t = _cornish_fisher(p, df)
+    start = _cornish_fisher(p, df)
     if df >= _CORNISH_FISHER_DF:
-        return t
-    t = max(t, 1e-3)
-    for _ in range(60):
-        step = (_t_tail(t, df) - tail) / _t_density(t, df)
-        nxt = t + step if t + step > 0.0 else t / 2.0
-        if abs(nxt - t) <= 1e-13 * nxt:
+        return start
+    return _t_solve(start, tail, df)
+
+
+def _t_solve(start: float, tail: float, df: int) -> float:
+    """The t whose upper tail is `tail`: Newton's method kept inside a bracket of the root, halving the bracket when a
+    step would leave it, so a poor start or an extreme tail still converges."""
+    lo, hi = 0.0, max(start, 1.0)
+    while _t_tail(hi, df) > tail:
+        lo, hi = hi, 2.0 * hi
+    t = start if lo < start < hi else (lo + hi) / 2.0
+    for _ in range(_NEWTON_STEPS):
+        excess = _t_tail(t, df) - tail
+        if excess == 0.0:
+            return t
+        if excess > 0.0:
+            lo = t
+        else:
+            hi = t
+        nxt = t + excess / _t_density(t, df)
+        if not lo < nxt < hi:
+            nxt = (lo + hi) / 2.0
+        if abs(nxt - t) <= _NEWTON_TOLERANCE * nxt:
             return nxt
         t = nxt
-    raise ArithmeticError(f"t quantile did not converge at p={p!r}, df={df!r}")
+    raise ArithmeticError(f"t quantile did not converge at tail={tail!r}, df={df!r}")
 
 
 def _cornish_fisher(p: float, df: int) -> float:
@@ -315,12 +337,13 @@ def _cornish_fisher(p: float, df: int) -> float:
 
 
 def _t_tail(t: float, df: int) -> float:
-    """P(T > t) for t >= 0, as half the regularized incomplete beta I_x(df/2, 1/2) at x = df/(df + t^2), with 1 - x
-    formed directly so large t keeps its precision."""
+    """P(T > t) for t > 0, as half the regularized incomplete beta I_x(df/2, 1/2) at x = df/(df + t^2). x and 1 - x
+    are each formed directly, and ln x is taken from whichever keeps its precision."""
     a = df / 2.0
     x = df / (df + t * t)
     y = t * t / (df + t * t)
-    front = math.exp(_ln_gamma_ratio(a) - _HALF_LN_PI + a * log1p(-y) + 0.5 * log(y))
+    ln_x = log1p(-y) if y < 0.5 else log(x)
+    front = math.exp(_ln_gamma_ratio(a) - _HALF_LN_PI + a * ln_x + 0.5 * log(y))
     if x < (a + 1.0) / (a + 2.5):
         return 0.5 * front * _beta_fraction(a, 0.5, x) / a
     return 0.5 * (1.0 - front * _beta_fraction(0.5, a, y) / 0.5)
@@ -345,15 +368,14 @@ def _ln_gamma_ratio(a: float) -> float:
 
 def _beta_fraction(a: float, b: float, x: float) -> float:
     """The continued fraction of the regularized incomplete beta, by the modified Lentz method."""
-    tiny = 1e-300
 
     def clamp(v: float) -> float:
-        return v if abs(v) > tiny else tiny
+        return v if abs(v) > _TINY else _TINY
 
     c = 1.0
     d = 1.0 / clamp(1.0 - (a + b) * x / (a + 1.0))
     h = d
-    for m in range(1, 10_000):
+    for m in range(1, _FRACTION_TERMS):
         for numerator in (
             m * (b - m) * x / ((a + 2 * m - 1.0) * (a + 2 * m)),
             -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1.0)),
@@ -361,6 +383,6 @@ def _beta_fraction(a: float, b: float, x: float) -> float:
             d = 1.0 / clamp(1.0 + numerator * d)
             c = clamp(1.0 + numerator / c)
             h *= d * c
-        if abs(d * c - 1.0) < 1e-16:
+        if abs(d * c - 1.0) < _FRACTION_TOLERANCE:
             return h
     raise ArithmeticError("incomplete beta continued fraction did not converge")
