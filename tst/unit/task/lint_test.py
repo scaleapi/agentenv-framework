@@ -81,6 +81,21 @@ def test_an_agent_prompt_response_criterion_a_run_would_refuse_is_a_config_probl
     assert fine.config_problems() == []
 
 
+def test_a_value_of_the_wrong_type_a_verifier_would_trip_on_is_a_config_problem():
+    criteria = [{"type": "probe_file_exists", "criterion": "has it", "paths": ["a.txt"]}, None, "probe"]
+    tests = RunContainerUnitTestsVerifierTaskStep(id="tests", version=1, sandbox_name="b", container_name="c",
+                                                  command=["pytest"], verifier_id=["tests"])
+
+    assert _found(_task(BOX, {**TESTS, "criteria": criteria})) == [
+        ("error", "step-config", "step 'tests': criterion #1 must be an object, not NoneType"),
+        ("error", "step-config", "step 'tests': criterion #2 must be an object, not str")]
+    assert tests.config_problems() == ["verifier_id must be a string, not list", "command must be a string, not list"]
+    assert tests.config_warnings() == []
+    assert _found(Task(id="t", version=1, steps=[*_task(BOX).steps, tests])) == [
+        ("error", "step-config", "step 'tests': verifier_id must be a string, not list"),
+        ("error", "step-config", "step 'tests': command must be a string, not list")]
+
+
 def test_a_unit_test_run_that_tests_nothing_is_a_warning_and_a_negative_timeout_an_error():
     def tests(**kw):
         return RunContainerUnitTestsVerifierTaskStep(id="tests", version=1, sandbox_name="b", container_name="c",
@@ -205,6 +220,11 @@ def test_the_cli_lints_a_bundle_folder_refusing_its_errors_and_printing_its_warn
     assert refused.exit_code == 1
     assert ("tasks/bad.json: step 'tests': verify_sandbox doesn't read 'min_passing_scor' (did you mean "
             "'min_passing_score'?)") in refused.output
+
+    _write(bundle_dir, "bad", [BOX, {**TESTS, "id": ["tests"]}])
+    unparsed = CliRunner().invoke(cli, ["task", "lint", str(bundle_dir)])
+    assert (unparsed.exit_code, unparsed.output.splitlines()[-1]) == (
+        1, "  - tasks/bad.json: step #1's id is a JSON array; it must be a string")
 
 
 def test_the_cli_lints_one_task_file_of_a_bundle_or_one_on_its_own(bundle_dir, tmp_path):

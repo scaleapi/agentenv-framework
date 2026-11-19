@@ -165,7 +165,7 @@ def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
     """An aggregate source that no verifier in the task writes, which fails the aggregate when it grades."""
     written = set()
     for step in steps:
-        if is_verifier(step):
+        if is_verifier(step) and isinstance(step.verifier_id, str):
             written.add(step.verifier_id)
             if (isinstance(step, RubricsVerifierTaskStep)
                     and step.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES):
@@ -202,7 +202,7 @@ def _coverage(task: Task) -> Iterator[Finding]:
 def _no_headlines(verifiers: list[TaskStep]) -> str:
     """Several verifiers and no headline: every grade is top-line. Name the aggregate that covers the others, if one
     does."""
-    ids = {step.verifier_id for step in verifiers}
+    ids = {step.verifier_id for step in verifiers if isinstance(step.verifier_id, str)}
     covering = [step.id for step in verifiers if isinstance(step, AggregateVerifiersTaskStep)
                 and ids - {step.verifier_id} <= set(step.verifier_ids)]
     suggestion = (f"; {covering[0]!r} aggregates the others, so name it in headline_verifiers" if covering

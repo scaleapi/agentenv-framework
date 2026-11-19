@@ -108,6 +108,9 @@ class VerifySandboxTaskStep(VerifierTaskStep):
         pattern that doesn't compile, a ``bash_cmd_succeeds`` with no command."""
         problems = super().config_problems()
         for idx, criterion in enumerate(self.criteria):
+            if not isinstance(criterion, dict):
+                problems.append(f"criterion #{idx} must be an object, not {type(criterion).__name__}")
+                continue
             rtype = criterion.get("type")
             paths = criterion.get("paths") or []
             if rtype in ("probe_file_exists", "probe_dir_exists", "probe_file_contains") and not paths:
@@ -127,6 +130,8 @@ class VerifySandboxTaskStep(VerifierTaskStep):
         ``probe_file_contains`` with no expected text, which any file passes."""
         warnings = super().config_warnings()
         for idx, criterion in enumerate(self.criteria):
+            if not isinstance(criterion, dict):
+                continue  # config_problems refuses it
             rtype = criterion.get("type")
             if rtype not in _HANDLED_TYPES:
                 warnings.append(f"criterion #{idx}: type {rtype!r} isn't one verify_sandbox checks, so a run skips "

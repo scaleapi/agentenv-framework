@@ -52,9 +52,9 @@ def _bundle(root: Path, task: str | None = None) -> tuple[list[str], list[str]]:
     from agent_env.store.routing import namespace_routing
 
     with namespace_routing():
-        bundle = parse_bundle(root)
-        names = [task] if task else [entry.name for entry in bundle.entries if entry.kind is BundleKind.TASK]
         try:
+            bundle = parse_bundle(root)
+            names = [task] if task else [entry.name for entry in bundle.entries if entry.kind is BundleKind.TASK]
             plan = plan_bundle(resolve_bundle(bundle), tasks=names, installed=installed_bundles)
         except BundleError as e:
             return list(e.problems), []
@@ -65,8 +65,10 @@ def _file(path: Path) -> tuple[list[str], list[str]]:
     """A task file on its own: its references name store ids, as ``task create`` reads them."""
     from agent_env.bundle.parse import task_file_parts
     from agent_env.bundle.resolve import build_step
+    from agent_env.plugins import _registration
     from agent_env.task import Task
     from agent_env.task.lint import Severity, lint as lint_task, unknown_fields
+    from agent_env.task_step.registry import get_task_step_registry
 
     try:
         steps, headlines = task_file_parts(json.loads(path.read_text()))
@@ -74,10 +76,22 @@ def _file(path: Path) -> tuple[list[str], list[str]]:
         return [f"{path}: {e}"], []
     if unknown := list(unknown_fields(steps)):
         return [f"{path}: {f.text}" for f in unknown], []
+    registry, built, problems = get_task_step_registry(), [], []
+    for step in steps:
+        step_type = step.get("type")
+        if not isinstance(step_type, str) or registry.get(step_type) is None:
+            note = _registration.failure_note(_registration.TASK_STEPS, step_type) if isinstance(step_type, str) else ""
+            problems.append(f"step {step.get('id')!r}: {step_type!r} is not a known step type{note}")
+            continue
+        try:
+            built.append(build_step(step))
+        except Exception as e:
+            problems.append(f"step {step.get('id')!r}: {step_type} can't read it ({type(e).__name__}: {e})")
+    if problems:
+        return [f"{path}: {problem}" for problem in problems], []
     try:
-        task = Task(id=path.stem, version=None, steps=[build_step(step) for step in steps],
-                    headline_verifiers=headlines)
-    except Exception as e:
+        task = Task(id=path.stem, version=None, steps=built, headline_verifiers=headlines)
+    except ValueError as e:
         return [f"{path}: {e}"], []
     findings = lint_task(task, steps)
     return ([f"{path}: {f.text}" for f in findings if f.severity is Severity.ERROR],
