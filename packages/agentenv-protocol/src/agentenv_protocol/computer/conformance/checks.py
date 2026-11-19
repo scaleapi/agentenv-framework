@@ -1190,10 +1190,12 @@ class Probe:
     async def _annotated_click(self, wire: dict, size: tuple[int, int], point: tuple[int, int],
                                inside: tuple[int, int], was: tuple[int, int, int]) -> str | None:
         """What is wrong with an annotated recording of one click at frame pixel ``point`` of a frame ``size``, the
-        clicked cell showing ``was`` at ``inside`` before it, or None. All its times are the computer's own."""
+        clicked cell showing ``was`` at ``inside`` before it, or None; NotApplicable for a recording of a native
+        recorder's finished segments, which the base class keeps as they came. All its times are the computer's own."""
         manifest = RecordingManifest.model_validate(wire)
         if manifest.annotate is None:
-            return "its manifest names no annotate: a recorder that hands over finished segments isn't drawn on"
+            raise NotApplicable("its manifest names no annotate: the driver's recorder hands over finished segments, "
+                                "which aren't drawn on")
         if manifest.annotate != {}:
             return f"its manifest's annotate is {manifest.annotate!r}, not the {{}} it was started with"
 

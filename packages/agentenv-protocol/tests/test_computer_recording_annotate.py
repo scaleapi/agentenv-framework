@@ -34,6 +34,7 @@ from agentenv_protocol.computer.annotate import (  # noqa: E402
     input_marks,
     tool_mark,
 )
+from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.tool_context import ROLE_META_KEY  # noqa: E402
 
 START, END = "/agentenv/ext/computer-recording/start", "/agentenv/ext/computer-recording/end"
@@ -292,3 +293,22 @@ async def test_a_recording_of_a_native_recorders_finished_segments_names_no_anno
         manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
 
     assert manifest["segments"] and "annotate" not in manifest
+
+
+def test_chips_past_the_most_a_frame_shows_wait_for_a_later_frame_rather_than_go_unseen():
+    annotations = Annotations()
+    for n in range(6):
+        annotations.add([tool_mark(f"tool{n}", {}, role=None, at=T0 + timedelta(milliseconds=n))])
+
+    first = [mark.label for mark, _colour, _age in annotations.showing(T0 + timedelta(milliseconds=100))]
+    later = [mark.label for mark, _colour, _age in annotations.showing(T0 + timedelta(seconds=3))]
+
+    assert first == ["tool2", "tool3", "tool4", "tool5"] and later == ["tool0", "tool1"]
+    assert annotations.showing(T0 + timedelta(seconds=4)) == [] and annotations.marks == []
+
+
+@pytest.mark.asyncio
+async def test_the_probe_finds_annotation_not_applicable_to_a_native_recorders_finished_segments():
+    wire = {"recording_id": "rec-1", "ended_by": "end", "segments": []}
+    with pytest.raises(checks.NotApplicable, match="hands over finished segments"):
+        await checks.Probe._annotated_click(None, wire, (100, 100), (10, 10), (20, 20), (255, 255, 255))

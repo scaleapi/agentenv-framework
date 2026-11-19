@@ -98,7 +98,7 @@ class Annotations:
         """The marks a frame captured ``at`` shows, each with its colour and the age, in seconds, it is drawn at: a
         mark over by then that no frame has drawn yet is drawn once, at the age it is last fully shown. A stream's
         frames come in the order they were captured, so a mark that is over and drawn is over for every later one."""
-        shown = []
+        due = []
         for mark in self.marks:
             if mark.at > at:
                 continue
@@ -107,8 +107,11 @@ class Annotations:
                 if id(mark) in self.drawn:
                     continue
                 age = max(0.0, (mark.until - mark.at).total_seconds() - FADE_S)
-            shown.append((mark, self.colours[mark.role], age))
-            self.drawn.add(id(mark))
+            due.append((mark, self.colours[mark.role], age))
+        chips = [mark for mark, _colour, _age in due if mark.kind == "chip"]
+        waiting = {id(mark) for mark in chips[:-MOST_CHIPS]}  # older chips than a frame shows wait for a later one
+        shown = [entry for entry in due if id(entry[0]) not in waiting]
+        self.drawn |= {id(mark) for mark, _colour, _age in shown}
         self._keep([mark for mark in self.marks if mark.until > at or id(mark) not in self.drawn])
         return shown
 
@@ -213,71 +216,119 @@ def draw(image: Any, marks: Sequence[tuple[Mark, tuple[int, int, int], float]]) 
             continue
         fade = 1.0 - max(0.0, min(1.0, (age - (span - FADE_S)) / FADE_S))
         points = [(fx * base.width, fy * base.height) for fx, fy in mark.points]
-        _DRAWERS[mark.kind](pen, mark, points, colour, unit, age, span, fade)
+        _DRAWERS[mark.kind](pen, mark, points, colour, unit, age, fade)
     if chips:
-        _draw_chips(pen, chips[-MOST_CHIPS:], base.size, unit)
+        _draw_chips(pen, chips, base.size, unit)
     return PILImage.alpha_composite(base, overlay).convert("RGB")
 
 
-def _draw_click(pen, mark, points, colour, unit, age, span, fade) -> None:
+@dataclass(frozen=True)
+class Style:
+    """How marks look: sizes in pixels of a frame whose longer edge is UNIT_EDGE, scaled with the frame; each coloured
+    stroke over a wider white halo, so a mark reads on any background."""
+
+    stroke: float = 3  # a ring's and a cross's coloured stroke
+    halo: float = 5  # the white band under a ring's stroke
+    line: float = 4  # a trail's and an arrow's coloured stroke
+    line_halo: float = 7
+    outline: float = 1.5  # a dot's white outline
+    ring_grow_s: float = 0.35  # how long a click's ring takes to grow to its full size, in seconds
+    ring_from: float = 12  # a click's ring's radius as it starts
+    ring_grows: float = 18  # and how much it grows
+    ring_apart: float = 8  # between the rings of a double or triple click
+    most_rings: int = 3
+    dot: float = 5  # the dot at a click's point
+    press_down: float = 10  # a press's filled ring's radius
+    press_up: float = 16  # a release's ring's radius
+    press_fill: float = 0.7  # a press's fill opacity, as a share of its stroke's
+    cross: float = 9  # each arm of a move's cross
+    cross_alpha: int = 200  # a move's cross is fainter than the marks of inputs that act
+    arrow: float = 46  # a scroll's arrow
+    arrowhead: float = 14  # an arrowhead's sides, beside the stroke's own width
+    arrowhead_angle: float = 0.5  # radians either side of its line
+    start_dot: float = 6  # the dot where a drag starts
+    chip_text: float = 20
+    chip_pad: float = 10  # beside a chip's text; above and below it, CHIP_PAD_HIGH of that
+    chip_gap: float = 8  # between stacked chips
+    chip_radius: float = 8
+    chip_alpha: int = 235
+    chip_low: float = 48  # the least the lowest chip ends above the bottom edge
+    label_text: float = 15  # a scroll's count and a button's name beside its mark
+    label_pad: float = 4
+    label_from: float = 16  # a button's name, right and down from its click
+    label_alpha: float = 0.9
+    least_text: int = 9  # the smallest text, in pixels, on any frame
+
+
+STYLE = Style()
+#: A chip's padding above and below its text, as a share of the padding beside it.
+CHIP_PAD_HIGH = 0.7
+WHITE = (255, 255, 255)
+
+
+def _width(width: float, unit: float) -> int:
+    return max(1, round(width * unit))
+
+
+def _draw_click(pen, mark, points, colour, unit, age, fade) -> None:
     x, y = points[0]
-    grow = min(1.0, age / 0.35)
+    grow = min(1.0, age / STYLE.ring_grow_s)
     alpha = round(255 * fade)
-    for ring in range(max(1, min(mark.count, 3))):
-        r = unit * (12 + 18 * grow + 8 * ring)
+    for ring in range(max(1, min(mark.count, STYLE.most_rings))):
+        r = unit * (STYLE.ring_from + STYLE.ring_grows * grow + STYLE.ring_apart * ring)
         box = (x - r, y - r, x + r, y + r)
         shape = pen.rectangle if mark.button == "right" else pen.ellipse
-        shape(box, outline=(255, 255, 255, alpha), width=max(1, round(5 * unit)))
-        shape(box, outline=(*colour, alpha), width=max(1, round(3 * unit)))
-    dot = unit * 5
-    pen.ellipse((x - dot, y - dot, x + dot, y + dot), fill=(*colour, alpha), outline=(255, 255, 255, alpha),
-                width=max(1, round(1.5 * unit)))
+        shape(box, outline=(*WHITE, alpha), width=_width(STYLE.halo, unit))
+        shape(box, outline=(*colour, alpha), width=_width(STYLE.stroke, unit))
+    dot = unit * STYLE.dot
+    pen.ellipse((x - dot, y - dot, x + dot, y + dot), fill=(*colour, alpha), outline=(*WHITE, alpha),
+                width=_width(STYLE.outline, unit))
     if mark.button not in ("left", "right"):
-        _label(pen, (x + unit * 16, y + unit * 16), mark.button, colour, unit, alpha)
+        _label(pen, (x + unit * STYLE.label_from, y + unit * STYLE.label_from), mark.button, colour, unit, alpha)
 
 
-def _draw_press(pen, mark, points, colour, unit, age, span, fade) -> None:
+def _draw_press(pen, mark, points, colour, unit, age, fade) -> None:
     x, y = points[0]
     alpha = round(255 * fade)
-    r = unit * (10 if mark.kind == "down" else 16)
-    fill = (*colour, round(alpha * 0.7)) if mark.kind == "down" else None
-    pen.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=(255, 255, 255, alpha), width=max(1, round(4 * unit)))
-    pen.ellipse((x - r, y - r, x + r, y + r), outline=(*colour, alpha), width=max(1, round(2.5 * unit)))
+    r = unit * (STYLE.press_down if mark.kind == "down" else STYLE.press_up)
+    fill = (*colour, round(alpha * STYLE.press_fill)) if mark.kind == "down" else None
+    pen.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=(*WHITE, alpha), width=_width(STYLE.halo, unit))
+    pen.ellipse((x - r, y - r, x + r, y + r), outline=(*colour, alpha), width=_width(STYLE.stroke, unit))
 
 
-def _draw_move(pen, mark, points, colour, unit, age, span, fade) -> None:
+def _draw_move(pen, mark, points, colour, unit, age, fade) -> None:
     x, y = points[0]
-    alpha = round(200 * fade)
-    arm = unit * 9
+    alpha = round(STYLE.cross_alpha * fade)
+    arm = unit * STYLE.cross
     for dx, dy in ((arm, 0), (0, arm)):
-        pen.line((x - dx, y - dy, x + dx, y + dy), fill=(255, 255, 255, alpha), width=max(1, round(4 * unit)))
-        pen.line((x - dx, y - dy, x + dx, y + dy), fill=(*colour, alpha), width=max(1, round(2 * unit)))
+        pen.line((x - dx, y - dy, x + dx, y + dy), fill=(*WHITE, alpha), width=_width(STYLE.halo, unit))
+        pen.line((x - dx, y - dy, x + dx, y + dy), fill=(*colour, alpha), width=_width(STYLE.stroke, unit))
 
 
-def _draw_scroll(pen, mark, points, colour, unit, age, span, fade) -> None:
+def _draw_scroll(pen, mark, points, colour, unit, age, fade) -> None:
     x, y = points[0]
     alpha = round(255 * fade)
     dx, dy = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}.get(mark.direction, (0, 1))
-    length = unit * 46
-    end = (x + dx * length, y + dy * length)
-    for width, fill in ((7, (255, 255, 255, alpha)), (4, (*colour, alpha))):
-        pen.line((x, y, *end), fill=fill, width=max(1, round(width * unit)))
+    end = (x + dx * unit * STYLE.arrow, y + dy * unit * STYLE.arrow)
+    for width, fill in ((STYLE.line_halo, (*WHITE, alpha)), (STYLE.line, (*colour, alpha))):
+        pen.line((x, y, *end), fill=fill, width=_width(width, unit))
         _arrowhead(pen, (x, y), end, unit, fill, width)
-    _label(pen, (end[0] + unit * 10, end[1] + unit * 4), f"x{mark.count}", colour, unit, alpha)
+    _label(pen, (end[0] + unit * STYLE.label_pad * 2, end[1] + unit * STYLE.label_pad), f"x{mark.count}", colour,
+           unit, alpha)
 
 
-def _draw_drag(pen, mark, points, colour, unit, age, span, fade) -> None:
+def _draw_drag(pen, mark, points, colour, unit, age, fade) -> None:
     alpha = round(255 * fade)
     shown = points if age >= mark.moving_s else _along(points, age / mark.moving_s)
-    for width, fill in ((7, (255, 255, 255, alpha)), (4, (*colour, alpha))):
+    for width, fill in ((STYLE.line_halo, (*WHITE, alpha)), (STYLE.line, (*colour, alpha))):
         if len(shown) > 1:
-            pen.line([coord for point in shown for coord in point], fill=fill, width=max(1, round(width * unit)),
+            pen.line([coord for point in shown for coord in point], fill=fill, width=_width(width, unit),
                      joint="curve")
             _arrowhead(pen, shown[-2], shown[-1], unit, fill, width)
     sx, sy = points[0]
-    r = unit * 6
-    pen.ellipse((sx - r, sy - r, sx + r, sy + r), fill=(*colour, alpha), outline=(255, 255, 255, alpha),
-                width=max(1, round(1.5 * unit)))
+    r = unit * STYLE.start_dot
+    pen.ellipse((sx - r, sy - r, sx + r, sy + r), fill=(*colour, alpha), outline=(*WHITE, alpha),
+                width=_width(STYLE.outline, unit))
 
 
 _DRAWERS = {"click": _draw_click, "down": _draw_press, "up": _draw_press, "move": _draw_move, "scroll": _draw_scroll,
@@ -286,35 +337,34 @@ _DRAWERS = {"click": _draw_click, "down": _draw_press, "up": _draw_press, "move"
 
 def _draw_chips(pen, chips, size, unit) -> None:
     """Chips stacked centred above the bottom edge, clear of a panel or dock there, the newest lowest."""
-    font = _font(max(10, round(20 * unit)))
-    pad, gap = unit * 10, unit * 8
-    y = size[1] - max(unit * 48, size[1] * CHIPS_ABOVE)
+    font = _font(max(STYLE.least_text, round(STYLE.chip_text * unit)))
+    pad, high, gap = unit * STYLE.chip_pad, unit * STYLE.chip_pad * CHIP_PAD_HIGH, unit * STYLE.chip_gap
+    y = size[1] - max(unit * STYLE.chip_low, size[1] * CHIPS_ABOVE)
     for mark, colour in reversed(chips):
         left, top, right, bottom = pen.textbbox((0, 0), mark.label, font=font)
-        w, h = right - left + 2 * pad, bottom - top + 2 * pad * 0.7
-        x0 = (size[0] - w) / 2
-        y0 = y - h
-        pen.rounded_rectangle((x0, y0, x0 + w, y), radius=unit * 8, fill=(*colour, 235),
-                              outline=(255, 255, 255, 235), width=max(1, round(1.5 * unit)))
-        pen.text((x0 + pad - left, y0 + pad * 0.7 - top), mark.label, font=font, fill=_ink(colour))
+        w, h = right - left + 2 * pad, bottom - top + 2 * high
+        x0, y0 = (size[0] - w) / 2, y - h
+        pen.rounded_rectangle((x0, y0, x0 + w, y), radius=unit * STYLE.chip_radius, fill=(*colour, STYLE.chip_alpha),
+                              outline=(*WHITE, STYLE.chip_alpha), width=_width(STYLE.outline, unit))
+        pen.text((x0 + pad - left, y0 + high - top), mark.label, font=font, fill=_ink(colour))
         y = y0 - gap
 
 
 def _label(pen, at: tuple[float, float], text: str, colour, unit, alpha) -> None:
-    font = _font(max(9, round(15 * unit)))
+    font = _font(max(STYLE.least_text, round(STYLE.label_text * unit)))
     left, top, right, bottom = pen.textbbox(at, text, font=font)
-    pad = unit * 4
-    pen.rounded_rectangle((left - pad, top - pad, right + pad, bottom + pad), radius=unit * 4,
-                          fill=(*colour, round(alpha * 0.9)))
+    pad = unit * STYLE.label_pad
+    pen.rounded_rectangle((left - pad, top - pad, right + pad, bottom + pad), radius=pad,
+                          fill=(*colour, round(alpha * STYLE.label_alpha)))
     pen.text(at, text, font=font, fill=(*_ink(colour)[:3], alpha))
 
 
 def _arrowhead(pen, start, end, unit, fill, width) -> None:
     angle = math.atan2(end[1] - start[1], end[0] - start[0])
-    size = unit * (14 + width)
-    left = (end[0] - size * math.cos(angle - 0.5), end[1] - size * math.sin(angle - 0.5))
-    right = (end[0] - size * math.cos(angle + 0.5), end[1] - size * math.sin(angle + 0.5))
-    pen.polygon([end, left, right], fill=fill)
+    size = unit * (STYLE.arrowhead + width)
+    sides = [(end[0] - size * math.cos(angle + turn), end[1] - size * math.sin(angle + turn))
+             for turn in (-STYLE.arrowhead_angle, STYLE.arrowhead_angle)]
+    pen.polygon([end, *sides], fill=fill)
 
 
 def _along(points: list[tuple[float, float]], fraction: float) -> list[tuple[float, float]]:
