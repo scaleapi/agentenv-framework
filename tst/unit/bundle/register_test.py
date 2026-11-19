@@ -122,6 +122,18 @@ def test_each_entry_takes_its_prefix_and_name_and_each_task_names_the_versions_i
     assert Artifact.get("triage-docs").version == 1
 
 
+def test_a_universe_folder_registers_its_environments_under_the_universe_s_registry_id(home):
+    universe = {"artifacts/world-u/artifact.toml": 'type = "environment_universe"\n',
+                "artifacts/world-u/gmail/gmail.zip": "mail\n", "artifacts/world-u/shelfway/shelfway.json": "{}\n",
+                "tasks/t.json": json.dumps([BOX, _load("world", "world-u")])}
+
+    registered = register_bundle(layout(home / "triage", universe))
+
+    assert {done.write.id for done in registered.materialization.writes} == {"triage-world-u", "triage-t"}
+    environments = Artifact.get("triage-world-u").get_environment_artifacts()
+    assert sorted(env.id for env in environments) == ["triage-world-u__gmail", "triage-world-u__shelfway"]
+
+
 def test_registering_again_writes_nothing_and_an_edit_rewrites_only_what_it_reaches(home):
     root = layout(home / "triage", TRIAGE)
     register_bundle(root)
