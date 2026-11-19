@@ -27,6 +27,8 @@ from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier 
 )
 
 MODEL = "http://localhost:4000/v1"
+# Anthropic's clients append their own /v1/messages, so their variable is the endpoint without its /v1.
+MODEL_ROOT = "http://localhost:4000"
 HEADERS = {"X-Bill-To": "acme"}
 ELSEWHERE = "http://127.0.0.1:5001"
 REFUSED = "refused"
@@ -188,11 +190,11 @@ def _verifier_env(monkeypatch, env_vars: dict, step_params: dict | None = None) 
 
 VERIFIER_CASES = {
     "configured": ({}, None, {"LITELLM_API_KEY": "k", "LITELLM_BASE_URL": MODEL, "ANTHROPIC_API_KEY": "k",
-                              "ANTHROPIC_BASE_URL": MODEL}),
+                              "ANTHROPIC_BASE_URL": MODEL_ROOT}),
     "elsewhere-is-refused": ({"LITELLM_BASE_URL": ELSEWHERE}, None, REFUSED),
     "elsewhere-with-its-key": ({"LITELLM_BASE_URL": ELSEWHERE, "LITELLM_API_KEY": "theirs"}, None,
                                {"LITELLM_API_KEY": "theirs", "LITELLM_BASE_URL": ELSEWHERE, "ANTHROPIC_API_KEY": "k",
-                                "ANTHROPIC_BASE_URL": MODEL}),
+                                "ANTHROPIC_BASE_URL": MODEL_ROOT}),
     "anthropic-elsewhere-is-refused": ({"ANTHROPIC_BASE_URL": ELSEWHERE, "LITELLM_API_KEY": "theirs"}, None, REFUSED),
     "anthropic-elsewhere-with-its-key": ({"ANTHROPIC_BASE_URL": ELSEWHERE, "ANTHROPIC_API_KEY": "theirs"}, None,
                                          {"LITELLM_API_KEY": "k", "LITELLM_BASE_URL": MODEL,
@@ -200,7 +202,7 @@ VERIFIER_CASES = {
     "elsewhere-by-step-params-is-refused": ({}, {"LITELLM_BASE_URL": ELSEWHERE}, REFUSED),
     "elsewhere-by-step-params-with-the-steps-key": ({"LITELLM_API_KEY": "theirs"}, {"LITELLM_BASE_URL": ELSEWHERE},
                                                     {"LITELLM_API_KEY": "theirs", "LITELLM_BASE_URL": ELSEWHERE,
-                                                     "ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": MODEL}),
+                                                     "ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": MODEL_ROOT}),
 }
 
 
