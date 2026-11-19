@@ -391,6 +391,17 @@ def _published() -> DockerImageArtifact:
                                source_digest="sha256:" + "6" * 64)
 
 
+_PRIVATE = "registry.example/team/items:src-" + "1" * 64
+
+
+def _private() -> DockerImageArtifact:
+    """A bundle's image as ``bundle register`` writes it: pushed to the store's own registry, by its digest, with its
+    build context beside it."""
+    return DockerImageArtifact(id="items", version=1, description="d", image_name=_PRIVATE, image_digest=_GATEWAY_DIGEST,
+                               build_context_object_url="s3://bucket/items/build-context.tar.gz",
+                               dockerfile_path="Dockerfile", source_digest="sha256:" + "1" * 64)
+
+
 class _PinnedPullFailsVm(_RecordingVmSandbox):
     """Fails the first ``fails`` pulls by digest with ``error``, and every build when ``build_fails``."""
 
@@ -421,6 +432,47 @@ async def test_a_published_image_is_pulled_by_its_digest_and_tagged_with_the_nam
 
     assert sandbox.scripts == [f"docker pull {PUBLIC}", f"docker pull {_PINNED}", f"docker tag {_PINNED} {_GATEWAY}"]
 
+
+@pytest.mark.asyncio
+async def test_an_image_in_a_registry_the_store_holds_is_pulled_by_its_digest_after_logging_in_to_it(registry):
+    """A bundle's image, registered by its digest in a private image store, pulls rather than being rebuilt on the VM;
+    the published one beside it, on a registry the store holds nothing for, logs in nowhere."""
+    sandbox = _StdinVm()
+    pinned = f"{_PRIVATE}@{_GATEWAY_DIGEST}"
+
+    await sandbox.load_docker_images([_private(), _published()])
+
+    assert sandbox.scripts[:3] == [
+        "mktemp -d",
+        "docker login --username user --password-stdin registry.example < /tmp/tmp.Xq3/password",
+        "rm -rf /tmp/tmp.Xq3",
+    ]
+    assert sorted(sandbox.scripts[3:]) == sorted([f"docker pull {pinned}", f"docker tag {pinned} {_PRIVATE}",
+                                                  f"docker pull {_PINNED}", f"docker tag {_PINNED} {_GATEWAY}"])
+
+
+class _RefusingRegistry(_Registry):
+    """Holds credentials for registry.example, which can't be minted."""
+
+    def auth(self, ref):
+        if ref.startswith("registry.example/"):
+            raise RuntimeError("the registry's credentials couldn't be minted")
+        return None
+
+
+@pytest.mark.asyncio
+async def test_an_image_whose_registry_cant_be_logged_in_to_is_built_from_its_build_context(signing_store):
+    """A pull by digest that fails falls back to building the image, so a login that fails does too, rather than
+    failing the deploy; the published image beside it is pulled as before."""
+    get_config().set_image_store(_RefusingRegistry())
+    sandbox = _RecordingVmSandbox()
+
+    await sandbox.load_docker_images([_private(), _published()])
+
+    assert not any(script.startswith(f"docker pull {_PRIVATE}") for script in sandbox.scripts)
+    assert any(f"docker build --platform linux/amd64 -f Dockerfile -t {_PRIVATE} ." in script
+               for script in sandbox.scripts)
+    assert f"docker pull {_PINNED}" in sandbox.scripts and f"docker tag {_PINNED} {_GATEWAY}" in sandbox.scripts
 
 @pytest.mark.asyncio
 async def test_a_published_image_the_vm_cant_pull_is_built_from_its_build_context_under_its_name(signing_store,

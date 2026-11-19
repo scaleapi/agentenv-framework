@@ -89,6 +89,11 @@ INSTALL_COMMANDS: Final[list[str]] = [
     "LITELLM_BASE_URL={litellm_base_url}\n"
     "LITELLM_EXTRA_HEADERS={litellm_extra_headers}\n"
     "OPENHANDS_A2A_ENV",
+    # agent-env's control token for the agent, which the runner exports when it has one (install/v1 optional_params),
+    # the same way: expanded by the install's shell into the heredoc, empty without one, which leaves the agent open.
+    f"{_DOCKER} exec -i {{container}} sh -c 'cat >> {INSTALL_DIR}/{ENV_FILE}' <<OPENHANDS_A2A_TOKEN\n"
+    "AGENTENV_CONTROL_TOKEN=${{AGENTENV_CONTROL_TOKEN:-}}\n"
+    "OPENHANDS_A2A_TOKEN",
     f"{_DOCKER} exec -d -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
 ]
 
@@ -322,7 +327,8 @@ def _stage_conversation(archive: Path, conversations_dir: Path, target_id: str, 
     lifespan=_turns_stop_with_the_server,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, description="The task's OpenHands SDK events, also while it runs."),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT,
+               description="The task's OpenHands SDK events, also while it runs."),
         enable(
             SNAPSHOT_V1,
             description=(
@@ -334,6 +340,7 @@ def _stage_conversation(archive: Path, conversations_dir: Path, target_id: str, 
         enable(
             INSTALL_V1,
             install_commands=INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=[
                 "container", "agent_ctx_tar", "a2a_port", "litellm_api_key", "litellm_base_url",
                 "litellm_extra_headers",

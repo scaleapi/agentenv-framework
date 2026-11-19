@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from importlib.metadata import distribution, packages_distributions
+from importlib.metadata import packages_distributions
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -136,15 +136,11 @@ class Providers:
             return None
         if self._packages is None:
             self._packages = packages_distributions()
-        module = cls.__module__
-        names = list(dict.fromkeys(self._packages.get(module.partition(".")[0], ())))
-        if len(names) > 1:  # a namespace package: the one whose files hold the module
-            files = {f"{module.replace('.', '/')}.py", f"{module.replace('.', '/')}/__init__.py"}
-            names = [name for name in names if files & {str(file) for file in distribution(name).files or ()}]
-        if len(names) != 1:
+        name = _requirements.distribution_holding(cls.__module__, self._packages)
+        if name is None:
             return None
-        version = _requirements.installed(canonicalize_name(names[0]))
-        return f"{names[0]} {version}" if version else names[0]
+        version = _requirements.installed(canonicalize_name(name))
+        return f"{name} {version}" if version else name
 
 
 def uses(resolved: ResolvedBundle, providers: Providers | None = None) -> list[Use]:

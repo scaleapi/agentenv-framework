@@ -52,6 +52,7 @@ from agent_env.bundle.parse import (
     segment_problem,
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
+from agent_env.bundle.register import REGISTRATIONS
 from agent_env.bundle.requires import Providers, Use, detected
 from agent_env.bundle.resolve import resolve_bundle, sync_context_paths
 from agent_env.config import get_config
@@ -62,14 +63,21 @@ from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
+from agent_env.plugins._bundles import AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES, InstalledAliases, installed_aliases
+from agent_env.store import Filter
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
+from agent_env.store.routing import configured_store
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
 
+_ALIAS_TABLES = {EntityKind.AGENT: AGENT_ALIASES, EntityKind.ENV: ENV_ALIASES, EntityKind.ARTIFACT: ARTIFACT_ALIASES}
+# The kind of entity whose aliases a kind folder's names would shadow in a run.
+_FOLDER_KINDS = {BundleKind.AGENT.value: EntityKind.AGENT, BundleKind.ENV.value: EntityKind.ENV,
+                 BundleKind.ARTIFACT.value: EntityKind.ARTIFACT}
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
 _DOWNLOADS = 8  # objects downloaded at once
@@ -83,11 +91,25 @@ def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
     ``dest``. Its steps' scoped fields are left out unless ``include_scopes`` names their scope. An image whose store id
     ``image_refs`` maps to a registry reference is written as that reference, which a run pulls, its tag pinned to the
     digest its registry serves now when it gives none, with its build context beside it."""
-    importer = _Importer(Path(dest), include_scopes, progress, image_refs)
     task = Task.get(task_id, version)
+    importer = _importing([task], Path(dest), include_scopes, progress, image_refs)
     importer.add_task(task)
     return importer.write(f"Imported from the store's task {task.id} v{task.version}.", {"task": task.id,
                                                                                          "version": task.version})
+
+
+def _importing(tasks: Collection[Task], dest: Path | None, include_scopes: Collection[FieldScope],
+               progress: Callable[[str], None] | None, image_refs: Mapping[str, str] | None) -> _Importer:
+    """An importer for ``tasks`` whose folders take no installed alias the export names floating, since a folder of
+    that name would capture the reference in a run. A first pass writing nothing finds them, an entity the export
+    writes naming one as well as a step. It changes what it reads as it goes, so it takes copies of the tasks and the
+    importer reads the rest again."""
+    scout = _Importer(None, include_scopes)
+    for task in tasks:
+        scout.add_task(copy.deepcopy(task))
+    importer = _Importer(dest, include_scopes, progress, image_refs)
+    importer.reserved, importer.installed, importer.aliases = scout.floated, scout.installed, scout.aliases
+    return importer
 
 
 def task_images(task_id: str, *, version: int | None = None,
@@ -96,8 +118,9 @@ def task_images(task_id: str, *, version: int | None = None,
     order it reaches them, found without downloading anything: what an export pushes to a registry before importing the
     task with ``image_refs`` naming them there. Every image is listed, however it's stored, since each is then given a
     reference; raises BundleError when the import would fail on anything else it reads."""
-    importer = _Importer(None, include_scopes)
-    importer.add_task(Task.get(task_id, version))
+    task = Task.get(task_id, version)
+    importer = _importing([task], None, include_scopes, None, None)
+    importer.add_task(task)
     if importer.problems:
         raise BundleError(importer.problems)
     return tuple(importer.images_named.values())
@@ -108,22 +131,25 @@ def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None,
                 progress: Callable[[str], None] | None = None) -> BundleImport:
     """Write the stored eval ``eval_id``, at ``version`` or its latest, the tasks it names and every entity they use as
     a bundle, leaving out their steps' scoped fields and writing ``image_refs`` as ``import_task`` does."""
-    importer = _Importer(Path(dest), include_scopes, progress, image_refs)
     stored = Eval.get(eval_id, version)
-    names, seen = [], set()
+    tasks, seen, problems, duplicates = [], set(), [], []
     for entry in stored.tasks:
         try:
             task = Task.get(entry.task_id, entry.task_version)
         except NotFoundError:
             at = f" v{entry.task_version}" if entry.task_version is not None else ""
-            importer.problems.append(f"eval {stored.id} v{stored.version} names task {entry.task_id}{at}, which isn't "
-                                     "in the store")
+            problems.append(f"eval {stored.id} v{stored.version} names task {entry.task_id}{at}, which isn't in the "
+                            "store")
             continue
         if (task.id, task.version) in seen:
-            importer.duplicates.append(f"task {task.id} v{task.version}")
+            duplicates.append(f"task {task.id} v{task.version}")
             continue
         seen.add((task.id, task.version))
-        names.append(importer.add_task(task))
+        tasks.append(task)
+    importer = _importing(tasks, Path(dest), include_scopes, progress, image_refs)
+    importer.problems += problems
+    importer.duplicates += duplicates
+    names = [importer.add_task(task) for task in tasks]
     if names:
         importer.add_eval(stored, names)
     return importer.write(f"Imported from the store's eval {stored.id} v{stored.version} and the tasks it names.",
@@ -149,6 +175,13 @@ class _EntityOut(ExportContext):
 
     def ref(self, entity: Any) -> str | dict:
         kind = _kind_of(entity)
+        if (bundle := self.importer._installed_for(kind, entity.id)) is not None:
+            self.importer.floating.append(Floating(self.folder, kind, entity.id, _from_bundle(bundle)))
+            return entity.id
+        if (bundle := self.importer._registered_from(kind, entity)) is not None:
+            self.importer.floated.setdefault(kind, set()).add(fold(entity.id))
+            self.importer.floating.append(Floating(self.folder, kind, entity.id, _registered_from_bundle(bundle)))
+            return entity.id
         local = self.importer.local(kind, entity, self.folder)
         return local if local is not None else {kind.value: entity.id, "version": entity.version}
 
@@ -204,6 +237,9 @@ class _Importer:
         self.jobs: list[ImageJob] = []
         self.providers = Providers()
         self.installed: tuple[InstalledBundle, ...] | None = None
+        self.aliases: dict[str, InstalledAliases] = {}  # the installed bundles' aliases, by aliases.toml table
+        self.reserved: dict[EntityKind, set[str]] = {}  # each kind's names no folder takes, folded (_importing)
+        self.floated: dict[EntityKind, set[str]] = {}  # each kind's installed aliases written floating, folded
         if self.dest is not None:
             _check_destination(self.dest)
 
@@ -451,6 +487,10 @@ class _Importer:
         if isinstance(entity, str):
             self.problems.append(f"{where}: {entity}")
             return
+        if (bundle := self._registered_from(kind, entity)) is not None:
+            self.floated.setdefault(kind, set()).add(fold(entity_id))
+            self._from_installed(site, where, bundle, _registered_from_bundle(bundle))
+            return
         if isinstance(site.key, str) and (why := _not_taken(site, entity)) is not None:
             # The store holds the step as it is, though the step can't read what it names; a folder can't.
             site.rewrite(None)
@@ -488,6 +528,9 @@ class _Importer:
             if fold(name) in self.taken[BundleKind.ARTIFACT.value]:
                 raise Unwritable(f"a skill's folder takes its skill's name, {name!r}, which another artifact in the "
                                  "folder already has")
+            if fold(name) in self.reserved.get(EntityKind.ARTIFACT, set()):
+                raise Unwritable(f"a skill's folder takes its skill's name, {name!r}, which the export names as an "
+                                 "installed alias of an artifact, so the folder would take the alias's place in a run")
             self.taken[BundleKind.ARTIFACT.value].add(fold(name))
             return BundleKind.SKILL, name
         bundle_kind = _FOLDERS[kind]
@@ -532,9 +575,29 @@ class _Importer:
             self.installed = installed_bundles()
         return next((bundle for bundle in self.installed if entity_id.startswith(f"{bundle.id_root}/")), None)
 
-    def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle) -> None:
+    def _registered_from(self, kind: EntityKind, entity: Any) -> InstalledBundle | None:
+        """The installed bundle ``entity`` comes with when the store holds it under that bundle's alias for it and this
+        version is the one ``bundle register`` wrote from the bundle, as its ledger in the store records: a run writes
+        it from the bundle too. An entity stored under the alias by anything else is the store's own."""
+        table = _ALIAS_TABLES.get(kind)
+        if table is None or (claim := self._aliases(table).target(entity.id)) is None:
+            return None
+        registered = configured_store(get_config().get_document_store()).find_one(REGISTRATIONS, Filter.of(
+            store=kind.value, id=claim.alias, version=entity.version, status="done",
+            bundle=f"installed:{claim.bundle.id_root.removeprefix(LOCAL_PREFIX)}"))
+        return claim.bundle if registered is not None else None
+
+    def _aliases(self, table: str) -> InstalledAliases:
+        """The aliases the installed bundles give in ``table``."""
+        if self.installed is None:
+            self.installed = installed_bundles()
+        if table not in self.aliases:
+            self.aliases[table] = installed_aliases(self.installed, table)
+        return self.aliases[table]
+
+    def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle, why: str | None = None) -> None:
         """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
-        why = f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
+        why = why or _from_bundle(bundle)
         if site.version is not None and site.version_key is not None:
             why += f"; the stored pin to v{site.version} is dropped, as such an entity has no fixed version"
         _unpin(site)
@@ -563,11 +626,13 @@ class _Importer:
                                           "default"))
 
     def _name(self, kind: str, entity_id: str) -> str:
-        """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly."""
+        """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly, or when the
+        export names it as an installed alias, floating (``_importing``)."""
         names = _names_of(BundleKind(kind))
+        aliases = self.reserved.get(_FOLDER_KINDS[kind], set()) if kind in _FOLDER_KINDS else set()
         base = _valid_name(entity_id.rsplit("/", 1)[-1]) or kind.removesuffix("s")
         name, n = base, 1
-        while fold(name) in self.taken[names]:
+        while fold(name) in self.taken[names] or fold(name) in aliases:
             n += 1
             name = f"{base}-{n}"
         self.taken[names].add(fold(name))
@@ -577,6 +642,15 @@ class _Importer:
 def _names_of(kind: BundleKind) -> str:
     """The folder whose names ``kind``'s share: artifacts' and skills' are one."""
     return BundleKind.ARTIFACT.value if kind is BundleKind.SKILL else kind.value
+
+
+def _from_bundle(bundle: InstalledBundle) -> str:
+    return f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
+
+
+def _registered_from_bundle(bundle: InstalledBundle) -> str:
+    return (f"the store holds it under its alias as registered from the installed bundle {bundle.qualified}, which a run "
+            "writes it from")
 
 
 def _kind_of(entity: Any) -> EntityKind:

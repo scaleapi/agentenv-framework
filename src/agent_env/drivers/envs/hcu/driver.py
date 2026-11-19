@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,8 @@ WINDOWS_KEPT = ("USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"
 WINDOWS_PATH = (r"{SYSTEMROOT}\System32;{SYSTEMROOT};{SYSTEMROOT}\System32\Wbem;"
                 r"{SYSTEMROOT}\System32\WindowsPowerShell\v1.0")
 SESSION_BUS = Path("/run/agentenv/bus")
+# AX batches allow a minute of waits; leave time for input and final evidence.
+CALL_TIMEOUT_S = 300
 
 
 @computer_driver(name="hcu", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]},
@@ -130,7 +133,11 @@ class _Server:
                     if answer.cancelled():
                         pending = None
                         continue
-                    result = await session.call_tool(tool, arguments)
+                    try:
+                        async with asyncio.timeout(CALL_TIMEOUT_S):
+                            result = await session.call_tool(tool, arguments)
+                    except TimeoutError as error:
+                        raise TimeoutError(f"HCU did not answer within {CALL_TIMEOUT_S} seconds") from error
                     if not answer.done():
                         answer.set_result(result)
                     pending = None
@@ -159,7 +166,8 @@ async def _session():
                 environment["XDG_RUNTIME_DIR"] = resources.enter_context(tempfile.TemporaryDirectory(prefix="hcu-runtime-"))
             server = StdioServerParameters(command="/usr/bin/env", args=[
                 "-i", *(f"{name}={value}" for name, value in environment.items()), str(EXECUTABLE), "mcp"], env={})
-        async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
+        async with stdio_client(server) as (read, write), ClientSession(
+                read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT_S)) as session:
             yield session, await session.initialize()
 
 

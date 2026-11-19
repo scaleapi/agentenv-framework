@@ -1047,11 +1047,9 @@ def _agentenv_error(exc: BaseException) -> AgentEnvError | None:
 
 def _error_result(error: AgentEnvError) -> Any:
     from mcp.types import CallToolResult, TextContent
-    return CallToolResult(
-        isError=True,
-        content=[TextContent(type="text", text=f"{error.code}: {error.message}")],
-        structuredContent=error.fields(),
-    )
+    text = f"{error.code}: {error.message}" + (f" ({error.hint})" if error.hint else "")
+    return CallToolResult(isError=True, content=[TextContent(type="text", text=text)],
+                          structuredContent=error.fields())
 
 
 def _schema_from_signature(fn: Callable) -> dict:

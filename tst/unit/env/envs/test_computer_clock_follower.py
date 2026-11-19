@@ -21,7 +21,7 @@ import pytest
 import agent_env
 from agentenv_protocol.computer import clock as protocol_clock
 
-CLOCK = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04" / "clock"
+CLOCK = Path(agent_env.__file__).parent / "utils" / "faketime_clock"
 FOLLOWER = CLOCK / "clock-follower"
 
 
@@ -179,6 +179,19 @@ def test_a_gateway_it_cant_reach_is_named_in_its_status_and_it_keeps_trying(foll
     assert status["connected"] is False and status["url"] == "http://127.0.0.1:9/clock/watch"
     assert "Connection refused" in status["error"] or "URLError" in status["error"]
     follower.until(lambda: follower.status().get("errors", 0) >= 2)
+
+
+def test_a_changed_config_is_followed_while_the_gateway_it_follows_refuses_at_once(follower):
+    gateway = Gateway()
+    try:
+        follower.configure({"watch_url": "http://127.0.0.1:9/clock/watch", "name": "desktop", "token": "t"})
+        follower.until(lambda: follower.status().get("errors", 0) >= 3)
+
+        gateway.set("boot:1", datetime(2020, 1, 1, tzinfo=timezone.utc), 1.0)
+        follower.configure({"watch_url": gateway.url, "name": "desktop", "token": "t"})
+        follower.until(lambda: follower.status().get("version") == "boot:1", within=3)
+    finally:
+        gateway.close()
 
 
 def test_a_config_that_isnt_one_is_named_and_a_good_one_then_followed(follower):

@@ -464,6 +464,21 @@ class Config:
     def get_model_for_role(self, role: str, *, or_default: bool = True) -> str | None:
         return self._model_config().model_for_role(role, or_default=or_default)
 
+    def resolve_model(
+        self,
+        role: model_config.ModelRole,
+        *,
+        step_params: str | None = None,
+        run: str | None = None,
+        step: str | None = None,
+        agent: str | None = None,
+    ) -> model_config.ResolvedModel:
+        """``role``'s model for one step, falling back to this config's ``[model.roles]`` and default. ``[model]`` is
+        read only when no layer names a model, so a fallback the step doesn't use, such as an unset ``env:``
+        reference, can't fail it."""
+        return (model_config.named_model(role, step_params=step_params, run=run, step=step, agent=agent)
+                or model_config.config_model(role, self._model_config()))
+
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)
         if overrides:
@@ -473,19 +488,20 @@ class Config:
     def get_model_headers(self, base_url: str | None) -> dict[str, str]:
         return self._model_config().headers_for(base_url, secret_resolver=self._resolve_secret)
 
+    def is_model_endpoint(self, url: str | None) -> bool:
+        return self._model_config().is_endpoint(url)
+
     def resolve_model_call(
         self,
         model: str,
         *,
         default_api_key: str | None = None,
         base_override: str | None = None,
-        model_overrides: dict[str, dict[str, str]] | None = None,
     ) -> model_config.ModelCallConfig:
         return self._model_config().resolve_call(
             model,
             default_api_key=default_api_key,
             base_override=base_override,
-            model_overrides=model_overrides,
             secret_resolver=self._resolve_secret,
         )
 

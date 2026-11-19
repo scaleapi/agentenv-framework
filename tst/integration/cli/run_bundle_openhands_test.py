@@ -186,8 +186,8 @@ def test_an_mcp_header_naming_a_variable_reaches_the_server_as_written(state, en
         await DeployAgentTaskStep(id="agent", version=None, sandbox_type="local", a2a_agent_id=AGENT).execute(context)
         (agent,) = context.deployed_agents
         base_url = agent.a2a_url or agent.api_url
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL})
-        async with httpx.AsyncClient() as client:
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL}, headers=agent.control_headers)
+        async with httpx.AsyncClient(headers=agent.control_headers) as client:
             registered = await client.post(f"{base_url}/ext/mcp-config", json={
                 "name": "probe", "url": f"{endpoint.url}/mcp-probe", "headers": {"X-Probe": "${LITELLM_API_KEY}"}})
             registered.raise_for_status()
@@ -208,7 +208,7 @@ def test_a_conversation_the_sdk_cannot_resume_fails_the_next_task_as_an_infra_er
         await DeployAgentTaskStep(id="agent", version=None, sandbox_type="local", a2a_agent_id=AGENT).execute(context)
         (agent,) = context.deployed_agents
         base_url = agent.a2a_url or agent.api_url
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL}, headers=agent.control_headers)
         outcomes["first"] = await _send(base_url, "ctx", "Say pong.")
         subprocess.run(["docker", "exec", f"agent-{agent.sandbox_id}", "sh", "-c",
                         "for f in ~/.openhands-a2a/conversations/*/base_state.json; do printf '{' > \"$f\"; done"],
@@ -253,7 +253,7 @@ def test_a_run_past_its_timeout_is_interrupted_and_its_context_keeps_working(sta
         (agent,) = context.deployed_agents
         base_url = agent.a2a_url or agent.api_url
         endpoint.respond = respond
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL, "timeout_seconds": 5})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL, "timeout_seconds": 5}, headers=agent.control_headers)
         endpoint.fail_next(Fault("stall", seconds=15))
         started = time.monotonic()
         outcomes["timed_out"] = await _send(base_url, "ctx", "Say pong.")
@@ -261,7 +261,7 @@ def test_a_run_past_its_timeout_is_interrupted_and_its_context_keeps_working(sta
         calls = len(endpoint.completions())
         await asyncio.sleep(25)  # past the stall, so a run left going would have called the endpoint again
         outcomes["calls_after_the_timeout"] = len(endpoint.completions()) - calls
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 120})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 120}, headers=agent.control_headers)
         outcomes["after"] = await _send(base_url, "ctx", "Say pong again.")
 
     _with_agent(state, steps)
@@ -295,11 +295,11 @@ def test_a_run_past_its_timeout_mid_command_leaves_no_process_behind(state, endp
         (agent,) = context.deployed_agents
         base_url = agent.a2a_url or agent.api_url
         endpoint.respond = respond
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL, "timeout_seconds": 5})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL, "timeout_seconds": 5}, headers=agent.control_headers)
         started = time.monotonic()
         outcomes["timed_out"] = await _send(base_url, "ctx", "Sleep.")
         outcomes["seconds"] = time.monotonic() - started
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 120})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"timeout_seconds": 120}, headers=agent.control_headers)
         outcomes["after"] = await _send(base_url, "ctx", "List the processes.")
 
     _with_agent(state, steps)
