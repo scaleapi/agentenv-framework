@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -169,8 +170,9 @@ def cdp_clients(tmp_path_factory) -> Path:
 
 
 def _composed(root: Path, bundle, env_id: str | None = None, disks: bool = False):
-    """``bundle`` written and its computers composed as a run on this machine composes them, its containers alone,
-    unless ``disks``, which composes every form of each base too."""
+    """``bundle`` written and its computers composed as a run on this machine composes them, its containers alone and
+    no computer app alone, unless ``disks``, which composes every form of each base and every app alone too; a fixture
+    of a computer app alone (``env_id``) has its apps composed alone."""
     patch = pytest.MonkeyPatch()
     patch.chdir(root)
     patch.setenv("XDG_STATE_HOME", str(root / "state"))
@@ -182,8 +184,9 @@ def _composed(root: Path, bundle, env_id: str | None = None, disks: bool = False
     with namespace_routing():
         plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
         try:
+            composing = Composing() if disks else replace(Composing.for_run(None), apps_alone=env_id is not None)
             materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)),
-                        composing=Composing() if disks else Composing.for_run(None))
+                        composing=composing)
         finally:
             package_cache.keep()
         yield Env.get(env_id or f"{bundle.id_root}/desktop")
