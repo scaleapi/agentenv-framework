@@ -36,6 +36,8 @@ COPY requirements.txt model-requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
 COPY a2a_server.py codex_bridge.py codex_config.py codex_kit.py entrypoint.sh install.sh run.sh ./
+# Every clocked agent's egress rule, which the bridge imports, and the clock page's format it reads (shared_sources.toml).
+COPY agent_clock/agent_egress.py clock/clockpage.py ./
 # The CLI's cwd, /app, and its state, fixed so neither follows the uid.
 RUN useradd --create-home --uid 10001 agent && mkdir -p /app /home/agent/.codex \
     && chown agent:agent /app /home/agent/.codex && chmod 0755 entrypoint.sh
