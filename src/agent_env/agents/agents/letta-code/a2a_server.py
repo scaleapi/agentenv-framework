@@ -287,7 +287,7 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
     config=LettaCodeConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
         enable(ATTRIBUTION_PROBE_V1),
         enable(
             INSTALL_V1,

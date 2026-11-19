@@ -310,6 +310,7 @@ def test_live_trajectory_is_available_by_context(codex, monkeypatch):
 
     assert asyncio.run(exercise()) == {
         "trajectory": [THREAD_STARTED],
+        "format": a2a_server.TRAJECTORY_FORMAT,
         "is_live": True,
         "session_id": "thread-1",
         "harness": "codex-cli",

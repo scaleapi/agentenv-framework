@@ -327,7 +327,8 @@ def _stage_conversation(archive: Path, conversations_dir: Path, target_id: str, 
     lifespan=_turns_stop_with_the_server,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, description="The task's OpenHands SDK events, also while it runs."),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT,
+               description="The task's OpenHands SDK events, also while it runs."),
         enable(
             SNAPSHOT_V1,
             description=(

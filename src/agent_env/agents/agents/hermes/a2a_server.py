@@ -343,7 +343,7 @@ def _tar(*args: str) -> None:
     config=HermesConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
         enable(ATTRIBUTION_PROBE_V1),
         # SDK default: Hermes reaches the task's other agents through the SDK's peer_agents MCP tools.
         PEER_AGENTS_V1,
