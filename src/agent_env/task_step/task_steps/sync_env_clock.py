@@ -30,6 +30,7 @@ from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.deploy_agent import bound_deployment
 
 if TYPE_CHECKING:
     from agent_env.env.legacy_protocol import BackingServer
@@ -75,6 +76,7 @@ class SyncEnvClockTaskStep(TaskStep):
         virtual_time: str,
         virtual_seconds_per_real_second: float = 1.0,
         tolerate_missing_sync_time: bool = True,
+        env_step_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         timeout_seconds: int = 30,
@@ -94,6 +96,7 @@ class SyncEnvClockTaskStep(TaskStep):
         if not isinstance(virtual_time, str):
             raise ValueError("virtual_time must be an RFC3339 string")
         self.env_id = env_id
+        self.env_step_id = env_step_id
         self.virtual_time = virtual_time
         self.virtual_seconds_per_real_second = virtual_seconds_per_real_second
         self.tolerate_missing_sync_time = tolerate_missing_sync_time
@@ -105,6 +108,7 @@ class SyncEnvClockTaskStep(TaskStep):
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["env_id"] = self.env_id
+        base["env_step_id"] = self.env_step_id
         base["virtual_time"] = self.virtual_time
         base["virtual_seconds_per_real_second"] = self.virtual_seconds_per_real_second
         base["tolerate_missing_sync_time"] = self.tolerate_missing_sync_time
@@ -120,6 +124,7 @@ class SyncEnvClockTaskStep(TaskStep):
         return cls(
             **cls._base_from_dict(data),
             env_id=data["env_id"],
+            env_step_id=data.get("env_step_id"),
             virtual_time=data["virtual_time"],
             virtual_seconds_per_real_second=data.get("virtual_seconds_per_real_second", 1.0),
             tolerate_missing_sync_time=data.get("tolerate_missing_sync_time", True),
@@ -139,7 +144,7 @@ class SyncEnvClockTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.env.env import gateway_url_of
 
-        deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
+        deployed = bound_deployment(context, self.env_id, env_step_id=self.env_step_id, step_id=self.id)
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
@@ -175,6 +180,7 @@ class SyncEnvClockTaskStep(TaskStep):
         agents = await self._follow_agents(context, deployed, env_get_time_url)
         configuration = {
             "step_id": self.id, "env_id": self.env_id,
+            "deploy_step_id": (deployed.metadata or {}).get("deploy_step_id"),
             "virtual_time": self.virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
             "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped, "agents": agents,
             "require_agent_clock": self.require_agent_clock,
@@ -194,12 +200,13 @@ class SyncEnvClockTaskStep(TaskStep):
     async def _follow_agents(self, context: TaskStepContext, deployed, env_get_time_url: Optional[str]) -> list[dict]:
         """Have every agent registered with the env follow its clock (``a2a_agent.clock.follow``): one that can't is
         reported and skipped, or fails the step under ``require_agent_clock``."""
-        from agent_env.a2a_agent.clock import follow_in, torn_down
+        from agent_env.a2a_agent.clock import follow_in, on_deployment, torn_down
 
         outcomes = []
         for agent in context.deployed_agents:
-            if self.env_id not in (agent.env_ids or []) or torn_down(context, agent):
-                continue  # not the env's, or taken down by teardown_sandboxes: nothing to follow
+            mine = self.env_id in (agent.env_ids or []) and on_deployment(agent, deployed)
+            if not mine or torn_down(context, agent):
+                continue  # not this deployment's, or taken down by teardown_sandboxes: nothing to follow
             outcome = await follow_in(context, agent, deployed, env_get_time_url=env_get_time_url,
                                       timezone=self.timezone, timeout=self.timeout_seconds)
             if not outcome["synced"]:

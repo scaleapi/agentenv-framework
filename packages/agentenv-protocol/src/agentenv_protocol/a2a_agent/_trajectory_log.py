@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 from ..atif import Adapter, AuxEntry, ServedTurn
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
+from ._turn_index import TurnIndex
 from .extensions import TrajectoryState
 from .tasks.v1 import TaskError, TrajectoryLog
 
@@ -92,6 +93,8 @@ class TaskTrajectories:
         self._max_contexts = max_contexts
         self._native = native
         self._atif = atif
+        #: Each context's count of started tasks, kept only for an agent that serves atif/1.
+        self._turns = TurnIndex() if atif is not None else None
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
         self._copies: dict[str, AtifCopy] = {}
@@ -111,7 +114,8 @@ class TaskTrajectories:
 
     def start(self, task_id: str, turn: TurnStart | None = None) -> None:
         """Place the task after the context's started tasks, as it begins to run, and open it in
-        the context's atif/1 copy, its turn index the number of tasks that started before it.
+        the context's atif/1 copy, its turn index the number of tasks the context started before
+        it, which a restart, an eviction or a restore doesn't reset.
 
         Only tasks that have not started move; they have no events, so no position shifts."""
         record = self._tasks[task_id]
@@ -126,9 +130,20 @@ class TaskTrajectories:
             copy = self._copies.get(record.context_id)
             if copy is None:
                 copy = self._copies[record.context_id] = AtifCopy(self._atif, record.context_id)
-            copy.start(task_id, started, turn)
+            copy.start(task_id, self._turns.next(record.context_id), turn)
             record.log._atif = _CopySink(copy, task_id)
         self._touch(record.context_id)
+
+    def turns(self, context_id: str) -> int:
+        """How many tasks the context has started, the count a snapshot of it carries; an agent that serves atif/1
+        only."""
+        return self._turns.count(context_id)
+
+    def restored(self, context_id: str, turns: int) -> None:
+        """A snapshot was restored into the context: its count goes on from the snapshot's, and its next task starts a
+        new document, since the conversation is the snapshot's now; an agent that serves atif/1 only."""
+        self._turns.set(context_id, turns)
+        self._copies.pop(context_id, None)
 
     def request_cancel(self, task_id: str) -> None:
         """Make ``canceled`` the outcome the task is sealed with, whatever ``run`` returns."""

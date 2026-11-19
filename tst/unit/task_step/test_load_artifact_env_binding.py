@@ -8,12 +8,14 @@ no data.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_env.env.env import DeployedGatewayEnv
-from agent_env.task_step.context import TaskStepContext
+from agent_env.artifact import Artifact, FileArtifactUniverse
+from agent_env.env.env import DeployedGatewayEnv, Env
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
@@ -38,6 +40,25 @@ def _loader(env_step_id: str | None) -> LoadArtifactTaskStep:
         id=f"load-{env_step_id or 'unbound'}", version=None, env_id=ENV_ID,
         env_step_id=env_step_id, artifact_id="universe", artifact_version=1,
     )
+
+
+async def _load(step: LoadArtifactTaskStep, context: TaskStepContext) -> list[str]:
+    """Run the step with the artifact store and the env's load boundary mocked; the sandboxes it loaded into."""
+    loaded_into = []
+
+    class _Env:
+        @classmethod
+        async def from_deployed_env(cls, deployed):
+            loaded_into.append(deployed.sandbox_id)
+            return cls()
+
+        async def load_file_artifact_universe(self, artifact, destination_path=None):
+            return SimpleNamespace(destination_path="/loaded", files=[])
+
+    universe = MagicMock(spec=FileArtifactUniverse, id="universe", version=1, type="file_artifact_universe")
+    with patch.object(Artifact, "get", return_value=universe), patch.object(Env, "get", return_value=_Env()):
+        await step.execute(context)
+    return loaded_into
 
 
 async def _deploy_two_in_parallel() -> TaskStepContext:
@@ -65,8 +86,8 @@ async def _deploy_one() -> TaskStepContext:
 async def test_each_load_targets_its_own_branch_env():
     context = await _deploy_two_in_parallel()
 
-    assert _loader("env-a")._deployed_env(context).sandbox_id == "sb-AAA"
-    assert _loader("env-b")._deployed_env(context).sandbox_id == "sb-BBB"
+    assert await _load(_loader("env-a"), context) == ["sb-AAA"]
+    assert await _load(_loader("env-b"), context) == ["sb-BBB"]
 
 
 @pytest.mark.asyncio
@@ -74,7 +95,7 @@ async def test_ambiguous_env_without_env_step_id_raises():
     context = await _deploy_two_in_parallel()
 
     with pytest.raises(RuntimeError, match="2 deployments of env"):
-        _loader(None)._deployed_env(context)
+        await _load(_loader(None), context)
 
 
 @pytest.mark.asyncio
@@ -82,7 +103,7 @@ async def test_stale_env_step_id_raises_even_with_one_deployment():
     context = await _deploy_one()
 
     with pytest.raises(RuntimeError, match="names no deployment"):
-        _loader("env-typo")._deployed_env(context)
+        await _load(_loader("env-typo"), context)
 
 
 @pytest.mark.asyncio
@@ -90,12 +111,13 @@ async def test_single_deployment_resolves_without_env_step_id():
     """The unchanged path every existing task takes."""
     context = await _deploy_one()
 
-    assert _loader(None)._deployed_env(context).sandbox_id == "sb-ONLY"
+    assert await _load(_loader(None), context) == ["sb-ONLY"]
 
 
 @pytest.mark.asyncio
-async def test_env_not_deployed_resolves_to_none():
-    assert _loader(None)._deployed_env(TaskStepContext()) is None
+async def test_env_not_deployed_raises_not_found():
+    with pytest.raises(StepContextError, match="Env 'multi-env' not found in context.deployed_envs"):
+        await _load(_loader(None), TaskStepContext())
 
 
 @pytest.mark.asyncio

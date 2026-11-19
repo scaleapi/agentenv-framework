@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
+from agentenv_protocol.a2a_agent import SNAPSHOT_STATE_PARAM, STANDARD_EXTENSIONS
 from agentenv_protocol.types import CONTROL_TOKEN_ENV
 
 from agent_env.config import get_config
@@ -180,6 +180,13 @@ class A2AAgent:
             if ext.get("uri") == uri:
                 return ext
         return None
+
+    @staticmethod
+    def keeps_snapshot_state(card: dict) -> bool:
+        """Whether the agent's SDK keeps its own state, its atif/1 copy's turn counts, in each snapshot beside the
+        agent's objects, as its card's snapshot extension says: an SDK from before it refuses the object."""
+        snapshot = A2AAgent.find_extension(card, A2AAgent.EXT_SNAPSHOT) or {}
+        return SNAPSHOT_STATE_PARAM in (snapshot.get("params") or {})
 
     @staticmethod
     def extension_method(card: dict, uri: str, method: str) -> dict | None:
