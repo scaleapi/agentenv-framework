@@ -50,7 +50,8 @@ class Hooks(Toy):
 
     @aux("hooks", type="note")
     def note(self, record: dict, turn: Any) -> None:
-        turn.message(step=record["step"], text=record["text"])
+        # Takes the text out of the record it's handed, which must leave the served aux log whole.
+        turn.message(step=record["step"], text=record.pop("text"))
 
 
 def _usage(step: str, prompt: int, out: int) -> dict[str, Any]:
@@ -65,6 +66,7 @@ def _work(tag: str) -> list[dict[str, Any]]:
         {"type": "result", "id": f"{tag}-c1", "out": "a.txt b.txt"},
         {"type": "say", "step": f"{tag}-2", "text": f"{tag}: two files"},
         _usage(f"{tag}-2", 12, 3),
+        {"type": "total", "cost": 0.25},
     ]
 
 
@@ -249,10 +251,6 @@ def _rebuild(pages: list[dict[str, Any]]) -> dict[str, Any]:
     return document
 
 
-def _strip_final_metrics(document: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in document.items() if key != "final_metrics"}
-
-
 def test_the_card_offers_atif_beside_the_native_format() -> None:
     card = _toy().create_app().state.agentenv_a2a.card.model_dump(mode="json", exclude_none=True)
     (trajectory,) = [e for e in card["capabilities"]["extensions"] if e["uri"] == TRAJECTORY_V1.uri]
@@ -308,7 +306,9 @@ def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest
     assert json.loads(uploaded[-1]) == document
     assert [step["step_id"] for step in cursor["events"]] == [1, 2, 3]
     assert cursor["next"] == 3 and cursor["has_more"] is False and cursor["state"] == "completed"
-    assert _rebuild([context_cursor]) == _strip_final_metrics(document)
+    # The task's cost is on no step, only in final_metrics, so the header has to carry it.
+    assert context_cursor["header"]["final_metrics"]["total_cost_usd"] == 0.25
+    assert _rebuild([context_cursor]) == document
     assert document["session_id"] == "ctx-1" and document["trajectory_id"]
     assert document["agent"] == {"name": "toy-agent", "version": "2.0"}
     user = document["steps"][0]
@@ -504,7 +504,7 @@ def test_cursor_pages_carry_the_header_and_their_tasks_sub_agents() -> None:
     spawning = next(page for page in pages if any(
         "subagent_trajectory_ref" in result for result in page["events"][0].get("observation", {}).get("results", [])))
     assert [sub["trajectory_id"] for sub in spawning["subagents"]] == ["t1-sub"]
-    assert _rebuild(pages) == _strip_final_metrics(document)
+    assert _rebuild(pages) == document
 
 
 def test_a_reader_following_the_cursor_gets_the_steps_a_sub_agent_writes_after_its_result() -> None:
@@ -524,7 +524,7 @@ def test_a_reader_following_the_cursor_gets_the_steps_a_sub_agent_writes_after_i
     # While the task ran the sub-agent had one closed step; the page that served the task's last step had all three.
     assert [len(steps) for steps in early][-1] == 1
     assert [len(sub["steps"]) for sub in pages[-1]["subagents"]] == [3]
-    assert _rebuild(pages) == _strip_final_metrics(document)
+    assert _rebuild(pages) == document
 
 
 def test_a_spawn_its_task_ended_without_answering_keeps_its_sub_agent_referenced() -> None:

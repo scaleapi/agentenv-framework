@@ -264,7 +264,8 @@ class TrajectoryEventsResponse(ExtensionResponse):
 
 class AtifEventsResponse(ExtensionResponse):
     """An atif/1 cursor page: the document's closed steps after step ``after``, ``next`` the last one's ``step_id``.
-    ``header`` is the document's root without its steps, and ``subagents`` the embedded sub-agent trajectories of the
+    ``header`` is the document's root without its steps and sub-agents (``final_metrics`` once no task is open), and
+    ``subagents`` the embedded sub-agent trajectories of the
     tasks these steps belong to, as far as each is served, so the page stands alone. A sub-agent can gain steps while
     its task runs; a reader keeps each sub-agent's latest copy, and the page that serves a task's last step carries
     them whole. The last page's header with every page's steps and the latest sub-agents is the document."""

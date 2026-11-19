@@ -78,7 +78,7 @@ class AtifCopy:
             try:
                 context = TurnContext(
                     index=index, context_id=self._context_id, task_id=task_id, message_id=turn.message_id,
-                    inbound=_content(turn.parts, self._run)[0], agent_name=turn.agent_name,
+                    inbound=tuple(_content(turn.parts, self._run)[0]), agent_name=turn.agent_name,
                     agent_version=turn.agent_version, agent_model=turn.agent_model, started_at=_now())
                 self._run.start_task(context)
             except Exception as exc:
@@ -97,7 +97,8 @@ class AtifCopy:
             task = self._open(task_id)
             if task is None:
                 return
-            task.aux.append({"name": name, "record": record, "after": task.natives})
+            # A copy: an adapter may change the record it's handed, and the log is replay's input.
+            task.aux.append({"name": name, "record": json.loads(json.dumps(record)), "after": task.natives})
             try:
                 self._run.aux(name, record)
             except Exception as exc:
@@ -175,8 +176,7 @@ class AtifCopy:
         header = None
         subagents: list[dict[str, Any]] = []
         if document is not None:
-            header = {key: value for key, value in document.items()
-                      if key not in ("steps", "subagent_trajectories", "final_metrics")}
+            header = {key: value for key, value in document.items() if key not in ("steps", "subagent_trajectories")}
             subagents = [sub for sub in document.get("subagent_trajectories", [])
                          if sub_tasks.get(sub["trajectory_id"]) in tasks]
         return AtifPage(header=header, subagents=subagents, steps=served,

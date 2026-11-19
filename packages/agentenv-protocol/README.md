@@ -1634,7 +1634,8 @@ included:
   calls are all answered, up to the first that isn't.
 - A cursor read pages those closed steps by `step_id`: `after` is the last
   `step_id` read, and `next` is the last one served. Each page carries `header`,
-  the document's root without its steps, and `subagents`, the embedded
+  the document's root without its steps (with `final_metrics` once no task is
+  open), and `subagents`, the embedded
   sub-agent trajectories of the tasks its steps belong to, as far as each is
   served. A sub-agent can gain steps while its task runs, so keep each one's
   latest copy; the page that serves a task's last step, which closes only as the
