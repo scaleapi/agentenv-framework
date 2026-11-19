@@ -110,8 +110,9 @@ def _reset():
         reset()
 
 
-def _configured_model(url: str) -> str | None:
-    return httpx.get(f"{url}/ext/agent-config", timeout=30).json()["config"].get("model")
+def _configured_model(agent) -> str | None:
+    return httpx.get(f"{agent.a2a_url}/ext/agent-config", headers=agent.control_headers,
+                     timeout=30).json()["config"].get("model")
 
 
 def test_each_role_runs_on_the_model_its_flag_gives_and_a_rerun_on_others_writes_nothing(bundle):
@@ -122,8 +123,8 @@ def test_each_role_runs_on_the_model_its_flag_gives_and_a_rerun_on_others_writes
     try:
         [run] = result.runs
         assert run.outcome is Outcome.PASSED, run.error or run.failed_steps
-        agents = {agent.agent_name: agent.a2a_url for agent in run.context.deployed_agents}
-        assert {name: _configured_model(url) for name, url in agents.items()} == {
+        agents = {agent.agent_name: agent for agent in run.context.deployed_agents}
+        assert {name: _configured_model(agent) for name, agent in agents.items()} == {
             "solver": "flag-solver", "user-sim": "flag-user"}
         assert run.models == {"solver": {"prompt": "flag-solver"}, "user simulator": {"prompt": "flag-user"},
                               "judge": {"judge": "openai/flag-judge"}}

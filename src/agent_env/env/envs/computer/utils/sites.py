@@ -35,7 +35,7 @@ from urllib.parse import urlsplit
 import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
-from agentenv_protocol.website import WEBSITE_LIVE_PARAM
+from agentenv_protocol.website import WEBSITE_LIVE_PARAM, WEBSITE_SIGN_IN_HEADERS_PARAM
 from agentenv_protocol.website_browser import NETWORK_LOG_ENV, SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -44,6 +44,8 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
+from agent_env.env.gateway.constants import AGENT_ENV_COMPUTER_HEADER
+from agent_env.env.gateway.rest_proxy import fallback_name, served_names
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
@@ -162,13 +164,6 @@ def covers(strong: str, weak: str) -> bool:
     """Whether every host ``weak`` names is one ``strong`` names."""
     return strong == weak or (strong.startswith("*.") and not weak.startswith("*.")
                               and weak.partition(".")[2] == strong[2:])
-
-
-def fallback_name(site: str) -> str:
-    """The name a synthetic site declaring none is reached by: its name on ``.localhost``, lowercase, each ``_`` a
-    ``-``, and no ``-`` at either end of the label (``My_Site`` is ``my-site.localhost``). Two sites it gives one name
-    are refused as any two claiming it."""
-    return f"{site.lower().replace('_', '-')[:63].strip('-')}.localhost"
 
 
 def claims(sites: Iterable[Site], allow_hosts: Iterable[str] = ()) -> list[Claim]:
@@ -313,12 +308,15 @@ def browser_environment(display: str) -> dict[str, str]:
 
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
-                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = ()) -> dict:
+                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = (),
+                 sign_in_headers: Optional[dict[str, list[str]]] = None) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
-    its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
-    (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
-    alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network log."""
+    its certificate and key, the headers its gateway's sandbox provider asks requests to it to carry
+    (``upstream_headers``, by site), which the proxy sends upstream alone, and those its site names as its sign-in
+    headers (``sign_in_headers``, by site), whose values its network log takes out, and with ``forward_port``, for a
+    browser alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network
+    log."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -326,6 +324,8 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
             site["cert_pem"], site["key_pem"] = issued.leaves[route.site]
         if (upstream_headers or {}).get(route.site):
             site["upstream_headers"] = dict(upstream_headers[route.site])
+        if (sign_in_headers or {}).get(route.site):
+            site["sign_in_headers"] = list(sign_in_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
             "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
@@ -452,13 +452,16 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 
     issued = issue(table.routes, label=label)
-    upstream_headers = {r.site: sandbox_request_headers_for_url(r.url) for r in table.routes}
+    # Each request names the computer it came from, so the gateway gives it the role driving that computer now.
+    upstream_headers = {r.site: {**sandbox_request_headers_for_url(r.url), AGENT_ENV_COMPUTER_HEADER: label}
+                        for r in table.routes}
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
-                                                               forward_port=display == ALONE_DISPLAY,
-                                                               upstream_headers=upstream_headers, direct=direct)))
+    await channel.write_secret(CONFIG, json.dumps(proxy_config(
+        table, issued, user=user, os_type=os_type, forward_port=display == ALONE_DISPLAY,
+        upstream_headers=upstream_headers, direct=direct,
+        sign_in_headers={site.name: site.sign_in_headers for site in sites if site.sign_in_headers})))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
@@ -585,11 +588,9 @@ def serves_websites(record: DeployedEnv) -> bool:
 def _served_names(sites: list[tuple[str, dict]]) -> list[dict]:
     """One env's ``sites``, each with the name it's served as: named by their cards, unless two cards share a name, as
     two websites of one image whose cards name it can; then each is named as it's served, its environment_name, which
-    the env's gateway gives each a route of its own by."""
-    names = [site["name"] for _, site in sites]
-    if len(set(names)) == len(names):
-        return [site for _, site in sites]
-    return [{**site, "name": service} for service, site in sites]
+    the env's gateway gives each a route of its own by (``served_names``, which its gateway lists them by too)."""
+    named = served_names({service: site["name"] for service, site in sites})
+    return [{**site, "name": named[service]} for service, site in sites]
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:
@@ -624,7 +625,11 @@ def _stored_domains(record: DeployedEnv) -> dict[str, list[str]]:
 
 
 def _found(name: str, url: str, params: dict, stored: Optional[list[str]] = None) -> dict:
-    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or [])}
+    """A site found, with its card's sign-in headers when it names any."""
+    sign_in = params.get(WEBSITE_SIGN_IN_HEADERS_PARAM)
+    named = [header for header in sign_in if isinstance(header, str) and header] if isinstance(sign_in, list) else []
+    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or []),
+            **({"sign_in_headers": named} if named else {})}
 
 
 def _joined(address: str, url: str) -> str:

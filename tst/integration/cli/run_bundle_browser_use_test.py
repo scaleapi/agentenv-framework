@@ -117,12 +117,13 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
                                   sandbox_type="local").execute(context)
         (env,), (agent,) = context.deployed_envs, context.deployed_agents
         base_url = agent.a2a_url
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL}, headers=agent.control_headers)
         outcomes["none"] = await _send(base_url, PROMPT)
         outcomes["none_asked"] = len(endpoint.completions())
 
         await BrowserConnectCdpTaskStep(id="connect", version=None, env_id=BROWSER).execute(context)
-        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"connect_by": "http"})
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"connect_by": "http"},
+                                         headers=agent.control_headers)
         outcomes["http"] = await _send(base_url, PROMPT, context_id="kept")
         asked = len(endpoint.completions())
         outcomes["again"] = await _send(base_url, AGAIN, context_id="kept")
@@ -130,14 +131,15 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
 
         forged = reachable_url(env.environment_url.rstrip("/"), from_sandbox_type=env.sandbox_type,
                                to_sandbox_type=agent.sandbox_type).rstrip("/") + f"/svc/chromium/cdp/{uuid.uuid4().hex}"
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, headers=agent.control_headers) as client:
             added = await client.post(f"{base_url}/ext/cdp-config", json={
                 "name": "forged", "http_url": f"{forged}/", "ws_url": "ws" + forged.removeprefix("http")
                 + "/devtools/browser"})
         added.raise_for_status()
         for connect_by in ("ws", "http"):
             await protocol.post_agent_config(f"{base_url}/ext/agent-config",
-                                             {"browser": "forged", "connect_by": connect_by})
+                                             {"browser": "forged", "connect_by": connect_by},
+                                             headers=agent.control_headers)
             outcomes[f"forged_{connect_by}"] = await _send(base_url, PROMPT)
 
     written = CliRunner().invoke(cli, ["run", str(_writes_the_agent_and_browser(state))])

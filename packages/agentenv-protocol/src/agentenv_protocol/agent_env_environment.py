@@ -990,7 +990,7 @@ def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = 
 
 def _fastmcp_tool_result(answer: Any) -> Any:
     """A hook's ``mcp.types.CallToolResult`` as the ``ToolResult`` a fastmcp middleware chain returns, the error
-    flag kept, under the field spellings of mcp 1 and 2."""
+    flag and ``_meta`` kept, under the field spellings of mcp 1 and 2."""
     from fastmcp.tools import ToolResult
     # mcp 2's spellings first: on mcp 1 they are plain misses, on mcp 2 the camel-case ones are deprecation shims.
     structured = getattr(answer, "structured_content", None)
@@ -999,7 +999,8 @@ def _fastmcp_tool_result(answer: Any) -> Any:
     is_error = getattr(answer, "is_error", None)
     if is_error is None:
         is_error = getattr(answer, "isError", False)
-    return ToolResult(content=list(answer.content), structured_content=structured, is_error=bool(is_error))
+    return ToolResult(content=list(answer.content), structured_content=structured, meta=getattr(answer, "meta", None),
+                      is_error=bool(is_error))
 
 
 def _mcp_tool_annotations(annotations: Any) -> Any:
@@ -1046,11 +1047,9 @@ def _agentenv_error(exc: BaseException) -> AgentEnvError | None:
 
 def _error_result(error: AgentEnvError) -> Any:
     from mcp.types import CallToolResult, TextContent
-    return CallToolResult(
-        isError=True,
-        content=[TextContent(type="text", text=f"{error.code}: {error.message}")],
-        structuredContent=error.fields(),
-    )
+    text = f"{error.code}: {error.message}" + (f" ({error.hint})" if error.hint else "")
+    return CallToolResult(isError=True, content=[TextContent(type="text", text=text)],
+                          structuredContent=error.fields())
 
 
 def _schema_from_signature(fn: Callable) -> dict:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
@@ -558,6 +559,9 @@ class JudgeResponseDiscrepancy:
     unknown_ids: list[str]
     parse_error: str | None = None
     non_finite_score_ids: list[str] = field(default_factory=list)
+    # What's wrong inside rows whose ids are right (user_sim_checks: a fail citing no graded turn, a verdict its own
+    # reason contradicts, ...), one problem per entry naming its row.
+    row_problems: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {
@@ -572,6 +576,8 @@ class JudgeResponseDiscrepancy:
             out["parse_error"] = self.parse_error
         if self.non_finite_score_ids:
             out["non_finite_score_ids"] = list(self.non_finite_score_ids)
+        if self.row_problems:
+            out["row_problems"] = list(self.row_problems)
         return out
 
     def __str__(self) -> str:
@@ -579,6 +585,8 @@ class JudgeResponseDiscrepancy:
             return f"invalid JSON ({self.parse_error})"
         if self.non_finite_score_ids:
             return _non_finite_score_problem(self.non_finite_score_ids)
+        if self.row_problems:
+            return "; ".join(self.row_problems)
         return (
             f"expected {self.expected_count} results but got {self.returned_count}"
             f" (missing={self.missing_ids}, duplicate={self.duplicate_ids}, unknown={self.unknown_ids})"
@@ -1228,6 +1236,330 @@ def format_trajectory_mistakes_correction(
     return f"{eval_prompt.rstrip()}\n\n{correction_block}"
 
 
+# ---------------------------------------------------------------------------
+# user_sim_checks: grades the user sim (the AI playing the user), not the assistant.
+#
+# Each criterion is one question about the user sim's run: a check (guidance, oversharing, ...) or one of the task's
+# own rubric items. Fields the prompt and the parser read on a criterion, beyond `id`:
+# - `question`: what to answer, with what fails, what doesn't, when n/a and when could_change_grade is true;
+# - `kind` (task items): "hard" or "general"; `na_when`: when it never came up, "never" when n/a isn't allowed;
+# - `graded_turns`: the turns marked GRADED, which a fail must cite (any cited turn counts when it's absent);
+# - `weight`: 0 records the row but never lets it lower the score (style).
+# The run goes in the template's trajectory placeholder, so the framing and the run come first, the same for every
+# call on a run, and the criteria last: a prompt cache can share everything before them.
+# ---------------------------------------------------------------------------
+USER_SIM_VERDICTS = ("pass", "fail", "n/a")
+_USER_SIM_NA_NEVER = "never"
+
+_USER_SIM_FRAMING = """You check a user simulator ("the user sim"): an AI playing a real person who messages their \
+personal AI assistant. You grade the user sim, never the assistant. You are given:
+1. THE USER SIM'S INSTRUCTIONS: exactly what it was told about who it is, what it knows, its decisions, its rules for \
+the assistant and what is private. Hold it to these lines only.
+2. THE RUN: every check-in it got, word for word ("what it was sent": the time, its new and earlier emails, texts and \
+notifications, the lines it sent, and the assistant's new messages), each followed by its answer: "reply" (the \
+message reaches the assistant), "no_reply" (nothing is sent) or "done" (a sign-off).
+3. THE CRITERIA: the questions to answer about it.
+
+How to read the run:
+- What it was sent at a turn, and at every earlier turn, is what it knew; a fact it was never shown is not one it \
+forgot.
+- Turns marked CONTEXT ONLY are fixed history: never fail the user sim for them, but they still count as what it said.
+- Grade only the turns marked GRADED (each criterion's "graded_turns"). Cite turns by their number.
+- The assistant's own words are the assistant's, even when they repeat an email.
+
+How to answer:
+- Answer each criterion's "question" only, narrowly, by its own definition; other problems belong to other criteria. \
+A failure needs clear evidence in a graded answer.
+- A criterion's "question" says what fails, what is not a failure, when to answer "n/a" and when "could_change_grade" \
+is true.
+- A task rubric item gives its "kind". A "hard" item is an exact rule from the user sim's instructions: it fails on \
+any breach of the list or value it names, however small. A "general" item is a judgement about how this person would \
+behave: it fails only on a clear instance.
+- An item's "na_when" is the situation in which it never came up: answer "n/a" for it then, and only then. \
+"na_when": "never" means it always applies: answer pass or fail.
+- Reason first and decide last. Write the reason, then the turns it rests on, and only then the verdict, which \
+follows from the reason: a reason that finds no clear failure gives "pass" (or "n/a"), never "fail". Keep every \
+reason to at most 40 words: the evidence and the conclusion, not your working.
+- "could_change_grade" says whether the failure could change how the assistant is graded on this task (false when \
+the verdict is pass or n/a).
+- "assistant_asked" is true when the assistant asked for or invited the behaviour you graded (e.g. asked the user \
+to write a message or to give a fact it should look up); false otherwise. Give it on every result, false when \
+nothing was asked; it is recorded only and doesn't change the verdict.
+
+Return only this JSON object, with one result per criterion, each result's keys in this order:
+{"results": [{"id": "the criterion's id", "reason": "at most 40 words", "turns": [turn numbers the reason rests on], \
+"verdict": "pass" | "fail" | "n/a", "could_change_grade": true | false, "assistant_asked": true | false}]}"""
+
+_USER_SIM_CRITERIA = """
+
+# THE CRITERIA
+$criteria_json
+
+Return only the JSON object."""
+
+# `$trajectory_content` is the user sim's instructions and its run as the user sim judge renders them.
+_USER_SIM_CHECKS_PROMPT_INLINE = Template(_USER_SIM_FRAMING + "\n\n$trajectory_content" + _USER_SIM_CRITERIA)
+_USER_SIM_CHECKS_PROMPT_PATH = Template(
+    _USER_SIM_FRAMING + "\n\n# THE USER SIM'S INSTRUCTIONS AND THE RUN\nBoth are in the file at $trajectory_path: "
+    "read all of it before you answer." + _USER_SIM_CRITERIA)
+# Without a trajectory the run comes in the sections the verifier adds after the template, so after the criteria.
+_USER_SIM_CHECKS_PROMPT_NO_TRAJECTORY = Template(
+    _USER_SIM_FRAMING + _USER_SIM_CRITERIA + "\n\nThe user sim's instructions and the run follow.")
+
+
+def _user_sim_checks_output_format() -> dict:
+    """Reason before verdict in every row: structured output is generated in schema order, so the judge decides after
+    reasoning. The parser reads the keys by name, in any order."""
+    return {
+        "type": "json_schema",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "reason": {"type": "string"},
+                            "turns": {"type": "array", "items": {"type": "integer"}},
+                            "verdict": {"type": "string", "enum": list(USER_SIM_VERDICTS)},
+                            "could_change_grade": {"type": "boolean"},
+                            "assistant_asked": {"type": "boolean"},
+                        },
+                        "required": ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["results"],
+            "additionalProperties": False,
+        },
+    }
+
+
+# A reason concluding nothing failed ("No clear delegation failures found"); a backstop to the reason-first prompt.
+_NO_FAILURE_FOUND = re.compile(
+    r"\bno\s+(?:clear\s+)?(?:\w+\s+)?failures?\s+(?:was\s+|were\s+)?(?:found|detected|identified)\b"
+    r"|\bno\s+clear\s+(?:\w+\s+)?failures?\b|\bnothing\s+fails\b", re.I)
+
+
+# A contrast that starts a sentence's conclusion: what follows "but" / "however" / "yet" / "except" is the conclusion
+# ("no clear failure except at turn 2, where she leaked it" is a fail). Not "although" or "though": what follows
+# those is a concession, and the main clause before them is the conclusion.
+_CONTRAST = re.compile(r",?\s+\b(?:but|however|yet|except)\b", re.I)
+
+
+def _reason_says_no_failure(reason: str) -> str | None:
+    """What in the reason's conclusion says no failure was found, or None. The conclusion is the last sentence, and
+    within it what follows its last "but", "however", "yet" or "except": "no clear failure at turn 1; at turn 2 she leaked
+    it" and "no clear failure at turn 1, but at turn 2 she leaked it" are real fails; "turn 2 looked off, but no clear
+    failure was found" isn't."""
+    sentences = [x for x in re.split(r"[.;!?]+", reason) if x.strip()]
+    if not sentences:
+        return None
+    conclusion = _CONTRAST.split(sentences[-1])[-1]
+    m = _NO_FAILURE_FOUND.search(conclusion)
+    return m.group(0) if m else None
+
+
+def _cited_turns(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out = []
+    for v in value:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError, OverflowError):  # OverflowError: an infinite number
+            continue
+    return out
+
+
+def _is_turn_number(value: Any) -> bool:
+    """A whole number, as the schema asks: ``true`` and ``1.9`` are not turn 1."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _graded_turns(criterion: dict) -> set[int] | None:
+    value = criterion.get("graded_turns")
+    return set(_cited_turns(value)) if isinstance(value, list) else None
+
+
+def _user_sim_json(text: str) -> Any:
+    """The JSON in an answer, tolerating a markdown fence or text around the object; None when there is none."""
+    s = str(text or "").strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return json.loads(s)
+    except ValueError:
+        m = re.search(r"\{.*\}", s, re.S)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(0))
+        except ValueError:
+            return None
+
+
+def _never_gates(criterion: dict) -> bool:
+    try:
+        return float(criterion.get("weight", 1.0)) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
+    """One result checked against its criterion: ``(row, [])``, or ``(None, problems)`` naming the row. The row
+    lowers the score (score 0.0, result false) only on a fail with could_change_grade, and never at weight 0;
+    ``verdict`` and ``could_change_grade`` keep what the judge said either way. ``assistant_asked`` (the assistant
+    asked for or invited the behaviour) is required and recorded only: it never changes the score or a gate."""
+    rid = item.get("id")
+    problems = []
+    verdict = str(item.get("verdict", "")).strip().lower()
+    if verdict not in USER_SIM_VERDICTS:
+        problems.append(f"{rid}: verdict {item.get('verdict')!r} is not one of {list(USER_SIM_VERDICTS)}")
+    change = item.get("could_change_grade")
+    if not isinstance(change, bool):
+        problems.append(f"{rid}: could_change_grade must be true or false")
+    asked = item.get("assistant_asked")
+    if not isinstance(asked, bool):
+        problems.append(f"{rid}: assistant_asked must be true or false")
+    if verdict == "n/a" and str(criterion.get("na_when") or "").strip().lower() == _USER_SIM_NA_NEVER:
+        problems.append(f"{rid} may not be n/a: it always applies, so answer pass or fail")
+    if not isinstance(item.get("reason"), str):
+        problems.append(f"{rid}: reason must be text")
+    raw_turns = item.get("turns")
+    turns_ok = isinstance(raw_turns, list) and all(_is_turn_number(t) for t in raw_turns)
+    if not isinstance(raw_turns, list):
+        problems.append(f"{rid}: turns must be a list of turn numbers")
+    elif not turns_ok:
+        problems.append(f"{rid}: turns must be a list of turn numbers; "
+                        f"{[t for t in raw_turns if not _is_turn_number(t)]} are not whole numbers")
+    turns = raw_turns if turns_ok else []
+    reason = item["reason"].strip() if isinstance(item.get("reason"), str) else ""
+    graded = _graded_turns(criterion)
+    if verdict == "fail":
+        if turns_ok and not any(graded is None or t in graded for t in turns):
+            problems.append(f"{rid}: a fail must cite at least one graded turn; cited {turns}"
+                            + (f", graded {sorted(graded)}" if graded is not None else ""))
+        said = _reason_says_no_failure(reason)
+        if said:
+            problems.append(f"{rid}: a fail whose reason says {said!r} contradicts itself; the verdict must follow "
+                            "the reason")
+    if problems:
+        return None, problems
+    change = change and verdict == "fail"
+    lowers = change and not _never_gates(criterion)
+    row = {**criterion, "id": rid, "reason": reason,
+           "turns": [t for t in turns if graded is None or t in graded],
+           "verdict": verdict, "could_change_grade": change, "assistant_asked": asked,
+           "justification": reason, "score": 0.0 if lowers else 1.0, "result": not lowers}
+    outside = [t for t in turns if graded is not None and t not in graded]
+    if outside:
+        row["turns_outside_graded"] = outside
+    return row, []
+
+
+def diagnose_user_sim_checks_response(
+    response_text: str, criteria: list[dict],
+) -> tuple[list[dict] | None, JudgeResponseDiscrepancy | None]:
+    """Parse a user_sim_checks judge response into rows, or a discrepancy for the correction prompt: no JSON
+    object, the wrong row set, or a row the user sim judge can't use: an id, reason or turns of the wrong type, a
+    verdict, could_change_grade or assistant_asked out of range, an n/a where ``na_when`` is never, a fail citing no
+    graded turn, or a fail whose reason concludes nothing failed."""
+    parsed = _user_sim_json(response_text)
+    if parsed is None:
+        return None, _parse_failure_discrepancy(criteria, "the answer is not a JSON object")
+    results = _extract_rubric_binary_results(parsed)
+    if not isinstance(results, list):
+        shape = ("`results` must be a list" if results is not None
+                 else f"unexpected response shape: {type(parsed).__name__}")
+        return None, _parse_failure_discrepancy(criteria, shape)
+    if not all(isinstance(r, dict) for r in results):
+        return None, _parse_failure_discrepancy(criteria, "every result must be a JSON object")
+    # The shared id check hashes each id, so one that isn't text (a list, an object) would raise instead of being
+    # asked again.
+    bad_ids = [f"result {i}: id must be a criterion id (text), not {r.get('id')!r}"
+               for i, r in enumerate(results, 1) if not isinstance(r.get("id"), str)]
+    if bad_ids:
+        return None, JudgeResponseDiscrepancy(
+            expected_count=len(criteria), returned_count=len(results), expected_ids=[c["id"] for c in criteria],
+            missing_ids=[], duplicate_ids=[], unknown_ids=[], row_problems=bad_ids)
+    discrepancy = _analyze_result_ids(results, criteria)
+    if discrepancy is not None:
+        return None, discrepancy
+    by_id = {c["id"]: c for c in criteria}
+    rows: list[dict] = []
+    problems: list[str] = []
+    for item in results:
+        row, its_problems = _user_sim_row(item, by_id[item["id"]])
+        problems += its_problems
+        if row is not None:
+            rows.append(row)
+    if problems:
+        return None, JudgeResponseDiscrepancy(
+            expected_count=len(criteria), returned_count=len(results), expected_ids=[c["id"] for c in criteria],
+            missing_ids=[], duplicate_ids=[], unknown_ids=[], row_problems=problems)
+    return rows, None
+
+
+def _parse_user_sim_checks_response(response_text: str, criteria: list[dict]) -> list[dict]:
+    """Rows, or ValueError: an unusable answer has no verdict, so it never degrades to fails that would gate."""
+    rows, discrepancy = diagnose_user_sim_checks_response(response_text, criteria)
+    if discrepancy is not None:
+        raise ValueError(f"user_sim_checks answer not usable: {discrepancy}")
+    assert rows is not None
+    return rows
+
+
+def format_user_sim_checks_correction(
+    *,
+    eval_prompt: str,
+    previous_response: str,
+    discrepancy: JudgeResponseDiscrepancy,
+    max_previous_response_chars: int = _CORRECTION_PROMPT_MAX_PREVIOUS_RESPONSE_CHARS,
+) -> str:
+    """The user_sim_checks correction prompt: what was wrong, then the row shape again."""
+    truncated = previous_response.strip()
+    if len(truncated) > max_previous_response_chars:
+        truncated = truncated[:max_previous_response_chars] + "\n... [truncated]"
+    if discrepancy.parse_error:
+        problems = [f"Your response could not be read: {discrepancy.parse_error}",
+                    "Return only a JSON object with a `results` array — no preamble, markdown fences, or extra text."]
+    elif discrepancy.row_problems:
+        problems = list(discrepancy.row_problems)
+    else:
+        problems = [f"You returned {discrepancy.returned_count} result(s) but there are "
+                    f"{discrepancy.expected_count} criteria."]
+        for ids, what in ((discrepancy.missing_ids, "Missing result(s) for criterion id(s)"),
+                          (discrepancy.duplicate_ids, "Duplicate result(s) for criterion id(s)"),
+                          (discrepancy.unknown_ids, "Unknown criterion id(s) in your results")):
+            if ids:
+                problems.append(f"{what}: {', '.join(ids)}")
+    correction_block = "\n".join([
+        "## Correction Required",
+        "",
+        "Your previous response did not satisfy the output requirements:",
+        *[f"- {problem}" for problem in problems],
+        "",
+        f"Return JSON with a `results` array containing exactly {discrepancy.expected_count} objects — "
+        "one per criterion, no duplicates, no extras.",
+        f"Required criterion ids (in any order): {', '.join(discrepancy.expected_ids)}",
+        "",
+        "Each result must include, in this order:",
+        '- "id": the criterion id',
+        '- "reason": at most 40 words, written before the verdict',
+        '- "turns": the turn numbers the reason rests on; a fail cites at least one graded turn',
+        '- "verdict": "pass", "fail" or "n/a", following from the reason: a reason that finds no clear failure is '
+        'never "fail"',
+        '- "could_change_grade": true or false',
+        '- "assistant_asked": true when the assistant asked for or invited the behaviour you graded, else false',
+        "",
+        "## Your Previous Response",
+        truncated,
+    ])
+    return f"{eval_prompt.rstrip()}\n\n{correction_block}"
+
+
 class JudgeOutputFormat(str, Enum):
     RUBRIC_BINARY = "rubric_binary"
     RUBRIC_PARTIAL = "rubric_partial"
@@ -1238,6 +1570,9 @@ class JudgeOutputFormat(str, Enum):
     # object); the entry is stored exactly as rubric_evidence's and the verifier writes a second,
     # trajectory_mistakes-shaped entry from the findings.
     RUBRIC_EVIDENCE_WITH_MISTAKES = "rubric_evidence_with_mistakes"
+    # Grades the user sim (the AI playing the user), not the assistant: per criterion a reason, the turns it cites, a
+    # pass / fail / n/a verdict, could_change_grade and assistant_asked (recorded only); a row lowers the score only on a fail that could change the grade.
+    USER_SIM_CHECKS = "user_sim_checks"
 
 
 DiagnoseResponse = Callable[[str, list[dict]], tuple[list[dict] | None, JudgeResponseDiscrepancy | None]]
@@ -1259,6 +1594,12 @@ class JudgeOutputFormatSpec:
     # Rows carry `frame` / `evidence_status`, so the per-criterion grounding asks the judge to cite them; a format
     # with this set needs the labelled per-criterion frames (the verifier enforces the configuration).
     cites_evidence: bool = False
+    # Rows are one per criterion, so judge_batch_size may split the criteria into calls whose rows merge by
+    # concatenation. A format with a per-call block (reasoning, checks, mistakes) or whole-run rows leaves it off.
+    batchable: bool = False
+    # Batched rows are checked for bulk verdicts (shared or short justifications) and retried with a correction. A
+    # format whose rows may rightly share a short reason turns it off.
+    checks_bulk_verdicts: bool = True
 
 
 JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
@@ -1270,6 +1611,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         parse_response=_parse_rubric_binary_response,
         diagnose_response=diagnose_rubric_binary_response,
         format_correction_prompt=format_judge_correction_prompt,
+        batchable=True,
     ),
     JudgeOutputFormat.RUBRIC_PARTIAL: JudgeOutputFormatSpec(
         output_format=_rubric_score_output_format(),
@@ -1279,6 +1621,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         parse_response=_parse_rubric_partial_response,
         diagnose_response=diagnose_rubric_partial_response,
         format_correction_prompt=format_partial_judge_correction_prompt,
+        batchable=True,
     ),
     JudgeOutputFormat.RUBRIC_EVIDENCE: JudgeOutputFormatSpec(
         output_format=_rubric_evidence_output_format(),
@@ -1310,6 +1653,19 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         parse_response=_parse_trajectory_mistakes_response,
         diagnose_response=diagnose_trajectory_mistakes_response,
         format_correction_prompt=format_trajectory_mistakes_correction,
+    ),
+    JudgeOutputFormat.USER_SIM_CHECKS: JudgeOutputFormatSpec(
+        output_format=_user_sim_checks_output_format(),
+        prompt_template_path=_USER_SIM_CHECKS_PROMPT_PATH,
+        prompt_template_inline=_USER_SIM_CHECKS_PROMPT_INLINE,
+        prompt_template_no_trajectory=_USER_SIM_CHECKS_PROMPT_NO_TRAJECTORY,
+        parse_response=_parse_user_sim_checks_response,
+        diagnose_response=diagnose_user_sim_checks_response,
+        format_correction_prompt=format_user_sim_checks_correction,
+        # Each row stands alone (no per-call reasoning, checks or mistakes), so a judge may ask its rows over several
+        # calls; and a short pass reason is normal here, so bulk verdicts aren't flagged.
+        batchable=True,
+        checks_bulk_verdicts=False,
     ),
 }
 

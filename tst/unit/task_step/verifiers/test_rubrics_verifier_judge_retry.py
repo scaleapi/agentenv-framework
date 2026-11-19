@@ -122,7 +122,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
         model="claude-sonnet-4-6",
         judge_a2a_url="http://judge.example/a2a",
         judge_agent_card={},
-        judge_agent=SimpleNamespace(sandbox_id="sb-test", sandbox_type=None),
+        judge_agent=SimpleNamespace(sandbox_id="sb-test", sandbox_type=None, control_headers={}),
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=True,

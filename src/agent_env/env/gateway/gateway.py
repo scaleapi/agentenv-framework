@@ -40,12 +40,15 @@ if TYPE_CHECKING:
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
+    AGENT_ENV_COMPUTER_HEADER,
     AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
     CHANGES_PAGE_DEFAULT,
+    CLOCK_FOLLOWERS_PATH,
+    CLOCK_WATCH_PATH,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
     CONTROL_ROUTES,
@@ -55,6 +58,7 @@ from .constants import (
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
+    IDLE_CONNECTION_TIMEOUT_S,
     MCP_TRANSPORT,
     METHOD_ADD,
     METHOD_GET,
@@ -83,15 +87,23 @@ from .rest_proxy import (
     UpstreamResponse,
     WebsiteRoute,
     declared_site_names,
+    called_tools,
+    fallback_name,
+    served_names,
+    website_card_name,
     fetch_child_card,
     forward,
+    is_child_mcp_path,
+    reaches,
     listed_url,
     lowered,
     operations,
+    reaches_child_mcp,
     refuse_websocket,
     relay_websocket,
     rewrite_child_card,
     route_name,
+    tool_call_refusal,
     upstream_url,
     website_routes,
 )
@@ -113,11 +125,13 @@ _STEP_API = {"source": "step_api"}
 
 
 class SiteCard(NamedTuple):
-    """What the gateway keeps from a site's card: the paths it advertises for agentenv, which its route refuses, and
-    the names it declares."""
+    """What the gateway keeps from a site's card: the paths it advertises for agentenv, which its route refuses, the
+    names it declares (hostnames), and the card's own name (``website_card_name``), which needn't be the name the
+    gateway serves the site as."""
 
     reserved: frozenset[str]
     names: tuple[str, ...]
+    card_name: str | None = None
 
 
 class ToolNameClash(ValueError):
@@ -128,6 +142,12 @@ class ToolNameClash(ValueError):
         self.clashes = clashes
         super().__init__(f"Duplicate tool name{'s' if len(clashes) > 1 else ''} {tool_name_clashes_text(clashes)}")
 
+
+
+def _read_only(tool: MCPTool) -> bool:
+    """Whether a tool says it only reads (``readOnlyHint``), as a computer's screenshots and waits do."""
+    annotations = getattr(tool, "annotations", None)
+    return annotations is not None and getattr(annotations, "readOnlyHint", None) is True
 
 class Gateway:
     """Gateway that aggregates MCP tools and REST proxies for website backends."""
@@ -156,6 +176,8 @@ class Gateway:
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
         control_token: str | None = None,
+        control_token_children: Iterable[str] = (),
+        computers: Iterable[str] = (),
         provider_headers: Iterable[str] = (),
         clock_followers: Mapping[str, str] | None = None,
         site_names: dict[str, Iterable[str]] | None = None,
@@ -166,7 +188,10 @@ class Gateway:
         followers of its clock, each with the read token its watch carries. `site_names` are each site's names as its
         env stores them, the names its card declares standing in for a site's that stores none: a site reached at one
         takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a browser
-        computer opens it, and the others at their ``website_urls``."""
+        computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
+        /svc routes pass its control token on to, a multi env's computers, which take it. `computers` are its children
+        that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
+        requests its browser sends take."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -175,7 +200,8 @@ class Gateway:
         self.rest_proxy_urls = rest_proxy_urls or {}
         self._site_names = {site: lowered(names) for site, names in (site_names or {}).items()}
         self._listed_by_name = frozenset(listed_by_name)
-        self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
+        self._mcp_endpoints = mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
+        self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_cards: dict[str, SiteCard] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
@@ -187,6 +213,13 @@ class Gateway:
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
+        self._control_token_children = frozenset(control_token_children)
+        self._computers = frozenset(computers)
+        # The computer each computer tool is one of, the computer tools that take input rather than read, and the role
+        # driving each computer now: the last to make an input call to its tools.
+        self._computer_of: dict[str, str] = {}
+        self._input_tools: frozenset[str] = frozenset()
+        self._drivers: dict[str, str] = {}
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -206,7 +239,7 @@ class Gateway:
 
         self._event_counter = 0
         self._event_lock = asyncio.Lock()
-        self._changes = ChangeAttribution()
+        self._changes = ChangeAttribution(lambda: self._computer_of)
         Path(GATEWAY_TRAJECTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
         self._trajectory_file = open(GATEWAY_TRAJECTORY_FILE, "a")
         atexit.register(self._close_trajectory_file)
@@ -219,7 +252,7 @@ class Gateway:
         if self.website_urls:
             @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
             async def list_website_urls() -> list[str]:
-                return [await self._listed_url(site, url) for site, url in self.website_urls.items()]
+                return await self._listed_urls()
             self._server_tools.setdefault("gateway", []).append(
                 MCPTool(
                     name="list_website_urls",
@@ -344,7 +377,8 @@ class Gateway:
                     {"ok": False, "error": f"'{GET_TIME_TOOL_NAME}' is already registered by a backing server"}, 409)
 
             def arm(body: dict) -> dict:
-                state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"))
+                state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"),
+                                             body.get("time_zone"))
                 self._register_get_time_tool()
                 return state
 
@@ -367,13 +401,38 @@ class Gateway:
 
             return await self._clock_write(request, disarm, body_optional=True)
 
-        @self._mcp.custom_route("/clock/watch", methods=["GET"])
+        @self._mcp.custom_route(CLOCK_WATCH_PATH, methods=["GET"])
         async def clock_watch(request: Request) -> Response:
             received = time.time()
             token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
             follower = self._clock_followers.follower_for(request.query_params.get("follower"), token)
             await self._clock_followers.watch(request.query_params.get("after", ""), follower)
             return self._json_response({**self._clock.state(), "received": received, "sent": time.time()}, 200)
+
+        @self._mcp.custom_route(CLOCK_FOLLOWERS_PATH, methods=["PUT"])
+        async def clock_declare_follower(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict):
+                return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+            try:
+                self._clock_followers.declare(str(body.get("name") or ""), str(body.get("read_token") or ""))
+            except ClockError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            return self._json_response({"ok": True, "followers": self._clock_followers.state()}, 200)
+
+        @self._mcp.custom_route(CLOCK_FOLLOWERS_PATH, methods=["DELETE"])
+        async def clock_retire_follower(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict) or not isinstance(body.get("name"), str) or not body["name"]:
+                return self._json_response({"ok": False, "error": "body must be a JSON object naming the follower"}, 400)
+            retired = await self._clock_followers.retire(body["name"])
+            return self._json_response({"ok": True, "retired": retired, "followers": self._clock_followers.state()}, 200)
 
         @self._mcp.custom_route("/clock/time", methods=["GET"])
         async def clock_time(request: Request) -> Response:
@@ -507,15 +566,7 @@ class Gateway:
 
     def run(self) -> None:
         logger.info(f"Starting Gateway on {self.host}:{self.port} (mode={self.gateway_mode.value})")
-        config = uvicorn.Config(
-            self._asgi_app(),
-            host=self._mcp.settings.host,
-            port=self._mcp.settings.port,
-            log_level=self._mcp.settings.log_level.lower(),
-            ws_ping_interval=PING_INTERVAL_S,
-            ws_ping_timeout=PING_INTERVAL_S,
-        )
-        server = uvicorn.Server(config)
+        server = uvicorn.Server(self._server_config())
         if self._resolve_i6pn_host():
             # On Modal's i6pn, serve both families: IPv4 for the orchestrator's HTTPS tunnel and
             # IPv6 for backing servers reaching the gateway over the i6pn mesh. A lone `::` bind
@@ -525,11 +576,30 @@ class Gateway:
         else:
             anyio.run(server.serve)
 
+    def _server_config(self) -> uvicorn.Config:
+        return uvicorn.Config(
+            self._asgi_app(),
+            host=self._mcp.settings.host,
+            port=self._mcp.settings.port,
+            log_level=self._mcp.settings.log_level.lower(),
+            ws_ping_interval=PING_INTERVAL_S,
+            ws_ping_timeout=PING_INTERVAL_S,
+            timeout_keep_alive=IDLE_CONNECTION_TIMEOUT_S,
+        )
+
     # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
     # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
     # session, in the session's server task before any handler task is spawned, so the key bound there is inherited
     # by every tools/call of that session (and the role is the one its initialize request carried, which that task
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
+
+    def _keeps_control_token(self, path: str) -> bool:
+        """Whether a request to ``path`` keeps the gateway's control token: its clock watch, where a computer it fronts
+        sends the token as its read token, and its /svc route to one of those computers, which takes the token."""
+        if path == CLOCK_WATCH_PATH:
+            return True
+        child = path.removeprefix("/svc/").split("/", 1)[0] if path.startswith("/svc/") else None
+        return child in self._control_token_children
 
     def _asgi_app(self):
         """The served app: FastMCP's Starlette app with the request's caller bound around it, the control routes behind
@@ -542,14 +612,17 @@ class Gateway:
         async def app(scope, receive, send):
             if self._control_bearer and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
-                if scope["type"] == "http" and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
+                if scope["type"] == "http" and self._takes_control_token(scope) and not hmac.compare_digest(
                         dict(headers).get(b"authorization", b""), self._control_bearer):
+                    logger.warning("refused %s %s: it takes the env's control token", scope["method"], scope["path"])
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
                     return
-                # The token is the gateway's own: no route reads it, and no service a route proxies to receives it.
-                scope = {**scope, "headers": [(name, value) for name, value in headers if not (
-                    name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
+                # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
+                # receive it, through their /svc routes; every other request goes on without it.
+                if not self._keeps_control_token(scope["path"]):
+                    scope = {**scope, "headers": [(name, value) for name, value in headers if not (
+                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
@@ -565,6 +638,19 @@ class Gateway:
                 Caller.reset(token)
 
         return app
+
+    def _takes_control_token(self, scope: dict) -> bool:
+        """Whether a request takes the deploy's control token: a control route, the env's data plane, or one of
+        ``token_paths`` behind /svc, by the path as routed or by the one the backing server receives (``reaches``),
+        after dot-segment normalisation. A site's /website route never reaches its data plane."""
+        path = scope["path"]
+        if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
+            return True
+        prefix, _, rest = path.lstrip("/").partition("/")
+        service, _, rest = rest.partition("/")
+        guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
+        raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
+        return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):
@@ -773,18 +859,22 @@ class Gateway:
     async def _proxy_rest_request(self, request: Request, url_map: dict[str, str] | None = None,
                                   site_names: tuple[str, ...] = ()) -> Response:
         """Reverse-proxy an HTTP request to an internal service, streaming the response through; a site reached at one
-        of its `site_names` takes it as its ``Host``."""
+        of its `site_names` takes it as its ``Host``. A call to a backing server's own MCP endpoint that the caller's
+        role may not make is refused here, as ``/mcp`` refuses it."""
         url_map = self.rest_proxy_urls if url_map is None else url_map
         service_name = request.path_params["service_name"]
         base_url = url_map.get(service_name)
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
-        site_mcp = self._site_mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
-        mcp_server = url_map is self.rest_proxy_urls and (service_name.startswith("mcp-") or site_mcp is not None)
-        mcp_endpoint = site_mcp or "mcp"
+        mcp_endpoint = self._mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
+        mcp_server = mcp_endpoint is not None
+        mcp_endpoint = mcp_endpoint or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
+        if mcp_server and request.method == "POST" and reaches_child_mcp(request, base_url, mcp_endpoint):
+            if (refusal := await self._refuse_disabled_calls(await request.body(), role)) is not None:
+                return refusal
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                                  withheld=self._withheld, mcp_endpoint=mcp_endpoint, site_names=site_names)
@@ -873,10 +963,24 @@ class Gateway:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
-    @staticmethod
-    def _request_role(request: HTTPConnection) -> str:
-        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
-        return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+    def _request_role(self, request: HTTPConnection) -> str:
+        """The role the gateway attributes a REST request to: the first AgentEnv-Role header; else, from a computer's
+        site proxy (AgentEnv-Computer), the role driving that computer as the request arrived; else the default role.
+        Read once per request, so its forwarding, its write and its triggers name one role, whoever drives after."""
+        known = getattr(request.state, "agentenv_role", None)
+        if known is None:
+            role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip()
+            computer = request.headers.get(AGENT_ENV_COMPUTER_HEADER, "").strip()
+            known = role or self._drivers.get(computer) or DEFAULT_ROLE
+            request.state.agentenv_role = known
+        return known
+
+    def _drive(self, role: str, tool_name: str) -> None:
+        """An input call to a computer's tools makes its caller that computer's driver as it starts, so a request the
+        page sends before the call returns is the caller's too. A read (a screenshot, a wait) changes nothing."""
+        if tool_name in self._input_tools:
+            self._drivers[self._computer_of[tool_name]] = role
+
 
     async def _read_trigger_website_routes(self, body: Any) -> None:
         """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
@@ -932,7 +1036,8 @@ class Gateway:
         except ValueError:
             card = None
         address = self.website_urls.get(app) or base_url
-        self._site_cards[app] = (SiteCard(site_reserved_paths(card, address), declared_site_names(card))
+        self._site_cards[app] = (SiteCard(site_reserved_paths(card, address), declared_site_names(card),
+                                          website_card_name(card))
                                  if isinstance(card, dict) else SiteCard(frozenset(), ()))
         return self._site_cards[app]
 
@@ -940,13 +1045,29 @@ class Gateway:
         """The names website ``app`` is reached at: those its env stores, else those its ``card`` declares."""
         return self._site_names.get(app) or (card.names if card else ())
 
-    async def _listed_url(self, site: str, url: str) -> str:
-        """The address ``list_website_urls`` gives ``site``, at ``url`` behind the gateway: for a site listed by name,
-        its first name (``listed_url``), its card read for a site whose env stores none; else, or with none, ``url``."""
-        if site not in self._listed_by_name:
-            return url
-        card = None if site in self._site_names else await self._site_card(site)
-        return listed_url(self._names(site, card)) or url
+    async def _listed_urls(self) -> list[str]:
+        """The address ``list_website_urls`` gives each site, at its url behind the gateway: for a site listed by name,
+        its first name (``listed_url``), those its env stores, else those its card declares, else, for a site declaring
+        none, the ``fallback_name`` its browser's site proxy routes it at, of the name it goes by (``served_names``:
+        its card's, unless two sites' cards give one); else, or while its card can't be read, its url. Cards are read
+        together, and those of sites with stored names only when some site needs a fallback."""
+        by_name = [site for site in self.website_urls if site in self._listed_by_name]
+        cards = await self._site_cards_of([site for site in by_name if site not in self._site_names])
+        if any(card is not None and not card.names for card in cards.values()):
+            cards |= await self._site_cards_of([site for site in by_name if site in self._site_names])
+        goes_by = served_names({site: card.card_name or site for site, card in cards.items() if card is not None})
+        listed = []
+        for site, url in self.website_urls.items():
+            card = cards.get(site)
+            names = self._names(site, card) if site in self._listed_by_name else ()
+            if not names and card is not None:
+                names = (fallback_name(goes_by[site]),)
+            listed.append(listed_url(names) or url)
+        return listed
+
+    async def _site_cards_of(self, sites: list[str]) -> dict[str, SiteCard | None]:
+        """Each of ``sites``' cards (``_site_card``), read at once."""
+        return dict(zip(sites, await asyncio.gather(*(self._site_card(site) for site in sites)), strict=True))
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
@@ -1053,6 +1174,7 @@ class Gateway:
         unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
         reconnect; the registered proxies look their child up by URL."""
         meta = caller.meta() if caller is not None else None
+        self._drive(caller.role if caller is not None else DEFAULT_ROLE, tool_name)
         return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
 
     async def _ensure_tools_discovered(self) -> None:
@@ -1115,6 +1237,10 @@ class Gateway:
             logger.debug(f"Registered proxy tool: {tool.name}")
         for server, tools in listed:
             self._server_tools[server.name] = tools
+        computer_tools = [(server.name, tool) for server, tools in listed if server.name in self._computers
+                          for tool in tools]
+        self._computer_of = {tool.name: computer for computer, tool in computer_tools}
+        self._input_tools = frozenset(tool.name for _, tool in computer_tools if not _read_only(tool))
         self._hidden_by_default = {
             tool.name for _, tools in listed for tool in tools
             if (tool.meta or {}).get(AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY) is True}
@@ -1176,15 +1302,8 @@ class Gateway:
         return self._json_response({"role": role, **snapshot}, 200)
 
     async def _handle_step(self, request: Request) -> Response:
-        try:
-            await self._ensure_tools_discovered()
-        except ToolNameClash as e:
-            return self._json_response({"error": f"{e}, so the env serves none of its servers' tools."}, 503)
-        except Exception:
-            return self._json_response(
-                {"error": "Tool discovery has not completed. Internal MCP servers may be unavailable."},
-                503,
-            )
+        if (unavailable := await self._discovery_unavailable()) is not None:
+            return unavailable
         try:
             body = await request.json()
         except Exception:
@@ -1614,6 +1733,30 @@ class Gateway:
 
         return StreamingResponse(_iter(), media_type="application/jsonl", headers={"X-Trajectory-Total-Bytes": str(total)})
 
+    async def _discovery_unavailable(self) -> Response | None:
+        """The 503 for a request that needs the servers' tools while their discovery can't complete; None once it has."""
+        try:
+            await self._ensure_tools_discovered()
+        except ToolNameClash as e:
+            return self._json_response({"error": f"{e}, so the env serves none of its servers' tools."}, 503)
+        except Exception:
+            return self._json_response(
+                {"error": "Tool discovery has not completed. Internal MCP servers may be unavailable."},
+                503,
+            )
+        return None
+
+    async def _refuse_disabled_calls(self, body: bytes, role: str) -> Response | None:
+        """The refusal for a child MCP POST through ``/svc`` calling a tool `role` may not call; None to forward it."""
+        if (names := called_tools(body)) is None:  # unread, it could carry a call a lenient server parses (gzip)
+            return tool_call_refusal(body, "The request body is not JSON")
+        if not names:
+            return None
+        if (unavailable := await self._discovery_unavailable()) is not None:
+            return unavailable  # a tool hidden by default is known only once discovery has listed it
+        disabled = next((name for name in names if self._is_disabled(role, name)), None)
+        return None if disabled is None else tool_call_refusal(body, f"Tool '{disabled}' is disabled for role '{role}'")
+
 
 class _ProxyArgModelBase(ArgModelBase):
     """ArgModelBase subclass that excludes unset fields from model_dump_one_level().
@@ -1715,6 +1858,36 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
         if resolved is not None and resolved.own_server and resolved.route_path is not None:
             endpoints[server.name] = resolved.route_path
     return endpoints
+
+
+def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                  rest_proxy_urls: dict[str, str]) -> dict[str, str]:
+    """The MCP endpoint, as a path under its /svc/<key>/ route, of each backing route that is an MCP server's: a site
+    that is an internal MCP server too (``site_mcp_endpoints``), and each ``mcp-`` route at the path its server's
+    ``mcp_url`` gives, ``/mcp`` when none is under the route's address. Where the proxy stamps the role and applies the
+    tool rules, and where the control token is taken."""
+    endpoints = site_mcp_endpoints(servers, website_urls, rest_proxy_urls)
+    for key, base in rest_proxy_urls.items():
+        if key in endpoints or not key.startswith("mcp-"):
+            continue
+        name = route_environment_name(key, base, servers, website=False)
+        found = [resolved.route_path for server in servers if server.name == name
+                 if (resolved := card_url(base, server.mcp_url)) is not None and resolved.own_server
+                 and resolved.route_path is not None]
+        endpoints[key] = found[0] if found else "/mcp"
+    return endpoints
+
+
+def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
+    """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
+    extensions included, and an MCP server's own endpoint (``mcp_endpoints``), which skips the gateway's trajectory and
+    triggers. A child env registered under its own name, a computer, takes its own token, so none of its paths are here."""
+    endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
+    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()))
+            for key, base in rest_proxy_urls.items()
+            if key in website_urls or route_environment_name(key, base, servers, website=False) != key
+            or not any(server.name == key for server in servers)}
 
 
 class CardURL(NamedTuple):

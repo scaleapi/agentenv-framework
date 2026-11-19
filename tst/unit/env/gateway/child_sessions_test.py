@@ -424,22 +424,25 @@ async def test_a_reported_transport_failure_retires_the_session_once_and_the_nex
     session = _FakeSession()
     opener = _Opener(session)
     gw = _gateway(opener)
-    first = await gw._sessions.ensure(URL)
-    gw._sessions.transport_failed(first, httpx.ReadError("peer went away"))
-    gw._sessions.transport_failed(first, httpx.ReadError("again"))  # every request in flight reports; one retirement
-    assert len(gw._sessions.retirements) == 1
-    await asyncio.gather(*gw._sessions.retirements)
-    assert gw._sessions.retirements == set() and gw._sessions.current == {}
-    assert opener.exited == opener.entered and len(opener.exited) == 1, "retired exactly once, by the task that opened it"
+    try:
+        first = await gw._sessions.ensure(URL)
+        gw._sessions.transport_failed(first, httpx.ReadError("peer went away"))
+        gw._sessions.transport_failed(first, httpx.ReadError("again"))  # every request in flight reports; one retirement
+        assert len(gw._sessions.retirements) == 1
+        await asyncio.gather(*gw._sessions.retirements)
+        assert gw._sessions.retirements == set() and gw._sessions.current == {}
+        assert opener.exited == opener.entered and len(opener.exited) == 1, "retired exactly once, by the task that opened it"
 
-    second = await gw._sessions.ensure(URL)
-    assert second is not first and opener.opened == 2
-    gw._sessions.transport_failed(first, httpx.ReadError("stale"))  # a report about the retired session
-    assert gw._sessions.retirements == set() and gw._sessions.current[URL] is second
+        second = await gw._sessions.ensure(URL)
+        assert second is not first and opener.opened == 2
+        gw._sessions.transport_failed(first, httpx.ReadError("stale"))  # a report about the retired session
+        assert gw._sessions.retirements == set() and gw._sessions.current[URL] is second
 
-    gw._sessions.closing = True
-    gw._sessions.transport_failed(second, httpx.ReadError("at shutdown"))
-    assert gw._sessions.retirements == set(), "nothing is retired on the way down; the process lifespan closes it"
+        gw._sessions.closing = True
+        gw._sessions.transport_failed(second, httpx.ReadError("at shutdown"))
+        assert gw._sessions.retirements == set(), "nothing is retired on the way down; the process lifespan closes it"
+    finally:
+        await gw._close_child_sessions()
 
 
 @pytest.mark.asyncio

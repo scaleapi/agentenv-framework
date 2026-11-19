@@ -22,14 +22,16 @@ if TYPE_CHECKING:
 
 
 class Site(BaseModel):
-    """A website the computer reaches by its names: its route on the env gateway, as this process reaches it, and the
-    names its card's website/v1 declares."""
+    """A website the computer reaches by its names: its route on the env gateway, as this process reaches it, the
+    names its card's website/v1 declares, and the request headers it names as its sign-in headers, whose values the
+    browser's network log takes out."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     url: str
     domains: list[str] = Field(default_factory=list)
+    sign_in_headers: list[str] = Field(default_factory=list)
 
 
 class ComputerParams(BaseModel):

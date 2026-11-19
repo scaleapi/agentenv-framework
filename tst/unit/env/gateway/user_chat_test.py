@@ -154,7 +154,8 @@ def test_get_time_reaches_a_configured_role_through_a_deny_all_while_the_clock_i
     _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"]})
     assert "get_time" not in _names(gateway, "psi_agent")  # no clock set, so no get_time at all
 
-    assert _req(gateway, "PUT", "/clock/set-time", {"virtual_time": T0}).status_code == 200
+    assert _req(gateway, "PUT", "/clock/set-time", {"virtual_time": T0, "virtual_seconds_per_real_second": 0}
+                ).status_code == 200
     assert "get_time" in _names(gateway, "psi_agent") and "get_time" not in _names(gateway, "other")
     called = _call(gateway, "get_time", {}, "psi_agent")
     assert called.status_code == 200 and T0 in called.text

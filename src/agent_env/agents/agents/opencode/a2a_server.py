@@ -139,6 +139,7 @@ class OpenCodeConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = Field(default=1800, gt=0)
+    max_turns: int | None = None
     # Which of the CLI's own tools it may use. With any selection, the tools of the MCP servers agent-env gives it stay.
     builtin_tools: OpenCodeTools | None = None
 
@@ -309,7 +310,7 @@ def memory_mb(cgroup_limit: Path = Path("/sys/fs/cgroup/memory.max")) -> int:
     config=OpenCodeConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
         enable(ATTRIBUTION_PROBE_V1),
         enable(
             INSTALL_V1,
@@ -317,8 +318,10 @@ def memory_mb(cgroup_limit: Path = Path("/sys/fs/cgroup/memory.max")) -> int:
             # Port the agent's A2A server listens on inside the container.
             a2a_port=8000,
             # Every placeholder referenced in install_commands must be in this list.
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",
@@ -384,6 +387,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         builtin_tools=request.config.builtin_tools,
                         event_callback=record,
                         workspace=str(WORKSPACE_DIR),
+                        max_turns=request.config.max_turns,
                     )
             except Exception:
                 logger.exception("OpenCode invocation failed")

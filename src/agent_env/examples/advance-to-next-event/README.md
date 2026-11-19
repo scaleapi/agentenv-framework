@@ -26,7 +26,8 @@ recorded as `triggers_still_firing`, if triggers are still running when `settle_
 than treat unfinished work as nothing left to happen. Envs whose clock was never armed are left out.
 
 Reference the hook from a `prompt_agent` step, after `sync_env_clock` (frozen: `virtual_seconds_per_real_second: 0`)
-and `configure_scheduled_checks` (`"roles": ["default"]`). Delivered lines, the person's included, are labelled in UTC:
+and `configure_scheduled_checks` (`"roles": ["default"]`). Delivered lines, the person's included, are labelled in
+the world's time zone, the one `sync_env_clock` armed the clock in, and in UTC when it has none, as in this example:
 
 ```json
 {"id": "week", "type": "prompt_agent", "prompt": "Keep an eye on curbfinch this week for an 8x10 rug.",

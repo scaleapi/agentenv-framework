@@ -145,7 +145,7 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "always_on_agent_verifier": _rubrics_verifier,
     **dict.fromkeys((
         "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_builtin_tools",
-        "verify_a2a_core_protocol", "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents",
+        "verify_a2a_control_token", "verify_a2a_core_protocol", "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents",
         "verify_a2a_role", "verify_a2a_skill_config", "verify_a2a_snapshot", "verify_a2a_system_prompt",
         "verify_a2a_trajectory",
     ), _validates_an_agent),
@@ -158,14 +158,18 @@ UNAFFECTED = frozenset({
     "browser_release_context", "browser_set_cookies", "browser_sign_in", "browser_set_local_storage", "build_mcp_cli",
     "combine_universe_verdicts", "configure_scheduled_checks", "deploy_env", "deploy_sandbox", "end_browser_recording",
     "end_computer_recording", "start_browser_recording", "start_computer_recording", "env_outcome_verifier",
-    "modify_env_tool_access", "reset_env", "review",
-    "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "snapshot_computer_env", "sync_env_clock",
+    "modify_env_tool_access", "reset_env", "review", "user_sim_judge",
+    "run_container_unit_tests_verifier", "run_docker_container", "set_env_clock_rate", "snapshot_env", "snapshot_computer_env",
+    "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",
     "verify_spec_conformance", "verify_universe_load_export_roundtrip",
     # They read only what an outside turn leaves: its reply.
     "agent_prompt_response_verifier", "verify_mcp_env_assessment",
     # It skips an agent that isn't deployed.
     "teardown_sandboxes",
+    # It talks only to a user sim deploy_user_sim_agent deployed (its load check), which that step's check keeps from
+    # being played from outside.
+    "rate_user_satisfaction",
     # They act on an outside agent's proxy, in its sandbox, as on the agent; install_agent installs the proxy in its place.
     "add_skills", "install_agent", "load_artifact", "run_code", "verify_sandbox",
 })

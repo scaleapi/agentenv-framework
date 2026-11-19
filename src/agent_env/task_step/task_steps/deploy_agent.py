@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import ClassVar, Optional
 
 import httpx
@@ -30,6 +30,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
+from agent_env.config.model import ModelRole
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
@@ -114,8 +115,7 @@ def _deploy_step_of(deployed_env: DeployedEnv) -> Optional[str]:
 def bound_deployment(
     context: TaskStepContext, env_id: str, *, env_step_id: Optional[str], step_id: str,
 ) -> Optional[DeployedEnv]:
-    """The deployment of `env_id` that the agent deployed by step `step_id` is bound to, by `env_step_id`, or None if
-    it isn't deployed here."""
+    """The deployment of `env_id` that step `step_id` acts on, by `env_step_id`, or None if it isn't deployed here."""
     matches = [d for d in context.deployed_envs if d.env_id == env_id]
     if env_step_id is not None:
         # A filter, not a hint: an unmatched id is an error, never a substitute.
@@ -123,15 +123,15 @@ def bound_deployment(
         named = [d for d in matches if _deploy_step_of(d) == env_step_id]
         if matches and not named:
             raise RuntimeError(
-                f"deploy_agent '{step_id}': env_step_id '{env_step_id}' names no deployment of "
+                f"step '{step_id}': env_step_id '{env_step_id}' names no deployment of "
                 f"env '{env_id}' (deployed by: {[_deploy_step_of(d) for d in matches]})"
             )
         matches = named
     if len(matches) > 1:
         raise RuntimeError(
-            f"deploy_agent '{step_id}': {len(matches)} deployments of env '{env_id}' "
+            f"step '{step_id}': {len(matches)} deployments of env '{env_id}' "
             f"(deployed by: {[_deploy_step_of(d) for d in matches]}). Set env_step_id "
-            "to the deploy_env step this agent should bind to."
+            "to the deploy_env step this step should act on."
         )
     return matches[0] if matches else None
 
@@ -485,7 +485,7 @@ class DeployAgentTaskStep(TaskStep):
             async with httpx.AsyncClient() as client:
                 for env_id, body in registrations:
                     logger.info(f"Registering MCP for env {env_id} via {body['url']}")
-                    resp = await client.post(endpoint, json=body, timeout=180)
+                    resp = await client.post(endpoint, json=body, headers=deployed.control_headers, timeout=180)
                     if resp.status_code >= 400:
                         logger.error(f"Failed to register MCP {env_id}: {resp.status_code} {resp.text}")
                     resp.raise_for_status()
@@ -511,28 +511,33 @@ class DeployAgentTaskStep(TaskStep):
                         " — skipping")
                 else:
                     endpoint = a2a_url + (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
-                    await protocol.post_agent_config(endpoint, {"system_prompt": system_prompt})
+                    await protocol.post_agent_config(endpoint, {"system_prompt": system_prompt},
+                                                     headers=deployed.control_headers)
                     logger.info(f"Set system_prompt on agent '{self.agent_name}'")
 
         if identity is not None:
-            await protocol.post_agent_config(a2a_url + identity.endpoint, identity.fields)
+            await protocol.post_agent_config(a2a_url + identity.endpoint, identity.fields,
+                                             headers=deployed.control_headers)
             card.update(identity.fields)
             logger.info(f"Stamped card identity on '{self.agent_name}': {sorted(identity.fields)}")
 
-        default_model = config.get_model_for_role("agent")
+        default_model = config.resolve_model(ModelRole.SOLVER).model
         if default_model and not context.default_agent_model:
             context.default_agent_model = default_model
             logger.info(f"Set context.default_agent_model to '{default_model}'")
 
         if self.agent_snapshot_files_artifact_id:
-            await self._load_snapshot(a2a_url, card, a2a_agent_id, context, sandbox_type=deployed.sandbox_type)
+            await self._load_snapshot(a2a_url, card, a2a_agent_id, context, sandbox_type=deployed.sandbox_type,
+                                      headers=deployed.control_headers)
 
         if self.agent_changelog_object_url:
-            await self._apply_agent_changelog(a2a_url, card, context, sandbox_type=deployed.sandbox_type)
+            await self._apply_agent_changelog(a2a_url, card, context, sandbox_type=deployed.sandbox_type,
+                                              headers=deployed.control_headers)
 
         if self.enable_agent_changelog:
             await self._configure_agent_changelog(
-                a2a_url, card, context, expires_in=resolved_ttl, sandbox_type=deployed.sandbox_type
+                a2a_url, card, context, expires_in=resolved_ttl, sandbox_type=deployed.sandbox_type,
+                headers=deployed.control_headers,
             )
 
         context.deployed_agents.append(DeployedAgent(
@@ -546,7 +551,11 @@ class DeployAgentTaskStep(TaskStep):
             role=self.role,
             network_policy=deployed.network_policy,
             env_ids=list(self.env_ids),
+            control_token=deployed.control_token,
         ))
+        # An agent deployed while a clock is armed follows it, as sync_env_clock had every agent then.
+        from agent_env.a2a_agent.clock import follow_armed_clocks
+        await follow_armed_clocks(context, context.deployed_agents[-1])
         return context
 
     def _model_endpoint(self, context: TaskStepContext) -> dict[str, str]:
@@ -577,6 +586,7 @@ class DeployAgentTaskStep(TaskStep):
         *,
         expires_in: int,
         sandbox_type: str | None,
+        headers: Mapping[str, str],
     ) -> None:
         """Enable whole-writable-layer changelog capture via the snapshot enable-changelog method; records the derived prefix in context.metadata['agent_changelog']."""
         from agent_env.a2a_agent import A2AAgent
@@ -610,6 +620,7 @@ class DeployAgentTaskStep(TaskStep):
             timeout=REPLY_TIMEOUT_SECONDS,
             response_model=NamespaceChangelogEnableResponse,
             store=store,
+            headers=headers,
         )
         entry = {
             "agent_name": self.agent_name,
@@ -625,7 +636,8 @@ class DeployAgentTaskStep(TaskStep):
         logger.info(f"agent-changelog capture enabled on '{self.agent_name}': {namespace_url}")
 
     async def _apply_agent_changelog(
-        self, a2a_url: str, card: dict, context: TaskStepContext, *, sandbox_type: str | None
+        self, a2a_url: str, card: dict, context: TaskStepContext, *, sandbox_type: str | None,
+        headers: Mapping[str, str],
     ) -> None:
         """Rewind this fresh agent to a point in a source changelog (fs + conversation) via the snapshot apply-changelog method and resume."""
         from agent_env.a2a_agent import A2AAgent
@@ -658,6 +670,7 @@ class DeployAgentTaskStep(TaskStep):
             timeout=TRANSFER_TIMEOUT_SECONDS,
             response_model=ObjectChangelogApplyResponse,
             store=store,
+            headers=headers,
         )
         check_changelog_applied(answer, call, agent_name=self.agent_name)
         context_id = answer.context_id
@@ -681,6 +694,7 @@ class DeployAgentTaskStep(TaskStep):
         context: TaskStepContext,
         *,
         sandbox_type: str | None,
+        headers: Mapping[str, str],
     ) -> None:
         """Restore a snapshot into the freshly-deployed agent via /ext/snapshot."""
         from agent_env.a2a_agent import A2AAgent
@@ -712,6 +726,7 @@ class DeployAgentTaskStep(TaskStep):
             file_names=set((universe.file_artifact_refs or universe.file_artifact_ids or {}).keys()),
             target_context_id=self.agent_snapshot_target_context_id,
             sandbox_type=sandbox_type,
+            state=A2AAgent.keeps_snapshot_state(card),
         )
         answer = await invoke_transfer(
             a2a_url + load_path,
@@ -721,6 +736,7 @@ class DeployAgentTaskStep(TaskStep):
             timeout=TRANSFER_TIMEOUT_SECONDS,
             response_model=ObjectSnapshotLoadResponse,
             store=store,
+            headers=headers,
         )
         loaded_context_id = answer.context_id
         logger.info(

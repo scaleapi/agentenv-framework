@@ -7,7 +7,6 @@ RUN npm run build
 
 FROM mirror.gcr.io/library/python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir "agentenv-framework-protocol>=0.1.466" "uvicorn>=0.30"
 COPY site.py /app/site.py
 COPY data /app/data

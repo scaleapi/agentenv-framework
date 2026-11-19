@@ -24,6 +24,11 @@ AGENT_ENV_FIXTURE_PREFIX (default ""): prepends <prefix>/ to the keys of artifac
 objects, image builds, env and agent snapshots, changelogs, default agent and judge
 trajectories, verifier outputs and the A2A validator's fixtures, so a fresh control-plane
 backend can write without colliding with existing objects in a shared store. Empty in prod.
+
+AGENT_ENV_COMPUTER_IMAGE_MIRROR (default ""): a registry repository, read anonymously, holding composed computer images
+under their keys and the composer's own digest, as ``ghcr.io/org/computers``. A compose that finds no image of a key in the
+env's image store copies the mirror's into it instead of building it. CI sets it so its runners share the images main
+built.
 """
 
 from __future__ import annotations
@@ -225,6 +230,9 @@ class Config:
 
     fixture_prefix: str = field(
         default_factory=lambda: os.getenv("AGENT_ENV_FIXTURE_PREFIX", "")
+    )
+    computer_image_mirror: str = field(
+        default_factory=lambda: os.getenv("AGENT_ENV_COMPUTER_IMAGE_MIRROR", "")
     )
     agent_sandbox_mode: str = field(
         default_factory=lambda: os.getenv("AGENT_SANDBOX_MODE") or _default_sandbox_mode()
@@ -458,6 +466,21 @@ class Config:
     def get_model_for_role(self, role: str, *, or_default: bool = True) -> str | None:
         return self._model_config().model_for_role(role, or_default=or_default)
 
+    def resolve_model(
+        self,
+        role: model_config.ModelRole,
+        *,
+        step_params: str | None = None,
+        run: str | None = None,
+        step: str | None = None,
+        agent: str | None = None,
+    ) -> model_config.ResolvedModel:
+        """``role``'s model for one step, falling back to this config's ``[model.roles]`` and default. ``[model]`` is
+        read only when no layer names a model, so a fallback the step doesn't use, such as an unset ``env:``
+        reference, can't fail it."""
+        return (model_config.named_model(role, step_params=step_params, run=run, step=step, agent=agent)
+                or model_config.config_model(role, self._model_config()))
+
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)
         if overrides:
@@ -467,19 +490,20 @@ class Config:
     def get_model_headers(self, base_url: str | None) -> dict[str, str]:
         return self._model_config().headers_for(base_url, secret_resolver=self._resolve_secret)
 
+    def is_model_endpoint(self, url: str | None) -> bool:
+        return self._model_config().is_endpoint(url)
+
     def resolve_model_call(
         self,
         model: str,
         *,
         default_api_key: str | None = None,
         base_override: str | None = None,
-        model_overrides: dict[str, dict[str, str]] | None = None,
     ) -> model_config.ModelCallConfig:
         return self._model_config().resolve_call(
             model,
             default_api_key=default_api_key,
             base_override=base_override,
-            model_overrides=model_overrides,
             secret_resolver=self._resolve_secret,
         )
 

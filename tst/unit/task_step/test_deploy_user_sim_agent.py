@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +21,7 @@ from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
+from agent_env.task_step.task_steps.agent.user_sim_common import persona_fingerprint
 from tst.unit.task_step.always_on_harness import USER_SIM, Rig
 
 DATA = Path(__file__).parents[2] / "data" / "user_sim"
@@ -53,9 +55,10 @@ class _Deploy:
         self.posts: list[tuple[str, dict]] = []
         self.agent = MagicMock(metadata={})
         self.agent.close = AsyncMock()
-        self.agent.deploy = AsyncMock(return_value=MagicMock(a2a_url=AGENT_URL, agent_card=card, sandbox_type=None))
+        self.agent.deploy = AsyncMock(return_value=MagicMock(a2a_url=AGENT_URL, agent_card=card, sandbox_type=None,
+                                                                      control_token=None, control_headers={}))
 
-        async def post(url, fields):
+        async def post(url, fields, headers=None):
             self.posts.append((url, fields))
 
         monkeypatch.setattr(protocol, "post_agent_config", post)
@@ -94,6 +97,74 @@ async def test_the_prompt_set_on_the_user_s_agent_is_the_tested_one_byte_for_byt
     assert [a.agent_name for a in context.deployed_agents] == ["hannah"]
     assert context.deployed_agents[0].env_ids == []  # no env tools unless the task gives some
     assert context.metadata["models"]["user simulator"]["user"] == "sim-model"
+
+
+@pytest.mark.asyncio
+async def test_the_record_keeps_each_tag_s_line_so_an_old_used_resolves_after_the_persona_is_reordered(monkeypatch):
+    record = await _published(monkeypatch, _step())
+    seen = record["tagged_lines"]
+    # Every tag the prompt shows, each with its line as the prompt shows it.
+    assert list(seen) == re.findall(r"^  ([A-Z]\d+) ", PROMPT, re.M)
+    assert all(f"  {tag:<4}{line.split(chr(10))[0]}" in PROMPT for tag, line in seen.items())
+    decisions = HANNAH["description"]["decisions"]
+    assert seen["D9"] == decisions[8]
+    assert seen["W2"] == f'Earlier you texted the assistant:\n"{PERSON["opening"]["text"]}"'
+    used = "D9"  # what the user sim answered in that run
+
+    # The task writer later reorders the decisions and adds one at the top: D9 now names another line.
+    edited = {**HANNAH, "description": {**HANNAH["description"],
+                                        "decisions": ["Anything over $600 for the weekend: ask you first.",
+                                                      *reversed(decisions)]}}
+    now = (await _published(monkeypatch, _step(persona=edited)))["tagged_lines"]
+    assert now["D9"] != decisions[8]
+    # The old run's record still resolves its used to the line its user sim saw.
+    assert seen[used] == decisions[8]
+    # Recording the map leaves the prompt as tested.
+    assert record["prompt_sha256"] == hashlib.sha256(PROMPT.encode()).hexdigest()
+
+
+# The persona fingerprint, pinned: psi-benchmark-tasks's converter computes it too, and its test uses this sample.
+FINGERPRINT_PERSONA = {
+    "display_name": "Hannah Reyes",
+    "description": {"who_you_are": ["Hannah Reyes, 32, a project manager in San Francisco."],
+                    "decisions": ["A place at $180 a night or less: yes."]},
+    "permissions": {"just_do": ["book flights"]},
+    "keep_private": ["Your card number."],
+}
+FINGERPRINT_OPENING = "ok mom and dad are coming thu\u2013mon (nov 19\u201323), can you handle it?"
+FINGERPRINT = "2d287ae4fd69f1f2398e223d7a3ed94976c912c825c606378859656b2ec2fdcd"
+
+
+def test_the_persona_fingerprint_is_pinned():
+    assert persona_fingerprint(FINGERPRINT_PERSONA, FINGERPRINT_OPENING) == FINGERPRINT
+    # The name and the reading settings aren't in it; the opening as written is.
+    assert persona_fingerprint({**FINGERPRINT_PERSONA, "display_name": "H. Reyes", "max_replies": 3},
+                               FINGERPRINT_OPENING) == FINGERPRINT
+    assert persona_fingerprint(FINGERPRINT_PERSONA, [{"kind": "text", "text": FINGERPRINT_OPENING}]) != FINGERPRINT
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_the_record_has_the_persona_fingerprint_of_the_step_as_written(monkeypatch):
+    from agent_env.task import Task
+
+    opening = [{"kind": "text", "text": "the <trip> trip, can you handle it?"},
+               {"kind": "file", "file": {"uri": "s3://reyes-family/<trip>/itinerary.pdf", "name": "itinerary.pdf"}}]
+    persona = {**HANNAH, "description": {**HANNAH["description"],
+                                         "who_you_are": [*HANNAH["description"]["who_you_are"], "Back from <trip>."]}}
+    context = TaskStepContext()
+    context.metadata["seed"] = {"trip": "nov-19"}
+    deploy = _Deploy(monkeypatch)
+    # Task.run fills the seed into every step before it runs: the record still has the fingerprint as written.
+    with (patch.object(A2AAgent, "get", return_value=deploy.agent),
+          patch("agent_env.task_step.task_steps.deploy_agent.get_config") as get_config):
+        get_config.return_value.get_model_for_role.return_value = None
+        context = await Task("t", None, [_step(persona=persona, opening_prompt=opening)]).run(context=context)
+    record = context.metadata[USER_SIMS_KEY]["hannah"]
+    assert "nov-19" in record["opening"] and "<trip>" not in json.dumps(record["description"])  # it ran seeded
+    assert record["persona_sha256"] == persona_fingerprint(persona, opening)  # unseeded
+    assert (await _published(monkeypatch, _step()))["persona_sha256"] == persona_fingerprint(
+        HANNAH, PERSON["opening"]["text"])
 
 
 @pytest.mark.asyncio
@@ -150,6 +221,8 @@ def test_the_step_round_trips_and_holds_no_system_prompt():
     ({"persona": {**HANNAH, "description": None}}, "description must be an object of sections"),
     ({"persona": {**HANNAH, "description": {"who_you_are": ["Linda."], "events": ["Tue"]}}},
      "unknown sections ['events']"),
+    ({"persona": {**HANNAH, "description": {"who_you_are": ["Linda."], "never_supply": ["Her card number."]}}},
+     "put facts the assistant should find in what_to_look_up, and secrets in keep_private"),
     ({"persona": {**HANNAH, "permissions": {"maybe": ["book it"]}}}, "permissions has unknown kinds ['maybe']"),
     ({"persona": {**HANNAH, "keep_private": "her age"}}, "keep_private must be a list of non-empty lines"),
     ({"persona": {**HANNAH, "schedule": ["07:30", "23:30"]}}, "schedule must be an object"),
@@ -278,7 +351,7 @@ async def test_a_card_that_won_t_take_the_model_fails_the_step(monkeypatch):
 async def test_a_failed_model_post_closes_the_agent_and_leaves_no_record(monkeypatch):
     deploy = _Deploy(monkeypatch)
 
-    async def refuse(url, fields):
+    async def refuse(url, fields, headers=None):
         if "model" in fields:
             raise RuntimeError("agent-config refused")
 
@@ -321,7 +394,7 @@ async def test_always_on_runs_the_deployed_user_from_its_opening_and_sets_up_not
               user_texts=['{"outcome": "reply", "message": "blue!", "used": "W1"}'])
     await rig.arm()
     ctx = await _rig_context(monkeypatch, rig)
-    async def post(url, fields):
+    async def post(url, fields, headers=None):
         ctx_posts.append((url, fields))
 
     monkeypatch.setattr(ao.protocol, "post_agent_config", post)

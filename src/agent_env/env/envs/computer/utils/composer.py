@@ -1,9 +1,11 @@
 """The composer: a computer env's base, driver and apps built into one image for each form and arch, on a builder the
 put's sandbox provider gives (``builder``), tagged in the env's image store by a key of everything that goes into it, so
-an image of that key, built for any env and on any builder, is reused. A disk form is made from its arch's container
-once that has built: its root filesystem as the disk's, on the base disk's EFI system partition, by a build that runs
-only on the builder's own platform. A VM bundle, macOS's, is composed on a Mac: its base's booted, given each layer
-over ssh and kept on that Mac by a name of its key (``vm_bundle``).
+an image of that key, built for any env and on any builder, is reused. An app agent-env's release published composed,
+chromium, is pulled from where it published it instead: its wheel records the lock it composed from and the key it
+took, so a build of the same inputs finds it, without resolving or building (``_released``). A disk form is made from
+its arch's container once that has built: its root filesystem as the disk's, on the base disk's EFI system partition,
+by a build that runs only on the builder's own platform. A VM bundle, macOS's, is composed on a Mac: its base's
+booted, given each layer over ssh and kept on that Mac by a name of its key (``vm_bundle``).
 Each result is recorded in the env's metadata as it finishes (``composed``), and the arches that built are written as
 the env's computer, a ``computer`` artifact over an index of their images."""
 
@@ -50,15 +52,16 @@ from agent_env.env.envs.computer.utils import (
     thin_disk,
     windows_disk,
 )
-from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
+from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, mirror_tag, now, stale
 from agent_env.env.envs.computer.utils.install import Install, for_os, platform_of
-from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
+from agent_env.env.published_images import (
+    DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned, released_image, released_index, released_lock)
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.image_store import ImageStore
-from agent_env.store.image_store.registry_api import pin_digest, pin_if_served, write_index
+from agent_env.store.image_store.registry_api import copy_image, pin_digest, pin_if_served, write_index
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
@@ -314,7 +317,7 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         protocol = _stage_protocol(context)
         layer = _stage_driver(context, driver, base, {})
         apps = [(app, _stage_app(context, app, base, {})) for app in env.composed_apps()]
-        parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
+        parts = [_part(layer, _services(f"driver-{gate.driver_folder(driver)}", layer.install),
                        {"MCP_PORT": driver.port}, protocol, False)]
         parts += [_part(staged, dict(zip(gate.programs(app, platform_of(base.os)), [
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
@@ -375,7 +378,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         driver_prefix = windows_disk.DRIVERS / name
         parts = [_windows_part(layer, driver_prefix, {
             program: windows_disk.argv(command, driver_prefix)
@@ -522,7 +525,7 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         prefix = omarchy_disk.DRIVERS / name
         parts = [_omarchy_part(layer, prefix, {
             program: omarchy_disk.argv(command, prefix)
@@ -633,6 +636,17 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             return held[0]
 
         inputs = packages.inputs_digest(wants, context, base_identity, arch)
+        settings, context_digest = _build_settings(env, base), _digest(context)
+
+        def keyed(lock: packages.Lock | None) -> tuple[str, str]:
+            dockerfile = _dockerfile(source, layers, base, settings, lock)
+            return dockerfile, _key(base=base_identity, dockerfile=dockerfile, context=context_digest,
+                                    lock=lock.digest() if lock is not None else None, form=form, arch=arch,
+                                    format=FORMAT)
+
+        if inputs is not None and (published := _released(inputs, keyed, arch, pair, progress)) is not None:
+            attempt.key = published["key"]
+            return published
         lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
         if inputs is not None and lock is None:
             attempt.stage = "resolve"
@@ -641,9 +655,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             lock, fetched = packages.resolve(inputs, wants, resolving, source, arch, env.stored_id)
             progress.at(pair, "resolved", f"resolved {len(fetched)} files and stored them")
             attempt.stage = "build"
-        dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
-        key = attempt.key = _key(base=base_identity, dockerfile=dockerfile, context=_digest(context),
-                                 lock=lock.digest() if lock is not None else None, form=form, arch=arch, format=FORMAT)
+        dockerfile, key = keyed(lock)
+        attempt.key = key
         store, ref, pinned = _stored(env, key)
         if pinned is not None:
             progress.at(pair, "reusing", "reusing the image of the same key, built earlier")
@@ -676,8 +689,11 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
                 progress: _Progress) -> dict:
     """The status of the disk form of ``arch`` once built from ``container``, its container's result, and pushed, or
     reused, or the stage that failed and why. Its key is of the container's key, the base disk and the disk recipe;
-    the base disk is the base's own, the one published for it, or else one made on the builder from the base's
-    container and the boot recipe. Its build runs no program of ``arch``'s but that recipe's."""
+    the base disk is the base's own or the one published for it, whose EFI system partition and size the disk keeps,
+    or else the base's container and size, the disk then taking the recipe's own partition at that size, all a base
+    disk made from them would give it. Its build runs no program of ``arch``'s but that recipe's. Two composes of one
+    disk on this machine take turns, so the second reuses the first's: built again, its tag would move off the image
+    the first pinned, which a boot mounts by that name and Docker doesn't pull for a mount."""
     pair, platform = f"disk/{arch}", f"linux/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened):
@@ -687,47 +703,34 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
         base_disk, base_identity, recipe = *_base_disk(base, arch), _digest(context)
         key = attempt.key = _key(container=container["key"], base_disk=base_identity, recipe=recipe, form="disk",
                                  arch=arch, format=FORMAT)
-        store, ref, pinned = _stored(env, key)
-        if pinned is not None:
-            progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
-            return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": now()}
-        link = builds.link(platform, base.image())
-        progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
-        on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
-        on.login(store.auth(container["image"]))
-        if base_disk is not None:
-            on.login(get_config().get_image_store().auth(base_disk))
-        if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
-            tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
-            on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
-                     context=f"{builder.CONTEXT}/tools")
-        dockerfile = (context / "Dockerfile").read_text()
-        if base_disk is None:
-            progress.at(pair, "making the base's disk")
-            base_disk = _made_base_disk(on, base, arch, f"{base_identity} {recipe}", tools, dockerfile)
-        progress.at(pair, "making the disk")
-        local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
-        on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
-            "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
-            "ESP": base_disk, "TOOLS": tools})
-        attempt.stage = "push"
-        progress.at(pair, "pushing the disk")
-        on.push(local, ref, store)
-        return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                "builder": on.name, "built_at": now()}
+        with holding_locks([f"linux-disk:{key}"], lambda: progress.at(
+                pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
+            store, ref, pinned = _stored(env, key)
+            if pinned is not None:
+                progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
+                return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": now()}
+            link = builds.link(platform, base.image())
+            progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
+            on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
+            on.login(store.auth(container["image"]))
+            if base_disk is not None:
+                on.login(get_config().get_image_store().auth(base_disk))
+            if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
+                tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
+                on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
+                         context=f"{builder.CONTEXT}/tools")
+            progress.at(pair, "making the disk")
+            local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
+            on.build((context / "Dockerfile").read_text(), local, platform, {KEY_LABEL: key}, build_args={
+                "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
+                "TOOLS": tools, **({"ESP": base_disk} if base_disk is not None
+                                   else {"SIZE_GB": str(base.forms.disk.min_disk_gb)})})
+            attempt.stage = "push"
+            progress.at(pair, "pushing the disk")
+            on.push(local, ref, store)
+            return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
+                    "builder": on.name, "built_at": now()}
     return attempt.result
-
-
-def _made_base_disk(on: builder.Builder, base: ComputerArtifact, arch: str, made_from: str, tools: str,
-                    dockerfile: str) -> str:
-    """The base's disk for ``arch``, made on ``on`` from the base's container with the boot recipe's ``dockerfile`` at
-    the base's size, under a tag of ``made_from``, what it's made from."""
-    source, _ = _base(base, arch)
-    tag = f"agentenv-computer:{hashlib.sha256(made_from.encode()).hexdigest()[:16]}-base-disk-{arch}"
-    on.build(dockerfile, tag, f"linux/{arch}", {}, build_args={
-        "ROOTFS": source, "ROOTFS_CONFIG": _encoded(_config(on, source, arch)), "TOOLS": tools,
-        "SIZE_GB": str(base.forms.disk.min_disk_gb)})
-    return tag
 
 
 @dataclass
@@ -771,10 +774,46 @@ def _key(**inputs: Any) -> str:
 
 def _stored(env: ComputerEnv, key: str) -> tuple[ImageStore, str, str | None]:
     """The env's image store, the ref there of the image of ``key``, and that ref pinned when the store serves one
-    already, for any env that built it."""
+    already, for any env that built it, or once it's copied there from the configured computer image mirror."""
     store = _image_store(env)
-    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
+    tag = key.removeprefix("sha256:")
+    ref = store.image_ref(REPOSITORY, tag)
+    if (pinned := pin_if_served(ref, store.auth(ref))) is not None or not (mirror := get_config().computer_image_mirror):
+        return store, ref, pinned
+    try:
+        if (mirrored := pin_if_served(f"{mirror}:{mirror_tag(tag)}", None)) is None:
+            return store, ref, None
+        copy_image(mirrored, ref, None, store.auth(ref))
+    except (ValueError, KeyError, OSError) as e:
+        logger.warning(f"the computer image mirror {mirror} couldn't give {tag}, so it's built: {e}")
+        return store, ref, None
+    logger.info(f"copied {tag} from the computer image mirror {mirror}")
     return store, ref, pin_if_served(ref, store.auth(ref))
+
+
+def _released(inputs: str, keyed: Callable[[packages.Lock], tuple[str, str]], arch: str, pair: str,
+              progress: _Progress) -> dict | None:
+    """The image agent-env's release published of a build of ``inputs``, which it resolved to the lock its wheel
+    records: found by the key ``keyed`` gives a build under that lock, so it's what this build would make, and recorded
+    there by its digest, which a sandbox pulls anonymously. None when the release published none, a build here differs,
+    or the registry won't give it, so it's composed as before."""
+    if (shipped := released_lock(inputs)) is None:
+        return None
+    _, key = keyed(packages.Lock.model_validate(shipped))
+    if (image := released_image(key)) is None:
+        logger.info(f"{pair}: agent-env's release resolved these packages, but a build here differs from its build, "
+                    "so it's composed")
+        return None
+    try:
+        kept = labels(image, arch, None)
+    except (ValueError, OSError) as e:
+        logger.warning(f"{pair}: agent-env's release published it as {image}, which can't be pulled, so it's composed: "
+                       f"{e}")
+        return None
+    progress.at(pair, "reusing", f"reusing the image agent-env's release published, {image}")
+    return {"status": "unverified", "key": key, "image": image, "reused": True, "published": True,
+            "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
+            "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": now()}
 
 
 def _image_store(env: ComputerEnv) -> ImageStore:
@@ -863,9 +902,9 @@ class _Layer:
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
-    its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
+    its port, its folder under ``DRIVERS`` named for the name its class declares (``gate.driver_folder``), its programs and their file under ``driver-``
     as an app's are under ``app-``, so neither ever takes the other's."""
-    install, name = for_os(driver.install, base.os), gate.folder_name(driver.id, "driver")
+    install, name = for_os(driver.install, base.os), gate.driver_folder(driver)
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
            {"MCP_PORT": driver.port}, from_store)
@@ -1113,13 +1152,41 @@ def _written(env: ComputerEnv, base: ComputerArtifact, arches: list[str], config
 
 
 def _joined(env: ComputerEnv, name: str, what: str, images: dict[str, str], arches: list[str]) -> DockerImageArtifact:
-    """``images`` of ``arches`` joined into one index in the env's image store, signed in to it, as an image artifact."""
+    """``images`` of ``arches`` joined into one index in the env's image store, signed in to it, as an image artifact:
+    the index agent-env's release published when those are the images it published, and an image of it among others
+    copied into the store first, since an index names images in its own repository."""
+    if (released := released_index({arch: images[arch] for arch in arches})) is not None:
+        try:
+            return DockerImageArtifact.put_ref(derive_id(env.stored_id, name),
+                                               description=f"{env.stored_id}'s {what}", image_name=released)
+        except (ValueError, OSError) as e:
+            logger.warning(f"{env.stored_id}: agent-env's release published its index as {released}, which can't be "
+                           f"read, so one is joined in its store: {e}")
     store = get_config().get_image_store_for(env.stored_id)
+    images = {arch: _in_store(store, images[arch]) for arch in arches}
     index = store.image_ref(REPOSITORY, "index-" + hashlib.sha256(
         ",".join(images[arch] for arch in arches).encode()).hexdigest())
     write_index(index, {f"linux/{arch}": images[arch] for arch in arches}, store.auth(index))
     return DockerImageArtifact.put_ref(derive_id(env.stored_id, name), description=f"{env.stored_id}'s {what}",
                                        image_name=index)
+
+
+def _in_store(store: ImageStore, image: str) -> str:
+    """``image``, pinned, as the store holds it: itself when it's in the store's repository, else copied there under a
+    tag of its digest, which the copy keeps."""
+    digest = image.rpartition("@")[2]
+    ref = store.image_ref(REPOSITORY, f"released-{digest.removeprefix('sha256:')}")
+    if _repository(image) == _repository(ref):
+        return image
+    if pin_if_served(ref, store.auth(ref)) is None:
+        copy_image(image, ref, None, store.auth(ref))
+    return f"{ref}@{digest}"
+
+
+def _repository(ref: str) -> str:
+    """``ref``'s registry and repository, without its tag or digest; a registry's port isn't a tag."""
+    name = ref.partition("@")[0]
+    return name[:name.rfind(":")] if name.rfind(":") > name.rfind("/") else name
 
 
 def _digest(folder: Path) -> str:

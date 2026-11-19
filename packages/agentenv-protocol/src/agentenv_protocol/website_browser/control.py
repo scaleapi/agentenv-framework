@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
 
 from .log import ACTOR, KEY_FIELDS, TYPING_METHODS, BrowserLog, Causes, caused, log_time, redact_url
-from ..computer.errors import DeviceUnavailable, InvalidArgument
+from ..computer.errors import DeviceUnavailable, InvalidArgument, TargetUnavailable
 from .devtools import DevToolsError, DevToolsPipe
 from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StartTab, StorageItem,
                      origin_of)
@@ -33,6 +33,8 @@ PIN_TIMEOUT_S = 10.0
 ARRIVAL_POLL_S = 0.05
 #: How long a start tab on a site the env doesn't serve may take to load before it's left loading.
 LIVE_START_TAB_TIMEOUT_S = 30.0
+#: How long a start tab's move within its document may take to land after the browser answers it, before its reload.
+MOVE_WITHIN_S = 5.0
 #: How a start tab settled.
 LOADED, FAILED, TIMED_OUT = "loaded", "failed", "timed_out"
 #: How much of a download each read hashes.
@@ -59,6 +61,8 @@ FRAME_RETRY_S = 0.25
 FOR_THE_MOMENT = ("Not attached to an active page", "Unable to capture screenshot", "Session with given id not found")
 #: How often a wait for a tab to load looks again.
 LOAD_POLL_S = 0.1
+#: A screencast's frames: JPEG at this quality, every frame the tab paints.
+SCREENCAST = {"format": "jpeg", "quality": FRAME_QUALITY, "everyNthFrame": 1}
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
 UPLOADS = "Uploads"
 DOWNLOADS = "Downloads"
@@ -106,6 +110,10 @@ class BrowserControl:
         self.dialog_log: list[dict] = []
         self._sessions: dict[str, str] = {}
         self._hidden: set[str] = set()
+        #: What each page of agentenv's own open now sets as it closes, with its context, None for the default one; and
+        #: the contexts being disposed, once per disposal under way, which open no more (``disposing``).
+        self._hidden_pages: dict[asyncio.Event, Optional[str]] = {}
+        self._disposing: list[str] = []
         self._closing: set[str] = set()
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
@@ -139,6 +147,10 @@ class BrowserControl:
         self.other_contexts: dict[str, str] = {}
         self.context_origins: dict[str, set[str]] = {}
         self._context_fronts: dict[str, str] = {}
+        #: Each screencast agentenv runs, by its session, and what hears its frames, each JPEG's bytes.
+        self._screencasts: dict[str, list[Callable[[bytes], None]]] = {}
+        #: What hears of each tab opening and closing: the event and the tab's record.
+        self.on_tab: list[Callable[[str, dict], None]] = []
         #: The browser's log, where its tab events go, and the commands in flight that cause them.
         self.log: Optional[BrowserLog] = None
         self.causes = Causes()
@@ -169,8 +181,12 @@ class BrowserControl:
         if self.log is not None:
             for tab in self.tabs.values():
                 self.log.note("tab", {"event": "closed", "id": tab["id"], "url": redact_url(tab["url"]), "by": how})
+        ended = list(self.tabs.values())
         self.tabs.clear()
         self._sessions.clear()
+        self._screencasts.clear()
+        for tab in ended:
+            self._heard("closed", tab)
         self._frame_tabs.clear()
         self._open_dialogs.clear()
         self._choosers.clear()
@@ -266,6 +282,17 @@ class BrowserControl:
         tab = self._frame_tabs.get(frame, frame) if isinstance(frame, str) else None
         return self.tabs.get(tab, {}).get("context_id") if tab is not None else None
 
+    def context_of_tab(self, target: object) -> Optional[str]:
+        """The context of the tab ``target``, open or closed since the record started; None for the default context's,
+        or one it hasn't seen."""
+        if (tab := self.tabs.get(target) if isinstance(target, str) else None) is not None:
+            return tab.get("context_id")
+        return next((tab.get("context_id") for tab in reversed(self.closed_tabs) if tab["id"] == target), None)
+
+    def session_of(self, target: Optional[str]) -> Optional[str]:
+        """The session of agentenv's own on the tab ``target``, None for one it isn't attached to."""
+        return next((session for session, tab in self._sessions.items() if tab == target), None) if target else None
+
     def label_of(self, entry: dict) -> Optional[str]:
         """The label of the lease a tab or download was in, None for the default context."""
         return self.other_contexts.get(entry.get("context_id"))
@@ -305,7 +332,8 @@ class BrowserControl:
         as ``site_of`` names them, an error status is too, or once it has been waited on ``own_timeout_s`` on such a
         site, else ``live_timeout_s``. Each tab's outcome, in order, kept though the browser has gone and the first
         can't come to the front. A page already loaded doesn't read cookies set after it, so a tab a load signed in
-        shows it only once it loads again."""
+        shows it only once it loads again: a tab already on its URL's document, as a hash-routed page, is reloaded
+        there, since going to the URL alone only moves within the document (``_start_navigation``)."""
         if not urls:
             return []
         targets = [target for target, tab in self.tabs.items()
@@ -336,7 +364,8 @@ class BrowserControl:
     async def _start_load(self, target: str, url: str, site: Optional[str]) -> _StartLoad:
         """The tab ``target`` sent to ``url``, its navigation followed by what the browser says of it. The browser
         answers a navigation once it commits, which a page that never answers never does, so its answer is awaited
-        apart, for as long as the tab is."""
+        apart, for as long as the tab is, and a navigation that stays in the tab's document is followed by a reload
+        (``_start_navigation``)."""
         session = next((s for s, t in self._sessions.items() if t == target), None)
         if session is None:
             raise DeviceUnavailable(f"the browser's tab {target} has no session to load a start tab in")
@@ -347,13 +376,42 @@ class BrowserControl:
             load.error = f"{type(e).__name__}: {e}"
             load.check()
             return load
-        landed = asyncio.get_running_loop().create_future()
-        self.causes.navigating(target, landed, _cause())
-        load.navigating = asyncio.ensure_future(self.devtools.request("Page.navigate", {"url": url},
-                                                                      session_id=session))
+        load.navigating = asyncio.ensure_future(self._start_navigation(target, load, session))
         load.navigating.add_done_callback(load.answered)
-        load.navigating.add_done_callback(lambda done: _landed_at(landed, done))
         return load
+
+    async def _start_navigation(self, target: str, load: _StartLoad, session: str) -> dict:
+        """``load``'s tab sent to its URL, which the log says who asked for: the browser's answer. A tab already on the
+        URL's document, as a hash-routed page is, only moves within it, which loads nothing and names no loader, so the
+        page wouldn't read what a load just set: it's reloaded there once the move has landed, which the browser
+        answers before it does (else the reload loads where the tab was), the load taking its main frame's first
+        document after for its own, and the log that navigation for the reload."""
+        cause, landed = _cause(), asyncio.get_running_loop().create_future()
+        self.causes.navigating(target, landed, cause)
+        try:
+            answer = await self.devtools.request("Page.navigate", {"url": load.url}, session_id=session)
+        except BaseException:
+            landed.cancel()
+            raise
+        result = answer.get("result") or {}
+        if "error" in answer or result.get("errorText"):
+            landed.cancel()
+            return answer
+        landed.set_result(result.get("loaderId"))
+        if result.get("loaderId"):
+            return answer
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(load.moved.wait(), MOVE_WITHIN_S)
+        load.reloading = True
+        self.causes.navigates_next(target, cause)
+        try:
+            reloaded = await self.devtools.request("Page.reload", {}, session_id=session)
+        except BaseException:
+            self.causes.navigated_nowhere(target, cause)
+            raise
+        if "error" in reloaded:
+            self.causes.navigated_nowhere(target, cause)
+        return reloaded
 
     async def _settled(self, target: str, load: _StartLoad, timeout_s: float) -> dict:
         """``load``'s outcome once it settles, or once it has been waited on ``timeout_s``."""
@@ -529,17 +587,38 @@ class BrowserControl:
     @contextlib.asynccontextmanager
     async def hidden_page(self, url: str = "about:blank", context: Optional[str] = None) -> AsyncIterator[str]:
         """A page of agentenv's own for reading state, in the context ``context``, else the default one, in no window
-        and never in the record; its session's id. It's closed after."""
-        target = (await self.devtools.call("Target.createTarget", {
-            "url": url, "hidden": True, "background": True,
-            **({"browserContextId": context} if context else {})}))["targetId"]
-        self._hidden.add(target)
-        self.tabs.pop(target, None)
+        and never in the record; its session's id. It's closed after, before its context is disposed;
+        TargetUnavailable for a context being disposed."""
+        if context in self._disposing:
+            raise TargetUnavailable(f"the context {self.other_contexts.get(context, context)!r} is being disposed")
+        closed = asyncio.Event()
+        self._hidden_pages[closed] = context
         try:
-            yield (await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
+            target = (await self.devtools.call("Target.createTarget", {
+                "url": url, "hidden": True, "background": True, **_in(context)}))["targetId"]
+            self._hidden.add(target)
+            self.tabs.pop(target, None)
+            try:
+                attached = await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True})
+                yield attached["sessionId"]
+            finally:
+                with contextlib.suppress(ConnectionError, DevToolsError):
+                    await self.devtools.call("Target.closeTarget", {"targetId": target})
         finally:
-            with contextlib.suppress(ConnectionError, DevToolsError):
-                await self.devtools.call("Target.closeTarget", {"targetId": target})
+            del self._hidden_pages[closed]
+            closed.set()
+
+    @contextlib.asynccontextmanager
+    async def disposing(self, context: str) -> AsyncIterator[None]:
+        """The context ``context`` disposed within: from its start no page of agentenv's own opens in it, and it waits
+        for those open there to close, as Chromium crashes disposing a context that holds a hidden page."""
+        self._disposing.append(context)
+        try:
+            for closed in [closed for closed, of in self._hidden_pages.items() if of == context]:
+                await closed.wait()
+            yield
+        finally:
+            self._disposing.remove(context)
 
     async def active_tab(self, context: Optional[str] = None) -> Optional[str]:
         """The active tab of the context ``context``, else of the default one, as ``page_tab`` picks among its tabs."""
@@ -731,21 +810,31 @@ class BrowserControl:
         await self._refresh(target)
         return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
 
-    async def frame(self, target: Optional[str], load_wait_s: float) -> tuple[str, str, Optional[str], Optional[str]]:
-        """A frame of the tab ``target``, else, for none or one that's gone, of the active tab: once its page has loaded,
-        waiting up to ``load_wait_s``, a JPEG of it as it shows, within ``FRAME_CAPTURE_S``, or, with a dialog keeping
-        it from painting, the frame it last took, else its last capture, a PNG; a tab that closes while its page loads
-        is the active tab's. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open,
-        or for one that paints nothing in time."""
-        session = next((s for s, t in self._sessions.items() if t == target), None) if target else None
+    async def frame(self, target: Optional[str], load_wait_s: float, context: Optional[str] = None,
+                    within: bool = False) -> tuple[str, str, Optional[str], Optional[str]]:
+        """A frame of the tab ``target``, else, for none or one that's gone, of the active tab, with ``within`` the
+        active tab of the context ``context``, else of the default one: once its page has loaded, waiting up to
+        ``load_wait_s``, a JPEG of it as it shows, within ``FRAME_CAPTURE_S``, or, with a dialog keeping it from
+        painting, the frame it last took, else its last capture, a PNG; a tab that closes while its page loads is the
+        active tab's. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for
+        one that paints nothing in time."""
+
+        async def active_session() -> str:
+            if not within:
+                return await self.active_session()
+            if (found := self.session_of(await self.active_tab(context))) is None:
+                raise DeviceUnavailable("the context has no tab open")
+            return found
+
+        session = self.session_of(target)
         if session is None:
-            session = await self.active_session()
+            session = await active_session()
         target = self._sessions[session]
         deadline = asyncio.get_running_loop().time() + load_wait_s
         while target in self._page_loading and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(LOAD_POLL_S)
         if session not in self._sessions:
-            session = await self.active_session()
+            session = await active_session()
             target = self._sessions[session]
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FRAME_CAPTURE_S
@@ -769,8 +858,7 @@ class BrowserControl:
             await asyncio.sleep(FRAME_RETRY_S)
             while session not in self._sessions:
                 try:
-                    session = next((s for s, t in self._sessions.items() if t == target), None) or (
-                        await self.active_session())
+                    session = self.session_of(target) or await active_session()
                 except DeviceUnavailable:
                     if loop.time() + FRAME_RETRY_S >= deadline:
                         raise
@@ -778,6 +866,74 @@ class BrowserControl:
             target = self._sessions[session]
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
+
+    async def capture_tab(self, target: str) -> Optional[bytes]:
+        """The tab ``target`` as it shows now, a JPEG's bytes, or with a dialog keeping it from painting the frame it
+        last took; None when it can't be had within ``FRAME_CAPTURE_S``, as for a tab that's gone or never painted. Of
+        that tab alone, as a recording of its context wants it."""
+        if (session := self.session_of(target)) is None:
+            return None
+        if session in self._open_dialogs:
+            held = self._frames.get(target)
+            return base64.b64decode(held[0]) if held is not None and held[1] == "jpg" else None
+        try:
+            shot = await self._nudged_capture(session, FRAME_CAPTURE_S)
+        except (asyncio.TimeoutError, ConnectionError, DevToolsError, _TabGone):
+            return None
+        self._frames[target] = shot["data"], "jpg"
+        return base64.b64decode(shot["data"])
+
+    async def visible(self, target: str) -> bool:
+        """Whether the tab ``target`` shows in its window, as a tab behind another doesn't; False when it can't be told.
+        A visible tab's screencast sends a frame each time it paints, so one that sends none is still."""
+        if (session := self.session_of(target)) is None:
+            return False
+        try:
+            answer = await self.devtools.call("Runtime.evaluate", {"expression": "document.visibilityState",
+                                                                   "returnByValue": True}, session_id=session,
+                                              timeout_s=ACTIVE_CHECK_TIMEOUT_S)
+            return answer["result"]["value"] == "visible"
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError, TypeError):
+            return False
+
+    async def screencast(self, target: str, heard: Callable[[bytes], None], max_edge: Optional[int] = None
+                         ) -> Optional[str]:
+        """``heard`` told each frame the tab ``target`` paints, a JPEG's bytes, on a screencast of agentenv's own
+        session on it, which one screencast serves for everything that follows the tab; its session, None for a tab it
+        isn't attached to or that won't screencast."""
+        if (session := self.session_of(target)) is None:
+            return None
+        hearing = self._screencasts.setdefault(session, [])
+        hearing.append(heard)
+        if len(hearing) == 1:
+            options = {**SCREENCAST, **({"maxWidth": max_edge, "maxHeight": max_edge} if max_edge else {})}
+            try:
+                await self.devtools.call("Page.startScreencast", options, session_id=session)
+            except (ConnectionError, DevToolsError, asyncio.TimeoutError):
+                self._screencasts.pop(session, None)
+                return None
+        return session
+
+    async def unscreencast(self, session: str, heard: Callable[[bytes], None]) -> None:
+        """``heard`` no longer told the frames of the screencast on ``session``, which stops once nothing hears it."""
+        hearing = self._screencasts.get(session)
+        if hearing is None or heard not in hearing:
+            return
+        hearing.remove(heard)
+        if not hearing:
+            self._screencasts.pop(session, None)
+            with contextlib.suppress(ConnectionError, DevToolsError, asyncio.TimeoutError):
+                await self.devtools.call("Page.stopScreencast", session_id=session)
+
+    def _on_Page_screencastFrame(self, params: dict, session: Optional[str]) -> None:
+        if isinstance(ack := params.get("sessionId"), int):
+            self._spawn(self.devtools.call("Page.screencastFrameAck", {"sessionId": ack}, session_id=session))
+        try:
+            data = base64.b64decode(params.get("data") or "")
+        except ValueError:
+            return
+        for heard in list(self._screencasts.get(session, ())):
+            heard(data)
 
     def _held_frame(self, target: str) -> tuple[str, str, Optional[str], Optional[str]]:
         """The frame of a tab a dialog keeps from painting: the one it last took, else its last capture, a PNG;
@@ -895,6 +1051,7 @@ class BrowserControl:
             if self.log is not None:
                 self._spawn(self._log_opened(self.log.reserve(), log_time(), info["targetId"], info.get("url", ""),
                                              info.get("openerId"), self._launching))
+            self._heard("opened", self.tabs[info["targetId"]])
 
     async def _log_opened(self, seq: int, at: str, target: str, url: str, opener: Optional[str],
                           launching: bool) -> None:
@@ -940,6 +1097,8 @@ class BrowserControl:
             self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, frame.get("url", ""),
                                             frame.get("loaderId")))
         if (load := self._loading.get(session)) is not None and not frame.get("parentId") and frame.get("loaderId"):
+            if load.reloading and load.loader is None:
+                load.loader = frame["loaderId"]
             load.commits.append(frame["loaderId"])
             load.check()
 
@@ -951,14 +1110,18 @@ class BrowserControl:
 
     def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
         """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
-        asked for it, else its page's."""
+        asked for it, else its page's; a start tab's move before its reload."""
         target = self._sessions.get(session)
+        if (load := self._loading.get(session)) is not None and params.get("frameId") == target:
+            load.moved.set()
         if self.log is not None and target in self.tabs and params.get("frameId") == target:
             self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, params.get("url", ""), False))
 
     def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
             load.requests[params["requestId"]] = params.get("loaderId", "")
+            if load.reloading and load.loader is None and params.get("frameId") == self._sessions.get(session):
+                load.loader = params.get("loaderId") or None
 
     def _on_Network_responseReceived(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document" and \
@@ -996,6 +1159,7 @@ class BrowserControl:
             if self.log is not None:
                 self.log.note("tab", {"event": "closed", "id": target, "url": redact_url(tab["url"]),
                                       **caused(self.causes.closed(target), self.log, target)})
+            self._heard("closed", tab)
         else:
             self.causes.closed(target)
         self._closing.discard(target)
@@ -1008,23 +1172,27 @@ class BrowserControl:
 
     async def _let_run(self, session: str) -> None:
         """A page it attached to, enabled and, alone, held to its window's size, then told to run: a page attached as
-        it opens, a popup say, or any new page alone, waits for that before it runs."""
+        it opens, a popup say, or any new page alone, waits for that before it runs. The calls go together, in order,
+        which the browser handles them in: a popup a click opened answers Page.enable only once it runs."""
         target = self._sessions.get(session)
+        calls: list[tuple[str, Optional[dict]]] = [("Page.enable", None)]
+        if self.viewport is not None:
+            width, height = self.viewport
+            calls += [("Emulation.setDeviceMetricsOverride",
+                       {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}),
+                      ("Page.setInterceptFileChooserDialog", {"enabled": True})]
+        calls.append(("Runtime.runIfWaitingForDebugger", None))
         try:
-            await self.devtools.call("Page.enable", session_id=session)
-            if self.viewport is not None:
-                width, height = self.viewport
-                await self.devtools.call("Emulation.setDeviceMetricsOverride", {
-                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session_id=session)
-                await self.devtools.call("Page.setInterceptFileChooserDialog", {"enabled": True}, session_id=session)
+            answers = await asyncio.gather(*(self.devtools.call(method, params, session_id=session)
+                                             for method, params in calls), return_exceptions=True)
         finally:
-            try:
-                await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
-            finally:
-                if target is not None:
-                    self._pinned.setdefault(target, asyncio.Event()).set()
+            if target is not None:
+                self._pinned.setdefault(target, asyncio.Event()).set()
+        if failed := next((answer for answer in answers if isinstance(answer, BaseException)), None):
+            raise failed
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
+        self._screencasts.pop(params["sessionId"], None)
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
             self._frames.pop(target, None)
@@ -1103,6 +1271,13 @@ class BrowserControl:
         finally:
             download["ended_at"] = _now()
 
+    def _heard(self, event: str, tab: dict) -> None:
+        for hook in self.on_tab:
+            try:
+                hook(event, tab)
+            except Exception as e:
+                logger.warning(f"what hears of the browser's tabs: {type(e).__name__}: {e}")
+
     def _spawn(self, work: Awaitable) -> None:
         task = asyncio.ensure_future(work)
         self._tasks.add(task)
@@ -1120,7 +1295,9 @@ class _StartLoad:
     commits in order, the loads that fired after a commit, and its documents' requests, final responses and failures.
     Its document is the last its main frame committed from its own navigation on, which a page that sends itself
     elsewhere before it loads replaces. It's ``settled`` once its navigation or its document has failed, its document
-    has loaded or, on one of the env's ``site``, answered an error."""
+    has loaded or, on one of the env's ``site``, answered an error. A ``reloading`` one's navigation stayed in its
+    document and was followed by a reload, whose answer names no loader either: its loader is its main frame's first
+    document request or commit after, so a reload that fails before it commits fails the load."""
     session: str
     url: str
     site: Optional[str]
@@ -1134,6 +1311,8 @@ class _StartLoad:
     failures: dict[str, str] = field(default_factory=dict)
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     navigating: Optional[asyncio.Future] = None
+    reloading: bool = False
+    moved: asyncio.Event = field(default_factory=asyncio.Event)
 
     def answered(self, navigating: asyncio.Future) -> None:
         """The browser's answer to its navigation: its loader, or why it couldn't navigate."""
@@ -1147,7 +1326,7 @@ class _StartLoad:
                 self.error = str(answer["error"].get("message", answer["error"]))
             else:
                 self.error = answer.get("result", {}).get("errorText") or None
-                self.loader = answer.get("result", {}).get("loaderId")
+                self.loader = answer.get("result", {}).get("loaderId") or self.loader
         self.check()
 
     def current(self) -> Optional[str]:
@@ -1164,18 +1343,6 @@ class _StartLoad:
         if document in self.failures or document in self.loaded or (
                 self.site is not None and status is not None and status >= 400):
             self.settled.set()
-
-
-def _landed_at(landed: asyncio.Future, navigating: asyncio.Future) -> None:
-    """``landed`` given the loader a start tab's navigation answered with; cancelled when it failed or named none."""
-    if landed.done():
-        return
-    answer = None if navigating.cancelled() or navigating.exception() is not None else navigating.result()
-    loader = ((answer or {}).get("result") or {}).get("loaderId")
-    if isinstance(loader, str):
-        landed.set_result(loader)
-    else:
-        landed.cancel()
 
 
 def _types(event: dict) -> bool:

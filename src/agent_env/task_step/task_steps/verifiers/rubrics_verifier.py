@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
@@ -19,7 +19,8 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
-from agent_env.config.model import ModelParam
+from agent_env.config.errors import ConfigError
+from agent_env.config.model import ModelParam, ModelRole, no_key_for
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -50,6 +51,7 @@ from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context, render_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.verifier import VERIFICATIONS_KEY, Verification, VerifierTaskStep
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -73,6 +75,8 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
 )
 
 logger = logging.getLogger(__name__)
+# How a judge sent to a URL other than the configured endpoint is given that URL's key.
+_JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
 
 
 # The judge echoes each criterion's id back and results are matched by exact string.
@@ -142,10 +146,6 @@ _BULK_SHORT_CHARS = 20
 # How much of a shared justification the stored discrepancy keeps, and how much the warning logs.
 _BULK_STORED_EXCERPT_CHARS = 200
 _BULK_LOGGED_EXCERPT_CHARS = 80
-
-
-def _criteria_batches(criteria: list[dict], size: int) -> list[list[dict]]:
-    return [criteria[i:i + size] for i in range(0, len(criteria), size)] or [[]]
 
 
 def _bulk_verdicts(rows: list[dict]) -> Optional[dict]:
@@ -276,6 +276,21 @@ def _looks_like_response_format_error(exc: Exception) -> bool:
     return any(s in msg for s in _SCHEMA_TERMS) and any(u in msg for u in _UNSUPPORTED_TERMS)
 
 
+def _caches_prompts(model: str) -> bool:
+    """Whether a judge call to ``model`` marks its shared prefix for the prompt cache: Claude models, by any route."""
+    return "claude" in model.lower()
+
+
+def _usage_and_cost(response: Any) -> dict:
+    """A LiteLLM response's token counts and LiteLLM's price of it in USD, each None when it has none."""
+    usage = getattr(response, "usage", None)
+    usage = usage.model_dump() if hasattr(usage, "model_dump") else usage
+    hidden = getattr(response, "_hidden_params", None)
+    cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
+    return {"usage": usage if isinstance(usage, dict) else None,
+            "cost": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None}
+
+
 def _image_url_block(frame: ImageFrame) -> dict:
     """Adapt a neutral trajectory image to LiteLLM's image block shape."""
     return {
@@ -317,6 +332,54 @@ class _CompactedTrajectory:
                    per_criterion=per_criterion)
 
 
+@dataclass(frozen=True)
+class StagedTrajectory:
+    """A run a subclass staged in the agent judge's sandbox itself (``stage_trajectory``): the path the judge prompt
+    names as the trajectory, a note added to every judge prompt on how to read it, and what the verification entry
+    keeps of the staging (``trajectory_staging``)."""
+
+    path: str
+    prompt_note: str
+    record: dict = field(default_factory=dict)
+
+
+@dataclass
+class RubricsVerdict(Verification):
+    """A rubrics verdict, and for rubric_evidence_with_mistakes the trajectory_mistakes-shaped entry ``verify`` writes
+    under ``trajectory_mistakes_key`` beside it."""
+
+    mistakes_entry: Optional[dict] = None
+
+
+class JudgeTimeoutError(TimeoutError):
+    """An agent judge ran out of ``judge_timeout_seconds``; ``trajectory_object_url`` is what it had done by then, when
+    its trajectory could be fetched."""
+
+    def __init__(self, message: str, trajectory_object_url: Optional[str]):
+        super().__init__(message)
+        self.trajectory_object_url = trajectory_object_url
+
+
+# With timeout retries on, the judge is allowed this much longer than the poll waits, so it never stops itself first:
+# the poll's deadline (which cancels the task) is the one sign that it ran out of time, whatever the harness names its
+# own timeout. More than a poll interval plus a request; the judge's own limit stays behind it as a backstop.
+_JUDGE_TIMEOUT_MARGIN_SECONDS = 60
+
+
+async def _terminate_auto_deployed_judge(judge: Any) -> None:
+    """Terminate the judge sandbox a verifier deployed itself; None (it used a task's agent) has nothing to release."""
+    if judge is None:
+        return
+    from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
+    try:
+        provider = build_sandbox_provider(judge.sandbox_type) if judge.sandbox_type else get_agent_sandbox_provider()
+        sandbox = await provider.get_sandbox(judge.sandbox_id)
+        await sandbox.terminate()
+        logger.info(f"Terminated auto-deployed judge sandbox {judge.sandbox_id}")
+    except Exception as e:
+        logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
+
+
 def _image_count(blocks: list[dict]) -> int:
     """Images among judge message blocks (per-criterion frames interleave a ``FRAME:`` text block before each)."""
     return sum(1 for b in blocks if b.get("type") == "image_url")
@@ -351,11 +414,6 @@ def _validated_batch_option(name: str, value: Optional[int]) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
     return value
-
-
-# Formats whose rows are one per criterion, so batches merge by concatenation. The evidence formats carry one
-# reasoning / checks / mistakes block per call and trajectory_mistakes adds whole-run rows, which batches would repeat.
-_BATCHABLE_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
 
 
 def _unbatchable_format_message(output_format: JudgeOutputFormat) -> str:
@@ -401,7 +459,7 @@ def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptR
     )
 
 
-class RubricsVerifierTaskStep(TaskStep):
+class RubricsVerifierTaskStep(VerifierTaskStep):
     type: ClassVar[str] = "rubrics_verifier"
     entity_refs = (EntityRef.agent("judge_a2a_agent_id"),)
     context_paths = ("context_facts_for_judge{}",)
@@ -463,17 +521,22 @@ class RubricsVerifierTaskStep(TaskStep):
         run_context_for_judge: Optional[list[str]] = None,
         judge_batch_size: Optional[int] = None,
         judge_batch_concurrency: Optional[int] = None,
+        judge_timeout_retries: Optional[int] = None,
+        judge_max_turns: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         fail_task_when_not_passing: bool = False,
+        min_passing_score: Optional[float] = None,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id or uuid.uuid4().hex, score_aggregator=score_aggregator,
+                         min_passing_score=min_passing_score)
         if fail_task_when_not_passing and not fail_task_on_error:
             raise ValueError(
                 "fail_task_when_not_passing needs fail_task_on_error: a tolerated failure lets the steps after it "
                 "run and score the run."
             )
-        # A verdict below 1.0 fails the step with VerifierNotPassingError once the verdict is recorded.
+        # A verdict below min_passing_score fails the step with VerifierNotPassingError once the verdict is recorded.
         self.fail_task_when_not_passing = fail_task_when_not_passing
         # RUN_CONTEXT_PARTS the judge also sees, cut at grade_up_to_turn like the trajectory.
         self.run_context_for_judge = _validated_run_context_parts(run_context_for_judge)
@@ -481,6 +544,15 @@ class RubricsVerifierTaskStep(TaskStep):
         # judge_batch_concurrency at once), and retry a batch whose rows read as bulk verdicts.
         self.judge_batch_size = _validated_batch_option("judge_batch_size", judge_batch_size)
         self.judge_batch_concurrency = _validated_batch_option("judge_batch_concurrency", judge_batch_concurrency)
+        # An agent judge call (a batch's, with batches) that runs out of judge_timeout_seconds is tried again this many
+        # times, and the timed-out attempt's trajectory is kept; None keeps the first timeout fatal, as it always was.
+        if judge_timeout_retries is not None and (isinstance(judge_timeout_retries, bool)
+                                                  or not isinstance(judge_timeout_retries, int)
+                                                  or judge_timeout_retries < 0):
+            raise ValueError(f"judge_timeout_retries must be a non-negative integer, got {judge_timeout_retries!r}")
+        self.judge_timeout_retries = judge_timeout_retries
+        # The agent judge's turn cap (its agent config's max_turns); None leaves the judge's own.
+        self.judge_max_turns = _validated_batch_option("judge_max_turns", judge_max_turns)
         # Grade a multi-turn run as it stood after this (1-based) turn: the judge sees turns 1..k only,
         # so a per-turn env snapshot can be scored on what the agent had done by then. None grades all.
         self.grade_up_to_turn = _validated_turn(grade_up_to_turn)
@@ -503,16 +575,12 @@ class RubricsVerifierTaskStep(TaskStep):
         if isinstance(output_format, str):
             output_format = JudgeOutputFormat(output_format)
         self.output_format = output_format
-        self.verifier_id = verifier_id or uuid.uuid4().hex
         self.criteria = criteria
         self.prompt_id = prompt_id
-        # A stored judge always holds a model: its author's, or the one the config names for judges, as for a step
-        # built in code, which the A2A validator's are.
-        self.default_model = default_model or get_config().get_model_for_role("judge") or "claude-sonnet-4-6"
+        # The author's model, or None to judge with the run's config when the step runs (``_judge_model``), so a
+        # stored task never carries the config of whoever wrote it.
+        self.default_model = default_model
         self.default_model_api_base = default_model_api_base
-        if isinstance(score_aggregator, str):
-            score_aggregator = ScoreAggregator(score_aggregator)
-        self.score_aggregator = score_aggregator or ScoreAggregator.ALL_PASS
         self.agent_name = agent_name
         if isinstance(trajectory_filter, dict):
             trajectory_filter = TrajectoryFilter.from_dict(trajectory_filter)
@@ -541,7 +609,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 "with use_trajectory=True and a trajectory_filter with compaction_type=screenshot and "
                 "frame_strategy=per_criterion."
             )
-        if self.judge_batch_size is not None and self.output_format not in _BATCHABLE_FORMATS:
+        if self.judge_batch_size is not None and not self._spec().batchable:
             raise ValueError(_unbatchable_format_message(self.output_format))
 
     def _spec(self) -> JudgeOutputFormatSpec:
@@ -551,7 +619,7 @@ class RubricsVerifierTaskStep(TaskStep):
     def _writes_mistakes_entry(self) -> bool:
         """rubric_evidence_with_mistakes: the same judge call also detects trajectory mistakes and a second entry,
         shaped and scored as a standalone trajectory_mistakes step's, is written under
-        ``trajectory_mistakes_key(self.verifier_id)`` (see ``_write_entries``)."""
+        ``trajectory_mistakes_key(self.verifier_id)`` (see ``_entries``)."""
         return self.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES
 
     def _entry_format_fields(self) -> dict:
@@ -566,19 +634,20 @@ class RubricsVerifierTaskStep(TaskStep):
         """``format`` / ``source_verifier_id`` of the second entry written under ``trajectory_mistakes_key``."""
         return {"format": JudgeOutputFormat.TRAJECTORY_MISTAKES.value, "source_verifier_id": self.verifier_id}
 
-    def _write_skipped_entries(self, context: TaskStepContext, row_id: str, message: str) -> None:
-        """Store a zero-score entry with one row saying why the run was not judged — under ``verifier_id``
-        and, for rubric_evidence_with_mistakes, ``trajectory_mistakes_key(verifier_id)``."""
-        def skipped(fields: dict) -> dict:
-            return {
-                **fields,
-                "results": [{"id": row_id, "score": 0, "result": False, "message": message}],
-                "score": 0,
-            }
-        verifications = context.metadata.setdefault("verifications", {})
-        verifications[self.verifier_id] = skipped(self._entry_format_fields())
-        if self._writes_mistakes_entry:
-            verifications[trajectory_mistakes_key(self.verifier_id)] = skipped(self._mistakes_entry_fields())
+    def _skipped(self, row_id: str, message: str) -> RubricsVerdict:
+        """A zero score with one row saying why the run was not judged, graded rather than skipped so the score stays
+        where readers count it; for rubric_evidence_with_mistakes the second entry says the same."""
+        def rows() -> list[dict]:
+            return [{"id": row_id, "score": 0, "result": False, "message": message}]
+        mistakes = ({**self._mistakes_entry_fields(), "results": rows(), "score": 0}
+                    if self._writes_mistakes_entry else None)
+        return RubricsVerdict(criteria=rows(), score=0, output=self._entry_format_fields(), mistakes_entry=mistakes)
+
+    def _judge_model(self, context: TaskStepContext) -> str:
+        """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
+        role and default, and claude-sonnet-4-6 last."""
+        overrides = context.metadata.get("user_overrides") or {}
+        return get_config().resolve_model(ModelRole.JUDGE, run=overrides.get("judge_model"), step=self.default_model).model
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -608,13 +677,16 @@ class RubricsVerifierTaskStep(TaskStep):
             base["judge_batch_size"] = self.judge_batch_size
         if self.judge_batch_concurrency is not None:
             base["judge_batch_concurrency"] = self.judge_batch_concurrency
+        if self.judge_timeout_retries is not None:
+            base["judge_timeout_retries"] = self.judge_timeout_retries
+        if self.judge_max_turns is not None:
+            base["judge_max_turns"] = self.judge_max_turns
         if self.fail_task_when_not_passing:
             base["fail_task_when_not_passing"] = True
         return base
 
     @classmethod
     def from_dict(cls, data: dict) -> RubricsVerifierTaskStep:
-        raw_agg = data.get("score_aggregator")
         raw_tf = data.get("trajectory_filter")
         return cls(
             **cls._base_from_dict(data),
@@ -622,8 +694,6 @@ class RubricsVerifierTaskStep(TaskStep):
             prompt_id=data["prompt_id"],
             default_model=data.get("default_model"),
             default_model_api_base=data.get("default_model_api_base"),
-            score_aggregator=ScoreAggregator(raw_agg) if raw_agg else None,
-            verifier_id=data.get("verifier_id"),
             agent_name=data.get("agent_name"),
             trajectory_filter=TrajectoryFilter.from_dict(raw_tf) if raw_tf else None,
             max_thinking_tokens=data.get("max_thinking_tokens"),
@@ -640,6 +710,8 @@ class RubricsVerifierTaskStep(TaskStep):
             run_context_for_judge=data.get("run_context_for_judge"),
             judge_batch_size=data.get("judge_batch_size"),
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
+            judge_timeout_retries=data.get("judge_timeout_retries"),
+            judge_max_turns=data.get("judge_max_turns"),
             fail_task_when_not_passing=data.get("fail_task_when_not_passing", False),
         )
 
@@ -648,31 +720,123 @@ class RubricsVerifierTaskStep(TaskStep):
         per run (never for one skipped) with the prompt's stored response. None here."""
         return []
 
+    async def judge_trajectory_content(self, context: TaskStepContext, prompt_response: PromptResponse) -> Optional[str]:
+        """What the judge prompt shows as the run's trajectory (the inline template's ``$trajectory_content``), in place
+        of a recorded trajectory, for a step with ``use_trajectory`` off: an override point, called once per run (never
+        for one skipped) with the prompt's stored response. A subclass that puts the run here, rather than in
+        ``judge_prompt_sections`` after the criteria, keeps it in the part of the prompt each batch shares. None here:
+        the prompt shows the recorded trajectory, or none."""
+        return None
+
+    async def unjudged_rows(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[dict]:
+        """Rows no judge grades, computed from the run or fixed, that the entry holds after the judge's and that are
+        scored with them: an override point, called once per run before the judge (never for one skipped) with the
+        prompt's stored response. Each is shaped as a judge's row (``id``, ``result`` / ``score``, any ``weight``),
+        with an id no criterion has. None here."""
+        return []
+
+    def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
+        """The judge calls ``criteria`` are graded in, one batch per call: ``size`` at a time in order, or all in one
+        call when ``size`` is None. An override point: a subclass may group them otherwise, putting every criterion
+        in exactly one non-empty batch. The criteria carry their short ids (c1..cN) and every other field."""
+        if size is None:
+            return [criteria]
+        return [criteria[i:i + size] for i in range(0, len(criteria), size)] or [[]]
+
+    async def stage_trajectory(self, context: TaskStepContext, prompt_response: PromptResponse,
+                               run_context: Optional[Run], sandbox: Any,
+                               container: Optional[str]) -> Optional[StagedTrajectory]:
+        """An override point for an agent judge with use_trajectory: stage the run in the judge's ``sandbox`` (into
+        ``container`` when the judge runs in one) and say where. None here: the prompt's trajectory files are loaded
+        as they are."""
+        return None
+
+    def judge_agent_config(self, judge_agent_card: dict) -> dict:
+        """Settings an override adds to what the agent judge is configured with, given the judge's card (its
+        agent-config extension takes only the ones it supports). None here."""
+        return {}
+
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
-        """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
+        """The criteria this run asks (``_run_values``): an override point, which user_sim_judge's plan replaces."""
+        return list(self._run_values(context)["criteria"])
 
-        Replace-on-presence, like ``load_artifact`` — an explicit ``[]`` replaces rather
-        than reverting (presence check, not truthiness). Returns a copy; never mutates
-        ``self``, which is shared across concurrent rollouts.
-        """
-        step_overrides = self.step_param_overrides(context)
-        return list(step_overrides["criteria"]) if "criteria" in step_overrides else self.criteria
+    def _run_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """Each setting a run's ``step_params`` or ``user_overrides`` can change, by the step's own field name, at the
+        value this run judges with: the judge reads these and ``verifier_settings`` records them, so the two can't
+        disagree. Unvalidated; the judge checks them as it reads them. Never mutates ``self``, which concurrent runs
+        share. A ``step_params`` ``criteria`` replaces on presence, so ``[]`` replaces too; effort and the thinking
+        budget reach only an agent judge, and the agent sandbox only a judge the step deploys."""
+        step_params = self.step_param_overrides(context)
+        overrides = context.metadata.get("user_overrides") or {}
+        use_agent_judge = self.use_agent_judge if overrides.get("use_agent_judge") is None else overrides["use_agent_judge"]
+        apply_filter = overrides.get("apply_trajectory_filter")
+        trajectory_filter = (None if apply_filter is False
+                             else self.trajectory_filter or TrajectoryFilter() if apply_filter is True
+                             else self.trajectory_filter)
+        return {
+            "criteria": list(step_params["criteria"]) if "criteria" in step_params else self.criteria,
+            "grade_up_to_turn": step_params["grade_up_to_turn"] if "grade_up_to_turn" in step_params
+            else self.grade_up_to_turn,
+            "use_agent_judge": use_agent_judge,
+            "trajectory_filter": trajectory_filter,
+            "effort": (overrides.get("judge_effort") or self.effort) if use_agent_judge else self.effort,
+            "max_thinking_tokens": (overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens)
+            if use_agent_judge else self.max_thinking_tokens,
+            "judge_batch_size": _override_or(overrides, "judge_batch_size", self.judge_batch_size),
+            "judge_batch_concurrency": _override_or(overrides, "judge_batch_concurrency", self.judge_batch_concurrency),
+            "judge_sandbox_type": (overrides.get("agent_sandbox") or self.judge_sandbox_type)
+            if use_agent_judge and self.agent_name is None else self.judge_sandbox_type,
+        }
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        context = await self._grade(context)
-        if self.fail_task_when_not_passing:
-            _raise_unless_passing(self.verifier_id, context.metadata["verifications"][self.verifier_id])
-        return context
+    def _recorded_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """``_run_values`` as ``verifier_settings`` records them, the trajectory filter as its dict; a subclass leaves
+        out the ones its judge never uses."""
+        values = self._run_values(context)
+        trajectory_filter = values["trajectory_filter"]
+        return {**values, "trajectory_filter": trajectory_filter.to_dict() if trajectory_filter is not None else None}
 
-    async def _grade(self, context: TaskStepContext) -> TaskStepContext:
+    def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
+        """The step's fields as this run judges with them (``_recorded_values`` in place of the stored ones), the judge
+        model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys one, and
+        ``overridden``, the settings this run's overrides changed. Never a key, header or base URL."""
+        settings = super().verifier_settings(context)
+        settings.pop("default_model_api_base", None)
+        values, stored = self._recorded_values(context), self._recorded_values(TaskStepContext())
+        overridden = [key for key, value in values.items() if value != stored[key]]
+        settings.update({key: values[key] for key in overridden})
+        overrides = context.metadata.get("user_overrides") or {}
+        if overrides.get("judge_model") and overrides["judge_model"] != self.default_model:
+            overridden.append("judge_model")
+        if settings.get("use_agent_judge") and self.agent_name is None and not self.judge_a2a_agent_id:
+            settings["judge_a2a_agent_id"] = get_config().get_default_a2a_agent_id()
+        recorded = (context.metadata.get("models") or {}).get(ModelRole.JUDGE.record_key) or {}
+        settings["judge_model"] = recorded[self.id] if self.id in recorded else self._judge_model(context)
+        return {**settings, "overridden": overridden}
+
+    async def verify(self, context: TaskStepContext) -> Verification:
+        verdict = self._gated(await self._judged(context))
+        if verdict.mistakes_entry is not None:
+            context.metadata.setdefault(VERIFICATIONS_KEY, {})[trajectory_mistakes_key(self.verifier_id)] = (
+                verdict.mistakes_entry)
+        return verdict
+
+    def _gated(self, verdict: RubricsVerdict) -> RubricsVerdict:
+        """``verdict``, failing its step once recorded when ``fail_task_when_not_passing`` and it scores under
+        ``min_passing_score``, naming the rows that weren't met."""
+        if not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
+            return verdict
+        unmet = [str(row.get("id")) for row in verdict.criteria
+                 if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
+        return replace(verdict, raise_after=VerifierNotPassingError(
+            f"Verifier '{self.verifier_id}' isn't passing (score {verdict.score}); rows not met: {unmet}"))
+
+    async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
+        """What the judge found in this run, written by nothing: an override point, whose result ``verify`` gates."""
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
-        overrides_for_step = self.step_param_overrides(context)
-        grade_up_to_turn = (
-            _validated_turn(overrides_for_step["grade_up_to_turn"])
-            if "grade_up_to_turn" in overrides_for_step else self.grade_up_to_turn
-        )
+        run = self._run_values(context)
+        grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
             # A cut copy's reply only points at turn k's trajectory, which use_trajectory=False never loads.
@@ -684,9 +848,7 @@ class RubricsVerifierTaskStep(TaskStep):
 
         if prompt_response.error_type:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
-            self._write_skipped_entries(
-                context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
-            return context
+            return self._skipped("prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
         run_context = None
         if self.run_context_for_judge:
             # The stored response, not the cut copy: the loader finds the prompt's place among the run's by identity.
@@ -700,20 +862,11 @@ class RubricsVerifierTaskStep(TaskStep):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
 
         overrides = context.metadata.get("user_overrides", {})
-        # Resolved into a local, not onto self: one step instance is shared across
-        # concurrent rollouts, so mutating self would leak the override between them.
-        use_agent_judge_override = overrides.get("use_agent_judge")
-        use_agent_judge = use_agent_judge_override if use_agent_judge_override is not None else self.use_agent_judge
+        use_agent_judge = run["use_agent_judge"]
         criteria = self._resolved_criteria(context)
         # The judge sees/echoes short keys (c1..cN), not UUIDs; frame labels use them too, hence before compaction.
         criteria_for_judge, real_by_short = _to_short_keyed_criteria(criteria)
-        apply_filter_override = overrides.get("apply_trajectory_filter")
-        if apply_filter_override is False:
-            filter_to_apply = None
-        elif apply_filter_override is True:
-            filter_to_apply = self.trajectory_filter or TrajectoryFilter()
-        else:
-            filter_to_apply = self.trajectory_filter
+        filter_to_apply = run["trajectory_filter"]
 
         # Multi-turn: judge every turn (fed from the per-turn URIs already on the
         # PromptResponse), not just the last. DEFAULT compaction runs per turn; SCREENSHOT
@@ -755,10 +908,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     f"Skipping verification '{self.verifier_id}': output_format={fmt} needs "
                     "per-criterion frames, but the trajectory holds no screenshots."
                 )
-                self._write_skipped_entries(
-                    context, "no_screenshots",
-                    f"Skipped: {fmt} needs per-criterion frames, but the trajectory holds no screenshots")
-                return context
+                return self._skipped(
+                    "no_screenshots", f"Skipped: {fmt} needs per-criterion frames, but the trajectory holds no screenshots")
             # The constructor checked the stored filter; a run-time override can still drop it, leaving a
             # prompt that demands `frame` / `evidence_status` with nothing to cite.
             raise RuntimeError(
@@ -766,7 +917,18 @@ class RubricsVerifierTaskStep(TaskStep):
                 "but this run's trajectory filter attached none (user_overrides.apply_trajectory_filter=False?)."
             )
 
+        # The subclass hooks run once the run is known not to be skipped, and before any judge is deployed.
+        trajectory_content = await self.judge_trajectory_content(context, stored_response)
+        if trajectory_content is not None and self.use_trajectory:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': judge_trajectory_content stands in for the recorded "
+                               "trajectory, so it needs use_trajectory=False.")
+        unjudged = [dict(row) for row in await self.unjudged_rows(context, stored_response)]
+        if clashing := {row.get("id") for row in unjudged} & {c.get("id") for c in criteria}:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': unjudged_rows gave rows with a criterion's id: "
+                               f"{sorted(map(str, clashing))}")
+
         auto_deployed_judge = None
+        staged: Optional[StagedTrajectory] = None
         judge_agent = None
         judge_a2a_url: Optional[str] = None
         judge_sandbox_id: Optional[str] = None
@@ -789,15 +951,18 @@ class RubricsVerifierTaskStep(TaskStep):
                 from agent_env.config import get_config
 
                 config = get_config()
-                api_key = (
-                    config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
-                    or config.get_litellm_api_key()
-                )
+                api_key = config.resolve_reference(
+                    overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
                 litellm_base_url = (
                     overrides.get("judge_litellm_base_url")
                     or overrides.get("litellm_base_url")
                     or config.get_litellm_base_url()
                 )
+                if not api_key:
+                    if not config.is_model_endpoint(litellm_base_url):
+                        raise ConfigError(f"{self.type} '{self.id}': its judge agent: "
+                                          f"{no_key_for(litellm_base_url, _JUDGE_KEY_HOW)}")
+                    api_key = config.get_litellm_api_key()
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
                 try:
@@ -807,41 +972,44 @@ class RubricsVerifierTaskStep(TaskStep):
                         raise
                     raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
                 deploy_kwargs = {"env_vars": env_vars}
-                resolved_sandbox_type = overrides.get("agent_sandbox") or self.judge_sandbox_type
-                if resolved_sandbox_type:
-                    deploy_kwargs["sandbox_type"] = resolved_sandbox_type
+                if run["judge_sandbox_type"]:
+                    deploy_kwargs["sandbox_type"] = run["judge_sandbox_type"]
                 auto_deployed_judge = await a2a_agent.deploy(**deploy_kwargs)
                 judge_a2a_url = auto_deployed_judge.a2a_url
                 judge_sandbox_id = auto_deployed_judge.sandbox_id
                 judge_agent_card = auto_deployed_judge.agent_card
                 judge_agent = auto_deployed_judge
                 logger.info(f"Auto-deployed judge A2A agent '{resolved_judge_id}' at {judge_a2a_url}")
-            if self.use_trajectory:
-                from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
-                judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
-                provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
-                sandbox = await provider.get_sandbox(judge_sandbox_id)
-                if multiturn:
-                    await self._load_per_turn_trajectories(
-                        sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
-                else:
-                    await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
-                                                         **into_container(judge_container))
-                    if compacted.tool_result_files:
-                        await self._load_tool_result_files(sandbox, compacted.tool_result_files, judge_container)
-                        compacted.tool_result_files = []
+            # Loading the trajectory can fail (an override's staging, a transfer): the judge this step deployed is
+            # released then too, not only after grading.
+            try:
+                if self.use_trajectory:
+                    from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
+                    judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
+                    provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
+                    sandbox = await provider.get_sandbox(judge_sandbox_id)
+                    staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
+                    if staged is None and multiturn:
+                        await self._load_per_turn_trajectories(
+                            sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
+                    elif staged is None:
+                        await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
+                                                             **into_container(judge_container))
+                        if compacted.tool_result_files:
+                            await self._load_tool_result_files(sandbox, compacted.tool_result_files, judge_container)
+                            compacted.tool_result_files = []
+            except BaseException:
+                await _terminate_auto_deployed_judge(auto_deployed_judge)
+                raise
 
         try:
-            model = overrides.get("judge_model") or self.default_model
-            context.record_model("judge", self.id, model)
+            model = self._judge_model(context)
+            context.record_model(ModelRole.JUDGE.record_key, self.id, model)
             agent_prompt_text = prompt_response.prompt_text or ""
-            judge_effort = overrides.get("judge_effort") or self.effort
-            judge_max_thinking_tokens = overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens
-            batch_size = _validated_batch_option("judge_batch_size", _override_or(
-                overrides, "judge_batch_size", self.judge_batch_size))
-            batch_concurrency = _validated_batch_option("judge_batch_concurrency", _override_or(
-                overrides, "judge_batch_concurrency", self.judge_batch_concurrency))
-            if batch_size is not None and self.output_format not in _BATCHABLE_FORMATS:
+            judge_effort, judge_max_thinking_tokens = run["effort"], run["max_thinking_tokens"]
+            batch_size = _validated_batch_option("judge_batch_size", run["judge_batch_size"])
+            batch_concurrency = _validated_batch_option("judge_batch_concurrency", run["judge_batch_concurrency"])
+            if batch_size is not None and not self._spec().batchable:
                 raise RuntimeError(f"Verifier '{self.verifier_id}': {_unbatchable_format_message(self.output_format)}")
             loaded_for_judge: list[dict] = []
             if use_agent_judge and self.agent_name is not None:
@@ -862,7 +1030,9 @@ class RubricsVerifierTaskStep(TaskStep):
                         f"verifier '{self.verifier_id}' uses an agent judge — raw trajectory "
                         "passed through unchanged."
                     )
-                if self.use_trajectory:
+                if staged is not None:
+                    trajectory_path = staged.path
+                elif self.use_trajectory:
                     trajectory_path = multiturn_dir if multiturn else self.TRAJECTORY_CONTAINER_PATH
             else:
                 image_blocks = compacted.image_blocks
@@ -873,6 +1043,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     trajectory_inline = compacted.inline_text
                     if trajectory_inline is None and compacted.container_object_url:
                         trajectory_inline = await asyncio.to_thread(self._read_trajectory_text, compacted.container_object_url)
+            if trajectory_content is not None:
+                trajectory_inline = trajectory_content
 
             def eval_prompt_for(batch: list[dict]) -> str:
                 criteria_json = json.dumps([
@@ -885,12 +1057,15 @@ class RubricsVerifierTaskStep(TaskStep):
                         agent_response=prompt_response.response,
                         criteria_json=criteria_json,
                         trajectory_path=trajectory_path,
+                        trajectory_inline=trajectory_inline,
                         loaded_artifacts=loaded_for_judge,
                         context_facts=context_facts,
                         run_context=run_context,
                         extra_sections=extra_sections,
                     )
-                    if self.use_trajectory and multiturn:
+                    if staged is not None:
+                        prompt += staged.prompt_note
+                    elif self.use_trajectory and multiturn:
                         prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
                 else:
                     prompt = self._build_eval_prompt(
@@ -914,10 +1089,17 @@ class RubricsVerifierTaskStep(TaskStep):
                     prompt += self._PER_ROW_EVIDENCE_NOTE
                 return prompt
 
-            batches = (_criteria_batches(criteria_for_judge, batch_size) if batch_size is not None
-                       else [criteria_for_judge])
-            concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
+            batches = self._criteria_batches(criteria_for_judge, batch_size)
             position = {c["id"]: i for i, c in enumerate(criteria_for_judge, 1)}
+            batched_ids = [c["id"] for batch in batches for c in batch]
+            if sorted(batched_ids) != sorted(position) or (len(batches) > 1 and not all(batches)):
+                raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches must put every criterion in "
+                                   "exactly one batch, and leave no batch empty")
+            if len(batches) > 1 and not self._spec().batchable:
+                # Batches merge by concatenating rows, which drops a format's one-per-call reasoning, checks and mistakes.
+                raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
+                                   f"output_format={self.output_format.value} is graded in one judge call.")
+            concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
 
             async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
                 prompt = eval_prompt_for(batch)
@@ -938,7 +1120,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         use_agent_judge=use_agent_judge,
                         criteria=batch,
                         image_blocks=image_blocks,
-                        reject_bulk_verdicts=batch_size is not None,
+                        reject_bulk_verdicts=batch_size is not None and self._spec().checks_bulk_verdicts,
                     )
 
             if len(batches) == 1:
@@ -967,16 +1149,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 _restore_frame_labels(verification_results, real_by_short)
                 _restore_frame_labels(verification_results.checks, real_by_short)
         finally:
-            if auto_deployed_judge is not None:
-                from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
-                try:
-                    judge_type = auto_deployed_judge.sandbox_type
-                    provider = build_sandbox_provider(judge_type) if judge_type else get_agent_sandbox_provider()
-                    sandbox = await provider.get_sandbox(auto_deployed_judge.sandbox_id)
-                    await sandbox.terminate()
-                    logger.info(f"Terminated auto-deployed judge sandbox {auto_deployed_judge.sandbox_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
+            await _terminate_auto_deployed_judge(auto_deployed_judge)
 
         judge_call_fields: dict = {
             **dual_keyed("compact_trajectory_s3_uri", "compact_trajectory_object_url", compacted.compact_object_url),
@@ -991,15 +1164,16 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_call_fields["judge_batch_trajectory_object_urls"] = batch_trajectory_urls
         if grade_up_to_turn is not None:
             judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
-        self._write_entries(context, verification_results, judge_call_fields)
-        return context
+        if staged is not None:
+            judge_call_fields["trajectory_staging"] = staged.record
+        return self._entries(verification_results, judge_call_fields, unjudged=unjudged)
 
-    def _write_entries(self, context: TaskStepContext, verification_results: list[dict], judge_call_fields: dict) -> None:
-        """Store the rubric entry under ``verifier_id`` and, for rubric_evidence_with_mistakes, the
-        trajectory-mistakes entry under ``trajectory_mistakes_key(verifier_id)``; ``judge_call_fields`` (URIs,
-        retries) go on both. The mistake rows are built before either entry is written, so a response they
-        cannot be derived from leaves neither behind."""
-        score = aggregate_score(verification_results, self.score_aggregator)
+    def _entries(self, verification_results: list[dict], judge_call_fields: dict, *,
+                 unjudged: Sequence[dict] = ()) -> RubricsVerdict:
+        """The rubric verdict and, for rubric_evidence_with_mistakes, the trajectory-mistakes entry;
+        ``judge_call_fields`` (URIs, retries) go on both. The mistake rows are built first, so a response they cannot
+        be derived from leaves neither. ``unjudged`` rows (``unjudged_rows``) join the rubric verdict's, after the
+        judge's, and its score; the mistakes entry is the judge's alone."""
         mistake_rows: Optional[list[dict]] = None
         if self._writes_mistakes_entry:
             if not isinstance(verification_results, ResultRows):
@@ -1007,32 +1181,24 @@ class RubricsVerifierTaskStep(TaskStep):
                     f"Verifier '{self.verifier_id}': the judge response carries no mistake findings "
                     f"({type(verification_results).__name__})")
             mistake_rows = trajectory_mistakes_rows_from_evidence(verification_results)
-        verifications = context.metadata.setdefault("verifications", {})
-        verification_entry = {
-            **self._entry_format_fields(),
-            "results": list(verification_results),
-            "score": score,
-            **judge_call_fields,
-        }
+        verification_results.extend(unjudged)  # in place, so a ResultRows keeps its reasoning and checks
+        score = aggregate_score(verification_results, self.score_aggregator)
+        output = {**self._entry_format_fields(), **judge_call_fields}
         if isinstance(verification_results, ResultRows):
             # rubric_evidence: the judge's `reasoning` and policy `checks` ride on the entry, not the rows.
-            verification_entry["reasoning"] = verification_results.reasoning
-            verification_entry["checks"] = verification_results.checks
-        verifications[self.verifier_id] = verification_entry
+            output["reasoning"] = verification_results.reasoning
+            output["checks"] = verification_results.checks
         logger.info(f"Verification '{self.verifier_id}' complete: {len(verification_results)} criteria, score={score}")
 
+        mistakes: Optional[dict] = None
         if mistake_rows is not None:
             mistakes_score = aggregate_score(mistake_rows, ScoreAggregator.WEIGHTED_AVERAGE)
-            mistakes_key = trajectory_mistakes_key(self.verifier_id)
-            verifications[mistakes_key] = {
-                **self._mistakes_entry_fields(),
-                "results": mistake_rows,
-                "score": mistakes_score,
-                **judge_call_fields,
-            }
+            mistakes = {**self._mistakes_entry_fields(), "results": mistake_rows, "score": mistakes_score,
+                        **judge_call_fields}
             logger.info(
-                f"Verification '{mistakes_key}' complete (from '{self.verifier_id}'): "
+                f"Verification '{trajectory_mistakes_key(self.verifier_id)}' complete (from '{self.verifier_id}'): "
                 f"{len(mistake_rows)} rows, score={mistakes_score}")
+        return RubricsVerdict(criteria=list(verification_results), score=score, output=output, mistakes_entry=mistakes)
 
     def _compact_trajectory(
         self,
@@ -1199,31 +1365,39 @@ class RubricsVerifierTaskStep(TaskStep):
         model: str,
         context: TaskStepContext,
         image_blocks: Optional[list[dict]] = None,
+        system: Optional[str] = None,
+        cached_prefix: Optional[str] = None,
     ) -> dict:
-        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_object_url}.
+        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_object_url, usage, cost}:
+        ``usage`` the call's token counts and ``cost`` LiteLLM's price of it in USD, each None when the response
+        has none, for a caller that records them (this step records neither).
 
-        When ``image_blocks`` are provided the user message becomes multimodal
-        (text + images); otherwise it stays a plain string, identical to before."""
+        When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
+        a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
+        ``eval_prompt`` that each of the run's calls shares: on a Claude model it is sent as its own text block,
+        marked for Anthropic's prompt cache, so the calls after the first read it from the cache; a prompt that
+        doesn't start with it is sent whole. The step's own calls pass neither, so their request is unchanged; a
+        subclass opts in by overriding this and calling it with them."""
         import litellm
 
         from agent_env.config import get_config
 
         overrides = context.metadata.get("user_overrides", {})
         config = get_config()
-        call_config = config.resolve_model_call(
-            model,
-            default_api_key=config.resolve_reference(
-                overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")
-            ),
-            base_override=overrides.get("judge_litellm_base_url")
-            or overrides.get("litellm_base_url")
-            or self.default_model_api_base,
-        )
-        user_content = (
-            [{"type": "text", "text": eval_prompt}, *image_blocks]
-            if image_blocks
-            else eval_prompt
-        )
+        api_key = config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
+        base = overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url") or self.default_model_api_base
+        if base and not api_key and not config.is_model_endpoint(base):
+            raise ConfigError(f"{self.type} '{self.id}': {no_key_for(base, _JUDGE_KEY_HOW)}")
+        call_config = config.resolve_model_call(model, default_api_key=api_key, base_override=base)
+        text_blocks: list[dict] = [{"type": "text", "text": eval_prompt}]
+        cached = bool(cached_prefix) and eval_prompt.startswith(cached_prefix or "") and _caches_prompts(model)
+        if cached:
+            rest = eval_prompt[len(cached_prefix or ""):]
+            text_blocks = [{"type": "text", "text": cached_prefix, "cache_control": {"type": "ephemeral"}},
+                           *([{"type": "text", "text": rest}] if rest else [])]
+        user_content = [*text_blocks, *(image_blocks or [])] if image_blocks or cached else eval_prompt
+        messages = [*([{"role": "system", "content": system}] if system else []),
+                    {"role": "user", "content": user_content}]
         response_format = {
             "type": "json_schema",
             "json_schema": {
@@ -1241,7 +1415,7 @@ class RubricsVerifierTaskStep(TaskStep):
             try:
                 request_kwargs: dict = dict(
                     model=model,
-                    messages=[{"role": "user", "content": user_content}],
+                    messages=messages,
                     timeout=self.judge_timeout_seconds,
                     **call_config.client_kwargs(),
                 )
@@ -1249,7 +1423,7 @@ class RubricsVerifierTaskStep(TaskStep):
                     request_kwargs[ModelParam.RESPONSE_FORMAT] = response_format
                 response = await litellm.acompletion(**request_kwargs)
                 content = response.choices[0].message.content or ""
-                return {"response": content, "trajectory_object_url": None}
+                return {"response": content, "trajectory_object_url": None, **_usage_and_cost(response)}
             except Exception as exc:
                 last_exc = exc
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
@@ -1275,6 +1449,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_effort: Optional[str],
         judge_max_thinking_tokens: Optional[int],
         context: TaskStepContext,
+        headers: Mapping[str, str],
     ) -> None:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent import protocol
@@ -1284,8 +1459,11 @@ class RubricsVerifierTaskStep(TaskStep):
             "effort": judge_effort,
             "max_thinking_tokens": judge_max_thinking_tokens,
             "output_format": self._spec().output_format,
-            "timeout_seconds": self.judge_timeout_seconds,
+            "timeout_seconds": (self.judge_timeout_seconds + _JUDGE_TIMEOUT_MARGIN_SECONDS
+                                if self.judge_timeout_retries is not None else self.judge_timeout_seconds),
+            "max_turns": self.judge_max_turns,
             "task_id": context.metadata.get("task_id"),
+            **self.judge_agent_config(judge_agent_card),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         config_ext = A2AAgent.find_extension(judge_agent_card, A2AAgent.EXT_AGENT_CONFIG)
@@ -1293,12 +1471,15 @@ class RubricsVerifierTaskStep(TaskStep):
         if config_ext and desired_config:
             supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
             config_payload = {k: v for k, v in desired_config.items() if k in supported}
+            if unsupported := sorted(set(self.judge_agent_config(judge_agent_card)) - set(supported)):
+                logger.warning("Verifier '%s': the judge agent doesn't take %s; it runs without them",
+                               self.verifier_id, unsupported)
             if config_payload:
                 endpoint = (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
-                await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload)
+                await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload, headers=headers)
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
         # What the judge agent took; one that doesn't accept a model grades on its own.
-        context.record_model("judge", self.id, config_payload.get("model"))
+        context.record_model(ModelRole.JUDGE.record_key, self.id, config_payload.get("model"))
 
     async def _invoke_judge_a2a(
         self,
@@ -1330,6 +1511,12 @@ class RubricsVerifierTaskStep(TaskStep):
             # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
             await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             raise
+        except protocol.AgentUnreachableError:
+            raise
+        except TimeoutError as e:
+            if self.judge_timeout_retries is None:
+                raise
+            raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
@@ -1363,8 +1550,36 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
+            headers=judge_agent.control_headers,
         )
         return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
+
+    async def _judge_timed_out(self, why: str, judge_a2a_url: str, judge_agent_card: dict, task_id: str,
+                               judge_agent: Any) -> JudgeTimeoutError:
+        """The error for a judge call that ran out of time, carrying the judge's trajectory so far."""
+        url = await self._fetch_judge_trajectory(judge_a2a_url=judge_a2a_url, judge_agent_card=judge_agent_card,
+                                                 a2a_server_task_id=task_id,
+                                                 sandbox_type=getattr(judge_agent, "sandbox_type", None),
+                                                 headers=judge_agent.control_headers)
+        logger.warning("Verifier '%s': judge task %s ran out of its %ss (%s); its trajectory so far: %s",
+                       self.verifier_id, task_id, self.judge_timeout_seconds, why, url)
+        return JudgeTimeoutError(f"Judge A2A task {task_id} ran out of its {self.judge_timeout_seconds}s: {why} "
+                                 f"(its trajectory so far: {url})", url)
+
+    async def _invoke_judge_retrying_timeouts(self, *, discrepancy_log: list[dict], **kwargs: Any) -> dict:
+        """``_invoke_judge_a2a``, tried again up to ``judge_timeout_retries`` times when it runs out of time; each
+        timeout is logged in ``discrepancy_log`` with the trajectory the judge left."""
+        retries = self.judge_timeout_retries or 0
+        for attempt in range(1, retries + 2):
+            try:
+                return await self._invoke_judge_a2a(**kwargs)
+            except JudgeTimeoutError as e:
+                discrepancy_log.append({"kind": "judge_timeout", "attempt": attempt,
+                                        "timeout_seconds": self.judge_timeout_seconds,
+                                        "judge_trajectory_object_url": e.trajectory_object_url})
+                if attempt > retries:
+                    raise
+        raise RuntimeError("Judge timeout retry loop exited unexpectedly")
 
     async def _fetch_judge_trajectory(
         self,
@@ -1373,6 +1588,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_agent_card: dict,
         a2a_server_task_id: str,
         sandbox_type: Optional[str],
+        headers: Mapping[str, str],
     ) -> Optional[str]:
         """Best-effort capture of the judge's own reasoning trajectory, via the same
         EXT_TRAJECTORY extension `prompt_agent` uses, keyed by the A2A task id. Retries
@@ -1418,7 +1634,8 @@ class RubricsVerifierTaskStep(TaskStep):
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
                 fetched = await fetch_trajectory(
-                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store
+                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                    headers=headers,
                 )
                 return await asyncio.to_thread(store_trajectory, fetched, prefix)
             except Exception as exc:
@@ -1470,11 +1687,13 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_effort=judge_effort,
                 judge_max_thinking_tokens=judge_max_thinking_tokens,
                 context=context,
+                headers=judge_agent.control_headers,
             )
 
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             if use_agent_judge:
-                data = await self._invoke_judge_a2a(
+                data = await self._invoke_judge_retrying_timeouts(
+                    discrepancy_log=discrepancy_log,
                     eval_prompt=prompt,
                     judge_a2a_url=judge_a2a_url,
                     judge_agent_card=judge_agent_card,
@@ -1516,7 +1735,7 @@ class RubricsVerifierTaskStep(TaskStep):
             )
             discrepancy_log.append(discrepancy.to_dict())
             if attempt == self.DEFAULT_MAX_RETRIES:
-                if discrepancy.non_finite_score_ids:
+                if discrepancy.non_finite_score_ids or discrepancy.row_problems:
                     raise ValueError(f"Judge output invalid after {attempt} attempts: {discrepancy}")
                 raise ValueError(
                     f"Judge returned {discrepancy.returned_count} results but expected "
@@ -1639,13 +1858,3 @@ def is_rubrics_verifier(step_or_config: TaskStep | dict[str, Any]) -> bool:
     else:
         cls = type(step_or_config)
     return isinstance(cls, type) and issubclass(cls, RubricsVerifierTaskStep)
-
-
-def _raise_unless_passing(verifier_id: str, entry: dict) -> None:
-    """Raise VerifierNotPassingError when the recorded verdict scores below 1.0, naming the rows that weren't met."""
-    if entry["score"] >= 1:
-        return
-    unmet = [str(row.get("id")) for row in entry["results"] if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
-    raise VerifierNotPassingError(
-        f"Verifier '{verifier_id}' isn't passing (score {entry['score']}); rows not met: {unmet}"
-    )

@@ -22,12 +22,15 @@ import logging
 import os
 import re
 import signal
+import struct
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -96,6 +99,82 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
+#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
+#: while the agent follows an armed clock.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
+#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
+CLOCK_PAGE = "/dev/shm/agentenv-clock"
+_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
+_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
+#: The constant every page's check is salted with (clockpage.check).
+_PAGE_CHECK_SALT = 0x9E3779B97F4A7C15
+#: How often, and how far apart, a read retries a page a write is under way on: 50 ms in all, far longer than a write.
+_PAGE_READ_TRIES, _PAGE_RETRY_S = 50, 0.001
+_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+
+
+def clock_armed(page_path: str | None = None) -> bool:
+    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
+    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
+    try:
+        with open(page_path or CLOCK_PAGE, "rb") as page:
+            for _ in range(_PAGE_READ_TRIES):
+                page.seek(0)
+                raw = page.read(_PAGE.size)
+                if len(raw) < _PAGE.size:
+                    return False
+                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
+                    _PAGE.unpack(raw)
+                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
+                    return False
+                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
+                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
+                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ _PAGE_CHECK_SALT) & _MASK
+                if seq % 2 == 0 and checked == expected:
+                    return bool(armed)
+                time.sleep(_PAGE_RETRY_S)
+    except OSError:
+        return False
+    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
+
+
+def model_direct_hosts(base_url: str | None) -> list[str]:
+    """The model endpoint's host when the CLI reaches it directly on an armed clock: over plain HTTP, which has no
+    certificate to check at the env's date. Over TLS it goes through the egress proxy, which checks the certificate on
+    real time and, in an agent's image, reaches a private network's address too (``AGENTENV_EGRESS_PRIVATE``)."""
+    endpoint = urlsplit(base_url or "")
+    return [endpoint.hostname] if endpoint.hostname and endpoint.scheme == "http" else []
+
+
+def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
+    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
+    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
+    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
+    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
+    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
+    ``no_proxy``) stay direct."""
+    proxy = environ.get(EGRESS_PROXY_ENV)
+    if not proxy or not armed:
+        return {}
+    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
+    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
+    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
+            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
+
+
+def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs. On an
+    armed clock (``clock_armed``) the CLI goes out through the egress proxy (``egress_env``), reaching the env's MCP
+    servers (``mcp_servers``), which it connects to itself, and a plain-HTTP model endpoint directly."""
+    model_host = model_direct_hosts(environ.get("LITELLM_BASE_URL")) if clock_armed else []
+    mcp_hosts = [url.hostname for url in (urlsplit(str(info.get("url") or "")) for info in (mcp_servers or {}).values()) if url.hostname and url.scheme == "http"]
+    return {**environ, **_context_xdg(context_id),
+            **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
+
+
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +192,7 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
     """`opencode export <session_id>` for the given context: the transcript JSON bytes."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "export", session_id, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode export failed: {err.decode(errors='replace')[:300]}")
@@ -123,7 +202,7 @@ async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI
 async def import_session(context_id: str, json_path: str, timeout_s: int = _CLI_TIMEOUT_S) -> str | None:
     """`opencode import <json_path>` into the given context's data dir: the imported session id, from
     'Imported session: <id>'."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "import", json_path, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode import failed: {err.decode(errors='replace')[:300]}")
@@ -430,10 +509,15 @@ async def run_opencode(
     builtin_tools: OpenCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
+    max_turns: int | None = None,
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
-    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection."""
+    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
+
+    ``max_turns`` bounds the turn's steps, OpenCode's model requests, as ``--max-turns`` bounds Claude Code's: once
+    the last step it allows asks for another, the CLI is killed and the turn fails. OpenCode v1's own ``steps`` limit
+    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921)."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -472,9 +556,8 @@ async def run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **os.environ,
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-        **_context_xdg(context_id),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")
@@ -491,8 +574,13 @@ async def run_opencode(
     ))
     _RUNNING.add(proc)
     parser = _EventParser(event_callback)
+
+    def at_turn_limit() -> bool:
+        return max_turns is not None and parser.needs_step_past(max_turns)
+
     try:
-        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line), timeout=timeout_s)
+        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line, at_turn_limit),
+                                        timeout=timeout_s)
     except asyncio.CancelledError:
         _kill_cli(proc)
         await _reap(proc)
@@ -514,6 +602,10 @@ async def run_opencode(
         _RUNNING.discard(proc)
 
     result = parser.result(stderr, proc.returncode)
+    if at_turn_limit():
+        # Claude Code's words, which callers already read as the turn limit.
+        result.error = f"Reached maximum number of turns ({max_turns})"
+        result.error_code = None
     if output_format is not None and result.error is None:
         try:
             structured_output = json.loads(result.response)
@@ -530,12 +622,14 @@ async def run_opencode(
 _STDOUT_READ_BYTES = 64 * 1024
 
 
-async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -> bytes:
+async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None],
+                      stop: Callable[[], bool] = lambda: False) -> bytes:
     """``proc.communicate(stdin_data)``, handing ``on_line`` each stdout line as it arrives.
 
     Lines are split as ``stdout.decode(errors="replace").splitlines()`` splits
     the whole output, so they are the same lines; a line has no length limit,
-    as with ``communicate``. Returns stderr once the CLI has exited."""
+    as with ``communicate``. Returns stderr once the CLI has exited, or, once
+    ``stop`` holds after a read, kills the CLI and returns no stderr."""
 
     async def feed_stdin() -> None:
         try:
@@ -562,6 +656,10 @@ async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -
                     on_line(line)
                 pieces = []
             pieces.append(rest)
+            if stop():
+                _kill_cli(proc)
+                await _reap(proc)
+                return b""
         for line in b"".join(pieces).decode(errors="replace").splitlines():
             on_line(line)
         await stdin_task
@@ -587,12 +685,17 @@ def _parse_events(stdout: bytes, stderr: bytes, returncode: int | None) -> Openc
     return parser.result(stderr, returncode)
 
 
+# The step-finish reasons after which OpenCode's loop makes another model request; any other reason ends the turn.
+_CONTINUING_STEP_REASONS = frozenset({"tool-calls", "unknown"})
+
+
 class _EventParser:
     """Parse the `--format json` JSONL event stream one line at a time.
 
     Events carry a `type` and (for content) a `part`. We accumulate assistant
-    `text` parts as the response, count `tool` parts as tool calls, and note
-    the session id wherever it appears. The whole event list is the trajectory,
+    `text` parts as the response, count `tool` parts as tool calls and
+    `step-finish` parts as steps, and note the session id wherever it
+    appears. The whole event list is the trajectory,
     and each event is handed to ``event_callback`` as it is parsed.
     """
 
@@ -601,6 +704,8 @@ class _EventParser:
         self.trajectory: list[dict] = []
         self.text_chunks: list[str] = []
         self.tool_calls: set[str] = set()
+        self.steps: set[str] = set()
+        self.last_step_continues = False
         self.session_id: str | None = None
         self.completed = False
         self.event_errors: list[str] = []
@@ -683,11 +788,20 @@ class _EventParser:
             call_id = (part or event).get("callID") or (part or event).get("id") or f"tool-{len(self.tool_calls)}"
             self.tool_calls.add(str(call_id))
         elif etype == "step_finish" or ptype == "step-finish":
-            if (part or event).get("reason") == "stop":
+            reason = (part or event).get("reason")
+            self.steps.add(str((part or event).get("id") or f"step-{len(self.steps)}"))
+            self.last_step_continues = reason in _CONTINUING_STEP_REASONS
+            if reason == "stop":
                 self.completed = True
 
         if self._event_callback is not None:
             self._event_callback(event)
+
+    def needs_step_past(self, max_steps: int) -> bool:
+        """Whether the turn has needed a model request past ``max_steps``: more steps finished, or the last step it
+        allows asked for another. Decided at a step's end, so how the CLI's output is split into reads can't change
+        it."""
+        return len(self.steps) > max_steps or (len(self.steps) == max_steps and self.last_step_continues)
 
     def result(self, stderr: bytes, returncode: int | None) -> OpencodeResult:
         # A turn is successful once OpenCode emits a terminal step_finish{reason:stop}.

@@ -1,8 +1,9 @@
 """Where and how a computer env's pairs build: this machine's Docker, natively or emulated, or a VM of the put's
 sandbox provider, each arch on the first link of a chain that runs it natively; what builds when emulation is off
-or no link can build; a VM the provider loses; the VM's shell helper; and what a put says as it goes. Docker,
-the registry and the VMs are faked."""
+or no link can build; a VM the provider loses; pulls of a base taking turns; the VM's shell helper; and what a put says
+as it goes. Docker, the registry and the VMs are faked."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -13,9 +14,11 @@ import subprocess
 import sys
 import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -25,6 +28,8 @@ from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import builder, composer, layers_in_image, packages
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.providers.sandbox_providers import host_images
+from agent_env.store.local_state import holding_locks
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -164,6 +169,58 @@ def test_one_deadline_bounds_a_resolve_from_its_containers_pull_to_its_output_an
     assert failed.value.log == "Pulling from acme/base"
 
 
+#: How long a fake pull of the base takes: long enough that pulls not taking turns would overlap.
+PULL_S = 0.2
+
+
+def test_a_resolves_pull_of_its_base_takes_turns_with_a_platform_checks_and_a_deploys(tmp_path, monkeypatch):
+    """A compose resolves one arch in a container of the base as it checks the other's with another, each pulled when
+    Docker lacks the base, and two pulls of one image at once left Docker's containerd image store without layers of
+    it, which every container of it then failed on."""
+    base, digest = "ghcr.io/acme/base:1", "sha256:" + "b" * 64
+    pulling, ran, most = [], [], []
+
+    def docker(command, **kwargs):
+        if f"{base}@{digest}" in command and command[1] in ("create", "run", "pull"):
+            pulling.append(command[1])
+            most.append(len(pulling))
+            time.sleep(PULL_S)
+            pulling.remove(command[1])
+            ran.append(command[1])
+        if command[1] == "cp" and command[3] == str(tmp_path / "work" / builder.RESOLVED / "out"):
+            (Path(command[3]) / "result.json").write_text(json.dumps({"apt": [], "wheels": {}}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+    deployed = DockerImageArtifact(id="base-image", version=1, description="", image_name=base, image_digest=digest)
+    builder._runs_here.cache_clear()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        calls = [pool.submit(local.resolve, {"apt": [], "python": []}, f"{base}@{digest}", "amd64", 60),
+                 pool.submit(builder._runs_here, "linux/arm64", f"{base}@{digest}"),
+                 pool.submit(host_images.pull, deployed)]
+        results = [call.result() for call in calls]
+    builder._runs_here.cache_clear()
+
+    assert results == [{"apt": [], "wheels": {}}, True, None]
+    assert sorted(ran) == ["create", "pull", "run"] and max(most) == 1
+
+
+def test_a_resolve_waiting_for_another_pull_of_its_base_gives_up_at_its_own_timeout(tmp_path, monkeypatch):
+    ran = []
+
+    def docker(command, **kwargs):
+        ran.append(command[1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+    started = time.monotonic()
+    with holding_locks([host_images.pull_lock("base")]), \
+            pytest.raises(builder.ResolveError, match="resolving took over 1 s, waiting for another pull of base"):
+        local.resolve({"apt": [], "python": []}, "base", "amd64", 1)
+
+    assert 1 <= time.monotonic() - started < 5 and ran == ["rm"]
+
+
 def _resolving(tmp_path, monkeypatch, docker):
     """A builder of this machine's Docker in ``tmp_path``, its build context a driver's, ``docker`` its subprocess.run."""
     work = tmp_path / "work"
@@ -173,6 +230,57 @@ def _resolving(tmp_path, monkeypatch, docker):
     monkeypatch.setattr(builder, "docker_login", lambda auth: None)
     return work, builder.LocalBuilder("LocalSandboxProvider", work, SimpleNamespace(
         image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/arm64")
+
+
+def test_a_download_its_connection_drops_is_tried_again_and_one_that_never_comes_says_why(tmp_path, monkeypatch):
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    local = builder.LocalBuilder("LocalSandboxProvider", tmp_path, SimpleNamespace(
+        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/amd64")
+    attempts, waits = [], []
+    monkeypatch.setattr(builder.time, "sleep", waits.append)
+
+    @contextlib.contextmanager
+    def stream(method, url, **kwargs):
+        attempts.append(url)
+        if url.endswith("/down") or len(attempts) < 3:
+            raise httpx.ConnectError("connection reset by peer")
+        yield httpx.Response(200, content=b"data", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(builder.httpx, "stream", stream)
+    local.download("https://files.test/flaky", hashlib.sha256(b"data").hexdigest(), "fetched/flaky")
+    fetched, tries, waited = (tmp_path / "fetched" / "flaky").read_bytes(), len(attempts), list(waits)
+    attempts.clear()
+    with pytest.raises(builder.ResolveError, match="downloading https://files.test/down failed: connection reset"):
+        local.download("https://files.test/down", "0" * 64, "fetched/down")
+
+    assert (fetched, tries, waited) == (b"data", 3, [1.0, 1.0])
+    assert len(attempts) == builder._DOWNLOAD_RETRIES + 1
+
+
+def test_a_download_dropped_mid_read_is_written_afresh_by_its_next_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    local = builder.LocalBuilder("LocalSandboxProvider", tmp_path, SimpleNamespace(
+        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/amd64")
+    monkeypatch.setattr(builder.time, "sleep", lambda seconds: None)
+    attempts = []
+
+    class Dropped:
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, size):
+            yield b"the first bytes of a body whose connection then drops"
+            raise httpx.ReadError("connection dropped mid-read")
+
+    @contextlib.contextmanager
+    def stream(method, url, **kwargs):
+        attempts.append(url)
+        yield Dropped() if len(attempts) == 1 else httpx.Response(200, content=b"ok", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(builder.httpx, "stream", stream)
+    local.download("https://files.test/dropped", hashlib.sha256(b"ok").hexdigest(), "fetched/dropped")
+
+    assert (tmp_path / "fetched" / "dropped").read_bytes() == b"ok" and len(attempts) == 2
 
 
 def test_the_packages_a_build_installed_are_read_from_its_image_without_running_it(monkeypatch):

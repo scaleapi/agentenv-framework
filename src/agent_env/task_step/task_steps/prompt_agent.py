@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any, ClassVar, Optional
 import httpx
 from a2a.types import TaskState
@@ -25,7 +26,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
 from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
-from agent_env.config.model import MODEL_PARAMS_RESERVED
+from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
     EXT_CLOCK_URI,
@@ -38,11 +39,12 @@ from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
-from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
+from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -109,6 +111,28 @@ def _duplicates_prompt_text(parts: list[dict], prompt_text: Optional[str]) -> bo
     return parts == [{"kind": "text", "text": prompt_text}]
 
 
+def apply_seed(parts: list[dict], seed: dict) -> list[dict]:
+    """Return a deep-copied parts list with seed substitutions applied.
+    `<key>` placeholders are replaced inside text parts' `text` and inside
+    file parts' `uri`/`name` (so tasks-as-templates with an object URL
+    ending `seeds/<seed_id>/x.png` resolve per-run)."""
+    if not seed:
+        return parts
+    out = copy.deepcopy(parts)
+    for p in out:
+        kind = p.get("kind")
+        if kind == "text":
+            for k, v in seed.items():
+                p["text"] = p["text"].replace(f"<{k}>", str(v))
+        elif kind == "file":
+            f = p.get("file") or {}
+            for field in ("uri", "name"):
+                if field in f and isinstance(f[field], str):
+                    for k, v in seed.items():
+                        f[field] = f[field].replace(f"<{k}>", str(v))
+    return out
+
+
 def _file_uris(parts: list[dict]) -> list[str]:
     files = (part.get("file") for part in parts if part.get("kind") == "file")
     return [file["uri"] for file in files if isinstance(file, dict) and isinstance(file.get("uri"), str)]
@@ -132,6 +156,7 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
+    step_role = StepRole.AGENT
     DEFAULT_USER_AGENT_NAME: ClassVar[str] = "human_agent"
     entity_refs = (
         EntityRef.env("snapshot_config.env_id"),
@@ -251,25 +276,7 @@ class PromptAgentTaskStep(TaskStep):
         return [{"kind": "text", "text": self.prompt}]
 
     def _apply_seed(self, parts: list[dict], seed: dict) -> list[dict]:
-        """Return a deep-copied parts list with seed substitutions applied.
-        `<key>` placeholders are replaced inside text parts' `text` and inside
-        file parts' `uri`/`name` (so tasks-as-templates with an object URL
-        ending `seeds/<seed_id>/x.png` resolve per-run)."""
-        if not seed:
-            return parts
-        out = copy.deepcopy(parts)
-        for p in out:
-            kind = p.get("kind")
-            if kind == "text":
-                for k, v in seed.items():
-                    p["text"] = p["text"].replace(f"<{k}>", str(v))
-            elif kind == "file":
-                f = p.get("file") or {}
-                for field in ("uri", "name"):
-                    if field in f and isinstance(f[field], str):
-                        for k, v in seed.items():
-                            f[field] = f[field].replace(f"<{k}>", str(v))
-        return out
+        return apply_seed(parts, seed)
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -386,16 +393,17 @@ class PromptAgentTaskStep(TaskStep):
         """Model and effort for this run: this step's ``step_overrides`` win over the run-wide ``agent_model`` / ``agent_effort`` and the stored values."""
         step_overrides = self.step_param_overrides(context)
         overrides = context.metadata.get("user_overrides", {})
-        model = step_overrides.get("model") or context.agent_model or self.model or context.default_agent_model
+        model = resolve_model(ModelRole.SOLVER, step_params=step_overrides.get("model"), run=context.agent_model,
+                              step=self.model, agent=context.default_agent_model).model
         effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
         return model, effort
 
     def _resolve_user_model(self, context: TaskStepContext) -> Optional[str]:
         """The user simulator's model for this run: this step's ``step_overrides``, then the run's ``user_model``, the
         stored value, and the config's ``user`` role when it names one."""
-        return (self.step_param_overrides(context).get("user_model")
-                or context.metadata.get("user_overrides", {}).get("user_model") or self.user_model
-                or get_config().get_model_for_role("user", or_default=False))
+        return get_config().resolve_model(
+            ModelRole.USER_SIMULATOR, step_params=self.step_param_overrides(context).get("user_model"),
+            run=context.metadata.get("user_overrides", {}).get("user_model"), step=self.user_model).model
 
     def _built_in_user_sim(self, context: TaskStepContext) -> Optional[tuple[dict, str]]:
         """The user deploy_user_sim_agent deployed, when it is this step's user, and their time zone; None for any other
@@ -428,12 +436,18 @@ class PromptAgentTaskStep(TaskStep):
                              "each reply at once); drop them from that step's persona")
         seed = context.metadata.get("seed", {})
         parts = self._apply_seed(self._effective_parts(), seed)
-        deployed_with = self._apply_seed([{"kind": "text", "text": record.get("opening") or ""}], seed)[0]["text"]
+        deployed_with = self._apply_seed(recorded_opening(record), seed)
         # TODO(FD-5495): the first message is written twice, here and as the user sim's opening_prompt; write it once.
-        if (_joined_text(parts) or "").strip() != deployed_with.strip():
+        if (_joined_text(parts) or "").strip() != opening_text(deployed_with).strip():
             # Its prompt quotes the opening it was deployed with as what the user sent; another one would contradict it.
             raise ValueError(f"prompt_agent '{self.id}': its prompt isn't the opening_prompt its user "
                              f"'{self.user_agent_name}' was deployed with; give both the same text")
+        mine, theirs = _files(parts), _files(deployed_with)
+        if mine != theirs:
+            # The user's prompt says what they attached; the agent must be sent those files, in that order.
+            raise ValueError(f"prompt_agent '{self.id}': its prompt's files ({_described(mine)}) aren't the files of "
+                             f"the opening_prompt its user '{self.user_agent_name}' was deployed with "
+                             f"({_described(theirs)}); give both the same files in the same order")
         clocks = context.metadata.get("clock_configurations") or []
         return record, task_zone(record, clocks, f"prompt_agent '{self.id}'")
 
@@ -516,6 +530,8 @@ class PromptAgentTaskStep(TaskStep):
             for key, value in seed.items():
                 system_prompt = system_prompt.replace(f"<{key}>", str(value))
         initial_parts = self._apply_seed(self._effective_parts(), seed)
+        if built_in is not None:  # a file part's description, copied from the opening_prompt, is for the user sim
+            initial_parts = [for_agent(p) for p in initial_parts]
         prompt_text = initial_parts[0]["text"] if self.prompt is not None else None
 
         model, effort = self._resolve_model_and_effort(context)
@@ -541,22 +557,24 @@ class PromptAgentTaskStep(TaskStep):
             desired_config["model_params"] = model_params
         negotiated = A2AAgent.negotiate_agent_config(card, desired_config)
         if negotiated:
-            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
+                                             headers=agent.control_headers)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
-        context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
+        context.record_model(ModelRole.SOLVER.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
-            context.record_model("user simulator", self.id, built_in[0].get("model"))
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
             user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
-                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
+                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
+                                                 headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
-            context.record_model("user simulator", self.id, negotiated.fields.get("model") if negotiated else None)
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
@@ -601,6 +619,7 @@ class PromptAgentTaskStep(TaskStep):
         # What comes due for the agent's role on these envs (notifications/v1) opens its next message.
         notification_envs = [d for d in context.deployed_envs if d.supports(EXT_NOTIFICATIONS_URI, "take")]
         recipient = agent.role or DEFAULT_ROLE
+        zone = built_in[1] if built_in else labels_zone(context.metadata.get("clock_configurations") or [])
         final_terminal = protocol.TerminalResponse(response_text="")
         # Each turn's terminal reports only that turn's tool calls, so the conversation's count is
         # their sum. None until a turn reports one, so agents that don't report it stay None.
@@ -611,7 +630,8 @@ class PromptAgentTaskStep(TaskStep):
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
-            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds) if live is not None else None
+            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers)
+            if live is not None else None
         )
         final_state: str = TaskState.completed.value
         trajectory_url: Optional[str] = None
@@ -687,6 +707,7 @@ class PromptAgentTaskStep(TaskStep):
                         turn_traj_uri = await self._fetch_trajectory(
                             target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
                             target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                            headers=agent.control_headers,
                         )
                     except Exception as e:
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
@@ -739,7 +760,7 @@ class PromptAgentTaskStep(TaskStep):
                 # The conversation goes on: what came due for the agent goes first, the user side's reply after it.
                 # An answer that ended it, or the last turn, takes nothing, so what is due stays queued on the env.
                 due = await take_due(notification_envs, recipient) if notification_envs else []
-                current_user_parts = next_message(delivered_parts(due), answer["message"])
+                current_user_parts = next_message(delivered_parts(due, zone), answer["message"])
                 end_after = answer.get("end_after")
                 if not current_user_parts:  # a hook said nothing ([]) and nothing came due
                     logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")
@@ -759,7 +780,7 @@ class PromptAgentTaskStep(TaskStep):
         if trig_ext and triggers_registered:  # best-effort firing-log readback (provenance only; never fails the run)
             try:
                 async with httpx.AsyncClient() as client:
-                    r = await client.get(state_url, timeout=15)
+                    r = await client.get(state_url, headers=user_sim.control_headers, timeout=15)
                     r.raise_for_status()
                     context.metadata.setdefault("agent_trigger_state", {})[self.id] = r.json().get("firing_log", [])
             except Exception as e:
@@ -873,7 +894,7 @@ class PromptAgentTaskStep(TaskStep):
 
     async def _fetch_trajectory(
         self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
-        target_a2a_task_id: str, *, sandbox_type: str | None, card: dict | None = None,
+        target_a2a_task_id: str, *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
     ) -> str | None:
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
         store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
@@ -891,7 +912,8 @@ class PromptAgentTaskStep(TaskStep):
                 TrajectoryUpload.to,
                 store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
             )
-        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store)
+        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                                         headers=headers)
         return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
 
     async def _env_clock(self, envs: list) -> dict:
@@ -926,12 +948,12 @@ class PromptAgentTaskStep(TaskStep):
         return env_triggers
 
     async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict,
-                      **quiet: bool) -> dict:
+                      *, headers: Mapping[str, str], **quiet: bool) -> dict:
         """Call the usersim's /decide for the triggers that should fire this turn."""
         payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id,
                    "env_triggers": env_triggers, **quiet}
         async with httpx.AsyncClient() as client:
-            resp = await client.post(decide_url, json=payload, timeout=self.user_agent_timeout_seconds)
+            resp = await client.post(decide_url, json=payload, headers=headers, timeout=self.user_agent_timeout_seconds)
             if resp.status_code >= 400:
                 raise RuntimeError(f"agent-trigger /decide failed (HTTP {resp.status_code}): {resp.text}")
             return resp.json()
@@ -1116,7 +1138,7 @@ class _UserSide:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id,
-                                            env_triggers)
+                                            env_triggers, headers=self._user_sim.control_headers)
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
             logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
             answer = _trigger_answer(resp)
@@ -1162,7 +1184,8 @@ class _UserSide:
         try:
             return await asyncio.wait_for(
                 step._fetch_trajectory(self._url, ext, task_id, step._trajectory_prefix() + "user_sim/", message_id,
-                                       card=card, sandbox_type=self._user_sim.sandbox_type),
+                                       card=card, sandbox_type=self._user_sim.sandbox_type,
+                                       headers=self._user_sim.control_headers),
                 _USER_SIM_TRAJECTORY_FETCH_SECONDS)
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
@@ -1178,7 +1201,7 @@ class _UserSide:
                                "agentenv-framework-protocol whose triggers/v1 decide takes record_unfired")
         env_triggers = await self._step._read_env_triggers(self._context)
         resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id, env_triggers,
-                                        record_unfired=False)
+                                        headers=self._user_sim.control_headers, record_unfired=False)
         logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
         answer = _trigger_answer(resp)
         if answer is not None:
@@ -1259,7 +1282,11 @@ class _BuiltInUserSim:
                     initial_parts: list[dict], clock_envs: list) -> _BuiltInUserSim:
         """The user ``record`` describes, already checked by ``_built_in_user_sim``, in time zone ``zone``."""
         text = _joined_text(initial_parts)
-        opening = {"at": await _clock_now(step, clock_envs), "text": text} if text else None
+        # What the user attached, as their prompt says: the opening's files, with their descriptions, which
+        # _built_in_user_sim checked are the ones this step sends.
+        files = attached(step._apply_seed(recorded_opening(record), context.metadata.get("seed", {})))
+        opening = ({"at": await _clock_now(step, clock_envs), "text": text, **({"files": files} if files else {})}
+                   if text else None)
         person = {**person_of(record), "max_replies": record.get("max_replies"), "time_zone": zone,
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
@@ -1330,6 +1357,19 @@ _USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
 def _agent_text(solver_message: str, agent_parts: Optional[list[dict]]) -> str:
     """Every text part the agent sent, joined, not only the last one solver_message keeps."""
     return _joined_text(agent_parts or []) or solver_message
+
+
+def _files(parts: list[dict]) -> list[dict]:
+    """The file parts' files, in order, as the match check on the user's opening compares them."""
+    return [p.get("file") or {} for p in parts if p.get("kind") == "file"]
+
+
+def _described(files: list[dict]) -> str:
+    """Files named for an error: each one's name, address and type, or its size when it is sent inline."""
+    def one(f: dict) -> str:
+        where = f.get("uri") or (f"{len(f['bytes'])} bytes inline" if isinstance(f.get("bytes"), str) else "?")
+        return " ".join(x for x in (f.get("name"), f"<{where}>", f.get("mimeType") or f.get("mime_type")) if x)
+    return "; ".join(map(one, files)) or "none"
 
 
 def _joined_text(parts: list[dict]) -> Optional[str]:

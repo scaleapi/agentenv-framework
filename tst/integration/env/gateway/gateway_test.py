@@ -439,6 +439,11 @@ def agentenv_website_env() -> WebsiteEnv:
         id="agent37",
         marks=skip_without_remote_sandbox("agent37"),
     ),
+    pytest.param(
+        "kosa8",
+        id="kosa8",
+        marks=skip_without_remote_sandbox("kosa8"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -481,6 +486,9 @@ def sandbox_provider(request):
     elif request.param == "agent37":
         set_sandbox_provider(build_sandbox_provider("agent37"))
         set_env_sandbox_provider(build_sandbox_provider("agent37"))
+    elif request.param == "kosa8":
+        set_sandbox_provider(build_sandbox_provider("kosa8"))
+        set_env_sandbox_provider(build_sandbox_provider("kosa8"))
     try:
         yield request.param
     finally:
@@ -984,7 +992,8 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
 
         build_step = BuildMcpCliTaskStep(id=f"build-cli-{email_env.id}", version=None, env_id=email_env.id, command_name="email")
         ctx = TaskStepContext(deployed_envs=[result])
-        await build_step.execute(ctx)
+        with protocol_v1.authorized({result.environment_url: result.control_headers}):
+            await build_step.execute(ctx)
 
         cli_ref = ctx.metadata["cli_artifact"]
         cli_artifact = Artifact.get(cli_ref["id"], version=cli_ref["version"])
@@ -1915,7 +1924,7 @@ async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_
         async with httpx.AsyncClient() as client:
             seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
             after_id = seen[-1]["id"] if seen else 0
-            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "carol@example.com"}, timeout=60) as as_carol:
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "carol@example.com", **result.control_headers}, timeout=60) as as_carol:
                 async with streamable_http_client(f"{gw}/svc/mcp-email/mcp", http_client=as_carol) as (read, write, _):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
@@ -1928,6 +1937,44 @@ async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_
             assert all([(a["kind"], a["role"], a["request"]["route"], a["request"]["service"], a["request"]["path"])
                         for a in c["actors"]] == [("request", "carol@example.com", "svc", "mcp-email", "/mcp")]
                        for c in changes), changes
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_a_tool_disabled_for_a_role_is_refused_through_svc_as_on_the_gateway_s_mcp(mcp_server_envs,
+                                                                                         email_service_artifact):
+    """A tool disabled for a role is refused on the child's own MCP endpoint through /svc as on /mcp, before it
+    reaches the server, while another role still calls it there."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)
+        gw = result.gateway_url
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
+            resp = await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}", timeout=30,
+                                     json={"role": "carol@example.com", "tools": ["send_email"]})
+            assert resp.status_code == 200, resp.text
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+        answers = {}
+        for role in ("carol@example.com", "dana@example.com"):
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: role, **result.control_headers}, timeout=60) as as_role:
+                for path in ("/mcp", "/svc/mcp-email/mcp"):
+                    async with streamable_http_client(f"{gw}{path}", http_client=as_role) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            answers[role, path] = await session.call_tool("send_email", {
+                                "recipients": ["erin@example.com"], "subject": f"via {path}", "content": "noon"})
+        refused = [answers["carol@example.com", path] for path in ("/mcp", "/svc/mcp-email/mcp")]
+        assert all(a.isError for a in refused) and refused[0].content[0].text == refused[1].content[0].text, refused
+        assert "disabled for role 'carol@example.com'" in refused[1].content[0].text, refused
+        assert not any(answers["dana@example.com", path].isError for path in ("/mcp", "/svc/mcp-email/mcp")), answers
+        async with httpx.AsyncClient() as client:
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()["changes"]
+        assert {a["role"] for c in changes for a in c["actors"]} == {"dana@example.com"}, changes  # carol wrote nothing
     finally:
         await email_env.close()
 
@@ -2149,7 +2196,7 @@ async def test_renamed_registration_serves_its_registered_name(agentenv_items_en
         monkeypatch.undo()
         routes = [r for r in sent if r[1].startswith("/svc/")]
         assert routes == [("POST", "/svc/mcp-renameditems/agentenv")] * 2, routes
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["r"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["r"]}
     finally:
         await env.close()
 
@@ -2200,23 +2247,23 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
                 }
             },
         }
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": []}
-        await protocol_v1.add_data(base, [DataPart(data={"items": ["a", "b"]})])
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["a", "b"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": []}
+        await protocol_v1.add_data(base, [DataPart(data={"items": ["a", "b"]})], headers=result.control_headers)
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["a", "b"]}
 
-        await protocol_v1.reset_data(base)
-        await protocol_v1.add_data(base, [FilePart(file={"uri": "file:///data/seed.json", "mimeType": "application/json"})])
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["seeded-a", "seeded-b"]}
+        await protocol_v1.reset_data(base, headers=result.control_headers)
+        await protocol_v1.add_data(base, [FilePart(file={"uri": "file:///data/seed.json", "mimeType": "application/json"})], headers=result.control_headers)
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["seeded-a", "seeded-b"]}
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers=result.control_headers) as client:
             r = await client.post(f"{base}/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/add", "params": {"parts": []}})
             assert r.status_code == 200 and r.json()["error"]["code"] == -32602
             r = await client.post(f"{base}/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/bogus"})
             assert r.json()["error"]["code"] == -32601
 
-        await protocol_v1.reset_data(base)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": []}
-        await protocol_v1.add_data(base, [DataPart(data={"items": ["x"]})])
+        await protocol_v1.reset_data(base, headers=result.control_headers)
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": []}
+        await protocol_v1.add_data(base, [DataPart(data={"items": ["x"]})], headers=result.control_headers)
 
         async def assert_tool_sees_items(session, tools_result, tool_names):
             assert "list_items" in tool_names, f"Expected list_items tool, got {tool_names}"
@@ -2254,7 +2301,7 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
             ),
         )
         await env.load_environment_artifact(items_artifact)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["y", "z"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["y", "z"]}
 
         # Non-JSON EnvironmentArtifact loads via the file:// FilePart branch (no content_type special-case).
         csv_artifact = EnvironmentArtifact.put(
@@ -2269,11 +2316,11 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
             ),
         )
         await env.load_environment_artifact(csv_artifact)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
 
         # A file name with shell syntax in it is staged and loaded as it is, and runs nothing on the sandbox host.
         await _load_shell_named_artifact(env, "items", monkeypatch, tmp_path)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["shell-named"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["shell-named"]}
         assert not (tmp_path / "pwned").exists()
 
         # Environment Card extension end-to-end (urn:agentenv:set-errors/v1): a server-local
@@ -2302,7 +2349,7 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
         assert await _count_list_items_errors(20) == 0  # no injection yet
         ack = await protocol_v1.invoke_extension(
             base, card, "urn:agentenv:set-errors/v1",
-            {"tool_name": "list_items", "error_rate": 0.75},
+            {"tool_name": "list_items", "error_rate": 0.75}, headers=result.control_headers,
         )
         assert ack == {"tool_name": "list_items", "error_rate": 0.75}
         assert await _count_list_items_errors(20) >= 1  # P(0 errors) = 0.25**20 ~ 1e-12
@@ -2352,13 +2399,13 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
 
         ack = await protocol_v1.invoke_extension(
             result.gateway_url, items_child, "urn:agentenv:set-errors/v1",
-            {"tool_name": "list_items", "error_rate": 0.5},
+            {"tool_name": "list_items", "error_rate": 0.5}, headers=result.control_headers,
         )
         assert ack == {"tool_name": "list_items", "error_rate": 0.5}
 
-        await protocol_v1.reset_data(result.gateway_url)
-        await protocol_v1.add_data(result.gateway_url, [DataPart(data={"items": ["env-added"]})])
-        assert (await protocol_v1.get_data(result.gateway_url)).parts[0].data == {"items": ["env-added"]}
+        await protocol_v1.reset_data(result.gateway_url, headers=result.control_headers)
+        await protocol_v1.add_data(result.gateway_url, [DataPart(data={"items": ["env-added"]})], headers=result.control_headers)
+        assert (await protocol_v1.get_data(result.gateway_url, headers=result.control_headers)).parts[0].data == {"items": ["env-added"]}
     finally:
         await env.close()
 
@@ -2386,7 +2433,7 @@ async def test_snapshot_agent_state_v1_and_fallback(multi_env_items_email, items
         env_card = await protocol_v1.get_card(result.gateway_url)
         assert protocol_v1.find_child(env_card, "items") is not None
         assert protocol_v1.find_child(env_card, "email") is None
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers=result.control_headers) as client:
             r = await client.post(f"{result.gateway_url}/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/reset"})
             assert "exactly one" in r.json()["error"]["message"]
 
@@ -2453,7 +2500,7 @@ async def test_gateway_with_website_env_v1(agentenv_website_env, monkeypatch, tm
         base = f"{result.gateway_url}/svc/webitems"
 
         assert await protocol_v1.supports_v1(base) is True
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": []}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": []}
 
         assert result.environment_card_url == f"{result.gateway_url}/.well-known/agent-env.json"
         env_card = await protocol_v1.get_card(result.gateway_url)
@@ -2472,7 +2519,7 @@ async def test_gateway_with_website_env_v1(agentenv_website_env, monkeypatch, tm
             ),
         )
         await env.load_environment_artifact(web_artifact)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["w1", "w2"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["w1", "w2"]}
 
         # Non-JSON EnvironmentArtifact loads via the file:// FilePart branch.
         csv_artifact = EnvironmentArtifact.put(
@@ -2487,10 +2534,10 @@ async def test_gateway_with_website_env_v1(agentenv_website_env, monkeypatch, tm
             ),
         )
         await env.load_environment_artifact(csv_artifact)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
 
         await _load_shell_named_artifact(env, "webitems", monkeypatch, tmp_path)
-        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["shell-named"]}
+        assert (await protocol_v1.get_data(base, headers=result.control_headers)).parts[0].data == {"items": ["shell-named"]}
         assert not (tmp_path / "pwned").exists()
     finally:
         await env.close()

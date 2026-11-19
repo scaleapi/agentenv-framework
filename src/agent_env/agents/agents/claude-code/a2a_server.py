@@ -57,6 +57,7 @@ from agentenv_protocol.a2a_agent import (
     enable,
     extension,
 )
+from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_SERVER_NAME
 from agentenv_protocol.transfers import Uploaded, download, upload
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
@@ -97,6 +98,8 @@ logger = logging.getLogger(__name__)
 HARNESS = "claude-code"
 # The versioned format of the stream-json events a turn's trajectory holds.
 TRAJECTORY_FORMAT = "claude-code-stream-json/1"
+# A context read's format: the records of the CLI's session file, the conversation so far. Never the native format.
+SESSION_TRAJECTORY_FORMAT = "claude-code-session/1"
 # The CLI loads skills from <state>/skills/<name>/SKILL.md.
 SKILLS_DIR = CLAUDE_STATE_DIR / "skills"
 # FileParts are written here, one folder per task, and their paths appended to the prompt: the CLI reads a path in
@@ -137,6 +140,8 @@ class ClaudeCodeConfig(AgentConfig):
     max_thinking_tokens: int | None = None
     # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
     builtin_tools: ClaudeCodeTools | None = None
+    # Whether a turn gets the SDK's peer_agents MCP tools, to message the task's other agents.
+    peer_tools: bool = True
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:
@@ -398,7 +403,7 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
     config_description="Set or read agent configuration such as model, role, and allowed tools.",
     lifespan=_turns_stop_with_the_server,
     extensions=(
-        enable(TRAJECTORY_V1, live=True, description=(
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, description=(
             "Retrieve a task's Claude Code stream-json trajectory, also while it runs, "
             "or a context's cumulative trajectory including a live run.")),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Claude Code CLI should connect to."),
@@ -414,8 +419,10 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
             description="Commands to install this agent into a running task container, or onto its sandbox's host.",
             install_commands=_INSTALL_COMMANDS,
             a2a_port=_A2A_PORT,
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",
@@ -481,7 +488,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 resume=resume,
                 model=cfg.model,
                 allowed_tools=cfg.allowed_tools,
-                mcp_servers=dict(request.mcp_servers),
+                mcp_servers={name: server for name, server in request.mcp_servers.items()
+                             if cfg.peer_tools or name != PEER_MCP_SERVER_NAME},
                 system_prompt=cfg.system_prompt,
                 output_format=cfg.output_format,
                 timeout_s=cfg.timeout_seconds,
@@ -532,6 +540,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             raise HTTPException(status_code=404, detail=f"No transcript yet for context_id '{context_id}'")
         return {
             "trajectory": trajectory,
+            "format": SESSION_TRAJECTORY_FORMAT,
             "session_lines": session_lines,
             "is_live": context_id in self._active_contexts,
             "session_id": session_id,
@@ -547,7 +556,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
     async def upload_context_trajectory(self, request: ContextObjectTrajectoryRequest) -> dict[str, Any]:
         trajectory = (await self._context_trajectory(request.context_id))["trajectory"]
         body = json.dumps(trajectory, separators=(",", ":"), default=str).encode()
-        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))}}
+        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))},
+                "format": SESSION_TRAJECTORY_FORMAT}
 
     @extension(SKILL_CONFIG_V1.add.inline)
     async def add_inline_skill(self, request: InlineSkillRequest) -> SkillAddResponse:

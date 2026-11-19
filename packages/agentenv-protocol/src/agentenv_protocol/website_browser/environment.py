@@ -31,12 +31,14 @@ from ..computer.errors import DeviceUnavailable, InvalidArgument, PermissionDeni
 from ..tool_context import DEFAULT_ROLE, ROLE_HEADER, normalize_role
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
+from ..website.readiness import names_host
 from . import data
 from .contexts import CONTEXTS, TASK, Contexts, label_problem
 from .scope import Scope
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
-from .recording import BROWSER_RECORDING, MAX_DURATION_S, MAX_FRAMES, BrowserRecordings
+from .recording import (BROWSER_RECORDING, DEFAULT_FPS, MAX_CHILDREN, MAX_DURATION_S, MAX_FPS, MAX_FRAMES,
+                        MAX_OBJECTS, MAX_OPEN, MP4, BrowserRecordings, Video)
 from .shapes import (BrowserRecord, BrowserState, ContextState, ContextToLoad, CookieToSet, OriginStorage, SiteNames,
                      StateToLoad)
 
@@ -170,8 +172,11 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
                            control=self.control, contexts=self.contexts)
         self.contexts.on_end.append(self._lease_ended)
-        #: Its recordings: frames of the tab an agent last acted in, and its log, uploaded under each one's grant.
-        self.recordings = BrowserRecordings(self.log, self.control)
+        #: Its recordings, one per context: a video of the tab its agent is on, its log, the network log as HAR and,
+        #: when asked, frames, uploaded under each one's grant.
+        self.recordings = BrowserRecordings(self.log, self.control, self.contexts,
+                                            self.network if self.settings.network else None,
+                                            (self.settings.window.width, self.settings.window.height))
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
@@ -416,11 +421,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return {}
 
     @extension(BROWSER_RECORDING, op="start")
-    async def browser_recording_start(self, request_id: str, upload: dict, frames: bool = True) -> dict:
-        """A recording of this browser, its frames and its log uploaded under the write namespace grant ``upload``:
-        with ``frames``, a frame of the tab an agent last acted in at the start, after each burst of its actions
-        settles and at the end. A start again with the same ``request_id`` answers the recording it began."""
-        return await self.recordings.start(request_id, upload, frames)
+    async def browser_recording_start(self, request_id: str, upload: dict, frames: bool = False,
+                                      context: Optional[str] = None, fps: Optional[int] = None,
+                                      network: Optional[bool] = None, max_edge: Optional[int] = None) -> dict:
+        """A recording of the lease ``context``, else of the default context, uploaded under the write namespace grant
+        ``upload``: a video of the tab its agent is on at ``fps``, its longer edge at most ``max_edge``; its log's lines
+        of that context; with ``network``, the browser's network log as HAR, by default when it keeps one; and with
+        ``frames``, a frame of that tab at the start, after each burst of its agent's actions settles and at the end.
+        A start again with the same ``request_id`` answers the recording it began."""
+        return await self.recordings.start(request_id, upload, frames, context, fps, network, max_edge)
 
     @extension(BROWSER_RECORDING, op="end")
     async def browser_recording_end(self, recording_id: str, upload: Optional[dict] = None,
@@ -810,7 +819,10 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def extension_params(self, uri: str) -> dict:
         if uri == BROWSER_RECORDING:
-            return {"max_duration_s": MAX_DURATION_S, "max_frames": MAX_FRAMES, "frames": True}
+            return {"max_duration_s": MAX_DURATION_S, "max_frames": MAX_FRAMES, "frames": True,
+                    "video": Video is not None, "formats": [MP4], "fps": {"default": DEFAULT_FPS, "max": MAX_FPS},
+                    "context": True, "network": self.recordings.network is not None, "max_open": MAX_OPEN,
+                    "max_children": MAX_CHILDREN, "max_objects": MAX_OBJECTS}
         if uri == BROWSER:
             params: dict[str, Any] = {"chromium": self.version, "clock": "real", "mode": _mode()}
             if _alone():
@@ -925,15 +937,7 @@ def _read_sites() -> list[SiteNames]:
 def _site_of(url: str, sites: list[SiteNames]) -> Optional[str]:
     """The name of the env's site among ``sites`` that serves ``url``'s host, None for any other."""
     host = (urlsplit(url).hostname or "").rstrip(".")
-    return next((site.name for site in sites if any(_matches(domain.lower(), host) for domain in site.domains)), None)
-
-
-def _matches(pattern: str, host: str) -> bool:
-    """Whether ``host`` is the name ``pattern`` names: itself, or for ``*.example.com`` one label more."""
-    if pattern.startswith("*."):
-        head, dot, rest = host.partition(".")
-        return bool(head) and bool(dot) and rest == pattern[2:]
-    return host == pattern
+    return next((site.name for site in sites if any(names_host(domain.lower(), host) for domain in site.domains)), None)
 
 
 def _refuse_failed(tabs: list[dict]) -> None:

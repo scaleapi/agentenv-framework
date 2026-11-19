@@ -150,8 +150,9 @@ def _own_names(website: WebsiteEnv, child: protocol_v1.ChildEnv) -> list[str]:
 
 def scoped(cookies: list[dict], names: list[str]) -> list[dict]:
     """Each of ``cookies``, which ``session`` leaves unplaced, set for each of the site's ``names``: an exact name by
-    its URL, so the cookie is the name's alone, over HTTPS, a ``.localhost`` one over HTTP; a ``*.`` name as a domain
-    cookie on the name it ends in."""
+    its URL, so the cookie is the name's alone, over HTTPS, a ``.localhost`` one over HTTP, with its path given too,
+    since a URL alone puts a cookie on ``/admin`` at ``/``, its default path, beside the site's own; a ``*.`` name as
+    a domain cookie on the name it ends in."""
     placed = []
     for cookie in cookies:
         unplaced = {key: value for key, value in cookie.items() if key not in ("url", "domain")}
@@ -160,8 +161,8 @@ def scoped(cookies: list[dict], names: list[str]) -> list[dict]:
                 placed.append({**unplaced, "domain": f".{name[2:]}", "path": unplaced.get("path") or "/"})
             else:
                 scheme = "http" if name == "localhost" or name.endswith(".localhost") else "https"
-                placed.append({**{key: value for key, value in unplaced.items() if key != "path"},
-                               "url": f"{scheme}://{name}{unplaced.get('path') or '/'}"})
+                path = unplaced.get("path") or "/"
+                placed.append({**unplaced, "url": f"{scheme}://{name}{path}", "path": path})
     return placed
 
 

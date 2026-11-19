@@ -31,9 +31,11 @@ from agentenv_protocol.computer import (  # noqa: E402
 )
 from agentenv_protocol.computer import recording as recording_module  # noqa: E402
 from agentenv_protocol.transfers import TransferError  # noqa: E402
+from agentenv_protocol.types import CONTROL_TOKEN_ENV  # noqa: E402
 
 START, END = "/agentenv/ext/computer-recording/start", "/agentenv/ext/computer-recording/end"
 END_ALL = "/agentenv/ext/computer-recording/end_all"
+LIST = "/agentenv/ext/computer-recording/list"
 
 
 @pytest.fixture(autouse=True)
@@ -135,7 +137,7 @@ async def test_every_driver_serves_recording_unless_it_turns_it_off():
     async with http_client(Off()) as http:
         off = (await http.get("/.well-known/agent-env.json")).json()
     extension = next(e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING)
-    assert set(extension["params"]["methods"]) == {"start", "end", "end_all"}
+    assert set(extension["params"]["methods"]) == {"start", "end", "end_all", "list"}
     assert {k: v for k, v in extension["params"].items() if k not in ("methods", "endpoint")} == {
         "formats": ["video/mp4; codecs=avc1"], "scopes": ["display"], "fps": {"default": 10, "max": 15},
         "cursor": True, "source": "capture", "max_segment_s": 15, "max_concurrent": 2, "max_duration_s": 86_400}
@@ -335,6 +337,27 @@ async def test_a_start_past_max_concurrent_is_refused_and_a_reason_is_kept(home)
         await http.post(END, json={"recording_id": after.json()["recording_id"]})
     assert refused.status_code == 429 and refused.json()["error"]["code"] == "limit_exceeded"
     assert ended["ended_by"] == "reset" and after.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_list_names_each_recording_still_recording_as_its_start_answered(home):
+    async with http_client(FakeDriver()) as http:
+        first = (await http.post(START, json={"request_id": "a"})).json()
+        second = (await http.post(START, json={"request_id": "b"})).json()
+        await http.post(END, json={"recording_id": first["recording_id"]})
+        listed = (await http.get(LIST)).json()["recordings"]
+        await http.post(END, json={"recording_id": second["recording_id"]})
+        after = (await http.get(LIST)).json()["recordings"]
+    assert listed == [{"recording_id": second["recording_id"], "started_at": second["started_at"]}] and after == []
+
+
+@pytest.mark.asyncio
+async def test_list_takes_the_control_token_as_every_framework_only_route_does(home, monkeypatch):
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+    async with http_client(FakeDriver()) as http:
+        refused = await http.get(LIST)
+        allowed = await http.get(LIST, headers={"Authorization": "Bearer s3cret"})
+    assert refused.status_code == 401 and allowed.status_code == 200 and allowed.json() == {"recordings": []}
 
 
 @pytest.mark.asyncio

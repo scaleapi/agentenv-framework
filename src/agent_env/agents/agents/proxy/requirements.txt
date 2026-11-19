@@ -1,3 +1,4 @@
 # The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
-# image is built again only when this folder changes. The floor is the first that ships ProxyAgent and proxy/v1.
-agentenv-framework-protocol[agent]>=0.1.370
+# image is built again only when this folder changes. The floor is the first whose proxy reports each turn's model usage,
+# as the driver records it; raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.597

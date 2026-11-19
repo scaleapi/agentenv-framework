@@ -456,11 +456,12 @@ class Env(ABC):
         file_artifact_universe: "Any",
         destination_path: Optional[str] = None,
     ) -> "LoadFileArtifactUniverseResult":
-        """Stage every FileArtifact in `file_artifact_universe` onto this env's sandbox VM.
+        """Stage every FileArtifact in `file_artifact_universe` onto this env's sandbox VM, or, for a sandbox that is
+        the env's own container (a lone server's), into that container.
 
         Files land at ``<destination>/<filename>``. Nested relative paths
         (e.g. ``subdir/file.txt``) are supported — parent dirs are created
-        as needed. The sandbox fetches each file directly from the object
+        as needed. A VM fetches each file directly from the object
         store through a signed URL where the store can sign one, so the bytes
         don't round-trip through this process.
 
@@ -468,6 +469,9 @@ class Env(ABC):
         ``from_deployed_env()`` on most env subclasses). Subclasses that
         manage several sandboxes, or none, should override.
         """
+        from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container  # providers import this module
+        from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
+
         sandbox = getattr(self, "_sandbox", None)
         if sandbox is None:
             raise RuntimeError(
@@ -486,6 +490,15 @@ class Env(ABC):
             )
             return LoadFileArtifactUniverseResult(destination_path=destination, files={})
 
+        total = len(file_artifacts)
+        if sandbox.mode == SANDBOX_MODE_CONTAINER:
+            logger.info(
+                f"Loading FileArtifactUniverse '{file_artifact_universe.id}' "
+                f"v{file_artifact_universe.version} ({total} file(s)) into the env's container at {destination}"
+            )
+            loaded = await stage_files_into_container(sandbox, file_artifacts, destination)
+            return LoadFileArtifactUniverseResult(destination_path=destination, files=loaded)
+
         dirs_to_make = {destination}
         loaded: dict[str, str] = {}
         for filename in file_artifacts:
@@ -499,7 +512,6 @@ class Env(ABC):
         mkdir_cmd = " && ".join(f"mkdir -p {shlex.quote(d)}" for d in sorted(dirs_to_make))
         await sandbox.exec_script(mkdir_cmd)
 
-        total = len(file_artifacts)
         logger.info(
             f"Loading FileArtifactUniverse '{file_artifact_universe.id}' "
             f"v{file_artifact_universe.version} ({total} file(s)) at {destination}"

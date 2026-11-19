@@ -141,7 +141,7 @@ def test_fetch_trajectory_object_named_by_target_a2a_task_id(monkeypatch):
     # unbound call: the inline branch never touches `self`, so we skip AWS-touching construction.
     uri = asyncio.run(PromptAgentTaskStep._fetch_trajectory(
         object(), "http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", "s3://b/traj/",
-        "CLIENT-ID", sandbox_type="local"))
+        "CLIENT-ID", sandbox_type="local", headers={}))
     assert uri == "s3://b/traj/trajectory-CLIENT-ID.json"
     assert puts_on_loop == [False]
 
@@ -151,7 +151,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
     grants_on_loop = []
     client = MagicMock()
 
-    async def post(url, *, json, timeout):
+    async def post(url, *, json, timeout, headers=None):
         sent.update(url=url, json=json, timeout=timeout)
         return SimpleNamespace(
             raise_for_status=lambda: None,
@@ -216,7 +216,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
             "SERVER-ID",
             "s3://b/traj/",
             "CLIENT-ID",
-            sandbox_type="local",
+            sandbox_type="local", headers={},
         )
     )
 

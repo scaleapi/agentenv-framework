@@ -32,12 +32,13 @@ from agent_env.artifact.artifacts.docker_image import docker_login, push_local_i
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils import layers_in_image
 from agent_env.env.published_images import COMPUTER_IMAGES
-from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
+from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag, pull_lock
 from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 from agent_env.store.base import ObjectAlreadyExistsError
 from agent_env.store.image_store.oci_registry_credentials import (
     is_loopback_host, names_registry, registry_host_from_ref)
+from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError, build_image
 
 if TYPE_CHECKING:
@@ -70,6 +71,8 @@ _VM = {"cpu": 4.0, "memory": 8192, "disk_size_gb": 40}
 #: How long a builder VM may run, natively and when it emulates the arch, which runs some 10-20 times slower.
 VM_TIMEOUT_S, EMULATED_VM_TIMEOUT_S = 7200, 21600
 _DOWNLOAD_TIMEOUT_S = 600
+#: How often a download that fails in transit is tried again, and how long apart: as the builder VM's helper has curl.
+_DOWNLOAD_RETRIES, _DOWNLOAD_RETRY_S = 5, 1.0
 _FETCHES_IN_FLIGHT = 8
 _CHUNK = 1 << 20
 
@@ -243,10 +246,12 @@ def _docker_here(link: SandboxProvider) -> bool:
 @functools.cache
 def _runs_here(platform: str, image: str) -> bool:
     """Whether this machine's Docker runs ``platform``'s programs, natively or emulated, as a container of ``image`` for
-    it shows: what its builder lists can leave out a platform it runs, as colima's does Rosetta's linux/amd64."""
+    it shows: what its builder lists can leave out a platform it runs, as colima's does Rosetta's linux/amd64. Its pull
+    of ``image`` takes turns with the others (``pull_lock``), as a compose's other arch resolves on the same base."""
     try:
-        return subprocess.run(["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", image],
-                              capture_output=True).returncode == 0
+        with holding_locks([pull_lock(image)]):
+            return subprocess.run(["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", image],
+                                  capture_output=True).returncode == 0
     except FileNotFoundError:
         return False
 
@@ -285,15 +290,17 @@ class LocalBuilder(Builder):
     def resolve(self, request: dict, source: str, arch: str, timeout: int) -> dict:
         """With the build context and what the resolver reads copied into its container, and what it wrote copied out,
         rather than bind-mounted: a Docker in a VM, as on a Mac, mounts only the folders the VM shares, colima's only the
-        home, and keeps no owner on them."""
+        home, and keeps no owner on them. The container's pull of ``source`` takes turns with the others
+        (``pull_lock``), its wait for its turn within ``timeout`` too."""
         out = self.work / RESOLVED / "out"
         out.mkdir(parents=True)
         (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
         shutil.copy(RESOLVER, out / "resolve.py")
         container, deadline = f"agentenv-resolve-{uuid.uuid4().hex[:12]}", time.monotonic() + timeout
         try:
-            _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
-                    "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
+            with holding_locks([pull_lock(source)], deadline=deadline):
+                _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
+                        "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
             _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx", deadline=deadline)
             _docker("cp", f"{out}/.", f"{container}:/out", deadline=deadline)
             ran = subprocess.run(["docker", "start", "--attach", container], capture_output=True, text=True,
@@ -303,22 +310,30 @@ class LocalBuilder(Builder):
             _docker("cp", f"{container}:/out/.", str(out), deadline=deadline)
         except subprocess.TimeoutExpired as e:
             raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
+        except TimeoutError:
+            raise ResolveError(f"resolving took over {timeout} s, waiting for another pull of {source}") from None
         finally:
             subprocess.run(["docker", "rm", "--force", container], capture_output=True)
         return json.loads((out / "result.json").read_text())
 
     def download(self, url: str, sha256: str, path: str) -> None:
-        target, hashed = self.work / path, hashlib.sha256()
+        target = self.work / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with httpx.stream("GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S) as response:
-                response.raise_for_status()
-                with target.open("wb") as file:
-                    for chunk in response.iter_bytes(_CHUNK):
-                        hashed.update(chunk)
-                        file.write(chunk)
-        except httpx.HTTPError as e:
-            raise ResolveError(f"downloading {url} failed: {e}") from None
+        for attempt in range(_DOWNLOAD_RETRIES + 1):
+            hashed = hashlib.sha256()
+            try:
+                with httpx.stream("GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+                    response.raise_for_status()
+                    with target.open("wb") as file:
+                        for chunk in response.iter_bytes(_CHUNK):
+                            hashed.update(chunk)
+                            file.write(chunk)
+                break
+            except httpx.HTTPError as e:
+                if attempt == _DOWNLOAD_RETRIES:
+                    raise ResolveError(f"downloading {url} failed: {e}") from None
+                logger.warning(f"downloading {url} failed ({e}); trying again")
+                time.sleep(_DOWNLOAD_RETRY_S)
         if hashed.hexdigest() != sha256:
             raise ResolveError(f"{url} has the sha256 {hashed.hexdigest()}, not the {sha256} its download names")
 

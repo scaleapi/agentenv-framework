@@ -21,13 +21,34 @@ the folder changes. A run that deploys the agent registers that image when it's 
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
-`node`, without npm or npx, and the Python packages `model-requirements.txt` pins. A `deploy_agent` `builtin_tools`
+`node`, without npm or npx, and the Python packages `model-requirements.txt` pins: boto3, and openpyxl, pypdf,
+python-docx and python-pptx, which read the .xlsx, .pdf, .docx and .pptx files tasks often give the model. Without them
+a script that opens such a file stops at `ModuleNotFoundError`, and the model spends turns working around it or fails
+the task for a reason that isn't the model's; a sandbox with no network can't install them either. They add about 50 MB,
+mostly the lxml and Pillow they depend on, and their pins match the Codex and Gemini images' and Harbor bundles', so a
+task's documents read the same way in each. A `deploy_agent` `builtin_tools`
 selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
 `--strict-mcp-config`, so its MCP servers are only the task env's. Tool search is off unless the agent's environment sets
 `ENABLE_TOOL_SEARCH`, so the CLI sends the env's tools and its own up front. The names are `ClaudeCodeTool`'s in
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
+
+The image follows a task env's clock the way a computer does (FD-5916): it runs the computer base's clock follower
+and egress proxy, taken from `utils/faketime_clock` and `utils/egress_proxy` through its `shared_sources.toml`, each as
+its own user under root's supervisord (`start-agent`, `root.conf`), with agent-env's libfaketime preloaded for the
+agent's user.
+The A2A server starts with the real-time marker, so it and its records stay on real time, and serves clock/v1's
+`sync_time`, which the protocol's framework serves on the card of any agent in an image with the follower
+(`agentenv_protocol.a2a_agent.clock`). Once `sync_env_clock` has armed the clock, it declares the agent at the gateway
+as a follower with a read token of its own and calls that `sync_time` with the follower's config, which the server
+writes; `deploy_agent` does the same for an agent it deploys while the clock is armed. From then on the CLI, its own
+"Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
+followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps a live
+site's TLS working at any date the clock shows, and to the env's MCP servers and a plain-HTTP model endpoint directly.
+The image's proxy reaches private networks too (`AGENTENV_EGRESS_PRIVATE`), so a model endpoint over TLS at a private
+address works at any date as well. Unarmed, the page holds real time and the CLI goes out directly, as before. Started
+as a user other than root, the image runs the A2A server alone, on real time, as before.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements

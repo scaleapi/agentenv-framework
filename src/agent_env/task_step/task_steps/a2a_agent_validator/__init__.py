@@ -1,5 +1,6 @@
 from .verify_a2a_agent_card import VerifyA2AAgentCardStep
 from .verify_a2a_agent_config_identity import VerifyA2AAgentConfigIdentityStep
+from .verify_a2a_control_token import VerifyA2AControlTokenStep
 from .verify_a2a_agent_mcp import VerifyA2AAgentMCPStep
 from .verify_a2a_builtin_tools import VerifyA2ABuiltinToolsStep
 from .verify_a2a_core_protocol import VerifyCoreA2AProtocolStep
@@ -15,6 +16,7 @@ from .verify_a2a_trajectory import VerifyA2ATrajectoryStep
 __all__ = [
     "VerifyA2AAgentCardStep",
     "VerifyA2AAgentConfigIdentityStep",
+    "VerifyA2AControlTokenStep",
     "VerifyA2AAgentMCPStep",
     "VerifyA2ABuiltinToolsStep",
     "VerifyCoreA2AProtocolStep",

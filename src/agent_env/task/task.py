@@ -24,6 +24,7 @@ from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
+from agent_env.task.outcome import FailedStep
 from agent_env.task.teardown import env_record_ids
 from agent_env.task_step.context import ENTITY_IDS_KEY, TaskStepContext, VerifierNotPassingError, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
@@ -130,12 +131,15 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
             return {k: _sub(v) for k, v in value.items()}
         return value
 
-    from agent_env.task_step.task_step import attach_retry_config
+    from agent_env.task_step.task_step import attach_base_fields
 
     out: list["TaskStep"] = []
     for step in steps:
         data = _sub(step.to_dict())
-        out.append(attach_retry_config(type(step).from_dict(data), data))
+        seeded = attach_base_fields(type(step).from_dict(data), data)
+        if (keep := getattr(seeded, "seeded_from", None)) is not None:  # a step that keeps something as written
+            keep(step)
+        out.append(seeded)
     return out
 
 
@@ -351,6 +355,8 @@ class Task:
     registration records (``agent-env bundle register``); None when nothing recorded it.
     ``entity_ids`` maps each id a bundle rewrote in the task's steps, as the task names it, to the id the bundle gave
     it; ``run`` puts it in ``context.metadata`` for ``run_entity_id``. None for a task stored as written.
+    ``headline_verifiers`` names, by step id, the grades that are the task's reward: one is the reward and the run's
+    pass or fail, several a multi-reward over them; None, or empty, a multi-reward over every grade.
     """
 
     type: ClassVar[str] = "task"
@@ -362,14 +368,31 @@ class Task:
         steps: list[TaskStep] | None = None,
         requires: Sequence[str] | None = None,
         entity_ids: Mapping[str, str] | None = None,
+        headline_verifiers: Sequence[str] | None = None,
     ):
         self.id = id
         self.version = version
         self.steps: list[TaskStep] = steps or []
         self.requires: list[str] | None = list(requires) if requires is not None else None
         self.entity_ids: dict[str, str] | None = dict(entity_ids) if entity_ids else None
+        self.headline_verifiers: list[str] | None = list(headline_verifiers) if headline_verifiers else None
         self._validate_dag(self.steps)
         self._validate_pairings(self.steps)
+        self._validate_headlines(self.headline_verifiers, self.steps)
+
+    @staticmethod
+    def _validate_headlines(headlines: list[str] | None, steps: list[TaskStep]) -> None:
+        """Refuse a headline that isn't a step id of this task, or that is named twice. Whether the step it names is a
+        verifier is the task lint's to say."""
+        if headlines is None:
+            return
+        ids = {step.id for step in steps}
+        unknown = [h for h in headlines if not isinstance(h, str) or h not in ids]
+        if unknown:
+            raise ValueError(f"headline_verifiers names no step in this task: {unknown!r} (its steps: {sorted(ids)})")
+        if len(set(headlines)) != len(headlines):
+            twice = sorted({h for h in headlines if headlines.count(h) > 1})
+            raise ValueError(f"headline_verifiers names {twice!r} more than once")
 
     @staticmethod
     def _validate_pairings(steps: list[TaskStep]) -> None:
@@ -442,6 +465,8 @@ class Task:
             data["requires"] = list(self.requires)
         if self.entity_ids:
             data["entity_ids"] = dict(self.entity_ids)
+        if self.headline_verifiers:
+            data["headline_verifiers"] = list(self.headline_verifiers)
         return data
 
     @classmethod
@@ -460,15 +485,16 @@ class Task:
                                f"{_registration.failure_note(_registration.TASK_STEPS, step_type)}", *problems]),
                     unmet,
                 )
-            from agent_env.task_step.task_step import attach_retry_config
+            from agent_env.task_step.task_step import attach_base_fields
 
-            steps.append(attach_retry_config(step_cls.from_dict(step_dict), step_dict))
+            steps.append(attach_base_fields(step_cls.from_dict(step_dict), step_dict))
         return cls(
             id=data["id"],
             version=data.get("version"),
             steps=steps,
             requires=data["requires"] if isinstance(data.get("requires"), list) else None,
             entity_ids=data["entity_ids"] if isinstance(data.get("entity_ids"), dict) else None,
+            headline_verifiers=data["headline_verifiers"] if isinstance(data.get("headline_verifiers"), list) else None,
         )
 
     async def run(
@@ -681,12 +707,9 @@ class Task:
             except BaseException as exc:
                 duration = time.monotonic() - started_mono
                 fatal = getattr(step, "fail_task_on_error", True)
-                context.metadata.setdefault("failed_steps", []).append({
-                    "step_id": step.id, "step_type": step.type,
-                    "error": str(exc), "error_type": type(exc).__name__,
-                    "started_at_utc": started_utc, "duration_seconds": duration,
-                    "is_fatal": fatal,
-                })
+                context.metadata.setdefault("failed_steps", []).append(FailedStep.from_exception(
+                    step, exc, started_at_utc=started_utc, duration_seconds=duration, is_fatal=fatal,
+                ).to_dict())
                 if not fatal:
                     await _heartbeat_step(step, pre_context, _store.TaskStepStatus.FAILURE, dispatch_epoch)
                 raise

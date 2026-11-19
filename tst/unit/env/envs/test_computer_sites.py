@@ -211,7 +211,7 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
                                "docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json",
                                "docker exec -u 0 computer-1 python3 /etc/agentenv/sites/site_proxy.py install "
                                "/etc/agentenv/sites/config.json"]
-    assert "upstream_headers" not in site and "proxy_port" not in config
+    assert site["upstream_headers"] == {"AgentEnv-Computer": "desktop"} and "proxy_port" not in config
     assert routed["checks"] == _REPORT["checks"] and routed["names"]["routes"] == {"notes": ["notes.test"]}
     assert "PRIVATE KEY" not in json.dumps(routed)
 
@@ -272,7 +272,7 @@ async def test_the_headers_the_gateways_provider_asks_for_go_in_the_private_conf
                                label="desktop", os_type="linux", display="x11")
 
     (site,) = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]
-    assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret"}
+    assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret", "AgentEnv-Computer": "desktop"}
     private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json")
     copied = ("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json")
     assert sandbox.events.index(copied) < private < len(sandbox.events) - 1
@@ -388,6 +388,41 @@ async def test_a_site_naming_the_gateway_its_routes_are_on_is_refused_before_any
                           label="desktop", os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
+
+
+@pytest.mark.asyncio
+async def test_a_sites_sign_in_headers_go_from_its_card_to_its_proxy_whose_network_log_takes_their_values_out(
+        monkeypatch):
+    from agentenv_protocol import client as protocol_v1
+
+    from agent_env.env.env import DeployedGatewayEnv
+    from agent_env.env.envs.computer.utils import site_proxy
+
+    cards = {"https://gw.example/svc/shop": {"capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {
+                 "domains": ["shop.localhost"], "sign_in_headers": ["X-Auto-Login", 7, ""]}}]}},
+             "https://gw.example/svc/notes": {"capabilities": {"extensions": [
+                 {"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}}
+
+    async def get_card(url, timeout=10, verify=True):
+        return cards[url]
+
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
+                                 website_frontend_urls={name: f"https://gw.example/website/{name}/"
+                                                        for name in ("shop", "notes")})
+    shop, notes = [Site(**found) for found in await sites.deployed_sites([gateway])]
+    sandbox = FakeVm({**_REPORT, "names": ["shop.localhost", "notes.test"], "checks": {
+        "shop.localhost": {"url": "http://shop.localhost/", "status": 200}, **_REPORT["checks"]}})
+
+    await sites.route(sandbox, [shop, notes], user="user", network=None, label="desktop", os_type="linux",
+                      display="none")
+
+    entries = {entry["name"]: entry for entry in json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]}
+    assert (shop.sign_in_headers, notes.sign_in_headers) == (["X-Auto-Login"], [])
+    assert entries["shop"]["sign_in_headers"] == ["X-Auto-Login"] and "sign_in_headers" not in entries["notes"]
+    assert site_proxy.logged_headers([("x-auto-login", "admin:test"), ("Accept", "*/*")],
+                                     entries["shop"]["sign_in_headers"]) == [["x-auto-login", site_proxy.REMOVED],
+                                                                             ["Accept", "*/*"]]
 
 
 @pytest.mark.asyncio

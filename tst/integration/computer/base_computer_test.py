@@ -27,6 +27,9 @@ from tst.integration.computer.conftest import (BASE, FOLLOWER_BACK_S, PAGE_WRITE
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 SUPERVISOR = ["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "status"]
+#: How long the window manager may take to claim the screen once supervisord has the desktop RUNNING, and how often the
+#: root window is read meanwhile, in seconds.
+WINDOW_MANAGER_S, WINDOW_MANAGER_POLL_S = 60, 0.5
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 
 
@@ -53,14 +56,14 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         zone = _exec(name, "readlink", "/etc/localtime").strip()
         uid = _exec(name, "id", "-u", "user").strip()
         screen = _exec(name, "xdpyinfo")
-        wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
+        wm = _window_manager(name)
         # As the session user, whose process it is: root here lacks the ptrace capability to read another's.
         environment = _exec_as(name, "user", "sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -x xfwm4)/environ')
         accessibility = _exec(name, "pgrep", "-c", "at-spi2-registr")
         folders = set(_exec(name, "ls", "/home/user").split())
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    assert {line.split()[0] for line in running.splitlines()} == {"dbus", "desktop", "xvfb"}
+    assert {line.split()[0] for line in running.splitlines()} == {"clock-panel", "dbus", "desktop", "xvfb"}
     assert all(" RUNNING " in line for line in running.splitlines()), running
     assert uid == "1000" and only_session_clock_and_egress(owners)
     assert zone == "/usr/share/zoneinfo/Europe/Paris"
@@ -86,7 +89,7 @@ def test_the_desktop_comes_back_however_often_x_dies(base):
             time.sleep(1.2)
         time.sleep(5)
         running = _all_running(name)
-        wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
+        wm = _window_manager(name)
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     assert all(" RUNNING " in line for line in running.splitlines()), running
@@ -166,13 +169,18 @@ def test_the_session_user_can_neither_change_nor_read_the_config_of_nor_stop_the
     assert page == f"{FOLLOWER_USER} 644" and still == follower
 
 
+#: How far behind real time the universe is armed, from a given real instant, so each read's offset from real time, taken
+#: as it returns, is this for a universe read and about 0 for a real one, however long the reads before it took.
+BACK = -182 * 86400
+
+
 def test_only_the_sessions_programs_read_universe_time_and_a_marked_one_real_time_but_not_what_it_starts(base):
     name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
     docker("run", "-d", "--name", name, base)
     try:
         _all_running(name)
-        universe = time.time() - 182 * 86400
-        _exec_as(name, FOLLOWER_USER, "python3", PAGE_WRITER, "set", repr(universe), "1")
+        anchor = time.time()
+        _exec_as(name, FOLLOWER_USER, "python3", PAGE_WRITER, "set", repr(anchor + BACK), "1", repr(anchor))
         read = {who: float(subprocess.run(["docker", "exec", *flags, name, *command], check=True, capture_output=True,
                                           text=True).stdout) - time.time()
                 for who, flags, command in [
@@ -184,8 +192,7 @@ def test_only_the_sessions_programs_read_universe_time_and_a_marked_one_real_tim
                     ("the follower's user", ["-u", FOLLOWER_USER], ["date", "+%s.%N"])]}
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    back = universe - time.time()
-    assert {who: abs(offset - back) < 5 for who, offset in read.items()} == {
+    assert {who: abs(offset - BACK) < 5 for who, offset in read.items()} == {
         "session": True, "marked": False, "started by a marked one": True, "root": False, "the follower's user": False}
     assert all(abs(offset) < 5 for who, offset in read.items() if who in ("marked", "root", "the follower's user"))
 
@@ -221,6 +228,18 @@ def _all_running(name: str) -> str:
             break
         time.sleep(1)
     return running
+
+
+def _window_manager(name: str) -> str:
+    """The root window's WM check once xfwm4 sets it: supervisord has the desktop RUNNING as its process starts
+    (startsecs=0), which then waits for X and starts the XFCE session, which starts xfwm4."""
+    deadline = time.monotonic() + WINDOW_MANAGER_S
+    while True:
+        wm = subprocess.run(["docker", "exec", name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], capture_output=True,
+                            text=True).stdout
+        if "window id #" in wm or time.monotonic() > deadline:
+            return wm
+        time.sleep(WINDOW_MANAGER_POLL_S)
 
 
 def _exec(name: str, *argv: str) -> str:

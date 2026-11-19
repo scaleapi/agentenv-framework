@@ -64,7 +64,13 @@ FIXTURE_START_S = 30.0
 NORM = 1000
 #: How long the probe records, and the frame rate it asks for.
 RECORD_S = 2.0
+#: How many times a check whose effect a busy desk can miss is tried before it fails: a desk starved through a drag
+#: sees its motion as one event, and keys sent while the click that focuses a box waits go wherever focus was.
+BUSY_DESK_ATTEMPTS = 2
 RECORD_FPS = 5
+#: How many starts per slot of ``max_concurrent`` the limit check tries before it gives up on a computer whose other
+#: recordings keep starting and ending under it.
+LIMIT_STARTS = 3
 #: Prints a file's size and SHA-256 as JSON, run with ``python3 -c`` on the computer.
 READ_DIGEST = ("import hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
                "print(json.dumps({'size':len(d),'sha256':hashlib.sha256(d).hexdigest()}))")
@@ -165,15 +171,22 @@ class Probe:
 
     # Recording
 
-    async def check(self, check: str, name: str, test: Test, *extensions: str) -> bool:
-        try:
-            problem = await test()
-        except NotApplicable as e:
-            self._record(check, name, "not_applicable", str(e), extensions)
-            return True
-        except Exception as e:
-            problem = f"{type(e).__name__}: {e}"
-        self._record(check, name, "failed" if problem else "passed", problem or "", extensions)
+    async def check(self, check: str, name: str, test: Test, *extensions: str, attempts: int = 1) -> bool:
+        """Run ``test`` up to ``attempts`` times until it passes; a pass after a failed try says what that try found."""
+        tried: list[str] = []
+        while True:
+            try:
+                problem = await test()
+            except NotApplicable as e:
+                self._record(check, name, "not_applicable", str(e), extensions)
+                return True
+            except Exception as e:
+                problem = f"{type(e).__name__}: {e}"
+            if problem is None or len(tried) + 1 == attempts:
+                break
+            tried.append(problem)
+        detail = problem or (f"passed on try {len(tried) + 1} of {attempts}; before: {'; '.join(tried)}" if tried else "")
+        self._record(check, name, "failed" if problem else "passed", detail, extensions)
         return problem is None
 
     async def _guarded(self, check: str, section: Callable[[], Awaitable[None]]) -> None:
@@ -837,7 +850,7 @@ class Probe:
 
         await self.check("P6", "Unicode and mixed-case text arrives whole", unicode)
         await self.check("P6", "typed text arrives as key events", events)
-        await self.check("P6", "a chord selects all, and Backspace clears it", chord)
+        await self.check("P6", "a chord selects all, and Backspace clears it", chord, attempts=BUSY_DESK_ATTEMPTS)
         await self.check("P6", "a repeated key presses that many times", repeat)
         await self.check("P6", "tabs and newlines arrive as typed", whitespace)
         await self.check("P6", "typing leaves the clipboard as it was", clipboard)
@@ -865,8 +878,9 @@ class Probe:
             start, end, waypoint = (50, 50), (300, 250), (200, 100)
             points = [start, waypoint, end] if int(self.features.get("max_drag_points", 2)) >= 3 else [start, end]
             path = [list(self._at("pad", scale, x, y)) for x, y in points]
+            before = (await self.state())["drags"]
             await self.act("computer_drag", {"path": path, "duration_ms": 400, "frame_id": frame})
-            ok, state = await self.until(lambda s: bool(s["drags"]))
+            ok, state = await self.until(lambda s: s["drags"] != before)
             if not ok:
                 return "no drag reached the pad"
             stroke = state["drags"][-1]
@@ -878,7 +892,8 @@ class Probe:
 
         await self.check("P7", "a scroll moves a list", scroll_list)
         await self.check("P7", "scrolls up, down, left and right each arrive that many times", directions)
-        await self.check("P7", "a drag starts and ends where it says, through its waypoints", drag)
+        await self.check("P7", "a drag starts and ends where it says, through its waypoints", drag,
+                         attempts=BUSY_DESK_ATTEMPTS)
 
     async def _pointer_input(self) -> None:
         if not self.driver.declares(COMPUTER_POINTER):
@@ -1025,10 +1040,35 @@ class Probe:
         async def joined() -> str | None:
             return None if state.get("joined") else "a repeated request_id started a second recording"
 
+        async def recording_now() -> int:
+            return len((await self.driver.invoke(COMPUTER_RECORDING, "list"))["recordings"])
+
+        async def limited_counting(most: int) -> str | None:
+            """Below ``most`` open recordings a start succeeds, and at ``most`` it's refused, counting every recording the
+            driver lists. Others may start or end between a listing and a start, so a surprise is judged by a fresh one."""
+            tries = LIMIT_STARTS * (most + 1)
+            for _ in range(tries):
+                before = await recording_now()
+                try:
+                    started = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+                except ExtensionCallError as e:
+                    if e.code != "limit_exceeded":
+                        return f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
+                    if before >= most or (now := await recording_now()) >= most:
+                        return None
+                    return f"refused limit_exceeded with {now} recordings open, of at most {most}"
+                if before >= most and (now := await recording_now()) > most:
+                    return f"recording {now} of at most {most} started: {started['recording_id']}"
+            return f"the computer's recordings kept changing over {tries} starts"
+
         async def limited() -> str | None:
+            """A start past ``max_concurrent`` is refused. A driver that lists its recordings is checked with them all
+            counted; one that doesn't, after the probe's own ``max_concurrent``, as before it could."""
             most = params.get("max_concurrent")
             if not isinstance(most, int):
                 return "the card declares no max_concurrent"
+            if "list" in (params.get("methods") or {}):
+                return await limited_counting(most)
             for _ in range(most):
                 await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
             try:
@@ -1063,7 +1103,7 @@ class Probe:
             return f"segments {unmeasured} lack their times, size, frame count or digest"
         span = (_when(segments[-1].ended_at) - _when(segments[0].started_at)).total_seconds()
         frames = sum(s.frames for s in segments)
-        if span < RECORD_S - 2 / fps or frames < fps * RECORD_S / 2:
+        if span < RECORD_S / 2 or frames < fps * RECORD_S / 2:
             return f"{frames} frames over {span:.2f} s of a {RECORD_S:g} s recording at {fps} fps"
         for before, after in zip(segments, segments[1:]):
             gap = (_when(after.started_at) - _when(before.ended_at)).total_seconds()

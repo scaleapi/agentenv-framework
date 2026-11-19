@@ -48,6 +48,7 @@ from agent_env.utils.paths import validate_relative_filename
 if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
@@ -164,9 +165,22 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         fields["apps"], fields["app_settings"] = _listed_apps(fields.get("apps", []), ctx)
         try:
-            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, **fields)
+            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, compose=ctx.compose,
+                           **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a computer env naming its base, driver and apps, each app with its settings beside it, which
+        ``from_toml`` reads back as it. What it composed isn't written: a run of the folder composes it."""
+        toml = {"type": self.type, "environment_name": self.environment_name, "computer": out.ref(self.computer),
+                "driver": out.ref(self.driver)}
+        if self.apps:
+            toml["apps"] = [_app_entry(out.ref(app), self.app_settings.get(app.environment_name)) for app in self.apps]
+        for key in ("display", "network", "computer_settings", "tools"):
+            if value := getattr(self, key):
+                toml[key] = value
+        return toml
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
@@ -287,17 +301,19 @@ class ComputerEnv(Env):
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
                      env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "",
-                     sites_later: bool = False, live_hosts: tuple[str, ...] = ()) -> DeployedEnv:
+                     sites_later: bool = False, live_hosts: tuple[str, ...] = (),
+                     control_token: Optional[str] = None) -> DeployedEnv:
         """With ``tool_prefix``, its driver serves its tools under it, with ``reach``, a network that restricts its
-        egress allows that URL's host too, and the ``live_hosts`` of the run's live websites, and with ``sites_later``
-        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them: what a multi env gives
-        each of its computers."""
+        egress allows that URL's host too, and the ``live_hosts`` of the run's live websites, with ``sites_later``
+        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them, and with
+        ``control_token`` its framework-only routes take that token, not one of its own: what a multi env gives each
+        of its computers."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
             env_params=env_params, tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
-            live_hosts=tuple(live_hosts))
+            live_hosts=tuple(live_hosts), control_token=control_token)
 
     async def route_sites(self, sites: list[dict]) -> None:
         """Route ``sites`` on this computer, deployed with ``sites_later``, launch its held apps and finish its boot;
@@ -517,6 +533,13 @@ def _listed_apps(refs: list, ctx: AuthoringContext) -> tuple[list[ComputerAppEnv
     if problems:
         ctx.refuse(problems)
     return apps, app_settings
+
+
+def _app_entry(ref: str | dict, settings: Optional[dict]) -> str | dict:
+    """An env.toml's ``apps`` entry: the app's ref, in a table with its ``settings`` beside it when it has some."""
+    if not settings:
+        return ref
+    return {**(ref if isinstance(ref, dict) else {"env": ref}), "settings": dict(settings)}
 
 
 def _not_an_app(env: Env) -> str | None:

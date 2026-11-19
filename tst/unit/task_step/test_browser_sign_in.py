@@ -102,9 +102,8 @@ async def test_a_browser_in_a_multi_envs_computer_is_signed_in_with_the_sites_se
     assert (json.loads(session.content), session.headers["authorization"]) == ({"user": "alex"}, "Bearer gateway-token")
     assert (str(add.url), add.headers["authorization"]) == (f"{_DESKTOP}/svc/chromium/agentenv", "Bearer desktop-token")
     body = json.loads(add.content)
-    unplaced = {key: value for key, value in _SESSION.items() if key != "path"}
     assert body["method"] == "data/add" and body["params"]["parts"] == [{"kind": "data", "data": {
-        "cookies": [{**unplaced, "url": "https://shop.test/"}, {**unplaced, "path": "/", "domain": ".shop.test"}],
+        "cookies": [{**_SESSION, "path": "/", "url": "https://shop.test/"}, {**_SESSION, "path": "/", "domain": ".shop.test"}],
         "local_storage": []}}]
     assert context.metadata["browser_steps"]["in"] == {
         "env_id": "office", "browser": None, "site": "shop-site", "user": "alex", "cookies": ["agentenv_session_shop"],
@@ -193,12 +192,14 @@ async def test_a_site_that_cant_sign_in_fails_the_step_before_the_browser_is_tou
     assert served == []
 
 
-def test_each_cookie_is_placed_on_each_name_the_site_is_reached_by():
+def test_each_cookie_is_placed_on_each_name_the_site_is_reached_by_at_its_own_path():
     cookie = {"name": "s", "value": "v", "path": "/app", "max_age": 60, "domain": "ignored"}
     assert scoped([cookie], ["shop.test", "*.shop.test", "notes.localhost"]) == [
-        {"name": "s", "value": "v", "max_age": 60, "url": "https://shop.test/app"},
+        {"name": "s", "value": "v", "path": "/app", "max_age": 60, "url": "https://shop.test/app"},
         {"name": "s", "value": "v", "path": "/app", "max_age": 60, "domain": ".shop.test"},
-        {"name": "s", "value": "v", "max_age": 60, "url": "http://notes.localhost/app"}]
+        {"name": "s", "value": "v", "path": "/app", "max_age": 60, "url": "http://notes.localhost/app"}]
+    assert scoped([{"name": "s", "value": "v"}], ["shop.test"]) == [
+        {"name": "s", "value": "v", "url": "https://shop.test/", "path": "/"}]
 
 
 def test_the_step_round_trips_and_checks_its_fields(monkeypatch):

@@ -72,6 +72,14 @@ CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 # The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
 # it out of logged compose files.
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
+# The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
+CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
+# The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
+# who drives it, the role its browser's requests take.
+COMPUTERS_ENV = "COMPUTERS"
+# The route a clock follower long-polls, with its read token.
+CLOCK_WATCH_PATH = "/clock/watch"
+CLOCK_FOLLOWERS_PATH = "/clock/followers"
 # How long /clock/watch holds a watch naming the current version before answering it unchanged; a follower's request
 # timeout must be longer. The card's watch method advertises it as hold_s.
 CLOCK_WATCH_HOLD_S = 25.0
@@ -109,6 +117,10 @@ CARD_FETCH_TIMEOUT_S = 5.0
 # connection every caller shares, so a large service busy with another call can take a while, and a timeout
 # here fails the whole discovery, to be retried on the next connect.
 CHILD_DISCOVERY_TIMEOUT_S = 30.0
+
+# How long the gateway keeps an idle connection open (uvicorn's default is 5 s). A request a client sends on a pooled
+# connection as the server closes it is reset unread, so this outlasts any pause between an agent's tool calls.
+IDLE_CONNECTION_TIMEOUT_S = 3600
 
 # The GET /state field naming each tool name more than one source serves, with its sources: backing servers by name,
 # `gateway` for the gateway's own tools. Empty unless discovery found such a clash, which leaves the env serving none
@@ -158,6 +170,8 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+# Sent by a computer's site proxy: the computer whose browser made the request, which takes the role driving it now.
+AGENT_ENV_COMPUTER_HEADER = "AgentEnv-Computer"
 # Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
 AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 GATEWAY_PROVIDER_HEADERS_ENV = "AGENTENV_PROVIDER_REQUEST_HEADERS"
@@ -176,12 +190,14 @@ WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
 TOOL_ENABLE_ACTION = "enable"
 # The harness's routes that take the deploy's control token: the ones that change tool access, triggers and
-# notifications. Every other route stays open for now, the clock's writes included: callers outside agent-env set the
-# clock over plain HTTP and don't send the token yet.
+# notifications. The gateway also takes it for the data plane and for an MCP server's own endpoint behind its proxy
+# (Gateway._takes_control_token). Every other route stays open for now, the clock's writes included: callers outside
+# agent-env set the clock over plain HTTP and don't send the token yet.
 CONTROL_ROUTES = frozenset({
     f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
     "/triggers/register", "/triggers/remove", "/triggers/clear",
     "/notifications/config", "/notifications/take", "/notifications/clear",
+    CLOCK_FOLLOWERS_PATH,
 })
 
 
@@ -244,15 +260,17 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); declare_follower adds a follower after the gateway started (an agent the run deploys), with the read token its watches carry, and retire_follower removes one so writes stop waiting for it (an agent the run tears down); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
-            "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
+            "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, "time_zone": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
             "set_rate": {"method": "PUT", "endpoint": "/clock/set-rate", "request": {"type": "object", "properties": {"virtual_seconds_per_real_second": {"type": "number", "minimum": 0}, **_WAIT_FOLLOWERS}, "required": ["virtual_seconds_per_real_second"]}},
             "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
             "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {**_WAIT_FOLLOWERS}}},
             "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}},
-            "watch": {"method": "GET", "endpoint": "/clock/watch", "hold_s": CLOCK_WATCH_HOLD_S, "request": {"type": "object", "properties": {"after": {"type": "string"}, "follower": {"type": "string"}}}}}},
+            "declare_follower": {"method": "PUT", "endpoint": CLOCK_FOLLOWERS_PATH, "request": {"type": "object", "properties": {"name": {"type": "string"}, "read_token": {"type": "string"}}, "required": ["name", "read_token"]}},
+            "retire_follower": {"method": "DELETE", "endpoint": CLOCK_FOLLOWERS_PATH, "request": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+            "watch": {"method": "GET", "endpoint": CLOCK_WATCH_PATH, "hold_s": CLOCK_WATCH_HOLD_S, "request": {"type": "object", "properties": {"after": {"type": "string"}, "follower": {"type": "string"}}}}}},
         "required": False,
     },
     {
