@@ -14,8 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-#: Where the counts are kept, one small file per context, under the agent's user's home.
-TURNS_DIR = Path.home() / ".local" / "state" / "agentenv" / "turns"
 #: The snapshot extension's card param naming the fields of the state an SDK keeps in each snapshot: a caller grants
 #: the ``state`` object only to an agent whose card has it, since an SDK from before it refuses the object.
 SNAPSHOT_STATE_PARAM = "state"
@@ -30,13 +28,20 @@ class SnapshotState(BaseModel):
     turns: int = Field(ge=0)
 
 
+def turns_folder() -> Path:
+    """Where the counts are kept, one small file per context: ``agentenv/turns`` in the user's state folder,
+    ``$XDG_STATE_HOME`` when it's an absolute path, as the XDG spec has it, else ``~/.local/state``."""
+    state = os.environ.get("XDG_STATE_HOME", "")
+    return (Path(state) if os.path.isabs(state) else Path.home() / ".local" / "state") / "agentenv" / "turns"
+
+
 class TurnIndex:
     """Each context's count of started tasks, read from its file each time, so two servers on one home agree and memory
     holds nothing per context. A count that can't be written stays in memory, with a warning, so a read-only home costs
     only the count's survival across a restart."""
 
     def __init__(self, folder: Path | None = None) -> None:
-        self._folder = folder if folder is not None else TURNS_DIR
+        self._folder = folder if folder is not None else turns_folder()
         self._unwritten: dict[str, int] = {}
         self._warned: set[str] = set()
 

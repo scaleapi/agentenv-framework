@@ -1650,7 +1650,8 @@ are unaffected.
 
 Each task's user step carries its turn index, the number of tasks its context
 started before it. The SDK keeps each context's count on disk, under
-`~/.local/state/agentenv/turns/`, so a restarted server, or a context it dropped
+`agentenv/turns/` in the user's state folder (`$XDG_STATE_HOME`, else
+`~/.local/state`), so a restarted server, or a context it dropped
 from memory, goes on counting in a new document of the same session; a home it
 can't write keeps the counts in memory, with one warning. A snapshot carries the
 count in its `state` object, a JSON object that is the SDK's own: on save the

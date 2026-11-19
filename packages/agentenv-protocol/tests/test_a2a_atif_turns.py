@@ -145,7 +145,7 @@ def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_int
     assert saved.json()["objects"]["state"]["size_bytes"] == len(objects["state"])
     assert json.loads(objects["state"]) == {"turns": 2}
     # Another container: none of the first one's counts.
-    monkeypatch.setattr(_turn_index, "TURNS_DIR", tmp_path / "fresh-agent")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "fresh-agent"))
     with TestClient(_snapshotting().create_app()) as client:
         loaded = client.put("/ext/snapshot", json={"target_context_id": "ctx-restored", "objects": {
             "trajectory": _grant("http-get", "trajectory", "application/octet-stream"),
@@ -277,6 +277,18 @@ def test_a_save_while_a_task_runs_is_answered_without_waiting_for_it(objects: di
     assert saved.status_code == 200, saved.text
     # The running task started before the capture, so the count has it.
     assert json.loads(objects["state"]) == {"turns": 2}
+
+
+@pytest.mark.parametrize("state_home, folder", [
+    ("{tmp}/state", "{tmp}/state/agentenv/turns"),
+    ("", "{home}/.local/state/agentenv/turns"),
+    ("relative/state", "{home}/.local/state/agentenv/turns"),
+], ids=["xdg-state-home", "unset", "relative-is-ignored"])
+def test_the_counts_live_in_the_users_state_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state_home: str,
+                                                   folder: str) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_STATE_HOME", state_home.format(tmp=tmp_path))
+    assert _turn_index.turns_folder() == Path(folder.format(tmp=tmp_path, home=tmp_path / "home"))
 
 
 def test_two_servers_on_one_home_share_its_counts(tmp_path: Path) -> None:
