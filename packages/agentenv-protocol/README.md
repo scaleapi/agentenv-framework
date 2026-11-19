@@ -1657,9 +1657,10 @@ count in its `state` object, a JSON object that is the SDK's own: on save the
 SDK uploads it after the agent's handler returns and adds it to the answer, and
 on load it reads it before the agent's handler runs and seeds the context the
 handler restored into, whose next task goes on from the snapshot's count in a
-new document. The SDK takes its state between turns: a save or load holds the
-context, so a task of it that would start meanwhile waits until the agent's
-handler returns. The agent's handlers leave `state` alone. The card's snapshot
+new document. While such a save or load is in flight, a task of its context
+waits to start until the agent's handler returns, so the count is the
+conversation's the agent captured; a task already running goes on, as a capture
+mid-task expects. The agent's handlers leave `state` alone. The card's snapshot
 extension names the state the SDK keeps (`"state": ["turns"]` in its params,
 `SNAPSHOT_STATE_PARAM`), and agent-env grants the object only to an agent whose
 card has it, since an SDK from before it refuses the object.

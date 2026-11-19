@@ -43,15 +43,15 @@ from agentenv_protocol.atif import errors_in, validate
 _IDENTITY = AgentIdentity(name="toy-agent", description="test", version="2.0")
 
 
-def _snapshotting(*, atif: Any = Hooks, save_hold: _Hold | None = None) -> AgentEnvAgent:
+def _snapshotting(*, atif: Any = Hooks, save_hold: _Hold | None = None, run_hold: _Hold | None = None) -> AgentEnvAgent:
     """The toy agent with a snapshot extension of its own, whose save and load the SDK's state rides beside; a save
-    waits at ``save_hold``, as one uploading the conversation it captured would."""
+    waits at ``save_hold``, as one uploading the conversation it captured would, and a turn holds at ``run_hold``."""
     extensions = (enable(TRAJECTORY_V1, live=True, native=NATIVE, **({"atif": atif} if atif else {})),)
 
     @a2a_agent(identity=_IDENTITY, extensions=extensions)
     class Snapshotting(AgentEnvAgent):
         async def run(self, request: TaskRequest) -> TaskResult:
-            return await _turn(request, _Hold())
+            return await _turn(request, run_hold or _Hold())
 
         @extension(SNAPSHOT_V1.save)
         async def save(self, request: ObjectSnapshotSaveRequest) -> ObjectSnapshotSaveResponse:
@@ -229,6 +229,28 @@ def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(o
     assert saved.status_code == 200, saved.text
     assert json.loads(objects["state"]) == {"turns": 2}
     assert [user["turn"] for user in _users(document)] == [0, 1, 2]
+
+
+def test_a_save_while_a_task_runs_is_answered_without_waiting_for_it(objects: dict[str, bytes]) -> None:
+    running = _Hold()
+    with TestClient(_snapshotting(run_hold=running).create_app()) as client:
+        _ended(client, _send(client, "work t1", "m-t1"))
+        task_id = _send(client, "late t2", "m-t2")
+        running.reached()
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            saving = pool.submit(client.post, "/ext/snapshot", json={"context_id": "ctx-1", "objects": {
+                "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
+                "state": _grant("http-put", "state", "application/json")}})
+            try:
+                saved = saving.result(timeout=5)
+            finally:
+                running.resume.set()
+                running.reached(2)
+                running.resume.set()
+        _ended(client, task_id)
+    assert saved.status_code == 200, saved.text
+    # The running task started before the capture, so the count has it.
+    assert json.loads(objects["state"]) == {"turns": 2}
 
 
 def test_two_servers_on_one_home_share_its_counts(tmp_path: Path) -> None:

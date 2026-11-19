@@ -12,7 +12,7 @@ import tempfile
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, TypeVar, get_args, get_origin, get_type_hints
@@ -247,6 +247,39 @@ class _BoundedContextLocks:
                 # The temporary excess is proportional only to live work; it
                 # is removed as soon as one of those contexts becomes idle.
                 return
+
+
+@dataclass(slots=True)
+class _InFlight:
+    count: int = 0
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class _SnapshotsInFlight:
+    """Each context's snapshots in flight that carry the SDK's state: a task of the context waits to start until none
+    is, so the turn count a snapshot saves or restores is its conversation's. A running task isn't held."""
+
+    def __init__(self) -> None:
+        self._contexts: dict[str, _InFlight] = {}
+
+    @asynccontextmanager
+    async def holding(self, context_id: str | None) -> AsyncIterator[None]:
+        if context_id is None:
+            yield
+            return
+        entry = self._contexts.setdefault(context_id, _InFlight())
+        entry.count += 1
+        try:
+            yield
+        finally:
+            entry.count -= 1
+            if not entry.count:
+                del self._contexts[context_id]
+                entry.done.set()
+
+    async def wait(self, context_id: str) -> None:
+        while (entry := self._contexts.get(context_id)) is not None:
+            await entry.done.wait()
 
 
 class AgentEnvAgent:
@@ -597,8 +630,7 @@ class _SdkServices:
         self.task_trajectories = TaskTrajectories(native=native, atif=atif)
         #: Whether the card offers atif/1, served from the copy an adapter builds.
         self.serves_atif = atif is not None
-        #: Each context's lock, held while a task of it runs, and while its snapshot state is taken.
-        self.context_locks = _BoundedContextLocks()
+        self.snapshots_in_flight = _SnapshotsInFlight()
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -971,23 +1003,24 @@ class _SdkServices:
 
     async def snapshot(self, name: str, request: Any, invoke: Callable[[], Awaitable[Any]]) -> Any:
         """An agent's snapshot ``save`` or ``load``, with the SDK's state, the context's turn count, uploaded after a
-        save and read before a load through the request's ``state`` grant. The SDK's state is taken between turns:
-        under the context's lock, so no task of it starts while the agent captures or restores it."""
+        save and read before a load through the request's ``state`` grant. While one is in flight no task of its
+        context starts, so the count is the conversation's the agent captured; a running task goes on, as a capture
+        mid-task expects."""
         grant = getattr(getattr(request, "objects", None), "state", None)
         if not self.serves_atif or grant is None:
             return await invoke()
-        context_id = request.context_id if name == "save" else request.target_context_id
-        async with self.context_locks.acquire(context_id) if context_id else nullcontext():
-            if name == "save":
+        if name == "save":
+            async with self.snapshots_in_flight.holding(request.context_id):
                 answer = await invoke()
                 state = SnapshotState(turns=self.task_trajectories.turns(request.context_id))
-                uploaded = await upload(grant, state.model_dump_json().encode())
-                return {**answer, "objects": {**answer["objects"],
-                                              "state": uploaded.model_dump(mode="json", exclude_none=True)}}
-            state = await _read_snapshot_state(grant)
+            uploaded = await upload(grant, state.model_dump_json().encode())
+            return {**answer, "objects": {**answer["objects"],
+                                          "state": uploaded.model_dump(mode="json", exclude_none=True)}}
+        state = await _read_snapshot_state(grant)
+        async with self.snapshots_in_flight.holding(request.target_context_id):
             answer = await invoke()
             self.task_trajectories.restored(str(answer["context_id"]), state.turns)
-            return answer
+        return answer
 
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
@@ -1466,6 +1499,7 @@ class _StandardExecutor:
         self._services = services
         self._workspace = workspace
         self._streaming = streaming
+        self._context_locks = _BoundedContextLocks()
 
     async def execute(self, context: Any, event_queue: Any) -> None:
         from a2a.server.tasks import TaskUpdater
@@ -1492,7 +1526,7 @@ class _StandardExecutor:
                 **_thaw(getattr(context.message, "metadata", None) or {}),
                 **({"role": task_config.role} if task_config.role is not None else {}),
             }
-            async with self._services.context_locks.acquire(task.context_id):
+            async with self._context_locks.acquire(task.context_id):
                 parts = tuple(_from_a2a_part(part) for part in (context.message.parts or []))
                 turn = None
                 if self._services.serves_atif:
@@ -1504,6 +1538,7 @@ class _StandardExecutor:
                         agent_version=card.version,
                         agent_model=_config_model(task_config),
                     )
+                await self._services.snapshots_in_flight.wait(task.context_id)
                 trajectories.start(task.id, turn)
                 request = TaskRequest(
                     task_id=task.id,
