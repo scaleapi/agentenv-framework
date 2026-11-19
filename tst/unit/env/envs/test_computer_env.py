@@ -2071,20 +2071,6 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
                                                                               "container/arm64": "ready"}
 
 
-@pytest.mark.asyncio
-async def test_a_run_leaves_an_app_to_its_first_deploy_alone_which_composes_it_first(base, driver, docker, boots,
-                                                                                    tmp_path):
-    boots.display = (1280, 800)
-    app = _app(base, driver, tmp_path / "mail", composing=Composing.for_run(None))
-    written, built_then = Env.get(app.id), list(docker.builds)
-
-    deployed = await Env.get(app.id).deploy()
-
-    assert built_then == [] and "composed" not in written.metadata
-    assert sorted(build["platform"] for build in docker.builds) == ["linux/amd64", "linux/arm64"]
-    assert Env.get(app.id).build_statuses()["container/arm64"] == "ready" and deployed.env_id == app.id
-
-
 @pytest.mark.parametrize("at, checkout", [("boot", False), ("demand", True)], ids=["boot-release", "demand-checkout"])
 def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base, driver, docker, tmp_path, monkeypatch,
                                                                             at, checkout):

@@ -17,7 +17,6 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -35,7 +34,7 @@ from agent_env.config import configure, reset_config
 from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
-from agent_env.env.envs.computer.utils import builder, inside
+from agent_env.env.envs.computer.utils import builder, composer, inside
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
@@ -170,9 +169,10 @@ def cdp_clients(tmp_path_factory) -> Path:
 
 
 def _composed(root: Path, bundle, env_id: str | None = None, disks: bool = False):
-    """``bundle`` written and its computers composed as a run on this machine composes them, its containers alone and
-    no computer app alone, unless ``disks``, which composes every form of each base and every app alone too; a fixture
-    of a computer app alone (``env_id``) has its apps composed alone."""
+    """``bundle`` written and its computers composed as a run on this machine composes them, its containers alone,
+    unless ``disks``, which composes every form of each base too. A computer app among them is composed alone only
+    when it's ``env_id`` or with ``disks``: a fixture of a desktop deploys its apps on the desktop, never alone, and a
+    test that deploys one alone has its deploy compose it first."""
     patch = pytest.MonkeyPatch()
     patch.chdir(root)
     patch.setenv("XDG_STATE_HOME", str(root / "state"))
@@ -183,16 +183,29 @@ def _composed(root: Path, bundle, env_id: str | None = None, disks: bool = False
     package_cache.seed()
     with namespace_routing():
         plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
+        alone = pytest.MonkeyPatch()
+        if not disks:
+            alone.setattr(composer, "compose", _no_app_alone_but(env_id))
         try:
-            composing = Composing() if disks else replace(Composing.for_run(None), apps_alone=env_id is not None)
             materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)),
-                        composing=composing)
+                        composing=Composing() if disks else Composing.for_run(None))
         finally:
+            alone.undo()
             package_cache.keep()
         yield Env.get(env_id or f"{bundle.id_root}/desktop")
     reset_artifact_store()
     reset_config()
     patch.undo()
+
+
+def _no_app_alone_but(target: str | None):
+    """``composer.compose``, but composing no computer app alone other than ``target``."""
+    compose = composer.compose
+
+    def composing(env, pairs=None, composing=Composing()):
+        return {} if env.type == "computer_app" and env.id != target else compose(env, pairs, composing)
+
+    return composing
 
 
 #: How many characters of docker's stderr a failed call's error carries: the last, where docker says what failed.
