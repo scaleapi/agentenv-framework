@@ -47,7 +47,7 @@ def test_installed_agent_is_registered_in_the_instance_store():
         "agent_env.a2a_agent.store.get_a2a_agent_instance_store",
         return_value=store,
     ):
-        deployed = _step()._register_instance(agent, "https://a2a.example", _sandbox_record(), card)
+        deployed = _step()._register_instance(agent, "https://a2a.example", _sandbox_record(), card, control_token="t")
 
     assert deployed.instance_id == "claude-code-cli-abcd1234"
     (created, _ttl), = store.created
@@ -57,6 +57,7 @@ def test_installed_agent_is_registered_in_the_instance_store():
     assert created.sandbox_id == "sb-1"
     assert created.sandbox_type == "modal_vm"
     assert created.agent_card == card
+    assert created.control_token == "t"
 
 
 def test_instance_ttl_mirrors_the_sandbox_expiry():

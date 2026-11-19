@@ -100,7 +100,7 @@ class RegisterAgentTriggersStep(TaskStep):
         body: dict = {"triggers": self.triggers}
         url = f"{agent.a2a_url or agent.api_url}{endpoint}"
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=body, timeout=30)
+            resp = await client.post(url, json=body, headers=agent.control_headers, timeout=30)
             if resp.status_code >= 400:
                 raise RuntimeError(f"agent trigger registration failed (HTTP {resp.status_code}): {resp.text}")
             result = resp.json()

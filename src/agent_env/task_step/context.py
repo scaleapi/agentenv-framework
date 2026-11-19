@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentenv_protocol import client as protocol_v1
+
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, host_url_for
@@ -128,6 +130,8 @@ class DeployedAgent:
     installed_container: str | None = None
     # The envs deploy_agent registered with it, by id.
     env_ids: list[str] = field(default_factory=list)
+    # The token its extension routes take, from the deploy that started it; None for an agent agent-env didn't start.
+    control_token: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployedAgent:
@@ -144,7 +148,12 @@ class DeployedAgent:
             on_host=bool(data.get("on_host", False)),
             installed_container=data.get("installed_container"),
             env_ids=list(data.get("env_ids") or []),
+            control_token=data.get("control_token"),
         )
+
+    @property
+    def control_headers(self) -> dict[str, str]:
+        return protocol_v1.control_token_headers(self.control_token)
 
     def url_for(self, sandbox_type: str | None, *, on_host: bool = False) -> str:
         """This agent's A2A URL as an agent on ``sandbox_type`` reaches it, in a container there or, ``on_host``, on

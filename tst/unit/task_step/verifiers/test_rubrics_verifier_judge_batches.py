@@ -262,7 +262,7 @@ async def test_a_cancelled_batch_cancels_its_remote_judge_task(monkeypatch):
     monkeypatch.setattr(protocol, "cancel_a2a_task", fake_cancel)
     call = asyncio.create_task(v._invoke_judge_a2a(
         eval_prompt="grade", judge_a2a_url="http://judge", judge_agent_card={},
-        judge_agent=SimpleNamespace(sandbox_id="sb-1")))
+        judge_agent=SimpleNamespace(sandbox_id="sb-1", control_headers={})))
     await polling.wait()
     call.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -11,6 +11,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import httpx
@@ -64,6 +65,7 @@ async def capture_workspace(
     artifact_id: str,
     timeout_seconds: float,
     sandbox_type: str | None,
+    headers: Mapping[str, str],
 ) -> WorkspaceCapture:
     """Capture the agent's workspace below a fresh prefix and wrap it as a universe.
 
@@ -103,6 +105,7 @@ async def capture_workspace(
         timeout=timeout_seconds,
         response_model=ObjectSnapshotSaveResponse,
         store=store,
+        headers=headers,
     )
 
     # The agent's answer is only a claim: a snapshot missing either object cannot be restored.
@@ -149,6 +152,7 @@ async def read_partial_trajectory(
     timeout_seconds: float,
     trajectory_output_prefix: str,
     sandbox_type: str | None,
+    headers: Mapping[str, str],
 ) -> TrajectoryCapture:
     """Read the trajectory-so-far for an in-progress run.
 
@@ -191,7 +195,8 @@ async def read_partial_trajectory(
             return TrajectoryCapture(reason="trajectory_grant_unavailable")
     try:
         fetched = await fetch_trajectory(
-            a2a_url + get_path, {"context_id": context_id}, upload=upload, timeout=timeout_seconds, store=store
+            a2a_url + get_path, {"context_id": context_id}, upload=upload, timeout=timeout_seconds, store=store,
+            headers=headers,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:

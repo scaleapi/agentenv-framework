@@ -10,10 +10,13 @@ import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
+from agentenv_protocol.types import CONTROL_TOKEN_ENV
 
 from agent_env.config import get_config
-from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.config.errors import ConfigError
+from agent_env.config.model import MODEL_HEADERS_ENV, no_key_for
 from agent_env.entity.refs import EntityRef
 from agent_env.plugins._bundles import installed_aliases
 from agent_env.store.base import NotFoundError
@@ -41,6 +44,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_url_rewrites,
 )
 from agent_env.attribution import Attribution
+from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 
 if TYPE_CHECKING:
     from agent_env.a2a_agent.store import A2AAgentQuery, A2AAgentStore
@@ -68,6 +72,9 @@ _DIND_PORT = 2375
 # Metadata an agent whose commands its player runs sets False: it is given no model endpoint, key or headers, whatever
 # a deploy passes, and none of the object store's shared credentials.
 TAKES_CREDENTIALS = "takes_credentials"
+# How an agent sent to a URL other than the configured endpoint is given that URL's key.
+AGENT_KEY_HOW = ("LITELLM_API_KEY in the step's env_vars or the agent's default_env_vars, or litellm_api_key in the "
+                 "run's overrides or the step's step_params")
 MODEL_CREDENTIALS_ENV = ("LITELLM_API_KEY", "LITELLM_BASE_URL", MODEL_HEADERS_ENV)
 
 
@@ -101,6 +108,8 @@ class DeployedA2AAgent:
     created_at_utc: str | None = None
     expires_at_utc: str | None = None
     network_policy: dict | None = None
+    # The token the agent's extension routes take: agent-env holds it and gives no other agent.
+    control_token: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "DeployedA2AAgent":
@@ -115,7 +124,12 @@ class DeployedA2AAgent:
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
             network_policy=data.get("network_policy"),
+            control_token=data.get("control_token"),
         )
+
+    @property
+    def control_headers(self) -> dict[str, str]:
+        return protocol_v1.control_token_headers(self.control_token)
 
 
 @dataclass(frozen=True)
@@ -261,6 +275,7 @@ class A2AAgent:
             operation=f"skill add ({name})",
             timeout=TRANSFER_TIMEOUT_SECONDS,
             store=store,
+            headers=deployed.control_headers,
         )
 
     @staticmethod
@@ -531,6 +546,9 @@ class A2AAgent:
             resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
+        # Last, so no caller's env var stands in for it: the agent's extension routes take it from here on.
+        control_token = new_control_token()
+        merged_env[CONTROL_TOKEN_ENV] = control_token
         image = self.docker_image_artifact
         image_name = image.image_name
         if provider is None:
@@ -590,6 +608,7 @@ class A2AAgent:
                 a2a_url=a2a_url, sandbox_id=self._sandbox.sandbox_id,
                 agent_card=agent_card, sandbox_type=self._sandbox.type,
                 network_policy=self._sandbox.network_policy.to_dict() if self._sandbox.network_policy else None,
+                control_token=control_token,
             )
             from agent_env.a2a_agent.store import get_a2a_agent_instance_store
             deployed = get_a2a_agent_instance_store().create_instance(deployed, ttl_seconds)
@@ -609,11 +628,16 @@ class A2AAgent:
 
     def _with_model_credentials(self, env_vars: dict[str, str], config) -> dict[str, str]:
         """``env_vars`` with the model endpoint, key and headers each taken from config when neither they nor
-        ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them."""
+        ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them. The
+        configured key goes only with the configured endpoint: an agent sent elsewhere with no key of its own is
+        refused before anything starts."""
         if not self.metadata.get(TAKES_CREDENTIALS, True):
             return {name: value for name, value in env_vars.items() if name not in MODEL_CREDENTIALS_ENV}
         resolved_env = dict(env_vars)
         if "LITELLM_API_KEY" not in resolved_env and "LITELLM_API_KEY" not in self.default_env_vars:
+            url = resolved_env.get("LITELLM_BASE_URL") or self.default_env_vars.get("LITELLM_BASE_URL")
+            if url and not config.is_model_endpoint(url):
+                raise ConfigError(f"Agent {self.id!r}: {no_key_for(url, AGENT_KEY_HOW)}")
             resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
         if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
             resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()

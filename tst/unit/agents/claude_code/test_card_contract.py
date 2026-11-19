@@ -77,6 +77,7 @@ def test_the_config_takes_every_field_prompt_agent_sends_that_the_cli_has(app):
 def test_request_and_response_contracts(app):
     methods = {uri: ext["params"].get("methods", {}) for uri, ext in _extensions(app).items()}
     assert methods["urn:agentenv:trajectory/v1"]["get"]["request"] == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},

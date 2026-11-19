@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
@@ -28,6 +29,11 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ..atif import FORMAT as ATIF_FORMAT
+from ..atif import PROFILE_KEY as ATIF_PROFILE_KEY
+from ..atif import PROFILE_VERSION as ATIF_PROFILE_VERSION
+from ..atif import SCHEMA_VERSION as ATIF_SCHEMA_VERSION
+from ._atif_copy import TurnStart
 from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
@@ -39,6 +45,8 @@ from .extensions import (
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
+    CLOCK_V1,
+    ClockSyncTimeRequest,
     ContextEventsTrajectoryRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
@@ -53,12 +61,22 @@ from .extensions import (
     TaskEventsTrajectoryRequest,
     TaskObjectTrajectoryRequest,
     TaskTrajectoryRequest,
+    AtifEventsResponse,
+    AtifObjectsResponse,
+    AtifUploadedObjects,
     TrajectoryEventsResponse,
+    TrajectoryObjectsResponse,
     TrajectoryState,
+    TrajectoryUploadedObjects,
     TriggerDecideRequest,
     TriggerRegisterRequest,
     enable,
 )
+from ..computer.errors import ComputerError
+from ..errors import AgentEnvError
+from ..types import error_body
+from . import clock as agent_clock
+from .control_token import REFUSAL, carries_control_token, log_guard, log_refusal, take_control_token
 from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
 from .registry import RegisteredOperation, build_registry
 from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
@@ -512,6 +530,11 @@ def _unwrap_bound_handler(handler: Callable) -> Callable:
     return resolved
 
 
+def _agent_env_error_response(error: AgentEnvError) -> JSONResponse:
+    """An extension's ``AgentEnvError`` as its status and the body env servers answer with."""
+    return JSONResponse(error_body(**error.fields()), status_code=error.status)
+
+
 def _opaque_extension_error(stage: str) -> HTTPException:
     """Log an extension failure while keeping implementation details off the wire."""
     correlation_id = uuid.uuid4().hex
@@ -546,7 +569,16 @@ class _SdkServices:
         )
         self.mcp_servers: dict[str, dict[str, Any]] = {}
         self.cdp_endpoints: dict[str, dict[str, Any]] = {}
-        self.task_trajectories = TaskTrajectories()
+        trajectory = self._activations.get(TRAJECTORY_V1.uri)
+        native = trajectory.options.get("native") if trajectory is not None else None
+        atif = trajectory.options.get("atif") if trajectory is not None else None
+        #: What a trajectory read may name, as the card's trajectory ``formats`` lists them.
+        self.trajectory_formats: tuple[str, ...] = (
+            (native, ATIF_FORMAT) if atif is not None else (native,) if native else ()
+        )
+        self.task_trajectories = TaskTrajectories(native=native, atif=atif)
+        #: Whether the card offers atif/1, served from the copy an adapter builds.
+        self.serves_atif = atif is not None
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -631,6 +663,7 @@ class _SdkServices:
             (TRIGGERS_V1.uri, "register"): self.triggers_register,
             (TRIGGERS_V1.uri, "decide"): self.triggers_decide,
             (TRIGGERS_V1.uri, "state"): self.triggers_state,
+            (CLOCK_V1.uri, "sync_time"): self.clock_sync_time,
         }
 
     async def agent_config_set(self, request: AgentConfig) -> dict[str, Any]:
@@ -799,13 +832,19 @@ class _SdkServices:
         | ContextObjectTrajectoryRequest
         | ContextEventsTrajectoryRequest,
     ) -> Any:
+        if request.format == ATIF_FORMAT:
+            if isinstance(request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)):
+                return self._atif_events(request)
+            return await self._atif_document(request)
         if isinstance(
             request, (TaskEventsTrajectoryRequest, ContextEventsTrajectoryRequest)
         ):
             return self._trajectory_events(request)
+        if isinstance(request, (TaskObjectTrajectoryRequest, ContextObjectTrajectoryRequest)):
+            _refuse_turn_objects(request)
         if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
-            body = self.task_trajectories.final(request.task_id)
-            if body is None:
+            trajectory = self.task_trajectories.final(request.task_id)
+            if trajectory is None:
                 raise HTTPException(
                     status_code=404,
                     detail=(
@@ -813,19 +852,109 @@ class _SdkServices:
                     ),
                 )
         else:
-            body = self.task_trajectories.context_events(request.context_id)
-            if body is None:
+            trajectory = self.task_trajectories.context_events(request.context_id)
+            if trajectory is None:
                 raise HTTPException(
                     status_code=404, detail=f"Unknown context '{request.context_id}'"
                 )
         if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
-            return {"trajectory": json.loads(body)}
-        uploaded = await upload(request.objects.trajectory, body)
-        return {
-            "objects": {
-                "trajectory": uploaded.model_dump(mode="json"),
-            }
-        }
+            return {"trajectory": json.loads(trajectory.body), "format": trajectory.format}
+        uploaded = await upload(request.objects.trajectory, trajectory.body)
+        return TrajectoryObjectsResponse(
+            objects=TrajectoryUploadedObjects(trajectory=uploaded), format=trajectory.format
+        )
+
+    def _atif_events(
+        self, request: TaskEventsTrajectoryRequest | ContextEventsTrajectoryRequest
+    ) -> dict[str, Any]:
+        """An atif/1 cursor page: the copy's closed steps after step ``after``, of the task or of
+        the whole context."""
+        max_steps = request.limit or MAX_TRAJECTORY_READ_EVENTS
+        try:
+            if isinstance(request, TaskEventsTrajectoryRequest):
+                cursor = self.task_trajectories.atif_task_page(
+                    request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                )
+                unknown = f"Unknown task '{request.task_id}'"
+            else:
+                cursor = self.task_trajectories.atif_context_page(
+                    request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                )
+                unknown = f"Unknown context '{request.context_id}'"
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if cursor is None:
+            raise HTTPException(status_code=404, detail=unknown)
+        page = cursor.page
+        return AtifEventsResponse(
+            context_id=cursor.context_id,
+            task_id=cursor.task_id,
+            state=cursor.state,
+            **_atif_versions(page.header),
+            header=page.header,
+            subagents=page.subagents,
+            events=page.steps,
+            next=page.next,
+            has_more=page.has_more,
+        ).model_dump(mode="json", exclude_none=True)
+
+    async def _atif_document(
+        self,
+        request: TaskTrajectoryRequest
+        | TaskObjectTrajectoryRequest
+        | ContextTrajectoryRequest
+        | ContextObjectTrajectoryRequest,
+    ) -> dict[str, Any]:
+        """A whole atif/1 document: a task read's as it stood when the task ended, with the
+        task's aux log and turn context, or a context read's live page; inline, or uploaded
+        through the request's grants."""
+        served: dict[str, Any] = {}
+        if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
+            read = self.task_trajectories.atif_task(request.task_id)
+            if read is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No completed trajectory available for task '{request.task_id}'",
+                )
+            document = read.document
+            served = {"aux": [entry.wire() for entry in read.aux], "turn_context": read.turn.wire()}
+        else:
+            if isinstance(request, ContextObjectTrajectoryRequest):
+                _refuse_turn_objects(request)
+            document = self.task_trajectories.atif_context(request.context_id)
+            if document is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Context '{request.context_id}' has no {ATIF_FORMAT} step to serve yet",
+                )
+        versions = _atif_versions(document)
+        if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
+            return {"trajectory": document, "format": ATIF_FORMAT, **versions, **served}
+        objects = request.objects
+        uploaded = AtifUploadedObjects(
+            trajectory=await upload(objects.trajectory, _json_bytes(document)),
+            aux=None if objects.aux is None else await upload(objects.aux, _json_bytes(served["aux"])),
+            turn_context=(
+                None
+                if objects.turn_context is None
+                else await upload(objects.turn_context, _json_bytes(served["turn_context"]))
+            ),
+        )
+        return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
+
+    def check_trajectory_format(self, format: str | None) -> None:
+        """Refuse a trajectory read naming a format the card doesn't offer, before any handler
+        runs, the agent's own included."""
+        if format is None or format in self.trajectory_formats:
+            return
+        offered = ", ".join(self.trajectory_formats)
+        raise AgentEnvError(
+            "format_not_offered",
+            f"the trajectory format {format!r} is not offered; this agent offers {offered}"
+            if offered
+            else f"the trajectory format {format!r} is not offered; this agent's card lists no formats, "
+            "so its reads take none",
+        )
 
     def _trajectory_events(
         self, request: TaskEventsTrajectoryRequest | ContextEventsTrajectoryRequest
@@ -875,6 +1004,22 @@ class _SdkServices:
 
     async def triggers_state(self) -> dict[str, Any]:
         return self.trigger_engine.state()
+
+    async def clock_sync_time(self, request: ClockSyncTimeRequest) -> dict[str, Any]:
+        try:
+            return await agent_clock.sync_time(**request.model_dump())
+        except ComputerError as exc:
+            raise HTTPException(status_code=exc.STATUS, detail=f"{exc.CODE}: {exc}") from exc
+
+
+def _with_clock(definition: _AgentDefinition) -> _AgentDefinition:
+    """``definition`` serving clock/v1 where the agent's image runs the clock follower, so every agent in such an
+    image follows the env's clock with no code of its own, and takes back the task's zone if it restarted mid-run;
+    unchanged elsewhere, or where the agent declares it."""
+    if not agent_clock.follows() or any(a.definition.uri == CLOCK_V1.uri for a in definition.extensions):
+        return definition
+    agent_clock.restore_zone()  # a server restarted mid-run takes back the task's zone
+    return dataclasses.replace(definition, extensions=(*definition.extensions, ExtensionActivation(CLOCK_V1)))
 
 
 class DefaultExtensionHandlers:
@@ -956,6 +1101,26 @@ def _serving_peer_tools(
     return lifespan
 
 
+def _taking_the_control_token(
+    application: "A2AAgentApplication",
+    inner: Callable[[Starlette], AbstractAsyncContextManager] | None,
+) -> Callable[[Starlette], AbstractAsyncContextManager]:
+    """The application's lifespan, ``inner``'s if it has one: serving starts by taking the agent's control token out of
+    the environment, and the extension routes take it from then on. An application that isn't served stays open."""
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[Any]:
+        application.control_token = take_control_token() or application.control_token
+        log_guard(application.control_token)
+        if inner is None:
+            yield None
+        else:
+            async with inner(app) as state:
+                yield state
+
+    return lifespan
+
+
 class A2AAgentApplication:
     """Resolved Agent Card, extension routes, and A2A task executor."""
 
@@ -968,6 +1133,7 @@ class A2AAgentApplication:
                 "agent instance is already bound to an application; create a new "
                 "agent instance for each application"
             )
+        definition = _with_clock(definition)
         self.agent = agent
         self.definition = definition
         self.rpc_path = _rpc_path(definition.identity.url)
@@ -1065,10 +1231,12 @@ class A2AAgentApplication:
         if self.services.peers is not None:
             routes.append(Route(PEER_MCP_PATH, self.services.peers.app))
             lifespan = _serving_peer_tools(self.services.peers, lifespan)
-        kwargs = {"routes": routes, "middleware": [Middleware(_ServingOnItsPort)]}
-        if lifespan is not None:
-            kwargs["lifespan"] = lifespan
-        self.app = Starlette(**kwargs)
+        self.control_token: str | None = None
+        self.app = Starlette(
+            routes=routes,
+            middleware=[Middleware(_ServingOnItsPort)],
+            lifespan=_taking_the_control_token(self, lifespan),
+        )
 
         try:
             from a2a.server.apps import A2AStarletteApplication
@@ -1135,6 +1303,9 @@ class A2AAgentApplication:
         self, extension_uri: str, operation: RegisteredOperation
     ) -> Callable:
         async def invoke(request: Request) -> JSONResponse:
+            if not carries_control_token(request.headers, self.control_token):
+                log_refusal(request.method, request.url.path, request.client.host if request.client else None)
+                return JSONResponse({"detail": REFUSAL}, status_code=401)
             try:
                 if operation.definition.method == "GET":
                     payload = dict(request.query_params)
@@ -1156,8 +1327,15 @@ class A2AAgentApplication:
                     extension_request = None
                 else:
                     extension_request = request_model.model_validate(payload)
+                if extension_uri == TRAJECTORY_V1.uri:
+                    self.services.check_trajectory_format(extension_request.format)
+                    if extension_request.format == ATIF_FORMAT:
+                        # The SDK serves atif/1 from its own copy, context reads an agent binds included.
+                        handler = self.services.trajectory_get
             except HTTPException:
                 raise
+            except AgentEnvError as exc:
+                return _agent_env_error_response(exc)
             except ValidationError as exc:
                 raise HTTPException(
                     status_code=400, detail=_validation_error_detail(exc)
@@ -1208,6 +1386,8 @@ class A2AAgentApplication:
                 return JSONResponse(result)
             except HTTPException:
                 raise
+            except AgentEnvError as exc:
+                return _agent_env_error_response(exc)
             except TriggerError as exc:
                 raise HTTPException(
                     status_code=exc.status_code, detail=str(exc)
@@ -1263,13 +1443,22 @@ class _StandardExecutor:
                 **({"role": task_config.role} if task_config.role is not None else {}),
             }
             async with self._context_locks.acquire(task.context_id):
-                trajectories.start(task.id)
+                parts = tuple(_from_a2a_part(part) for part in (context.message.parts or []))
+                turn = None
+                if self._services.serves_atif:
+                    card = self._services.card
+                    turn = TurnStart(
+                        message_id=getattr(context.message, "message_id", None),
+                        parts=parts,
+                        agent_name=card.name,
+                        agent_version=card.version,
+                        agent_model=_config_model(task_config),
+                    )
+                trajectories.start(task.id, turn)
                 request = TaskRequest(
                     task_id=task.id,
                     context_id=task.context_id,
-                    parts=tuple(
-                        _from_a2a_part(part) for part in (context.message.parts or [])
-                    ),
+                    parts=parts,
                     config=task_config,
                     mcp_servers=self._services.task_mcp_servers(),
                     cdp_endpoints=self._services.cdp_endpoints,
@@ -1284,6 +1473,8 @@ class _StandardExecutor:
                         result = await self._run_streaming(request, updater, event_queue)
                     else:
                         result = await self._handler(request)
+                    if isinstance(result, TaskResult) and result.native_trajectory is not None:
+                        trajectory._hold_returned(result.native_trajectory.format)
                 except _TaskFailed as failed:
                     result = TaskResult.failure(
                         failed.error.code, failed.error.message, error_type=failed.error.error_type
@@ -1304,6 +1495,9 @@ class _StandardExecutor:
                 if result.outcome is TaskOutcome.FAILED
                 else TrajectoryState.COMPLETED,
                 native=None if native is None else _encode_trajectory(native.payload),
+                native_format=None if native is None else native.format,
+                final=result.parts,
+                error=result.error,
             )
             message = updater.new_agent_message(parts=parts)
             if result.outcome is TaskOutcome.FAILED:
@@ -1314,17 +1508,17 @@ class _StandardExecutor:
             trajectories.seal(task.id, TrajectoryState.CANCELED)
             raise
         except Exception:
-            trajectories.seal(task.id, TrajectoryState.FAILED)
             correlation_id = uuid.uuid4().hex
-            logger.exception(
-                "unhandled task execution error (correlation_id=%s)",
-                correlation_id,
-            )
             failure = TaskResult.failure(
                 "framework.unhandled_exception",
                 "An unexpected framework error occurred. "
                 f"Correlation ID: {correlation_id}",
                 error_type="infra_error",
+            )
+            trajectories.seal(task.id, TrajectoryState.FAILED, error=failure.error)
+            logger.exception(
+                "unhandled task execution error (correlation_id=%s)",
+                correlation_id,
             )
             await updater.failed(
                 message=updater.new_agent_message(parts=_to_a2a_parts(failure))
@@ -1402,6 +1596,39 @@ class _StandardExecutor:
 
         self._services.task_trajectories.request_cancel(context.task_id)
         await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
+
+
+def _refuse_turn_objects(
+    request: TaskObjectTrajectoryRequest | ContextObjectTrajectoryRequest,
+) -> None:
+    """``aux`` and ``turn_context`` grants ride only an atif/1 task read, which has them to upload."""
+    if request.objects.aux is not None or request.objects.turn_context is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"aux and turn_context objects go with an {ATIF_FORMAT} task read only",
+        )
+
+
+def _atif_versions(document: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What every atif/1 answer names beside its format: the served document's ATIF and profile
+    versions."""
+    if document is None:
+        return {"schema_version": ATIF_SCHEMA_VERSION, "profile_version": ATIF_PROFILE_VERSION}
+    profile = (document.get("extra") or {}).get(ATIF_PROFILE_KEY) or {}
+    return {
+        "schema_version": document.get("schema_version", ATIF_SCHEMA_VERSION),
+        "profile_version": profile.get("version", ATIF_PROFILE_VERSION),
+    }
+
+
+def _config_model(config: AgentConfig) -> str | None:
+    """The model an agent's own config names, for the atif/1 copy's agent; the base config has none."""
+    model = getattr(config, "model", None)
+    return model if isinstance(model, str) and model else None
+
+
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(value, separators=(",", ":"), allow_nan=False).encode()
 
 
 def _from_a2a_part(part: Any) -> Any:

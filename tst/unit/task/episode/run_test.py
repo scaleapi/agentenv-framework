@@ -192,7 +192,9 @@ async def _ended(episode):
 
 
 async def _until(holds):
-    async with asyncio.timeout(5):
+    # The budget covers a cold start: the first episode in a process imports every sandbox provider's SDK (seconds)
+    # before its first turn opens. The loop returns as soon as ``holds`` does, so a passing test never waits it out.
+    async with asyncio.timeout(30):
         while not holds():
             await asyncio.sleep(0.01)
 
@@ -571,6 +573,24 @@ async def test_a_tolerated_verifier_that_recorded_no_score_is_missing_from_the_s
     await (await episode.next_turn()).end("done")
 
     assert await episode.result() == {"replies": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_the_stored_run_holds_each_verifiers_named_grade_a_failed_one_included(teardowns):
+    passing = {"id": "crates", "type": "agent_prompt_response_verifier", "prompt_id": "turn",
+               "verifier_id": "has-crate", "criteria": [{"type": "response_contains", "needles": ["crate"]}]}
+    broken = {"id": "graded", "type": "agent_prompt_response_verifier", "prompt_id": "missing",
+              "verifier_id": "graded", "criteria": [{"type": "response_contains", "needles": ["crate"]}],
+              "fail_task_on_error": False}
+    episode = await _spec(ITEMS, ALICE, TURN, passing, broken).start()
+    await (await episode.next_turn()).end("Added a crate.")
+
+    assert await episode.result() == {"crates": 1.0}
+    grades = Task.get_instance(episode.id).context["metadata"]["grades"]
+    assert {step: (g["verifier_status"], g["score"], g["passed"]) for step, g in grades.items()} == {
+        "crates": ("graded", 1.0, True), "graded": ("failed", None, False)}
+    assert grades["graded"]["verifier_error_reasoning"].startswith("StepContextError: PromptResponse")
+    assert grades["crates"]["verifier_criteria"][0]["passed"] is True
 
 
 BREAKS_WHILE_THE_TURN_IS_OPEN = (
