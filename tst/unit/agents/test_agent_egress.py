@@ -50,6 +50,14 @@ def test_a_plain_http_host_goes_direct_and_a_tls_one_through_the_proxy(url, dire
     assert (urlsplit(url).hostname in _direct(urls=[url])) is direct
 
 
+@pytest.mark.parametrize("urls", [
+    ["http://tools.example.com:8080/mcp", "https://tools.example.com/mcp"],
+    ["https://tools.example.com/mcp", "http://tools.example.com:8080/mcp"],
+])
+def test_a_host_also_reached_over_tls_stays_behind_the_proxy_since_no_proxy_goes_by_host(urls):
+    assert _direct(urls=urls) == LOOPBACK
+
+
 def test_the_hosts_the_deploy_names_in_no_proxy_stay_direct():
     hosts = _direct({"NO_PROXY": "registry.internal, .corp", "no_proxy": "mirror.internal"})
 

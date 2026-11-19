@@ -42,12 +42,14 @@ def clock_armed(page_path: str | None = None) -> bool:
 def egress_env(environ: Mapping[str, str], urls: Iterable[str] = (), *, armed: bool) -> dict[str, str]:
     """The proxy variables for the CLI and what it starts where the image runs the proxy and the clock is ``armed``,
     else none: every host goes through the proxy but loopback, which it refuses, the hosts the deploy's NO_PROXY names,
-    and the hosts of plain-HTTP ``urls``, whose connections carry no certificate."""
+    and hosts ``urls`` name over plain HTTP alone, with no certificate to check (NO_PROXY goes by host, not scheme)."""
     proxy = environ.get(EGRESS_PROXY_ENV)
     if not proxy or not armed:
         return {}
     configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
-    plain = [parts.hostname for parts in map(urlsplit, urls) if parts.scheme == "http"]
+    parsed = [urlsplit(url) for url in urls]
+    tls = {parts.hostname for parts in parsed if parts.scheme != "http"}
+    plain = [parts.hostname for parts in parsed if parts.scheme == "http" and parts.hostname not in tls]
     hosts = ",".join(dict.fromkeys(filter(None, [*_DIRECT_HOSTS, *configured, *plain])))
     return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
             "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
