@@ -138,7 +138,9 @@ class DeployedAgent:
     env_bindings: dict[str, str | None] = field(default_factory=dict)
     # The token its extension routes take, from the deploy that started it; None for an agent agent-env didn't start.
     control_token: str | None = None
-    # The host (and port) of the model endpoint it was given, never a key or a URL's userinfo; None when unknown.
+    # The host (and port) of the model endpoint it was given, as configured, before a sandbox's rewrite to reach it
+    # (localhost to host.docker.internal), so one endpoint has one name; never a key or a URL's userinfo. None when
+    # unknown.
     model_endpoint_host: str | None = None
 
     @classmethod

@@ -15,6 +15,7 @@ from agent_env.task_step.context import ATTEMPT_EPOCH, TaskStepContext
 STEP_USAGE_KEY = "step_usage"
 _COUNTERS = ("tool_call_count", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
              "cache_write_tokens")
+_TOKEN_COUNTS = _COUNTERS[1:]
 
 
 @dataclass
@@ -38,7 +39,7 @@ class RoleUsage:
     def entry(self) -> dict[str, Any]:
         """The turns summed: each count and the cost the sum of the turns that reported it, None when none did, never
         0. ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
-        bound: some turns reported tokens and others didn't, or a turn said some of its calls reported none
+        bound: some turns reported a token count and others none, or a turn said some of its calls reported none
         (``unreported_calls``, which the entry sums, or a proxy's ``unreported``)."""
         reported = [usage for usage in self.turns if usage is not None]
 
@@ -46,7 +47,7 @@ class RoleUsage:
             values = [getattr(usage, name) for usage in reported if getattr(usage, name) is not None]
             return sum(values) if values else None
 
-        counted = [usage for usage in reported if usage.input_tokens is not None or usage.output_tokens is not None]
+        counted = [usage for usage in reported if any(getattr(usage, name) is not None for name in _TOKEN_COUNTS)]
         flags = {usage.input_includes_cache for usage in counted}
         unreported = [n for usage in reported if (n := _unreported_calls(usage))]
         partial = (0 < len(counted) < len(self.turns) or bool(unreported)

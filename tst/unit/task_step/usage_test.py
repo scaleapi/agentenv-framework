@@ -43,3 +43,13 @@ def test_a_step_whose_roles_ran_no_turns_records_nothing():
 
     assert record_step_usage(context, "solve", (RoleUsage("solver"), None)) is None
     assert "step_usage" not in context.metadata
+
+
+def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_partial():
+    role = RoleUsage("solver")
+    role.add(Usage(total_tokens=100))
+    role.add(None)
+
+    entry = role.entry()
+
+    assert (entry["total_tokens"], entry["input_tokens"], entry["partial"]) == (100, None, True)
