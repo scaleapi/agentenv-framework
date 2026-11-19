@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from tst.unit.agents.hermes.agent import AGENT_DIR, hermes_bridge
+from tst.unit.agents.hermes.agent import AGENT_DIR, PYTHONPATH, hermes_bridge
 
 
 def _methods(card: dict) -> dict[str, list[str]]:
@@ -57,7 +57,8 @@ async def test_the_attribution_probe_reads_back_what_the_last_turn_sent(monkeypa
 def test_the_card_is_read_by_importing_agent_card():
     """agent-env imports AGENT_CARD from the image with no agent environment, and parses its stdout as the card."""
     script = "import json; from a2a_server import AGENT_CARD; print(json.dumps(AGENT_CARD.model_dump(mode='json')))"
-    env = {key: value for key, value in os.environ.items() if not key.startswith("LITELLM_")}
+    env = {**{key: value for key, value in os.environ.items() if not key.startswith("LITELLM_")},
+           "PYTHONPATH": PYTHONPATH}
     out = subprocess.run([sys.executable, "-c", script], cwd=AGENT_DIR, env=env, capture_output=True, text=True,
                          check=True)
 

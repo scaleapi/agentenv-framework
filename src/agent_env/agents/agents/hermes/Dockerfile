@@ -37,6 +37,8 @@ WORKDIR /opt/agent
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY a2a_server.py hermes_bridge.py hermes_kit.py entrypoint.sh ./
+# Every clocked agent's egress rule, which the bridge imports, and the clock page's format it reads (shared_sources.toml).
+COPY agent_clock/agent_egress.py clock/clockpage.py ./
 COPY agentenv_plugin ./agentenv_plugin
 RUN chmod 0755 entrypoint.sh
 # The env's clock: the follower and the egress proxy, each as its own user, under root's supervisord (root.conf), and
