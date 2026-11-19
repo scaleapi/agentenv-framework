@@ -278,7 +278,8 @@ class _Importer:
                     self._ref(site, f"{where}: {site.path}", pins)
             self._default_agents(step, cls.entity_refs or (), where)
         sync_context_paths(stored, steps)
-        self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        body = {"headline_verifiers": list(task.headline_verifiers), "steps": steps} if task.headline_verifiers else steps
+        self.files[path] = json.dumps(body, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
         self.declared += task.requires or ()
         return name

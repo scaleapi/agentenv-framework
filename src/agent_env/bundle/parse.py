@@ -16,7 +16,7 @@ import tomllib
 import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, NoReturn
@@ -65,7 +65,24 @@ _ORDER = {kind: index for index, kind in enumerate(BundleKind)}
 CONFIG_FILES = {BundleKind.ENV: "env.toml", BundleKind.AGENT: "agent.toml", BundleKind.ARTIFACT: "artifact.toml"}
 _DEFAULT_TYPE = {BundleKind.ENV: "mcp_server", BundleKind.AGENT: "a2a_agent"}
 _EVAL_KEYS = ("tasks", "type", "id")
+_TASK_KEYS = ("steps", "headline_verifiers")
 _FILE_SUFFIX = {BundleKind.TASK: ".json", BundleKind.EVAL: ".toml"}
+
+
+def task_file_parts(data: Any) -> tuple[list[dict], list[str] | None]:
+    """A task file's steps and ``headline_verifiers``: a bare array of steps, or ``{"headline_verifiers": [...],
+    "steps": [...]}``. Raises ValueError saying what's wrong with any other shape."""
+    steps, headlines = data, None
+    if isinstance(data, dict):
+        if unknown := sorted(set(data) - set(_TASK_KEYS)):
+            raise ValueError(f"unknown key{'s' * (len(unknown) > 1)} {', '.join(map(repr, unknown))}; a task file's "
+                             f"object takes {' and '.join(_TASK_KEYS)}")
+        steps, headlines = data.get("steps"), data.get("headline_verifiers")
+    if not (isinstance(steps, list) and all(isinstance(step, dict) for step in steps)) or not (
+            headlines is None or isinstance(headlines, list) and all(isinstance(h, str) for h in headlines)):
+        raise ValueError("a task file must be a JSON array of step objects, or an object whose steps is one and whose "
+                         "headline_verifiers lists step ids")
+    return steps, headlines
 
 
 @dataclass(frozen=True)
@@ -77,6 +94,8 @@ class BundleEntry:
     type: str  # declared, else the kind's default; for artifacts, inferred from the directory
     # The toml as written ({} when absent), a task's steps, None for skills.
     config: Any = field(compare=False, repr=False)
+    # A task file's headline_verifiers, None when it names none.
+    headline_verifiers: tuple[str, ...] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -315,10 +334,12 @@ class _Parser:
         return read.get(kind, self._artifact)(name, path)
 
     def _task(self, name: str, path: Path) -> BundleEntry:
-        steps = self._read_json(path)
-        if not (isinstance(steps, list) and all(isinstance(step, dict) for step in steps)):
-            self._skip(path, "a task file must be a JSON array of step objects")
-        return self._make(BundleKind.TASK, name, path, "task", steps)
+        try:
+            steps, headlines = task_file_parts(self._read_json(path))
+        except ValueError as e:
+            self._skip(path, str(e))
+        entry = self._make(BundleKind.TASK, name, path, "task", steps)
+        return replace(entry, headline_verifiers=tuple(headlines) if headlines else None)
 
     def _eval(self, name: str, path: Path) -> BundleEntry:
         config = self._read_toml(path)

@@ -377,6 +377,42 @@ def test_the_written_task_records_the_ids_its_bundle_gave_what_it_names(bundle_d
     assert Task.get(f"{ROOT}/t").entity_ids == {"solver": f"{ROOT}/solver"}
 
 
+_GRADED = [{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
+           {"id": "tests", "type": "verify_sandbox", "sandbox_name": "box", "verifier_id": "tests", "criteria": []},
+           {"id": "final", "type": "aggregate_verifiers", "verifier_id": "final", "verifier_ids": ["tests"]}]
+
+
+def _task_file(root, **fields):
+    (root / "tasks/t.json").write_text(json.dumps({**fields, "steps": _GRADED} if fields else _GRADED))
+
+
+def test_a_task_files_headline_verifiers_are_written_and_changing_them_writes_a_new_version(bundle_dir):
+    _task_file(bundle_dir)
+    bare = _summary(_run(bundle_dir))[f"{ROOT}/t"]
+    _task_file(bundle_dir, headline_verifiers=[])
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"] == (bare[0], True, ())
+
+    _task_file(bundle_dir, headline_verifiers=["final"])
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"] == (bare[0] + 1, False, ("headline_verifiers final",))
+    assert Task.get(f"{ROOT}/t").headline_verifiers == ["final"]
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"] == (bare[0] + 1, True, ())
+
+    _task_file(bundle_dir, headline_verifiers=["tests", "final"])
+    assert _summary(_run(bundle_dir))[f"{ROOT}/t"][1:] == (False, ("headline_verifiers tests, final",))
+    assert Task.get(f"{ROOT}/t").headline_verifiers == ["tests", "final"]
+
+
+@_RUN_OR_DRY_RUN
+def test_a_headline_naming_no_step_is_refused_before_anything_is_written(bundle_dir, dry_run):
+    _task_file(bundle_dir, headline_verifiers=["finl"])
+
+    (problem,) = _problems(lambda: _run(bundle_dir, dry_run=dry_run))
+
+    assert problem.startswith("tasks/t.json: headline_verifiers names no step in this task: ['finl']")
+    with pytest.raises(NotFoundError):
+        Task.get(f"{ROOT}/t")
+
+
 @pytest.mark.parametrize(("toml", "problem"), [
     ('image = "claude-image"\nowner = "me"\n',
      "agent.toml: unknown key 'owner'; an a2a_agent agent takes image, default_env_vars, metadata, type and id"),

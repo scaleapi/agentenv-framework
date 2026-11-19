@@ -1122,7 +1122,8 @@ class _Planner:
             self.steps[key] = steps
             if not failed:
                 try:
-                    Task(id=source.entry.id, version=None, steps=steps)
+                    Task(id=source.entry.id, version=None, steps=steps,
+                         headline_verifiers=source.entry.headline_verifiers)
                 except ValueError as e:
                     self.problems.append(f"{self._path(source.entry)}: {e}")
 
