@@ -2,17 +2,20 @@
 snapshot restored into a fresh agent, each of which starts a new document that goes on counting."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
-from test_a2a_atif_serving import NATIVE, Hooks, _atif, _ended, _Hold, _send, _turn
+from test_a2a_atif_serving import NATIVE, Hooks, _atif, _ended, _Hold, _send, _state, _turn
 
 from agentenv_protocol.a2a_agent import (
+    SNAPSHOT_STATE_PARAM,
     SNAPSHOT_V1,
     TRAJECTORY_V1,
     AgentEnvAgent,
@@ -40,8 +43,9 @@ from agentenv_protocol.atif import errors_in, validate
 _IDENTITY = AgentIdentity(name="toy-agent", description="test", version="2.0")
 
 
-def _snapshotting(*, atif: Any = Hooks) -> AgentEnvAgent:
-    """The toy agent with a snapshot extension of its own, whose save and load the SDK's state rides beside."""
+def _snapshotting(*, atif: Any = Hooks, save_hold: _Hold | None = None) -> AgentEnvAgent:
+    """The toy agent with a snapshot extension of its own, whose save and load the SDK's state rides beside; a save
+    waits at ``save_hold``, as one uploading the conversation it captured would."""
     extensions = (enable(TRAJECTORY_V1, live=True, native=NATIVE, **({"atif": atif} if atif else {})),)
 
     @a2a_agent(identity=_IDENTITY, extensions=extensions)
@@ -51,6 +55,8 @@ def _snapshotting(*, atif: Any = Hooks) -> AgentEnvAgent:
 
         @extension(SNAPSHOT_V1.save)
         async def save(self, request: ObjectSnapshotSaveRequest) -> ObjectSnapshotSaveResponse:
+            if save_hold is not None:
+                await save_hold.wait()
             return ObjectSnapshotSaveResponse(context_id=request.context_id,
                                               objects=SnapshotUploadedObjects(trajectory=Uploaded(size_bytes=12)))
 
@@ -190,6 +196,53 @@ def test_an_agent_that_serves_no_atif_writes_no_state(objects: dict[str, bytes])
             "state": _grant("http-put", "state", "application/json")}})
     assert saved.status_code == 200, saved.text
     assert "state" not in saved.json()["objects"] and "state" not in objects
+
+
+def test_the_card_names_the_state_only_an_sdk_serving_atif_keeps() -> None:
+    def snapshot_params(agent: AgentEnvAgent) -> dict[str, Any]:
+        card = TestClient(agent.create_app()).get("/.well-known/agent-card.json").json()
+        [snapshot] = [ext for ext in card["capabilities"]["extensions"] if ext["uri"] == SNAPSHOT_V1.uri]
+        return snapshot["params"]
+
+    assert snapshot_params(_snapshotting())[SNAPSHOT_STATE_PARAM] == ["turns"]
+    assert SNAPSHOT_STATE_PARAM not in snapshot_params(_snapshotting(atif=None))
+
+
+def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(objects: dict[str, bytes]) -> None:
+    paused = _Hold()
+    with TestClient(_snapshotting(save_hold=paused).create_app()) as client:
+        for tag in ("t1", "t2"):
+            _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            saving = pool.submit(client.post, "/ext/snapshot", json={"context_id": "ctx-1", "objects": {
+                "trajectory": _grant("http-put", "trajectory", "application/octet-stream"),
+                "state": _grant("http-put", "state", "application/json")}})
+            paused.reached()
+            task_id = _send(client, "work t3", "m-t3")
+            time.sleep(0.3)
+            waiting = _state(client, task_id)
+            paused.resume.set()
+            saved = saving.result(timeout=10)
+        _ended(client, task_id)
+        document = _atif(client, task_id=task_id)["trajectory"]
+    assert waiting not in ("completed", "failed", "canceled")
+    assert saved.status_code == 200, saved.text
+    assert json.loads(objects["state"]) == {"turns": 2}
+    assert [user["turn"] for user in _users(document)] == [0, 1, 2]
+
+
+def test_two_servers_on_one_home_share_its_counts(tmp_path: Path) -> None:
+    first, second = _turn_index.TurnIndex(tmp_path), _turn_index.TurnIndex(tmp_path)
+    assert [first.next("ctx"), second.next("ctx"), first.next("ctx")] == [0, 1, 2]
+
+
+def test_a_count_that_cant_be_read_starts_again_with_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    turns = _turn_index.TurnIndex(tmp_path)
+    turns.set("ctx", 3)
+    next(tmp_path.glob("*.json")).write_text("not a count")
+    with caplog.at_level(logging.WARNING):
+        assert turns.next("ctx") == 0
+    assert turns.count("ctx") == 1 and "can't be read" in caplog.text
 
 
 def test_a_snapshot_state_grant_names_json() -> None:

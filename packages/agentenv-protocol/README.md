@@ -1657,8 +1657,12 @@ count in its `state` object, a JSON object that is the SDK's own: on save the
 SDK uploads it after the agent's handler returns and adds it to the answer, and
 on load it reads it before the agent's handler runs and seeds the context the
 handler restored into, whose next task goes on from the snapshot's count in a
-new document. The agent's handlers leave `state` alone, and agent-env grants it
-only to an agent whose card lists `atif/1`.
+new document. The SDK takes its state between turns: a save or load holds the
+context, so a task of it that would start meanwhile waits until the agent's
+handler returns. The agent's handlers leave `state` alone. The card's snapshot
+extension names the state the SDK keeps (`"state": ["turns"]` in its params,
+`SNAPSHOT_STATE_PARAM`), and agent-env grants the object only to an agent whose
+card has it, since an SDK from before it refuses the object.
 
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose

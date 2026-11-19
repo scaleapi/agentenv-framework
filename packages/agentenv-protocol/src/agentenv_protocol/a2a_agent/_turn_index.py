@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 #: Where the counts are kept, one small file per context, under the agent's user's home.
 TURNS_DIR = Path.home() / ".local" / "state" / "agentenv" / "turns"
+#: The snapshot extension's card param naming the fields of the state an SDK keeps in each snapshot: a caller grants
+#: the ``state`` object only to an agent whose card has it, since an SDK from before it refuses the object.
+SNAPSHOT_STATE_PARAM = "state"
 
 
 class SnapshotState(BaseModel):
@@ -28,13 +31,14 @@ class SnapshotState(BaseModel):
 
 
 class TurnIndex:
-    """Each context's count of started tasks. A count that can't be written stays in memory, with a warning, so a
-    read-only home costs only the count's survival across a restart."""
+    """Each context's count of started tasks, read from its file each time, so two servers on one home agree and memory
+    holds nothing per context. A count that can't be written stays in memory, with a warning, so a read-only home costs
+    only the count's survival across a restart."""
 
     def __init__(self, folder: Path | None = None) -> None:
         self._folder = folder if folder is not None else TURNS_DIR
-        self._counts: dict[str, int] = {}
-        self._warned = False
+        self._unwritten: dict[str, int] = {}
+        self._warned: set[str] = set()
 
     def next(self, context_id: str) -> int:
         """The starting task's turn index, the number of tasks the context started before it, counting this one."""
@@ -43,18 +47,17 @@ class TurnIndex:
         return index
 
     def count(self, context_id: str) -> int:
-        if context_id not in self._counts:
-            try:
-                self._counts[context_id] = json.loads(self._path(context_id).read_text())["turns"]
-            except FileNotFoundError:
-                self._counts[context_id] = 0
-            except OSError as exc:
-                self._warn(exc)
-                self._counts[context_id] = 0
-        return self._counts[context_id]
+        if context_id in self._unwritten:
+            return self._unwritten[context_id]
+        try:
+            return SnapshotState.model_validate_json(self._path(context_id).read_bytes()).turns
+        except FileNotFoundError:
+            return 0
+        except (OSError, ValueError) as exc:
+            self._warn("a turn count can't be read, so its context counts from 0 again: %s", exc)
+            return 0
 
     def set(self, context_id: str, count: int) -> None:
-        self._counts[context_id] = count
         path = self._path(context_id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,12 +65,15 @@ class TurnIndex:
             part.write_text(json.dumps({"context_id": context_id, "turns": count}))
             os.replace(part, path)
         except OSError as exc:
-            self._warn(exc)
+            self._warn("turn counts are kept in memory only, so a restart starts them again: %s", exc)
+            self._unwritten[context_id] = count
+        else:
+            self._unwritten.pop(context_id, None)
 
     def _path(self, context_id: str) -> Path:
         return self._folder / f"{hashlib.sha256(context_id.encode()).hexdigest()}.json"
 
-    def _warn(self, exc: OSError) -> None:
-        if not self._warned:
-            self._warned = True
-            logger.warning("turn counts are kept in memory only, so a restart starts them again: %s", exc)
+    def _warn(self, message: str, exc: Exception) -> None:
+        if message not in self._warned:
+            self._warned.add(message)
+            logger.warning(message, exc)

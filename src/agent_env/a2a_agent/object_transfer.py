@@ -91,7 +91,8 @@ CHANGELOG_LIMITS = ObjectLimits(
 
 SNAPSHOT_TRAJECTORY_OBJECT_NAME = "trajectory"
 SNAPSHOT_WORKSPACE_OBJECT_NAME = "workspace"
-#: The SDK's own object of a snapshot, its turn counts as JSON, which only an agent that serves atif/1 is granted.
+#: The SDK's own object of a snapshot, its turn counts as JSON, granted only to an agent whose card says its SDK keeps
+#: one (``A2AAgent.keeps_snapshot_state``).
 SNAPSHOT_STATE_OBJECT_NAME = "state"
 SNAPSHOT_STATE_MAX_BYTES = 64 * 1024
 # A portable snapshot's objects, each opaque bytes, and the most each may hold.
@@ -452,7 +453,7 @@ def snapshot_save_call(
     state: bool = False,
 ) -> TransferCall:
     """The snapshot ``save`` call that writes one capture below ``capture_prefix``, granting the
-    SDK's ``state`` object too when the agent keeps one (``A2AAgent.serves_atif``)."""
+    SDK's ``state`` object too when the agent's SDK keeps one (``A2AAgent.keeps_snapshot_state``)."""
     _require_object_form(
         method,
         ObjectSnapshotSaveRequest,
