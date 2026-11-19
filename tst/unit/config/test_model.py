@@ -12,6 +12,7 @@ from agent_env.config.model import (
     ModelRole,
     ModelSource,
     ResolvedModel,
+    api_root,
     config_model,
     named_model,
     resolve_model,
@@ -343,6 +344,20 @@ def test_no_named_layer_leaves_the_role_to_its_config():
 ], ids=["v1", "slashes", "case", "https-default-port", "http-default-port", "path-prefix", "whitespace"])
 def test_same_endpoint_reads_one_endpoint_spelled_two_ways_as_one(a, b):
     assert same_endpoint(a, b) and same_endpoint(b, a)
+
+
+@pytest.mark.parametrize("url, root", [
+    ("https://gw.example/v1", "https://gw.example"),
+    ("https://gw.example/v1/", "https://gw.example"),
+    ("https://gw.example/", "https://gw.example"),
+    ("https://gw.example", "https://gw.example"),
+    ("https://gw.example/litellm/v1", "https://gw.example/litellm"),
+    ("https://gw.example/v1/v1", "https://gw.example/v1"),
+    ("http://localhost:4000/v1?team=a", "http://localhost:4000?team=a"),
+    ("HTTPS://GW.Example/v1", "https://GW.Example"),
+], ids=["v1", "v1-slash", "slash", "bare", "path-prefix", "one-v1-only", "port-and-query", "case-kept"])
+def test_api_root_drops_a_trailing_slash_and_one_trailing_v1(url, root):
+    assert api_root(url) == root
 
 
 @pytest.mark.parametrize("a, b", [

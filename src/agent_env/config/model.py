@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from agent_env.config.errors import ConfigError
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, SecretResolver, interpolate
@@ -284,6 +284,18 @@ def same_endpoint(a: Optional[str], b: Optional[str]) -> bool:
     return bool(a and b) and _endpoint(a) == _endpoint(b)
 
 
+def api_root(url: str) -> str:
+    """``url`` without a trailing ``/`` and one trailing ``/v1``, for a client that appends its own versioned path
+    (Anthropic's ``/v1/messages``): the endpoint may be configured either way, and ``same_endpoint`` compares by the
+    same root."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=_root_path(parts.path)))
+
+
+def _root_path(path: str) -> str:
+    return path.rstrip("/").removesuffix("/v1").rstrip("/")
+
+
 def _endpoint(url: str) -> tuple:
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
@@ -291,8 +303,7 @@ def _endpoint(url: str) -> tuple:
         port = parts.port
     except ValueError:
         return (url,)
-    path = parts.path.rstrip("/")
-    path = path.removesuffix("/v1").rstrip("/")
+    path = _root_path(parts.path)
     return scheme, (parts.hostname or "").lower(), None if port == _DEFAULT_PORTS.get(scheme) else port, path, parts.query
 
 
