@@ -11,9 +11,11 @@ from agent_env.env import snapshot_store
 from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT, ServiceDBConfig
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.env_providers.env_gateway_provider import (
+    TEARDOWN_RETRIES,
     EnvironmentGatewayProvider,
     MCPServerConfig,
     SidecarConfig,
+    tear_down_slot,
 )
 from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 
@@ -395,3 +397,56 @@ def test_the_default_stack_records_nothing_and_a_record_without_a_layout_is_the_
 def test_a_damaged_recorded_layout_is_refused_rather_than_read_as_the_default_stack(data):
     with pytest.raises((ValueError, TypeError)):
         StackLayout.from_record(data)
+
+
+def test_the_default_stack_is_never_torn_down_on_its_own():
+    with pytest.raises(ValueError, match="default stack"):
+        DEFAULT_STACK_LAYOUT.teardown_script
+
+
+@pytest.mark.parametrize("layout", [
+    StackLayout(compose_project="s1"),
+    StackLayout(app_dir="/app/s2", compose_project="s1", scratch_prefix="/tmp/s1-"),
+    StackLayout(app_dir="/app/s1", compose_project="s1", scratch_prefix="/tmp/"),
+    StackLayout(app_dir="/app/s1", compose_project="s1", scratch_prefix="/tmp/s1"),
+    StackLayout(app_dir="/app/s1-x", compose_project="s1-x", scratch_prefix="/tmp/s1-x-", host_port_offset=2000),
+    StackLayout(app_dir="/app/s1", compose_project="s1", scratch_prefix="/tmp/s1-", host_port_offset=5000),
+    StackLayout(app_dir="/app/web", compose_project="web", scratch_prefix="/tmp/web-", host_port_offset=1000),
+    StackLayout(app_dir="/app/s01", compose_project="s01", scratch_prefix="/tmp/s01-", host_port_offset=2000),
+])
+def test_a_slot_layout_not_made_by_for_slot_is_never_torn_down(layout):
+    with pytest.raises(ValueError, match="for_slot"):
+        layout.teardown_script
+
+
+def test_a_slots_teardown_names_only_its_own_project_dir_and_scratch_files():
+    script = StackLayout.for_slot(7).teardown_script
+    assert script.count("label=com.docker.compose.project=s7") == 3
+    assert script.splitlines()[-1] == "rm -rf /app/s7 /tmp/s7-*"
+
+
+@pytest.mark.asyncio
+async def test_tearing_down_a_slot_runs_its_script_on_the_vm_and_may_retry():
+    vm = _RecordingVm([], set())
+    vm.exec_script = AsyncMock(return_value="")
+    await tear_down_slot(vm, StackLayout.for_slot(2))
+    vm.exec_script.assert_awaited_once_with(StackLayout.for_slot(2).teardown_script, max_retries=TEARDOWN_RETRIES)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_slot_teardown_raises_so_the_slot_is_never_counted_gone():
+    vm = _RecordingVm([], set())
+    vm.exec_script = AsyncMock(side_effect=RuntimeError("Script failed (exit 1)"))
+    with pytest.raises(RuntimeError, match="exit 1"):
+        await tear_down_slot(vm, StackLayout.for_slot(2))
+
+
+@pytest.mark.asyncio
+async def test_only_a_slot_on_a_vm_can_be_torn_down():
+    vm = _RecordingVm([], set())
+    with pytest.raises(ValueError, match="default stack"):
+        await tear_down_slot(vm, DEFAULT_STACK_LAYOUT)
+    vm.mode = "container"
+    with pytest.raises(ValueError, match="only be on a VM"):
+        await tear_down_slot(vm, StackLayout.for_slot(2))
+    assert vm.calls == []

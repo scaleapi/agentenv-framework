@@ -135,6 +135,23 @@ class MCPServerConfig:
         return _ENV_NETWORK in self.networks
 
 
+TEARDOWN_RETRIES = 2
+
+
+async def tear_down_slot(sandbox: Sandbox, layout: StackLayout) -> None:
+    """End one slot's stack on a VM other slots share, leaving the VM and every other slot running. Idempotent, so a
+    retry after a dropped connection is safe. Raises for the default stack, or for a sandbox that is not a VM, since
+    only a VM holds slots; raises too if the script fails, so the caller never counts a slot gone that isn't.
+
+    The caller must first cancel or await the slot's own deploy: a ``compose up`` still running can create containers
+    after the script has listed them, and the slot would be counted gone while it still holds its ports."""
+    if not layout.is_slot:
+        raise ValueError("tear_down_slot ends one slot of a shared VM; the default stack ends with its VM")
+    if sandbox.mode != SANDBOX_MODE_VM:
+        raise ValueError(f"slot {layout.compose_project} can only be on a VM, not a {sandbox.mode} sandbox")
+    await sandbox.exec_script(layout.teardown_script, max_retries=TEARDOWN_RETRIES)
+
+
 @dataclass
 class DeployedGateway:
     """Result of a gateway deployment."""
