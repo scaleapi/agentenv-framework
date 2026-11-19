@@ -1,7 +1,9 @@
 """What an annotated recording (computer-recording/v1 ``start`` with ``annotate``) draws over its frames: where each
 input landed and what it typed or pressed, in the colour of the role that sent it, on the frames captured while its
 mark shows. ``ComputerRuntime.act`` marks every ``computer_*`` input as it is delivered; a call to one of the
-driver's own or forwarded tools, which acts without it, shows as a chip naming the tool and its main argument."""
+driver's own or forwarded tools, which acts without it, shows as a chip naming the tool and its main argument. Where
+the frames can't show the pointer themselves, as frames from screenshots that leave it out, the agent's pointer is
+drawn where its inputs left it."""
 from __future__ import annotations
 
 import functools
@@ -29,6 +31,10 @@ SHOW_S = {"click": 0.8, "down": 0.8, "up": 0.8, "move": 0.5, "scroll": 0.9, "dra
 FADE_S = 0.3
 #: How long a mark no frame has drawn is kept, in seconds: past it, the recording's frames have stopped coming.
 KEEP_S = 30.0
+#: The marks of inputs that leave the pointer at their last point, a drag's after moving it along its path.
+MOVES_POINTER = ("click", "drag", "scroll", "move", "down", "up")
+#: How long after the pointer jumps a line shows where it came from, in seconds.
+JUMP_S = 0.4
 #: The inputs whose marks are drawn at a point of the display.
 POINTED = ("click", "drag", "scroll", "pointer_move", "pointer_down", "pointer_up")
 #: The most a chip of typed text shows, which grows with its length from the chip's own time.
@@ -80,12 +86,15 @@ def check_annotate(annotate: object) -> Optional[dict]:
 class Annotations:
     """One annotated recording's marks, from their inputs until they stop showing, and the colour of each role. Each
     mark shows on every frame captured while it lasts, and on the first one after its input however late that comes,
-    as at a low fps or from a slow capture."""
+    as at a low fps or from a slow capture. With ``pointer``, as for frames that can't show the pointer themselves,
+    each frame also draws the pointer where the last input before it left it, from the recording's first input on."""
 
-    def __init__(self) -> None:
+    def __init__(self, pointer: bool = False) -> None:
         self.marks: list[Mark] = []
         self.drawn: set[int] = set()
         self.colours: dict[str, tuple[int, int, int]] = {DEFAULT_ROLE: COLOURS[0]}
+        self.pointer = pointer
+        self.moves: list[Mark] = []  # the pointer's, each a "pointer" mark: where it was, then its path
 
     def add(self, marks: Sequence[Mark]) -> None:
         for mark in marks:
@@ -93,6 +102,19 @@ class Annotations:
             stale = mark.at - timedelta(seconds=KEEP_S)
             self._keep([kept for kept in self.marks if kept.until > stale])
             self.marks.append(mark)
+            if self.pointer and mark.kind in MOVES_POINTER and mark.points:
+                path = mark.points if mark.kind == "drag" else mark.points[-1:]
+                was = self.moves[-1].points[-1] if self.moves else path[0]
+                self.moves.append(Mark("pointer", mark.at, mark.at, mark.role, (was, *path), moving_s=mark.moving_s))
+
+    def _pointer(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
+        """The pointer a frame captured ``at`` shows: the last move before it, as its age; none before the first."""
+        current = next((i for i in range(len(self.moves) - 1, -1, -1) if self.moves[i].at <= at), None)
+        if current is None:
+            return []
+        self.moves = self.moves[current:]  # the frames come in order, so an earlier move won't show again
+        move = self.moves[0]
+        return [(move, self.colours[move.role], (at - move.at).total_seconds())]
 
     def showing(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
         """The marks a frame captured ``at`` shows, each with its colour and the age, in seconds, it is drawn at: a
@@ -113,7 +135,7 @@ class Annotations:
         shown = [entry for entry in due if id(entry[0]) not in waiting]
         self.drawn |= {id(mark) for mark, _colour, _age in shown}
         self._keep([mark for mark in self.marks if mark.until > at or id(mark) not in self.drawn])
-        return shown
+        return shown + (self._pointer(at) if self.pointer else [])
 
     def _keep(self, marks: list[Mark]) -> None:
         self.marks = marks
@@ -214,7 +236,7 @@ def draw(image: Any, marks: Sequence[tuple[Mark, tuple[int, int, int], float]]) 
         if mark.kind == "chip":
             chips.append((mark, colour))
             continue
-        fade = 1.0 - max(0.0, min(1.0, (age - (span - FADE_S)) / FADE_S))
+        fade = 1.0 if mark.kind == "pointer" else 1.0 - max(0.0, min(1.0, (age - (span - FADE_S)) / FADE_S))
         points = [(fx * base.width, fy * base.height) for fx, fy in mark.points]
         _DRAWERS[mark.kind](pen, mark, points, colour, unit, age, fade)
     if chips:
@@ -237,7 +259,11 @@ class Style:
     ring_grows: float = 18  # and how much it grows
     ring_apart: float = 8  # between the rings of a double or triple click
     most_rings: int = 3
-    dot: float = 5  # the dot at a click's point
+    dot: float = 5  # the hollow dot at a click's point, which leaves the pointer's tip there in sight
+    dot_stroke: float = 2
+    pointer: float = 1.6  # the agent's pointer, as a multiple of the usual arrow cursor's size
+    pointer_outline: float = 2
+    jump_alpha: int = 170  # the line from where the pointer jumped, at its start
     press_down: float = 10  # a press's filled ring's radius
     press_up: float = 16  # a release's ring's radius
     press_fill: float = 0.7  # a press's fill opacity, as a share of its stroke's
@@ -281,8 +307,7 @@ def _draw_click(pen, mark, points, colour, unit, age, fade) -> None:
         shape(box, outline=(*WHITE, alpha), width=_width(STYLE.halo, unit))
         shape(box, outline=(*colour, alpha), width=_width(STYLE.stroke, unit))
     dot = unit * STYLE.dot
-    pen.ellipse((x - dot, y - dot, x + dot, y + dot), fill=(*colour, alpha), outline=(*WHITE, alpha),
-                width=_width(STYLE.outline, unit))
+    pen.ellipse((x - dot, y - dot, x + dot, y + dot), outline=(*colour, alpha), width=_width(STYLE.dot_stroke, unit))
     if mark.button not in ("left", "right"):
         _label(pen, (x + unit * STYLE.label_from, y + unit * STYLE.label_from), mark.button, colour, unit, alpha)
 
@@ -331,8 +356,25 @@ def _draw_drag(pen, mark, points, colour, unit, age, fade) -> None:
                 width=_width(STYLE.outline, unit))
 
 
+#: The usual arrow cursor, its tip at (0, 0), in pixels of a UNIT_EDGE frame.
+ARROW = ((0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12))
+
+
+def _draw_pointer(pen, mark, points, colour, unit, age, fade) -> None:
+    """The agent's pointer: along a drag's path while it moves, else where its input left it, after a fading line
+    from where it jumped."""
+    was, path = points[0], points[1:]
+    tip = _along(path, age / mark.moving_s)[-1] if len(path) > 1 and age < mark.moving_s else path[-1]
+    if age < JUMP_S and math.dist(was, path[0]) > unit * STYLE.cross:
+        alpha = round(STYLE.jump_alpha * (1 - age / JUMP_S))
+        pen.line((*was, *path[0]), fill=(*colour, alpha), width=_width(STYLE.stroke, unit))
+    scale = unit * STYLE.pointer
+    arrow = [(tip[0] + dx * scale, tip[1] + dy * scale) for dx, dy in ARROW]
+    pen.polygon(arrow, fill=(*colour, 255), outline=(*WHITE, 255), width=_width(STYLE.pointer_outline, unit))
+
+
 _DRAWERS = {"click": _draw_click, "down": _draw_press, "up": _draw_press, "move": _draw_move, "scroll": _draw_scroll,
-            "drag": _draw_drag}
+            "drag": _draw_drag, "pointer": _draw_pointer}
 
 
 def _draw_chips(pen, chips, size, unit) -> None:

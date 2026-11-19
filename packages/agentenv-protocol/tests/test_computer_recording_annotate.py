@@ -13,7 +13,7 @@ pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 av = pytest.importorskip("av")
 
-from computer_fake import FakeDriver, http_client, mcp_session  # noqa: E402
+from computer_fake import FakeDriver, MinimalDriver, http_client, mcp_session  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
@@ -29,6 +29,8 @@ from agentenv_protocol.computer.annotate import (  # noqa: E402
     COLOURS,
     FADE_S,
     KEEP_S,
+    STYLE,
+    UNIT_EDGE,
     Annotations,
     draw,
     input_marks,
@@ -49,6 +51,11 @@ def home(tmp_path, monkeypatch):
 
 
 class Recorded(FakeDriver):
+    recording = Recording(max_segment_s=60)
+
+
+class Pointerless(MinimalDriver):
+    """A driver with no pointer group, so its recordings, polled from captures, can't draw the pointer themselves."""
     recording = Recording(max_segment_s=60)
 
 
@@ -255,7 +262,9 @@ def test_a_mark_lands_at_its_point_on_a_frame_of_any_size():
     for size in ((1000, 500), (400, 200), (2000, 1000)):
         image = draw(PILImage.new("RGB", size, (255, 255, 255)), annotations.showing(at))
         cx, cy = size[0] // 2, size[1] // 2
-        assert any(image.getpixel((cx + dx, cy + dy)) == COLOURS[0] for dx in range(-3, 4) for dy in range(-3, 4)), size
+        reach = round(STYLE.dot * max(size) / UNIT_EDGE) + 3  # the click's hollow dot, around its point
+        assert any(image.getpixel((cx + dx, cy + dy)) == COLOURS[0]
+                   for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)), size
         assert image.getpixel((5, 5)) == (255, 255, 255)
 
 
@@ -340,3 +349,46 @@ async def test_a_tool_named_after_its_environment_is_told_read_only_by_its_own_a
 
     [poke] = [name for name in names if name.endswith("_poke")]
     assert len(names) == 2 and labels == [poke]
+
+
+def _pointed(image: PILImage.Image, tip: tuple[int, int], colour: tuple[int, int, int]) -> int:
+    """How many pixels near ``colour`` the agent's pointer drawn at ``tip`` would cover: its arrow, down and right."""
+    x, y = tip
+    return sum(1 for px in range(x, min(image.width, x + 14)) for py in range(y + 2, min(image.height, y + 22))
+               if sum(abs(a - b) for a, b in zip(image.getpixel((px, py)), colour)) < 90)
+
+
+@pytest.mark.parametrize("driver, drawn", [(Pointerless, True), (Recorded, False)],
+                         ids=["frames-without-a-pointer", "frames-with-the-pointer"])
+@pytest.mark.asyncio
+async def test_the_agents_pointer_is_drawn_where_its_click_left_it_only_where_the_frames_cant_show_the_pointer(
+        driver, drawn):
+    """Once the click's own mark is over, a frame still shows the pointer there: drawn in the agent's colour where
+    the recording's frames leave the pointer out, and left to the frames' own where they draw it."""
+    driver = driver()
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        await asyncio.sleep(0.3)
+        shot = await session.call_tool("computer_screenshot", {})
+        sent = datetime.now(timezone.utc)
+        await session.call_tool("computer_click", {"x": 200, "y": 150, "frame_id": shot.structuredContent["frame_id"]})
+        await asyncio.sleep(1.6)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
+
+    after = [image for at, image in _timed_frames(manifest)
+             if sent + timedelta(seconds=1.0) <= at <= sent + timedelta(seconds=1.5)]
+    assert after and all((_pointed(image, (200, 150), COLOURS[0]) > 10) is drawn for image in after)
+
+
+def test_the_pointer_follows_the_last_input_before_each_frame_from_the_first_input_on():
+    annotations = Annotations(pointer=True)
+    annotations.add(input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100)))
+    annotations.add(input_marks("pointer_move", (50, 50), role=None, at=T0 + timedelta(seconds=1), size=(100, 100)))
+
+    def pointer(seconds):
+        return [(mark.points[0], mark.points[-1]) for mark, _colour, _age in
+                annotations.showing(T0 + timedelta(seconds=seconds)) if mark.kind == "pointer"]
+
+    assert pointer(-1) == []
+    assert pointer(0.5) == [((0.1, 0.1), (0.1, 0.1))]
+    assert pointer(1.5) == [((0.1, 0.1), (0.5, 0.5))] and pointer(9) == [((0.1, 0.1), (0.5, 0.5))]

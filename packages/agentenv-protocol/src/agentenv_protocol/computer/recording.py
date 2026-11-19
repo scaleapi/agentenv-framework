@@ -262,7 +262,7 @@ class Video:
         self.streams = streams
         self.cursor = cursor
         self.annotate = annotate
-        self.annotations = annotating.Annotations() if annotate is not None else None
+        self.annotations = annotating.Annotations(pointer=hints.cursor and not cursor) if annotate is not None else None
         self.native = False
         self.segments: list[_Segment] = []
         self.encoder: Optional[_Encoder] = None

@@ -77,8 +77,8 @@ MARK_PIXELS = 20
 #: How far around the click, in pixels of a frame whose longer edge is the marks' UNIT_EDGE, the mark is looked for;
 #: and the least, on a smaller one.
 MARK_REACH, MARK_REACH_LEAST = 40, 8
-#: Where in the clicked cell its colour is read, right and down from its centre as a share of the cell: clear of the
-#: pointer drawn at the click and of the mark's dot.
+#: Where in the clicked cell its colour is read, left and up from its centre as a share of the cell: clear of the
+#: mark's dot and of a pointer at the click, real or drawn, which points from there down and right.
 CELL_INSIDE = 0.36
 #: How many times a check whose effect a busy desk can miss is tried before it fails: a desk starved through a drag
 #: sees its motion as one event, and keys sent while the click that focuses a box waits go wherever focus was.
@@ -1121,7 +1121,7 @@ class Probe:
             frame, scale, img = await self._base()
             size = self.layout["cell"]
             x, y = self._at("grid", scale, size + size / 2, 6 * size + size / 2)
-            inside = (x + math.floor(size * CELL_INSIDE * scale), y + math.floor(size * CELL_INSIDE * scale))
+            inside = (x - math.floor(size * CELL_INSIDE * scale), y - math.floor(size * CELL_INSIDE * scale))
             was = img.getpixel(inside)
             await self.act("computer_click", {"x": x, "y": y, "frame_id": frame})
             await asyncio.sleep(ANNOTATE_TAIL_S)

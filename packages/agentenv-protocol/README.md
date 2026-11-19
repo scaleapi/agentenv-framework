@@ -770,11 +770,15 @@ class MyDriver(ComputerDriverEnvironment):
   segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
 - **Annotations.** `start` with `annotate`, an object of options (`{}` for none; the card lists those a
   driver takes under its params' `annotate.options`), draws each input over the frames captured while it
-  shows, in the colour of the role that sent it (the agent's first): a ring where a click landed (a
-  square for the right button, a ring for each click of a double or triple), a trail for a drag, an
+  shows, in the colour of the role that sent it (the agent's first): a ring where a click landed, round a
+  hollow dot that leaves the pointer's tip in sight (a square for the right button, a ring for each click
+  of a double or triple), a trail for a drag, an
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
   each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
-  main argument. Every `computer_*` input is marked as `act` delivers it, best effort, and shows on
+  main argument. Where the frames can't show the pointer themselves, as frames polled from captures that
+  leave it out do (cua-driver's), the agent's pointer is drawn where its last input left it, along a
+  drag's path as it moves, after a fading line from where it jumped. Every `computer_*` input is marked
+  as `act` delivers it, best effort, and shows on
   every frame while it lasts and on the first one after it however late, as at a low fps. A segment a
   native recorder finished is kept as it came. The manifest's `annotate` is the object the recording
   drew with, and is left out for one that took a native recorder's segments.
