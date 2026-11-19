@@ -177,13 +177,12 @@ def test_processes_with_their_own_state_roots_or_temp_folders_hand_out_host_port
     assert drawn == [20101, 20102, 20103]
 
 
-def test_a_machine_tmp_it_cant_write_leaves_the_cursor_in_the_state_root(busy, machine_temp):
-    machine_temp.chmod(0o500)
-    try:
-        assert local_sandbox_module._host_port_cursor() == (
-            state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR)
-    finally:
-        machine_temp.chmod(0o700)
+def test_a_machine_tmp_it_cant_make_its_folder_in_leaves_the_cursor_in_the_state_root(busy, tmp_path, monkeypatch):
+    """A file where /tmp would be, so not even root makes the folder."""
+    (tmp_path / "not-a-folder").write_text("")
+    monkeypatch.setattr(local_sandbox_module, "_MACHINE_TMP", tmp_path / "not-a-folder")
+
+    assert local_sandbox_module._host_port_cursor() == state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR
 
 
 def test_a_machine_folder_others_can_write_leaves_the_cursor_in_the_state_root(busy, machine_temp, monkeypatch):
