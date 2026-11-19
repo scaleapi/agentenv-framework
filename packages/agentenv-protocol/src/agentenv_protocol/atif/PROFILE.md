@@ -61,7 +61,9 @@ to native exactly.
 - `reasoning_content` joins a step's reasoning blocks' texts with a blank line. The profile's `reasoning` lists every
   block, in native order, with its share of that text, so a reader that knows the profile can rebuild exact blocks.
 - Timestamps are UTC, written `YYYY-MM-DDTHH:MM:SS(.fff|.ffffff)Z`. Other precisions are normalized: ATIF's Step
-  validator on Python 3.10 reads no other.
+  validator on Python 3.10 reads no other. A document keeps one clock: the steps the SDK writes, each task's user step
+  and final response, are on the clock the agent's programs read, the universe's when the agent follows the env's
+  clock.
 - Usage follows ATIF: `prompt_tokens` includes cache reads and writes, and `cached_tokens` is the cache reads. Each
   adapter's `input_includes_cache` constant says whether its native input count already includes the cache.
   Cache writes go in `Metrics.extra.agentenv.cache_write_tokens`. An adapter may give a step's counts over several

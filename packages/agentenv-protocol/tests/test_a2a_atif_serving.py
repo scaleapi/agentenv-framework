@@ -28,6 +28,8 @@ from agentenv_protocol.a2a_agent import (
     extension,
     framework,
 )
+from agentenv_protocol.a2a_agent import clock as agent_clock
+from agentenv_protocol.computer import clock as follower
 from agentenv_protocol.atif import (
     FORMAT,
     PROFILE_VERSION,
@@ -613,3 +615,31 @@ def test_an_unknown_or_unfinished_read_is_not_found() -> None:
         hold.resume.set()
         _ended(client, task_id)
     assert (unfinished.status_code, unknown.status_code, past.status_code) == (404, 404, 400)
+
+
+def test_two_messages_sent_at_once_in_one_context_are_two_tasks_of_one_document() -> None:
+    # The second waits on the context's lock; the first is closed in the copy before that lock lets the second start.
+    with TestClient(_toy().create_app()) as client:
+        first = _send(client, "work t1", "m-1")
+        second = _send(client, "work t2", "m-2")
+        _ended(client, first)
+        _ended(client, second)
+        document = _atif(client, task_id=second)["trajectory"]
+    assert errors_in(validate(document)) == []
+    users = [step["extra"]["agentenv"] for step in document["steps"] if step["source"] == "user"]
+    assert [(user["task_id"], user["turn"]) for user in users] == [(first, 0), (second, 1)]
+
+
+def test_an_agent_on_the_envs_clock_stamps_the_sdks_steps_with_the_time_its_programs_read(tmp_path, monkeypatch):
+    clock_file = tmp_path / "clock"
+    clock_file.write_text(f"@1748768400.000000000 x1 ^{time.time()}\n")
+    monkeypatch.setattr(follower, "CLOCK_FILE", str(clock_file))
+    monkeypatch.setattr(agent_clock, "follows", lambda: True)
+    with TestClient(_toy().create_app()) as client:
+        task_id = _send(client, "data t1", "m-1")
+        _ended(client, task_id)
+        answer = _atif(client, task_id=task_id)
+    steps = answer["trajectory"]["steps"]
+    # The user step and the final response are the SDK's; both are on the universe's 2025-06-01, as the harness is.
+    assert steps[0]["timestamp"].startswith("2025-06-01T09:0") and steps[-1]["timestamp"].startswith("2025-06-01T09:0")
+    assert answer["turn_context"]["started_at"].startswith("2025-06-01") and answer["turn_context"]["ended_at"].startswith("2025-06-01")

@@ -17,7 +17,9 @@ from typing import Any, Iterable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from ..atif import FORMAT, Adapter, AdapterRun, AuxEntry, Media, ServedTurn, TurnContext
+from ..computer import clock as follower
 from ..errors import AgentEnvError
+from . import clock as agent_clock
 from .tasks.v1 import DataPart, FilePart, TaskError, TextPart, _thaw
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,9 @@ class AtifCopy:
         self._lock = threading.Lock()
         self._tasks: dict[str, _Task] = {}
         self._failed: str | None = None
+        # The steps the SDK writes keep the clock the adapter's steps come from: an agent that follows the env's clock
+        # runs its programs on the universe's time, while this server stays on real time.
+        self._now = _session_now if agent_clock.follows() else _real_now
 
     def start(self, task_id: str, index: int, turn: TurnStart) -> None:
         with self._lock:
@@ -80,7 +85,7 @@ class AtifCopy:
                 context = TurnContext(
                     index=index, context_id=self._context_id, task_id=task_id, message_id=turn.message_id,
                     inbound=tuple(_inbound(turn.parts, self._run)), agent_name=turn.agent_name,
-                    agent_version=turn.agent_version, agent_model=turn.agent_model, started_at=_now())
+                    agent_version=turn.agent_version, agent_model=turn.agent_model, started_at=self._now())
                 self._run.start_task(context)
                 self._tasks[task_id] = _Task(place=len(self._tasks), context=context)
 
@@ -113,7 +118,7 @@ class AtifCopy:
                     self._feed(task, record)
                 content, data = _final(final, self._run)
                 ending = {
-                    "state": state, "final": content or None, "ended_at": _now(), "data": data or None,
+                    "state": state, "final": content or None, "ended_at": self._now(), "data": data or None,
                     "error": None if error is None else {"kind": error.error_type, "message": error.message,
                                                          "code": error.code},
                 }
@@ -203,8 +208,12 @@ class AtifCopy:
             )
 
 
-def _now() -> datetime:
+def _real_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _session_now() -> datetime:
+    return datetime.fromtimestamp(follower.session_time(), timezone.utc)
 
 
 def _inbound(parts: Iterable[Any], run: AdapterRun) -> list[Any]:

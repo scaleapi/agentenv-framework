@@ -1620,7 +1620,8 @@ from one of them and its native record from the other.
 
 The SDK writes each task's user step from the inbound message and its final
 response from the result, both as [PROFILE.md](src/agentenv_protocol/atif/PROFILE.md)
-says. `session_id` is the A2A context id, and `trajectory_id` names the document.
+says, stamped on the clock the agent's programs read: the universe's when the
+agent follows the env's clock, though the server itself stays on real time. `session_id` is the A2A context id, and `trajectory_id` names the document.
 Reads naming `atif/1` are served by the SDK, context reads an agent binds
 included:
 
