@@ -670,6 +670,16 @@ def test_a_served_turn_gives_the_recorded_task_back():
     assert (recorded.state, recorded.final, recorded.data) == ("completed", ["a picture"], [{"data": {"n": 1}}])
 
 
+def test_a_served_turn_keeps_a_null_it_requires_so_replay_rebuilds_the_document():
+    run = AdapterRun(adapter())
+    run.start_task(CTX)
+    error = {"kind": "agent_error", "message": "it broke", "code": None}
+    run.end_task(final=["done"], data=[{"data": None}], error=error)
+    turn = ServedTurn.of(CTX, state="completed", final=["done"], data=[{"data": None}], error=error).wire()
+    assert (turn["data"], turn["error"]) == ([{"data": None}], {"kind": "agent_error", "message": "it broke"})
+    assert replay(adapter(), [RecordedTask.from_served(turn, [])]) == run.document()
+
+
 @pytest.mark.parametrize("turn, aux", [
     ({"index": -1, "context_id": "ctx", "task_id": "t1", "state": "completed"}, []),
     ({"index": 0, "context_id": "ctx", "task_id": "t1", "state": "completed", "surprise": 1}, []),

@@ -16,8 +16,9 @@ class _Served(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     def wire(self) -> dict[str, Any]:
-        """As JSON on the wire: fields that aren't set are left out."""
-        return self.model_dump(mode="json", exclude_none=True)
+        """As JSON on the wire: an optional field left at its default is left out, a required one is kept even when
+        null."""
+        return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class ServedMedia(_Served):
@@ -60,10 +61,6 @@ class AuxEntry(_Served):
     name: str
     record: Any
     after: int = Field(ge=0)
-
-    def wire(self) -> dict[str, Any]:
-        """As JSON on the wire, the record whole, even when it is null."""
-        return self.model_dump(mode="json")
 
 
 class ServedTurn(_Served):
