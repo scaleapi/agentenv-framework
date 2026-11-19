@@ -58,6 +58,7 @@ class Echoes(Adapter):
 
 class ToyConfig(AgentConfig):
     api_token: WriteOnly[str | None] = None
+    model_params: WriteOnly[dict[str, Any] | None] = None
 
 
 def _echoing(*, register: str | None = None, atif: bool = True) -> AgentEnvAgent:
@@ -210,12 +211,15 @@ def test_a_secret_the_sdk_holds_or_is_handed_is_redacted(monkeypatch: pytest.Mon
 
 def test_a_presigned_grant_is_redacted_whole_as_a_request_line_names_it_and_by_its_signature() -> None:
     secrets = Secrets()
-    url = "https://bucket.example.test/runs/1/trajectory.json?X-Amz-Signature=abcdef0123456789&X-Amz-Expires=900"
+    url = ("https://bucket.example.test/runs/1/trajectory.json?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+           "&X-Amz-Date=20261119T204500Z&X-Amz-Signature=abcdef0123456789&X-Amz-Expires=900")
     secrets.add_request(ReadObject(media_type="application/json", max_bytes=10, read=HttpGetGrant(
         kind="http-get", url=url, expires_at=datetime.now(timezone.utc) + timedelta(hours=1))))
-    target = "/runs/1/trajectory.json?X-Amz-Signature=abcdef0123456789&X-Amz-Expires=900"
-    assert secrets.scrub([url, f"GET {target} HTTP/1.1", "sig abcdef0123456789", f"wrapped {quote(url, safe='')}"]) == [
-        f"[redacted:{len(url)}]", f"GET [redacted:{len(target)}] HTTP/1.1", "sig [redacted:16]",
+    target = url.removeprefix("https://bucket.example.test")
+    plain = "signed with AWS4-HMAC-SHA256 at 20261119T204500Z"
+    assert secrets.scrub([url, f"GET {target} HTTP/1.1", "sig abcdef0123456789", plain,
+                          f"wrapped {quote(url, safe='')}"]) == [
+        f"[redacted:{len(url)}]", f"GET [redacted:{len(target)}] HTTP/1.1", "sig [redacted:16]", plain,
         f"wrapped [redacted:{len(quote(url, safe=''))}]"]
 
 
@@ -233,6 +237,19 @@ def test_a_tokened_url_is_redacted_by_its_token_and_plain_paths_and_values_are_l
     text = f"token {token} under /v1/grants and /runs/trajectory.json, as application/json for 900 s"
     assert secrets.scrub(text) == text.replace(token, f"[redacted:{len(token)}]")
     assert not caplog.records
+
+
+def test_a_write_only_mapping_is_redacted_by_its_credentials_alone(monkeypatch: pytest.MonkeyPatch,
+                                                                   caplog: pytest.LogCaptureFixture) -> None:
+    params = {"service_tier": "priority", "thinking": {"type": "enabled"},
+              "extra_headers": {"Authorization": "Bearer params-0123456789", "X-Title": "toy agent app"},
+              "auth": {"user": "bob-the-builder"}}
+    with caplog.at_level(logging.WARNING), TestClient(_echoing().create_app()) as client:
+        assert client.post("/ext/agent-config", json={"model_params": params}).status_code == 200
+        task_id = _turn(client, "priority enabled toy agent app Bearer params-0123456789 bob-the-builder")
+        document = client.post("/ext/trajectory", json={"task_id": task_id, "format": FORMAT}).json()["trajectory"]
+    assert document["steps"][0]["message"] == "priority enabled toy agent app [redacted:24] [redacted:15]"
+    assert not [record for record in caplog.records if "shorter than" in record.message]
 
 
 def test_a_signed_upload_form_is_redacted_by_its_signing_fields_alone() -> None:

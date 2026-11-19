@@ -597,10 +597,9 @@ class _SdkServices:
         self.secrets = Secrets() if atif is not None else None
         if self.secrets is not None:
             self.secrets.add_environment()
-            self.secrets.add_values(
-                [value for name, value in self.config_defaults.items() if name in self._write_only_config_fields],
-                source="a write-only agent-config default",
-            )
+            for name, value in self.config_defaults.items():
+                if name in self._write_only_config_fields:
+                    self.secrets.add_values(value, source="a write-only agent-config default")
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -754,10 +753,9 @@ class _SdkServices:
         if isinstance(request, AgentConfig):
             wire_names = _config_wire_names(type(request))
             write_only = _config_write_only_wire_names(type(request))
-            self.secrets.add_values(
-                [getattr(request, name) for name in request.model_fields_set if wire_names[name] in write_only],
-                source="a write-only agent-config value",
-            )
+            for name in request.model_fields_set:
+                if wire_names[name] in write_only:
+                    self.secrets.add_values(getattr(request, name), source="a write-only agent-config value")
 
     async def agent_config_get(self) -> dict[str, Any]:
         config = _thaw(self.config)

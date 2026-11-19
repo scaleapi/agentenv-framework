@@ -28,8 +28,15 @@ MODEL_KEY_ENV = "LITELLM_API_KEY"
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 #: Header names whose values describe a request rather than authorize it.
 _PLAIN_HEADERS = frozenset({"accept", "content-encoding", "content-length", "content-type", "user-agent"})
-#: Words in a signed upload form's field names that mark the values that sign it.
-_SIGNING_FIELDS = ("policy", "signature", "credential", "token", "accesskey", "accessid")
+#: The words of a name (a query parameter, a signed form's field, a key in a write-only mapping) that mark its value as a
+#: credential, and the endings that do: ``X-Amz-Signature`` and Azure's ``sig`` are, ``X-Amz-Algorithm``, ``X-Amz-Date``
+#: and ``X-Amz-SignedHeaders`` aren't, so ``AWS4-HMAC-SHA256`` is left in an agent's text.
+_CREDENTIAL_WORDS = frozenset({
+    "auth", "authorization", "bearer", "cookie", "credential", "credentials", "jwt", "key", "passwd", "password",
+    "policy", "pwd", "secret", "sig", "signature", "token", "accessid", "googleaccessid", "awsaccesskeyid",
+})
+_CREDENTIAL_ENDINGS = ("key", "token", "secret", "password", "signature", "credential")
+_NAME_WORD = re.compile(r"[a-z0-9]+")
 #: A path segment a URL with no query can carry its credential in, as a grant server's signed token.
 _TOKEN_SEGMENT = re.compile(r"[A-Za-z0-9_.=~+-]{16,}")
 
@@ -101,8 +108,10 @@ class Secrets:
                 self.add(item.read_token, source="a clock follower's read token")
 
     def add_values(self, value: Any, *, source: str) -> None:
-        """Every string ``value`` holds, in fields, lists and mappings, as a write-only config value may."""
-        self.add_all(_strings(value), source=source)
+        """The credentials a write-only config value holds: a string or list of strings whole, and in a mapping or a model
+        only what a credential-like key names (and everything below it), so a write-only mapping of sampling parameters,
+        as pi's ``model_params`` is, doesn't have ``priority`` or a provider's name redacted wherever it occurs."""
+        self.add_all(_credentials(value, whole=not isinstance(value, (Mapping, BaseModel))), source=source)
 
     def scrub(self, value: T) -> T:
         """``value`` with every secret redacted in its strings: its mappings' keys and values and its lists' items."""
@@ -166,18 +175,26 @@ def _models(value: Any) -> Iterator[BaseModel]:
             yield from _models(item)
 
 
-def _strings(value: Any) -> Iterator[str | SecretStr]:
+def _credentials(value: Any, *, whole: bool) -> Iterator[str | SecretStr]:
+    """The strings ``value`` holds that are credentials: all of them when ``whole`` (a write-only string field, or what a
+    credential-like key names), else those a credential-like key or field name marks, and everything below it."""
     if isinstance(value, (str, SecretStr)):
-        yield value
-    elif isinstance(value, BaseModel):
-        for name in type(value).model_fields:
-            yield from _strings(getattr(value, name))
+        if whole:
+            yield value
     elif isinstance(value, (list, tuple, set)):
         for item in value:
-            yield from _strings(item)
+            yield from _credentials(item, whole=whole)
+    elif isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            yield from _credentials(getattr(value, name), whole=whole or _names_credential(name))
     elif isinstance(value, Mapping):
-        for item in value.values():
-            yield from _strings(item)
+        for key, item in value.items():
+            yield from _credentials(item, whole=whole or isinstance(key, str) and _names_credential(key))
+
+
+def _names_credential(name: str) -> bool:
+    words = _NAME_WORD.findall(name.lower())
+    return any(word in _CREDENTIAL_WORDS or word.endswith(_CREDENTIAL_ENDINGS) for word in words)
 
 
 def _grant_secrets(grant: HttpGetGrant | HttpPutGrant | HttpPostPolicyGrant) -> list[str]:
@@ -185,15 +202,15 @@ def _grant_secrets(grant: HttpGetGrant | HttpPutGrant | HttpPostPolicyGrant) -> 
     secrets = _header_values(grant.headers)
     if isinstance(grant, HttpPostPolicyGrant):
         secrets += [value for name, value in grant.fields.items()
-                    if name != grant.path_field and any(word in name.lower() for word in _SIGNING_FIELDS)]
+                    if name != grant.path_field and _names_credential(name)]
     return secrets
 
 
 def _url_secrets(url: str) -> list[str]:
     """A URL that can carry a credential, in its path, query or user info: whole, and the part that carries it. A
-    presigned URL keeps its signature in its query, so its query's values and its path and query as a request line
-    names them (``curl -v`` prints that); a URL with no query keeps its token in a long path segment. A bare origin
-    carries none."""
+    presigned URL keeps its signature in its query, so its credential-like query values and its path and query as a
+    request line names them (``curl -v`` prints that); a URL with no query keeps its token in a long path segment. A
+    bare origin carries none."""
     parts = urlsplit(url)
     if not parts.path.strip("/") and not parts.query and parts.password is None:
         return []
@@ -205,7 +222,8 @@ def _url_secrets(url: str) -> list[str]:
 
 
 def _query_values(url: str) -> list[str]:
-    return [value for _, value in parse_qsl(urlsplit(url).query)]
+    """The values of a URL's credential-like query parameters: a signature, a credential, a token, a key."""
+    return [value for name, value in parse_qsl(urlsplit(url).query) if _names_credential(name)]
 
 
 def _header_values(headers: Mapping[str, Any] | None) -> list[str]:

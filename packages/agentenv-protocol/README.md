@@ -1673,11 +1673,14 @@ what they serve. The SDK knows:
 
 - its control token, and the model credentials in its environment:
   `LITELLM_API_KEY` and the values of `LITELLM_EXTRA_HEADERS`;
-- write-only agent-config values;
-- an MCP registration's header and query values, and a CDP endpoint's header
-  values and its URLs, unless one is a bare origin;
+- write-only agent-config values: a string whole, and in a mapping what a
+  credential-like key names (`Authorization`, `api_key`, `token`, `password`,
+  ...), so a mapping of sampling parameters keeps its ordinary words;
+- an MCP registration's header values and credential-like query values, and a
+  CDP endpoint's header values and its URLs, unless one is a bare origin;
 - every transfer grant an extension call hands the agent: its URL whole, its
-  path and query as a request line names them, its query values, its headers
+  path and query as a request line names them, its credential-like query
+  values (`X-Amz-Signature` is one, `X-Amz-Algorithm` isn't), its headers
   other than `Content-Type` and the like, and a signed upload form's signing
   fields;
 - a clock follower's read token;
