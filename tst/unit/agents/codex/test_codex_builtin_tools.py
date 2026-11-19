@@ -231,6 +231,11 @@ def test_a_cancelled_catalog_read_kills_its_child(cli, tmp_path):
     assert not _alive(int(pid_file.read_text()))
 
 
+#: How much more than the catalog read's own time the CLI's budget may lose: the scheduling around the read, which
+#: load stretches.
+_SCHEDULING_SLACK_S = 2
+
+
 def test_the_catalog_read_counts_against_the_turns_time_limit(codex, cli, monkeypatch):
     """The CLI gets what is left of `timeout_seconds` after the catalog read; without a read, all of it, as before."""
     monkeypatch.setenv("A2A_PORT", "8000")
@@ -264,8 +269,7 @@ def test_the_catalog_read_counts_against_the_turns_time_limit(codex, cli, monkey
     without_read, with_read = timeouts
     (read,) = reads
     assert without_read == 30
-    # The CLI's budget lost at least the read's own time; the slack is the scheduling around it, which load stretches.
-    assert 30 - read - 2 < with_read <= 30 - read
+    assert 30 - read - _SCHEDULING_SLACK_S < with_read <= 30 - read
 
 
 @pytest.mark.parametrize("selection, match", [
