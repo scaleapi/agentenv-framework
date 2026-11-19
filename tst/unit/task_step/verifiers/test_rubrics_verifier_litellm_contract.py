@@ -28,7 +28,7 @@ def judge(monkeypatch):
 
     config = cfg_mod.Config()
     config.set_secret_store(LocalSecretStore(values={"litellm_api_key": "k"}, use_env=False))
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig())
+    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url="https://judge.invalid/v1"))
     monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)

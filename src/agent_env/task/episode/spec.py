@@ -38,7 +38,8 @@ class EpisodeSpec:
             raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
         sandboxed = {name: works_in_sandbox(seeded, name) for name in outside}
         steps = [_in_episode(step, as_run, sandboxed, turn_timeout) for step, as_run in zip(task.steps, seeded)]
-        return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
+        copy = Task(id=task.id, version=task.version, steps=steps, headline_verifiers=task.headline_verifiers)
+        return cls(copy=copy, trainer_agents=tuple(outside), seed=seed)
 
     @property
     def prompts(self) -> tuple[tuple[str, str | None], ...]:

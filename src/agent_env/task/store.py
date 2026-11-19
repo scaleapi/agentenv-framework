@@ -791,6 +791,14 @@ class TaskInstanceStore:
             ),
         )
 
+    def record_teardown_sync(self, instance_id: str, context: "TaskStepContext", attempt_epoch: int) -> None:
+        """Keep the context a run's teardown ended with: what the run deployed, writes of a step a signal cut short
+        included, and what the teardown took down and left up, unless an attempt later than ``attempt_epoch``, the
+        instance's as the teardown began, owns the instance by now."""
+        match = Filter.of(instance_id=instance_id).where("attempt_epoch", Lte(attempt_epoch))
+        self._doc_store.update(TASK_INSTANCES_COLLECTION, match,
+                               UpdateSpec(set={"context": context.to_safe_dict()}, inc={"rev": 1}))
+
     def append_step_attempt_failure_sync(self, instance_id: str, failure: "StepAttemptFailure") -> None:
         """Best-effort append of one attempt's failure, designed not to conflict with the
         ``record_task_failure`` write. ``add_to_set`` creates the array on the first append and

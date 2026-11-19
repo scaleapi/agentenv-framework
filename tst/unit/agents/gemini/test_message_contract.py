@@ -202,7 +202,7 @@ def test_a_turn_keeps_its_trajectory_failed_or_not(calls, client):
 
     task = send(client, "go")
 
-    assert client.post(TRAJECTORY_PATH, json={"task_id": task["id"]}).json() == {"trajectory": trajectory}
+    assert client.post(TRAJECTORY_PATH, json={"task_id": task["id"]}).json() == {"trajectory": trajectory, "format": a2a_server.TRAJECTORY_FORMAT}
 
 
 # ── the CLI invocation itself ────────────────────────────────────────────────────

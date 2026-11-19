@@ -1,0 +1,229 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-7f3a",
+ "agent": {
+  "name": "toy",
+  "version": "1.0",
+  "model_name": "claude-opus-5-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-04T17:02:11.204Z",
+   "source": "user",
+   "message": "tests/test_parse.py::test_utc fails. Fix parse_date without changing the test.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-7f3a",
+     "task_id": "task-91c2",
+     "message_id": "msg-a1",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "reasoning_content": "Run the failing test first to see the error.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_01",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "pytest tests/test_parse.py -q"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_01",
+      "content": "FAILED tests/test_parse.py::test_utc - ValueError: Invalid isoformat string: '2026-01-02T03:04:05Z'",
+      "extra": {
+       "agentenv": {
+        "status": "error",
+        "exit_code": 1
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 18432,
+    "cached_tokens": 16890,
+    "completion_tokens": 212,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 1402
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 44,
+       "visibility": "raw",
+       "signature": "EqQBCkgIBhABGAIiQKm3"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_02",
+     "function_name": "Read",
+     "arguments": {
+      "file_path": "tests/fixtures/dates.txt"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_02",
+      "content": "2026-01-01T03:04:05Z -> 2026-01-01 03:04:05+00:00\n2026-01-02T03:04:05Z -> 2026-01-02 03:04:05+00:00\n2026-01-03T03:04:05Z -> 2026-01-03 03:04:05+00:00\n2026-01-04T03:04:05Z -> 2026-01-04 03:04:05+00:00\n2026-01-05T03:04:05Z -> 2026-01-05 03:04:05+00:00\n2026-01-06T03:04:05Z -> 2026-01-06 03:04:05+00:00\n2026-01-07T03:04:05Z -> 2026-01-07 03:04:05+00:00\n2026-01-08T03:04:05Z -> 2026-01-08 03:04:05+00:00\n2026-01-09T03:04:05Z -> 2026-01-09 03:04:05+00:00\n2026-01-10T03:04:05Z -> 2026-01-10 03:04:05+00:00\n2026-01-11T03:04:05Z -> 2026-01-11 03:04:05+00:00\n2026-01-12T03:04:05Z -> 2026-01-12 03:04:05+00:00\n2026-01-13T03:04:05Z -> 2026-01-13 03:04:05+00:00\n2026-01-14T03:04:05Z -> 2026-01-14 03:04:05+00:00\n2026-01-15T03:04:05Z -> 2026-01-15 03:04:05+00:00\n2026-01-16T03:04:05Z -> 2026-01-16 03:04:05+00:00\n2026-01-17T03:04:05Z -> 2026-01-17 03:04:05+00:00\n2026-01-18T03:04:05Z -> 2026-01-18 03:04:05+00:00\n2026-01-19T03:04:05Z -> 2026-01-19 03:04:05+00:00\n2026-01-20T03:04:05Z -> 2026-01-20 03:04:05+00:00\n2026-01-21T03:04:05Z -> 2026-01-21 03:04:05+00:00\n2026-01-22T03:04:05Z -> 2026-01-22 03:04:05+00:00\n2026-01-23T03:04:05Z -> 2026-01-23 03:04:05+00:00\n2026-01-24T03:04:05Z -> 2026-01-24 03:04:05+00:00\n2026-01-25T03:04:05Z -> 2026-01-25 03:04:05+00:00\n2026-01-26T03:04:05Z -> 2026-01-26 03:04:05+00:00\n2026-01-27T03:04:05Z -> 2026-01-27 03:04:05+00:00\n2026-01-28T03:04:05Z -> 2026-01-28 03:04:05+00:00\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 18901,
+    "cached_tokens": 18292,
+    "completion_tokens": 96,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 469
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 4,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_03",
+     "function_name": "Edit",
+     "arguments": {
+      "file_path": "src/parse.py",
+      "old_string": "datetime.fromisoformat(s)",
+      "new_string": "datetime.fromisoformat(s.replace('Z', '+00:00'))"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_03",
+      "content": "The file src/parse.py has been updated."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 31377,
+    "cached_tokens": 18761,
+    "completion_tokens": 188,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 12476
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_04",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "pytest tests/test_parse.py -q"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_04",
+      "content": "3 passed in 0.18s"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 31702,
+    "cached_tokens": 31237,
+    "completion_tokens": 74,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 325
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "parse_date now accepts a trailing Z; all 3 tests in tests/test_parse.py pass.",
+   "metrics": {
+    "prompt_tokens": 31890,
+    "cached_tokens": 31562,
+    "completion_tokens": 41,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 188
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 132302,
+  "total_completion_tokens": 611,
+  "total_cached_tokens": 116742,
+  "total_cost_usd": 0.2117,
+  "total_steps": 6,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 14860
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "toy-events/1",
+   "adapter": {
+    "name": "toy-events-atif",
+    "version": "0.1.0"
+   },
+   "unmatched": {
+    "system": 1
+   }
+  }
+ }
+}
