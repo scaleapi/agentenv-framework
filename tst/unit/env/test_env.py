@@ -414,3 +414,18 @@ async def test_readiness_of_a_record_with_no_card_url_cannot_be_asked(sent, site
     with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'ready' on urn:agentenv:website/v1"):
         await dataclasses.replace(_record(sites), environment_card_url=None).readiness()
     assert sent == []
+
+
+def test_a_gateway_record_grants_each_childs_route_its_own_token_and_everything_else_the_gateways():
+    """A step reaching a multi env's computer through any gateway sends the computer's own token, not the env's."""
+    gateway = DeployedGatewayEnv(env_id="multi", env_version=1, gateway_url="https://gw.example", sandbox_id="gw",
+                                 environment_card_url=f"https://gw.example{WELL_KNOWN_PATH}", control_token="env-token",
+                                 child_envs={"desktop": {"control_token": "desk-own"}, "laptop": {}})
+    urls = ["https://gw.example/svc/desktop/agentenv/ext/computer-exec", "https://gw.example/svc/desktop",
+            "https://gw.example/svc/desktop-2/agentenv", "https://gw.example/svc/laptop/agentenv",
+            "https://gw.example/svc/pgweb/", "https://elsewhere/svc/desktop/agentenv"]
+    assert [gateway.control_headers_for(url) for url in urls] == [
+        {"Authorization": "Bearer desk-own"}] * 2 + [{"Authorization": "Bearer env-token"}] * 3 + [{}]
+    with protocol_v1.authorized(gateway.control_grants):
+        assert protocol_v1.request_headers(urls[0]) == {"Authorization": "Bearer desk-own"}
+        assert protocol_v1.request_headers(urls[4]) == {"Authorization": "Bearer env-token"}

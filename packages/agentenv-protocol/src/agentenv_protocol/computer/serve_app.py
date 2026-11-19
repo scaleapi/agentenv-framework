@@ -2,7 +2,7 @@
 ``python -m agentenv_protocol.computer.serve_app <file>:<Class>``, run in the app's folder, serves the class's card and
 ``computer-app/v1`` where only the computer reaches it (``served``): on Linux and macOS the Unix socket
 ``.agentenv/server.sock`` there, on Windows a loopback port it writes there with a token. It takes no control token
-(``CONTROL_TOKEN_ENV``): the driver checks it in front of the app. Before it serves, it keeps a copy of
+(``CONTROL_TOKEN_ENV``, ``CONTROL_TOKEN_SHA256_ENV``): the driver checks it in front of the app. Before it serves, it keeps a copy of
 the app's data paths as installed, which a reset puts back; once it serves, it adds the app's launcher and launches a
 boot app (``AppRuntime.start``). A server that can't start, or whose start fails once it serves, writes why to
 ``.agentenv/server.failure``, which its computer's driver reports, and exits. It runs on real time, so its own
@@ -20,7 +20,7 @@ from pathlib import Path
 import uvicorn
 
 from .. import transfers
-from ..types import CONTROL_TOKEN_ENV
+from ..types import CONTROL_TOKEN_ENV, CONTROL_TOKEN_SHA256_ENV
 from ._load import load_class
 from .app import FAILURE, ComputerAppEnvironment
 from .served import LOOPBACK, SOCKET, bind, guarded
@@ -45,6 +45,7 @@ def _serve(argv: list[str]) -> None:
         raise SystemExit(USAGE)
     file, _, name = argv[0].partition(":")
     os.environ.pop(CONTROL_TOKEN_ENV, None)
+    os.environ.pop(CONTROL_TOKEN_SHA256_ENV, None)
     app = load_class(Path(file), name, ComputerAppEnvironment)()
     runtime = app._computer_app_runtime()
     app._computer_app_data_plane().keep_initial()

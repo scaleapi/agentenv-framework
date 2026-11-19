@@ -190,6 +190,7 @@ async def test_the_card_declares_the_contract_the_driver_implements():
     assert computer["buttons"] == ["left", "right", "middle"] and computer["max_click_count"] == 3
     assert computer["keys"] == "all" and computer["platform"] == LINUX.as_dict() and computer["delivery"] == "foreground"
     assert computer["default_data_paths"] == ["Desktop", "Documents", "Downloads"] and computer["screen"] == "desktop"
+    assert computer["control_token"] == "sha256"  # agent-env boots it with the token's digest, not the token
     assert "methods" not in computer and extensions["urn:agentenv:skill/v1"]["params"]["methods"]["get"]["method"] == "GET"
     assert extensions["urn:agentenv:computer-pointer/v1"]["params"]["buttons"] == ["left", "right", "middle"]
     assert set(extensions["urn:agentenv:computer-keyboard/v1"]["params"]["methods"]) == {"get", "set"}

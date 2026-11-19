@@ -72,8 +72,13 @@ CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 # The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
 # it out of logged compose files.
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
-# The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
+# The children the gateway passes its control token on to, comma-separated: a multi env's computers that an older
+# agent-env booted with it. Delete once no deploy sets it.
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
+# Each child's own control token, as `name=token`, comma-separated: a multi env's computers, each booted with a token
+# of its own, which the gateway puts in place of its own on that child's /svc routes; TOKEN in the name keeps it out of
+# logged compose files.
+CHILD_CONTROL_TOKENS_ENV = "CHILD_CONTROL_TOKENS"
 # The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
 # who drives it, the role its browser's requests take.
 COMPUTERS_ENV = "COMPUTERS"

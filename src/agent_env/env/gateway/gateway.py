@@ -177,6 +177,7 @@ class Gateway:
         service_db_url: str | None = None,
         control_token: str | None = None,
         control_token_children: Iterable[str] = (),
+        child_control_tokens: Mapping[str, str] | None = None,
         computers: Iterable[str] = (),
         provider_headers: Iterable[str] = (),
         clock_followers: Mapping[str, str] | None = None,
@@ -189,8 +190,11 @@ class Gateway:
         followers of its clock, each with the read token its watch carries. `site_names` are each site's names as its
         env stores them, the names its card declares standing in for a site's that stores none: a site reached at one
         takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a browser
-        computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
-        /svc routes pass its control token on to, a multi env's computers, which take it. `computers` are its children
+        computer opens it, and the others at their ``website_urls``. `child_control_tokens` are its children's own
+        control tokens, a multi env's computers', by name: a request to one's /svc routes with the gateway's token goes
+        on with the child's instead, and a child's token goes on only to that child and to the clock watch, where the
+        child sends it as its read token. `control_token_children` are the children its /svc routes pass its own token on
+        to unchanged, the computers an older agent-env booted with it. `computers` are its children
         that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
         requests its browser sends take. `console_urls` are the env's SQL consoles by key, each served at /svc/<key>/
         only with the control token, and not at all without one."""
@@ -216,6 +220,7 @@ class Gateway:
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
+        self._child_bearers = {name: f"Bearer {token}".encode() for name, token in (child_control_tokens or {}).items()}
         self._consoles = dict(console_urls or {}) if control_token else {}
         if clashes := sorted(self._consoles.keys() & self.rest_proxy_urls.keys()):
             raise ValueError(f"console keys {clashes} are also backing servers' /svc keys")
@@ -601,13 +606,21 @@ class Gateway:
     # by every tools/call of that session (and the role is the one its initialize request carried, which that task
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
 
-    def _keeps_control_token(self, path: str) -> bool:
-        """Whether a request to ``path`` keeps the gateway's control token: its clock watch, where a computer it fronts
-        sends the token as its read token, and its /svc route to one of those computers, which takes the token."""
-        if path == CLOCK_WATCH_PATH:
-            return True
+    def _passed_authorization(self, path: str, value: bytes) -> bytes | None:
+        """The ``Authorization`` a request to ``path`` that carries ``value`` goes on with, None for none. The gateway's
+        token goes on as a child's own token to that child's /svc routes, as itself to the clock watch, which reads it,
+        and to an older agent-env's computers (``control_token_children``), and nowhere else. A child's token goes on
+        only to that child's /svc routes and to the clock watch, where the child sends it as its read token. Any other
+        value goes on as it came."""
         child = path.removeprefix("/svc/").split("/", 1)[0] if path.startswith("/svc/") else None
-        return child in self._control_token_children
+        if self._control_bearer is not None and hmac.compare_digest(value, self._control_bearer):
+            if child in self._child_bearers:
+                return self._child_bearers[child]
+            return value if path == CLOCK_WATCH_PATH or child in self._control_token_children else None
+        owner = next((name for name, bearer in self._child_bearers.items() if hmac.compare_digest(value, bearer)), None)
+        if owner is None:
+            return value
+        return value if path == CLOCK_WATCH_PATH or child == owner else None
 
     def _asgi_app(self):
         """The served app: FastMCP's Starlette app with the request's caller bound around it, the control routes behind
@@ -618,19 +631,17 @@ class Gateway:
             inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
-            if self._control_bearer and scope["type"] in ("http", "websocket"):
+            if (self._control_bearer or self._child_bearers) and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
-                if scope["type"] == "http" and self._takes_control_token(scope) and not hmac.compare_digest(
-                        dict(headers).get(b"authorization", b""), self._control_bearer):
+                if self._control_bearer and scope["type"] == "http" and self._takes_control_token(scope) and \
+                        not hmac.compare_digest(dict(headers).get(b"authorization", b""), self._control_bearer):
                     logger.warning("refused %s %s: it takes the env's control token", scope["method"], scope["path"])
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
                     return
-                # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
-                # receive it, through their /svc routes; every other request goes on without it.
-                if not self._keeps_control_token(scope["path"]):
-                    scope = {**scope, "headers": [(name, value) for name, value in headers if not (
-                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
+                passed = [(name, self._passed_authorization(scope["path"], value) if name == b"authorization" else value)
+                          for name, value in headers]
+                scope = {**scope, "headers": [(name, value) for name, value in passed if value is not None]}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return

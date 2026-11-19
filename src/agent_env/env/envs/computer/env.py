@@ -301,19 +301,16 @@ class ComputerEnv(Env):
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
                      env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "",
-                     sites_later: bool = False, live_hosts: tuple[str, ...] = (),
-                     control_token: Optional[str] = None) -> DeployedEnv:
+                     sites_later: bool = False, live_hosts: tuple[str, ...] = ()) -> DeployedEnv:
         """With ``tool_prefix``, its driver serves its tools under it, with ``reach``, a network that restricts its
         egress allows that URL's host too, and the ``live_hosts`` of the run's live websites, with ``sites_later``
-        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them, and with
-        ``control_token`` its framework-only routes take that token, not one of its own: what a multi env gives each
-        of its computers."""
+        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
             env_params=env_params, tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
-            live_hosts=tuple(live_hosts), control_token=control_token)
+            live_hosts=tuple(live_hosts))
 
     async def route_sites(self, sites: list[dict]) -> None:
         """Route ``sites`` on this computer, deployed with ``sites_later``, launch its held apps and finish its boot;

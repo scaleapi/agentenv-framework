@@ -2888,7 +2888,7 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     assert "CLOCK_FOLLOWER_TOKENS" not in env
 
 
-def test_compose_names_the_gateways_computers_and_passes_its_token_on_to_them_only_when_it_has_one():
+def test_compose_names_the_gateways_computers_with_their_own_tokens_and_logs_none_of_them(caplog):
     from agent_env.env.envs.service_db import ServiceDBConfig
     from agent_env.env.gateway import ExternalChild
 
@@ -2897,13 +2897,18 @@ def test_compose_names_the_gateways_computers_and_passes_its_token_on_to_them_on
             mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
             state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
             state_instance=LocalPostgresStateProvider.default_instance(), control_token=control_token,
-            external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example"),
-                               ExternalChild("laptop", "https://lap.example/mcp", "https://lap.example")))
+            external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example",
+                                             control_token="desk-own"),
+                               ExternalChild("laptop", "https://lap.example/mcp", "https://lap.example",
+                                             control_token="lap-own")))
         return dict(line.split("=", 1) for line in yaml.safe_load(rendered)["services"][GATEWAY_SERVICE_NAME]["environment"])
 
-    assert gateway_env("gw-token")["CONTROL_TOKEN_CHILDREN"] == "desktop,laptop"
-    assert "CONTROL_TOKEN_CHILDREN" not in gateway_env(None)
+    caplog.set_level(logging.DEBUG)
+    assert gateway_env("gw-token")["CHILD_CONTROL_TOKENS"] == gateway_env(None)["CHILD_CONTROL_TOKENS"] == \
+        "desktop=desk-own,laptop=lap-own"
+    assert "CONTROL_TOKEN_CHILDREN" not in gateway_env("gw-token")
     assert gateway_env("gw-token")["COMPUTERS"] == gateway_env(None)["COMPUTERS"] == "desktop,laptop"
+    assert "desk-own" not in caplog.text and "lap-own" not in caplog.text
 
 
 def test_compose_declares_the_children_that_follow_the_clock_by_their_read_tokens_and_logs_none_of_them():
@@ -2956,8 +2961,8 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
     sandbox.url_from_sandbox = MagicMock(side_effect=lambda url: url.replace("localhost", "host.docker.internal"))
     order, composes = [], []
 
-    async def children(reach, control_token):
-        order.append(("children", reach, control_token))
+    async def children(reach):
+        order.append(("children", reach))
         return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001", "read-desk")]
 
     def compose(**kwargs):
@@ -2983,7 +2988,7 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
             gateway_port=18765, website_configs=None, website_images=None, gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60,
             disk_size_gb=10, children=children, control_token="gw-token")
 
-    assert sorted(order[:2]) == [("children", "https://gw.example", "gw-token"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
+    assert sorted(order[:2]) == [("children", "https://gw.example"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
     assert order[2:] == [("up", "")]
     assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001",
                                            "read-desk"),)]
@@ -3002,7 +3007,7 @@ async def test_a_vm_deploy_whose_children_or_services_fail_raises_once_both_have
     gp._state_instance = MagicMock()
     ended = []
 
-    async def children(reach, control_token):
+    async def children(reach):
         await asyncio.sleep(0.05)
         ended.append("children")
         if failing == "children":
@@ -3046,9 +3051,9 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
             return _FakeSandbox(f"db-{port}", port, f"tcp://db.modal.host:{port}")
         return _FakeSandbox(f"sb-{kwargs['image_name']}-{port}", port, f"https://{kwargs['image_name']}.modal.host")
 
-    async def children(reach, control_token):
-        reaches.append((reach, control_token))
-        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk")]
+    async def children(reach):
+        reaches.append(reach)
+        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk", "desk-own")]
 
     gateway_env = MagicMock(docker_image_artifact=_image("agent-gateway"))
     db_env = MagicMock()
@@ -3067,11 +3072,12 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
             control_token="gw-token")
 
     env = create_calls[-1]["env"]
-    assert reaches == [(None, "gw-token")]
+    assert reaches == [None]
     assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
     assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"
-    assert env["CONTROL_TOKEN_CHILDREN"] == "desktop"
+    assert env["CHILD_CONTROL_TOKENS"] == "desktop=desk-own"
+    assert "CONTROL_TOKEN_CHILDREN" not in env
     assert env["COMPUTERS"] == "desktop"
 
 
