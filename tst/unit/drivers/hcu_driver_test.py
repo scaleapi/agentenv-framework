@@ -529,7 +529,12 @@ async def test_a_stalled_call_expires_closes_its_session_and_does_not_replay_que
 
     assert answer.isError and "TimeoutError: HCU did not answer within" in answer.content[0].text
     (old,) = _starts(tmp_path)
-    assert not Path(old["env"]["XDG_RUNTIME_DIR"]).exists()
+    if module.WINDOWS:
+        assert "XDG_RUNTIME_DIR" not in old["env"]
+    else:
+        assert not Path(old["env"]["XDG_RUNTIME_DIR"]).exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(old["pid"], 0)
     if not cancel_caller:
         failed = await first
         assert failed.isError and "so AX may have run" in failed.content[0].text
