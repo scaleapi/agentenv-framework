@@ -14,6 +14,7 @@ import pytest
 
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.deploy_agent import bound_deployment
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
@@ -38,6 +39,10 @@ def _loader(env_step_id: str | None) -> LoadArtifactTaskStep:
         id=f"load-{env_step_id or 'unbound'}", version=None, env_id=ENV_ID,
         env_step_id=env_step_id, artifact_id="universe", artifact_version=1,
     )
+
+
+def _bound(step: LoadArtifactTaskStep, context: TaskStepContext):
+    return bound_deployment(context, step.env_id, env_step_id=step.env_step_id, step_id=step.id)
 
 
 async def _deploy_two_in_parallel() -> TaskStepContext:
@@ -65,8 +70,8 @@ async def _deploy_one() -> TaskStepContext:
 async def test_each_load_targets_its_own_branch_env():
     context = await _deploy_two_in_parallel()
 
-    assert _loader("env-a")._deployed_env(context).sandbox_id == "sb-AAA"
-    assert _loader("env-b")._deployed_env(context).sandbox_id == "sb-BBB"
+    assert _bound(_loader("env-a"), context).sandbox_id == "sb-AAA"
+    assert _bound(_loader("env-b"), context).sandbox_id == "sb-BBB"
 
 
 @pytest.mark.asyncio
@@ -74,7 +79,7 @@ async def test_ambiguous_env_without_env_step_id_raises():
     context = await _deploy_two_in_parallel()
 
     with pytest.raises(RuntimeError, match="2 deployments of env"):
-        _loader(None)._deployed_env(context)
+        _bound(_loader(None), context)
 
 
 @pytest.mark.asyncio
@@ -82,7 +87,7 @@ async def test_stale_env_step_id_raises_even_with_one_deployment():
     context = await _deploy_one()
 
     with pytest.raises(RuntimeError, match="names no deployment"):
-        _loader("env-typo")._deployed_env(context)
+        _bound(_loader("env-typo"), context)
 
 
 @pytest.mark.asyncio
@@ -90,12 +95,12 @@ async def test_single_deployment_resolves_without_env_step_id():
     """The unchanged path every existing task takes."""
     context = await _deploy_one()
 
-    assert _loader(None)._deployed_env(context).sandbox_id == "sb-ONLY"
+    assert _bound(_loader(None), context).sandbox_id == "sb-ONLY"
 
 
 @pytest.mark.asyncio
 async def test_env_not_deployed_resolves_to_none():
-    assert _loader(None)._deployed_env(TaskStepContext()) is None
+    assert _bound(_loader(None), TaskStepContext()) is None
 
 
 @pytest.mark.asyncio
