@@ -2,8 +2,9 @@
 defaults. The agents are the echo agent (tst/data/a2a_agent), which appends a step a second before its echo, so a
 turn runs for a few seconds; over a two-turn conversation with a user-sim, each turn is stored under its own prefix,
 in more than one chunk, and its chunks join to that turn's final trajectory; each turn names the one after it, and
-the last none. The echo agent declares its native format, which its card offers and its reads name, and a read
-naming another format is refused with a code agent-env reads. Needs Docker and a throwaway local registry."""
+the last none. The echo agent declares its native format and an ATIF adapter, so its card offers both; its native reads
+name their format, its atif/1 reads are valid ATIF, and a read naming another format is refused with a code agent-env
+reads. Needs Docker and a throwaway local registry."""
 
 import json
 import re
@@ -15,6 +16,8 @@ import uuid
 
 import httpx
 import pytest
+
+from agentenv_protocol.atif import FORMAT as ATIF, PROFILE_VERSION, SCHEMA_VERSION, errors_in, validate
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent.protocol import raise_for_extension_status
@@ -135,7 +138,7 @@ async def test_each_turn_is_stored_live_under_its_own_prefix_and_joins_to_its_fi
 
 
 @pytest.mark.asyncio
-async def test_a_deployed_agent_serves_its_native_format_and_refuses_another(local_registry):
+async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_another(local_registry):
     suffix = uuid.uuid4().hex[:8]
     native = "agentenv-echo-agent/v1"
     agent = put_test_agent(f"trajectory-formats-agent-{suffix}")
@@ -152,7 +155,7 @@ async def test_a_deployed_agent_serves_its_native_format_and_refuses_another(loc
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     [deployed] = context.deployed_agents
     params = A2AAgent.find_extension(deployed.a2a_card, A2AAgent.EXT_TRAJECTORY)["params"]
-    assert (params["formats"], params["native"], params["default"]) == ([native], native, native)
+    assert (params["formats"], params["native"], params["default"]) == ([native, ATIF], native, native)
     url = deployed.a2a_url + params["endpoint"]
     async with httpx.AsyncClient(timeout=30, headers=deployed.control_headers) as client:
         page = (await client.post(url, json={"context_id": f"formats-{suffix}", "after": 0})).json()
@@ -160,7 +163,15 @@ async def test_a_deployed_agent_serves_its_native_format_and_refuses_another(loc
         for named in ({}, {"format": native}):
             final = (await client.post(url, json={"task_id": page["task_id"], **named})).json()
             assert (final["format"], [event["type"] for event in final["trajectory"]]) == (native, ["echo"])
-        refused = await client.post(url, json={"task_id": page["task_id"], "format": "atif/1"})
+        atif = (await client.post(url, json={"task_id": page["task_id"], "format": ATIF})).json()
+        cursor = (await client.post(url, json={"context_id": f"formats-{suffix}", "after": 0, "format": ATIF})).json()
+        refused = await client.post(url, json={"task_id": page["task_id"], "format": "other-events/1"})
+    document = atif["trajectory"]
+    assert (atif["format"], atif["schema_version"], atif["profile_version"]) == (ATIF, SCHEMA_VERSION, PROFILE_VERSION)
+    assert errors_in(validate(document)) == []
+    assert [step["message"] for step in document["steps"]] == ["hello", "Echo: hello"]
+    assert (document["session_id"], atif["turn_context"]["task_id"]) == (f"formats-{suffix}", page["task_id"])
+    assert cursor["events"] == document["steps"] and cursor["header"]["trajectory_id"] == document["trajectory_id"]
     with pytest.raises(httpx.HTTPStatusError, match="HTTP 400: format_not_offered"):
         raise_for_extension_status(refused, operation="trajectory read")
 
