@@ -15,7 +15,6 @@ import os
 import platform
 import random
 import socket
-import tempfile
 import threading
 
 import pytest
@@ -113,10 +112,10 @@ async def test_tunnel_urls_stay_keyed_by_container_port(fake_ports):
 
 @pytest.fixture(autouse=True)
 def machine_temp(tmp_path, monkeypatch):
-    """The machine's temp folder, which holds the cursor: this test's own, so parallel workers don't share it."""
+    """The machine's /tmp, which holds the cursor: this test's own, so parallel workers don't share it."""
     folder = tmp_path / "machine-tmp"
     folder.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(folder))
+    monkeypatch.setattr(local_sandbox_module, "_MACHINE_TMP", folder)
     return folder
 
 
@@ -159,22 +158,32 @@ def test_the_first_port_on_a_machine_does_not_follow_a_reseeded_random(busy, tmp
     starts = []
     for machine in ("a", "b", "c"):
         (tmp_path / machine).mkdir()
-        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / machine))
+        monkeypatch.setattr(local_sandbox_module, "_MACHINE_TMP", tmp_path / machine)
         random.seed(0)
         starts.append(local_sandbox_module._free_host_port())
 
     assert len(set(starts)) > 1
 
 
-def test_processes_with_their_own_state_roots_hand_out_host_ports_in_turn(busy, tmp_path, monkeypatch):
+def test_processes_with_their_own_state_roots_or_temp_folders_hand_out_host_ports_in_turn(busy, tmp_path, monkeypatch):
     """As each xdist worker does: a port one drew isn't drawn by the next before docker binds it."""
     _last_handed_out(20100)
     drawn = []
     for root in ("a", "b", "c"):
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / root))
+        monkeypatch.setenv("TMPDIR", str(tmp_path / root))
         drawn.append(local_sandbox_module._free_host_port())
 
     assert drawn == [20101, 20102, 20103]
+
+
+def test_a_machine_tmp_it_cant_write_leaves_the_cursor_in_the_state_root(busy, machine_temp):
+    machine_temp.chmod(0o500)
+    try:
+        assert local_sandbox_module._host_port_cursor() == (
+            state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR)
+    finally:
+        machine_temp.chmod(0o700)
 
 
 def test_a_machine_folder_others_can_write_leaves_the_cursor_in_the_state_root(busy, machine_temp, monkeypatch):

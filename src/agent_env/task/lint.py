@@ -60,6 +60,10 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
     return sorted(findings, key=lambda finding: finding.severity is not Severity.ERROR)
 
 
+#: How many of the tasks a finding is in a run names, before how many more.
+SHOWN_TASKS = 3
+
+
 def said(findings: Iterable[tuple[str, Finding]]) -> list[str]:
     """``findings``, each with the task it's in, as a run says them: each kind once, errors first, after its task when
     only one has it, else with how many and the first few, so a bundle of a thousand tasks says each kind once."""
@@ -71,7 +75,8 @@ def said(findings: Iterable[tuple[str, Finding]]) -> list[str]:
         if len(tasks) == 1:
             lines.append(f"{tasks[0]}: {severity.value}: {text}")
         else:
-            shown = ", ".join(tasks[:3]) + (f" and {len(tasks) - 3} more" if len(tasks) > 3 else "")
+            more = len(tasks) - SHOWN_TASKS
+            shown = ", ".join(tasks[:SHOWN_TASKS]) + (f" and {more} more" if more > 0 else "")
             lines.append(f"{severity.value}: {text} ({len(tasks)} tasks: {shown}; agent-env task lint lists each)")
     return lines
 

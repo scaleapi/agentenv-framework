@@ -127,9 +127,10 @@ _VM_SIZE_FILE = ".vm-size.json"
 # up on Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and
 # below Kubernetes' node ports (30000-32767).
 _HOST_PORTS = range(20000, 30000)
-# Holds the last host port handed out, in a folder of the user's own in this machine's temp folder, so every process the
-# user runs here hands them out in turn, whatever its state root.
+# Holds the last host port handed out, in a folder of the user's own in this machine's /tmp, so every process the user
+# runs here hands them out in turn, whatever its state root or TMPDIR.
 _HOST_PORT_CURSOR = "host-ports"
+_MACHINE_TMP = Path("/tmp")
 
 
 def _local_sandbox_root_path() -> Path:
@@ -177,13 +178,14 @@ def _free_host_port() -> int:
 
 
 def _host_port_cursor() -> Path:
-    """The cursor's file: in this user's own folder of the machine's temp folder, shared by processes whose state roots
-    differ, as each xdist worker's does; in the state root's locks when that folder isn't this user's alone."""
-    folder = Path(tempfile.gettempdir()) / f"agentenv-{os.getuid()}"
-    with contextlib.suppress(FileExistsError):
+    """The cursor's file: in this user's own folder of the machine's /tmp, not of ``TMPDIR``, which a process may set
+    for itself, so processes whose state roots or temp folders differ, as each xdist worker's state root does, share
+    it; in the state root's locks when that folder can't be made or isn't this user's alone."""
+    folder = _MACHINE_TMP / f"agentenv-{os.getuid()}"
+    with contextlib.suppress(OSError):
         folder.mkdir(mode=0o700)
-    held = folder.lstat()
-    if stat.S_ISDIR(held.st_mode) and held.st_uid == os.getuid() and not held.st_mode & 0o077:
+    held = folder.lstat() if folder.exists() else None
+    if held and stat.S_ISDIR(held.st_mode) and held.st_uid == os.getuid() and not held.st_mode & 0o077:
         return folder / _HOST_PORT_CURSOR
     locks = state_root() / "locks"
     ensure_state_dir(locks)
