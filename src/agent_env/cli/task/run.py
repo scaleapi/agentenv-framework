@@ -254,7 +254,7 @@ def _format_verifier_output(vid: str, vdata: dict) -> list[str]:
             else:
                 lines.append(f"  {path}: {str(parsed)[:600]}")
     results = vdata.get("results")
-    if results is not None:
+    if results:
         lines.append(f"verification (verifier_id={vid}):")
         lines.append(_format_verification_results(results))
     score = vdata.get("score")
