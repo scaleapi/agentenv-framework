@@ -708,6 +708,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
             control_token=deployed.control_token,
+            stack_layout=self._stack_layout.to_record(),
         )
 
     async def create_gateway(
@@ -1571,9 +1572,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         return sandbox_ids
 
     async def _reattach(self, env: Env, deployed: DeployedEnv) -> Sandbox:
-        """A record this provider wrote, reattached: a MultiEnv's through its own rebuild, any other env's as the base reattaches it."""
+        """A record this provider wrote, reattached: a MultiEnv's through its own rebuild, any other env's as the base reattaches it.
+        Either way the provider takes back the stack layout the record kept, so its commands reach the same stack."""
         from agent_env.env.envs.multi_env import MultiEnv
 
+        self._stack_layout = StackLayout.from_record(getattr(deployed, "stack_layout", None))
         if isinstance(env, MultiEnv):
             return await self._reattach_multi_env(deployed)
         return await super()._reattach(env, deployed)

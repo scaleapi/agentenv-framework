@@ -370,3 +370,28 @@ def test_a_layout_that_differs_from_the_default_must_name_its_project(changes):
 def test_only_a_named_project_makes_a_slot():
     assert not DEFAULT_STACK_LAYOUT.is_slot
     assert StackLayout.for_slot(0).is_slot
+
+
+@pytest.mark.parametrize("index", [0, 3, 45])
+def test_a_slot_layout_comes_back_the_same_from_its_record(index):
+    layout = StackLayout.for_slot(index)
+    assert StackLayout.from_record(layout.to_record()) == layout
+
+
+def test_the_default_stack_records_nothing_and_a_record_without_a_layout_is_the_default():
+    assert DEFAULT_STACK_LAYOUT.to_record() is None
+    assert StackLayout.from_record(None) is DEFAULT_STACK_LAYOUT
+
+
+@pytest.mark.parametrize("data", [
+    "s1",
+    {"app_dir": "/app/s1", "compose_project": "s1", "host_port_offset": 2000},
+    {**StackLayout.for_slot(1).to_record(), "extra": 1},
+    {**StackLayout.for_slot(1).to_record(), "host_port_offset": True},
+    {**StackLayout.for_slot(1).to_record(), "host_port_offset": "2000"},
+    {**StackLayout.for_slot(1).to_record(), "app_dir": "/app/../etc"},
+    {"app_dir": "/app", "compose_project": None, "host_port_offset": 0, "scratch_prefix": "/tmp/"},
+])
+def test_a_damaged_recorded_layout_is_refused_rather_than_read_as_the_default_stack(data):
+    with pytest.raises((ValueError, TypeError)):
+        StackLayout.from_record(data)

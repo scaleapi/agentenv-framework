@@ -110,6 +110,29 @@ class StackLayout:
         project = f" -p {self.compose_project}" if self.is_slot else ""
         return f"docker compose{project}"
 
+    def to_record(self) -> dict | None:
+        """What a deploy record keeps of this layout, so a reload finds the same stack; None for the default stack."""
+        if not self.is_slot:
+            return None
+        return {"app_dir": self.app_dir, "compose_project": self.compose_project,
+                "host_port_offset": self.host_port_offset, "scratch_prefix": self.scratch_prefix}
+
+    @classmethod
+    def from_record(cls, data: object) -> StackLayout:
+        """The layout a deploy record kept; the default stack for a record that kept none. Raises for one that isn't a
+        valid slot layout, so a damaged record never sends a slot's commands to the default stack."""
+        if data is None:
+            return DEFAULT_STACK_LAYOUT
+        fields = ("app_dir", "compose_project", "host_port_offset", "scratch_prefix")
+        if not isinstance(data, dict) or set(data) != set(fields):
+            raise ValueError(f"a recorded stack layout must have exactly the fields {fields}, got {data!r}")
+        if not isinstance(data["host_port_offset"], int) or isinstance(data["host_port_offset"], bool):
+            raise ValueError(f"a recorded stack layout's host_port_offset must be an int, got {data['host_port_offset']!r}")
+        layout = cls(**data)
+        if not layout.is_slot:
+            raise ValueError(f"a recorded stack layout must be a slot's, got {data!r}")
+        return layout
+
     def scratch_path(self, name: str) -> str:
         return f"{self.scratch_prefix}{name}"
 
