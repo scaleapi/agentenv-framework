@@ -3,6 +3,7 @@ sandbox provider, each arch on the first link of a chain that runs it natively; 
 or no link can build; a VM the provider loses; pulls of a base taking turns; the VM's shell helper; and what a put says
 as it goes. Docker, the registry and the VMs are faked."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -17,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -228,6 +230,31 @@ def _resolving(tmp_path, monkeypatch, docker):
     monkeypatch.setattr(builder, "docker_login", lambda auth: None)
     return work, builder.LocalBuilder("LocalSandboxProvider", work, SimpleNamespace(
         image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/arm64")
+
+
+def test_a_download_its_connection_drops_is_tried_again_and_one_that_never_comes_says_why(tmp_path, monkeypatch):
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    local = builder.LocalBuilder("LocalSandboxProvider", tmp_path, SimpleNamespace(
+        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/amd64")
+    attempts, waits = [], []
+    monkeypatch.setattr(builder.time, "sleep", waits.append)
+
+    @contextlib.contextmanager
+    def stream(method, url, **kwargs):
+        attempts.append(url)
+        if url.endswith("/down") or len(attempts) < 3:
+            raise httpx.ConnectError("connection reset by peer")
+        yield httpx.Response(200, content=b"data", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(builder.httpx, "stream", stream)
+    local.download("https://files.test/flaky", hashlib.sha256(b"data").hexdigest(), "fetched/flaky")
+    fetched, tries, waited = (tmp_path / "fetched" / "flaky").read_bytes(), len(attempts), list(waits)
+    attempts.clear()
+    with pytest.raises(builder.ResolveError, match="downloading https://files.test/down failed: connection reset"):
+        local.download("https://files.test/down", "0" * 64, "fetched/down")
+
+    assert (fetched, tries, waited) == (b"data", 3, [1.0, 1.0])
+    assert len(attempts) == builder._DOWNLOAD_RETRIES + 1
 
 
 def test_the_packages_a_build_installed_are_read_from_its_image_without_running_it(monkeypatch):
