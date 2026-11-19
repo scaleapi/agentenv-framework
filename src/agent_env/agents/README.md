@@ -44,11 +44,17 @@ The A2A server starts with the real-time marker, so it and its records stay on r
 as a follower with a read token of its own and calls that `sync_time` with the follower's config, which the server
 writes; `deploy_agent` does the same for an agent it deploys while the clock is armed. From then on the CLI, its own
 "Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
-followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps a live
-site's TLS working at any date the clock shows, and to the env's MCP servers and a plain-HTTP model endpoint directly.
-The image's proxy reaches private networks too (`AGENTENV_EGRESS_PRIVATE`), so a model endpoint over TLS at a private
-address works at any date as well. Unarmed, the page holds real time and the CLI goes out directly, as before. Started
-as a user other than root, the image runs the A2A server alone, on real time, as before.
+followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
+working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts
+(the peer-agents MCP server's), `host.docker.internal`, the hosts the agent's `NO_PROXY` names and the hosts it reaches
+by plain HTTP alone, which have no certificate to check, go direct. `NO_PROXY` goes by host, not scheme, so a host the
+agent also reaches over TLS stays behind the proxy. The image's proxy reaches private networks too
+(`AGENTENV_EGRESS_PRIVATE`), so a host over TLS at a private address works at any date as well. Unarmed, the page holds
+real time and the CLI goes out directly, as before. That rule is `agent_egress.py` in `utils/agent_clock`, which only
+agent images take (`agent_clock` in `shared_sources.toml`), so changing it rebuilds no computer base. The bridge
+imports it, and the image and `install.sh` copy it beside the bridge with the clock's `clockpage.py`, whose layout and
+check it reads the page by, so every agent put on the clock, OpenCode's too, goes out the same way. Started as a user
+other than root, the image runs the A2A server alone, on real time, as before.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements

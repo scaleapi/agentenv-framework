@@ -17,6 +17,7 @@ from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, gateway_url_of
 from agent_env.env.gateway.constants import DATA_PLANE_LOAD_TIMEOUT_S
 from agent_env.env.store import register_env_instance
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.store.base import ObjectNotFoundError
 from agent_env.utils.paths import validate_file_name
 
@@ -320,6 +321,12 @@ def as_builtin(provider: Optional[EnvironmentProvider]) -> Optional[_SandboxEnvi
     """The provider if it is a built-in or subclasses one, whose sandboxes loads stage into and reattach and close() reach; None for any other plugin's."""
     from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider
     return provider if isinstance(provider, _SandboxEnvironmentProvider) else None
+
+
+def stack_layout_of(provider: Optional[EnvironmentProvider]) -> StackLayout:
+    """Where a built-in provider's stack lives in its sandbox; the default for any other provider, or none."""
+    builtin = as_builtin(provider)
+    return builtin.stack_layout if builtin is not None else DEFAULT_STACK_LAYOUT
 
 
 def provider_options(env: Env, provider: EnvironmentProvider, **options) -> dict:
