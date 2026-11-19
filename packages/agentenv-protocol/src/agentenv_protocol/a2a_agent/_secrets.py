@@ -12,7 +12,7 @@ import re
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, TypeVar
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import quote, unquote_plus, urlsplit
 
 from pydantic import BaseModel, SecretStr
 
@@ -237,22 +237,27 @@ def _grant_secrets(grant: HttpGetGrant | HttpPutGrant | HttpPostPolicyGrant) -> 
 
 
 def _url_secrets(url: str) -> list[str]:
-    """The parts of a URL that carry its credential: a presigned URL's credential-like query values, the token-like path
-    segments of a URL with no query, as a grant server's, and its password. Every copy of the URL, whole or as a
-    request line, holds them, so redacting them is enough; the rest (its host, its path, ``X-Amz-Algorithm``) isn't
-    secret, and leaving it keeps each grant's share of the match to its signature: the session token and access key a
-    role signs every grant with are each one secret."""
+    """The parts of a URL that carry its credential: a presigned URL's credential-like query values, else its token-like
+    path segments, as a grant server's (``/v1/grants/<token>``, with or without a plain query such as ``?download=1``),
+    and its password. Every copy of the URL, whole or as a request line, holds them, so redacting them is enough; the
+    rest (its host, its path, ``X-Amz-Algorithm``) isn't secret, and leaving it keeps each grant's share of the match
+    to its signature: the session token and access key a role signs every grant with are each one secret."""
     parts = urlsplit(url)
-    if parts.query:
-        carried = _query_values(url)
-    else:
+    carried = _query_values(url)
+    if not carried:
         carried = [segment for segment in parts.path.split("/") if _TOKEN_SEGMENT.fullmatch(segment)]
     return [*carried, *([parts.password] if parts.password else [])]
 
 
 def _query_values(url: str) -> list[str]:
-    """The values of a URL's credential-like query parameters: a signature, a credential, a token, a key."""
-    return [value for name, value in parse_qsl(urlsplit(url).query) if _names_credential(name)]
+    """The values of a URL's credential-like query parameters (a signature, a credential, a token, a key), decoded and
+    as the URL writes them, whose own percent-encoding is what a copy of the URL inside another URL's query holds."""
+    values: list[str] = []
+    for pair in urlsplit(url).query.split("&"):
+        name, _, written = pair.partition("=")
+        if written and _names_credential(unquote_plus(name)):
+            values += [unquote_plus(written), written]
+    return values
 
 
 def _header_values(headers: Mapping[str, Any] | None) -> list[str]:

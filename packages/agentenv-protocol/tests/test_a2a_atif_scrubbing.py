@@ -257,6 +257,21 @@ def test_a_write_only_mapping_is_redacted_by_its_credentials_alone(monkeypatch: 
     assert not [record for record in caplog.records if "shorter than" in record.message]
 
 
+def test_a_path_token_beside_a_plain_query_and_a_signed_url_encoded_again_are_redacted() -> None:
+    secrets = Secrets()
+    token = "eyJvcCI6ImdldCJ9.c2lnbmF0dXJlLXRoYXQtaXMtbG9uZw"
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    secrets.add_request(HttpGetGrant(kind="http-get", url=f"https://host.example.test/v1/grants/{token}?download=1",
+                                     expires_at=expires))
+    signed = "https://store.example.test/runs/1.json?X-Amz-Security-Token=abc%2Fdef%2Bghi%3D123456789&X-Amz-Expires=900"
+    secrets.add_request(HttpGetGrant(kind="http-get", url=signed, expires_at=expires))
+    nested = f"https://viewer.example.test/open?src={quote(signed, safe='')}"
+    assert "abc%252Fdef%252Bghi%253D123456789" in nested
+    scrubbed = secrets.scrub([f"GET /v1/grants/{token}?download=1", signed, nested])
+    assert not [text for text in scrubbed if token in text or "abc" in text]
+    assert all("[redacted:" in text for text in scrubbed)
+
+
 def test_a_roles_grants_add_their_signatures_alone() -> None:
     """Every grant a role signs carries the same session token and access key: each is one secret, so a grant's share of
     the match is its signature, however long its URL."""
