@@ -19,7 +19,7 @@ import shutil
 import signal
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -520,7 +520,7 @@ def _tool_error(message: str) -> ProxyToolResult:
     return ProxyToolResult(content=[{"type": "text", "text": f"error: {message}"}], is_error=True)
 
 
-_USAGE_SUMS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
+_USAGE_SUMS = tuple(f.name for f in fields(Usage) if f.name.endswith("_tokens"))
 
 
 def _turn_usage(turn: _Turn) -> Usage:

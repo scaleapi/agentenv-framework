@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
@@ -376,9 +376,9 @@ class Usage:
         if not isinstance(data, Mapping):
             raise TypeError("usage must be a mapping")
         known = {
-            name: data[name]
-            for name in (*_USAGE_COUNTERS, "input_includes_cache", "cost_usd")
-            if data.get(name) is not None
+            f.name: data[f.name]
+            for f in fields(cls)
+            if f.name != "provider_details" and data.get(f.name) is not None
         }
         details = data.get("provider_details")
         return cls(**known, provider_details={} if details is None else details)
@@ -396,16 +396,15 @@ class Usage:
         read = cached if cached is not None else _count(usage.get("cache_read_input_tokens"))
         write = _count(usage.get("cache_creation_input_tokens"))
         cache = (read or 0) + (write or 0)
-        added = 0  # the cache the response's own counts leave out
-        if "prompt_tokens" in usage:
-            input_tokens = _count(usage["prompt_tokens"])
-            if input_tokens is not None and (cached is None or input_tokens < cache):
-                input_tokens, added = input_tokens + cache, cache
-        elif (input_tokens := _count(usage.get("input_tokens"))) is not None:
-            input_tokens, added = input_tokens + cache, cache
+        openai = "prompt_tokens" in usage
+        input_tokens = _count(usage["prompt_tokens"] if openai else usage.get("input_tokens"))
+        counts_cache = openai and cached is not None and input_tokens is not None and input_tokens >= cache
+        missing = cache if input_tokens is not None and not counts_cache else 0
+        if input_tokens is not None:
+            input_tokens += missing
         output = _count(usage.get("completion_tokens", usage.get("output_tokens")))
         if (total := _count(usage.get("total_tokens"))) is not None:
-            total += added
+            total += missing
         elif input_tokens is not None and output is not None:
             total = input_tokens + output
         return cls(input_tokens=input_tokens, output_tokens=output, total_tokens=total, cache_read_tokens=read,
@@ -413,23 +412,17 @@ class Usage:
 
     @property
     def is_empty(self) -> bool:
-        return (
-            all(getattr(self, name) is None for name in _USAGE_COUNTERS)
-            and self.input_includes_cache is None
-            and self.cost_usd is None
-            and not self.provider_details
-        )
+        return all(value is None for value in self._values().values()) and not self.provider_details
 
     def to_dict(self) -> dict[str, Any]:
-        values = {
-            **{name: getattr(self, name) for name in _USAGE_COUNTERS},
-            "input_includes_cache": self.input_includes_cache,
-            "cost_usd": self.cost_usd,
-        }
-        result = {name: value for name, value in values.items() if value is not None}
+        result = {name: value for name, value in self._values().items() if value is not None}
         if self.provider_details:
             result["provider_details"] = _thaw(self.provider_details)
         return result
+
+    def _values(self) -> dict[str, Any]:
+        """Every field but ``provider_details``, by name, in declaration order."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "provider_details"}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
