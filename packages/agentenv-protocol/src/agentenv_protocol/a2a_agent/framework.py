@@ -34,6 +34,7 @@ from ..atif import PROFILE_KEY as ATIF_PROFILE_KEY
 from ..atif import PROFILE_VERSION as ATIF_PROFILE_VERSION
 from ..atif import SCHEMA_VERSION as ATIF_SCHEMA_VERSION
 from ._atif_copy import TurnStart
+from ._snapshot_state import SnapshotStates
 from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
@@ -43,6 +44,7 @@ from .extensions import (
     MCP_CONFIG_V1,
     PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
+    SNAPSHOT_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
     CLOCK_V1,
@@ -579,6 +581,8 @@ class _SdkServices:
         self.task_trajectories = TaskTrajectories(native=native, atif=atif)
         #: Whether the card offers atif/1, served from the copy an adapter builds.
         self.serves_atif = atif is not None
+        #: The SDK's state in the agent's snapshots, which only an agent that serves atif/1 keeps.
+        self.snapshot_states = SnapshotStates(self.task_trajectories) if atif is not None else None
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -1276,8 +1280,9 @@ class A2AAgentApplication:
             skill if isinstance(skill, AgentSkill) else AgentSkill.model_validate(skill)
             for skill in identity.skills
         ]
+        states = self.services.snapshot_states
         extensions = [
-            AgentExtension.model_validate(item)
+            AgentExtension.model_validate(states.card_extension(item) if states is not None else item)
             for item in self.registry.card_extensions()
         ]
         if self.staging.max_bytes:
@@ -1381,6 +1386,13 @@ class A2AAgentApplication:
                 ):
                     async with self.services.skill_registration(input_payload):
                         result = await invoke_and_validate()
+                elif (
+                    (states := self.services.snapshot_states) is not None
+                    and extension_uri == SNAPSHOT_V1.uri
+                    and operation.definition.name in ("save", "load")
+                ):
+                    take = states.save if operation.definition.name == "save" else states.load
+                    result = await take(extension_request, invoke_and_validate)
                 else:
                     result = await invoke_and_validate()
                 return JSONResponse(result)
@@ -1454,6 +1466,8 @@ class _StandardExecutor:
                         agent_version=card.version,
                         agent_model=_config_model(task_config),
                     )
+                if self._services.snapshot_states is not None:
+                    await self._services.snapshot_states.task_may_start(task.context_id)
                 trajectories.start(task.id, turn)
                 request = TaskRequest(
                     task_id=task.id,
