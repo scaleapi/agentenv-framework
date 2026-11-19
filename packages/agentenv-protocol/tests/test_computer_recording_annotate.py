@@ -83,13 +83,14 @@ class Segmented(FakeDriver):
 
 
 class Templated(Recorded):
-    """A driver with tools of its own named after its environment: one that only reads, one that acts."""
+    """A driver with tools of its own named after its environment: one that only reads, and one that acts whose name
+    ends as the first's does."""
 
     @tool(name="{environment_name}_inspect", annotations={"readOnlyHint": True})
     async def inspect(self) -> str:
         return "read"
 
-    @tool(name="{environment_name}_poke")
+    @tool(name="{environment_name}_foo_inspect")
     async def poke(self) -> str:
         return "poked"
 
@@ -339,7 +340,7 @@ async def test_the_probe_finds_annotation_not_applicable_to_a_native_recorders_f
 async def test_a_tool_named_after_its_environment_is_told_read_only_by_its_own_annotations():
     driver = Templated()
     async with http_client(driver) as http, mcp_session(driver) as session:
-        names = [t.name for t in (await session.list_tools()).tools if t.name.endswith(("_inspect", "_poke"))]
+        names = [t.name for t in (await session.list_tools()).tools if t.name.endswith("_inspect")]
         started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
         recording = driver._computer.recordings.running[started["recording_id"]]
         for name in names:
@@ -347,7 +348,7 @@ async def test_a_tool_named_after_its_environment_is_told_read_only_by_its_own_a
         labels = [mark.label for mark in recording.annotations.marks]
         await http.post(END, json={"recording_id": started["recording_id"]})
 
-    [poke] = [name for name in names if name.endswith("_poke")]
+    [poke] = [name for name in names if name.endswith("_foo_inspect")]
     assert len(names) == 2 and labels == [poke]
 
 

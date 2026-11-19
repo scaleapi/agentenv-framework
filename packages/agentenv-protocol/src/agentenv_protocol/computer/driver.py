@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
@@ -146,25 +145,19 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     def _computer_tool_acts(self, name: str) -> bool:
         """Whether the driver's own or forwarded tool ``name`` may act: its annotations don't say it only reads. A
-        tool named with ``{environment_name}`` is served under that name filled in, so it's matched by the rest."""
-        known = self.__dict__.get("_computer_acting")
-        if known is None:
+        tool named with ``{environment_name}`` is served under that name filled in from the card, as the SDK fills
+        it in when it mounts the tools."""
+        acting = self.__dict__.get("_computer_acting")
+        if acting is None:
             acting = {forwarded.tool.name: not _reads_only(forwarded.annotations)
                       for forwarded in self.forwarded_tools()}
-            templated = []
+            environment_name = self.mounted_card().name
             for member, marker in _marked_members(self, _TOOL_ATTR):
                 options = getattr(member, _TOOL_OPTIONS_ATTR, None)
-                acts = not _reads_only(options.annotations if options is not None else None)
-                if _ENV_NAME_TOKEN in marker.name:
-                    parts = map(re.escape, marker.name.split(_ENV_NAME_TOKEN))
-                    templated.append((re.compile(".+".join(parts)), acts))
-                else:
-                    acting[marker.name] = acts
-            known = self._computer_acting = (acting, templated)
-        acting, templated = known
-        if name in acting:
-            return acting[name]
-        return next((acts for pattern, acts in templated if pattern.fullmatch(name)), True)
+                acting[marker.name.replace(_ENV_NAME_TOKEN, environment_name)] = not _reads_only(
+                    options.annotations if options is not None else None)
+            self._computer_acting = acting
+        return acting.get(name, True)
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
