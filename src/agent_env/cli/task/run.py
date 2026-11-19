@@ -18,14 +18,14 @@ from agent_env.cli.task._checks import runnable_task
 from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
-from agent_env.cli.teardown_output import echo_teardown
+from agent_env.cli.teardown_output import echo_finish_teardown, echo_teardown, gone
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.store import get_task_instance_store, new_instance_id
-from agent_env.task.teardown import TeardownReport, kind, teardown_run
+from agent_env.task.teardown import TeardownReport, attempt_epoch, kind, record_teardown, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.context_ops import build_context_update_ops
@@ -254,7 +254,7 @@ def _format_verifier_output(vid: str, vdata: dict) -> list[str]:
             else:
                 lines.append(f"  {path}: {str(parsed)[:600]}")
     results = vdata.get("results")
-    if results is not None:
+    if results:
         lines.append(f"verification (verifier_id={vid}):")
         lines.append(_format_verification_results(results))
     score = vdata.get("score")
@@ -288,14 +288,22 @@ def _tear_down_kept(kept) -> None:
     """Tear down what the runs kept; a Ctrl-C stops it. Counts signals afresh, so the one that got here doesn't."""
     count = sum(len(left) for _, _, left in kept)
     click.echo(f"\nTearing down {count} {'sandbox' if count == 1 else 'sandboxes'} (Ctrl-C again to stop now)")
+    epochs = [attempt_epoch(context.instance_id) for _, context, _ in kept]
     with Interrupts() as stopper:
         try:
             reports = stopper.run(stopper.stopping(teardown_run(context) for _, context, _ in kept))
         except asyncio.CancelledError:
             click.echo(click.style("Stopped the teardown; what it hadn't reached is still up.", fg="yellow"))
-            return
-    for (tag, _, _), report in zip(kept, reports):
-        echo_teardown(tag, report)
+            reports = [TeardownReport.skipped(context) for _, context, _ in kept]
+        else:
+            for (tag, _, _), report in zip(kept, reports):
+                echo_teardown(tag, report)
+    contexts = [context for _, context, _ in kept]
+    for context, report, epoch in zip(contexts, reports, epochs):
+        if epoch is not None:
+            record_teardown(context.instance_id, context, report, epoch)
+    echo_finish_teardown([context.instance_id for context, report in zip(contexts, reports)
+                          if context.instance_id and any(not gone(sandbox) for sandbox in report.still_up)])
 
 
 def _settle_kept(tagged_contexts, interrupts: Interrupts, interrupted) -> None:

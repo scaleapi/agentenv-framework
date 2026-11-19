@@ -91,8 +91,8 @@ async def test_an_agent_gets_the_model_endpoint_its_container_reaches(
     (None, None, HEADERS),
     ({"LITELLM_BASE_URL": MODEL}, None, HEADERS),
     (None, {"LITELLM_BASE_URL": MODEL}, HEADERS),
-    ({"LITELLM_BASE_URL": ELSEWHERE}, None, None),
-    (None, {"LITELLM_BASE_URL": ELSEWHERE}, None),
+    ({"LITELLM_BASE_URL": ELSEWHERE, "LITELLM_API_KEY": "theirs"}, None, None),
+    (None, {"LITELLM_BASE_URL": ELSEWHERE, "LITELLM_API_KEY": "theirs"}, None),
     ({"LITELLM_EXTRA_HEADERS": '{"X-Bill-To": "mine"}'}, None, {"X-Bill-To": "mine"}),
 ], ids=["configured", "passed-configured", "own-configured", "passed-elsewhere", "own-elsewhere", "given-its-own"])
 async def test_an_agent_gets_the_headers_only_for_the_configured_endpoint(
@@ -135,7 +135,8 @@ async def test_an_agents_own_model_endpoint_is_left_as_it_declares(monkeypatch, 
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: provider)
 
     with pytest.raises(_Started):
-        await _agent(default_env_vars={"LITELLM_BASE_URL": "http://localhost:9000"}).deploy(sandbox_type="local")
+        await _agent(default_env_vars={"LITELLM_BASE_URL": "http://localhost:9000", "LITELLM_API_KEY": "own"}).deploy(
+            sandbox_type="local")
 
     assert provider.env["LITELLM_BASE_URL"] == "http://localhost:9000"
 
@@ -189,14 +190,15 @@ def test_a_unit_test_verifier_gets_the_model_endpoint_its_container_reaches(
 
 
 def test_a_model_endpoint_the_verifier_sets_itself_is_reached_through_the_host(monkeypatch, local_stores, model_endpoint):
-    run = _run_verifier(monkeypatch, "local", env_vars={"LITELLM_BASE_URL": "http://127.0.0.1:5001"})
+    run = _run_verifier(monkeypatch, "local", env_vars={"LITELLM_BASE_URL": "http://127.0.0.1:5001",
+                                                         "LITELLM_API_KEY": "theirs"})
 
     assert "-e LITELLM_BASE_URL=http://host.docker.internal:5001 " in run
 
 
 @pytest.mark.parametrize("step_env, seed, expected", [
     ({}, None, HEADERS),
-    ({"LITELLM_BASE_URL": ELSEWHERE}, None, None),
+    ({"LITELLM_BASE_URL": ELSEWHERE, "LITELLM_API_KEY": "theirs"}, None, None),
     ({}, {"litellm_extra_headers": "{}"}, HEADERS),
 ], ids=["configured", "elsewhere", "a-seed-column-cant-replace-them"])
 def test_a_unit_test_verifier_gets_the_headers_only_for_the_configured_endpoint(

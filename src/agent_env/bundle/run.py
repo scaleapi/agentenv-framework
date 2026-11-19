@@ -34,7 +34,7 @@ from agent_env.task.store import record_task_cancelled
 from agent_env.task.interrupts import Interrupts
 from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
-from agent_env.task.teardown import TeardownReport, teardown_run
+from agent_env.task.teardown import TeardownReport, attempt_epoch, record_teardown, teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 
 from .hub import SOURCE_KEY, HubSource
@@ -73,6 +73,7 @@ class TaskRun:
     cancelled: bool = False
     started: bool = True  # False when it was cancelled before it started
     torn_down: TeardownReport | None = None  # None while its sandboxes are kept up
+    attempt_epoch: int | None = None  # its instance's as its teardown began, which ``record_teardown`` is fenced by
 
     @property
     def instance_id(self) -> str | None:
@@ -136,9 +137,10 @@ class BundleRun:
         kept = [run for run in self.runs if run.torn_down is None]
         if not kept:
             return self
-        with Interrupts() as interrupts:
+        with namespace_routing(), Interrupts() as interrupts:
             reports = interrupts.run(interrupts.stopping(teardown_run(run.context) for run in kept))
             result = self._with_reports(kept, reports)
+            _record_teardowns([replace(run, torn_down=report) for run, report in zip(kept, reports)])
             if interrupts.count:
                 raise RunInterrupted(result, interrupts.signum)
         return result
@@ -270,6 +272,7 @@ def run_bundle(
                                            solver_params(plan, prepared.materialization), keep, say, interrupts,
                                            source))
             _mark_cancelled(runs, interrupts.reason)
+            _record_teardowns(runs)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
@@ -380,6 +383,15 @@ def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
         if run.cancelled and run.instance_id:
             with run_scope(run.task.id):
                 record_task_cancelled(run.instance_id, reason, Task._utc_now_str())
+
+
+def _record_teardowns(runs: Sequence[TaskRun]) -> None:
+    """Keep on each run's instance the context its teardown ended with, so ``agent-env task teardown`` finds what it
+    left up, those a step a signal cut short had recorded included, and nothing once all is down. Like
+    ``_mark_cancelled``, it runs once the loop has closed."""
+    for run in runs:
+        if run.torn_down is not None and run.instance_id and run.attempt_epoch is not None:
+            record_teardown(run.instance_id, run.context, run.torn_down, run.attempt_epoch)
 
 
 def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRun, ...],
@@ -555,7 +567,7 @@ async def _run_all(
         me = asyncio.current_task()
         running.add(me)
         began = time.monotonic()
-        error, cancelled = None, False
+        error, cancelled, epoch = None, False, None
         try:
             try:
                 with run_progress(lambda line: say(f"{tag} {line}")):
@@ -574,11 +586,12 @@ async def _run_all(
                     raise
                 cancelled = True
             duration = time.monotonic() - began
+            epoch = attempt_epoch(context.instance_id)  # synchronous, so no signal cuts it short
             report = await settle(context, cancelled)
         finally:
             running.discard(me)
             semaphore.release()
-        run = TaskRun(entry, task, context, error, duration, cancelled=cancelled, torn_down=report)
+        run = TaskRun(entry, task, context, error, duration, cancelled=cancelled, torn_down=report, attempt_epoch=epoch)
         say(f"{tag} {run.outcome.value} in {run.duration:.1f}s")
         for sandbox_record, why in (report.failed if report else ()):
             say(f"{tag} couldn't tear down {sandbox_record.sandbox_id}: {why}")

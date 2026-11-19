@@ -113,6 +113,7 @@ chmod 0755 "$stage/gemini"
     printf '%s=%s\n' "$name" "$(quoted "${!name:-}")"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
+  [ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\n' "$(quoted "$AGENTENV_CONTROL_TOKEN")"
   printf 'A2A_PORT=%s\nGEMINI_CLI_HOME=%s\nGEMINI_CWD=%s\n' \
     "$(quoted "$port")" "$(quoted "$root/gemini")" "$(quoted "$workspace")"
 } > "$stage/agent.env"

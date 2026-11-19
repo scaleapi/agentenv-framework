@@ -130,7 +130,7 @@ class Extensions:
     @extension(COMPUTER_RECORDING, op="start",
                description="Record the display: start returns a recording whose segments upload through its grant as "
                            "they close; end seals it and returns its manifest, uploaded beside them; end_all ends "
-                           "every one not yet ended; repeats answer the same.")
+                           "every one not yet ended; list names those still recording; repeats answer the same.")
     async def _computer_recording_start(self, request_id: str, scope: str = "display", window: Optional[str] = None,
                                         fps: Optional[int] = None, max_edge: Optional[int] = None, cursor: bool = True,
                                         upload: Optional[dict] = None) -> dict:
@@ -144,6 +144,10 @@ class Extensions:
     @extension(COMPUTER_RECORDING, op="end_all")
     async def _computer_recording_end_all(self, reason: str = "end") -> dict:
         return {"manifests": await self._computer.recordings.end_all(reason)}
+
+    @extension(COMPUTER_RECORDING, op="list", method="GET")
+    async def _computer_recording_list(self) -> dict:
+        return {"recordings": await self._computer.recordings.listed()}
 
 
 async def _run(computer: ComputerRuntime, cap: int, argv: list, cwd: Optional[str], env: Optional[dict],

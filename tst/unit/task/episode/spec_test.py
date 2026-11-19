@@ -89,6 +89,12 @@ def test_a_task_prompting_no_agent_has_nothing_to_play():
     assert _refusal(_task(ENV, VERIFY)) == "task 'dock' prompts no agent"
 
 
+def test_the_copy_keeps_the_tasks_headline_verifiers():
+    task = Task.from_dict({**_portsim().to_dict(), "headline_verifiers": ["verify"]})
+
+    assert EpisodeSpec.from_task(task)._copy.headline_verifiers == ["verify"]
+
+
 def test_the_copy_stands_in_for_the_outside_agents_steps_and_keeps_everything_else():
     task = _portsim(BOB, ASK_BOB)
     copy = EpisodeSpec.from_task(task, trainer_agents=["default-agent"])._copy

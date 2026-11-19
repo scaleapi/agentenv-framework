@@ -40,6 +40,7 @@ class AgentUnreachableError(TimeoutError):
 
 
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_REFUSED = " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
 
 
 def raise_for_extension_status(
@@ -60,9 +61,11 @@ def raise_for_extension_status(
             error = body.get("error") if isinstance(body, Mapping) else None
             code = error.get("code") if isinstance(error, Mapping) else None
             detail = code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else ""
-        message = f"{operation} failed with HTTP {response.status_code}"
-        if detail:
-            message += f": {detail}"
+        status = f"{operation} failed with HTTP {response.status_code}"
+        refused = _REFUSED if response.status_code == 401 else ""
+        if refused:
+            logger.warning(status + refused)
+        message = status + (f": {detail}" if detail else "") + refused
         raise httpx.HTTPStatusError(message, request=exc.request, response=response) from exc
 
 

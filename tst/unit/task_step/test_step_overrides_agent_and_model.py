@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_env.config.model import ModelConfig
+from agent_env.config.model import ModelConfig, resolve_model
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import prompt_agent
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -119,7 +119,7 @@ class TestUserSimModel:
     def config(self, monkeypatch):
         roles = ModelConfig(default="config-default", roles={})
         monkeypatch.setattr(prompt_agent, "get_config", lambda: type("C", (), {
-            "get_model_for_role": staticmethod(roles.model_for_role)})())
+            "resolve_model": staticmethod(lambda role, **layers: resolve_model(role, config=roles, **layers))})())
         return roles
 
     def test_stored_value_without_overrides(self):

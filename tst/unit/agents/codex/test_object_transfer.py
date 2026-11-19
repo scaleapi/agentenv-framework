@@ -109,6 +109,7 @@ def test_card_offers_only_the_object_forms(codex):
     }
     trajectory = _methods(codex, "urn:agentenv:trajectory/v1")["get"]["request"]
     assert trajectory == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
@@ -235,9 +236,9 @@ def test_a_task_trajectory_upload_does_not_consume_it(codex, monkeypatch, store)
     inline, granted, again = asyncio.run(exercise())
 
     body = store.objects["traj/trajectory.json"]
-    assert inline == again == {"trajectory": events}
+    assert inline == again == {"trajectory": events, "format": a2a_server.TRAJECTORY_FORMAT}
     assert body == json.dumps(events, separators=(",", ":")).encode()
-    assert granted == {"objects": {"trajectory": {"size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}}}
+    assert granted == {"objects": {"trajectory": {"size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}}, "format": a2a_server.TRAJECTORY_FORMAT}
 
 
 @pytest.mark.parametrize("live", [True, False])
@@ -267,7 +268,7 @@ def test_a_context_trajectory_is_uploaded_through_its_grant(codex, monkeypatch, 
     assert result == {"objects": {"trajectory": {
         "size_bytes": len(store.objects["traj/ctx.json"]),
         "sha256": hashlib.sha256(store.objects["traj/ctx.json"]).hexdigest(),
-    }}}
+    }}, "format": a2a_server.TRAJECTORY_FORMAT}
     assert (inline["trajectory"], inline["is_live"]) == (events, live)
 
 

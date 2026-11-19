@@ -168,7 +168,7 @@ class ComputerAppEnv(ComputerEnv):
             return cls.put(id=ctx.id, environment_name=fields["environment_name"], module=fields["module"],
                            files=universe, declaration=declaration, computer=computer, driver=driver,
                            build_settings=fields.get("build_settings"), settings=fields.get("settings"),
-                           composing=ctx.composing)
+                           composing=ctx.composing, compose=ctx.compose)
         except ValueError as e:
             ctx.refuse([str(e)])
 
