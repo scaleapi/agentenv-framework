@@ -167,6 +167,7 @@ class LoadArtifactTaskStep(TaskStep):
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         snapshot_after_load: Optional[bool] = None,
+        computer: Optional[str] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if artifacts is not None and artifact_id is not None:
@@ -191,6 +192,11 @@ class LoadArtifactTaskStep(TaskStep):
             )
         if container_name is not None and sandbox_name is None:
             raise ValueError("`container_name` requires `sandbox_name`")
+        if computer is not None and env_id is None:
+            raise ValueError("`computer` names one of the computers of the env `env_id`, so it requires `env_id`")
+        if computer is not None and (sandbox_name is not None or container_name is not None or agent_name is not None):
+            raise ValueError("`computer` loads into a computer of the env `env_id`, so it takes no `sandbox_name`, "
+                             "`container_name` or `agent_name`")
         if urls and container_name is None and agent_name is None and sandbox_name is None:
             raise ValueError(
                 "`urls` requires `agent_name`, `sandbox_name`, or `container_name`+`sandbox_name`"
@@ -217,10 +223,15 @@ class LoadArtifactTaskStep(TaskStep):
         # None = defer to the AGENT_ENV_SNAPSHOT_AFTER_LOAD flag on the worker, so a task
         # doc doesn't hard-code a cost decision an operator may want to flip.
         self.snapshot_after_load = snapshot_after_load
+        # One of a multi env's computers, by its environment name, that files load into instead of the env's host.
+        self.computer = computer
 
     def config_problems(self) -> list[str]:
-        """A step naming nothing to load."""
-        return [] if self._names_a_source() else [self._nothing_to_load()]
+        """A step naming nothing to load, or a computer that isn't a non-empty name."""
+        problems = [] if self._names_a_source() else [self._nothing_to_load()]
+        if self.computer is not None and (not isinstance(self.computer, str) or not self.computer):
+            problems.append(f"load_artifact '{self.id}': computer, when given, must be a non-empty string")
+        return problems
 
     def preflight(self) -> list[str]:
         """An environment artifact this step names for an env whose type loads none."""
@@ -229,6 +240,10 @@ class LoadArtifactTaskStep(TaskStep):
         env = stored_env(self.env_id)
         if env is None:  # what the run reports
             return []
+        if self.computer is not None:
+            from agent_env.task_step.task_steps.computer.computer_exec import computer_problem
+            if problem := computer_problem(env, self.computer):
+                return [f"load_artifact '{self.id}': {problem}"]
         try:
             artifacts = [Artifact.get(ref["id"], ref.get("version")) for ref in self.artifacts]
         except NotFoundError:
@@ -262,6 +277,8 @@ class LoadArtifactTaskStep(TaskStep):
         base["sandbox_name"] = self.sandbox_name
         base["container_name"] = self.container_name
         base["snapshot_after_load"] = self.snapshot_after_load
+        if self.computer is not None:
+            base["computer"] = self.computer
         return base
 
     @classmethod
@@ -285,6 +302,7 @@ class LoadArtifactTaskStep(TaskStep):
             sandbox_name=data.get("sandbox_name"),
             container_name=data.get("container_name"),
             snapshot_after_load=data.get("snapshot_after_load"),
+            computer=data.get("computer"),
         )
 
     @staticmethod
@@ -499,6 +517,9 @@ class LoadArtifactTaskStep(TaskStep):
                     or self.sandbox_name is not None
                 )
             )
+            if self.computer is not None and not isinstance(artifact, (FileArtifactUniverse, FileArtifact)):
+                raise RuntimeError(f"load_artifact '{self.id}': only files load into a computer by name, not "
+                                   f"{artifact.type} '{artifact.id}'")
             if stage_as_files:
                 if self.sandbox_name is not None:
                     destination = (destination_path or "/loaded").rstrip("/") or "/"
@@ -529,16 +550,23 @@ class LoadArtifactTaskStep(TaskStep):
                 if self.env_id is not None:
                     # Only a FileArtifactUniverse or a FileArtifact reaches here — `stage_as_files`
                     # excludes a service universe whenever an env is targeted.
-                    if env is None:
-                        env_obj = Env.get(deployed.env_id, deployed.env_version)
-                        env = await type(env_obj).from_deployed_env(deployed)
-                    result = await env.load_file_artifact_universe(artifact, destination_path=destination_path)
+                    if self.computer is not None:
+                        from agent_env.env.envs.computer.env import load_files
+                        from agent_env.task_step.task_steps.computer.computer_exec import computer_of
+                        result = await load_files(computer_of(deployed, self.computer), artifact,
+                                                  destination_path, name=f"{self.env_id}'s computer {self.computer}")
+                    else:
+                        if env is None:
+                            env_obj = Env.get(deployed.env_id, deployed.env_version)
+                            env = await type(env_obj).from_deployed_env(deployed)
+                        result = await env.load_file_artifact_universe(artifact, destination_path=destination_path)
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
                         "id": artifact.id,
                         "version": artifact.version,
                         "artifact_type": artifact.type,
                         "env_id": deployed.env_id,
                         "agent_name": None,
+                        **({"computer": self.computer} if self.computer is not None else {}),
                         "destination_path": result.destination_path,
                         "files": result.files,
                     })

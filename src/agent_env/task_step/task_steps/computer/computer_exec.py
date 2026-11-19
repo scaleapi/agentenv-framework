@@ -94,7 +94,7 @@ class ComputerExecTaskStep(TaskStep):
         problems = super().preflight()
         if not isinstance(self.env_id, str) or not self.env_id or (env := stored_env(self.env_id)) is None:
             return problems
-        if problem := _computer_problem(env, self.computer):
+        if problem := computer_problem(env, self.computer):
             problems.append(f"step {self.id!r}: {problem}")
         return problems
 
@@ -154,6 +154,12 @@ def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
         raise RuntimeError(f"env {env_id!r} isn't in context.deployed_envs")
+    return computer_of(deployed, computer)
+
+
+def computer_of(deployed: DeployedEnv, computer: Optional[str]) -> DeployedSandboxEnv:
+    """``find_computer`` within one deployment's record, ``deployed``."""
+    env_id = deployed.env_id
     children = {name: DeployedEnv.from_dict(data) for name, data in (getattr(deployed, "child_envs", None) or {}).items()}
     if computer is not None:
         found = children.get(computer)
@@ -169,7 +175,7 @@ def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]
     return computers[0]
 
 
-def _computer_problem(env: object, computer: Optional[str]) -> Optional[str]:
+def computer_problem(env: object, computer: Optional[str]) -> Optional[str]:
     if isinstance(env, ComputerEnv):
         return None if computer is None else f"env {env.id!r} is a computer env, so it takes no computer name"
     if not isinstance(env, MultiEnv):
