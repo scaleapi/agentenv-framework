@@ -63,7 +63,7 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         folders = set(_exec(name, "ls", "/home/user").split())
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    assert {line.split()[0] for line in running.splitlines()} == {"dbus", "desktop", "xvfb"}
+    assert {line.split()[0] for line in running.splitlines()} == {"clock-panel", "dbus", "desktop", "xvfb"}
     assert all(" RUNNING " in line for line in running.splitlines()), running
     assert uid == "1000" and only_session_clock_and_egress(owners)
     assert zone == "/usr/share/zoneinfo/Europe/Paris"

@@ -9,6 +9,7 @@ protocol's schema, and its tool names are those of the CLI version package.json 
 import asyncio
 import json
 import os
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -230,16 +231,23 @@ def test_a_cancelled_catalog_read_kills_its_child(cli, tmp_path):
     assert not _alive(int(pid_file.read_text()))
 
 
+#: How much more than the catalog read's own time the CLI's budget may lose: the scheduling around the read, which
+#: load stretches.
+_SCHEDULING_SLACK_S = 2
+
+
 def test_the_catalog_read_counts_against_the_turns_time_limit(codex, cli, monkeypatch):
     """The CLI gets what is left of `timeout_seconds` after the catalog read; without a read, all of it, as before."""
     monkeypatch.setenv("A2A_PORT", "8000")
-    timeouts = []
+    timeouts, reads = [], []
     real_catalog_overrides = codex_config.catalog_overrides
 
     async def slow_catalog_overrides(builtin_tools, timeout_s):
+        started = time.monotonic()
         overrides = await real_catalog_overrides(builtin_tools, timeout_s)
         if overrides:
             await asyncio.sleep(0.5)
+            reads.append(time.monotonic() - started)
         return overrides
 
     async def fake_run_codex(**kwargs):
@@ -259,8 +267,9 @@ def test_the_catalog_read_counts_against_the_turns_time_limit(codex, cli, monkey
     asyncio.run(exercise())
 
     without_read, with_read = timeouts
+    (read,) = reads
     assert without_read == 30
-    assert 29 < with_read <= 29.5
+    assert 30 - read - _SCHEDULING_SLACK_S < with_read <= 30 - read
 
 
 @pytest.mark.parametrize("selection, match", [

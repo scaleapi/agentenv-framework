@@ -48,7 +48,7 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
     assert (computer.arch, computer.os.version, computer.session.user) == (["amd64", "arm64"], "24.04", "user")
     assert image.id == f"{UBUNTU}__forms_container_image" and image.dockerfile_path == "Dockerfile"
     built = next(call["build"] for call in builds if call["build"][2] == image.image_name)
-    assert built[1] == ["Dockerfile", "artifact.toml", "root.conf", "root/init", "root/install.sh",
+    assert built[1] == ["Dockerfile", "artifact.toml", "clock-panel", "root.conf", "root/init", "root/install.sh",
                         "shared_sources.toml", "start-desktop", "supervisord.conf", "xfwm4.xml"]
     stored = get_config().get_object_store_at(image.build_context_object_url).get(image.build_context_object_url)
     with tarfile.open(fileobj=io.BytesIO(stored), mode="r:gz") as context:
