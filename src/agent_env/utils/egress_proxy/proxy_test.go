@@ -202,7 +202,7 @@ func TestAUniverseInsideTheSitesCertificateIsSplicedAndOneOutsideIntercepted(t *
 		t.Fatalf("outside: %q %v", body, err)
 	}
 	leaf := resp.TLS.PeerCertificates[0]
-	if leaf.CheckSignatureFrom(h.ca.cert) != nil || !leaf.NotAfter.After(later) || leaf.NotBefore.Year() != 1950 {
+	if leaf.CheckSignatureFrom(h.ca.cert) != nil || !leaf.NotAfter.After(later) || !leaf.NotBefore.Equal(LeafFrom) {
 		t.Fatalf("the client's leaf: issuer %s, %s to %s", leaf.Issuer, leaf.NotBefore, leaf.NotAfter)
 	}
 	row := h.lastRow()
