@@ -98,7 +98,7 @@ def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
                                                                                          "version": task.version})
 
 
-def _importing(tasks: Collection[Task], dest: Path, include_scopes: Collection[FieldScope],
+def _importing(tasks: Collection[Task], dest: Path | None, include_scopes: Collection[FieldScope],
                progress: Callable[[str], None] | None, image_refs: Mapping[str, str] | None) -> _Importer:
     """An importer for ``tasks`` whose folders take no installed alias the export names floating, since a folder of
     that name would capture the reference in a run. A first pass writing nothing finds them, an entity the export
@@ -118,8 +118,9 @@ def task_images(task_id: str, *, version: int | None = None,
     order it reaches them, found without downloading anything: what an export pushes to a registry before importing the
     task with ``image_refs`` naming them there. Every image is listed, however it's stored, since each is then given a
     reference; raises BundleError when the import would fail on anything else it reads."""
-    importer = _Importer(None, include_scopes)
-    importer.add_task(Task.get(task_id, version))
+    task = Task.get(task_id, version)
+    importer = _importing([task], None, include_scopes, None, None)
+    importer.add_task(task)
     if importer.problems:
         raise BundleError(importer.problems)
     return tuple(importer.images_named.values())

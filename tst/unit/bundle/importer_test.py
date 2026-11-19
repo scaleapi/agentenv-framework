@@ -16,7 +16,7 @@ from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
-from agent_env.bundle.importer import ImportedEval, import_eval, import_task
+from agent_env.bundle.importer import ImportedEval, import_eval, import_task, task_images
 from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle import register as register_module
@@ -885,8 +885,8 @@ def test_a_skill_named_like_an_artifact_alias_the_export_floats_fails_the_import
                 {"id": "skills", "type": "add_skills", "agent_name": "default-agent",
                  "skills": [{"skill_artifact_id": "team/windows-11"}]}])
 
-    with pytest.raises(BundleError) as refused:
-        import_task("t", tmp_path / "imported")
-
-    assert ("a skill's folder takes its skill's name, 'windows-11', which the export names as an installed alias of "
-            "an artifact") in refused.value.problems[0]
+    for imports in (lambda: import_task("t", tmp_path / "imported"), lambda: task_images("t")):
+        with pytest.raises(BundleError) as refused:
+            imports()
+        assert ("a skill's folder takes its skill's name, 'windows-11', which the export names as an installed alias "
+                "of an artifact") in refused.value.problems[0]
