@@ -25,6 +25,8 @@ tests, so no Go toolchain is left in the image. `go.sum` pins its modules, and D
 - The session's supervisord (the base's `supervisord.conf`), and a login shell through `agentenv-egress.sh`, point
   `HTTP(S)_PROXY`, `ALL_PROXY`, Java's proxy properties (`JAVA_TOOL_OPTIONS`) and Node's `fetch`
   (`NODE_USE_ENV_PROXY`) at it.
+- In an agent's image, the agent's bridge points its CLI at it while the clock is armed, for every host but loopback,
+  the agent's `NO_PROXY` hosts and plain-HTTP hosts (`../faketime_clock/agent_egress.py`).
 - agent-env's own servers in the computer, the driver and its apps' servers, run on real time and send their own
   transfers to the object store directly (`agentenv_protocol.transfers.direct`); the programs they start keep the
   proxy.
@@ -37,9 +39,10 @@ tests, so no Go toolchain is left in the image. `go.sum` pins its modules, and D
 - **`CONNECT`**: the destination's name is resolved, and the connection is refused unless every address is global
   (`notGlobal` lists the blocks that aren't). An agent's image sets `AGENTENV_EGRESS_PRIVATE=allow` for the proxy,
   which then reaches private networks' addresses too (RFC 1918, RFC 6598's shared space, IPv6 unique local), as the
-  agent's processes do directly anyway, so a model endpoint there is reached on real time; loopback, link-local and the
-  rest stay refused. A computer's proxy doesn't set it. A routed site's name, in the hosts file's `# agentenv sites` block, goes
-  to the site proxy there. Bytes that aren't TLS, and a routed site's TLS, are relayed untouched.
+  agent's processes do directly anyway, so a model endpoint or env MCP server there is reached on real time; loopback,
+  link-local and the rest stay refused. A computer's proxy doesn't set it. A routed site's name, in the hosts file's
+  `# agentenv sites` block, goes to the site proxy there. Bytes that aren't TLS, and a routed site's TLS, are relayed
+  untouched.
 - **TLS, with the clock unarmed**: relayed untouched.
 - **TLS, with the clock armed**: each of the name's addresses is decided by its own probe, a handshake the proxy makes
   with the client's own ClientHello, cached per address and SNI. An address already found working is tried first; one

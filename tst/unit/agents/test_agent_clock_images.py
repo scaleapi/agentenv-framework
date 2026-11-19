@@ -1,13 +1,14 @@
-"""Every agent image on the env's clock (FD-5916), whichever agent it is: each folder whose ``shared_sources.toml``
-takes the clock takes the computer bases' clock library and egress proxy from agent-env's one copy, whose libfaketime
-patch has the init guard; runs the follower and the proxy, each as its own user, and the A2A server as the agent's user
-on real time, under root's supervisord; preloads agent-env's libfaketime for the agent's user alone; starts as another
-user as it did before; and its bridge decides the CLI's proxy with the same ``clock_armed`` and ``egress_env`` as every
-other agent's."""
+"""Every agent image on the env's clock, whichever agent it is: each folder whose ``shared_sources.toml`` takes the
+clock takes the computer bases' clock library and egress proxy from agent-env's one copy, whose libfaketime patch has
+the init guard; runs the follower and the proxy, each as its own user, and the A2A server as the agent's user on real
+time, under root's supervisord; preloads agent-env's libfaketime for the agent's user alone; starts as another user as
+it did before; and its bridge takes ``clock_armed`` and ``egress_env`` from the one shared ``agent_egress``, which its
+image copies beside it."""
 
 from __future__ import annotations
 
 import ast
+import posixpath
 import re
 import tomllib
 from pathlib import Path
@@ -87,16 +88,50 @@ def test_started_as_another_user_the_image_runs_the_server_alone_as_before(agent
     assert "AGENTENV_SESSION_USER=agent AGENTENV_EGRESS_NSS=off" in start
 
 
-def _clock_helpers(agent: str) -> dict[str, str]:
-    """The bridge's clock helpers, as source: the one module in the agent's folder that defines ``egress_env``."""
-    [module] = [p for p in (AGENTS_DIR / agent).glob("*.py") if "def egress_env(" in p.read_text()]
-    tree = ast.parse(module.read_text())
-    names = {"clock_armed", "model_direct_hosts", "egress_env"}
-    found = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names}
-    assert set(found) == names, (module, sorted(found))
-    return found
+SHARED = ("clock_armed", "egress_env")
+SHARED_FILES = ("clock/agent_egress.py", "clock/clockpage.py")
+
+
+def _modules(agent: str) -> dict[str, ast.Module]:
+    return {path.name: ast.parse(path.read_text()) for path in sorted((AGENTS_DIR / agent).glob("*.py"))}
+
+
+def _bridges(agent: str) -> list[str]:
+    """The agent's modules that take the egress rule from the shared module."""
+    return [name for name, tree in _modules(agent).items()
+            if any(isinstance(node, ast.ImportFrom) and node.module == "agent_egress"
+                   and set(SHARED) <= {alias.name for alias in node.names} for node in tree.body)]
 
 
 @pytest.mark.parametrize("agent", CLOCKED)
-def test_every_bridge_decides_the_clis_proxy_as_claude_codes_does(agent):
-    assert _clock_helpers(agent) == _clock_helpers("claude-code")
+def test_every_bridge_takes_the_egress_rule_from_the_shared_module_and_defines_none_of_it(agent):
+    assert _bridges(agent), f"no module of {agent}'s imports {SHARED} from agent_egress"
+    for name, tree in _modules(agent).items():
+        defined = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        defined |= {target.id for node in tree.body if isinstance(node, ast.Assign)
+                    for target in node.targets if isinstance(target, ast.Name)}
+        own = defined & {*SHARED, "EGRESS_PROXY_ENV"}
+        assert not own, (name, sorted(own))
+
+
+def _copied_to(dockerfile: str) -> dict[str, set[str]]:
+    """The folders the image's last stage copies each file of its build context into, by the file's name there."""
+    workdir, folders = "/", {}
+    stage = re.split(r"^FROM .*$", dockerfile, flags=re.MULTILINE)[-1]
+    for instruction, args in re.findall(r"^(WORKDIR|COPY) (.+)$", stage, re.MULTILINE):
+        if instruction == "WORKDIR":
+            workdir = posixpath.join(workdir, args)
+        elif not re.search(r"(^| )--from=", args):
+            *sources, dest = [arg for arg in args.split() if not arg.startswith("--")]
+            dest = posixpath.join(workdir, dest)
+            folder = posixpath.normpath(dest if dest.endswith("/") or len(sources) > 1 else posixpath.dirname(dest))
+            for source in sources:
+                folders.setdefault(source, set()).add(folder)
+    return folders
+
+
+@pytest.mark.parametrize("agent", CLOCKED)
+def test_every_clocked_image_copies_the_shared_module_and_the_page_format_beside_its_bridge(agent):
+    folders = _copied_to((AGENTS_DIR / agent / "Dockerfile").read_text())
+
+    assert set.intersection(*(folders.get(name, set()) for name in (*_bridges(agent), *SHARED_FILES))), folders

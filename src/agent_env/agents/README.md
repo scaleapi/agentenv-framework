@@ -44,12 +44,14 @@ The A2A server starts with the real-time marker, so it and its records stay on r
 as a follower with a read token of its own and calls that `sync_time` with the follower's config, which the server
 writes; `deploy_agent` does the same for an agent it deploys while the clock is armed. From then on the CLI, its own
 "Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
-followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps a live
-site's TLS working at any date the clock shows, an env MCP server's included, and to loopback hosts (the peer-agents
-MCP server's) and a plain-HTTP model endpoint directly. The image's proxy reaches private networks too
-(`AGENTENV_EGRESS_PRIVATE`), so an env MCP server or a model endpoint over TLS at a private address works at any date
-as well. Unarmed, the page holds real time and the CLI goes out directly, as before. Started
-as a user other than root, the image runs the A2A server alone, on real time, as before.
+followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
+working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts
+(the peer-agents MCP server's), the hosts the agent's `NO_PROXY` names and plain-HTTP hosts, which have no certificate
+to check, go direct. The image's proxy reaches private networks too (`AGENTENV_EGRESS_PRIVATE`), so a host over TLS at
+a private address works at any date as well. Unarmed, the page holds real time and the CLI goes out directly, as
+before. That rule is `utils/faketime_clock/agent_egress.py`, which the bridge imports and the image copies beside it
+with the `clockpage.py` whose page it reads (`install.sh` too), so every agent put on the clock goes out the same way.
+Started as a user other than root, the image runs the A2A server alone, on real time, as before.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
