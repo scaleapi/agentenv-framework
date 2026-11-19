@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import os
+import tempfile
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
@@ -34,6 +35,7 @@ from ..atif import PROFILE_KEY as ATIF_PROFILE_KEY
 from ..atif import PROFILE_VERSION as ATIF_PROFILE_VERSION
 from ..atif import SCHEMA_VERSION as ATIF_SCHEMA_VERSION
 from ._atif_copy import TurnStart
+from ._turn_index import SnapshotState
 from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
@@ -43,6 +45,7 @@ from .extensions import (
     MCP_CONFIG_V1,
     PEER_AGENTS_V1,
     SKILL_CONFIG_V1,
+    SNAPSHOT_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
     CLOCK_V1,
@@ -55,6 +58,8 @@ from .extensions import (
     ExtensionActivation,
     ExtensionDefinition,
     ImplementationOwner,
+    ObjectSnapshotLoadRequest,
+    ObjectSnapshotSaveRequest,
     McpAddRequest,
     OperationReference,
     PeerAgentsSetRequest,
@@ -98,7 +103,7 @@ from .tasks.v1 import (
 from .tasks.v1 import (
     TextPart as TaskTextPart,
 )
-from ..transfers import TransferError, serving_on, upload
+from ..transfers import TransferError, download, serving_on, upload
 
 logger = logging.getLogger(__name__)
 
@@ -942,6 +947,40 @@ class _SdkServices:
         )
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
 
+    async def read_snapshot_state(self, request: Any) -> SnapshotState | None:
+        """Before an agent's snapshot load: the SDK's state the snapshot carries, read through
+        its ``state`` grant, which only an agent that serves atif/1 is sent."""
+        if not (self.serves_atif and isinstance(request, ObjectSnapshotLoadRequest)
+                and request.objects.state is not None):
+            return None
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            await download(request.objects.state, path)
+            try:
+                return SnapshotState.model_validate_json(path.read_bytes())
+            except ValidationError as exc:
+                raise AgentEnvError(
+                    "snapshot_state_invalid",
+                    f"the snapshot's state object isn't the SDK's snapshot state: {exc.errors()[0]['msg']}",
+                    status=400,
+                ) from exc
+
+    def restore_snapshot_state(self, state: SnapshotState | None, answer: Mapping[str, Any]) -> None:
+        """After the load: the context the agent restored into goes on counting from the
+        snapshot's turn count."""
+        if state is not None:
+            self.task_trajectories.restored(str(answer["context_id"]), state.turns)
+
+    async def write_snapshot_state(self, request: Any, answer: dict[str, Any]) -> dict[str, Any]:
+        """After an agent's snapshot save: the SDK's state, the context's turn count, uploaded
+        through the request's ``state`` grant and named among the answer's objects."""
+        if not (self.serves_atif and isinstance(request, ObjectSnapshotSaveRequest)
+                and request.objects.state is not None):
+            return answer
+        state = SnapshotState(turns=self.task_trajectories.turns(request.context_id))
+        uploaded = await upload(request.objects.state, state.model_dump_json().encode())
+        return {**answer, "objects": {**answer["objects"], "state": uploaded.model_dump(mode="json", exclude_none=True)}}
+
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
         runs, the agent's own included."""
@@ -1381,6 +1420,14 @@ class A2AAgentApplication:
                 ):
                     async with self.services.skill_registration(input_payload):
                         result = await invoke_and_validate()
+                elif extension_uri == SNAPSHOT_V1.uri and operation.definition.name == "load":
+                    state = await self.services.read_snapshot_state(extension_request)
+                    result = await invoke_and_validate()
+                    self.services.restore_snapshot_state(state, result)
+                elif extension_uri == SNAPSHOT_V1.uri and operation.definition.name == "save":
+                    result = await self.services.write_snapshot_state(
+                        extension_request, await invoke_and_validate()
+                    )
                 else:
                     result = await invoke_and_validate()
                 return JSONResponse(result)

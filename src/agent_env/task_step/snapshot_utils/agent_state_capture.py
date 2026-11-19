@@ -96,6 +96,7 @@ async def capture_workspace(
         context_id=a2a_context_id,
         capture_prefix=capture_prefix,
         sandbox_type=sandbox_type,
+        state=A2AAgent.serves_atif(a2a_card or {}),
     )
     await invoke_transfer(
         a2a_url + save_path,

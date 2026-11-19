@@ -28,6 +28,7 @@ from agentenv_protocol.a2a_agent import (
     extension,
     framework,
 )
+from agentenv_protocol.a2a_agent import _turn_index
 from agentenv_protocol.a2a_agent import clock as agent_clock
 from agentenv_protocol.computer import clock as follower
 from agentenv_protocol.atif import (
@@ -332,7 +333,7 @@ def test_enable_refuses_an_adapter_that_doesnt_fit(arguments: dict[str, Any], er
         enable(TRAJECTORY_V1, **arguments)
 
 
-def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     uploaded: list[bytes] = []
 
     async def capture(_target: Any, body: bytes) -> Uploaded:
@@ -349,6 +350,8 @@ def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest
                 {"task_id": task_id}, {"context_id": "ctx-1"}, {"task_id": task_id, "after": 0},
                 {"context_id": "ctx-1", "after": 0}, {"task_id": task_id, "objects": {"trajectory": _grant()}})]
             native_bodies.append(json.loads(json.dumps(bodies).replace(task_id, "TASK")))
+    # Another agent's container, whose turn counts aren't the first one's.
+    monkeypatch.setattr(_turn_index, "TURNS_DIR", tmp_path / "another-container")
     with TestClient(_toy().create_app()) as client:
         task_id = _send(client, "work t1", "m-1")
         _ended(client, task_id)

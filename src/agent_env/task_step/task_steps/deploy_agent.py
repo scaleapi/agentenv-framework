@@ -726,6 +726,7 @@ class DeployAgentTaskStep(TaskStep):
             file_names=set((universe.file_artifact_refs or universe.file_artifact_ids or {}).keys()),
             target_context_id=self.agent_snapshot_target_context_id,
             sandbox_type=sandbox_type,
+            state=A2AAgent.serves_atif(card),
         )
         answer = await invoke_transfer(
             a2a_url + load_path,

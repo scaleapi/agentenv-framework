@@ -1648,6 +1648,18 @@ Every `atif/1` answer names `schema_version` and `profile_version` beside
 copy's reads then answer HTTP 409 with code `atif_unavailable`, and native reads
 are unaffected.
 
+Each task's user step carries its turn index, the number of tasks its context
+started before it. The SDK keeps each context's count on disk, under
+`~/.local/state/agentenv/turns/`, so a restarted server, or a context it dropped
+from memory, goes on counting in a new document of the same session; a home it
+can't write keeps the counts in memory, with one warning. A snapshot carries the
+count in its `state` object, a JSON object that is the SDK's own: on save the
+SDK uploads it after the agent's handler returns and adds it to the answer, and
+on load it reads it before the agent's handler runs and seeds the context the
+handler restored into, whose next task goes on from the snapshot's count in a
+new document. The agent's handlers leave `state` alone, and agent-env grants it
+only to an agent whose card lists `atif/1`.
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic
@@ -1783,7 +1795,9 @@ counterpart. Without them, or `enable(TRAJECTORY_V1, live=True)`, the
 generated card advertises only the framework-owned completed-task variants:
 `{task_id}`, answered inline, and `{task_id, objects}`, answered by upload.
 Snapshot `save` and `load` are an atomic core contract, while its optional
-changelog handlers are enabled as an atomic feature group.
+changelog handlers are enabled as an atomic feature group. A snapshot's optional
+`state` object is the SDK's own, which its handlers leave alone (see
+[Serving ATIF](#serving-atif-atif1)).
 Each operation has at most one response model. The framework validates a
 handler's return value against it before serializing, so a response with a
 missing or unknown field is an HTTP 500.
