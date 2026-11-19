@@ -7,10 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file_part
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import GetDataResponse
 
 from agent_env.env import legacy_protocol
-from agent_env.env.env import DeployedSandboxEnv
+from agent_env.env.env import DeployedGatewayEnv, DeployedSandboxEnv
 
 
 @pytest.mark.asyncio
@@ -44,7 +45,7 @@ async def test_reset_uses_rest_on_success(monkeypatch):
     result = await legacy_protocol.reset("http://gw", "email", "/data/seed.json")
 
     assert result == {"ok": True}
-    rest.assert_awaited_once_with("http://gw/svc/mcp-email", "/data/seed.json")
+    rest.assert_awaited_once_with("http://gw/svc/mcp-email", "/data/seed.json", headers=None)
     mcp.assert_not_called()
 
 
@@ -59,6 +60,21 @@ async def test_reset_falls_back_to_mcp_tool(monkeypatch):
 
     assert result is None
     mcp.assert_awaited_once_with("http://gw/mcp", "email", "/data/seed.json", max_retries=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_reset_refused_for_its_token_raises_instead_of_falling_back_to_the_mcp_tool(monkeypatch, status):
+    """A refused token is a dropped or wrong token; the MCP tool would reset the service without one and hide it."""
+    seen = _authorizations(monkeypatch, status=status)
+    mcp = AsyncMock()
+    monkeypatch.setattr(legacy_protocol, "reset_via_mcp_tool", mcp)
+
+    with pytest.raises(httpx.HTTPStatusError) as refused:
+        await legacy_protocol.reset("http://gw", "email", "/data/seed.json")
+
+    assert refused.value.response.status_code == status and seen == [("/svc/mcp-email/api/reset", None)]
+    mcp.assert_not_called()
 
 
 def test_service_base_url_mcp_vs_website():
@@ -177,6 +193,80 @@ async def test_a_v1_services_state_is_the_data_it_answers_with_else_its_export_s
 
     assert await legacy_protocol.service_state(None, "http://gw", "slack") == state
     assert ("GET /svc/mcp-slack/export-state" in asked) is reads_export_state
+
+
+def _authorizations(monkeypatch, rpc_parts: list | None = None, status: int = 200) -> list[tuple[str, str | None]]:
+    """Each request sent, as its path and its Authorization header; data/get answers with ``rpc_parts``, and every
+    other route with ``status``."""
+    seen, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith("/agentenv"):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"parts": rpc_parts or []}})
+        return httpx.Response(status, json={})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return seen
+
+
+_LEGACY_CALLS = {
+    "/svc/mcp-email/api/reset": lambda **kw: legacy_protocol.reset_via_rest("http://gw/svc/mcp-email", "/data/seed.json", **kw),
+    "/svc/mcp-email/api/add": lambda **kw: legacy_protocol.add_via_rest("http://gw/svc/mcp-email", "/data/seed.json", **kw),
+    "/svc/mcp-email/export-state": lambda **kw: legacy_protocol.export_state("http://gw", "email", **kw),
+}
+_GRANT = {"http://gw": protocol_v1.control_headers("granted")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, call", _LEGACY_CALLS.items(), ids=list(_LEGACY_CALLS))
+@pytest.mark.parametrize("grants, headers, sent", [
+    ({}, None, None),
+    (_GRANT, None, "Bearer granted"),
+    ({"http://other": protocol_v1.control_headers("granted")}, None, None),
+    (_GRANT, protocol_v1.control_headers("own"), "Bearer own"),
+    (_GRANT, {}, None),
+], ids=["no-grant", "granted", "granted-elsewhere", "own-headers", "own-none"])
+async def test_a_legacy_route_sends_the_headers_it_is_given_else_the_runs_grant(monkeypatch, path, call, grants, headers, sent):
+    seen = _authorizations(monkeypatch)
+    with protocol_v1.authorized(grants):
+        await call(headers=headers)
+    assert seen == [(path, sent)]
+
+
+def _gateway_record(card: dict, token: str | None) -> DeployedGatewayEnv:
+    """A record whose card is read at its gateway's own address, as a built-in gateway's is."""
+    return DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None,
+                              sandbox_id="sb-1", environment_card_url=f"http://gw{WELL_KNOWN_PATH}", environment_card=card,
+                              control_token=token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token, sent", [("t0ken", "Bearer t0ken"), (None, None)], ids=["token", "no-token"])
+async def test_a_services_export_state_is_read_with_its_deployments_control_token(monkeypatch, token, sent):
+    """slack answers data/get with a bundle, so its state is read from its export-state; email serves no card, so the
+    gateway's card lists none and its state is read from its export-state behind the gateway."""
+    card = {"name": "gw", "children_environments": [{"name": "slack", "url": "/svc/mcp-slack/agentenv"}]}
+    seen = _authorizations(monkeypatch, [uploaded_file_part("slack.zip", name="slack.zip").model_dump(mode="json")])
+    deployed = _gateway_record(card, token)
+
+    await legacy_protocol.service_state(deployed, "http://gw", "slack")
+    await legacy_protocol.service_state(deployed, "http://gw", "email")
+
+    assert seen == [("/svc/mcp-slack/agentenv", sent), ("/svc/mcp-slack/export-state", sent),
+                    ("/svc/mcp-email/export-state", sent)]
+
+
+@pytest.mark.asyncio
+async def test_a_services_export_state_behind_another_gateway_is_read_with_the_runs_grant(monkeypatch):
+    """The record's token covers its own gateway only; at an override's gateway the run's grant decides."""
+    seen = _authorizations(monkeypatch)
+    deployed = _gateway_record({"name": "gw", "children_environments": []}, "t0ken")
+
+    with protocol_v1.authorized({"http://override": protocol_v1.control_headers("granted")}):
+        await legacy_protocol.service_state(deployed, "http://override", "email")
+
+    assert seen == [("/svc/mcp-email/export-state", "Bearer granted")]
 
 
 def test_definition_servers_are_an_envs_mcp_servers_then_its_websites():

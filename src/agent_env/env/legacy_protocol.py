@@ -209,21 +209,28 @@ async def reset_via_rest(
     mock_data_path: Optional[str] = None,
     timeout: int = 30,
     verify: bool = True,
+    *,
+    headers: Optional[dict[str, str]] = None,
 ) -> dict:
-    """POST ``{base_url}/api/reset``. Sends the seed path when given. Raises on non-2xx."""
+    """POST ``{base_url}/api/reset`` with ``headers``, else the run's grant (``request_headers``). Sends the seed path
+    when given. Raises on non-2xx."""
     body = {"mock_data_path": mock_data_path} if mock_data_path is not None else None
+    url = f"{base_url}/api/reset"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout)
+        response = await client.post(url, json=body, timeout=timeout, headers=protocol_v1.request_headers(url, headers))
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: REST reset succeeded: {result}")
         return result
 
 
-async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify: bool = True) -> dict:
-    """POST ``{base_url}/api/add`` with a backend file path. Raises on non-2xx."""
+async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify: bool = True, *,
+                       headers: Optional[dict[str, str]] = None) -> dict:
+    """POST ``{base_url}/api/add`` with a backend file path and ``headers``, else the run's grant. Raises on non-2xx."""
+    url = f"{base_url}/api/add"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout)
+        response = await client.post(url, json={"file_path": file_path}, timeout=timeout,
+                                     headers=protocol_v1.request_headers(url, headers))
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: add response: {result}")
@@ -231,36 +238,41 @@ async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify
 
 
 async def export_state(
-    gateway_url: str, environment_name: str, timeout: int = EXPORT_STATE_TIMEOUT_SECONDS, verify: bool = True
+    gateway_url: str, environment_name: str, timeout: int = EXPORT_STATE_TIMEOUT_SECONDS, verify: bool = True, *,
+    headers: Optional[dict[str, str]] = None,
 ) -> dict:
-    """GET ``/svc/mcp-{name}/export-state`` — the legacy state snapshot for one service."""
-    return await _export_state_at(environment_base_url(gateway_url, environment_name, mcp=True), timeout, verify)
+    """GET ``/svc/mcp-{name}/export-state``, the legacy state snapshot for one service, with ``headers``, else the
+    run's grant."""
+    return await _export_state_at(environment_base_url(gateway_url, environment_name, mcp=True), timeout, verify, headers)
 
 
-async def _export_state_at(base_url: str, timeout: int, verify: bool) -> dict:
+async def _export_state_at(base_url: str, timeout: int, verify: bool, headers: Optional[dict[str, str]]) -> dict:
+    url = f"{base_url}/export-state"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url}/export-state", timeout=timeout)
+        response = await client.get(url, timeout=timeout, headers=protocol_v1.request_headers(url, headers))
         response.raise_for_status()
         return response.json()
 
 
 async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str) -> dict:
-    """An MCP service's state as JSON: its v1 ``data/get`` answer when that is data, asked with the deployment's
-    control token, else ``GET /export-state``.
+    """An MCP service's state as JSON: its v1 ``data/get`` answer when that is data, else ``GET /export-state``, each
+    asked with the deployment's control token.
 
     A service that exports a file from ``data/get`` (a bundle of its database, to reload from) still serves its state
     as JSON at ``/export-state``.
     """
     base_url = await v1_base_url(deployed, gateway_url, environment_name, mcp=True)
     if base_url is None:
-        return await export_state(gateway_url, environment_name)
-    response = await protocol_v1.get_data(base_url,
-                                          headers=deployed.control_headers_for(base_url) if deployed is not None else None)
+        legacy_url = environment_base_url(gateway_url, environment_name, mcp=True)
+        return await export_state(gateway_url, environment_name,
+                                  headers=(deployed.control_headers_for(legacy_url) or None) if deployed is not None else None)
+    headers = (deployed.control_headers_for(base_url) or None) if deployed is not None else None
+    response = await protocol_v1.get_data(base_url, headers=headers)
     if not response.parts:
         return {}
     if isinstance(response.parts[0], DataPart):
         return response.parts[0].data
-    return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
+    return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True, headers=headers)
 
 
 async def offers_tool(mcp_url: str, name: str) -> bool:
@@ -322,12 +334,17 @@ async def reset(
     environment_name: str,
     mock_data_path: str,
     max_retries: int = DEFAULT_MCP_MAX_RETRIES,
+    *,
+    headers: Optional[dict[str, str]] = None,
 ) -> Optional[dict]:
-    """Reset an MCP service to a seed: try REST ``/api/reset``, fall back to the MCP tool."""
+    """Reset an MCP service to a seed: try REST ``/api/reset`` with ``headers``, fall back to the MCP tool. A 401 or
+    403 raises: it means the token was dropped or wrong, and the tool would reset the service without one."""
     base_url = environment_base_url(gateway_url, environment_name, mcp=True)
     try:
-        return await reset_via_rest(base_url, mock_data_path)
+        return await reset_via_rest(base_url, mock_data_path, headers=headers)
     except Exception as rest_err:
+        if isinstance(rest_err, httpx.HTTPStatusError) and rest_err.response.status_code in (401, 403):
+            raise
         # TODO remove MCP tool fallback once all usages of MCP servers are on REST
         logger.info(f"load_environment_artifact: REST reset failed ({type(rest_err).__name__}), falling back to MCP tool")
         await reset_via_mcp_tool(f"{gateway_url}/mcp", environment_name, mock_data_path, max_retries=max_retries)
