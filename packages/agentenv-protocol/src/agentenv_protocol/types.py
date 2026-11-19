@@ -19,6 +19,9 @@ RPC_PATH = "/agentenv"
 #: The variable that hands an env the token its framework-only routes take as their bearer, everything it serves but
 #: its MCP endpoint and its card; agent-env sets it when it deploys the env, and without it those routes are open.
 CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
+#: The variable that hands an env only the hex sha256 of that token, which those routes then take in its place: a
+#: process that can read the env's environment learns nothing it could send. Set, it is checked and the token isn't.
+CONTROL_TOKEN_SHA256_ENV = "AGENTENV_CONTROL_TOKEN_SHA256"
 #: The header a control token travels in where it must not collide with a front door's own ``Authorization``.
 CONTROL_TOKEN_HEADER = "AgentEnv-Control-Token"
 

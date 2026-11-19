@@ -230,7 +230,8 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert _containers(computer["sandbox_id"]) == []
     assert json.dumps(deployed.child_envs)  # the record stores as JSON
     assert note == through_gateway == "from the universe" and "snap-x" in listed_items
-    assert computer["control_token"] == deployed.control_token  # one token for the multi env, which the gateway passes on
+    # Each computer holds a token of its own, never the multi env's, which opens the consoles and guarded routes.
+    assert computer["control_token"] and computer["control_token"] != deployed.control_token
     assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
     # The gateway states each child's environment_name, which lookups, servers and snapshots go by: the shop
     # website's card is named webitems.

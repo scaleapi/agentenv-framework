@@ -16,6 +16,9 @@ from agent_env.env.gateway.constants import CONTROL_ROUTES, WELL_KNOWN_PATH
 from agent_env.env.gateway.gateway import Gateway
 
 TOKEN = "s3cret"
+# A multi env's computers' own tokens, by name, as the gateway is started with them (CHILD_CONTROL_TOKENS).
+DESK, LAPTOP = "the-desks-own", "the-laptops-own"
+COMPUTERS = {"desk": DESK, "laptop": LAPTOP}
 CONTROL = {
     "/tools/disable": "POST", "/tools/enable": "POST",
     "/triggers/register": "POST", "/triggers/remove": "POST", "/triggers/clear": "POST",
@@ -104,17 +107,19 @@ async def test_no_route_behind_the_gateway_reads_its_token(value, seen):
     assert response.json() == {"authorization": seen}
 
 
-@pytest.mark.parametrize("path, kept", [
-    ("/svc/desktop/agentenv/ext/computer-exec", True), ("/svc/desktop", True), ("/clock/watch", True),
-    ("/svc/mcp-items/agentenv", False), ("/svc/desktop-2/agentenv", False), ("/website/desktop/", False),
-    ("/state", False)])
-def test_its_token_goes_on_only_to_the_computers_it_fronts_and_to_its_clock_watch(path, kept):
-    """A multi env's computers boot with the gateway's token and take it on their /svc routes, and send it to its clock
-    watch as their read token; every other request loses it."""
-    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[], control_token=TOKEN,
-                 control_token_children=["desktop"])
-    assert gw._keeps_control_token(path) is kept
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(OPEN))
+async def test_a_gateway_started_without_a_token_lets_a_childs_through_nowhere_but_the_child(path):
+    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[], control_token=None,
+                 child_control_tokens={"desk": DESK})
 
+    @gw._mcp.custom_route("/echo", methods=["GET"])
+    async def echo(request):
+        return JSONResponse({"authorization": request.headers.get("authorization")})
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gw._asgi_app()), base_url="http://gateway") as client:
+        response = await client.get("/echo", headers={"Authorization": f"Bearer {DESK}"})
+    assert response.json() == {"authorization": None}
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", sorted(CONTROL))
@@ -129,12 +134,14 @@ class _Backing:
 
     def __init__(self, monkeypatch):
         self.paths: list[str] = []
+        self.hosts: list[str] = []
         self.authorization: list[str | None] = []
         transport = httpx.MockTransport(self._answer)
         monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
 
     def _answer(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.url.path)
+        self.hosts.append(request.url.host)
         self.authorization.append(request.headers.get("authorization"))
 
         async def body():
@@ -259,3 +266,87 @@ async def test_a_server_behind_a_base_path_is_guarded_however_a_path_climbs_into
                 "rest_proxy_urls": {"mcp-x": base}, "website_urls": {}}
     assert await _proxied(TOKEN, "POST", path, {}, **prefixed) == 401
     assert backing.paths == []
+
+
+def _computers(**extra) -> dict:
+    """A multi env's two computers behind the gateway, each with its own token, beside an MCP server, a website and
+    the SQL consoles."""
+    return {"internal_mcp_servers": [InternalMCPServer(name="desk", mcp_url="http://desk:18765/mcp"),
+                                     InternalMCPServer(name="laptop", mcp_url="http://laptop:18765/mcp")],
+            "rest_proxy_urls": {"mcp-svc": "http://svc", "shop": "http://shop-backend", "desk": "http://desk:18765",
+                                "laptop": "http://laptop:18765"},
+            "website_urls": {"shop": "http://shop-backend"},
+            "console_urls": {"pgweb": "http://pgweb:8081", "db-mcp": "http://db-mcp:8000"},
+            "child_control_tokens": COMPUTERS, **extra}
+
+
+def _reached(backing: _Backing) -> list[tuple[str, str | None]]:
+    return [(at, sent) for at, sent in zip(backing.paths, backing.authorization) if at != WELL_KNOWN_PATH]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/svc/desk/agentenv", "/svc/desk/agentenv/ext/computer-exec", "/svc/desk/mcp",
+                                  "/svc/desk/svc/notes/api"])
+async def test_the_gateways_token_reaches_a_computer_as_that_computers_own(monkeypatch, path):
+    """A harness caller holding the multi env's token reaches its computer's framework-only routes; the computer
+    receives its own token, never the gateway's."""
+    backing = _Backing(monkeypatch)
+    assert await _proxied(TOKEN, "POST", path, {"Authorization": f"Bearer {TOKEN}"}, **_computers()) != 401
+    assert _reached(backing) == [(path.removeprefix("/svc/desk"), f"Bearer {DESK}")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, reached", [
+    ("/svc/desk/agentenv", ("/agentenv", f"Bearer {DESK}")),
+    ("/svc/laptop/agentenv", ("/agentenv", None)),
+    ("/svc/laptop/agentenv/ext/computer-exec", ("/agentenv/ext/computer-exec", None)),
+    ("/svc/mcp-svc/export-state", ("/export-state", None)),
+    ("/svc/shop/api/orders", ("/api/orders", None)),
+    ("/website/shop/index.html", ("/index.html", None))])
+async def test_a_computers_token_goes_on_only_to_that_computer(monkeypatch, path, reached):
+    """A computer's token, read from it, carries to no other computer, server or site behind the gateway."""
+    backing = _Backing(monkeypatch)
+    await _proxied(TOKEN, "POST", path, {"Authorization": f"Bearer {DESK}"}, **_computers())
+    assert _reached(backing) == [reached]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, path", [
+    ("GET", "/svc/pgweb/"), ("POST", "/svc/pgweb/api/query"), ("POST", "/svc/db-mcp/mcp"),
+    *GUARDED])
+async def test_a_computers_token_opens_no_route_that_takes_the_gateways(monkeypatch, method, path):
+    """A computer's token is no key to the SQL consoles, the data plane or an MCP server's endpoint."""
+    backing = _Backing(monkeypatch)
+    assert await _proxied(TOKEN, method, path, {"Authorization": f"Bearer {DESK}"}, **_computers()) == 401
+    assert backing.paths == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(CONTROL))
+async def test_a_computers_token_opens_none_of_the_gateways_control_routes(path):
+    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", control_token=TOKEN, **_computers())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gw._asgi_app()), base_url="http://gateway") as client:
+        response = await client.request(CONTROL[path], path, json={}, headers={"Authorization": f"Bearer {DESK}"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/svc/desktop/agentenv/ext/computer-exec", "/svc/desktop/mcp"])
+async def test_a_computer_an_older_agent_env_booted_with_the_gateways_token_still_takes_it(monkeypatch, path):
+    """An older agent-env names its computers in CONTROL_TOKEN_CHILDREN, each booted with the gateway's own token."""
+    backing = _Backing(monkeypatch)
+    older = {"internal_mcp_servers": [], "rest_proxy_urls": {"desktop": "http://desktop:18765"}, "website_urls": {},
+             "control_token_children": ["desktop"]}
+    await _proxied(TOKEN, "POST", path, {"Authorization": f"Bearer {TOKEN}"}, **older)
+    assert [sent for _, sent in _reached(backing)] == [f"Bearer {TOKEN}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/svc/desk/../pgweb/api/query", "/svc/desk/%2E%2E/pgweb/api/query",
+                                  "/svc/desk/..%2Fpgweb/api/query"])
+async def test_a_computers_route_that_climbs_out_of_it_reaches_only_that_computer(monkeypatch, path):
+    """Whatever a path under a computer's route spells, its token goes only to that computer, never to a console."""
+    backing = _Backing(monkeypatch)
+    await _proxied(TOKEN, "GET", path, {"Authorization": f"Bearer {TOKEN}"}, **_computers())
+    assert set(backing.hosts) <= {"desk"}
+    assert set(backing.authorization) <= {f"Bearer {DESK}"}

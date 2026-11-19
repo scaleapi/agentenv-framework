@@ -431,3 +431,18 @@ def test_a_pgweb_link_opens_the_gateways_pgweb_once_and_carries_no_token():
                          ids=["no-pgweb", "no-token"])
 def test_a_record_without_pgweb_at_its_gateway_or_a_token_has_no_pgweb_link(changes):
     assert dataclasses.replace(_record(None), **changes).pgweb_link() is None
+
+
+def test_a_gateway_record_grants_each_childs_route_its_own_token_and_everything_else_the_gateways():
+    """A step reaching a multi env's computer through any gateway sends the computer's own token, not the env's."""
+    gateway = DeployedGatewayEnv(env_id="multi", env_version=1, gateway_url="https://gw.example", sandbox_id="gw",
+                                 environment_card_url=f"https://gw.example{WELL_KNOWN_PATH}", control_token="env-token",
+                                 child_envs={"desktop": {"control_token": "desk-own"}, "laptop": {}})
+    urls = ["https://gw.example/svc/desktop/agentenv/ext/computer-exec", "https://gw.example/svc/desktop",
+            "https://gw.example/svc/desktop-2/agentenv", "https://gw.example/svc/laptop/agentenv",
+            "https://gw.example/svc/pgweb/", "https://elsewhere/svc/desktop/agentenv"]
+    assert [gateway.control_headers_for(url) for url in urls] == [
+        {"Authorization": "Bearer desk-own"}] * 2 + [{"Authorization": "Bearer env-token"}] * 3 + [{}]
+    with protocol_v1.authorized(gateway.control_grants):
+        assert protocol_v1.request_headers(urls[0]) == {"Authorization": "Bearer desk-own"}
+        assert protocol_v1.request_headers(urls[4]) == {"Authorization": "Bearer env-token"}
