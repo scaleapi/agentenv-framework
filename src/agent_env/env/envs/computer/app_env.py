@@ -119,8 +119,9 @@ class ComputerAppEnv(ComputerEnv):
             composing: Composing = Composing()) -> Self:
         """Write the app once what it declares, ``build_settings``, its build settings' values, and ``settings``,
         defaults for some of its settings, check out, and with a computer and a driver, once it fits them (gate 1); then
-        compose it with them as ``composing`` says unless ``compose`` is False. Refused, naming every problem, before
-        anything is stored."""
+        compose it with them as ``composing`` says unless ``compose`` is False, or ``composing`` leaves a computer
+        app to its first deploy alone (``Composing.apps_alone``). Refused, naming every problem, before anything is
+        stored."""
         app = cls(id=id, version=None, environment_name=environment_name, module=module, files=files,
                   declaration=declaration, computer=computer, driver=driver, build_settings=build_settings,
                   settings=settings)
@@ -140,7 +141,7 @@ class ComputerAppEnv(ComputerEnv):
         if problems:
             raise ValueError(f"computer app env {id!r}: " + "; ".join(problems))
         app = get_env_store().put_document(app)
-        if computer is not None and compose:
+        if computer is not None and compose and composing.apps_alone:
             composer.compose(app, composing=composing)
         return app
 

@@ -98,19 +98,25 @@ _SHOWN = 10
 class Composing:
     """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link runs
     natively unless ``emulate`` is False; each pair's stages told to ``on_progress``; the forms of the base, or for a
-    run (``for_run``) those its deploys boot (``forms_of``) on ``deploys_on``, by default the provider it composes on."""
+    run (``for_run``) those its deploys boot (``forms_of``) on ``deploys_on``, by default the provider it composes on.
+    A computer app env, which deploys alone on a computer and a driver, is composed alone only with ``apps_alone``: a
+    run leaves it to the first deploy that boots it alone (``ComputerEnv.compose_unstarted``), since most of a run's
+    apps deploy only on a desktop, which composes them into its own image."""
 
     sandbox_provider: SandboxProvider | None = None
     emulate: bool = True
     on_progress: Callable[[str], None] | None = None
     forms_of: Literal["base", "deploys"] = "base"
     deploys_on: SandboxProvider | None = None
+    apps_alone: bool = True
 
     @classmethod
-    def for_run(cls, sandbox_provider: SandboxProvider | None, emulate: bool = True) -> Composing:
+    def for_run(cls, sandbox_provider: SandboxProvider | None, emulate: bool = True,
+                apps_alone: bool = False) -> Composing:
         """How a run whose deploys are on ``sandbox_provider``, by default the env's, composes: on the env's, this
-        machine unless the config names another, the forms its deploys boot."""
-        return cls(None, emulate, forms_of="deploys", deploys_on=sandbox_provider)
+        machine unless the config names another, the forms its deploys boot, and a computer app alone only with
+        ``apps_alone``, as a register that others deploy from needs."""
+        return cls(None, emulate, forms_of="deploys", deploys_on=sandbox_provider, apps_alone=apps_alone)
 
     def provider(self) -> SandboxProvider:
         """``sandbox_provider``, else the env's default, looked up by each compose that needs it, once: a run with no
@@ -120,7 +126,10 @@ class Composing:
         return self.sandbox_provider or get_env_sandbox_provider()
 
     def forms(self, env: ComputerEnv, provider: SandboxProvider) -> list[str]:
-        """The forms of ``env``'s base this compose on ``provider``, its ``provider()``, builds."""
+        """The forms of ``env``'s base this compose on ``provider``, its ``provider()``, builds: none of a computer
+        app's without ``apps_alone``."""
+        if env.type == "computer_app" and not self.apps_alone:
+            return []
         return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, self.deploys_on or provider)
 
 
