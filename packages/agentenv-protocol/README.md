@@ -776,8 +776,9 @@ class MyDriver(ComputerDriverEnvironment):
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
   each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
   main argument. Where the frames can't show the pointer themselves, as frames polled from captures that
-  leave it out do (cua-driver's), the agent's pointer is drawn where its last input left it, along a
-  drag's path as it moves, after a fading line from where it jumped. Every `computer_*` input is marked
+  leave it out do (cua-driver's), a pointer is drawn for each role and pointer that has acted, where its
+  last input left it, along a drag's path as it moves, after a fading line from where it jumped: the one
+  that moved last at full strength, the others fainter, each named once there are several. Every `computer_*` input is marked
   as `act` delivers it, best effort, and shows on
   every frame while it lasts and on the first one after it however late, as at a low fps. A segment a
   native recorder finished is kept as it came. The manifest's `annotate` is the object the recording

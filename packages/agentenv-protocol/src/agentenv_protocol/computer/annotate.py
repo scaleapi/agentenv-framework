@@ -6,6 +6,7 @@ the frames can't show the pointer themselves, as frames from screenshots that le
 drawn where its inputs left it."""
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
 from collections.abc import Mapping, Sequence
@@ -23,6 +24,8 @@ from .errors import InvalidArgument
 OPTIONS: tuple[str, ...] = ()
 #: The role of a call that names none: the agent.
 DEFAULT_ROLE = "default"
+#: The pointer an input acts through when it names none: the computer's own, the only one the SDK drives yet.
+DEFAULT_POINTER = "default"
 #: Each role's colour: the agent's first, then each other role's in the order it first acts on the recording.
 COLOURS = ((255, 138, 0), (0, 184, 148), (175, 82, 222), (255, 59, 105), (52, 120, 246), (250, 204, 21))
 #: How long a mark shows from its input, in seconds; a drag's, after its moves.
@@ -56,9 +59,10 @@ KEY_NAMES = {"Control": "Ctrl", "Escape": "Esc", "ArrowLeft": "Left", "ArrowRigh
 
 @dataclass(frozen=True)
 class Mark:
-    """One input on a recording: ``kind`` is click, down, up, move, scroll, drag or chip; ``points`` are fractions of
-    the display, so they land on any frame size; it shows from ``at`` until ``until``, a drag moving for its first
-    ``moving_s``."""
+    """One input on a recording: ``kind`` is click, down, up, move, scroll, drag or chip, or pointer for where a
+    pointer was and then went; ``points`` are fractions of the display, so they land on any frame size; it shows from
+    ``at`` until ``until``, a drag moving for its first ``moving_s``. ``pointer`` is the pointer it acted through;
+    ``faded``, a pointer drawn fainter, as one that didn't move last."""
 
     kind: str
     at: datetime
@@ -70,6 +74,8 @@ class Mark:
     direction: str = ""
     label: str = ""
     moving_s: float = 0.0
+    pointer: str = DEFAULT_POINTER
+    faded: bool = False
 
 
 def check_annotate(annotate: object) -> Optional[dict]:
@@ -87,14 +93,15 @@ class Annotations:
     """One annotated recording's marks, from their inputs until they stop showing, and the colour of each role. Each
     mark shows on every frame captured while it lasts, and on the first one after its input however late that comes,
     as at a low fps or from a slow capture. With ``pointer``, as for frames that can't show the pointer themselves,
-    each frame also draws the pointer where the last input before it left it, from the recording's first input on."""
+    each frame also draws a pointer for each role and pointer that has acted, where its last input before the frame
+    left it: the one that moved last at full strength, the others fainter, each named once there are several."""
 
     def __init__(self, pointer: bool = False) -> None:
         self.marks: list[Mark] = []
         self.drawn: set[int] = set()
         self.colours: dict[str, tuple[int, int, int]] = {DEFAULT_ROLE: COLOURS[0]}
         self.pointer = pointer
-        self.moves: list[Mark] = []  # the pointer's, each a "pointer" mark: where it was, then its path
+        self.moves: dict[tuple[str, str], list[Mark]] = {}  # by role and pointer: each move, where it was and went
 
     def add(self, marks: Sequence[Mark]) -> None:
         for mark in marks:
@@ -103,18 +110,26 @@ class Annotations:
             self._keep([kept for kept in self.marks if kept.until > stale])
             self.marks.append(mark)
             if self.pointer and mark.kind in MOVES_POINTER and mark.points:
+                moves = self.moves.setdefault((mark.role, mark.pointer), [])
                 path = mark.points if mark.kind == "drag" else mark.points[-1:]
-                was = self.moves[-1].points[-1] if self.moves else path[0]
-                self.moves.append(Mark("pointer", mark.at, mark.at, mark.role, (was, *path), moving_s=mark.moving_s))
+                was = moves[-1].points[-1] if moves else path[0]
+                moves.append(Mark("pointer", mark.at, mark.at, mark.role, (was, *path), moving_s=mark.moving_s,
+                                  pointer=mark.pointer))
 
-    def _pointer(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
-        """The pointer a frame captured ``at`` shows: the last move before it, as its age; none before the first."""
-        current = next((i for i in range(len(self.moves) - 1, -1, -1) if self.moves[i].at <= at), None)
-        if current is None:
-            return []
-        self.moves = self.moves[current:]  # the frames come in order, so an earlier move won't show again
-        move = self.moves[0]
-        return [(move, self.colours[move.role], (at - move.at).total_seconds())]
+    def _pointers(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
+        """The pointers a frame captured ``at`` shows, each as its last move before the frame at its age, the one that
+        moved last drawn over the others; none for a role or pointer that hadn't acted by then."""
+        current = []
+        for key, moves in self.moves.items():
+            last = next((i for i in range(len(moves) - 1, -1, -1) if moves[i].at <= at), None)
+            if last is not None:
+                self.moves[key] = moves[last:]  # the frames come in order, so an earlier move won't show again
+                current.append(moves[last])
+        current.sort(key=lambda move: move.at)
+        several = len(current) > 1
+        shown = [dataclasses.replace(move, faded=move is not current[-1],
+                                     label=_pointer_label(move) if several else "") for move in current]
+        return [(move, self.colours[move.role], (at - move.at).total_seconds()) for move in shown]
 
     def showing(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
         """The marks a frame captured ``at`` shows, each with its colour and the age, in seconds, it is drawn at: a
@@ -135,7 +150,7 @@ class Annotations:
         shown = [entry for entry in due if id(entry[0]) not in waiting]
         self.drawn |= {id(mark) for mark, _colour, _age in shown}
         self._keep([mark for mark in self.marks if mark.until > at or id(mark) not in self.drawn])
-        return shown + (self._pointer(at) if self.pointer else [])
+        return shown + (self._pointers(at) if self.pointer else [])
 
     def _keep(self, marks: list[Mark]) -> None:
         self.marks = marks
@@ -263,6 +278,7 @@ class Style:
     dot_stroke: float = 2
     pointer: float = 1.6  # the agent's pointer, as a multiple of the usual arrow cursor's size
     pointer_outline: float = 2
+    pointer_faded_alpha: int = 120  # a pointer that didn't move last
     jump_alpha: int = 170  # the line from where the pointer jumped, at its start
     press_down: float = 10  # a press's filled ring's radius
     press_up: float = 16  # a release's ring's radius
@@ -370,7 +386,11 @@ def _draw_pointer(pen, mark, points, colour, unit, age, fade) -> None:
         pen.line((*was, *path[0]), fill=(*colour, alpha), width=_width(STYLE.stroke, unit))
     scale = unit * STYLE.pointer
     arrow = [(tip[0] + dx * scale, tip[1] + dy * scale) for dx, dy in ARROW]
-    pen.polygon(arrow, fill=(*colour, 255), outline=(*WHITE, 255), width=_width(STYLE.pointer_outline, unit))
+    alpha = STYLE.pointer_faded_alpha if mark.faded else 255
+    pen.polygon(arrow, fill=(*colour, alpha), outline=(*WHITE, alpha), width=_width(STYLE.pointer_outline, unit))
+    if mark.label:
+        corner = max(dx for dx, _dy in ARROW), max(dy for _dx, dy in ARROW)
+        _label(pen, (tip[0] + corner[0] * scale, tip[1] + corner[1] * scale), mark.label, colour, unit, alpha)
 
 
 _DRAWERS = {"click": _draw_click, "down": _draw_press, "up": _draw_press, "move": _draw_move, "scroll": _draw_scroll,
@@ -423,6 +443,12 @@ def _along(points: list[tuple[float, float]], fraction: float) -> list[tuple[flo
         shown.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
         break
     return shown
+
+
+def _pointer_label(move: Mark) -> str:
+    """A pointer's name beside it: its role's, the agent's as agent, and its own when it isn't the default."""
+    role = "agent" if move.role == DEFAULT_ROLE else move.role
+    return role if move.pointer == DEFAULT_POINTER else f"{role} {move.pointer}"
 
 
 def _ink(colour: tuple[int, int, int]) -> tuple[int, int, int, int]:

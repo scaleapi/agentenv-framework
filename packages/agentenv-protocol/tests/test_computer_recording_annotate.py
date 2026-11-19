@@ -4,6 +4,7 @@ shows as a chip; a plain recording draws nothing."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -393,3 +394,24 @@ def test_the_pointer_follows_the_last_input_before_each_frame_from_the_first_inp
     assert pointer(-1) == []
     assert pointer(0.5) == [((0.1, 0.1), (0.1, 0.1))]
     assert pointer(1.5) == [((0.1, 0.1), (0.5, 0.5))] and pointer(9) == [((0.1, 0.1), (0.5, 0.5))]
+
+
+def test_each_role_and_pointer_has_a_pointer_the_last_mover_on_top_each_named_when_there_are_several():
+    """The agent and a user simulator on one computer, and a second pointer of the agent's, as a lease would give it."""
+    annotations = Annotations(pointer=True)
+    annotations.add(input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100)))
+
+    def pointers(seconds):
+        return [(mark.role, mark.pointer, mark.points[-1], mark.faded, mark.label) for mark, _colour, _age in
+                annotations.showing(T0 + timedelta(seconds=seconds)) if mark.kind == "pointer"]
+
+    assert pointers(0.5) == [("default", "default", (0.1, 0.1), False, "")]
+    annotations.add(input_marks("click", (50, 50, "left", 1, []), role="user", at=T0 + timedelta(seconds=1),
+                                size=(100, 100)))
+    assert pointers(1.5) == [("default", "default", (0.1, 0.1), True, "agent"),
+                             ("user", "default", (0.5, 0.5), False, "user")]
+    [second] = input_marks("pointer_move", (80, 20), role=None, at=T0 + timedelta(seconds=2), size=(100, 100))
+    annotations.add([dataclasses.replace(second, pointer="p2")])
+    assert pointers(2.5) == [("default", "default", (0.1, 0.1), True, "agent"),
+                             ("user", "default", (0.5, 0.5), True, "user"),
+                             ("default", "p2", (0.8, 0.2), False, "agent p2")]
