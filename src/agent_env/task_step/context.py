@@ -130,6 +130,8 @@ class DeployedAgent:
     installed_container: str | None = None
     # The envs deploy_agent registered with it, by id.
     env_ids: list[str] = field(default_factory=list)
+    # The deploy_env step whose deployment of those envs it is bound to, when deploy_agent named one.
+    env_step_id: str | None = None
     # The token its extension routes take, from the deploy that started it; None for an agent agent-env didn't start.
     control_token: str | None = None
 
@@ -148,6 +150,7 @@ class DeployedAgent:
             on_host=bool(data.get("on_host", False)),
             installed_container=data.get("installed_container"),
             env_ids=list(data.get("env_ids") or []),
+            env_step_id=data.get("env_step_id"),
             control_token=data.get("control_token"),
         )
 

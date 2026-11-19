@@ -180,6 +180,7 @@ class SyncEnvClockTaskStep(TaskStep):
         agents = await self._follow_agents(context, deployed, env_get_time_url)
         configuration = {
             "step_id": self.id, "env_id": self.env_id,
+            "deploy_step_id": (deployed.metadata or {}).get("deploy_step_id"),
             "virtual_time": self.virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
             "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped, "agents": agents,
             "require_agent_clock": self.require_agent_clock,
@@ -199,12 +200,13 @@ class SyncEnvClockTaskStep(TaskStep):
     async def _follow_agents(self, context: TaskStepContext, deployed, env_get_time_url: Optional[str]) -> list[dict]:
         """Have every agent registered with the env follow its clock (``a2a_agent.clock.follow``): one that can't is
         reported and skipped, or fails the step under ``require_agent_clock``."""
-        from agent_env.a2a_agent.clock import follow_in, torn_down
+        from agent_env.a2a_agent.clock import follow_in, on_deployment, torn_down
 
         outcomes = []
         for agent in context.deployed_agents:
-            if self.env_id not in (agent.env_ids or []) or torn_down(context, agent):
-                continue  # not the env's, or taken down by teardown_sandboxes: nothing to follow
+            mine = self.env_id in (agent.env_ids or []) and on_deployment(agent, deployed)
+            if not mine or torn_down(context, agent):
+                continue  # not this deployment's, or taken down by teardown_sandboxes: nothing to follow
             outcome = await follow_in(context, agent, deployed, env_get_time_url=env_get_time_url,
                                       timezone=self.timezone, timeout=self.timeout_seconds)
             if not outcome["synced"]:
