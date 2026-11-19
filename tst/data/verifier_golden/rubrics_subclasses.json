@@ -2,7 +2,6 @@
  "us_passing_with_the_gate_off": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -124,6 +123,7 @@
      }
     ],
     "score": 1.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -179,7 +179,6 @@
  "us_the_gate_on_a_slip_that_changes_the_grade": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -321,6 +320,7 @@
      }
     ],
     "score": 0.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -379,7 +379,6 @@
  "us_a_slip_on_unconfirmed_instructions": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -503,6 +502,7 @@
      }
     ],
     "score": 0.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -561,9 +561,10 @@
  "us_no_graded_turns": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [],
     "score": null,
+    "skipped": "no graded turns",
+    "format": "user_sim_checks",
     "run_step_id": "talk",
     "run_kind": "prompt_agent",
     "judge_model": "fake/judge",
@@ -577,7 +578,6 @@
     "graded_turns": [],
     "turns": 1,
     "notes": [],
-    "skipped": "no graded turns",
     "user_sim_error": {
      "value": "no",
      "because": [],
@@ -592,7 +592,6 @@
  "us_a_persona_mismatch": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -714,6 +713,7 @@
      }
     ],
     "score": 1.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -775,7 +775,6 @@
  "us_an_unknown_persona_with_a_line_item": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -913,6 +912,7 @@
      }
     ],
     "score": 1.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -977,7 +977,6 @@
  "us_one_check_undecided": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -1099,6 +1098,7 @@
      }
     ],
     "score": 1.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -1157,7 +1157,6 @@
  "us_every_check_undecided": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -1279,6 +1278,7 @@
      }
     ],
     "score": 1.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -1342,7 +1342,6 @@
  "us_an_answer_retry": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -1466,6 +1465,7 @@
      }
     ],
     "score": 0.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -1539,7 +1539,6 @@
  "us_an_auto_item": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -1682,6 +1681,7 @@
      }
     ],
     "score": 0.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -1740,7 +1740,6 @@
  "us_a_grade_up_to_turn_that_cuts_nothing": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -1862,6 +1861,7 @@
      }
     ],
     "score": 1.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -1918,13 +1918,13 @@
  "us_a_chat_run_that_ended_in_an_error": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [],
     "score": null,
+    "skipped": "the run ended with error_type=user_sim_error",
+    "format": "user_sim_checks",
     "run_step_id": "talk",
     "run_kind": "prompt_agent",
     "judge_model": "fake/judge",
-    "skipped": "the run ended with error_type=user_sim_error",
     "user_sim_error": {
      "value": "no",
      "because": [],
@@ -1946,13 +1946,13 @@
  "us_a_chat_run_with_no_reads": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [],
     "score": null,
+    "skipped": "the user sim never read: the run has no user_sim_reads",
+    "format": "user_sim_checks",
     "run_step_id": "talk",
     "run_kind": "prompt_agent",
     "judge_model": "fake/judge",
-    "skipped": "the user sim never read: the run has no user_sim_reads",
     "user_sim_error": {
      "value": "no",
      "because": [],
@@ -1974,7 +1974,6 @@
  "us_a_chat_run_the_gate_fails": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -2098,6 +2097,7 @@
      }
     ],
     "score": 0.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -2162,7 +2162,6 @@
  "us_an_always_on_run_the_gate_fails": {
   "verifications": {
    "usj": {
-    "format": "user_sim_checks",
     "results": [
      {
       "id": "guidance",
@@ -2286,6 +2285,7 @@
      }
     ],
     "score": 0.0,
+    "format": "user_sim_checks",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -2347,7 +2347,6 @@
  "ao_unstaged_with_its_harness": {
   "verifications": {
    "rubric": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "c1",
@@ -2357,6 +2356,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -2386,7 +2386,6 @@
  "ao_a_prompt_error_the_gate_fails": {
   "verifications": {
    "rubric": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "prompt_error",
@@ -2396,6 +2395,7 @@
      }
     ],
     "score": 0,
+    "format": "rubric_binary",
     "assistant_harness": {
      "agent_name": "assistant"
     }
@@ -2414,7 +2414,6 @@
  "ao_staged_with_what_its_judge_read": {
   "verifications": {
    "rubric": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "c1",
@@ -2424,6 +2423,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": "mem://judge/1.json",
@@ -2495,7 +2495,6 @@
  "ao_context_loss_the_gate_fails": {
   "verifications": {
    "rubric": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "gate",
@@ -2515,6 +2514,7 @@
      }
     ],
     "score": 0.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": "mem://judge/1.json",

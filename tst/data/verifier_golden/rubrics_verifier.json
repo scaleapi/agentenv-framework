@@ -2,7 +2,6 @@
  "binary": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "table-reserved",
@@ -20,6 +19,7 @@
      }
     ],
     "score": 0.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -36,7 +36,6 @@
  "partial_weighted": {
   "verifications": {
    "vid": {
-    "format": "rubric_partial",
     "results": [
      {
       "id": "q",
@@ -63,6 +62,7 @@
      }
     ],
     "score": 0.625,
+    "format": "rubric_partial",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -79,7 +79,6 @@
  "batches_with_a_bulk_verdict_retry": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "crit-01",
@@ -123,6 +122,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -223,7 +223,6 @@
  "an_answer_retry_for_a_missing_id": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "crit-01",
@@ -251,6 +250,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -284,7 +284,6 @@
  "a_compacted_trajectory": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "crit-01",
@@ -312,6 +311,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": "mem://compact/1.json",
     "compact_trajectory_object_url": "mem://compact/1.json",
     "judge_trajectory_s3_uri": null,
@@ -328,7 +328,6 @@
  "grade_up_to_turn": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "crit-01",
@@ -348,6 +347,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -365,7 +365,6 @@
  "prompt_error": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "prompt_error",
@@ -374,7 +373,8 @@
       "message": "Skipped: prompt had error_type=timeout"
      }
     ],
-    "score": 0
+    "score": 0,
+    "format": "rubric_binary"
    }
   },
   "models": null,
@@ -383,7 +383,6 @@
  "the_gate_on_an_unmet_row": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "table-reserved",
@@ -401,6 +400,7 @@
      }
     ],
     "score": 0.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -417,7 +417,6 @@
  "the_gate_on_a_prompt_error": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "prompt_error",
@@ -426,7 +425,8 @@
       "message": "Skipped: prompt had error_type=timeout"
      }
     ],
-    "score": 0
+    "score": 0,
+    "format": "rubric_binary"
    }
   },
   "models": null,
@@ -453,8 +453,6 @@
  "rubric_evidence": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
-    "judge_output_format": "rubric_evidence",
     "results": [
      {
       "id": "table-reserved",
@@ -486,6 +484,8 @@
      }
     ],
     "score": 0.0,
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -510,8 +510,6 @@
  "rubric_evidence_without_screenshots": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
-    "judge_output_format": "rubric_evidence",
     "results": [
      {
       "id": "no_screenshots",
@@ -520,7 +518,9 @@
       "message": "Skipped: rubric_evidence needs per-criterion frames, but the trajectory holds no screenshots"
      }
     ],
-    "score": 0
+    "score": 0,
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence"
    }
   },
   "models": null,
@@ -528,53 +528,6 @@
  },
  "with_mistakes": {
   "verifications": {
-   "vid": {
-    "format": "rubric_binary",
-    "judge_output_format": "rubric_evidence_with_mistakes",
-    "results": [
-     {
-      "id": "table-reserved",
-      "description": "A table is reserved",
-      "frame": "[table-reserved] action 3",
-      "evidence_status": "visible",
-      "justification": "about c1",
-      "score": 1.0,
-      "result": true
-     },
-     {
-      "id": "party-size",
-      "description": "Party size is four",
-      "frame": "[party-size] action 3",
-      "evidence_status": "missing",
-      "justification": "about c2",
-      "score": 0.0,
-      "result": false
-     },
-     {
-      "id": "no-autocomplete",
-      "description": "No suggestion was accepted",
-      "weight": -1,
-      "frame": "[no-autocomplete] action 3",
-      "evidence_status": "not_applicable",
-      "justification": "about c3",
-      "score": 1.0,
-      "result": true
-     }
-    ],
-    "score": 0.0,
-    "compact_trajectory_s3_uri": null,
-    "compact_trajectory_object_url": null,
-    "judge_trajectory_s3_uri": null,
-    "judge_trajectory_object_url": null,
-    "reasoning": "the frames show the booking",
-    "checks": [
-     {
-      "id": "typed",
-      "passed": true,
-      "evidence": "x"
-     }
-    ]
-   },
    "vid-trajectory-mistakes": {
     "format": "trajectory_mistakes",
     "source_verifier_id": "vid",
@@ -625,6 +578,53 @@
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
     "judge_trajectory_object_url": null
+   },
+   "vid": {
+    "results": [
+     {
+      "id": "table-reserved",
+      "description": "A table is reserved",
+      "frame": "[table-reserved] action 3",
+      "evidence_status": "visible",
+      "justification": "about c1",
+      "score": 1.0,
+      "result": true
+     },
+     {
+      "id": "party-size",
+      "description": "Party size is four",
+      "frame": "[party-size] action 3",
+      "evidence_status": "missing",
+      "justification": "about c2",
+      "score": 0.0,
+      "result": false
+     },
+     {
+      "id": "no-autocomplete",
+      "description": "No suggestion was accepted",
+      "weight": -1,
+      "frame": "[no-autocomplete] action 3",
+      "evidence_status": "not_applicable",
+      "justification": "about c3",
+      "score": 1.0,
+      "result": true
+     }
+    ],
+    "score": 0.0,
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence_with_mistakes",
+    "compact_trajectory_s3_uri": null,
+    "compact_trajectory_object_url": null,
+    "judge_trajectory_s3_uri": null,
+    "judge_trajectory_object_url": null,
+    "reasoning": "the frames show the booking",
+    "checks": [
+     {
+      "id": "typed",
+      "passed": true,
+      "evidence": "x"
+     }
+    ]
    }
   },
   "models": {
@@ -636,19 +636,6 @@
  },
  "with_mistakes_without_screenshots": {
   "verifications": {
-   "vid": {
-    "format": "rubric_binary",
-    "judge_output_format": "rubric_evidence_with_mistakes",
-    "results": [
-     {
-      "id": "no_screenshots",
-      "score": 0,
-      "result": false,
-      "message": "Skipped: rubric_evidence_with_mistakes needs per-criterion frames, but the trajectory holds no screenshots"
-     }
-    ],
-    "score": 0
-   },
    "vid-trajectory-mistakes": {
     "format": "trajectory_mistakes",
     "source_verifier_id": "vid",
@@ -661,6 +648,19 @@
      }
     ],
     "score": 0
+   },
+   "vid": {
+    "results": [
+     {
+      "id": "no_screenshots",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: rubric_evidence_with_mistakes needs per-criterion frames, but the trajectory holds no screenshots"
+     }
+    ],
+    "score": 0,
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence_with_mistakes"
    }
   },
   "models": null,
@@ -668,19 +668,6 @@
  },
  "with_mistakes_on_a_prompt_error": {
   "verifications": {
-   "vid": {
-    "format": "rubric_binary",
-    "judge_output_format": "rubric_evidence_with_mistakes",
-    "results": [
-     {
-      "id": "prompt_error",
-      "score": 0,
-      "result": false,
-      "message": "Skipped: prompt had error_type=timeout"
-     }
-    ],
-    "score": 0
-   },
    "vid-trajectory-mistakes": {
     "format": "trajectory_mistakes",
     "source_verifier_id": "vid",
@@ -693,6 +680,19 @@
      }
     ],
     "score": 0
+   },
+   "vid": {
+    "results": [
+     {
+      "id": "prompt_error",
+      "score": 0,
+      "result": false,
+      "message": "Skipped: prompt had error_type=timeout"
+     }
+    ],
+    "score": 0,
+    "format": "rubric_binary",
+    "judge_output_format": "rubric_evidence_with_mistakes"
    }
   },
   "models": null,
@@ -710,7 +710,6 @@
  "unjudged_rows": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "crit-01",
@@ -741,6 +740,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
@@ -757,7 +757,6 @@
  "an_agent_judge_timing_out_once": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "crit-01",
@@ -777,6 +776,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": "mem://judge/a2a.json",
@@ -801,7 +801,6 @@
  "a_runs_criteria_and_judge_overrides": {
   "verifications": {
    "vid": {
-    "format": "rubric_binary",
     "results": [
      {
       "id": "only",
@@ -812,6 +811,7 @@
      }
     ],
     "score": 1.0,
+    "format": "rubric_binary",
     "compact_trajectory_s3_uri": null,
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,

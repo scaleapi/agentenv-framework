@@ -1,7 +1,8 @@
 """run_container_unit_tests_verifier, verify_sandbox, env_outcome_verifier and aggregate_verifiers on the
-VerifierTaskStep base write the legacy ``verifications`` entry they wrote before it, byte for byte with its key order,
-and raise what they raised (``tst/data/verifier_golden/legacy_entries.json``, recorded from main at 25b862bc6, object
-urls under ``<objects>/``), but for ``CHANGED``; and each writes its named grade beside it."""
+VerifierTaskStep base write the legacy ``verifications`` entry their golden file holds, byte for byte with its key
+order, and raise what it holds (``tst/data/verifier_golden/legacy_entries.json``, recorded on main at 25b862bc6 but for
+the base's two deliberate changes: an aggregate's entry has its empty ``results``, and a check script that returns None
+is told so); and each writes its named grade beside it."""
 import asyncio
 import itertools
 import json
@@ -25,16 +26,10 @@ from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier 
 )
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
 from tst.unit.computer_home import Computer
-from tst.util.verifier_golden import GOLDEN
+from tst.util import verifier_golden
 
-RECORDED = json.loads((GOLDEN / "legacy_entries.json").read_text())
 REWARD = "/logs/verifier/reward.txt"
 SCENARIOS = {}
-# What the base changes on purpose: an aggregate's entry has its (empty) results, and a script that returns None is
-# told so rather than by a log line's len().
-CHANGED_RAISES = {
-    "outcome_returns_none": "TypeError: verify() in artifact 's' returned None, not a list of criterion rows",
-}
 
 
 def scenario(fn):
@@ -42,16 +37,14 @@ def scenario(fn):
     return fn
 
 
-def outcome(step, context) -> tuple[str | None, str | None]:
-    """What ``step`` raised running on ``context``, and its entry as JSON with the object store's urls normalised."""
+def outcome(step, context) -> tuple[str | None, dict | None]:
+    """What ``step`` raised running on ``context``, and its entry with the object store's urls normalised."""
     raised = None
     try:
         asyncio.run(step.execute(context))
     except Exception as exc:
         raised = f"{type(exc).__name__}: {exc}"
-    entry = (context.metadata.get("verifications") or {}).get(step.verifier_id)
-    objects = get_config().get_object_store().object_url("x")[:-1]
-    return raised, json.dumps(entry).replace(objects, "<objects>/")
+    return raised, verifier_golden.normalised((context.metadata.get("verifications") or {}).get(step.verifier_id))
 
 
 class _ContainerSandbox:
@@ -475,29 +468,19 @@ def aggregate_missing_a_source(monkeypatch, tmp_path):
     return _aggregate(["fs", "gone"]), _sources()
 
 
-def _expected(name, step) -> tuple[str | None, dict | None]:
-    entry = RECORDED[name]["entry"]
-    if step.type == "aggregate_verifiers" and entry is not None:
-        entry = {"results": [], **entry}
-    return CHANGED_RAISES.get(name, RECORDED[name]["raised"]), entry
-
-
 @pytest.mark.parametrize("name", list(SCENARIOS))
-def test_each_path_writes_the_entry_and_raises_what_it_did_before_the_base(name, local_stores, monkeypatch, tmp_path):
+def test_each_path_writes_the_entry_and_raises_what_its_golden_file_holds(name, local_stores, monkeypatch, tmp_path):
     step, context = SCENARIOS[name](monkeypatch, tmp_path)
-    expected_raise, expected_entry = _expected(name, step)
 
     raised, entry = outcome(step, context)
 
-    assert raised == expected_raise
-    assert entry == json.dumps(expected_entry)
+    verifier_golden.check("legacy_entries.json", name, {"raised": raised, "entry": entry})
 
 
 @pytest.mark.parametrize("name", list(SCENARIOS))
 def test_each_path_writes_its_named_grade(name, local_stores, monkeypatch, tmp_path):
     step, context = SCENARIOS[name](monkeypatch, tmp_path)
     raised, entry = outcome(step, context)
-    entry = json.loads(entry)
 
     grade = context.metadata["grades"][step.id]
 

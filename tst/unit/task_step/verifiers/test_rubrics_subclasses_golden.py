@@ -1,5 +1,6 @@
-"""user_sim_judge and always_on_agent_verifier leave the legacy entries main left, and a named grade that agrees with
-them, with their own tests' fakes standing in for the judge and the runs they grade."""
+"""user_sim_judge and always_on_agent_verifier leave the legacy entries their golden file holds (main's, with
+``results`` and ``score`` written first), and a named grade that agrees with them, with their own tests' fakes standing
+in for the judge and the runs they grade."""
 
 from __future__ import annotations
 
@@ -67,7 +68,7 @@ async def _judged_chat(monkeypatch, run, fake, *, matches=True, run_persona=T.OT
     ("us_a_grade_up_to_turn_that_cuts_nothing", [("reply", "ok")], {},
      {"overrides": {"step_params": {"judge_user_sim": {"grade_up_to_turn": 3}}}}),
 ])
-async def test_a_judged_chat_leaves_the_legacy_entry_main_left(monkeypatch, case, answers, script, kw):
+async def test_a_judged_chat_leaves_the_legacy_entry_its_golden_file_holds(monkeypatch, case, answers, script, kw):
     kw = dict(kw)
     graded = kw.pop("graded", None)
     got = await _judged_chat(monkeypatch, T._run(*answers, graded=graded), T.FakeModel(script), **kw)
@@ -77,7 +78,7 @@ async def test_a_judged_chat_leaves_the_legacy_entry_main_left(monkeypatch, case
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_a_chat_run_skipped_for_its_error_or_for_no_reads_leaves_the_entries_main_left(monkeypatch):
+async def test_a_chat_run_skipped_for_its_error_or_for_no_reads_leaves_the_entries_its_golden_file_holds(monkeypatch):
     context = await T._chat(monkeypatch)
     context.prompt_responses[-1].error_type = "user_sim_error"
     verifier_golden.check(FILE, "us_a_chat_run_that_ended_in_an_error",
@@ -89,7 +90,7 @@ async def test_a_chat_run_skipped_for_its_error_or_for_no_reads_leaves_the_entri
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_a_chat_run_the_gate_fails_leaves_the_entry_main_left(monkeypatch):
+async def test_a_chat_run_the_gate_fails_leaves_the_entry_its_golden_file_holds(monkeypatch):
     context = await T._chat(monkeypatch)
 
     got = await _ran(T._step(T.FakeModel({"oversharing": T.FAIL()}), monkeypatch), context)
@@ -99,7 +100,7 @@ async def test_a_chat_run_the_gate_fails_leaves_the_entry_main_left(monkeypatch)
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_an_always_on_run_the_gate_fails_leaves_the_entry_main_left(monkeypatch, tmp_path):
+async def test_an_always_on_run_the_gate_fails_leaves_the_entry_its_golden_file_holds(monkeypatch, tmp_path):
     rig, context, prompt = await T._always_on(monkeypatch, tmp_path)
 
     got = await _ran(T._step(T.FakeModel({"guidance": T.FAIL(turns=[2])}), monkeypatch, run_step_id="week"), context)
@@ -115,7 +116,8 @@ def _harness(context: TaskStepContext) -> None:
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_an_unstaged_always_on_grade_with_its_harness_leaves_the_entry_main_left(monkeypatch, tmp_path):
+async def test_an_unstaged_always_on_grade_with_its_harness_leaves_the_entry_its_golden_file_holds(monkeypatch,
+                                                                                                  tmp_path):
     rig, context = await A._run(monkeypatch, tmp_path)
     _harness(context)
     verifier = A._verifier(default_model=JUDGE_MODEL)
@@ -126,7 +128,7 @@ async def test_an_unstaged_always_on_grade_with_its_harness_leaves_the_entry_mai
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_an_always_on_prompt_error_the_gate_fails_leaves_the_entry_main_left(monkeypatch, tmp_path):
+async def test_an_always_on_prompt_error_the_gate_fails_leaves_the_entry_its_golden_file_holds(monkeypatch, tmp_path):
     def fails(n, texts, rig):
         raise TimeoutError("no answer")
 
@@ -142,7 +144,7 @@ async def test_an_always_on_prompt_error_the_gate_fails_leaves_the_entry_main_le
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_a_staged_always_on_grade_with_what_its_judge_read_leaves_the_entry_main_left(monkeypatch):
+async def test_a_staged_always_on_grade_with_what_its_judge_read_leaves_the_entry_its_golden_file_holds(monkeypatch):
     context, sandbox, sources = A._staged_run(monkeypatch)
     verifier = A._verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", default_model=JUDGE_MODEL)
     A._agent_judge(monkeypatch, verifier, sources)
@@ -152,7 +154,7 @@ async def test_a_staged_always_on_grade_with_what_its_judge_read_leaves_the_entr
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_an_always_on_context_loss_the_gate_fails_leaves_the_entry_main_left(monkeypatch):
+async def test_an_always_on_context_loss_the_gate_fails_leaves_the_entry_its_golden_file_holds(monkeypatch):
     context, sandbox, sources = A._v7_staged_run(monkeypatch, summary_drops=" FACT: the gate code must never be shared. |")
     _harness(context)
     verifier = A._verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", fail_task_when_not_passing=True,

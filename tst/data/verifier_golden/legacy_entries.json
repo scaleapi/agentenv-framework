@@ -2536,7 +2536,7 @@
   }
  },
  "outcome_returns_none": {
-  "raised": "TypeError: object of type 'NoneType' has no len()",
+  "raised": "TypeError: verify() in artifact 's' returned None, not a list of criterion rows",
   "entry": {
    "results": null,
    "score": 0.0
@@ -2573,6 +2573,7 @@
  "aggregate_two_sources": {
   "raised": null,
   "entry": {
+   "results": [],
    "score": 0.25,
    "source_verifier_ids": [
     "fs",
@@ -2583,6 +2584,7 @@
  "aggregate_all_pass": {
   "raised": null,
   "entry": {
+   "results": [],
    "score": 0.0,
    "source_verifier_ids": [
     "fs",
@@ -2593,6 +2595,7 @@
  "aggregate_of_an_aggregate": {
   "raised": null,
   "entry": {
+   "results": [],
    "score": 1.0,
    "source_verifier_ids": [
     "inner",
@@ -2603,6 +2606,7 @@
  "aggregate_of_a_source_without_rows": {
   "raised": null,
   "entry": {
+   "results": [],
    "score": 0.0,
    "source_verifier_ids": [
     "no-rows"
@@ -2612,6 +2616,7 @@
  "aggregate_of_nothing": {
   "raised": null,
   "entry": {
+   "results": [],
    "score": 0.0,
    "source_verifier_ids": []
   }

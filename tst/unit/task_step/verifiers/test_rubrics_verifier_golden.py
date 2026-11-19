@@ -1,6 +1,6 @@
-"""rubrics_verifier leaves the legacy entries main left on every path that writes one, or none, and a named grade that
-agrees with them, with the judge faked below the seams the verifier's own code owns (``_prompt_llm_judge``,
-``_invoke_judge_a2a``)."""
+"""rubrics_verifier leaves the legacy entries its golden file holds on every path that writes one, or none (main's,
+with ``results`` and ``score`` written first), and a named grade that agrees with them, with the judge faked below the
+seams the verifier's own code owns (``_prompt_llm_judge``, ``_invoke_judge_a2a``)."""
 
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ CASES: dict[str, Callable[[], tuple[RubricsVerifierTaskStep, TaskStepContext]]] 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", list(CASES))
-async def test_a_run_leaves_the_legacy_entries_main_left_and_a_grade_that_agrees(case):
+async def test_a_run_leaves_the_legacy_entries_its_golden_file_holds_and_a_grade_that_agrees(case):
     step, context = CASES[case]()
     raised = None
     try:
