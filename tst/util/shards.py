@@ -2,9 +2,11 @@
 
 A file's tests stay together, so its module fixtures (image builds, deployed envs) run once per runner;
 a file the durations table names in ``split_by_test`` is split by test instead, except that the tests
-``pytest.mark.dependency`` links stay on one runner. The groups are balanced by the seconds the table
-records (``tst/integration/slow_durations.json``), a unit it doesn't know weighs the median of the ones it
-does, and the same table and selection always give the same groups.
+``pytest.mark.dependency`` links stay on one runner, and one it names in ``split_in`` is split into that many
+runs of neighbouring tests, each of about the same length once the runs after the first are charged the
+setup of the file's module fixtures that each runner does anew. The groups are balanced by the seconds the
+table records (``tst/integration/slow_durations.json``), a unit it doesn't know weighs the median of the
+ones it does, and the same table and selection always give the same groups.
 """
 
 from __future__ import annotations
@@ -32,13 +34,17 @@ def parse(value: str) -> tuple[int, int]:
 def select(nodeids: list[str], index: int, count: int, table: dict, together: dict[str, str] | None = None) -> list[str]:
     """The nodeids that shard ``index`` of ``count`` runs, in their collected order. ``together`` maps a nodeid
     to a unit it shares with others (``dependency_groups``); that unit weighs the sum of its tests."""
-    split = set(table.get("split_by_test", []))
+    parts = table.get("split_in", {})
+    split = set(table.get("split_by_test", [])) | set(parts)
     seconds = table.get("seconds", {})
     base = {nodeid: _unit(nodeid, split) for nodeid in nodeids}
-    unit = {nodeid: (together or {}).get(nodeid, base[nodeid]) for nodeid in nodeids}
     known = [seconds[name] for name in set(base.values()) if seconds.get(name, 0) > 0]
     default = statistics.median(known) if known else 1.0
-    weights: dict[str, float] = defaultdict(float)
+    runs, setups = _runs(nodeids, parts, seconds, default)
+    if linked := sorted(nodeid for nodeid in runs if nodeid in (together or {})):
+        raise ValueError(f"a file split_in runs can't link its tests with pytest.mark.dependency: {linked}")
+    unit = {nodeid: (together or {}).get(nodeid, runs.get(nodeid, base[nodeid])) for nodeid in nodeids}
+    weights: dict[str, float] = defaultdict(float, setups)
     for base_unit, shared in {base[nodeid]: unit[nodeid] for nodeid in nodeids}.items():
         weights[shared] += seconds.get(base_unit, default)
     shard = _assign(weights, count)
@@ -80,6 +86,30 @@ def load_table(path: Path = DURATIONS) -> dict:
 def _unit(nodeid: str, split_by_test: set[str]) -> str:
     path = nodeid.split("::", 1)[0]
     return nodeid if path in split_by_test else path
+
+
+def _runs(nodeids: list[str], parts: dict[str, int], seconds: dict, default: float) -> tuple[dict, dict]:
+    """The run (``path#k``) each test of a file ``parts`` names falls in, its tests cut in collected order into up to
+    that many runs of about the same length, and the seconds each run but the first adds: the setup of the file's
+    module fixtures, which its first test bore, taken as what that test took over the median of the others."""
+    tests: dict[str, list[str]] = defaultdict(list)
+    for nodeid in nodeids:
+        if (path := nodeid.split("::", 1)[0]) in parts:
+            tests[path].append(nodeid)
+    runs, setups = {}, {}
+    for path, members in tests.items():
+        times = [seconds.get(nodeid, default) for nodeid in members]
+        count = max(1, min(int(parts[path]), len(members)))
+        setup = max(0.0, times[0] - statistics.median(times[1:])) if len(times) > 1 else 0.0
+        target = (sum(times) + setup * (count - 1)) / count
+        run, load = 1, 0.0
+        for nodeid, took in zip(members, times):
+            if run < count and load > setup and load + took / 2 > target:
+                run, load = run + 1, setup
+                setups[f"{path}#{run}"] = setup
+            runs[nodeid] = f"{path}#{run}"
+            load += took
+    return runs, setups
 
 
 def _assign(weights: dict[str, float], count: int) -> dict[str, int]:
