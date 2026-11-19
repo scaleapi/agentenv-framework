@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 import httpx
+import pytest
 
 from tst.unit.agents.codex.agent import a2a_server, codex_bridge
 
@@ -271,3 +272,17 @@ def test_triggers_register_decide_and_state(codex):
     decided = _call(codex, "POST", "/ext/triggers/decide", {"turn": 1, "solver_message": "x"}).json()
     assert (decided["parts"], decided["done"], decided["fired"]) == ([{"kind": "text", "text": "hi"}], False, ["hello"])
     assert _call(codex, "GET", "/ext/triggers").json()["firing_log"]
+
+
+@pytest.mark.parametrize("base", ["https://llm.example.com/v1", "https://llm.example.com/v1/"])
+def test_an_endpoint_ending_in_v1_gets_litellms_openai_route_once(codex, monkeypatch, base):
+    monkeypatch.setenv("LITELLM_BASE_URL", base)
+
+    async def exercise():
+        async with codex.app.router.lifespan_context(codex.app):
+            pass
+
+    asyncio.run(exercise())
+
+    config = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
+    assert config["model_providers"]["litellm"]["base_url"] == "https://llm.example.com/openai/v1"

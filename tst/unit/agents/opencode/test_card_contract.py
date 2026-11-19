@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from tst.unit.agents.opencode.agent import AGENT_DIR, a2a_server, opencode_bridge
+from tst.unit.agents.opencode.agent import AGENT_DIR, PYTHONPATH, a2a_server, opencode_bridge
 from tst.unit.agents.opencode.conftest import Harness
 
 _ENDPOINT = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
@@ -92,7 +92,8 @@ def test_install_mode_reads_the_card_by_importing_agent_card():
     """agent-env's install step imports AGENT_CARD from the image with no agent environment, and parses its stdout as
     the card."""
     script = "import json; from a2a_server import AGENT_CARD; print(json.dumps(AGENT_CARD.model_dump(mode='json')))"
-    env = {key: value for key, value in os.environ.items() if not key.startswith("LITELLM_")}
+    env = {**{key: value for key, value in os.environ.items() if not key.startswith("LITELLM_")},
+           "PYTHONPATH": PYTHONPATH}
     out = subprocess.run([sys.executable, "-c", script], cwd=AGENT_DIR, env=env, capture_output=True, text=True,
                          check=True)
     extensions = {ext["uri"]: ext for ext in json.loads(out.stdout)["capabilities"]["extensions"]}

@@ -64,11 +64,10 @@ from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
     AGENT_ENV_WEBSITE_HEALTH_PATH,
-    DOCKER_COMPOSE_PATH,
-    GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
     GATEWAY_SERVICE_NAMES,
 )
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.providers.env_providers.env_provider import (
     DeployRefused,
     _SandboxEnvironmentProvider,
@@ -316,7 +315,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
             async def store_exec(argv: list[str]) -> tuple[int, str, str]:
                 return await self._sandbox.exec_with_output(
-                    "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH,
+                    "sudo", *self._stack_layout.compose_argv,
                     "exec", "-T", store_name, *argv,
                 )
 
@@ -735,6 +734,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
             control_token=deployed.control_token,
+            stack_layout=self._stack_layout.to_record(),
         )
 
     async def create_gateway(
@@ -849,6 +849,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         website_configs = website_configs or []
         website_images = website_images or []
         sidecars = sidecars or []
+        layout = self._stack_layout
 
         config = get_config()
         gateway_env = Env.get(gateway_env_id(config))
@@ -891,6 +892,19 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 **vm_kwargs,
             )
         sandbox = self._sandbox
+
+        def publish(port: int) -> int:
+            return sandbox.host_port(layout.host_port(port))
+
+        def tunnel_url(port: int) -> str | None:
+            host_port = layout.host_port(port)
+            url = sandbox.tunnel_urls.get(host_port)
+            if url is None and layout.is_slot:
+                raise RuntimeError(
+                    f"Sandbox {sandbox.sandbox_id} has no tunnel for slot port {host_port} (container port {port}); "
+                    "a shared VM must be created exposing every slot's ports"
+                )
+            return url
         await sandbox.load_docker_images(all_images)
 
         # Compose declares the local_state service by name, so "standing up" is just naming the host;
@@ -924,7 +938,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sidecars=sidecars,
             state_provider=self._state_provider,
             state_instance=state_instance,
-            host_port=sandbox.host_port,
+            host_port=publish,
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
@@ -935,16 +949,16 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         # Write files to VM
         logger.info("Writing files to VM...")
-        await sandbox.exec_script(f"mkdir -p {GATEWAY_APP_DIR}", max_retries=2)
+        await sandbox.exec_script(f"mkdir -p {layout.app_dir}", max_retries=2)
 
         # Only local postgres needs its init script to be directly run by the gateway's servicedb
         # container; remote/external stores are already initialized upstream.
         if self._needs_local_postgres:
             init_script = local_store_spec.init_sql
             logger.info(f"Generated init-schemas.sql:\n{init_script}")
-            await self._write_file(sandbox, f"{GATEWAY_APP_DIR}/init-schemas.sql", init_script)
+            await self._write_file(sandbox, layout.init_schemas_file, init_script)
 
-        await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose_content)
+        await self._write_file(sandbox, layout.compose_file, compose_content)
 
         # Start MCP services with docker compose
         logger.info("Starting MCP services...")
@@ -954,14 +968,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             # Everything but the gateway, beside the children; then the gateway, which waits for every child it fronts.
             # Both run to the end before either's failure is raised, so no child is still starting when the deploy closes.
             up, started = await asyncio.gather(self._compose_up(sandbox, f"--scale {GATEWAY_SERVICE_NAME}=0"),
-                                               children(sandbox.tunnel_urls.get(gateway_port), control_token),
+                                               children(tunnel_url(gateway_port), control_token),
                                                return_exceptions=True)
             for result in (up, started):
                 if isinstance(result, BaseException):
                     raise result
             external = tuple(replace(child, mcp_url=sandbox.url_from_sandbox(child.mcp_url),
                                      base_url=sandbox.url_from_sandbox(child.base_url)) for child in started)
-            await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose(external_children=external))
+            await self._write_file(sandbox, layout.compose_file, compose(external_children=external))
             await self._compose_up(sandbox)
 
         # Wait for containers to start
@@ -974,17 +988,16 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if exit_code != 0:
             raise RuntimeError(f"docker ps failed: {stderr}")
 
-        # Check gateway container is running
-        exit_code, stdout, stderr = await sandbox.exec_with_output( "sudo", "docker", "ps")
-        if GATEWAY_SERVICE_NAME not in stdout:
+        running, listing = await self._gateway_running(sandbox)
+        if not running:
             down = await self._down_services(sandbox)
             raise RuntimeError(f"Gateway container not running:\n{down}" if down else
-                               f"Gateway container not running. docker ps: {stdout}")
+                               f"Gateway container not running. docker ps: {listing}")
 
         # Wait for gateway to be fully ready (needs time to discover internal servers)
         # Host-side port: exec_with_output runs inside the VM on per-VM backends but on
         # the host for LocalSandbox, where the gateway is published elsewhere.
-        gateway_ready = await self._wait_for_gateway(sandbox, sandbox.host_port(gateway_port))
+        gateway_ready = await self._wait_for_gateway(sandbox, publish(gateway_port))
 
         # Print gateway logs for debugging
         logger.info("Gateway logs:")
@@ -1003,10 +1016,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if not await self._log_service(sandbox, name):
                 logger.warning(f"{name} container not found")
 
-        gateway_url = sandbox.tunnel_urls.get(gateway_port)
-        db_web_base_url = sandbox.tunnel_urls.get(DB_WEB_PORT) if PGWEB_SERVICE_NAME in sidecar_names else None
+        gateway_url = tunnel_url(gateway_port)
+        db_web_base_url = tunnel_url(DB_WEB_PORT) if PGWEB_SERVICE_NAME in sidecar_names else None
         db_web_url = f"{db_web_base_url}/" if db_web_base_url else None
-        db_mcp_base_url = sandbox.tunnel_urls.get(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
+        db_mcp_base_url = tunnel_url(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
         db_mcp_url = f"{db_mcp_base_url}/mcp" if db_mcp_base_url else None
         logger.info(f"pgweb URL: {db_web_url}")
         if db_mcp_url:
@@ -1310,7 +1323,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         """``docker compose up -d`` the stack, whose failure names each service that went down and ends with its
         output, which compose's own error leaves out."""
         try:
-            await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose up -d {args}".rstrip(), max_retries=2)
+            layout = self._stack_layout
+            await sandbox.exec_script(f"cd {layout.app_dir} && {layout.compose_command_from_app_dir} up -d {args}".rstrip(),
+                                      max_retries=2)
         except RuntimeError as e:
             down = await self._down_services(sandbox)
             if down is None:
@@ -1330,7 +1345,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     async def _read_down_services(self, sandbox: VmSandbox) -> str | None:
         try:
             exit_code, stdout, stderr = await sandbox.exec_with_output(
-                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "--format", "json"
+                "sudo", *self._stack_layout.compose_argv, "ps", "-a", "--format", "json"
             )
             if exit_code != 0:
                 logger.warning(f"Can't list the stack's services: docker compose ps exited {exit_code}: {stderr.strip()[-500:]}")
@@ -1383,7 +1398,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         exec transport failed (exit -1) is retried, then raised: it can't tell "no container" apart."""
         for attempt in range(_TRAJECTORY_READ_ATTEMPTS):
             exit_code, stdout, stderr = await sandbox.exec_with_output(
-                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "-q", compose_service
+                "sudo", *self._stack_layout.compose_argv, "ps", "-a", "-q", compose_service
             )
             if exit_code != -1:
                 break
@@ -1392,6 +1407,22 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             raise RuntimeError(f"Could not look up the {compose_service} container: exec transport failed {_TRAJECTORY_READ_ATTEMPTS} times")
         container_id = stdout.strip()
         return container_id if container_id else None
+
+    async def _gateway_running(self, sandbox: VmSandbox) -> tuple[bool, str]:
+        """Whether this stack's gateway container is running, and the listing that says so.
+
+        The default stack keeps today's plain ``docker ps`` check, which any gateway container on the VM satisfies. That is
+        safe because a VM runs either one default stack or only slot stacks, never both. A slot asks its own compose project
+        (``compose ps --status running -q``), since another slot's gateway would satisfy the plain check.
+        """
+        layout = self._stack_layout
+        if not layout.is_slot:
+            _, stdout, _ = await sandbox.exec_with_output("sudo", "docker", "ps")
+            return GATEWAY_SERVICE_NAME in stdout, stdout
+        _, stdout, _ = await sandbox.exec_with_output(
+            "sudo", *layout.compose_argv, "ps", "--status", "running", "-q", GATEWAY_SERVICE_NAME
+        )
+        return bool(stdout.strip()), stdout
 
     async def _provision_sidecar(self, deploy: _ContainerDeploy, spec) -> Sandbox:
         logger.info(f"Provisioning {spec.name} from {spec.image}...")
@@ -1530,12 +1561,20 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
+        stack_layout: StackLayout = DEFAULT_STACK_LAYOUT,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
         server on its private network. ``website_browser`` runs among its MCP servers, on the network it shares with
-        the sites; by default the run's (``run_website_browser``) when there are websites, which only a VM runs."""
+        the sites; by default the run's (``run_website_browser``) when there are websites, which only a VM runs.
+
+        ``stack_layout`` places the stack in a VM; the provider keeps it for the commands it later runs on that stack.
+        """
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
+        if stack_layout.is_slot and (existing_sandbox is None or not existing_sandbox.walls_verified):
+            raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a slot needs an existing sandbox "
+                             f"whose walls between slots are verified")
+        self._stack_layout = stack_layout
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
         self._state_instance = state_instance
         self._state_provider = (
@@ -1594,9 +1633,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         return sandbox_ids
 
     async def _reattach(self, env: Env, deployed: DeployedEnv) -> Sandbox:
-        """A record this provider wrote, reattached: a MultiEnv's through its own rebuild, any other env's as the base reattaches it."""
+        """A record this provider wrote, reattached: a MultiEnv's through its own rebuild, any other env's as the base reattaches it.
+        Either way the provider takes back the stack layout the record kept, so its commands reach the same stack."""
         from agent_env.env.envs.multi_env import MultiEnv
 
+        self._stack_layout = StackLayout.from_record(getattr(deployed, "stack_layout", None))
         if isinstance(env, MultiEnv):
             return await self._reattach_multi_env(deployed)
         return await super()._reattach(env, deployed)
