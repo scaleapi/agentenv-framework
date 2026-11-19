@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
@@ -15,9 +16,9 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
 
-from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, _TOOL_OPTIONS_ATTR, AgentEnvEnvironment,
-                                     AgentEnvFastMCPApplication, AgentEnvError, _error_response, _marked_members,
-                                     add_websocket_route, control_check, environment_card)
+from ..agent_env_environment import (_CARD_CONFIG_ATTR, _ENV_NAME_TOKEN, _TOOL_ATTR, _TOOL_OPTIONS_ATTR,
+                                     AgentEnvEnvironment, AgentEnvFastMCPApplication, AgentEnvError, _error_response,
+                                     _marked_members, add_websocket_route, control_check, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import _linux, annotate, apps, card, svc
@@ -144,16 +145,26 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return None
 
     def _computer_tool_acts(self, name: str) -> bool:
-        """Whether the driver's own or forwarded tool ``name`` may act: its annotations don't say it only reads."""
-        acting = self.__dict__.get("_computer_acting")
-        if acting is None:
+        """Whether the driver's own or forwarded tool ``name`` may act: its annotations don't say it only reads. A
+        tool named with ``{environment_name}`` is served under that name filled in, so it's matched by the rest."""
+        known = self.__dict__.get("_computer_acting")
+        if known is None:
             acting = {forwarded.tool.name: not _reads_only(forwarded.annotations)
                       for forwarded in self.forwarded_tools()}
+            templated = []
             for member, marker in _marked_members(self, _TOOL_ATTR):
                 options = getattr(member, _TOOL_OPTIONS_ATTR, None)
-                acting[marker.name] = not _reads_only(options.annotations if options is not None else None)
-            self._computer_acting = acting
-        return acting.get(name, True)
+                acts = not _reads_only(options.annotations if options is not None else None)
+                if _ENV_NAME_TOKEN in marker.name:
+                    parts = map(re.escape, marker.name.split(_ENV_NAME_TOKEN))
+                    templated.append((re.compile(".+".join(parts)), acts))
+                else:
+                    acting[marker.name] = acts
+            known = self._computer_acting = (acting, templated)
+        acting, templated = known
+        if name in acting:
+            return acting[name]
+        return next((acts for pattern, acts in templated if pattern.fullmatch(name)), True)
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
@@ -286,5 +297,6 @@ def computer_driver(name: str | None = None, *, supports: list | None = None) ->
 
 def _reads_only(annotations: Any) -> bool:
     """Whether a tool's MCP annotations, as a dict or a ``ToolAnnotations``, say it only reads."""
-    hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else getattr(annotations, "readOnlyHint", None)
-    return hint is True
+    if isinstance(annotations, dict):
+        return annotations.get("readOnlyHint") is True
+    return getattr(annotations, "readOnlyHint", None) is True

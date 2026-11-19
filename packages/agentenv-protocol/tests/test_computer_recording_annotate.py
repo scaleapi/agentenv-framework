@@ -17,7 +17,7 @@ from computer_fake import FakeDriver, http_client, mcp_session  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool  # noqa: E402
+from agentenv_protocol import EnvironmentTool, ForwardedTool, tool  # noqa: E402
 from agentenv_protocol.computer import (  # noqa: E402
     COMPUTER_RECORDING,
     DeviceUnavailable,
@@ -73,6 +73,18 @@ class Segmented(FakeDriver):
         out.close()
         yield RecordedSegment(path, start, start + timedelta(seconds=0.2), 160, 100, 3)
         await asyncio.sleep(3600)
+
+
+class Templated(Recorded):
+    """A driver with tools of its own named after its environment: one that only reads, one that acts."""
+
+    @tool(name="{environment_name}_inspect", annotations={"readOnlyHint": True})
+    async def inspect(self) -> str:
+        return "read"
+
+    @tool(name="{environment_name}_poke")
+    async def poke(self) -> str:
+        return "poked"
 
 
 class Forwarding(Recorded):
@@ -312,3 +324,19 @@ async def test_the_probe_finds_annotation_not_applicable_to_a_native_recorders_f
     wire = {"recording_id": "rec-1", "ended_by": "end", "segments": []}
     with pytest.raises(checks.NotApplicable, match="hands over finished segments"):
         await checks.Probe._annotated_click(None, wire, (100, 100), (10, 10), (20, 20), (255, 255, 255))
+
+
+@pytest.mark.asyncio
+async def test_a_tool_named_after_its_environment_is_told_read_only_by_its_own_annotations():
+    driver = Templated()
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        names = [t.name for t in (await session.list_tools()).tools if t.name.endswith(("_inspect", "_poke"))]
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        recording = driver._computer.recordings.running[started["recording_id"]]
+        for name in names:
+            await session.call_tool(name, {})
+        labels = [mark.label for mark in recording.annotations.marks]
+        await http.post(END, json={"recording_id": started["recording_id"]})
+
+    [poke] = [name for name in names if name.endswith("_poke")]
+    assert len(names) == 2 and labels == [poke]

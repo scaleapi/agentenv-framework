@@ -39,6 +39,7 @@ from ..card import (
     POINT_TOOLS,
 )
 from ..annotate import COLOURS as MARK_COLOURS
+from ..annotate import UNIT_EDGE
 from ..manifest import ManifestSegment, RecordingManifest
 from ..recording import RECORDINGS_DIR
 from .client import Driver, image
@@ -71,6 +72,14 @@ RECORD_S = 2.0
 ANNOTATE_LEAD_S, ANNOTATE_TAIL_S = 1.0, 1.0
 #: How far, as the sum of its channels' differences, an encoded pixel may be from the colour drawn and still count.
 NEAR_COLOUR = 90
+#: How many pixels near the mark's colour around the click make a frame draw its mark.
+MARK_PIXELS = 20
+#: How far around the click, in pixels of a frame whose longer edge is the marks' UNIT_EDGE, the mark is looked for;
+#: and the least, on a smaller one.
+MARK_REACH, MARK_REACH_LEAST = 40, 8
+#: Where in the clicked cell its colour is read, right and down from its centre as a share of the cell: clear of the
+#: pointer drawn at the click and of the mark's dot.
+CELL_INSIDE = 0.36
 #: How many times a check whose effect a busy desk can miss is tried before it fails: a desk starved through a drag
 #: sees its motion as one event, and keys sent while the click that focuses a box waits go wherever focus was.
 BUSY_DESK_ATTEMPTS = 2
@@ -1112,7 +1121,7 @@ class Probe:
             frame, scale, img = await self._base()
             size = self.layout["cell"]
             x, y = self._at("grid", scale, size + size / 2, 6 * size + size / 2)
-            inside = (x + math.floor(size * 0.36 * scale), y + math.floor(size * 0.36 * scale))
+            inside = (x + math.floor(size * CELL_INSIDE * scale), y + math.floor(size * CELL_INSIDE * scale))
             was = img.getpixel(inside)
             await self.act("computer_click", {"x": x, "y": y, "frame_id": frame})
             await asyncio.sleep(ANNOTATE_TAIL_S)
@@ -1204,11 +1213,11 @@ class Probe:
 
         def marked(picture: Any, shape: tuple[int, int]) -> bool:
             cx, cy = at(point, shape)
-            reach = max(8, round(40 * max(shape) / 1280))
+            reach = max(MARK_REACH_LEAST, round(MARK_REACH * max(shape) / UNIT_EDGE))
             near = sum(1 for px in range(max(0, cx - reach), min(shape[0], cx + reach))
                        for py in range(max(0, cy - reach), min(shape[1], cy + reach))
                        if _distance(picture.getpixel((px, py)), MARK_COLOURS[0]) < NEAR_COLOUR)
-            return near > 20
+            return near > MARK_PIXELS
 
         def changed(picture: Any, shape: tuple[int, int]) -> bool:
             return _distance(picture.getpixel(at(inside, shape)), was) >= NEAR_COLOUR
