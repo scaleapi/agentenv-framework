@@ -1,6 +1,7 @@
 """A played agent's turn reaches the host with the usage of the model calls its trainer recorded: an episode's proxy,
-served in this process, sums an OpenAI-shaped and an Anthropic-shaped call into one ``Usage`` whose ``input_tokens``
-counts the cache, and the host stores it with the agent's reply in the run's conversation. Local stores, no Docker."""
+served in this process, sums an OpenAI-shaped and an Anthropic-shaped response's usage and a ``Usage`` the trainer
+reports itself into one ``Usage`` whose ``input_tokens`` counts the cache, and the host stores it with the agent's reply
+in the run's conversation. Local stores, no Docker."""
 
 import pytest
 from agentenv_protocol.a2a_agent.tasks.v1 import Usage
@@ -14,6 +15,8 @@ pytestmark = [pytest.mark.integration]
 
 OPENAI = {"prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127, "prompt_tokens_details": {"cached_tokens": 100}}
 ANTHROPIC = {"input_tokens": 3, "output_tokens": 9, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20}
+REPORTED = Usage(input_tokens=4, output_tokens=2, total_tokens=6, cache_read_tokens=10, input_includes_cache=False,
+                 cost_usd=0.02)
 
 
 @pytest.fixture
@@ -51,7 +54,9 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
         turn = await episode.next_turn()
         await turn.record_model_call({"role": "assistant", "content": "Thinking."}, model="policy-model",
                                      usage=OPENAI)
-        await turn.record_model_call("Hi.", model="policy-model", usage=ANTHROPIC)
+        await turn.record_model_call({"role": "assistant", "content": "Still thinking."}, model="policy-model",
+                                     usage=ANTHROPIC)
+        await turn.record_model_call("Hi.", model="policy-model", usage=REPORTED)
         await turn.end("Hi.")
         await episode.result()
     finally:
@@ -62,7 +67,7 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
     [play] = record.context["prompt_responses"]
     assert play["response"] == "Hi."
     [usage] = _stored_usage(play["a2a_context_id"])
-    assert Usage.from_dict(usage) == Usage(tool_call_count=0, input_tokens=120 + 3 + 100 + 20, output_tokens=16,
-                                           total_tokens=127 + 123 + 9, cache_read_tokens=200, cache_write_tokens=20,
-                                           input_includes_cache=True,
-                                           provider_details={"model_calls": 2, "unreported": {"cache_write_tokens": 1}})
+    assert Usage.from_dict(usage) == Usage(
+        tool_call_count=0, input_tokens=120 + 123 + 14, output_tokens=18, total_tokens=127 + 132 + 16,
+        cache_read_tokens=210, cache_write_tokens=20, input_includes_cache=True, cost_usd=0.02,
+        provider_details={"model_calls": 3, "unreported": {"cache_write_tokens": 2, "cost_usd": 2}})

@@ -325,6 +325,13 @@ _USAGE_COUNTERS = (
 )
 
 
+# The keys a model response's usage is read by, in any of the shapes ``Usage.from_model_response`` reads.
+_RESPONSE_USAGE_KEYS = frozenset({
+    "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens",
+    "prompt_tokens_details", "input_tokens_details", "cache_read_input_tokens", "cache_creation_input_tokens",
+})
+
+
 def _count(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
@@ -385,20 +392,25 @@ class Usage:
 
     @classmethod
     def from_model_response(cls, usage: Mapping[str, Any]) -> "Usage":
-        """A model call's usage as its response carried it, OpenAI's way or Anthropic's, with ``input_tokens``
-        counting the cache. OpenAI's ``prompt_tokens`` counts what ``prompt_tokens_details.cached_tokens`` says was
-        cached, and so does a LiteLLM client's, which also counts ``cache_creation_input_tokens``; Anthropic's
-        ``input_tokens``, and the ``prompt_tokens`` a LiteLLM proxy sends with Anthropic's
-        ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` beside it, count neither, so they're added. A
-        value that isn't a count is left out."""
-        details = usage.get("prompt_tokens_details")
-        cached = _count(details.get("cached_tokens")) if isinstance(details, Mapping) else None
+        """A model call's usage as its response carried it, with ``input_tokens`` counting the cache: OpenAI's Chat
+        Completions (``prompt_tokens``) and Responses (``input_tokens``) shapes, and Anthropic's. An OpenAI count,
+        or a LiteLLM client's, says what it holds in its ``prompt_tokens_details`` or ``input_tokens_details``, whose
+        ``cached_tokens`` it counts, and ``cache_write_tokens`` with them. Anthropic's ``input_tokens``, and the
+        ``prompt_tokens`` a LiteLLM proxy sends with Anthropic's ``cache_read_input_tokens`` and
+        ``cache_creation_input_tokens`` beside it, count neither, so they're added, to ``total_tokens`` too. A
+        provider's split of its cache writes by how long they're kept (Anthropic's ``cache_creation``, OpenAI's
+        ``cache_write_tokens_details``), priced apart, is kept in ``provider_details``; so are the keys of a usage
+        in none of these shapes, as ``unrecognized``. A value that isn't a count is left out."""
+        key = "prompt_tokens" if "prompt_tokens" in usage else "input_tokens"
+        details = usage.get(f"{key}_details")
+        details = details if isinstance(details, Mapping) else {}
+        cached = _count(details.get("cached_tokens"))
         read = cached if cached is not None else _count(usage.get("cache_read_input_tokens"))
-        write = _count(usage.get("cache_creation_input_tokens"))
+        written = _count(details.get("cache_write_tokens"))
+        write = written if written is not None else _count(usage.get("cache_creation_input_tokens"))
         cache = (read or 0) + (write or 0)
-        openai = "prompt_tokens" in usage
-        input_tokens = _count(usage["prompt_tokens"] if openai else usage.get("input_tokens"))
-        counts_cache = openai and cached is not None and input_tokens is not None and input_tokens >= cache
+        input_tokens = _count(usage.get(key))
+        counts_cache = cached is not None and input_tokens is not None and input_tokens >= cache
         missing = cache if input_tokens is not None and not counts_cache else 0
         if input_tokens is not None:
             input_tokens += missing
@@ -407,8 +419,16 @@ class Usage:
             total += missing
         elif input_tokens is not None and output is not None:
             total = input_tokens + output
+        kept = {"cache_creation": usage.get("cache_creation"),
+                "cache_write_tokens_details": details.get("cache_write_tokens_details")}
+        provider_details: dict[str, Any] = {
+            name: counts for name, split in kept.items() if isinstance(split, Mapping)
+            if (counts := {k: v for k, v in split.items() if _count(v) is not None})}
+        if usage and _RESPONSE_USAGE_KEYS.isdisjoint(usage):
+            provider_details["unrecognized"] = sorted(map(str, usage))
         return cls(input_tokens=input_tokens, output_tokens=output, total_tokens=total, cache_read_tokens=read,
-                   cache_write_tokens=write, input_includes_cache=True if input_tokens is not None else None)
+                   cache_write_tokens=write, input_includes_cache=True if input_tokens is not None else None,
+                   provider_details=provider_details)
 
     @property
     def is_empty(self) -> bool:

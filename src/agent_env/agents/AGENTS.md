@@ -54,8 +54,9 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   text part, so add one.
 - **Usage:** when the runtime counts prompt-cache tokens, put them in `Usage`'s `cache_read_tokens` and
   `cache_write_tokens`, not `provider_details`, and set `input_includes_cache` to whether `input_tokens` counts them
-  (`None` when it can't tell). Code that sets them needs a `requirements.txt` protocol floor at the first release that
-  has them.
+  (`None` when it can't tell). Set it per call: through a gateway it depends on the model behind it. Where the runtime
+  hands back a model response's own usage, `Usage.from_model_response` reads it. Code that sets these fields needs a
+  `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
   never sent.

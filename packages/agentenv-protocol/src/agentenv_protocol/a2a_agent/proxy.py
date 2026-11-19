@@ -19,7 +19,7 @@ import shutil
 import signal
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException
 from .extensions import (
     MCP_CONFIG_V1,
     PROXY_V1,
+    REPORTED_USAGE_KEY,
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
     BundleSkillRequest,
@@ -111,7 +112,7 @@ class _Turn:
     pending: list[tuple[str, str]] = field(default_factory=list)  # (tool, its canonical arguments) not yet run
     last_event: str = field(default_factory=lambda: _now())
     model: str | None = None
-    model_usage: list[Usage] = field(default_factory=list)  # each recorded model call's
+    model_usage: list[Usage] = field(default_factory=list)  # each recorded model call's, its input counting the cache
 
 
 @contextlib.asynccontextmanager
@@ -239,6 +240,7 @@ class ProxyAgent(AgentEnvAgent):
     @extension(PROXY_V1.record)
     async def record(self, request: ProxyRecordRequest) -> None:
         content, calls = _read_message(request.message)
+        usage = _counting_cache(_recorded_usage(request.usage))
         offered = await self._tools(self._open_turn(request.token, request.task_id))
         turn = self._open_turn(request.token, request.task_id)
         if turn.pending:
@@ -248,7 +250,6 @@ class ProxyAgent(AgentEnvAgent):
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
-        usage = Usage.from_model_response(request.usage or {})
         turn.model_usage.append(usage)
         for key in ("input_tokens", "output_tokens"):
             if (count := getattr(usage, key)) is not None:
@@ -520,23 +521,64 @@ def _tool_error(message: str) -> ProxyToolResult:
     return ProxyToolResult(content=[{"type": "text", "text": f"error: {message}"}], is_error=True)
 
 
-_USAGE_SUMS = tuple(f.name for f in fields(Usage) if f.name.endswith("_tokens"))
+_USAGE_SUMS = (*(f.name for f in fields(Usage) if f.name.endswith("_tokens")), "cost_usd")
+# Each provider's split of its cache writes by how long they're kept, which ``Usage.from_model_response`` keeps.
+_CACHE_WRITE_SPLITS = ("cache_creation", "cache_write_tokens_details")
+
+
+def _recorded_usage(usage: dict[str, Any] | None) -> Usage:
+    """A recorded call's usage: the ``Usage`` its driver reported under ``REPORTED_USAGE_KEY``, taken as given, or
+    else read from the model response's own by ``Usage.from_model_response``."""
+    if usage is None:
+        return Usage()
+    if REPORTED_USAGE_KEY not in usage:
+        return Usage.from_model_response(usage)
+    try:
+        return Usage.from_dict(usage[REPORTED_USAGE_KEY])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"usage[{REPORTED_USAGE_KEY!r}]: {e}") from e
+
+
+def _counting_cache(usage: Usage) -> Usage:
+    """``usage`` with its ``input_tokens`` counting the cache, as its span shows it and its turn sums it: one that
+    leaves the cache out has it added, to its total too, and one with no cache to count counts it. One whose flag is
+    unknown while it has cache counts stays as given."""
+    cache = (usage.cache_read_tokens or 0) + (usage.cache_write_tokens or 0)
+    if usage.input_tokens is None or usage.input_includes_cache is True:
+        return usage
+    if usage.input_includes_cache is False:
+        total = None if usage.total_tokens is None else usage.total_tokens + cache
+        return replace(usage, input_tokens=usage.input_tokens + cache, total_tokens=total, input_includes_cache=True)
+    return replace(usage, input_includes_cache=True) if cache == 0 else usage
 
 
 def _turn_usage(turn: _Turn) -> Usage:
     """The turn's usage: the calls to its tools, and each count summed over the recorded model calls that gave it,
-    None when none did. ``provider_details`` says how many calls were recorded and, for a count only some of them
-    gave, how many left it out, so a sum short of some calls reads as the lower bound it is."""
+    None when none did, with ``input_tokens`` counting the cache. ``provider_details`` says how many calls were
+    recorded (``model_calls``); for a count only some gave, how many left it out (``unreported``), so the sum reads
+    as the lower bound it is; how many had cache counts with no word on whether their input held them
+    (``cache_unsettled``), which leaves the turn's flag unknown; how many usages were in a shape none of the readers
+    know (``unrecognized``); and each provider's split of the cache writes, summed."""
+    calls = turn.model_usage
     sums, unreported = {}, {}
     for name in _USAGE_SUMS:
-        values = [value for call in turn.model_usage if (value := getattr(call, name)) is not None]
+        values = [value for call in calls if (value := getattr(call, name)) is not None]
         sums[name] = sum(values) if values else None
-        if values and len(values) < len(turn.model_usage):
-            unreported[name] = len(turn.model_usage) - len(values)
-    details = {"model_calls": len(turn.model_usage), **({"unreported": unreported} if unreported else {})}
+        if values and len(values) < len(calls):
+            unreported[name] = len(calls) - len(values)
+    unsettled = sum(call.input_tokens is not None and call.input_includes_cache is None for call in calls)
+    unrecognized = sum("unrecognized" in call.provider_details for call in calls)
+    splits: dict[str, dict[str, int]] = {}
+    for call in calls:
+        for name in _CACHE_WRITE_SPLITS:
+            for part, count in (call.provider_details.get(name) or {}).items():
+                splits.setdefault(name, {})[part] = splits.get(name, {}).get(part, 0) + count
+    details = {"model_calls": len(calls), **({"unreported": unreported} if unreported else {}),
+               **({"cache_unsettled": unsettled} if unsettled else {}),
+               **({"unrecognized": unrecognized} if unrecognized else {}), **splits}
     return Usage(tool_call_count=len(turn.actions), **sums,
-                 input_includes_cache=True if sums["input_tokens"] is not None else None,
-                 provider_details=details if turn.model_usage else {})
+                 input_includes_cache=True if sums["input_tokens"] is not None and not unsettled else None,
+                 provider_details=details if calls else {})
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,

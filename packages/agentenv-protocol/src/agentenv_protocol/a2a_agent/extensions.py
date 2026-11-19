@@ -450,6 +450,13 @@ class ProxyActionState(ExtensionResponse):
     result: Annotated[ProxyBashResult | ProxyToolResult, Field(discriminator="kind")] | None = None
 
 
+# The key under which a record's ``usage`` carries a ``Usage`` its driver reported, as ``Usage.to_dict`` wrote it; any
+# other ``usage`` is a model response's own, which the proxy reads with ``Usage.from_model_response``. It rides in
+# ``usage`` rather than a field of its own so a proxy on an earlier protocol, whose request refuses unknown fields,
+# still takes the record.
+REPORTED_USAGE_KEY = "agentenv_usage"
+
+
 class ProxyRecordRequest(ExtensionRequest):
     token: str
     task_id: str

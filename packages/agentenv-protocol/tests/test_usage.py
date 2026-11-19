@@ -73,8 +73,9 @@ def test_a_failed_result_carries_its_usage():
     assert TaskResult.failure("agent.boom", "it broke").usage == Usage()
 
 
-# Real responses to one Claude prompt of 7,818 tokens, 7,809 of them cacheable, and one GPT prompt, recorded through
-# a LiteLLM proxy and, for the client's shape, as LiteLLM 1.83's client reads Anthropic's.
+# Real responses recorded through a LiteLLM proxy: one Claude prompt of 7,818 tokens, 7,809 of them cacheable, and one
+# GPT prompt, through Chat Completions, Anthropic's Messages and OpenAI's Responses; the LiteLLM client's shape is as
+# LiteLLM 1.83's client reads Anthropic's, and the Responses read with a cache hit is OpenAI's documented shape.
 RESPONSES = {
     "litellm-proxy-claude-writes": ({"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14,
                                      "cache_creation_input_tokens": 7809, "cache_read_input_tokens": 0},
@@ -87,7 +88,31 @@ RESPONSES = {
     "anthropic-messages-reads": ({"input_tokens": 9, "output_tokens": 5, "cache_creation_input_tokens": 0,
                                   "cache_read_input_tokens": 7809, "cache_creation": {"ephemeral_5m_input_tokens": 0}},
                                  Usage(input_tokens=7818, output_tokens=5, total_tokens=7823, cache_read_tokens=7809,
-                                       cache_write_tokens=0, input_includes_cache=True)),
+                                       cache_write_tokens=0, input_includes_cache=True,
+                                       provider_details={"cache_creation": {"ephemeral_5m_input_tokens": 0}})),
+    "anthropic-messages-writes-for-an-hour": (
+        {"input_tokens": 9, "output_tokens": 5, "cache_creation_input_tokens": 7813, "cache_read_input_tokens": 0,
+         "cache_creation": {"ephemeral_1h_input_tokens": 7813, "ephemeral_5m_input_tokens": 0}, "speed": "standard"},
+        Usage(input_tokens=7822, output_tokens=5, total_tokens=7827, cache_read_tokens=0, cache_write_tokens=7813,
+              input_includes_cache=True,
+              provider_details={"cache_creation": {"ephemeral_1h_input_tokens": 7813, "ephemeral_5m_input_tokens": 0}})),
+    "openai-responses-gpt": (
+        {"input_tokens": 7823, "output_tokens": 3, "total_tokens": 7826, "cost": None,
+         "input_tokens_details": {"audio_tokens": None, "cached_tokens": 0, "cache_write_tokens": 0, "text_tokens": None,
+                                  "cache_write_tokens_details": {"ttl_12h_tokens": 0, "ttl_30m_tokens": 0}},
+         "output_tokens_details": {"reasoning_tokens": 0, "text_tokens": None}},
+        Usage(input_tokens=7823, output_tokens=3, total_tokens=7826, cache_read_tokens=0, cache_write_tokens=0,
+              input_includes_cache=True,
+              provider_details={"cache_write_tokens_details": {"ttl_12h_tokens": 0, "ttl_30m_tokens": 0}})),
+    "openai-responses-claude": (
+        {"input_tokens": 7819, "output_tokens": 5, "total_tokens": 7824, "cost": None,
+         "input_tokens_details": {"audio_tokens": None, "cached_tokens": 0, "text_tokens": 7819},
+         "output_tokens_details": {"reasoning_tokens": 0, "text_tokens": 5}},
+        Usage(input_tokens=7819, output_tokens=5, total_tokens=7824, cache_read_tokens=0, input_includes_cache=True)),
+    "openai-responses-reads": ({"input_tokens": 7823, "output_tokens": 3, "total_tokens": 7826,
+                                "input_tokens_details": {"cached_tokens": 7680}},
+                               Usage(input_tokens=7823, output_tokens=3, total_tokens=7826, cache_read_tokens=7680,
+                                     input_includes_cache=True)),
     "litellm-client-claude-reads": ({"prompt_tokens": 7818, "completion_tokens": 5, "total_tokens": 7823,
                                      "prompt_tokens_details": {"cached_tokens": 7809},
                                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 7809},
@@ -104,6 +129,9 @@ RESPONSES = {
                                       input_includes_cache=True)),
     "nothing": ({}, Usage()),
     "unreadable": ({"prompt_tokens": "9", "completion_tokens": True, "prompt_tokens_details": "x"}, Usage()),
+    "bedrock-camel-case": ({"inputTokens": 5, "outputTokens": 2, "cacheReadInputTokens": 1},
+                           Usage(provider_details={"unrecognized": ["cacheReadInputTokens", "inputTokens",
+                                                                    "outputTokens"]})),
 }
 
 
