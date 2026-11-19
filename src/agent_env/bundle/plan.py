@@ -355,16 +355,34 @@ class _Planner:
 
     def _pointed(self, entry: ResolvedEntry) -> ResolvedEntry:
         """``entry`` with each store reference naming an installed alias pointed at what the alias names, pulled in, and
-        each field naming the alias naming its id; none is pointed until ``_resolve_aliases`` reads the aliases."""
+        each field naming the alias naming its id; none is pointed until ``_resolve_aliases`` reads the aliases. An
+        entity pulled in from an installed bundle has its references pointed so even where the store has an entity of
+        the alias's id (``_installed_alias``): it comes with what its aliases name."""
+        installed = entry.entry in self.origins
         references, aliased = [], {}
         for ref in entry.references:
-            if ref.local is None and (use := self._alias_of(ref)) is not None:
-                aliased[ref.kind, ref.id] = use.target_id
-                ref = self._pulled(replace(ref, id=use.target_id))
+            target = None
+            if ref.local is None:
+                target = self._installed_alias(ref) if installed else None
+                if target is None and (use := self._alias_of(ref)) is not None:
+                    target = use.target_id
+            if target is not None:
+                aliased[ref.kind, ref.id] = target
+                ref = self._pulled(replace(ref, id=target))
             references.append(ref)
         if not aliased:
             return entry
         return replace(entry, config=_renamed(entry, aliased), references=tuple(references))
+
+    def _installed_alias(self, ref: Reference) -> str | None:
+        """The id of what the installed alias ``ref``, an installed bundle's entity's store reference, names, whatever
+        the store has of the alias's id; None when it names none, pins a version, as an alias has none, or names a
+        refused alias, left to ``_alias_of`` as any other reference is."""
+        table = self.alias_tables.get(ref.kind)
+        if table is None or is_local_id(ref.id) or ref.version is not None or table.refusal(ref.id) is not None:
+            return None
+        named = table.target(ref.id)
+        return None if named is None else named.target_id
 
     def _alias_of(self, ref: Reference) -> AliasUse | None:
         """The installed alias ``ref``, a store reference, names, to point it at: None when it names none, or the store's
