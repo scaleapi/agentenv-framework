@@ -38,12 +38,16 @@ T = TypeVar("T")
 
 class Secrets:
     """The values an agent's atif/1 reads leave out, each written ``[redacted:<length>]`` wherever it occurs, in its raw,
-    JSON-escaped and percent-encoded forms. Safe to add to from the agent's threads while the loop scrubs."""
+    JSON-escaped (ASCII or not) and percent-encoded forms. Safe to add to from the agent's threads while the loop
+    scrubs. The match is compiled as a prefix trie, once per change and when a read needs it, so a call that hands the
+    agent a grant per file, or a run that accumulates thousands, costs neither a rebuild per secret nor a slower
+    scan."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._forms: set[str] = set()
         self._pattern: re.Pattern[str] | None = None
+        self._stale = False
         self._short: set[str] = set()
 
     def add(self, value: str | SecretStr | None, *, source: str, warn: bool = True) -> None:
@@ -58,13 +62,11 @@ class Secrets:
                 logger.warning("a secret from %s is shorter than %d characters, so atif/1 reads don't scrub it",
                                source, MIN_SECRET_LENGTH)
             return
-        forms = {text, json.dumps(text)[1:-1], quote(text, safe="")}
+        forms = {text, json.dumps(text)[1:-1], json.dumps(text, ensure_ascii=False)[1:-1], quote(text, safe="")}
         with self._lock:
-            if forms <= self._forms:
-                return
-            self._forms |= forms
-            ordered = sorted(self._forms, key=len, reverse=True)
-            self._pattern = re.compile("|".join(re.escape(form) for form in ordered))
+            if not forms <= self._forms:
+                self._forms |= forms
+                self._stale = True
 
     def add_all(self, values: Iterable[str | SecretStr | None], *, source: str, warn: bool = True) -> None:
         for value in values:
@@ -103,19 +105,51 @@ class Secrets:
         self.add_all(_strings(value), source=source)
 
     def scrub(self, value: T) -> T:
-        """``value`` with every secret in its strings, its mappings' values and its lists' items redacted."""
-        pattern = self._pattern
+        """``value`` with every secret redacted in its strings: its mappings' keys and values and its lists' items."""
+        pattern = self._match()
         return value if pattern is None else _scrub(value, pattern)
+
+    def _match(self) -> re.Pattern[str] | None:
+        with self._lock:
+            if self._stale:
+                self._pattern = re.compile(_trie(self._forms))
+                self._stale = False
+            return self._pattern
 
 
 def _scrub(value: Any, pattern: re.Pattern[str]) -> Any:
     if isinstance(value, str):
         return pattern.sub(lambda match: f"[redacted:{len(match.group(0))}]", value)
     if isinstance(value, dict):
-        return {key: _scrub(item, pattern) for key, item in value.items()}
+        return {_scrub(key, pattern): _scrub(item, pattern) for key, item in value.items()}
     if isinstance(value, list):
         return [_scrub(item, pattern) for item in value]
     return value
+
+
+def _trie(forms: Iterable[str]) -> str:
+    """One expression matching each of ``forms``, the longest at any position: a prefix trie, whose shared prefixes
+    are matched once, with each unbranching run written as one literal, so its nesting is its branching."""
+    root: dict[str, Any] = {}
+    for form in forms:
+        node = root
+        for char in form:
+            node = node.setdefault(char, {})
+        node[""] = {}
+    return _branch(root)
+
+
+def _branch(node: dict[str, Any]) -> str:
+    run: list[str] = []
+    while len(node) == 1 and "" not in node:
+        [(char, node)] = node.items()
+        run.append(re.escape(char))
+    children = sorted(char for char in node if char)
+    if not children:
+        return "".join(run)
+    group = "(?:" + "|".join(re.escape(char) + _branch(node[char]) for char in children) + ")"
+    # An end here as well: the longer match first, the end if it fails.
+    return "".join(run) + (f"{group}?" if "" in node else group)
 
 
 def _models(value: Any) -> Iterator[BaseModel]:

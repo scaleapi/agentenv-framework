@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import quote
@@ -31,6 +33,7 @@ from agentenv_protocol.a2a_agent import (
     framework,
 )
 from agentenv_protocol.a2a_agent._atif_copy import AtifCopy, TurnStart
+from agentenv_protocol.a2a_agent import _secrets
 from agentenv_protocol.a2a_agent._secrets import Secrets
 from agentenv_protocol.a2a_agent.extensions import ClockSyncTimeRequest
 from agentenv_protocol.atif import FORMAT, Adapter, atif_adapter, aux, errors_in, native, validate
@@ -259,6 +262,53 @@ def test_the_longest_secret_wins_and_an_escaped_one_is_redacted_too() -> None:
     secrets.add('pa"ss-wörd-0123', source="test")
     assert secrets.scrub({"a": ["abcdefgh-ijkl and abcdefgh"], "b": json.dumps({"p": 'pa"ss-wörd-0123'})}) == {
         "a": ["[redacted:13] and [redacted:8]"], "b": '{"p": "[redacted:21]"}'}
+
+
+def test_a_secret_is_redacted_in_mapping_keys_too() -> None:
+    secrets = Secrets()
+    secrets.add(SECRET, source="test")
+    assert secrets.scrub({SECRET: 1, "nested": [{f"key {SECRET}": SECRET}]}) == {
+        f"[redacted:{len(SECRET)}]": 1, "nested": [{f"key [redacted:{len(SECRET)}]": f"[redacted:{len(SECRET)}]"}]}
+
+
+def test_a_non_ascii_secret_in_an_inbound_data_part_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = 'pä"ss-wörd-0123'
+    with TestClient(_echoing(register=secret).create_app()) as client:
+        task_id = _send(client, "hello", "m-1", extra_parts=[{"kind": "data", "data": {"password": secret}}])
+        _ended(client, task_id)
+        reads = _reads(client, task_id, monkeypatch)
+    served = [text for read in reads for text in _strings(read)]
+    assert not [text for text in served if "ss-wörd-0123" in text or "ss-w\\u00f6rd" in text]
+    assert any('{"password":"[redacted:16]"}' in text for text in served)
+
+
+def test_the_trie_matches_what_a_longest_first_alternation_does() -> None:
+    rng = random.Random(7)
+    alphabet = "ab/?=-ü"
+    forms = {"".join(rng.choice(alphabet) for _ in range(rng.randint(8, 14))) for _ in range(60)}
+    forms |= {form[:9] for form in list(forms)[:20]}
+    naive = re.compile("|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True)))
+    trie = re.compile(_secrets._trie(forms))
+    for _ in range(300):
+        text = "".join(rng.choice(alphabet + "xyz ") for _ in range(rng.randint(0, 80)))
+        assert trie.sub("#", text) == naive.sub("#", text)
+
+
+def test_many_grants_compile_once_when_a_read_needs_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    compiled = []
+    trie = _secrets._trie
+    monkeypatch.setattr(_secrets, "_trie", lambda forms: compiled.append(len(forms)) or trie(forms))
+    secrets = Secrets()
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    urls = [f"https://bucket.example.test/skills/s/file-{n}.md?X-Amz-Signature={n:024d}" for n in range(3000)]
+    secrets.add_request(ReadObject(media_type="text/markdown", max_bytes=10, read=HttpGetGrant(
+        kind="http-get", url=urls[0], expires_at=expires)))
+    for url in urls[1:]:
+        secrets.add_request(HttpGetGrant(kind="http-get", url=url, expires_at=expires))
+    assert compiled == []
+    text = " ".join(["fetched", urls[1234], "and", "x" * 50_000])
+    assert secrets.scrub(text).startswith(f"fetched [redacted:{len(urls[1234])}] and")
+    assert secrets.scrub("again") == "again" and len(compiled) == 1
 
 
 def test_a_short_secret_is_left_with_one_warning_per_source(caplog: pytest.LogCaptureFixture) -> None:
