@@ -7,7 +7,8 @@
 #
 # The universe clock (clock/): agent-env's libfaketime and its TLS shim, built in a stage of their own so no compiler is
 # left in the image, are preloaded into every process and fake only the session user's, from the clock page the
-# follower writes, which the session user can read but neither write nor replace.
+# follower writes, which the session user can read but neither write nor replace. The session's clock-panel has the
+# panel's clock redraw whenever that clock is armed or jumps.
 #
 # The egress proxy (egress/), on real time, which every session program goes out through, so a live site loads at any
 # universe date: built and tested in a stage of its own, so no Go toolchain is left in the image.
@@ -44,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=clock /out/libfaketimeMT.so.1 /out/libtls_realtime.so /usr/local/lib/agentenv-clock/
 COPY clock/clockpage.py clock/clock-follower /usr/local/lib/agentenv-clock/
 COPY clock/clock.conf /etc/agentenv/clock.conf
+COPY clock-panel /usr/local/lib/agentenv-clock/clock-panel
 COPY --from=egress /out/egress /usr/local/lib/agentenv-egress/egress
 COPY root/ /usr/local/lib/agentenv-root/
 RUN sh /usr/local/lib/agentenv-root/install.sh user

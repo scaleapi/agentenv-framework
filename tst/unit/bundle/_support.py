@@ -22,6 +22,12 @@ from agent_env.store.routing import namespace_routing
 CLAUDE_CODE_IMAGE = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
 # The digest the registry fixture pins every tag to.
 DIGEST = "sha256:" + "a" * 64
+# A task's steps with two verifiers, the second an aggregate of the first, for headline_verifiers to name.
+GRADED_STEPS = (
+    {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
+    {"id": "tests", "type": "verify_sandbox", "sandbox_name": "box", "verifier_id": "tests", "criteria": []},
+    {"id": "final", "type": "aggregate_verifiers", "verifier_id": "final", "verifier_ids": ["tests"]},
+)
 
 
 def layout(root, files):

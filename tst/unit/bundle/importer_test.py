@@ -13,18 +13,23 @@ from click.testing import CliRunner
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import FileArtifact
-from agent_env.bundle import BundleError, parse_bundle
+from agent_env.artifact.artifacts.skill import SkillArtifact
+from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import importer as importer_module
-from agent_env.bundle.importer import ImportedEval, import_eval, import_task
+from agent_env.bundle.importer import ImportedEval, import_eval, import_task, task_images
 from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
+from agent_env.bundle import register as register_module
 from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.register import REGISTRATIONS, register_bundle
 from agent_env.bundle.requires import Provider
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
+from agent_env.env import store as env_store_module
 from agent_env.config.runtime import _DEFAULT_A2A_AGENT_ID as DEFAULT_AGENT, Config
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
 from agent_env.entity.scopes import FieldScope
@@ -33,7 +38,7 @@ from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
-from tst.unit.bundle._support import context_image, fake_plugins
+from tst.unit.bundle._support import context_image, fake_plugins, layout
 
 STEPS = [
     {"id": "env", "type": "deploy_env", "env_id": "crm-env"},
@@ -94,6 +99,18 @@ def test_a_task_imports_as_its_stored_steps_naming_each_entity_it_uses_by_the_fo
         ("agents/solver", "agent", "solver", 1), ("artifacts/crm-data", "artifact", "crm-data", 1),
         ("envs/crm-env", "env", "crm-env", 2)]
     assert imported.pinned == ()
+
+
+def test_a_task_naming_headline_verifiers_imports_as_the_object_form_its_folder_reads_back(store):
+    Task.put(id="triage", steps=Task.get("triage").steps, headline_verifiers=["judge"])
+
+    root = import_task("triage", store / "triage").root
+
+    written = json.loads((root / "tasks/triage.json").read_text())
+    assert (written["headline_verifiers"], [step["id"] for step in written["steps"]]) == (
+        ["judge"], [step["id"] for step in STEPS])
+    (task,) = [entry for entry in parse_bundle(root).entries if entry.kind is BundleKind.TASK]
+    assert task.headline_verifiers == ("judge",)
 
 
 def test_an_id_a_step_of_the_task_writes_stays_unpinned_and_unchanged(store):
@@ -745,3 +762,143 @@ def test_an_installed_bundles_entity_floats_unpinned_so_the_import_runs_it_from_
     assert ("dropped" in imported.floating[0].why) == (pin is not None) and imported.pinned == ()
     assert _steps(imported.root, "t")[0]["a2a_agent_version"] is None
 
+
+
+AGENT_NAMED_BY_ALIAS = [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "claude-code"}]
+
+
+@pytest.fixture
+def registry(local_stores, tmp_path, monkeypatch, agents_published):
+    """A registry of bare ids, with ``register`` registering a bundle into it, outside git."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(register_module, "_git", lambda root, *args: None)
+    return lambda name, steps: register_bundle(layout(tmp_path / name, {"tasks/t.json": json.dumps(steps)}))
+
+
+def test_an_agent_registered_from_an_installed_bundle_under_its_alias_floats_by_the_alias(registry, tmp_path):
+    registry("triage", AGENT_NAMED_BY_ALIAS)
+
+    imported = import_task("triage-t", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    assert [(ref.where, ref.id) for ref in imported.floating] == [
+        ("tasks/triage-t.json: step 'agent': a2a_agent_id", "claude-code")]
+    assert "registered from the installed bundle agentenv-framework" in imported.floating[0].why
+    assert "the stored pin to v1 is dropped" in imported.floating[0].why
+    assert imported.written == () and not (imported.root / "agents").exists()
+    step = _steps(imported.root, "triage-t")[0]
+    assert (step["a2a_agent_id"], step["a2a_agent_version"]) == ("claude-code", None)
+
+
+@pytest.mark.parametrize("registered_first", [False, True])
+def test_an_agent_stored_under_an_installed_alias_by_anything_else_is_written_into_the_folder(registry, tmp_path,
+                                                                                             registered_first):
+    if registered_first:
+        registry("triage", AGENT_NAMED_BY_ALIAS)
+    A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _task("own", AGENT_NAMED_BY_ALIAS)
+
+    imported = import_task("own", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    assert "claude-code" not in [ref.id for ref in imported.floating]
+    assert [(entity.folder, entity.id, entity.version) for entity in imported.written] == [
+        ("agents/claude-code", "claude-code", 2 if registered_first else 1)]
+    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == "claude-code"
+
+
+def test_a_folder_never_takes_an_alias_a_step_floats_so_each_version_keeps_its_own(registry, tmp_path):
+    registry("triage", AGENT_NAMED_BY_ALIAS)
+    A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _task("both", [{**AGENT_NAMED_BY_ALIAS[0], "id": "own", "a2a_agent_version": 2},
+                   {**AGENT_NAMED_BY_ALIAS[0], "id": "registered", "a2a_agent_version": 1}])
+
+    imported = import_task("both", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    steps = _steps(imported.root, "both")
+    assert [step["a2a_agent_id"] for step in steps] == ["claude-code-2", "claude-code"]
+    assert [(entity.folder, entity.version) for entity in imported.written] == [("agents/claude-code-2", 2)]
+    assert [(ref.where, ref.id) for ref in imported.floating if ref.id == "claude-code"] == [
+        ("tasks/both.json: step 'registered': a2a_agent_id", "claude-code")]
+
+
+def test_an_export_whose_steps_name_no_installed_alias_never_reads_the_registration_ledger(store, monkeypatch):
+    def unreachable(*args, **kwargs):
+        raise AssertionError("the registration ledger was read")
+
+    monkeypatch.setattr(importer_module, "configured_store", unreachable)
+
+    imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
+
+    assert [entity.folder for entity in imported.written] == ["envs/crm-env", "artifacts/crm-data", "agents/solver"]
+
+
+def test_an_env_another_names_by_its_registered_alias_floats_and_no_folder_takes_the_alias(store, tmp_path,
+                                                                                         monkeypatch):
+    monkeypatch.setattr(env_store_module, "shared_store", lambda store: True)
+    mail = MCPServerEnv.put(id="mail", docker_image_artifact=context_image(tmp_path, "mail-image"),
+                            environment_name="mail")
+    get_config().get_document_store().insert(REGISTRATIONS, {
+        "store": "env", "id": "mail", "version": mail.version, "status": "done",
+        "bundle": "installed:agentenv-framework/mail-mcp"})
+    MCPServerEnv.put(id="team/mail", docker_image_artifact=context_image(tmp_path, "team-mail-image"),
+                     environment_name="team-mail")
+    MultiEnv.put(id="office", mcp_server_envs=[mail])
+    _task("both", [{"id": "team", "type": "deploy_env", "env_id": "team/mail"},
+                   {"id": "office", "type": "deploy_env", "env_id": "office"}])
+
+    imported = import_task("both", tmp_path / "imported")
+
+    assert sorted(entity.folder for entity in imported.written) == ["envs/mail-2", "envs/office"]
+    assert [ref.where for ref in imported.floating if ref.id == "mail"] == ["envs/office"]
+    assert tomllib.loads((imported.root / "envs/office/env.toml").read_text())["mcp_server_envs"] == ["mail"]
+    assert _steps(imported.root, "both")[0]["env_id"] == "mail-2"
+
+
+def _registered(kind, id, version, bundle="installed:agentenv-framework/agents"):
+    get_config().get_document_store().insert(REGISTRATIONS, {"store": kind, "id": id, "version": version,
+                                                             "status": "done", "bundle": bundle})
+
+
+@pytest.mark.parametrize("bundle,kind,version", [("installed:someone/else", "agent", None), (None, "artifact", None),
+                                                  (None, "agent", 7)])
+def test_a_ledger_row_of_another_bundle_kind_or_version_floats_nothing(registry, tmp_path, bundle, kind, version):
+    agent = A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _registered(kind, "claude-code", version or agent.version, bundle or "installed:agentenv-framework/agents")
+    _task("own", AGENT_NAMED_BY_ALIAS)
+
+    imported = import_task("own", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    assert "claude-code" not in [ref.id for ref in imported.floating]
+    assert [entity.folder for entity in imported.written] == ["agents/claude-code"]
+
+
+@pytest.mark.parametrize("order", [("own", "registered"), ("registered", "own")])
+def test_an_evals_tasks_keep_a_version_off_the_alias_another_floats_whatever_their_order(registry, tmp_path, order):
+    registry("triage", AGENT_NAMED_BY_ALIAS)
+    A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _task("own", [{**AGENT_NAMED_BY_ALIAS[0], "a2a_agent_version": 2}])
+    _task("registered", [{**AGENT_NAMED_BY_ALIAS[0], "a2a_agent_version": 1}])
+    Eval.put(id="both", tasks=[EvalTask(task_id=name) for name in order])
+
+    imported = import_eval("both", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    assert [(entity.folder, entity.version) for entity in imported.written] == [("agents/claude-code-2", 2)]
+    assert [_steps(imported.root, name)[0]["a2a_agent_id"] for name in ("own", "registered")] == [
+        "claude-code-2", "claude-code"]
+
+
+def test_a_skill_named_like_an_artifact_alias_the_export_floats_fails_the_import(store, tmp_path):
+    (tmp_path / "base.txt").write_text("base")
+    base = FileArtifact.put("windows-11", description="base", file_path=str(tmp_path / "base.txt"))
+    _registered("artifact", "windows-11", base.version, "installed:agentenv-framework/computers")
+    SkillArtifact.put("team/windows-11", skill_dir=layout(tmp_path / "skill", {
+        "SKILL.md": "---\nname: windows-11\ndescription: how to use it\n---\nUse it.\n"}))
+    _task("t", [{"id": "env", "type": "deploy_env", "env_id": "crm-env"},
+                {"id": "load", "type": "load_artifact", "env_id": "crm-env", "artifacts": [{"id": "windows-11"}]},
+                {"id": "skills", "type": "add_skills", "agent_name": "default-agent",
+                 "skills": [{"skill_artifact_id": "team/windows-11"}]}])
+
+    for imports in (lambda: import_task("t", tmp_path / "imported"), lambda: task_images("t")):
+        with pytest.raises(BundleError) as refused:
+            imports()
+        assert ("a skill's folder takes its skill's name, 'windows-11', which the export names as an installed alias "
+                "of an artifact") in refused.value.problems[0]

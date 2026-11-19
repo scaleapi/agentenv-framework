@@ -7,11 +7,14 @@ import json
 import logging
 import time
 import uuid
+from collections import deque
 from typing import Final
 
 import httpx
 import pytest
 from click.testing import CliRunner
+
+from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.a2a_agent import protocol
 from agent_env.artifact.store import reset_artifact_store
@@ -31,6 +34,16 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 AGENT: Final[str] = "@local/agentenv-framework/agents/pydantic-ai"
 MODEL: Final[str] = "fake-model-1"
 ECHO_ENV: Final[str] = "@local/agentenv-framework/echo-mcp/echo"
+# A tool call and an answer from Claude through a LiteLLM proxy, whose prompt leaves out the cache it wrote and read,
+# and an answer from GPT through it, whose prompt counts the cache.
+CLAUDE_CALLS: Final[list[dict]] = [
+    {"prompt_tokens": 10, "completion_tokens": 129, "total_tokens": 139, "cache_creation_input_tokens": 10363,
+     "cache_read_input_tokens": 0},
+    {"prompt_tokens": 13, "completion_tokens": 43, "total_tokens": 56, "cache_creation_input_tokens": 199,
+     "cache_read_input_tokens": 10363},
+]
+GPT_CALL: Final[dict] = {"prompt_tokens": 2303, "completion_tokens": 2, "total_tokens": 2305,
+                         "prompt_tokens_details": {"cached_tokens": 2048}}
 
 
 @pytest.fixture
@@ -200,6 +213,35 @@ def test_a_context_continues_its_conversation_which_holds_neither_the_key_nor_th
     last = json.dumps(endpoint.completions()[-1].body["messages"])
     assert "Say pong." in last and "Look at your saved conversation." in last, last
     assert {call.headers.get("x-agentenv-test") for call in endpoint.completions()} == {"header-check"}
+
+
+def test_a_turns_usage_counts_the_cache_in_its_input_and_is_unknown_where_no_usage_came_back(state, endpoint):
+    outcomes = {}
+    endpoint.respond = answer("pong")
+
+    async def steps(context):
+        base_url, _ = await _deployed(context)
+        claude = deque(CLAUDE_CALLS)
+        endpoint.respond = tool_then_answer("shell", {"command": "echo hi"}, prefix="the shell said: ")
+        endpoint.usage = lambda body: claude.popleft() if claude else None
+        outcomes["claude"] = await _send(base_url, "ctx", "Say hi with the shell.")
+        endpoint.respond, endpoint.usage = answer("pong"), lambda body: GPT_CALL
+        outcomes["gpt"] = await _send(base_url, "ctx", "Say pong.")
+        endpoint.usage = lambda body: None
+        outcomes["none"] = await _send(base_url, "ctx", "Say pong again.")
+
+    _with_agent(state, steps)
+
+    assert {outcome["state"] for outcome in outcomes.values()} == {"completed"}, outcomes
+    usage = {name: Usage.from_dict(outcome["data"]["usage"]) for name, outcome in outcomes.items()}
+    assert usage == {
+        "claude": Usage(tool_call_count=1, input_tokens=20948, output_tokens=172, total_tokens=21120,
+                        cache_read_tokens=10363, cache_write_tokens=10562, input_includes_cache=True,
+                        provider_details={"requests": 2}),
+        "gpt": Usage(tool_call_count=0, input_tokens=2303, output_tokens=2, total_tokens=2305, cache_read_tokens=2048,
+                     cache_write_tokens=0, input_includes_cache=True, provider_details={"requests": 1}),
+        "none": Usage(tool_call_count=0, provider_details={"requests": 1, "unreported_calls": 1}),
+    }, outcomes
 
 
 def test_a_model_endpoint_that_refuses_the_key_fails_the_task_as_an_infra_error(state, endpoint):

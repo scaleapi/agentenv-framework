@@ -1388,6 +1388,39 @@ Extensions come from explicit definitions, configured activations, and
 decorated handlers in one validated registry, so routes and card advertisement
 cannot drift.
 
+`Usage` reports what a task used: `tool_call_count`, `input_tokens`,
+`output_tokens`, `total_tokens`, `cost_usd`, the prompt-cache counts
+`cache_read_tokens` and `cache_write_tokens`, and `input_includes_cache`, which
+says whether `input_tokens` counts both cache counts (`True`), neither
+(`False`), or is unknown (`None`, the default). Set the flag whenever you set
+the cache counts: a price can't read them without it. Runtime-specific counts go
+in `provider_details`, but cache counts go in their own fields. `Usage.from_dict`
+reads what `to_dict` wrote under any protocol version, a field it leaves out
+being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
+usage=...)` carries usage on a failure as `success` does.
+
+Whoever makes a model call knows what its counts hold, so an agent builds its own
+`Usage`. `Usage.from_model_response(usage)` is the default reader for a model
+response's own usage, with `input_tokens` counting the cache
+(`input_includes_cache` true), for OpenAI's Chat Completions (`prompt_tokens`)
+and Responses (`input_tokens`) shapes and Anthropic's:
+
+- An OpenAI count, or a LiteLLM client's, counts the cache its
+  `prompt_tokens_details` or `input_tokens_details` names: `cached_tokens`, and
+  `cache_write_tokens` beside it.
+- Anthropic's `input_tokens` counts neither `cache_read_input_tokens` nor
+  `cache_creation_input_tokens`, and neither does the `prompt_tokens` a LiteLLM
+  proxy sends with those two beside it, so they're added, to `total_tokens` too.
+- A provider's split of its cache writes by how long they're kept, priced apart
+  (Anthropic's `cache_creation`, OpenAI's `cache_write_tokens_details`), is kept
+  in `provider_details`, and so are the keys of a usage in none of these shapes,
+  as `unrecognized`. A value that isn't a count is left out.
+
+Through a gateway, whether a response's input counts the cache depends on the
+model behind it: a LiteLLM proxy's Claude answers through Chat Completions leave
+it out, its GPT answers don't. Set `input_includes_cache` per call, never once
+per agent.
+
 `run(request)` is the required execution contract. It is an ordinary method
 and needs no decorator.
 
@@ -1532,6 +1565,39 @@ are dropped, least recently used first; a context with a task still pending or
 running is never dropped, nor is the one whose task has just ended. A running
 task's log is logged as a warning once it passes 100 MiB.
 
+#### Trajectory formats
+
+`native` declares the format of the agent's native trajectory:
+
+```python
+enable(TRAJECTORY_V1, live=True, native="my-cli-events/1")
+```
+
+The card then lists three fields in the trajectory extension's `params`, beside
+`methods`:
+
+- `formats`: the formats a read may name.
+- `native`: the native trajectory's format, which never changes.
+- `default`: the format a read that names none gets; for now it is `native`.
+
+A card without `formats` predates them, so send its reads no `format`. With
+`native` declared, the log starts in that format and `set_format` is optional.
+A `set_format` or a returned `native_trajectory` in another format fails the
+turn as an `agent_error` with code `framework.trajectory_format_mismatch`, whose
+message names both formats.
+
+Every trajectory read takes an optional `format`. A read naming none gets the
+default. A read naming a format the card doesn't list is HTTP 400 with the error
+code `format_not_offered`, and its message lists the formats the card offers.
+That check comes before any handler runs, the agent's own included.
+
+Every read the framework answers names the format it served: `{trajectory, format}`,
+`{objects, format}`, and the cursor reads' `format`. A task whose result carries a
+`native_trajectory` is served in that trajectory's `format`. A context read names
+the most recent format its tasks set. Readers trust a response's `format` over
+the card. An agent that binds its own context reads should name, in their
+responses, the format it serves.
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic
@@ -1552,8 +1618,11 @@ configuration keywords, and third-party definitions use the same public API as
 the built-ins.
 
 Extension request parsing and schema validation failures return HTTP 400.
-Unhandled exceptions raised by an implementation handler return HTTP 500;
-handlers use `HTTPException` when they intentionally need another status.
+An `AgentEnvError` raised by a handler answers with its `status` and the body
+`{"ok": false, "error": {code, message, retryable, applied, hint?}}`, as it does
+from an env (see [Errors](#errors)). Other unhandled exceptions raised by an
+implementation handler return HTTP 500 with a correlation ID; handlers use
+`HTTPException` when they intentionally need another status.
 
 Passing `config=MyAgentConfig` automatically enables `AGENT_CONFIG_V1`; direct
 `enable(AGENT_CONFIG_V1, ...)` declarations are rejected. The model's fields become the Agent Card's
@@ -1830,7 +1899,18 @@ operations:
   records a call, each action must be one the last recorded call made, by name and
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
-  Calls to tools the turn doesn't offer aren't checked.
+  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's: a `Usage` the
+  driver reports under `REPORTED_USAGE_KEY` (`{"agentenv_usage": usage.to_dict()}`), taken as
+  given, or else the model response's own, read by `Usage.from_model_response`. It rides in
+  `usage` rather than a field of its own, so a proxy on an earlier protocol still takes the
+  record. A reported `Usage` that isn't one gets 400 and leaves the turn as it was. The call's
+  input is made to count the cache, its `chat` span shows that reading, and its turn sums it.
+  The turn's `Usage`, on its reply or its error, sums each count over the calls that gave it,
+  `cost_usd` included. Its `provider_details` give `model_calls`, how many were recorded;
+  `unreported`, how many left out each count only some gave, so such a sum reads as a lower
+  bound; `cache_unsettled`, how many had cache counts with no word on whether their input held
+  them, which leaves the turn's flag unknown; `unrecognized`, how many usages were in no shape
+  the reader knows; and each provider's cache-write split, summed.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 
@@ -1882,9 +1962,9 @@ optional field, `|` an alternative request):
 | Operation | Request | Response |
 | --- | --- | --- |
 | skill `add` | `{name, description, skill_md}` \| `{name, description, skill_bundle: {max_total_bytes, files: [{path, object: ReadObject}]}}` | `{name}` |
-| trajectory `get` | `{task_id}` \| `{context_id}` | `{trajectory}` |
-| | `{task_id \| context_id, objects: {trajectory: WriteObject}}` | `{objects: {trajectory: Uploaded}}` |
-| | `{task_id \| context_id, after, limit?}` | `{context_id, task_id, state, format, events, next, has_more}` |
+| trajectory `get` | `{task_id, format?}` \| `{context_id, format?}` | `{trajectory, format}` |
+| | `{task_id \| context_id, objects: {trajectory: WriteObject}, format?}` | `{objects: {trajectory: Uploaded}, format}` |
+| | `{task_id \| context_id, after, limit?, format?}` | `{context_id, task_id, state, format, events, next, has_more}` |
 | snapshot `save` | `{context_id, objects: {trajectory: WriteObject, workspace?: WriteObject}}` | `{context_id, objects: {trajectory: Uploaded, workspace?: Uploaded}}` |
 | snapshot `load` | `{objects: {trajectory: ReadObject, workspace?: ReadObject}, target_context_id?}` | `{context_id}` |
 | `enable-changelog` | `{write_namespace: WriteNamespaceGrant, roots?}` | `{roots}` |

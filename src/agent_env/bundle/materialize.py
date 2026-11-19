@@ -114,9 +114,9 @@ def materialize(
 
     Each computer env written that the run or registration composes (``_composed_envs``) is composed as ``composing``
     says, and so is what one reused has left, as ``agent-env env build`` does; any other is written uncomposed and
-    composes at its first deploy. ``on_progress``, when given, is told how each goes, a line at a time with its write. With
-    ``bootable``, as a registration has it, a computer env written or reused whose compose left no build a deploy can
-    boot stops it once every entity is written, before any task or eval, raising BundleError naming each such env.
+    composes at its first deploy. ``on_progress``, when given, is told how each goes, a line at a time with its write.
+    With ``bootable``, as a registration has it, a computer env written or reused whose compose left no build a deploy
+    can boot stops it once every entity is written, before any task or eval, raising BundleError naming each such env.
 
     ``ledger`` keeps the rows, this run's in the ``@local`` namespace's store unless given; it also says whether each
     task and eval names the versions it reads (``Ledger.pins_references``) and whether each image the bundle builds is
@@ -184,7 +184,8 @@ def materialize(
         for write in tasks:
             through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps,
                                                    requires=write.requires,
-                                                   entity_ids=built[write.id].entity_ids).version)
+                                                   entity_ids=built[write.id].entity_ids,
+                                                   headline_verifiers=built[write.id].headline_verifiers).version)
         for write in evals:
             through_ledger(write, lambda: _write_eval(plan, write, written))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked), tuple(left))
@@ -386,9 +387,10 @@ def _write_env(plan: Plan, write: Write, composing: Composing = Composing(), com
 
 
 def _composed_envs(plan: Plan) -> frozenset[str] | None:
-    """The envs a run or registration of ``plan`` composes: each its tasks deploy, and each those hold but not a computer
-    env's own apps and driver, which run inside it; and each it pulls in from an installed bundle, whose one write every
-    bundle shares. None, every env, for a plan with no tasks, which writes its envs for others to deploy, each alone."""
+    """The envs a run or registration of ``plan`` composes: each its tasks deploy, and each those hold but not a
+    computer env's own apps and driver, which run inside it; and each it pulls in from an installed bundle, whose one
+    write every bundle shares. None, every env, for a plan with no tasks, which writes its envs for others to deploy,
+    each alone."""
     tasks = [write.source for write in plan.writes if write.kind is BundleKind.TASK]
     if not tasks:
         return None
@@ -482,7 +484,7 @@ def _build(write: Write, plan: Plan, written: Mapping[tuple[str, str], Materiali
     naming the one it reads."""
     steps = write.source.config if written is None else pinned_steps(plan, write, written)
     return Task(id=write.id, version=None, steps=[build_step(step) for step in steps],
-                entity_ids=write.source.entity_ids)
+                entity_ids=write.source.entity_ids, headline_verifiers=write.source.entry.headline_verifiers)
 
 
 def pinned_steps(plan: Plan, write: Write, written: Mapping[tuple[str, str], Materialized]) -> list[dict]:

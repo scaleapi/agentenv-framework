@@ -146,6 +146,49 @@ field added in a later minor names the version it arrived in. Proposed for a lat
 `input_includes_cache` on the root and `cost_status` (`reported`, `priced` or `unpriced`), with the usage
 cross-check that reads them; per-part origins, when a reader needs them; and an always-on harness's fields.
 
+## Validator
+
+`validate(document)` returns findings, each with a rule id below, a severity and where in the document it is. It holds a
+producer's output to profile 1.0. `reader=True` checks someone else's document for reading instead: what a producer
+must not write only warns, and the document fails only where agentenv couldn't read it. `media` is the folder the
+document's media paths are relative to, the one holding `media/`, or the files by path; without it only the paths' form
+is checked. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. A sub-agent's task is its spawning call's, found through the references, so an embedded sub-agent that no served step references isn't held to `live-unanswered`. On
+the command line: `python -m agentenv_protocol.atif validate FILE [--media DIR] [--reader]`, which prints each finding
+and exits 1 when one is an error.
+
+| Rule | Holds | Producer | Reader |
+| --- | --- | --- | --- |
+| `json` | The document is a JSON object: UTF-8, with no NaN or infinity | error | error |
+| `atif` | ATIF's own models, vendored from Harbor, accept it | error | error |
+| `profile` | Each `extra.agentenv` parses with its profile model | error | error |
+| `profile-key` | Each `extra.agentenv` holds only the fields profile 1.0 defines | error | warning |
+| `profile-version` | The root's `extra.agentenv.version`, when given, is `1.0` | error | warning |
+| `vocabulary` | A vocabulary field holds one of its values | error | warning |
+| `outside-key` | No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments` | error | warning |
+| `call-id` | Each `tool_call_id` is unique across the document and its sub-agents | error | warning |
+| `reference` | Each `subagent_trajectory_ref` names an embedded sub-agent by `trajectory_id` | error | warning |
+| `totals` | A `final_metrics` total equals the sum over the model steps of the root and its embedded sub-agents, when every one has the count | error | warning |
+| `total-steps` | `final_metrics.total_steps` counts the root's steps, or the root's `notes` explain the difference | error | warning |
+| `usage` | A step's cache reads and writes fit within its `prompt_tokens` | error | warning |
+| `media-path` | A media path is `media/<sha256>.<ext>` | error | warning |
+| `media-bytes` | Given the media, each file the document names exists, with the sha256 its name and profile give and the profile's size | error | error |
+| `timestamp` | A timestamp is UTC in the builder's form: `YYYY-MM-DDTHH:MM:SSZ`, with no, 3 or 6 fractional digits | error | not checked |
+| `harbor-save` | Harbor's `to_json_dict` gives the document back unchanged | error | warning |
+| `text-message` | A step message whose parts are all text is one string | error | warning |
+| `live-prefix` | Every live page is a prefix of the next page and of the final read | error | not checked |
+| `live-unanswered` | No live page serves a step with an unanswered call before its task ends | error | not checked |
+
+The adapter kit, `check_adapter(adapter, recorded, expected=, from_atif=)`, is for an agent's CI. It runs an adapter
+over a context's recorded tasks as the SDK runs it live, applies the live rule after every record and the validator to
+the final document, and adds its own rules. `kit-from-atif` only warns when the adapter has no `from_atif`.
+
+| Rule | Holds | Severity |
+| --- | --- | --- |
+| `kit-run` | The adapter takes every recorded record without raising | error |
+| `kit-expected` | The document equals the checked-in expected document | error |
+| `kit-unmatched` | Every native record has a handler; one that none takes is only counted | warning |
+| `kit-from-atif` | `from_atif` turns a document without the profile into a native log | error |
+
 ## Fixtures
 
 `fixtures/` holds the profile's canonical examples, built through the adapter framework from a toy format's records:

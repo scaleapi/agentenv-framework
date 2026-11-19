@@ -297,7 +297,8 @@ def test_a_reused_app_no_task_deploys_is_not_composed_again_nor_said_to_be(tmp_p
     materialize(_plan(root), build_here=local_builds(_plan(root)))
     told = []
 
-    dry = materialize(_plan(root), dry_run=True, on_progress=lambda write, line: told.append(write.id.rsplit("/", 1)[1]))
+    dry = materialize(_plan(root), dry_run=True,
+                      on_progress=lambda write, line: told.append(write.id.rsplit("/", 1)[1]))
 
     assert set(told) <= {"desktop"} and all(not name.endswith(("mail", "notes")) for name in dry.composing)
 
