@@ -60,6 +60,28 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
     return sorted(findings, key=lambda finding: finding.severity is not Severity.ERROR)
 
 
+def said(findings: Iterable[tuple[str, Finding]]) -> list[str]:
+    """``findings``, each with the task it's in, as a run says them: each kind once, errors first, after its task when
+    only one has it, else with how many and the first few, so a bundle of a thousand tasks says each kind once."""
+    where: dict[tuple[Severity, str], list[str]] = {}
+    for task, finding in findings:
+        where.setdefault((finding.severity, finding.text), []).append(task)
+    lines = []
+    for (severity, text), tasks in sorted(where.items(), key=lambda item: item[0][0] is not Severity.ERROR):
+        if len(tasks) == 1:
+            lines.append(f"{tasks[0]}: {severity.value}: {text}")
+        else:
+            shown = ", ".join(tasks[:3]) + (f" and {len(tasks) - 3} more" if len(tasks) > 3 else "")
+            lines.append(f"{severity.value}: {text} ({len(tasks)} tasks: {shown}; agent-env task lint lists each)")
+    return lines
+
+
+def refuses(finding: Finding, *, skip_lint: bool = False) -> bool:
+    """Whether ``finding`` refuses a run. ``skip_lint`` lifts lint's own rules, not a step's ``config_problems``, which
+    refused a run before lint did and fail it when it runs."""
+    return finding.severity is Severity.ERROR and not (skip_lint and finding.rule != "step-config")
+
+
 def errors(findings: Iterable[Finding]) -> list[Finding]:
     return [finding for finding in findings if finding.severity is Severity.ERROR]
 

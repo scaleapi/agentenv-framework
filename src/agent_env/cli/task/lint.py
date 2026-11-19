@@ -59,7 +59,7 @@ def _bundle(root: Path, task: str | None = None) -> tuple[list[str], list[str]]:
             plan = plan_bundle(resolve_bundle(bundle), tasks=names, installed=installed_bundles)
         except BundleError as e:
             return list(e.problems), []
-    return [], list(plan.lint_warnings)
+    return [], [f"{task}: {finding}" for task, finding in plan.lint_findings]
 
 
 def _file(path: Path) -> tuple[list[str], list[str]]:

@@ -1,6 +1,7 @@
 """agent-env task lint: each rule with a task that breaks it and one that doesn't, where its findings refuse a run, and
 the bundles agent-env ships linting clean."""
 
+import importlib
 import json
 from typing import ClassVar
 
@@ -16,7 +17,7 @@ from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
-from agent_env.task.lint import Severity, lint
+from agent_env.task.lint import Finding, Severity, lint, said
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import (
     AgentPromptResponseVerifierTaskStep,
@@ -283,7 +284,7 @@ def test_a_shipped_bundles_tasks_lint_clean(name):
 
     expected = [f"tasks/{task}.json: warning: no step grades this task, so a run has no score" for task in tasks
                 ] if name in _UNGRADED else []
-    assert sorted(plan.lint_warnings) == sorted(expected)
+    assert sorted(f"{task}: {finding}" for task, finding in plan.lint_findings) == sorted(expected)
 
 
 @pytest.fixture
@@ -364,8 +365,35 @@ def test_eval_run_refuses_an_eval_whose_task_has_a_lint_error_before_any_run(loc
     result = CliRunner().invoke(cli, ["eval", "run", "--id", "e"])
 
     assert result.exit_code == 1, result.output
-    assert ("Task lint found 1 error(s), so no run started:\n  - t v1: headline_verifiers names 'box', a deploy_sandbox "
-            "step, which grades nothing") in result.output
+    assert ("Task lint found 1 error(s), so no run started (--skip-lint runs anyway):\n  - t v1: headline_verifiers "
+            "names 'box', a deploy_sandbox step, which grades nothing") in result.output
+
+
+def test_eval_run_with_skip_lint_says_the_error_and_goes_on_to_run(local_stores, monkeypatch):
+    task = _task(BOX, TESTS, headline_verifiers=["box"])
+    listed = Eval(id="e", version=1, tasks=[EvalTask(task_id="t", task_version=1)])
+    monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: listed))
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: task))
+    monkeypatch.setattr(importlib.import_module("agent_env.cli.eval.run"), "print_banner",
+                        lambda: (_ for _ in ()).throw(SystemExit(7)))
+
+    result = CliRunner().invoke(cli, ["eval", "run", "--id", "e", "--skip-lint"])
+
+    assert result.exit_code == 7, result.output
+    assert "  t v1: error: headline_verifiers names 'box', a deploy_sandbox step, which grades nothing" in result.output
+
+
+def test_eval_run_with_skip_lint_still_refuses_a_steps_config_problem(local_stores, monkeypatch):
+    task = _task(BOX, {**TESTS, "criteria": [{"type": "probe_file_exists", "criterion": "x"}]})
+    listed = Eval(id="e", version=1, tasks=[EvalTask(task_id="t", task_version=1)])
+    monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: listed))
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: task))
+
+    result = CliRunner().invoke(cli, ["eval", "run", "--id", "e", "--skip-lint"])
+
+    assert result.exit_code == 1, result.output
+    assert "Task lint found 1 error(s), so no run started:\n  - t v1: step 'tests': criterion #0: probe_file_exists" in (
+        result.output)
 
 
 def test_the_cli_takes_a_path_or_an_id_but_not_both(bundle_dir):
@@ -373,10 +401,48 @@ def test_the_cli_takes_a_path_or_an_id_but_not_both(bundle_dir):
     assert CliRunner().invoke(cli, ["task", "lint", str(bundle_dir), "--id", "t"]).exit_code == 2
 
 
-def test_a_run_of_a_bundle_with_a_lint_error_is_refused(bundle_dir):
-    _write(bundle_dir, "t", [BOX, {**TESTS, "criteria": [{"type": "probe_file_exists", "criterion": "x"}]}])
+_HEADLESS = "headline_verifiers names 'box', a deploy_sandbox step, which grades nothing"
 
-    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--dry-run"])
 
-    assert result.exit_code != 0
-    assert "tasks/t.json: step 'tests': criterion #0: probe_file_exists needs paths" in result.output
+def test_a_run_of_a_bundle_with_a_lint_error_is_refused_unless_it_skips_lint_but_not_for_a_steps_config(bundle_dir):
+    _write(bundle_dir, "t", {"headline_verifiers": ["box"], "steps": [BOX, TESTS]})
+    _write(bundle_dir, "u", [BOX, {**TESTS, "criteria": [{"type": "probe_file_exists", "criterion": "x"}]}])
+
+    refused = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "t", "--dry-run"])
+    skipped = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "t", "--dry-run", "--skip-lint"])
+    config = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "u", "--dry-run", "--skip-lint"])
+
+    assert refused.exit_code != 0
+    assert f"tasks/t.json: {_HEADLESS}" in refused.output
+    assert "task lint found 1 of these; --skip-lint runs the tasks anyway" in refused.output
+    assert skipped.exit_code == 0, skipped.output
+    assert f"tasks/t.json: error: {_HEADLESS}" in skipped.output
+    assert "Would run:\n  tasks/t.json v1\n" in skipped.output
+    assert config.exit_code != 0
+    assert "tasks/u.json: step 'tests': criterion #0: probe_file_exists needs paths" in config.output
+    assert "--skip-lint" not in config.output
+
+
+def test_bundle_register_with_skip_lint_registers_a_task_lint_refuses_saying_why_once(bundle_dir):
+    _write(bundle_dir, "t", {"headline_verifiers": ["box"], "steps": [BOX, TESTS]})
+
+    refused = CliRunner().invoke(cli, ["bundle", "register", str(bundle_dir), "--yes"])
+    skipped = CliRunner().invoke(cli, ["bundle", "register", str(bundle_dir), "--yes", "--skip-lint"])
+
+    assert refused.exit_code != 0
+    assert skipped.exit_code == 0, skipped.output
+    assert skipped.output.count(f"tasks/t.json: error: {_HEADLESS}") == 1
+    assert Task.get("triage-t").headline_verifiers == ["box"]
+
+
+def test_a_run_says_each_kind_of_finding_once_with_how_many_tasks_have_it_errors_first():
+    doubt, other = (Finding(Severity.WARNING, "no-verifier", text) for text in ("grades nothing", "unpinned"))
+    wrong = Finding(Severity.ERROR, "step-config", "needs paths", "tests")
+    findings = [*((f"tasks/{n}.json", doubt) for n in "abcde"), ("tasks/a.json", other), ("tasks/c.json", wrong),
+                ("tasks/d.json", wrong)]
+
+    assert said(findings) == [
+        "error: step 'tests': needs paths (2 tasks: tasks/c.json, tasks/d.json; agent-env task lint lists each)",
+        "warning: grades nothing (5 tasks: tasks/a.json, tasks/b.json, tasks/c.json and 2 more; agent-env task lint "
+        "lists each)",
+        "tasks/a.json: warning: unpinned"]

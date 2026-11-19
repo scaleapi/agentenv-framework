@@ -35,7 +35,9 @@ def _write_context(context, task_id, output_dir, prefix=""):
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
-def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None):
+@click.option("--skip-lint", is_flag=True,
+              help="Run tasks agent-env task lint refuses for its own rules (a field no step reads, a headline or aggregate source that grades nothing), saying them; a step's own config problems still refuse it.")
+def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, skip_lint: bool):
     """Run all tasks in an eval through the configured [runner], concurrently."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
@@ -44,7 +46,7 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     from agent_env.eval import Eval
     from agent_env.task import Task
-    from agent_env.task.lint import Severity, lint
+    from agent_env.task.lint import lint, refuses, said
 
     click.echo(f"Fetching eval: id={eval_id} version={eval_version or 'latest'}...")
     eval_obj = Eval.get(eval_id, version=eval_version)
@@ -57,19 +59,16 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         click.echo(f"  Loaded task: {task.id} v{task.version} ({len(task.steps)} steps){version_note}")
         tasks.append(task)
 
-    refused = []
-    for task in tasks:
-        for finding in lint(task):
-            line = f"{task.id} v{task.version}: {finding.text}"
-            if finding.severity is Severity.ERROR:
-                refused.append(line)
-            else:
-                click.echo(f"  Warning: {line}")
+    findings = [(f"{task.id} v{task.version}", finding) for task in tasks for finding in lint(task)]
+    refused = [(task, f) for task, f in findings if refuses(f, skip_lint=skip_lint)]
     if refused:
-        click.echo(f"Task lint found {len(refused)} error(s), so no run started:", err=True)
-        for line in refused:
-            click.echo(f"  - {line}", err=True)
+        liftable = " (--skip-lint runs anyway)" if any(not refuses(f, skip_lint=True) for _, f in refused) else ""
+        click.echo(f"Task lint found {len(refused)} error(s), so no run started{liftable}:", err=True)
+        for task, finding in refused:
+            click.echo(f"  - {task}: {finding.text}", err=True)
         raise SystemExit(1)
+    for line in said(findings):
+        click.echo(f"  {line}")
 
     print_banner()
 
