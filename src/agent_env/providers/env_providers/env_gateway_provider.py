@@ -12,7 +12,7 @@ import secrets
 import shlex
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
@@ -49,6 +49,7 @@ from agent_env.env.gateway.constants import (
     tool_name_clashes_text,
 )
 from agent_env.env.envs.service_db import (
+    CONSOLE_SERVICE_NAMES,
     DATABASE_SERVICE_NAME,
     DB_MCP_CONTAINER_PORT,
     DB_MCP_PORT,
@@ -570,8 +571,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
-        if consoles := state_provider.console_urls():
-            gateway_env.append(f"      - {CONSOLE_URLS_ENV}={','.join(f'{k}={v}' for k, v in consoles.items())}")
+        gateway_env.extend(f"      - {key}={value}" for key, value in consoles_environment(state_provider.console_urls()).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}"
@@ -1159,7 +1159,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                                              *(f"{c.name}={sandbox_provider.url_from_sandbox(c.base_url)}" for c in external)]),
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
-                **({CONSOLE_URLS_ENV: ",".join(f"{k}={v}" for k, v in consoles.items())} if consoles else {}),
+                **consoles_environment(consoles),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
                 **control_environment(control_token),
                 **clock_followers_environment(external),
@@ -1762,7 +1762,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
     problems += [f"environment name {name!r} is one a gateway deploy names its own containers "
                  f"({', '.join(sorted(GATEWAY_SERVICE_NAMES))})" for name in services if name in GATEWAY_SERVICE_NAMES]
     problems += [f"website name {w.environment_name!r} is the /svc key of a SQL console the gateway serves"
-                 for w in website_configs or [] if w.environment_name in _CONSOLE_PATHS]
+                 for w in website_configs or [] if w.environment_name in CONSOLE_SERVICE_NAMES]
     return problems
 
 
@@ -1856,6 +1856,12 @@ def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
     with or without a control token."""
     names = ",".join(child.name for child in children)
     return {COMPUTERS_ENV: names} if names else {}
+
+
+def consoles_environment(consoles: Mapping[str, str]) -> dict[str, str]:
+    """The env's SQL consoles the gateway serves behind its control token, each at its address on the env's network."""
+    value = ",".join(f"{name}={url}" for name, url in consoles.items())
+    return {CONSOLE_URLS_ENV: value} if value else {}
 
 
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:

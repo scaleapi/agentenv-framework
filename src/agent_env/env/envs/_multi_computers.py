@@ -15,7 +15,7 @@ from agentenv_protocol.computer import tool_prefix_problem
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env, gateway_url_of
 from agent_env.env.envs.computer.utils import clock as computer_clock, sites
-from agent_env.env.envs.service_db import DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
+from agent_env.env.envs.service_db import CONSOLE_SERVICE_NAMES
 from agent_env.env.gateway import ExternalChild
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
@@ -42,7 +42,7 @@ def name_problems(computers: Iterable[str], *, mcp_servers: Iterable[str] = (), 
     problems += [f"{name!r} is the gateway's route to MCP server {routes[name]!r}, and the gateway knows a computer by its "
                  "name alone" for name in dict.fromkeys(computers) if name in routes]
     problems += [f"{name!r} is the gateway's route to a SQL console, and the gateway knows a computer by its name alone"
-                 for name in dict.fromkeys(computers) if name in (PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME)]
+                 for name in dict.fromkeys(computers) if name in CONSOLE_SERVICE_NAMES]
     return problems
 
 
