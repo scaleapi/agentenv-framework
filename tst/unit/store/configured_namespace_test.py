@@ -281,12 +281,47 @@ def test_a_run_uploads_no_bytes_for_another_namespaces_entity(configured, tmp_pa
     assert list((tmp_path / "restricted").rglob("f.txt")) == []
 
 
-def test_a_run_may_update_a_shared_entity(stores):
-    router, shared, _ = stores
+@pytest.mark.parametrize("write", [
+    lambda router, f: router.update("envs", f, UpdateSpec(set={"metadata.checked": True})),
+    lambda router, f: router.update_one_and_get("envs", f, UpdateSpec(set={"metadata.checked": True})),
+    lambda router, f: router.replace("envs", f, {"id": "rocket", "version": 1, "metadata": {"checked": True}}),
+    lambda router, f: router.delete("envs", f),
+], ids=["update", "update_one_and_get", "replace", "delete"])
+def test_a_run_cannot_change_a_shared_entity_in_place(stores, write):
+    router, shared, team = stores
     router.insert("envs", {"id": "rocket", "version": 1, "metadata": {}})
     with run_scope(TEAM_TASK):
-        router.update("envs", Filter.of(id="rocket", version=1), UpdateSpec(set={"metadata.checked": True}))
-    assert shared.find_one("envs", Filter.of(id="rocket"))["metadata"] == {"checked": True}
+        with pytest.raises(NamespaceWriteError, match="in the configured store"):
+            write(router, Filter.of(id="rocket", version=1))
+        with pytest.raises(NamespaceWriteError, match="in the configured store"):
+            write(router, Filter.of(version=1))
+        assert router.find_one("envs", Filter.of(id="rocket"))["metadata"] == {}
+    assert shared.find_one("envs", Filter.of(id="rocket"))["metadata"] == {}
+    assert _ids(team, "envs") == set()
+
+
+@pytest.mark.parametrize("upsert", [
+    lambda router, f: router.update("envs", f, UpdateSpec(set={"metadata.checked": True}), upsert=True),
+    lambda router, f: router.update_one_and_get("envs", f, UpdateSpec(set={"metadata.checked": True}), upsert=True),
+    lambda router, f: router.replace("envs", f, {"id": "rocket", "version": 1, "metadata": {"checked": True}}, upsert=True),
+], ids=["update", "update_one_and_get", "replace"])
+def test_a_run_cannot_upsert_a_shared_entity(stores, upsert):
+    router, shared, team = stores
+    router.insert("envs", {"id": "rocket", "version": 1, "metadata": {}})
+    with run_scope(TEAM_TASK), pytest.raises(NamespaceWriteError, match="new version of 'rocket'"):
+        upsert(router, Filter.of(id="rocket", version=1))
+    assert shared.find_one("envs", Filter.of(id="rocket"))["metadata"] == {}
+    assert _ids(team, "envs") == set()
+
+
+def test_a_run_updates_its_own_entities_in_place(stores):
+    router, _, team = stores
+    router.insert("envs", {"id": "rocket", "version": 1, "metadata": {}})
+    with run_scope(TEAM_TASK):
+        router.insert("envs", {"id": "ti_1__env", "version": 1, "metadata": {}})
+        assert router.update("envs", Filter.of(id="ti_1__env"), UpdateSpec(set={"metadata.checked": True})) == 1
+        assert router.update("envs", Filter.of(version=1), UpdateSpec(set={"metadata.seen": True})) == 1
+    assert team.find_one("envs", Filter.of(id="ti_1__env"))["metadata"] == {"checked": True, "seen": True}
 
 
 def test_a_run_cannot_update_a_shared_run_record(stores):

@@ -632,7 +632,7 @@ class NamespaceDocumentStore(RoutingDocumentStore):
     namespace, else by an owner field; and every entity a run in a namespace writes. A read no id places sees the
     running task's namespace, the configured store and the namespaces ``reading_namespaces`` opens. A write asks
     the resolver fresh, and is refused when it can't answer. A run in a namespace never writes a new version of a
-    configured entity, so no entity id is in two stores."""
+    configured entity, so no entity id is in two stores, nor changes one in place, as a local run can't."""
 
     def __init__(self, configured: DocumentStore, namespaces: Mapping[str, DocumentStore], resolver: Any) -> None:
         self.configured = configured
@@ -739,7 +739,7 @@ class NamespaceDocumentStore(RoutingDocumentStore):
                 raise NamespaceWriteError(f"a run in {run!r} can't write records of {pinned!r}")
             yield self.namespaces[pinned]
             return
-        if run is not None and not is_entity_collection(collection):
+        if run is not None:
             yield self.namespaces[run]
             if self.configured.find_one(collection, filter) is not None:
                 raise NamespaceWriteError(f"a run in {run!r} can't update {collection!r}: its record is in the configured store")
