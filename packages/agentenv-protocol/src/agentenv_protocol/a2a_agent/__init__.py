@@ -93,6 +93,7 @@ from .extensions import (
     request_fields,
 )
 from .control_token import ControlTokenMiddleware
+from ._snapshot_state import SNAPSHOT_STATE_PARAM
 from .framework import (
     A2AAgentApplication,
     AgentEnvAgent,
@@ -153,6 +154,7 @@ __all__ = [
     "PEER_AGENTS_V1",
     "REPORTED_USAGE_KEY",
     "SKILL_CONFIG_V1",
+    "SNAPSHOT_STATE_PARAM",
     "SNAPSHOT_V1",
     "STAGING_ENDPOINT",
     "STAGING_V1_URI",
