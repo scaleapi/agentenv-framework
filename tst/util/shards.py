@@ -51,6 +51,22 @@ def select(nodeids: list[str], index: int, count: int, table: dict, together: di
     return [nodeid for nodeid in nodeids if shard[unit[nodeid]] == index]
 
 
+def heaviest_first(nodeids: list[str], table: dict) -> list[str]:
+    """``nodeids`` with each file's tests together in their collected order, the files by the seconds the table gives
+    their tests, heaviest first, the unknown weighing the median: pytest-xdist's loadfile hands a worker the next file
+    as it frees, so a long file collected last would start last and hold its shard up."""
+    parts = table.get("split_in", {})
+    split = set(table.get("split_by_test", [])) | set(parts)
+    seconds = table.get("seconds", {})
+    known = [seconds[name] for name in {_unit(nodeid, split) for nodeid in nodeids} if seconds.get(name, 0) > 0]
+    default = statistics.median(known) if known else 1.0
+    weight: dict[str, float] = defaultdict(float)
+    for unit in {_unit(nodeid, split) for nodeid in nodeids}:
+        weight[unit.split("::", 1)[0]] += seconds.get(unit, default)
+    order = {path: n for n, path in enumerate(dict.fromkeys(nodeid.split("::", 1)[0] for nodeid in nodeids))}
+    return sorted(nodeids, key=lambda nodeid: (-weight[nodeid.split("::", 1)[0]], order[nodeid.split("::", 1)[0]]))
+
+
 def dependency_groups(tests: list[tuple[str, str, list[str]]], table: dict) -> dict[str, str]:
     """The unit each test of a ``split_by_test`` file shares with the tests ``pytest.mark.dependency`` links
     it to, as ``select``'s ``together``. ``tests`` are (nodeid, the name its marker gives it, the names it

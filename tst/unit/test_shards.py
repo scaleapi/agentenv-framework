@@ -94,6 +94,17 @@ def test_a_file_split_in_runs_refuses_tests_a_dependency_links():
         shards.select(nodeids, 1, 2, table, {nodeids[0]: nodeids[1], nodeids[1]: nodeids[1]})
 
 
+def test_a_shards_files_run_heaviest_first_each_files_tests_together_in_their_collected_order():
+    heavy, light, split = "tst/integration/heavy_test.py", "tst/integration/light_test.py", "tst/integration/split_test.py"
+    nodeids = [f"{light}::test_a", f"{split}::test_1", f"{heavy}::test_a", f"{light}::test_b", f"{split}::test_2",
+               f"{heavy}::test_b", "tst/integration/unknown_test.py::test"]
+    table = {"split_in": {split: 2}, "seconds": {heavy: 300, light: 10, f"{split}::test_1": 100,
+                                                 f"{split}::test_2": 150}}
+    assert shards.heaviest_first(nodeids, table) == [
+        f"{heavy}::test_a", f"{heavy}::test_b", f"{split}::test_1", f"{split}::test_2", "tst/integration/unknown_test.py::test",
+        f"{light}::test_a", f"{light}::test_b"]
+
+
 def test_a_unit_the_table_does_not_know_weighs_the_median_of_the_known_ones():
     seconds = {"tst/integration/a_test.py": 10, "tst/integration/b_test.py": 20, "tst/integration/c_test.py": 900,
                "tst/integration/skipped_test.py": 0}
