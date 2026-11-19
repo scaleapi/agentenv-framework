@@ -51,6 +51,8 @@ class AuthoringContext:
     entry: BundleEntry
     #: How writing a computer env composes it.
     composing: Composing = Composing()
+    #: Whether writing a computer env composes it at all: not one no task of the run or registration deploys.
+    compose: bool = True
 
     @property
     def id(self) -> str:

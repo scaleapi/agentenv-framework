@@ -4,6 +4,7 @@ in ATIF's terms, and a live view that only ever grows."""
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from agentenv_protocol.atif import (
     Adapter,
@@ -20,6 +21,7 @@ from agentenv_protocol.atif import (
     is_prefix,
     native,
     profile_of,
+    ServedTurn,
     replay,
     timestamp,
 )
@@ -570,3 +572,119 @@ def test_a_file_the_sink_failed_to_take_is_handed_to_it_again():
     media = run.media(b"shot", "image/png")
     run.media(b"shot", "image/png")
     assert taken == [None, media.path]
+
+
+def test_a_document_names_the_trajectory_id_it_was_given():
+    run = AdapterRun(adapter(), trajectory_id="doc-1")
+    run.start_task(CTX)
+    run.end_task(final=["done"])
+    document = run.document()
+    assert (document["session_id"], document["trajectory_id"]) == ("ctx", "doc-1")
+    assert check(document)
+    assert "trajectory_id" not in replay(adapter(), [RecordedTask(context=CTX, final=["done"])])
+
+
+def test_a_document_through_an_ended_task_is_the_document_as_it_stood_then():
+    run = AdapterRun(adapter())
+    run.start_task(CTX)
+    run.native({"type": "say", "step": "a", "text": "first"})
+    run.native({"type": "usage", "step": "a", "in": 5, "out": 2})
+    run.end_task(final=["first"])
+    then = run.document()
+    run.start_task(TurnContext(index=1, context_id="ctx", task_id="t2", inbound=["again"]))
+    run.native({"type": "say", "step": "b", "text": "second"})
+    run.native({"something": "unhandled"})
+    assert run.document(through=0) == then
+    run.end_task(final=["second"])
+    assert run.document(through=0) == then
+    assert run.document(through=1) == run.document()
+    with pytest.raises(AtifError, match="hasn't ended"):
+        run.document(through=2)
+
+
+def test_a_tasks_diagnostics_and_error_go_on_its_last_step():
+    run = AdapterRun(adapter())
+    run.start_task(CTX)
+    run.native({"type": "say", "step": "a", "text": "trying"})
+    run.end_task(state="failed", final=["it broke"], data=[{"data": {"tool_call_count": 0}, "metadata": {"k": 1}}],
+                 error={"kind": "agent_error", "message": "it broke", "code": "toy.broke"})
+    profile = profile_of(run.document()["steps"][-1])
+    assert profile["state"] == "failed"
+    assert profile["data"] == [{"data": {"tool_call_count": 0}, "metadata": {"k": 1}}]
+    assert profile["error"] == {"kind": "agent_error", "message": "it broke", "code": "toy.broke"}
+    assert check(run.document())
+
+
+@pytest.mark.parametrize("data, error", [
+    ([{"tool_call_count": 0}], None),
+    ({"data": 1}, None),
+    (None, {"kind": "mystery", "message": "x"}),
+    (None, {"message": ""}),
+    (None, {"message": "x", "extra": 1}),
+])
+def test_a_tasks_diagnostics_and_error_are_checked_before_anything_is_written(data, error):
+    run = AdapterRun(adapter())
+    run.start_task(CTX)
+    with pytest.raises(AtifError):
+        run.end_task(data=data, error=error)
+
+
+def test_a_spawn_that_never_got_its_result_is_answered_canceled_when_its_task_ends():
+    @atif_adapter(native_format="toy-events/1", version="0.1.0", input_includes_cache=False)
+    class Spawning(adapter()):
+        @native(type="spawn")
+        def spawn(self, r, turn):
+            turn.subagent("sub", spawned_by=r["id"], name="explorer")
+
+        @native(type="sub")
+        def sub(self, r, turn):
+            turn.message(step=r["step"], text=r["text"], agent="sub")
+
+    run = AdapterRun(Spawning)
+    run.start_task(CTX)
+    for record in ({"type": "call", "step": "a", "id": "c1"}, {"type": "spawn", "id": "c1"},
+                   {"type": "sub", "step": "s", "text": "looking"}, {"type": "call", "step": "a", "id": "c2"}):
+        run.native(record)
+    run.end_task(state="canceled")
+    document = run.document()
+    results = document["steps"][1]["observation"]["results"]
+    assert results == [{"source_call_id": "c1", "content": "", "subagent_trajectory_ref": [{"trajectory_id": "sub"}],
+                        "extra": {"agentenv": {"status": "canceled"}}}]
+    assert check(document)
+
+
+def test_a_served_turn_gives_the_recorded_task_back():
+    run = AdapterRun(adapter())
+    shot = run.media(b"\x89PNG", "image/png", width=2, height=2)
+    context = TurnContext(index=3, context_id="ctx", task_id="t1", message_id="m1", inbound=["look", shot],
+                          agent_name="toy", agent_version="1.0", started_at="2026-11-18T10:00:00.5Z")
+    records = [{"type": "say", "step": "a", "text": "a picture"}]
+    turn = ServedTurn.of(context, state="completed", final=["a picture"], ended_at="2026-11-18T10:00:01Z",
+                         data=[{"data": {"n": 1}}]).wire()
+    assert turn["started_at"] == "2026-11-18T10:00:00.500Z"
+    assert turn["inbound"][1] == {"media": {"path": shot.path, "media_type": "image/png", "info": dict(shot.info)}}
+    assert "message_id" in turn and "error" not in turn
+    recorded = RecordedTask.from_served(turn, records, [{"name": "hooks", "record": None, "after": 1}])
+    assert recorded.context.inbound == ("look", shot)
+    assert recorded.records == [Fed(records[0]), Fed(None, aux="hooks")]
+    assert (recorded.state, recorded.final, recorded.data) == ("completed", ["a picture"], [{"data": {"n": 1}}])
+
+
+def test_a_served_turn_keeps_a_null_it_requires_so_replay_rebuilds_the_document():
+    run = AdapterRun(adapter())
+    run.start_task(CTX)
+    error = {"kind": "agent_error", "message": "it broke", "code": None}
+    run.end_task(final=["done"], data=[{"data": None}], error=error)
+    turn = ServedTurn.of(CTX, state="completed", final=["done"], data=[{"data": None}], error=error).wire()
+    assert (turn["data"], turn["error"]) == ([{"data": None}], {"kind": "agent_error", "message": "it broke"})
+    assert replay(adapter(), [RecordedTask.from_served(turn, [])]) == run.document()
+
+
+@pytest.mark.parametrize("turn, aux", [
+    ({"index": -1, "context_id": "ctx", "task_id": "t1", "state": "completed"}, []),
+    ({"index": 0, "context_id": "ctx", "task_id": "t1", "state": "completed", "surprise": 1}, []),
+    ({"index": 0, "context_id": "ctx", "task_id": "t1", "state": "completed"}, [{"name": "hooks", "after": -1}]),
+])
+def test_a_served_turn_or_aux_log_that_breaks_its_shape_is_refused(turn, aux):
+    with pytest.raises(ValidationError):
+        RecordedTask.from_served(turn, [], aux)

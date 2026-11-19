@@ -23,13 +23,17 @@ to native exactly.
 
 - One document per agent per A2A context. Each A2A task starts at a `source: user` step that holds the inbound
   message, with the task's ids in that step's profile. Steps number from 1 across the whole document.
-- A context's record may span several documents: after an agent instance restarts, after a snapshot restore, and when
-  long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
+- A context's record may span several documents: after an agent instance restarts or drops the context from memory,
+  after a snapshot restore, and when long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
   index, and each earlier document names the next in `continued_trajectory_ref`. The worker that stores the earlier
   document sets that link, since the agent that wrote it may be gone.
+- `session_id` is the A2A context id, and a served document's `trajectory_id` names that one document of the
+  context's record. A snapshot restored into a new context id starts a new session, since one snapshot can be loaded
+  many times; its turn index goes on from the snapshot's.
 - A sub-agent is an embedded trajectory in `subagent_trajectories`, with its own steps, referenced from the spawning
   call's result by `subagent_trajectory_ref`. It belongs to the task of the call that spawned it. A sub-agent that
-  wrote no step is left out, and so is the reference to it.
+  wrote no step is left out, and so is the reference to it. A spawning call with no result when its task ends gets
+  one, with no content and `status: canceled`, so its sub-agent stays referenced.
 - `schema_version` is the oldest ATIF version that holds the document's fields: `ATIF-v1.8` for profile 1.0.
 - Format id: `atif/1`. The profile's own version is the root's `extra.agentenv.version`.
 
@@ -46,13 +50,20 @@ to native exactly.
   of every later read, and every reference it is served resolves.
 - The final response is written once. When the task's last agent step already holds the same text, nothing is added;
   otherwise one step is appended, `source: agent` and `llm_call_count` 0. The task's terminal state goes on the task's
-  last step, which closes only when the task ends, so it is never served before the state is known.
+  last step, which closes only when the task ends, so it is never served before the state is known, and so does the
+  task's error, unless the adapter wrote one there.
+- A2A DataParts: what the conversation says is text, and what describes the run is profile. An inbound DataPart is a
+  text part holding its compact JSON, and so is a final response's `structured_output`, the task's answer. The final
+  response's other DataParts, a harness's diagnostics, go in its last step's `data`. The SDK's own usage and error
+  part is left out: `final_metrics` and the last step's `state` and `error` hold it.
 - An agent message whose parts are all text is one string, the parts joined by a blank line; Harbor's tools read only
   strings there. Text output always goes in whole: there is no reference part and no cap.
 - `reasoning_content` joins a step's reasoning blocks' texts with a blank line. The profile's `reasoning` lists every
   block, in native order, with its share of that text, so a reader that knows the profile can rebuild exact blocks.
 - Timestamps are UTC, written `YYYY-MM-DDTHH:MM:SS(.fff|.ffffff)Z`. Other precisions are normalized: ATIF's Step
-  validator on Python 3.10 reads no other.
+  validator on Python 3.10 reads no other. A document keeps one clock: the steps the SDK writes, each task's user step
+  and final response, are on the clock the agent's programs read, the universe's when the agent follows the env's
+  clock.
 - Usage follows ATIF: `prompt_tokens` includes cache reads and writes, and `cached_tokens` is the cache reads. Each
   adapter's `input_includes_cache` constant says whether its native input count already includes the cache.
   Cache writes go in `Metrics.extra.agentenv.cache_write_tokens`. An adapter may give a step's counts over several
@@ -109,6 +120,7 @@ One vocabulary, in three places:
 | Step | `state` | On a task's last step: its terminal state | the explorer, the hub's turns view |
 | Step | `attempt` | The harness attempt the step belongs to; absent means 1 | the explorer |
 | Step | `error` | A step-level error: `kind`, `message`, `code` | the explorer |
+| Step | `data` | On a task's last step: its final response's diagnostic DataParts, in order, each `data` and its `metadata` | the explorer |
 | Step | `reasoning` | Each reasoning block: `chars`, `visibility`, `signature`, `data` | resuming a session; RL replay |
 | Step | `media` | Details of the media the message names, by path | media transfer; the explorer |
 | ObservationResult | `status` | The result's status; absent means `ok` | the explorer, judges' turn events |

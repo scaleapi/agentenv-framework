@@ -231,18 +231,22 @@ class _Trajectory:
 
 
 class Document:
-    """One A2A context's ATIF document, built a task at a time. Not thread-safe: records are fed one at a time."""
+    """One A2A context's ATIF document, built a task at a time. Not thread-safe: records are fed one at a time.
+    ``trajectory_id`` names this document among the ones a context's record may span."""
 
-    def __init__(self, spec: AdapterSpec, sink: Callable[[str, bytes], None] | None = None) -> None:
+    def __init__(self, spec: AdapterSpec, sink: Callable[[str, bytes], None] | None = None, *,
+                 trajectory_id: str | None = None) -> None:
         self.spec = spec
         self.media: dict[str, bytes] = {}
         self._sink = sink
+        self._trajectory_id = _str(trajectory_id, "trajectory_id")
         self._stored: set[str] = set()
         self._root: _Trajectory | None = None
         self._subs: dict[str, _Trajectory] = {}
         self._call_home: dict[str, tuple[_Trajectory, _Step]] = {}
         self._spawned: dict[str, str] = {}
         self._unmatched: Counter[str] = Counter()
+        self._unmatched_at_end: list[dict[str, int]] = []
         self._task_costs: list[tuple[float, str] | None] = []
         self._context: TurnContext | None = None
         self._task = -1
@@ -281,28 +285,47 @@ class Document:
         return AtifTurn(self, context)
 
     def end_task(self, *, state: str = "completed", final: Sequence[Any] | None = None,
-                 ended_at: str | datetime | None = None) -> None:
+                 ended_at: str | datetime | None = None, data: Sequence[Mapping[str, Any]] | None = None,
+                 error: Mapping[str, Any] | None = None) -> None:
         if self._context is None:
             raise AtifError("no task is open")
         if state not in TASK_STATES:
             raise AtifError(f"state {state!r} isn't one of {', '.join(TASK_STATES)}")
         root = self._root
         assert root is not None
-        if final:
-            parts, media = self.parse_parts(final, None)
-            ended = timestamp(ended_at)
+        parts, media = self.parse_parts(final, None) if final else ([], {})
+        ended = timestamp(ended_at)
+        task_data, task_error = _task_data(data), _task_error(error)
+        if parts:
             last = next((s for s in reversed(root.steps) if s.task == self._task and s.source == "agent"), None)
             if last is None or _message(last.parts) != _message(parts):
                 step = self._start(root, "agent", None)
                 step.parts, step.media, step.llm_call_count = parts, media, 0
                 step.time = ended
-        root.steps[-1].profile["state"] = state
+        closing = root.steps[-1].profile
+        closing["state"] = state
+        if task_data:
+            closing["data"] = task_data
+        if task_error is not None and "error" not in closing:
+            closing["error"] = task_error
+        self._answer_unanswered_spawns()
         for trajectory in self._trajs():
             for step in trajectory.steps:
                 if step.task == self._task:
                     step.closed = step.ended = True
             trajectory.open = None
+        self._unmatched_at_end.append(dict(sorted(self._unmatched.items())))
         self._context = None
+
+    def _answer_unanswered_spawns(self) -> None:
+        """A call of the ending task that spawned a sub-agent and has no result gets one, canceled with no content, so
+        the sub-agent stays referenced from the step that started it."""
+        for call_id, agent_id in self._spawned.items():
+            _, home = self._call_home[call_id]
+            if home.task == self._task and call_id in home.pending:
+                home.results.append({"source_call_id": call_id, "parts": [], "profile": {"status": "canceled"},
+                                     "subagent": agent_id})
+                home.pending.discard(call_id)
 
     # What handlers call, through AtifTurn
 
@@ -435,14 +458,25 @@ class Document:
 
     # Reading the document
 
-    def document(self) -> dict[str, Any] | None:
-        """The whole document so far, or None before its first step. A fresh copy each time."""
-        return self._render(closed_only=False)
+    def document(self, *, through: int | None = None) -> dict[str, Any] | None:
+        """The whole document so far, or None before its first step; with ``through``, the document as it stood when
+        the context's task ``through`` (its 0-based place here) ended. A fresh copy each time."""
+        if through is not None and not (isinstance(through, int) and 0 <= through < len(self._unmatched_at_end)):
+            raise AtifError(f"task {through!r} of this document hasn't ended")
+        return self._render(closed_only=False, through=through)
 
     def page(self) -> dict[str, Any] | None:
         """What a live reader is served, built when it's read: each trajectory's closed steps, up to the first one
         still waiting on a result, or None while there are none."""
         return self._render(closed_only=True)
+
+    def step_tasks(self) -> list[int]:
+        """Each root step's task, in step order: the 0-based place in this document of the task it belongs to."""
+        return [step.task for step in self._root.steps] if self._root is not None else []
+
+    def subagent_tasks(self) -> dict[str, int]:
+        """Each declared sub-agent's task: the 0-based place in this document of the task whose call spawned it."""
+        return {agent_id: trajectory.task for agent_id, trajectory in self._subs.items()}
 
     # Internals
 
@@ -509,10 +543,12 @@ class Document:
             count += 1
         return count
 
-    def _counts(self, closed_only: bool) -> dict[str | None, int]:
+    def _counts(self, closed_only: bool, through: int | None = None) -> dict[str | None, int]:
         """How many steps of each trajectory a read shows, by sub-agent id (None for the root). A live page also holds
         back a step whose result points at a sub-agent it shows no step of yet, until the step's task ends."""
         trajectories = self._trajs()
+        if through is not None:
+            return {t.actor: sum(1 for s in t.steps if s.task <= through) for t in trajectories}
         if not closed_only:
             return {t.actor: len(t.steps) for t in trajectories}
         counts = {t.actor: self._servable(t) for t in trajectories}
@@ -526,40 +562,45 @@ class Document:
                         break
         return counts
 
-    def _render(self, *, closed_only: bool) -> dict[str, Any] | None:
+    def _render(self, *, closed_only: bool, through: int | None = None) -> dict[str, Any] | None:
         root = self._root
         if root is None:
             return None
-        counts = self._counts(closed_only)
+        counts = self._counts(closed_only, through)
         if counts[None] == 0:
             return None
         linked = {actor for actor, count in counts.items() if actor is not None and count}
-        doc: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "session_id": self._context_id,
-                               "agent": dict(root.agent),
-                               "steps": _steps(root, counts[None], linked, closed_only)}
+        doc: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "session_id": self._context_id}
+        if self._trajectory_id is not None:
+            doc["trajectory_id"] = self._trajectory_id
+        doc["agent"] = dict(root.agent)
+        doc["steps"] = _steps(root, counts[None], linked, closed_only)
         subs = [{"schema_version": SCHEMA_VERSION, "trajectory_id": trajectory.actor, "agent": dict(trajectory.agent),
                  "steps": _steps(trajectory, counts[trajectory.actor], linked, closed_only)}
                 for trajectory in self._subs.values() if counts[trajectory.actor]]
         if subs:
             doc["subagent_trajectories"] = subs
-        if self._context is None:
-            doc["final_metrics"] = self._final_metrics(root)
+        if through is not None or self._context is None:
+            doc["final_metrics"] = self._final_metrics(root, through)
         profile: dict[str, Any] = {"version": PROFILE_VERSION, "native_format": self.spec.native_format,
                                    "adapter": {"name": self.spec.name, "version": self.spec.version}}
-        if self._unmatched:
-            profile["unmatched"] = dict(sorted(self._unmatched.items()))
+        unmatched = self._unmatched_at_end[through] if through is not None else dict(sorted(self._unmatched.items()))
+        if unmatched:
+            profile["unmatched"] = unmatched
         doc["extra"] = {PROFILE_KEY: profile}
         return doc
 
-    def _final_metrics(self, root: _Trajectory) -> dict[str, Any]:
-        steps = [s for t in self._trajs() for s in t.steps if s.source == "agent" and s.llm_call_count != 0]
+    def _final_metrics(self, root: _Trajectory, through: int | None = None) -> dict[str, Any]:
+        last = self._task if through is None else through
+        steps = [s for t in self._trajs() for s in t.steps
+                 if s.source == "agent" and s.llm_call_count != 0 and s.task <= last]
         totals: dict[str, Any] = {}
         for key, total in (("prompt_tokens", "total_prompt_tokens"), ("completion_tokens", "total_completion_tokens"),
                            ("cached_tokens", "total_cached_tokens")):
             if steps and all(key in s.metrics for s in steps):
                 totals[total] = sum(s.metrics[key] for s in steps)
         profile: dict[str, Any] = {}
-        costs = self._task_costs
+        costs = self._task_costs[:last + 1]
         if costs and all(cost is not None for cost in costs):
             totals["total_cost_usd"] = round(sum(cost[0] for cost in costs), 10)
             sources = {cost[1] for cost in costs}
@@ -570,12 +611,46 @@ class Document:
             sources = {s.metrics_profile.get("cost_source") for s in steps}
             if len(sources) == 1 and None not in sources:
                 profile["cost_source"] = sources.pop()
-        totals["total_steps"] = len(root.steps)
+        totals["total_steps"] = sum(1 for s in root.steps if s.task <= last)
         if steps and all("cache_write_tokens" in s.metrics_profile for s in steps):
             profile["total_cache_write_tokens"] = sum(s.metrics_profile["cache_write_tokens"] for s in steps)
         if profile:
             totals["extra"] = {PROFILE_KEY: profile}
         return totals
+
+
+def _task_data(data: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    """A task's diagnostic DataParts as its last step's profile holds them: ``data``, and ``metadata`` when given."""
+    if data is None:
+        return []
+    if not isinstance(data, (list, tuple)):
+        raise AtifError(f"data is a list of DataParts, not {type(data).__name__}")
+    entries = []
+    for item in data:
+        if not isinstance(item, Mapping) or "data" not in item or set(item) - {"data", "metadata"}:
+            raise AtifError(f"a DataPart is {{'data': ..., 'metadata': {{...}}}}, not {item!r}")
+        entry = {"data": _json(item["data"], "a DataPart's data")}
+        metadata = item.get("metadata")
+        if metadata:
+            if not isinstance(metadata, Mapping):
+                raise AtifError(f"a DataPart's metadata is an object, not {metadata!r}")
+            entry["metadata"] = _json(dict(metadata), "a DataPart's metadata")
+        entries.append(entry)
+    return entries
+
+
+def _task_error(error: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """A task's error as a step's profile holds it."""
+    if error is None:
+        return None
+    if not isinstance(error, Mapping) or set(error) - {"kind", "message", "code"}:
+        raise AtifError(f"a task's error is {{'kind', 'message', 'code'}}, not {error!r}")
+    kind = error.get("kind", "agent_error")
+    if kind not in ERROR_KINDS:
+        raise AtifError(f"kind {kind!r} isn't one of {', '.join(ERROR_KINDS)}")
+    message = _str(error.get("message"), "an error's message", optional=False)
+    code = _str(error.get("code"), "an error's code")
+    return {k: v for k, v in (("kind", kind), ("message", message), ("code", code)) if v is not None}
 
 
 def _agent(name: str | None, version: str | None, model: str | None) -> dict[str, Any]:

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Any, Sequence
 
+from ..atif import Adapter, AuxEntry, ServedTurn
+from ._atif_copy import AtifCopy, AtifPage, TurnStart
+from ._turn_index import TurnIndex
 from .extensions import TrajectoryState
-from .tasks.v1 import TrajectoryLog
+from .tasks.v1 import TaskError, TrajectoryLog
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,25 @@ class TrajectoryPage:
     total: int
 
 
+@dataclass(frozen=True, slots=True)
+class AtifTaskRead:
+    """An ended task's atif/1 document as it stood when the task ended, its aux log and its served turn context."""
+
+    document: dict[str, Any]
+    aux: list[AuxEntry]
+    turn: ServedTurn
+
+
+@dataclass(frozen=True, slots=True)
+class AtifCursor:
+    """A cursor page of a context's atif/1 copy, with the context, the task a read of it is on and its state."""
+
+    page: AtifPage
+    context_id: str
+    task_id: str
+    state: TrajectoryState
+
+
 class TaskTrajectories:
     """Each task's log and final record, grouped by context in execution order.
 
@@ -57,27 +81,41 @@ class TaskTrajectories:
     positions in a context read never shift. A context with a task pending or running is
     never evicted, nor is the one whose task just ended, so its final record is readable."""
 
-    def __init__(self, max_contexts: int = MAX_CACHED_CONTEXTS, *, native: str | None = None) -> None:
+    def __init__(
+        self,
+        max_contexts: int = MAX_CACHED_CONTEXTS,
+        *,
+        native: str | None = None,
+        atif: type[Adapter] | None = None,
+    ) -> None:
         if max_contexts < 1:
             raise ValueError("max_contexts must be positive")
         self._max_contexts = max_contexts
         self._native = native
+        self._atif = atif
+        #: Each context's count of started tasks, kept only for an agent that serves atif/1.
+        self._turns = TurnIndex() if atif is not None else None
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
+        self._copies: dict[str, AtifCopy] = {}
 
     def register(self, task_id: str, context_id: str) -> TrajectoryLog:
         """The task's log, created ``pending`` the first time the task is seen."""
         record = self._tasks.get(task_id)
         if record is None:
-            log = TrajectoryLog(native=self._native)
+            log = TrajectoryLog(
+                native=self._native, adapter=self._atif.spec if self._atif is not None else None
+            )
             log._task_id = task_id
             record = self._tasks[task_id] = _TaskRecord(context_id=context_id, log=log)
             self._contexts.setdefault(context_id, []).append(task_id)
         self._touch(record.context_id)
         return record.log
 
-    def start(self, task_id: str) -> None:
-        """Place the task after the context's started tasks, as it begins to run.
+    def start(self, task_id: str, turn: TurnStart | None = None) -> None:
+        """Place the task after the context's started tasks, as it begins to run, and open it in
+        the context's atif/1 copy, its turn index the number of tasks the context started before
+        it, which a restart, an eviction or a restore doesn't reset.
 
         Only tasks that have not started move; they have no events, so no position shifts."""
         record = self._tasks[task_id]
@@ -88,7 +126,24 @@ class TaskTrajectories:
         started = sum(1 for other in order if self._tasks[other].started)
         order.insert(started, task_id)
         record.started = True
+        if self._atif is not None and turn is not None:
+            copy = self._copies.get(record.context_id)
+            if copy is None:
+                copy = self._copies[record.context_id] = AtifCopy(self._atif, record.context_id)
+            copy.start(task_id, self._turns.next(record.context_id), turn)
+            record.log._atif = _CopySink(copy, task_id)
         self._touch(record.context_id)
+
+    def turns(self, context_id: str) -> int:
+        """How many tasks the context has started, the count a snapshot of it carries; an agent that serves atif/1
+        only."""
+        return self._turns.count(context_id)
+
+    def restored(self, context_id: str, turns: int) -> None:
+        """A snapshot was restored into the context: its count goes on from the snapshot's, and its next task starts a
+        new document, since the conversation is the snapshot's now; an agent that serves atif/1 only."""
+        self._turns.set(context_id, turns)
+        self._copies.pop(context_id, None)
 
     def request_cancel(self, task_id: str) -> None:
         """Make ``canceled`` the outcome the task is sealed with, whatever ``run`` returns."""
@@ -103,8 +158,11 @@ class TaskTrajectories:
         *,
         native: bytes | None = None,
         native_format: str | None = None,
+        final: Sequence[Any] = (),
+        error: TaskError | None = None,
     ) -> None:
-        """End the task's trajectory; the first seal wins."""
+        """End the task's trajectory, and close it in the context's atif/1 copy with its final
+        response's parts and its error; the first seal wins."""
         record = self._tasks[task_id]
         if record.final_state is not None:
             return
@@ -119,6 +177,15 @@ class TaskTrajectories:
             record.native_format = native_format
         record.log._sealed = True
         record.final_state = TrajectoryState.CANCELED if record.cancel_requested else state
+        copy = self._copies.get(record.context_id)
+        if copy is not None:
+            copy.end(
+                task_id,
+                state=record.final_state.value,
+                final=final,
+                error=error,
+                native=None if native is None else json.loads(native),
+            )
         self._touch(record.context_id)
         self._evict(keep=record.context_id)
 
@@ -171,19 +238,8 @@ class TaskTrajectories:
         records = self._context_records(context_id)
         if records is None:
             return None
-        task_ids = self._contexts[context_id]
-        states = [record.state for record in records]
+        task_id, state = self._context_progress(context_id, records)
         lengths = [len(record.log) for record in records]
-        current = next(
-            (index for index, record in enumerate(records) if record.final_state is None),
-            len(records) - 1,
-        )
-        if TrajectoryState.RUNNING in states:
-            state = TrajectoryState.RUNNING
-        elif TrajectoryState.PENDING in states:
-            state = TrajectoryState.PENDING
-        else:
-            state = states[-1]
         page: list[bytes] = []
         offset = 0
         for record, length in zip(records, lengths):
@@ -204,12 +260,75 @@ class TaskTrajectories:
             offset += length
         return TrajectoryPage(
             context_id=context_id,
-            task_id=task_ids[current],
+            task_id=task_id,
             state=state,
             format=_context_format(records),
             events=page,
             total=sum(lengths),
         )
+
+    def atif_task(self, task_id: str) -> AtifTaskRead | None:
+        """The ended task's atif/1 document as it stood when it ended, with its aux log and served
+        turn context, or None when there is none."""
+        record = self._tasks.get(task_id)
+        copy = self._copies.get(record.context_id) if record is not None else None
+        if copy is None:
+            return None
+        self._touch(record.context_id)
+        read = copy.task_read(task_id)
+        return None if read is None else AtifTaskRead(*read)
+
+    def atif_context(self, context_id: str) -> dict[str, Any] | None:
+        """The context's atif/1 live page, or None when it has no closed step yet."""
+        copy = self._copies.get(context_id)
+        if copy is None:
+            return None
+        self._touch(context_id)
+        return copy.context_read()
+
+    def atif_task_page(
+        self, task_id: str, after: int, max_steps: int, max_bytes: int
+    ) -> AtifCursor | None:
+        """A cursor page of the task's closed atif/1 steps, in the task's state."""
+        record = self._tasks.get(task_id)
+        copy = self._copies.get(record.context_id) if record is not None else None
+        if copy is None:
+            return None
+        self._touch(record.context_id)
+        state = record.state
+        page = copy.page(after, max_steps, max_bytes, task_id=task_id)
+        return AtifCursor(page=page, context_id=record.context_id, task_id=task_id, state=state)
+
+    def atif_context_page(
+        self, context_id: str, after: int, max_steps: int, max_bytes: int
+    ) -> AtifCursor | None:
+        """A cursor page of the context's closed atif/1 steps, on the task the context is on and in
+        the context's state."""
+        copy = self._copies.get(context_id)
+        records = self._context_records(context_id) if copy is not None else None
+        if copy is None or records is None:
+            return None
+        task_id, state = self._context_progress(context_id, records)
+        page = copy.page(after, max_steps, max_bytes)
+        return AtifCursor(page=page, context_id=context_id, task_id=task_id, state=state)
+
+    def _context_progress(
+        self, context_id: str, records: list[_TaskRecord]
+    ) -> tuple[str, TrajectoryState]:
+        """The task a context read is on, the first that hasn't ended, and the context's state."""
+        task_ids = self._contexts[context_id]
+        states = [record.state for record in records]
+        current = next(
+            (index for index, record in enumerate(records) if record.final_state is None),
+            len(records) - 1,
+        )
+        if TrajectoryState.RUNNING in states:
+            state = TrajectoryState.RUNNING
+        elif TrajectoryState.PENDING in states:
+            state = TrajectoryState.PENDING
+        else:
+            state = states[-1]
+        return task_ids[current], state
 
     def _context_records(self, context_id: str) -> list[_TaskRecord] | None:
         task_ids = self._contexts.get(context_id)
@@ -232,8 +351,23 @@ class TaskTrajectories:
             ):
                 continue
             del self._contexts[context_id]
+            self._copies.pop(context_id, None)
             for task_id in task_ids:
                 del self._tasks[task_id]
+
+
+@dataclass(frozen=True, slots=True)
+class _CopySink:
+    """Where a task's log feeds its records: the context's atif/1 copy, under the task's id."""
+
+    copy: AtifCopy
+    task_id: str
+
+    def native(self, record: Any) -> None:
+        self.copy.native(self.task_id, record)
+
+    def aux(self, name: str, record: Any) -> None:
+        self.copy.aux(self.task_id, name, record)
 
 
 def _context_format(records: list[_TaskRecord]) -> str | None:

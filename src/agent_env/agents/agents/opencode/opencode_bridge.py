@@ -32,6 +32,8 @@ from typing import Literal
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
+
 logger = logging.getLogger(__name__)
 
 # The model a run uses when neither the task nor the agent-config names one; the
@@ -96,6 +98,15 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
+def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
+    armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
+    connects to itself."""
+    urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed)}
+
+
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +124,7 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
     """`opencode export <session_id>` for the given context: the transcript JSON bytes."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "export", session_id, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode export failed: {err.decode(errors='replace')[:300]}")
@@ -123,7 +134,7 @@ async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI
 async def import_session(context_id: str, json_path: str, timeout_s: int = _CLI_TIMEOUT_S) -> str | None:
     """`opencode import <json_path>` into the given context's data dir: the imported session id, from
     'Imported session: <id>'."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "import", json_path, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode import failed: {err.decode(errors='replace')[:300]}")
@@ -477,9 +488,8 @@ async def run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **os.environ,
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-        **_context_xdg(context_id),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")
