@@ -17,7 +17,6 @@ def _deployed_env(metadata):
         env_version=2,
         gateway_url="http://gw",
         mcp_url="http://mcp",
-        db_web_url=None,
         sandbox_id="s1",
         metadata=metadata,
     )

@@ -16,7 +16,7 @@ from agent_env.task_step.context_ops import (
 def _env(instance_id: str = "i1") -> DeployedEnv:
     return DeployedGatewayEnv(
         env_id="e", env_version=1, gateway_url="g", mcp_url="m",
-        db_web_url=None, sandbox_id="s", instance_id=instance_id,
+        sandbox_id="s", instance_id=instance_id,
     )
 
 

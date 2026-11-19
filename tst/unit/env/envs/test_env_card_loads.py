@@ -156,7 +156,7 @@ async def test_a_standalone_env_keeps_the_record_it_deploys(make, module):
     env = make()
     provider = MagicMock(
         spec=EnvironmentGatewayProvider, sandbox=SimpleNamespace(sandbox_id="sb-1", type="vm"),
-        deploy=AsyncMock(return_value=DeployedGatewayEnv(env_id="e", env_version=1, gateway_url=_GW, mcp_url=f"{_GW}/mcp", db_web_url=None, sandbox_id="sb-1")),
+        deploy=AsyncMock(return_value=DeployedGatewayEnv(env_id="e", env_version=1, gateway_url=_GW, mcp_url=f"{_GW}/mcp", sandbox_id="sb-1")),
         _environment_sandboxes={},
     )
     provider.environment_sandbox.return_value = None
@@ -204,7 +204,7 @@ async def test_multi_env_deploy_hands_its_record_to_every_child_env():
     container = MagicMock()
     provider.environment_sandbox.side_effect = lambda name: container if name == "email" else None  # container mode: the server's own
     provider.deploy = AsyncMock(return_value=DeployedGatewayEnv(env_id="multi", env_version=1, gateway_url=_GW, mcp_url=f"{_GW}/mcp",
-                                                                db_web_url=None, sandbox_id="sb-1"))
+                                                                sandbox_id="sb-1"))
 
     with patch("agent_env.providers.build_env_provider", return_value=provider), \
          patch("agent_env.providers.get_env_sandbox_provider", MagicMock()), \
@@ -297,8 +297,7 @@ async def _card(*keys: str) -> dict:
 
 def _record(card: dict | None) -> DeployedEnv:
     return DeployedGatewayEnv(
-        env_id="multi", env_version=1, gateway_url=_GW, mcp_url=f"{_GW}/mcp", db_web_url=None,
-        sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card,
+        env_id="multi", env_version=1, gateway_url=_GW, mcp_url=f"{_GW}/mcp", sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card,
     )
 
 

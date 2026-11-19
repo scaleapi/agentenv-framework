@@ -21,7 +21,6 @@ from agent_env.config import get_config
 from agent_env.env.envs.service_db import (
     DATABASE_SERVICE_NAME,
     DB_MCP_CONTAINER_PORT,
-    DB_MCP_PORT,
     DB_MCP_SERVICE_NAME,
     DB_NAME,
     DB_PASSWORD,
@@ -30,7 +29,6 @@ from agent_env.env.envs.service_db import (
     PGWEB_SERVICE_NAME,
     SERVICE_DB_PORT,
 )
-from agent_env.providers.sandbox_providers.sandbox import port_bindings
 from agent_env.providers.env_state.env_state_provider import (
     DatabaseStateProvider,
     DEFAULT_STATE_TTL_SECONDS,
@@ -258,10 +256,8 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         host_ips: tuple[str, ...] = (),
     ) -> list[str]:
         """The pgweb + db-mcp direct-SQL browse UIs (VM/compose path), each gated on the
-        servicedb's health. Beyond the mandatory readiness service."""
-        # Opened from the host only, so kept off the bridge address containers reach the host through.
-        host_ips = host_ips[:1]
-        publish = host_port or (lambda port: port)
+        servicedb's health. Beyond the mandatory readiness service. Neither publishes a port: only the gateway reaches
+        them, on the env's network, behind its control token."""
         cfg = self.service_db_config
         lines: list[str] = []
         if cfg.db_web_image:
@@ -278,8 +274,6 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 # sidecar_specs for why: Disconnect tore down pgweb's shared
                 # session and 500'd the changelog export on Save & Next).
                 "      - PGWEB_LOCK_SESSION=true",
-                "    ports:",
-                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(DB_WEB_PORT), DB_WEB_PORT)),
                 "    networks:",
                 "      - env-network",
                 "",
@@ -295,8 +289,6 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 "    environment:",
                 f"      - DATABASE_URI={self._pg_url(DATABASE_SERVICE_NAME, scheme='postgresql')}",
                 "    command: --transport=streamable-http --streamable-http-host=0.0.0.0 --access-mode=unrestricted",
-                "    ports:",
-                *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(DB_MCP_PORT), DB_MCP_CONTAINER_PORT)),
                 "    networks:",
                 "      - env-network",
                 "",

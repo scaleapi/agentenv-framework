@@ -54,10 +54,7 @@ from agent_env.env.gateway.constants import (
 from agent_env.env.envs.service_db import (
     CONSOLE_SERVICE_NAMES,
     DATABASE_SERVICE_NAME,
-    DB_MCP_CONTAINER_PORT,
-    DB_MCP_PORT,
     DB_MCP_SERVICE_NAME,
-    DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
 from agent_env.env.envs.computer.utils.boot import control_environment
@@ -146,8 +143,6 @@ class DeployedGateway:
 
     gateway_url: str
     mcp_url: str
-    db_web_url: str
-    db_mcp_url: str | None = None
     db_web_gateway_url: str | None = None
     db_mcp_gateway_url: str | None = None
     website_frontend_urls: dict[str, str] | None = None
@@ -724,10 +719,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             env_version=env.version,
             env_provider_type=self.type,
             gateway_url=deployed.gateway_url,
-            db_web_url=deployed.db_web_url,
             sandbox_id=self._sandbox.sandbox_id, sandbox_type=self._sandbox.type,
             sandbox_ids=self._sandbox_ids(always_name_gateway=topology.names_gateway_on_vm),
-            db_mcp_url=deployed.db_mcp_url,
             db_web_gateway_url=deployed.db_web_gateway_url,
             db_mcp_gateway_url=deployed.db_mcp_gateway_url,
             environment_card_url=f"{deployed.gateway_url}{WELL_KNOWN_PATH}",
@@ -888,7 +881,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if memory_mb is not None:
                 vm_kwargs["memory"] = memory_mb
             self._sandbox = await sandbox_provider.create_vm(
-                exposed_ports=[gateway_port, DB_WEB_PORT, DB_MCP_PORT] + [sc.host_port for sc in sidecars],
+                exposed_ports=[gateway_port] + [sc.host_port for sc in sidecars],
                 timeout=ttl_seconds,
                 disk_size_gb=disk_size_gb,
                 attribution=attribution,
@@ -1020,13 +1013,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 logger.warning(f"{name} container not found")
 
         gateway_url = tunnel_url(gateway_port)
-        db_web_base_url = tunnel_url(DB_WEB_PORT) if PGWEB_SERVICE_NAME in sidecar_names else None
-        db_web_url = f"{db_web_base_url}/" if db_web_base_url else None
-        db_mcp_base_url = tunnel_url(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
-        db_mcp_url = f"{db_mcp_base_url}/mcp" if db_mcp_base_url else None
-        logger.info(f"pgweb URL: {db_web_url}")
-        if db_mcp_url:
-            logger.info(f"DB MCP endpoint: {db_mcp_url}")
 
         # Wait for the tunnel to serve the env card, which the deploy records
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
@@ -1047,8 +1033,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         logger.info(f"Gateway URL: {gateway_url}")
         return DeployedGateway(
-            gateway_url=gateway_url, mcp_url=mcp_url, db_web_url=db_web_url, db_mcp_url=db_mcp_url,
-            db_web_gateway_url=consoles.get(PGWEB_SERVICE_NAME), db_mcp_gateway_url=consoles.get(DB_MCP_SERVICE_NAME),
+            gateway_url=gateway_url, mcp_url=mcp_url, db_web_gateway_url=consoles.get(PGWEB_SERVICE_NAME), db_mcp_gateway_url=consoles.get(DB_MCP_SERVICE_NAME),
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
             environment_card=card, environment_card_read_at_utc=card_read_at_utc, control_token=control_token,
@@ -1130,8 +1115,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             external: list[ExternalChild] = []
 
             mcp_results: list[tuple[str, "Sandbox"]] = []
-            pgweb_sb = None
-            db_mcp_sb = None
             consoles: dict[str, str] = {}
             errors: list[BaseException] = []
             for i, r in enumerate(all_results):
@@ -1150,10 +1133,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                     if r.private_host:
                         consoles[spec.name] = f"http://{r.private_host}:{spec.port}"
                     if spec.name == PGWEB_SERVICE_NAME:
-                        pgweb_sb = r
                         self._pgweb_sandbox = r
                     elif spec.name == DB_MCP_SERVICE_NAME:
-                        db_mcp_sb = r
                         self._db_mcp_sandbox = r
 
             if errors:
@@ -1203,14 +1184,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             card_read_at_utc = datetime.now(timezone.utc).isoformat()
             await self._refuse_tool_name_clashes(gateway_url)
 
-            db_web_url = pgweb_sb.tunnel_urls[DB_WEB_PORT] + "/" if pgweb_sb else None
-            db_mcp_url = db_mcp_sb.tunnel_urls[DB_MCP_CONTAINER_PORT] + "/mcp" if db_mcp_sb else None
             served = await self._served_consoles(gateway_url, consoles, control_token)
             return DeployedGateway(
                 gateway_url=gateway_url,
                 mcp_url=_mcp_url(gateway_url, card),
-                db_web_url=db_web_url,
-                db_mcp_url=db_mcp_url,
                 db_web_gateway_url=served.get(PGWEB_SERVICE_NAME),
                 db_mcp_gateway_url=served.get(DB_MCP_SERVICE_NAME),
                 website_frontend_urls=None,
@@ -1436,6 +1413,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             command=spec.command,
             **_size_kwargs(deploy.cpu, None),
             disk_size_gb=deploy.disk_size_gb, timeout=deploy.ttl_seconds,
+            expose_externally=False,
             attribution=deploy.attribution,
             private_network=True,
         )

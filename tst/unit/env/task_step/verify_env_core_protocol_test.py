@@ -28,7 +28,7 @@ def _make_context():
     ctx = TaskStepContext()
     ctx.deployed_envs = [DeployedGatewayEnv(
         env_id="e1", env_version=3, gateway_url="https://gw", mcp_url="https://gw/mcp",
-        db_web_url=None, sandbox_id="sb", environment_card_url=f"https://gw{WELL_KNOWN_PATH}",
+        sandbox_id="sb", environment_card_url=f"https://gw{WELL_KNOWN_PATH}",
     )]
     return ctx
 
@@ -154,7 +154,7 @@ class TestWire:
     def test_reads_the_card_and_probes_the_data_plane_at_the_cards_address(self, gateway_url):
         base = gateway_url.rstrip("/")
         ctx = TaskStepContext(deployed_envs=[DeployedGatewayEnv(
-            env_id="e1", env_version=3, gateway_url=gateway_url, mcp_url=f"{base}/mcp", db_web_url=None, sandbox_id="sb",
+            env_id="e1", env_version=3, gateway_url=gateway_url, mcp_url=f"{base}/mcp", sandbox_id="sb",
             environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}", control_token="s3cret",
         )])
         sent = []

@@ -353,7 +353,7 @@ def _with_features(*features: str) -> list:
 
 def _record(extensions: list = GATEWAY_EXTENSIONS) -> DeployedEnv:
     """A gateway deployment whose stored card advertises `extensions` (the gateway's own, by default)."""
-    return DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=_GATEWAY, mcp_url="", db_web_url=None, sandbox_id="sb",
+    return DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=_GATEWAY, mcp_url="", sandbox_id="sb",
                        environment_card_url=f"{_GATEWAY}{WELL_KNOWN_PATH}",
                        environment_card={"name": "gw", "capabilities": {"extensions": extensions}})
 

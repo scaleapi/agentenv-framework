@@ -74,7 +74,6 @@ def _ctx():
             env_version=1,
             gateway_url="https://gw",
             mcp_url="m",
-            db_web_url=None,
             sandbox_id="sb-1",
         )
     ]

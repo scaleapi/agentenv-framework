@@ -29,7 +29,7 @@ def _env(env_id: str, gateway_url: str, *uris: str):
     """A record whose stored card is the gateway's, offering only `uris` when given."""
     extensions = [e for e in GATEWAY_EXTENSIONS if not uris or e["uri"] in uris]
     return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url=gateway_url, mcp_url="",
-                       db_web_url=None, sandbox_id="sb", environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}",
+                       sandbox_id="sb", environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}",
                        environment_card={"capabilities": {"extensions": extensions}})
 
 

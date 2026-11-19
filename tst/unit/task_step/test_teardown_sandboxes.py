@@ -85,8 +85,7 @@ def _context() -> TaskStepContext:
         ],
         deployed_envs=[
             DeployedGatewayEnv(
-                env_id="shop", env_version=1, gateway_url=None, mcp_url="http://m", db_web_url=None,
-                sandbox_id="sb-gw", sandbox_type="modal",
+                env_id="shop", env_version=1, gateway_url=None, mcp_url="http://m", sandbox_id="sb-gw", sandbox_type="modal",
                 sandbox_ids={"gateway": "sb-gw", "service_db": {"orders": "sb-db"}, "modal_vm": "sb-vm"},
             ),
         ],

@@ -350,7 +350,7 @@ class _Deployable:
         store.insert("env_state_instances", {"instance_id": f"esi-{self.id}", "state_type": "none"})
         store.insert("env_instances", {"instance_id": f"gateway-for-{self.id}", "env_id": "gateway"})
         return SimpleNamespace(
-            instance_id="i", mcp_url="m", gateway_url="g", db_web_url=None, db_mcp_url=None, vnc_url=None,
+            instance_id="i", mcp_url="m", gateway_url="g", vnc_url=None,
             website_frontend_urls=None, expires_at_utc=None, a2a_url="a", sandbox_id="s", agent_card={},
         )
 

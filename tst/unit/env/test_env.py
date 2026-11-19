@@ -74,8 +74,7 @@ def composed() -> dict:
 
 def _record(card: dict | None, base: str = _BASES[0]) -> DeployedEnv:
     return DeployedGatewayEnv(
-        env_id="multi", env_version=1, gateway_url=base, mcp_url=f"{base.rstrip('/')}/mcp", db_web_url=None,
-        sandbox_id="sb-1", instance_id="inst-1", environment_card_url=f"{base}{WELL_KNOWN_PATH}", environment_card=card,
+        env_id="multi", env_version=1, gateway_url=base, mcp_url=f"{base.rstrip('/')}/mcp", sandbox_id="sb-1", instance_id="inst-1", environment_card_url=f"{base}{WELL_KNOWN_PATH}", environment_card=card,
     )
 
 
@@ -291,7 +290,7 @@ def test_a_stored_record_loads_as_its_type_or_else_its_shape_keeping_every_field
 def test_a_gateway_record_is_filled_the_way_it_always_was():
     record = DeployedEnv.from_dict({"env_id": "e", "env_version": 1, "mcp_url": "https://m/mcp", "gateway_url": "https://gw", "sandbox_id": "sb",
                                     "sandbox_ids": None, "env_state_instance_ids": None})
-    assert (record.gateway_mode, record.sandbox_ids, record.env_state_instance_ids, record.db_web_url) == ("performance", {}, [], None)
+    assert (record.gateway_mode, record.sandbox_ids, record.env_state_instance_ids, record.db_web_gateway_url) == ("performance", {}, [], None)
 
 
 @pytest.mark.parametrize("record", [
@@ -299,7 +298,7 @@ def test_a_gateway_record_is_filled_the_way_it_always_was():
     DeployedSandboxEnv(env_id="e", env_version=1, env_provider_type="server", sandbox_id="srv", sandbox_type="modal",
                        sandbox_ids={"mcp_server": {"slack": "srv"}}, environment_card_url=_CARD_URL, environment_card=_CARD),
     DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="https://gw.example/sb/x", gateway_mode="consistent", sandbox_id="gw",
-                       sandbox_type="modal_vm", sandbox_ids={"gateway_server": "gw"}, db_web_url="https://pg/", db_mcp_url="https://dm/mcp",
+                       sandbox_type="modal_vm", sandbox_ids={"gateway_server": "gw"},
                        db_web_gateway_url="https://gw.example/sb/x/svc/pgweb/",
                        db_mcp_gateway_url="https://gw.example/sb/x/svc/db-mcp/mcp",
                        website_frontend_urls={"shop": "https://gw/shop/"}, vnc_url="https://vnc", env_state_instance_ids=["st-1"],
@@ -318,6 +317,19 @@ def test_each_record_class_loads_every_one_of_its_fields(cls):
 def test_the_gateway_only_fields_are_the_gateway_classs_own():
     own = {f.name for f in dataclasses.fields(DeployedGatewayEnv)} - {f.name for f in dataclasses.fields(DeployedSandboxEnv)}
     assert set(_GATEWAY_ONLY_FIELDS) == own - {"gateway_mode", "env_provider_type"}
+
+
+def test_a_record_an_older_deploy_wrote_keeps_its_console_tunnels():
+    """A gateway deployed before the consoles moved behind it is still alive, or is reused by id, and its record names
+    the consoles only at their tunnels, which a consumer reads until that gateway is gone."""
+    old = {"env_id": "e", "env_version": 1, "env_provider_type": "gateway", "sandbox_id": "sb-1",
+           "gateway_url": "https://gw.example", "db_web_url": "https://pg.example/",
+           "db_mcp_url": "https://db-mcp.example/mcp"}
+    record = DeployedEnv.from_dict(old)
+    assert isinstance(record, DeployedGatewayEnv)
+    assert (record.db_web_url, record.db_mcp_url) == ("https://pg.example/", "https://db-mcp.example/mcp")
+    stored = dataclasses.asdict(record)
+    assert (stored["db_web_url"], stored["db_mcp_url"]) == ("https://pg.example/", "https://db-mcp.example/mcp")
 
 
 def test_only_a_gateway_record_has_a_gateway_url():

@@ -24,7 +24,7 @@ from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 def _fake_deployed() -> DeployedEnv:
     return DeployedGatewayEnv(
         env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://mcp",
-        db_web_url=None, sandbox_id="s1",
+        sandbox_id="s1",
     )
 
 

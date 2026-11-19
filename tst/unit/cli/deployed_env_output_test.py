@@ -49,12 +49,11 @@ def test_task_run_prints_a_gateway_record_as_before_and_omits_a_missing_gateway(
 
 _CONSOLES = DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="https://gw.example",
                                mcp_url="https://gw.example/mcp", sandbox_id="gw", instance_id="i1",
-                               db_web_url="https://tunnel-8081.example/", db_mcp_url="https://tunnel-18767.example/mcp",
                                db_web_gateway_url="https://gw.example/svc/pgweb/",
                                db_mcp_gateway_url="https://gw.example/svc/db-mcp/mcp")
 
 
-def test_the_cli_prints_the_sql_consoles_at_the_gateway_and_never_their_tunnels():
+def test_the_cli_prints_the_sql_consoles_at_the_gateway():
     async def fake_deploy(**kwargs):
         return _CONSOLES
 
@@ -66,7 +65,6 @@ def test_the_cli_prints_the_sql_consoles_at_the_gateway_and_never_their_tunnels(
         got = CliRunner().invoke(env_cli, ["get-instance", "--id", "i1"]).output
     for output in (deployed, got, _format_env(_CONSOLES)):
         assert "https://gw.example/svc/pgweb/" in output and "https://gw.example/svc/db-mcp/mcp" in output
-        assert "tunnel-" not in output
 
 
 def test_a_record_outside_our_sandboxes_prints_no_sandbox():

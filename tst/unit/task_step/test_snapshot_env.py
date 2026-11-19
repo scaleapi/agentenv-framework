@@ -30,7 +30,6 @@ def _deployed(env_id="env-1", instance_id="env-1-abc123", gateway="https://gw-1"
         env_version=3,
         gateway_url=gateway,
         mcp_url=f"{gateway}/mcp",
-        db_web_url=None,
         sandbox_id="sb-1",
         instance_id=instance_id,
         environment_card_url=f"{gateway}{WELL_KNOWN_PATH}",
@@ -1104,7 +1103,7 @@ def test_snapshot_servers_refuses_an_env_with_none():
 def _deployed_without_a_card() -> DeployedEnv:
     """An older record: no card URL, so its servers are the ones its definition names."""
     return DeployedGatewayEnv(env_id="env-1", env_version=3, gateway_url="https://gw-1", mcp_url="https://gw-1/mcp",
-                              db_web_url=None, sandbox_id="sb-1")
+                              sandbox_id="sb-1")
 
 
 def test_resolve_loaded_universe_ref_reads_store(monkeypatch):
@@ -1343,8 +1342,7 @@ def _carded(card: dict) -> DeployedEnv:
     from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 
     return DeployedGatewayEnv(
-        env_id="env-1", env_version=3, gateway_url="https://gw-1", mcp_url="https://gw-1/mcp", db_web_url=None,
-        sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card,
+        env_id="env-1", env_version=3, gateway_url="https://gw-1", mcp_url="https://gw-1/mcp", sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card,
     )
 
 
