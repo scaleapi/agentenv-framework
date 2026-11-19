@@ -182,6 +182,7 @@ class Gateway:
         clock_followers: Mapping[str, str] | None = None,
         site_names: dict[str, Iterable[str]] | None = None,
         listed_by_name: Iterable[str] = (),
+        console_urls: Mapping[str, str] | None = None,
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
         which the gateway takes off every request it forwards to a service behind it. `clock_followers` names the
@@ -191,7 +192,8 @@ class Gateway:
         computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
         /svc routes pass its control token on to, a multi env's computers, which take it. `computers` are its children
         that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
-        requests its browser sends take."""
+        requests its browser sends take. `console_urls` are the env's SQL consoles by key, each served at /svc/<key>/
+        only with the control token, and not at all without one."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -214,6 +216,9 @@ class Gateway:
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
+        self._consoles = dict(console_urls or {}) if control_token else {}
+        if clashes := sorted(self._consoles.keys() & self.rest_proxy_urls.keys()):
+            raise ValueError(f"console keys {clashes} are also backing servers' /svc keys")
         self._computers = frozenset(computers)
         # The computer each computer tool is one of, the computer tools that take input rather than read, and the role
         # driving each computer now: the last to make an input call to its tools.
@@ -267,14 +272,17 @@ class Gateway:
         self._env_get_time_url_cache: str | None = None
         self._install_role_filters()
 
-        if self.rest_proxy_urls:
+        if self.rest_proxy_urls or self._consoles:
             @self._mcp.custom_route(
                 "/svc/{service_name}/{path:path}",
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_service(request: Request) -> Response:
+                if request.path_params["service_name"] in self._consoles:
+                    return await self._proxy_rest_request(request, url_map=self._consoles)
                 return await self._proxy_rest_request(request)
 
+        if self.rest_proxy_urls:
             @self._mcp.custom_route(BROWSER_ROUTE, methods=["GET", "HEAD"])
             async def browser_discovery(request: Request) -> Response:
                 return await self._browsers.discovery(request)
@@ -640,14 +648,17 @@ class Gateway:
         return app
 
     def _takes_control_token(self, scope: dict) -> bool:
-        """Whether a request takes the deploy's control token: a control route, the env's data plane, or one of
-        ``token_paths`` behind /svc, by the path as routed or by the one the backing server receives (``reaches``),
-        after dot-segment normalisation. A site's /website route never reaches its data plane."""
+        """Whether a request takes the deploy's control token: a control route, the env's data plane, any path of a SQL
+        console behind /svc, or one of ``token_paths`` behind /svc, by the path as routed or by the one the backing
+        server receives (``reaches``), after dot-segment normalisation. A site's /website route never reaches its data
+        plane."""
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
         prefix, _, rest = path.lstrip("/").partition("/")
         service, _, rest = rest.partition("/")
+        if prefix == "svc" and service in self._consoles:
+            return True
         guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
         raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
         return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
