@@ -248,9 +248,7 @@ def test_publish_tags_each_new_images_platform_builds_as_one_and_leaves_a_publis
     assert _run(script, monkeypatch, "publish", json.dumps([json.loads(_gateway()), json.loads(_disk())])) == 0
 
     assert calls[0] == ["docker", "login", "ghcr.io", "--username", "bot", "--password-stdin"]
-    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new,
-                     "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
-                     "--annotation", "index:org.opencontainers.image.revision=c0ffee", f"{new}-amd64", f"{new}-arm64"]]
+    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new, f"{new}-amd64", f"{new}-arm64"]]
     assert f"{published} is published already, so it's left as it is" in capsys.readouterr().out
 
 
