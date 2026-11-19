@@ -18,7 +18,7 @@ import os
 import shutil
 import signal
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -558,7 +558,8 @@ def _turn_usage(turn: _Turn) -> Usage:
     recorded (``model_calls``); for a count only some gave, how many left it out (``unreported``), so the sum reads
     as the lower bound it is; how many had cache counts with no word on whether their input held them
     (``cache_unsettled``), which leaves the turn's flag unknown; how many usages were in a shape none of the readers
-    know (``unrecognized``); and each provider's split of the cache writes, summed."""
+    know (``unrecognized``); and each provider's split of the cache writes, summed, a reported ``Usage``'s split
+    counted only where it holds counts, as its ``provider_details`` may hold anything."""
     calls = turn.model_usage
     sums, unreported = {}, {}
     for name in _USAGE_SUMS:
@@ -571,8 +572,10 @@ def _turn_usage(turn: _Turn) -> Usage:
     splits: dict[str, dict[str, int]] = {}
     for call in calls:
         for name in _CACHE_WRITE_SPLITS:
-            for part, count in (call.provider_details.get(name) or {}).items():
-                splits.setdefault(name, {})[part] = splits.get(name, {}).get(part, 0) + count
+            if isinstance(split := call.provider_details.get(name), Mapping):
+                for part, count in split.items():
+                    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                        splits.setdefault(name, {})[part] = splits.get(name, {}).get(part, 0) + count
     details = {"model_calls": len(calls), **({"unreported": unreported} if unreported else {}),
                **({"cache_unsettled": unsettled} if unsettled else {}),
                **({"unrecognized": unrecognized} if unrecognized else {}), **splits}

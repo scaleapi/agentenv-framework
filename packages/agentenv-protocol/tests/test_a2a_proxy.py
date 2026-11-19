@@ -694,6 +694,21 @@ def test_a_reported_usage_that_isnt_one_is_refused_and_the_turn_left_as_it_was(c
     assert _usage(_settled(client, task_id))["provider_details"] == {"model_calls": 1}
 
 
+def test_a_reported_usages_cache_write_split_counts_only_where_it_holds_counts(client):
+    task_id = _send(client, "go")
+    for details in ({"cache_creation": {"ephemeral_1h_input_tokens": None, "ephemeral_5m_input_tokens": 7}},
+                    {"cache_creation": "x", "cache_write_tokens_details": [1, 2]},
+                    {"cache_creation": {"ephemeral_5m_input_tokens": "3", "ephemeral_1h_input_tokens": True,
+                                        "other": -1}}):
+        usage = _reported(Usage(input_tokens=1, output_tokens=1, provider_details=details))
+        assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage).status_code == 200
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    task = _settled(client, task_id)
+    assert task["status"]["state"] == "completed"
+    assert _usage(task)["provider_details"] == {"model_calls": 3, "cache_creation": {"ephemeral_5m_input_tokens": 7}}
+
+
 def test_a_turn_sums_each_providers_cache_write_split_and_counts_usage_it_couldnt_read(client):
     task_id = _send(client, "go")
     for usage in ({"input_tokens": 9, "output_tokens": 5, "cache_creation_input_tokens": 7813,
