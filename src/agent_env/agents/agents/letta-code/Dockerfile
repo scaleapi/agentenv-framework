@@ -39,6 +39,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
 COPY mcp_tools.ts a2a_server.py letta_code_bridge.py letta_code_kit.py entrypoint.sh install.sh run.sh ./
+# Every clocked agent's egress rule, which the bridge imports, and the clock page's format it reads (shared_sources.toml).
+COPY agent_clock/agent_egress.py clock/clockpage.py ./
 # The CLI's cwd, /app, and its state under /data, fixed so neither follows the uid.
 RUN useradd --create-home --uid 10001 agent && mkdir -p /app /data \
     && chown agent:agent /app /data && chmod 0755 entrypoint.sh \
