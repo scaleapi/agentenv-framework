@@ -230,8 +230,8 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     gateway_mode: str = GatewayMode.PERFORMANCE.value
     db_web_url: Optional[str] = None
     db_mcp_url: Optional[str] = None
-    # pgweb and db-mcp behind the gateway, which take the control token (``control_headers_for``); None when its image
-    # serves neither.
+    # pgweb and db-mcp behind the gateway, which take the control token (``control_headers_for``); None when the deploy
+    # renders no such console, has no control token, or its gateway doesn't guard and reach the console.
     db_web_gateway_url: Optional[str] = None
     db_mcp_gateway_url: Optional[str] = None
     website_frontend_urls: Optional[dict[str, str]] = None

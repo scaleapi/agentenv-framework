@@ -18,6 +18,7 @@ import yaml
 from typing import NamedTuple
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 # Each test deploys a real GatewayEnv + MCP servers on sandbox VMs
 # (~5-15 min per test). Mark the entire module as slow.
@@ -1243,6 +1244,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             logger.info(f"Changelog count after load: {content_text}")
             assert content_text == "[{'cnt': 0}]", f"Expected empty changelog after load, got {content_text}"
 
+        assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
         await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
                                 tool_verifier_callback=assert_changelog_empty)
 
@@ -1267,6 +1269,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             assert "email" in content_text, f"Expected schema_name 'email' in changelog, got {content_text}"
             assert "INSERT" in content_text, f"Expected INSERT operation in changelog, got {content_text}"
 
+        assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
         await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
                                 tool_verifier_callback=assert_changelog_has_entry)
 
@@ -1311,6 +1314,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             logger.info(f"Post-rehydrate changelog query: {content_text}")
             assert rehydrate_probe_subject in content_text, f"Expected probe subject in changelog (triggers re-installed via rehydrated provider), got {content_text}"
 
+        assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
         await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
                                 tool_verifier_callback=assert_probe_in_changelog)
     finally:
@@ -1688,7 +1692,7 @@ async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable, hea
         logger.info(f"Testing gateway via tunnel (attempt {attempt + 1}/{max_retries})...")
         verified = False
         try:
-            async with httpx.AsyncClient(headers=headers) as http_client, \
+            async with create_mcp_http_client(headers=headers) as http_client, \
                     streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()

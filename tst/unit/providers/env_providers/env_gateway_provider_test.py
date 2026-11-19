@@ -3120,6 +3120,7 @@ def test_a_site_answering_only_errors_fails_its_health_probe(tmp_path):
 
 _TIMEOUT = httpx.ReadTimeout("slow")
 _REFUSED = httpx.ConnectError("refused")
+_DROPPED = httpx.RemoteProtocolError("Server disconnected without sending a response.")
 _GUARDED = {"pgweb": ([401], [200]), "db-mcp": ([401], [404])}
 _BOTH = {"pgweb": "https://gw.example/svc/pgweb/", "db-mcp": "https://gw.example/svc/db-mcp/mcp"}
 
@@ -3127,18 +3128,19 @@ _BOTH = {"pgweb": "https://gw.example/svc/pgweb/", "db-mcp": "https://gw.example
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answers, recorded", [
     pytest.param(_GUARDED, _BOTH, id="both-guarded-and-reached"),
-    pytest.param({**_GUARDED, "db-mcp": ([401], [502, 502])}, {"pgweb": _BOTH["pgweb"]}, id="db-mcp-unreachable"),
+    pytest.param({**_GUARDED, "db-mcp": ([401], [502] * 3)}, {"pgweb": _BOTH["pgweb"]}, id="db-mcp-unreachable"),
     pytest.param({**_GUARDED, "db-mcp": ([401], [502, 404])}, _BOTH, id="db-mcp-up-on-the-second-ask"),
     pytest.param({**_GUARDED, "pgweb": ([_TIMEOUT, 401], [200])}, _BOTH, id="pgweb-slow-once"),
-    pytest.param({**_GUARDED, "pgweb": ([_TIMEOUT, _TIMEOUT], [])}, {"db-mcp": _BOTH["db-mcp"]}, id="pgweb-silent"),
+    pytest.param({**_GUARDED, "pgweb": ([_TIMEOUT] * 3, [])}, {"db-mcp": _BOTH["db-mcp"]}, id="pgweb-silent"),
+    pytest.param({**_GUARDED, "pgweb": ([_DROPPED, 401], [_REFUSED, 200])}, _BOTH, id="pgweb-tunnel-drops-once"),
     pytest.param({"pgweb": ([404], []), "db-mcp": ([404], [])}, {}, id="older-gateway"),
     pytest.param({"pgweb": ([200], []), "db-mcp": ([200], [])}, {}, id="open"),
-    pytest.param({"pgweb": ([_REFUSED], []), "db-mcp": ([_REFUSED], [])}, {}, id="unreachable-gateway"),
+    pytest.param({"pgweb": ([_REFUSED] * 3, []), "db-mcp": ([_REFUSED] * 3, [])}, {}, id="unreachable-gateway"),
 ])
 async def test_the_record_names_each_console_the_gateway_guards_and_reaches(monkeypatch, answers, recorded):
     """A console counts when the gateway refuses it without the control token and, with the token, answers for it
     rather than with a 5xx: an older gateway image answers 404, and a console bound where the gateway can't reach it
-    leaves the gateway a 502."""
+    leaves the gateway a 502. A timeout, a dropped connection or a 5xx is asked again, three times in all here."""
     queues = {(key, with_token): list(replies) for key, (bare, token) in answers.items()
               for with_token, replies in ((False, bare), (True, token))}
 
@@ -3153,6 +3155,7 @@ async def test_the_record_names_each_console_the_gateway_guards_and_reaches(monk
     real = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(reply), **kw))
     monkeypatch.setattr(env_gateway_provider, "_CONSOLE_RETRY_PAUSE_S", 0)
+    monkeypatch.setattr(env_gateway_provider, "_CONSOLE_ATTEMPTS", 3)
     served = await EnvironmentGatewayProvider()._served_consoles("https://gw.example", ["pgweb", "db-mcp"], "tok")
     assert served == recorded
 

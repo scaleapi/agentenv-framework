@@ -212,17 +212,18 @@ class SidecarConfig:
 
 
 async def _console_answer(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> int | str:
-    """The status ``url`` answers, or the name of the error when it doesn't answer. A console still booting can time out
-    or leave the gateway a 502, so such an answer is asked once more after a pause."""
+    """The status ``url`` answers, or the name of the error when it doesn't answer. A console still booting, or a
+    sandbox tunnel dropping a connection, leaves a timeout, a connection error or a 502-504, so such an answer is asked
+    again, ``_CONSOLE_ATTEMPTS`` times in all."""
     answer: int | str = "unasked"
-    for attempt in range(2):
+    for attempt in range(_CONSOLE_ATTEMPTS):
         if attempt:
             await asyncio.sleep(_CONSOLE_RETRY_PAUSE_S)
         try:
             answer = (await client.get(url, headers=headers)).status_code
             if answer not in (502, 503, 504):
                 return answer
-        except httpx.TimeoutException as e:
+        except httpx.TransportError as e:
             answer = type(e).__name__
         except httpx.HTTPError as e:
             return type(e).__name__
@@ -1883,6 +1884,7 @@ def _seconds(seconds: float) -> str:
 # time, if startup's didn't complete.
 _STATE_READ_TIMEOUT_S = 60.0
 _CONSOLE_RETRY_PAUSE_S = 5.0
+_CONSOLE_ATTEMPTS = 4
 
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0

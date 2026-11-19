@@ -279,7 +279,7 @@ class Gateway:
             )
             async def proxy_to_service(request: Request) -> Response:
                 if request.path_params["service_name"] in self._consoles:
-                    return await self._proxy_rest_request(request, url_map=self._consoles)
+                    return await self._proxy_console_request(request)
                 return await self._proxy_rest_request(request)
 
         if self.rest_proxy_urls:
@@ -915,6 +915,13 @@ class Gateway:
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                              on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint,
                              site_names=site_names)
+
+    async def _proxy_console_request(self, request: Request) -> Response:
+        """Forward a request to one of the env's SQL consoles. Only a holder of the control token reaches one, and what
+        it writes there is no role's, so it opens no write window."""
+        return await forward(request, self._consoles[request.path_params["service_name"]],
+                             role=self._request_role(request), timeout=self.REST_PROXY_TIMEOUT, mcp_server=False,
+                             withheld=self._withheld)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.

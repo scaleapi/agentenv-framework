@@ -9,6 +9,8 @@ import httpx
 import pytest
 
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
+from agent_env.env.gateway.constants import CONSOLE_URLS_ENV
+from agent_env.env.gateway.entrypoint import parse_name_url_map
 from agent_env.env.gateway.gateway import Gateway
 
 TOKEN = "s3cret"
@@ -147,3 +149,32 @@ async def test_consoles_alone_get_the_svc_route(monkeypatch):
 def test_a_console_cannot_share_a_backing_servers_key():
     with pytest.raises(ValueError, match="shop"):
         _gateway(TOKEN, {"shop": "http://pgweb:8081"})
+
+
+@pytest.mark.asyncio
+async def test_a_write_through_a_console_opens_no_write_window(monkeypatch):
+    """Only a holder of the control token reaches a console, so what it writes there is credited to no role; a backing
+    server's write beside it still is."""
+    upstream = _Upstream(monkeypatch)
+    gw = _gateway(TOKEN)
+    changelog, events = iter(range(1, 100)), []
+
+    async def log_event(event):
+        events.append(event)
+        return "event"
+
+    monkeypatch.setattr(gw, "_query_changelog_id", lambda: next(changelog))
+    monkeypatch.setattr(gw, "_log_event", log_event)
+    for path in ("/svc/db-mcp/mcp", "/svc/pgweb/api/query"):
+        assert (await _send(gw, "POST", path, {"Authorization": f"Bearer {TOKEN}"}))[0] == 200
+    assert (await _send(gw, "POST", "/svc/shop/api/orders", {}))[0] == 200
+    assert [(e["event_type"], e["service"]) for e in events] == [("http_request", "shop")]
+    assert upstream.console_hosts == ["db-mcp", "pgweb"]
+
+
+@pytest.mark.parametrize("value, error", [("pgweb", "Invalid CONSOLE_URLS entry: 'pgweb'"),
+                                          ("pgweb=http://a:1,pgweb=http://b:2", "Duplicate service name in CONSOLE_URLS")])
+def test_a_bad_console_entry_names_its_own_variable(monkeypatch, value, error):
+    monkeypatch.setenv(CONSOLE_URLS_ENV, value)
+    with pytest.raises(ValueError, match=f"^{error}"):
+        parse_name_url_map(CONSOLE_URLS_ENV)

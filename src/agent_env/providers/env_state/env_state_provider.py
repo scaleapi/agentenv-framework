@@ -209,7 +209,7 @@ class DatabaseStateProvider(EnvStateProvider):
 
     def console_urls(self) -> dict[str, str]:
         """The SQL consoles ``render_sidecar_containers`` emits, by service name, at their addresses on the env's
-        network; the gateway serves each behind its control token. None for a backend without sidecars."""
+        network; the gateway serves each behind its control token. Empty for a backend without sidecars."""
         return {}
 
     def render_compose_containers(
