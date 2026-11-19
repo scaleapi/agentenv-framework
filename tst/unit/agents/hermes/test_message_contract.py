@@ -262,3 +262,19 @@ def test_a_turn_whose_calls_reported_no_usage_has_unknown_counts():
 
     assert a2a_server._usage(result(usage=report, tool_call_count=2)).to_dict() == {
         "tool_call_count": 2, "provider_details": {"api_calls": 3, "unreported_calls": 3}}
+
+
+def test_a_turns_usage_follows_what_its_total_says_its_input_holds():
+    """A total of the input and output alone says Hermes counted the cache in the input already; one that is neither
+    sum keeps Hermes' rule, unconfirmed."""
+    held = {"input_tokens": 21246, "output_tokens": 48, "total_tokens": 21294, "cache_read_tokens": 10496,
+            "cache_write_tokens": 0, "api_calls": 2}
+    neither = {**held, "input_tokens": 10750, "total_tokens": 30000}
+
+    assert a2a_server._usage(result(usage=held, tool_call_count=1)).to_dict() == {
+        "tool_call_count": 1, "input_tokens": 21246, "output_tokens": 48, "total_tokens": 21294,
+        "cache_read_tokens": 10496, "cache_write_tokens": 0, "input_includes_cache": True,
+        "provider_details": {"api_calls": 2}}
+    assert a2a_server._usage(result(usage=neither, tool_call_count=1)).to_dict() == {
+        "tool_call_count": 1, "input_tokens": 21246, "output_tokens": 48, "total_tokens": 30000,
+        "cache_read_tokens": 10496, "cache_write_tokens": 0, "provider_details": {"api_calls": 2}}

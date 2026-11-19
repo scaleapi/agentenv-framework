@@ -108,6 +108,20 @@ def test_usage_adds_the_cache_back_to_the_input() -> None:
     }
 
 
+def test_usage_follows_what_each_messages_total_says_its_input_holds() -> None:
+    """A total of the input and output alone says pi counted the cache in the input already; one that is neither sum
+    keeps pi's rule, unconfirmed."""
+    held = pi_agent._Run(assistant_messages=[_message(1139, 2, 1024, 1141)])
+    neither = pi_agent._Run(assistant_messages=[_message(1109, 21, 0, 1130), _message(115, 2, 1024, 0)])
+
+    assert pi_agent._usage(held).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 1139, "output_tokens": 2, "total_tokens": 1141,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0, "input_includes_cache": True}
+    assert pi_agent._usage(neither).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 2248, "output_tokens": 23, "total_tokens": 1130,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0}
+
+
 def test_a_call_that_reported_no_usage_is_unknown_not_zero() -> None:
     """Claude's streamed answers through a LiteLLM proxy carry no usage, so pi records zeros for them."""
     unreported = pi_agent._Run(assistant_messages=[_message(0, 0, 0, 0), _message(0, 0, 0, 0)], tool_calls=1)
