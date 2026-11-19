@@ -55,8 +55,13 @@ FAKE = textwrap.dedent('''\
     async def call(name, arguments):
         global calls
         calls += 1
+        with (state / "calls.jsonl").open("a") as output:
+            output.write(json.dumps({"tool": name, "arguments": arguments, "pid": os.getpid()}) + "\\n")
         if arguments.get("mode") == "exit":
             os._exit(1)
+        if arguments.get("mode") == "stall":
+            await server.request_context.session.send_log_message(level="info", data="stalled")
+            await anyio.sleep_forever()
         if arguments.get("mode") == "error":
             return types.CallToolResult(isError=True, content=[types.TextContent(type="text", text="ref expired")])
         answer = {"tool": name, "arguments": arguments, "pid": os.getpid(), "calls": calls}
@@ -305,6 +310,65 @@ async def test_concurrent_calls_are_serial_and_a_cancelled_queued_call_is_not_se
     release.set()
     assert all(not result.isError for result in await asyncio.gather(first, last))
     assert seen == [1, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_a_stalled_call_expires_closes_its_session_and_does_not_replay_queued_input(
+        module, driver, monkeypatch, tmp_path, cancel_caller):
+    entered, queued = asyncio.Event(), asyncio.Event()
+    deadlines = []
+    real_timeout = asyncio.timeout
+    real_client = module.ClientSession
+
+    def deadline(delay):
+        limit = real_timeout(None)
+        deadlines.append(limit)
+        return limit
+
+    async def logging(params):
+        assert params.data == "stalled"
+        entered.set()
+
+    def client(*args, **kwargs):
+        return real_client(*args, logging_callback=logging, **kwargs)
+
+    monkeypatch.setattr(module, "ClientSession", client)
+    monkeypatch.setattr(module.asyncio, "timeout", deadline)
+    first = asyncio.create_task(driver._forward("AX", mode="stall"))
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    put = driver._server._calls.put
+
+    async def enqueue(item):
+        await put(item)
+        queued.set()
+
+    monkeypatch.setattr(driver._server._calls, "put", enqueue)
+    next_call = asyncio.create_task(driver._forward("GUI", action="screenshot"))
+    await queued.wait()
+    if cancel_caller:
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+    deadlines[0].reschedule(asyncio.get_running_loop().time() - 1)
+    answer = await asyncio.wait_for(next_call, timeout=10)
+    await driver._server._task
+
+    assert answer.isError and "TimeoutError: HCU did not answer within" in answer.content[0].text
+    (old,) = _starts(tmp_path)
+    assert not Path(old["env"]["XDG_RUNTIME_DIR"]).exists()
+    if not cancel_caller:
+        failed = await first
+        assert failed.isError and "so AX may have run" in failed.content[0].text
+    fresh = await driver._forward("AX", mode="apps")
+    assert not fresh.isError and json.loads(fresh.content[0].text)["calls"] == 1
+    old, new = _starts(tmp_path)
+    assert old["pid"] != new["pid"]
+    called = [json.loads(line) for line in (tmp_path / "fake" / "calls.jsonl").read_text().splitlines()]
+    assert called == [
+        {"tool": "AX", "arguments": {"mode": "stall"}, "pid": old["pid"]},
+        {"tool": "AX", "arguments": {"mode": "apps"}, "pid": new["pid"]},
+    ]
 
 
 @pytest.mark.asyncio
