@@ -140,9 +140,11 @@ def _deploy_step_of(env: DeployedEnv) -> Optional[str]:
 
 
 def on_deployment(agent: DeployedAgent, env: DeployedEnv) -> bool:
-    """Whether ``env`` is the deployment ``agent`` is bound to: the one its ``env_step_id`` names, any when it names
-    none. A task that deploys one env several times binds each agent to one of them."""
-    return agent.env_step_id is None or agent.env_step_id == _deploy_step_of(env)
+    """Whether ``env`` is the deployment of its env that ``deploy_agent`` bound ``agent`` to, so a later deployment of
+    the same env never takes it over; any deployment is when it recorded none, as for an agent agent-env didn't deploy."""
+    if env.env_id not in agent.env_bindings:
+        return True
+    return agent.env_bindings[env.env_id] == _deploy_step_of(env)
 
 
 def _agent_deployment(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> Optional[DeployedEnv]:
@@ -162,7 +164,7 @@ async def follow_in(context: TaskStepContext, agent: DeployedAgent, env: Deploye
     if env.env_id != clock_env(agent):
         return {"synced": False, "reason": "follows_another_env", "follows": clock_env(agent)}
     if not on_deployment(agent, env):
-        return {"synced": False, "reason": "bound_to_another_deployment", "bound_to": agent.env_step_id}
+        return {"synced": False, "reason": "bound_to_another_deployment", "bound_to": agent.env_bindings[env.env_id]}
     outcome = await follow(agent, env, env_get_time_url=env_get_time_url, timezone=timezone, timeout=timeout)
     if outcome["synced"]:
         context.metadata.setdefault(FOLLOWING_KEY, {})[_slot(agent.agent_name)] = {

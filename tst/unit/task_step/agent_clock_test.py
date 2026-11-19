@@ -24,7 +24,7 @@ SYNC_TIME = {"method": "POST", "endpoint": "/ext/clock/sync-time",
 def _agent(name="solver", sync_time=SYNC_TIME, env_ids=("e1",), env_step_id=None) -> DeployedAgent:
     extensions = [{"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock", "methods": {"sync_time": sync_time}}}]
     return DeployedAgent(agent_name=name, api_url=AGENT_URL, a2a_url=AGENT_URL, env_ids=list(env_ids),
-                         env_step_id=env_step_id,
+                         env_bindings={env_id: env_step_id for env_id in env_ids} if env_step_id else {},
                          a2a_card={"capabilities": {"extensions": extensions if sync_time else []}})
 
 
@@ -395,3 +395,46 @@ async def test_a_teardown_retires_the_follower_at_the_deployment_it_followed(mon
 
     assert await agent_clock.retire_followers(context, ["solver-b"]) == ["agent-solver-b"]
     assert [(r.method, str(r.url)) for r in sent] == [("DELETE", "https://sandbox.example/sb-b/clock/followers")]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_deployed_unbound_stays_on_the_deployment_it_got_when_another_comes(monkeypatch):
+    """deploy_agent without env_step_id binds to the one deployment there is; a second deployment of the env, and
+    arming its clock, leave the agent on the first."""
+    import agent_env.a2a_agent as a2a_agent_package
+    from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+
+    card = _agent().a2a_card
+
+    class _Agent:
+        metadata: dict = {}
+
+        async def deploy(self, **_):
+            return SimpleNamespace(a2a_url=AGENT_URL, agent_card=card, sandbox_id="sb-agent", sandbox_type="fake",
+                                   instance_id="i-1", network_policy=None, control_token=None, control_headers={})
+
+    monkeypatch.setattr(a2a_agent_package.A2AAgent, "get", classmethod(lambda cls, *a, **k: _Agent()))
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _two_deployments()
+    first, second = context.deployed_envs
+    context.deployed_envs = [first]
+
+    await DeployAgentTaskStep(id="deploy", version=None, a2a_agent_id="a", agent_name="solver",
+                              env_ids=["e1"]).execute(context)
+    [agent] = context.deployed_agents
+    assert agent.env_bindings == {"e1": "deploy-a"}
+    assert DeployedAgent.from_dict(dataclasses.asdict(agent)).env_bindings == {"e1": "deploy-a"}
+    context.deployed_envs.append(second)
+    del sent[:]
+
+    await _step(env_step_id="deploy-b").execute(context)
+
+    assert not any(r.url.path.endswith("/clock/followers") or r.url.host == "solver" for r in sent)
+    assert context.metadata["clock_configurations"][-1]["agents"] == []
+    assert agent_clock.FOLLOWING_KEY not in context.metadata
+
+
+def test_an_agent_record_from_before_bindings_loads_bound_to_any_deployment():
+    agent = DeployedAgent.from_dict({"agent_name": "solver", "api_url": AGENT_URL, "env_ids": ["e1"]})
+    assert agent.env_bindings == {}
