@@ -55,11 +55,11 @@ def _in_agent(container: str, *command: str, real_time: bool = False) -> str:
 
 
 def _routes_through_proxy(container: str, bridge: str) -> bool:
-    """Whether the CLI the agent starts now goes out through the egress proxy, as the image's bridge decides: every
-    bridge has the same ``clock_armed`` and ``egress_env``."""
+    """Whether the CLI the agent starts now goes out through the egress proxy, as the image's bridge decides with the
+    ``clock_armed`` and ``egress_env`` every clocked bridge imports from ``agent_egress`` beside it."""
     # The A2A server's environment has the proxy (root.conf); this shell's doesn't, so it's passed as the server has it.
-    return _in_agent(container, "python3", "-c", f"import {bridge} as b; print('HTTPS_PROXY' in b.egress_env("
-                     "{b.EGRESS_PROXY_ENV: 'http://127.0.0.1:3128'}, armed=b.clock_armed()))",
+    return _in_agent(container, "python3", "-c", f"import {bridge} as b, agent_egress as e; print('HTTPS_PROXY' in "
+                     "b.egress_env({e.EGRESS_PROXY_ENV: 'http://127.0.0.1:3128'}, armed=b.clock_armed()))",
                      real_time=True) == "True"
 
 
@@ -89,6 +89,7 @@ class Agent:
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
+    "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
     "pi": Agent(bridge="pi_agent", version=("pi", "--version"), shows="1.1.0"),
 }
 

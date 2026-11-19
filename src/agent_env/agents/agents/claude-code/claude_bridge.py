@@ -11,17 +11,16 @@ import os
 import re
 import signal
 import stat
-import struct
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -175,74 +174,9 @@ def _model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
-#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
-#: while the agent follows an armed clock.
-EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
-#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
-#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
-CLOCK_PAGE = "/dev/shm/agentenv-clock"
-_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
-_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
-#: The constant every page's check is salted with (clockpage.check).
-_PAGE_CHECK_SALT = 0x9E3779B97F4A7C15
-#: How often, and how far apart, a read retries a page a write is under way on: 50 ms in all, far longer than a write.
-_PAGE_READ_TRIES, _PAGE_RETRY_S = 50, 0.001
-_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
-
-
-def clock_armed(page_path: str | None = None) -> bool:
-    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
-    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
-    try:
-        with open(page_path or CLOCK_PAGE, "rb") as page:
-            for _ in range(_PAGE_READ_TRIES):
-                page.seek(0)
-                raw = page.read(_PAGE.size)
-                if len(raw) < _PAGE.size:
-                    return False
-                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
-                    _PAGE.unpack(raw)
-                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
-                    return False
-                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
-                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
-                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ _PAGE_CHECK_SALT) & _MASK
-                if seq % 2 == 0 and checked == expected:
-                    return bool(armed)
-                time.sleep(_PAGE_RETRY_S)
-    except OSError:
-        return False
-    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
-
-
-def model_direct_hosts(base_url: str | None) -> list[str]:
-    """The model endpoint's host when the CLI reaches it directly on an armed clock: over plain HTTP, which has no
-    certificate to check at the env's date. Over TLS it goes through the egress proxy, which checks the certificate on
-    real time and, in an agent's image, reaches a private network's address too (``AGENTENV_EGRESS_PRIVATE``)."""
-    endpoint = urlsplit(base_url or "")
-    return [endpoint.hostname] if endpoint.hostname and endpoint.scheme == "http" else []
-
-
-def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
-    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
-    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
-    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
-    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
-    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
-    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
-    ``no_proxy``) stay direct."""
-    proxy = environ.get(EGRESS_PROXY_ENV)
-    if not proxy or not armed:
-        return {}
-    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
-    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
-    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
-            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
-
-
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
             task_id: str | None = None, max_thinking_tokens: int | None = None,
-            direct_hosts: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
+            clock_armed: bool = False, mcp_urls: Iterable[str] = ()) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
     token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
     aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
@@ -271,8 +205,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     # Older CLIs prepend a changing attribution block to the system prompt on custom base URLs, which defeats the
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
-    model_hosts = model_direct_hosts(env.get("ANTHROPIC_BASE_URL")) if clock_armed else []
-    env.update(egress_env(environ, [*direct_hosts, *model_hosts], armed=clock_armed))
+    env.update(egress_env(environ, [env.get("ANTHROPIC_BASE_URL", ""), *mcp_urls], armed=clock_armed))
     return env
 
 
@@ -753,8 +686,7 @@ async def _spawn_claude(
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
                     max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed(),
-                    direct_hosts=[urlsplit(str(entry.get("url") or "")).hostname or ""
-                                  for entry in (mcp_servers or {}).values()]),
+                    mcp_urls=[info["url"] for info in (mcp_servers or {}).values()]),
         cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))

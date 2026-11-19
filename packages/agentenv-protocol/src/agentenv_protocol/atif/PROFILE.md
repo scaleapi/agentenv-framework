@@ -23,13 +23,13 @@ to native exactly.
 
 - One document per agent per A2A context. Each A2A task starts at a `source: user` step that holds the inbound
   message, with the task's ids in that step's profile. Steps number from 1 across the whole document.
-- A context's record may span several documents: after an agent instance restarts, after a snapshot restore, and when
-  long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
+- A context's record may span several documents: after an agent instance restarts or drops the context from memory,
+  after a snapshot restore, and when long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
   index, and each earlier document names the next in `continued_trajectory_ref`. The worker that stores the earlier
   document sets that link, since the agent that wrote it may be gone.
 - `session_id` is the A2A context id, and a served document's `trajectory_id` names that one document of the
   context's record. A snapshot restored into a new context id starts a new session, since one snapshot can be loaded
-  many times.
+  many times; its turn index goes on from the snapshot's.
 - A sub-agent is an embedded trajectory in `subagent_trajectories`, with its own steps, referenced from the spawning
   call's result by `subagent_trajectory_ref`. It belongs to the task of the call that spawned it. A sub-agent that
   wrote no step is left out, and so is the reference to it. A spawning call with no result when its task ends gets
