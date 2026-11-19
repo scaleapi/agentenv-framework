@@ -17,8 +17,6 @@ from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway.constants import IDLE_CONNECTION_TIMEOUT_S
 from agent_env.env.gateway.gateway import Gateway
 
-REQUEST = b"GET /nothing-here HTTP/1.1\r\nHost: gateway\r\n\r\n"
-
 
 @pytest.fixture(autouse=True)
 def _disable_network():
@@ -28,14 +26,14 @@ def _disable_network():
 
 
 def test_an_idle_connection_outlasts_any_pause_between_tool_calls():
-    assert IDLE_CONNECTION_TIMEOUT_S >= 600
+    assert IDLE_CONNECTION_TIMEOUT_S >= MIN_IDLE_TIMEOUT_S
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[])
     assert gw._server_config().timeout_keep_alive == IDLE_CONNECTION_TIMEOUT_S
 
 
 @pytest.mark.asyncio
 async def test_the_server_closes_an_idle_connection_only_when_the_timeout_runs_out(monkeypatch):
-    monkeypatch.setattr(gateway_module, "IDLE_CONNECTION_TIMEOUT_S", 2)
+    monkeypatch.setattr(gateway_module, "IDLE_CONNECTION_TIMEOUT_S", TEST_IDLE_TIMEOUT_S)
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[])
     config = gw._server_config()
     config.log_level = "critical"
@@ -49,7 +47,7 @@ async def test_the_server_closes_an_idle_connection_only_when_the_timeout_runs_o
     await server.startup(sockets=[sock])
     reader, writer = await asyncio.open_connection("127.0.0.1", sock.getsockname()[1])
     try:
-        for idle_s in (0, 1):  # reused within the timeout: still served
+        for idle_s in REUSE_AFTER_S:  # reused within the timeout: still served
             await asyncio.sleep(idle_s)
             writer.write(REQUEST)
             await writer.drain()
@@ -59,8 +57,20 @@ async def test_the_server_closes_an_idle_connection_only_when_the_timeout_runs_o
                           if line.lower().startswith(b"content-length"))
             await reader.readexactly(length)
         idle_from = time.monotonic()
-        assert await asyncio.wait_for(reader.read(1), timeout=4) == b""  # then closed by the server
-        assert 1.5 < time.monotonic() - idle_from < 3.5
+        closed = await asyncio.wait_for(reader.read(1), timeout=TEST_IDLE_TIMEOUT_S + 2 * SCHEDULING_SLACK_S)
+        assert closed == b""  # then closed by the server
+        assert abs(time.monotonic() - idle_from - TEST_IDLE_TIMEOUT_S) < SCHEDULING_SLACK_S
     finally:
         writer.close()
         await server.shutdown()
+
+
+# An agent pauses seconds between tool calls, minutes at most; the real timeout must sit well past that.
+MIN_IDLE_TIMEOUT_S = 600
+# The timeout patched in for the socket test: short enough for a unit test, well under uvicorn's default 5 s.
+TEST_IDLE_TIMEOUT_S = 2
+# Idle times the connection is reused after, both inside TEST_IDLE_TIMEOUT_S.
+REUSE_AFTER_S = (0, 1)
+# How far the measured close may land from TEST_IDLE_TIMEOUT_S under event-loop scheduling.
+SCHEDULING_SLACK_S = 1.0
+REQUEST = b"GET /nothing-here HTTP/1.1\r\nHost: gateway\r\n\r\n"
