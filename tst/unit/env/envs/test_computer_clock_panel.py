@@ -1,8 +1,9 @@
 """The ubuntu-24.04 base's clock-panel, run as it runs on a computer, against a clock page written as the follower
-writes it and a stand-in for xfconf-query that records each call: when the clock is armed or jumps it has each of the
-panel's clocks redraw at once and again at the universe's next minute, and at every universe minute while the clock
-runs at another rate, at most once a second; a re-anchoring redraws nothing, nor does a clock that isn't armed; and a
-clock given a zone of its own is left alone. The base installs it beside the page writer and runs it on real time."""
+writes it and a stand-in for xfconf-query that keeps the panel's config and records each call: when the clock is armed
+or jumps it has each of the panel's clocks redraw at once and again at the universe's next minute, and at every universe
+minute while the clock runs at another rate, at most once a second; a re-anchoring redraws nothing, nor does a clock
+that isn't armed; a redraw leaves the config as it was, and one cut short leaves a clock the next redraws; and a clock
+given another zone is left alone. The base installs it beside the page writer and runs it on real time."""
 from __future__ import annotations
 
 import configparser
@@ -22,25 +23,36 @@ import agent_env
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
 CLOCK = Path(agent_env.__file__).parent / "utils" / "faketime_clock"
 ZONE = "Europe/Paris"
-#: The panel's plugins as xfconf-query lists them: two clocks, the second with a zone of its own.
-LISTING = """/plugins/plugin-1                  applicationsmenu
-/plugins/plugin-12                 clock
-/plugins/plugin-13                 separator
-/plugins/plugin-13/style           0
-/plugins/plugin-20                 clock
-/plugins/plugin-20/timezone        Asia/Tokyo
-/plugins/plugin-22/base-directory  /home/user
+#: The panel's plugins: two clocks, the second with another zone.
+PANEL = {"/plugins/plugin-1": "applicationsmenu", "/plugins/plugin-12": "clock", "/plugins/plugin-13": "separator",
+         "/plugins/plugin-13/style": "0", "/plugins/plugin-20": "clock", "/plugins/plugin-20/timezone": "Asia/Tokyo",
+         "/plugins/plugin-22/base-directory": "/home/user"}
+#: xfconf-query on the panel's channel kept in a JSON file: it lists (``-l -v``), sets (``-s``) and resets (``-r``),
+#: recording each call, and fails the next reset while the failure marker is there, removing it.
+XFCONF = """#!@PYTHON@
+import json, os, sys, time
+args = sys.argv[1:]
+with open("@CALLS@", "a") as f:
+    f.write(json.dumps({"at": time.time(), "args": args}) + "\\n")
+with open("@STATE@") as f:
+    state = json.load(f)
+path = args[args.index("-p") + 1]
+if "-l" in args:
+    sys.stdout.write("".join(f"{key:<36}{value}\\n" for key, value in sorted(state.items())))
+    sys.exit(0)
+if "-r" in args and os.path.exists("@FAIL@"):
+    os.remove("@FAIL@")
+    sys.exit("Failed to init libxfconf: the bus went away")
+if "-r" in args:
+    state.pop(path, None)
+else:
+    state[path] = args[args.index("-s") + 1]
+with open("@STATE@", "w") as f:
+    json.dump(state, f)
 """
-XFCONF = """#!{python}
-import json, sys, time
-with open({calls!r}, "a") as f:
-    f.write(json.dumps({{"at": time.time(), "args": sys.argv[1:]}}) + "\\n")
-if "-l" in sys.argv:
-    sys.stdout.write({listing!r})
-"""
-REDRAW = [["-c", "xfce4-panel", "-p", "/plugins", "-l", "-v"],
-          ["-c", "xfce4-panel", "-p", "/plugins/plugin-12/timezone", "-n", "-t", "string", "-s", ZONE],
-          ["-c", "xfce4-panel", "-p", "/plugins/plugin-12/timezone", "-r"]]
+TIMEZONE = "/plugins/plugin-12/timezone"
+SET = ["-c", "xfce4-panel", "-p", TIMEZONE, "-n", "-t", "string", "-s", ZONE]
+RESET = ["-c", "xfce4-panel", "-p", TIMEZONE, "-r"]
 MINUTE = 60.0
 
 
@@ -53,9 +65,11 @@ def panel(tmp_path):
     bin_.mkdir()
     shutil.copy(CLOCK / "clockpage.py", lib / "clockpage.py")
     shutil.copy(BASE / "clock-panel", lib / "clock-panel")
-    calls = tmp_path / "calls.jsonl"
+    calls, state, fail = tmp_path / "calls.jsonl", tmp_path / "panel.json", tmp_path / "fail-reset"
+    state.write_text(json.dumps(PANEL))
     xfconf = bin_ / "xfconf-query"
-    xfconf.write_text(XFCONF.format(python=sys.executable, calls=str(calls), listing=LISTING))
+    xfconf.write_text(XFCONF.replace("@PYTHON@", sys.executable).replace("@CALLS@", str(calls))
+                      .replace("@STATE@", str(state)).replace("@FAIL@", str(fail)))
     xfconf.chmod(0o755)
     (tmp_path / "timezone").write_text(ZONE + "\n")
     paths = {"AGENTENV_CLOCK_PAGE": tmp_path / "page", "AGENTENV_CLOCK_FILE": tmp_path / "clock",
@@ -69,6 +83,14 @@ def panel(tmp_path):
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     class Running:
+        errors = 0
+
+        def fail_next_reset(self) -> None:
+            fail.touch()
+
+        def config(self) -> dict:
+            return json.loads(state.read_text())
+
         def set(self, universe: float, rate: float) -> float:
             """The page written as the follower writes it; when the write started."""
             started = time.time()
@@ -82,20 +104,31 @@ def panel(tmp_path):
             page.write(armed, (universe_ns + (now - anchor_ns) * rate) / 1e9 + by, rate, now / 1e9)
 
         def redraws(self) -> list[float]:
-            """When each redraw began, each checked to be the one redraw the panel's clocks need."""
+            """When each redraw began."""
+            return [call["at"] for call in self.calls() if "-l" in call["args"]]
+
+        def writes(self) -> list[list[list[str]]]:
+            """Each redraw's writes, in order."""
+            redraws = []
+            for call in self.calls():
+                if "-l" in call["args"]:
+                    redraws.append([])
+                else:
+                    redraws[-1].append(call["args"])
+            return redraws
+
+        def calls(self) -> list[dict]:
             try:
-                recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+                return [json.loads(line) for line in calls.read_text().splitlines()]
             except FileNotFoundError:
                 return []
-            starts = [n for n, call in enumerate(recorded) if "-l" in call["args"]]
-            for n in starts[:-1] if starts and len(recorded) - starts[-1] < len(REDRAW) else starts:
-                assert [call["args"] for call in recorded[n:n + len(REDRAW)]] == REDRAW, recorded
-            return [recorded[n]["at"] for n in starts]
 
-    yield Running()
+    running = Running()
+    yield running
     process.kill()
     output = process.communicate()[0]
-    assert '"error"' not in output, output
+    assert output.count('"event": "error"') == running.errors, output
+    assert all(writes in ([SET, RESET], [RESET, SET], [SET]) for writes in running.writes()), running.writes()
 
 
 def _until(check, within: float):
@@ -120,6 +153,8 @@ def test_an_unarmed_clock_redraws_nothing_and_arming_it_redraws_each_clock_witho
     started = panel.set(_minute_ahead(30), 1)
 
     assert _until(panel.redraws, within=1.5)[0] - started < 1.0
+    _until(lambda: len(panel.calls()) == 3, within=1.5)
+    assert panel.writes() == [[SET, RESET]] and panel.config() == PANEL
 
 
 def test_a_jump_redraws_at_once_and_again_as_the_universes_next_minute_turns_then_the_panels_own_timer_takes_over(
@@ -164,3 +199,21 @@ def test_the_base_installs_it_beside_the_page_writer_and_its_session_runs_it_on_
     assert "COPY clock-panel /usr/local/lib/agentenv-clock/clock-panel\n" in (BASE / "Dockerfile").read_text()
     assert (program["command"], program["environment"]) == (
         "/usr/bin/python3 -I /usr/local/lib/agentenv-clock/clock-panel", 'AGENTENV_REAL_TIME="1"')
+
+
+def test_a_redraw_cut_short_between_its_changes_leaves_a_clock_on_the_local_zone_which_later_redraws_move_and_restore(
+        panel):
+    panel.fail_next_reset()
+    panel.errors = 1
+    panel.set(_minute_ahead(30), 1)
+    _until(lambda: len(panel.calls()) == 3, within=1.5)
+    left = panel.config()
+    panel.set(_minute_ahead(20), 1)
+    _until(lambda: len(panel.calls()) == 6, within=1.5)
+    panel.set(_minute_ahead(10), 1)
+    _until(lambda: len(panel.calls()) == 9, within=1.5)
+    time.sleep(0.5)
+
+    assert left == {**PANEL, TIMEZONE: ZONE}
+    assert panel.writes() == [[SET, RESET], [RESET, SET], [RESET, SET]]
+    assert panel.config() == {**PANEL, TIMEZONE: ZONE}

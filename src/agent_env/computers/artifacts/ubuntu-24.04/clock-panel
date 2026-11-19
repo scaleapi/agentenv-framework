@@ -4,10 +4,11 @@ real time, so when the universe clock is armed or jumps it shows the old time un
 later, and the timer keeps its old phase, so the universe's next minute shows late too. This session program reads the
 clock page the follower writes (``clockpage.py``) and, when the universe moves by a second or more or its rate changes,
 has each clock on the panel redraw at once and again at the universe's next minute; while the clock runs at a rate
-other than 1, at every universe minute, at most once a second. A redraw sets a clock's time zone to the local zone's
-name and then resets it: two changes the plugin redraws on, which leave the panel's config as it was. A clock given a
-zone of its own is left alone. It runs on real time (the clock's real-time marker), against which the page anchors the
-universe."""
+other than 1, at every universe minute, at most once a second. A clock whose time zone is unset or the local zone's name
+shows local time either way, so a redraw moves it to the other and back: two changes the plugin redraws on, which leave
+the panel's config as it was, and a redraw cut short between them leaves it in one of the two, which the next redraws.
+A clock given another zone is left alone. It runs on real time (the clock's real-time marker), against which the page
+anchors the universe."""
 import json
 import os
 import re
@@ -82,13 +83,17 @@ def redraw(why: str) -> None:
     try:
         listed = dict((path, value.strip()) for path, _, value in
                       (line.partition(" ") for line in xfconf("-p", "/plugins", "-l", "-v").splitlines()))
-        clocks = [path for path, value in listed.items()
-                  if PLUGIN.fullmatch(path) and value == "clock" and f"{path}/timezone" not in listed]
         with open(ZONE) as f:
             zone = f.read().strip()
+        clocks = [path for path, value in listed.items() if PLUGIN.fullmatch(path) and value == "clock"
+                  and listed.get(f"{path}/timezone", zone) == zone]
         for path in clocks:
-            xfconf("-p", f"{path}/timezone", "-n", "-t", "string", "-s", zone)
-            xfconf("-p", f"{path}/timezone", "-r")
+            if f"{path}/timezone" in listed:
+                xfconf("-p", f"{path}/timezone", "-r")
+                xfconf("-p", f"{path}/timezone", "-n", "-t", "string", "-s", zone)
+            else:
+                xfconf("-p", f"{path}/timezone", "-n", "-t", "string", "-s", zone)
+                xfconf("-p", f"{path}/timezone", "-r")
         log("redrawn", why=why, clocks=clocks)
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:  # no panel or bus yet: the next change tries again
         log("error", why=why, error=f"{type(e).__name__}: {e}"[:300])
