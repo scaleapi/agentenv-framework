@@ -125,6 +125,10 @@ class AdapterRun:
     def page(self) -> dict[str, Any] | None:
         return self._doc.page()
 
+    def subagent_tasks(self) -> dict[str, int]:
+        """Each declared sub-agent's task, by its 0-based place among this run's tasks."""
+        return self._doc.subagent_tasks()
+
     def start_task(self, context: TurnContext) -> None:
         """Open a task and write its user step. The context's first task creates the adapter."""
         if self._turn is not None:

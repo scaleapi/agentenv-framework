@@ -1635,7 +1635,10 @@ included:
 - A cursor read pages those closed steps by `step_id`: `after` is the last
   `step_id` read, and `next` is the last one served. Each page carries `header`,
   the document's root without its steps, and `subagents`, the embedded
-  sub-agent trajectories its steps reference.
+  sub-agent trajectories of the tasks its steps belong to, as far as each is
+  served. A sub-agent can gain steps while its task runs, so keep each one's
+  latest copy; the page that serves a task's last step, which closes only as the
+  task ends, carries them whole.
 
 Every `atif/1` answer names `schema_version` and `profile_version` beside
 `format`. An adapter that raises stops its context's copy, never the turn: the

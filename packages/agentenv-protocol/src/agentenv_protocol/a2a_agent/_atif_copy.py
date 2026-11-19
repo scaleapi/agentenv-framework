@@ -50,7 +50,8 @@ class _Task:
 
 @dataclass(frozen=True, slots=True)
 class AtifPage:
-    """A cursor page of a copy: the closed steps after ``after``, ``next`` the last one's ``step_id``."""
+    """A cursor page of a copy: the closed steps after ``after``, ``next`` the last one's ``step_id``, and the
+    sub-agents of their tasks."""
 
     header: dict[str, Any] | None
     subagents: list[dict[str, Any]]
@@ -146,30 +147,40 @@ class AtifCopy:
 
     def page(self, after: int, max_steps: int, max_bytes: int, *, task_id: str | None = None) -> AtifPage:
         """The closed steps after step ``after``, of the whole context or of task ``task_id``, within both budgets; the
-        first is always returned, so one larger than ``max_bytes`` can't stall a reader."""
+        first is always returned, so one larger than ``max_bytes`` can't stall a reader. With them, the sub-agents of
+        every task they belong to, as far as each is served: a sub-agent can gain steps while its task runs, and the
+        page that serves a task's last step, which closes only as the task ends, carries them whole."""
         with self._lock:
             self._check()
             document = self._run.page()
+            places = {place: task_id for task_id, place in
+                      ((task_id, task.place) for task_id, task in self._tasks.items())}
+            sub_tasks = {agent_id: places.get(place) for agent_id, place in self._run.subagent_tasks().items()}
         steps = document["steps"] if document is not None else []
         if after > len(steps):
             raise ValueError(f"after={after} is past the document's {len(steps)} closed steps")
-        scope = [step for step, owner in zip(steps, _owners(steps)) if task_id is None or owner == task_id]
-        pending = [step for step in scope if step["step_id"] > after]
+        owners = _owners(steps)
+        scope = [(step, owner) for step, owner in zip(steps, owners) if task_id is None or owner == task_id]
+        pending = [(step, owner) for step, owner in scope if step["step_id"] > after]
         served: list[dict[str, Any]] = []
+        tasks: set[str | None] = set()
         used = 0
-        for step in pending[:max_steps]:
+        for step, owner in pending[:max_steps]:
             size = len(json.dumps(step))
             if served and used + size > max_bytes:
                 break
             served.append(step)
+            tasks.add(owner)
             used += size
         header = None
+        subagents: list[dict[str, Any]] = []
         if document is not None:
             header = {key: value for key, value in document.items()
                       if key not in ("steps", "subagent_trajectories", "final_metrics")}
-        return AtifPage(header=header, subagents=_referenced(served, (document or {}).get("subagent_trajectories", [])),
-                        steps=served, next=served[-1]["step_id"] if served else after,
-                        has_more=len(served) < len(pending))
+            subagents = [sub for sub in document.get("subagent_trajectories", [])
+                         if sub_tasks.get(sub["trajectory_id"]) in tasks]
+        return AtifPage(header=header, subagents=subagents, steps=served,
+                        next=served[-1]["step_id"] if served else after, has_more=len(served) < len(pending))
 
     def _open(self, task_id: str) -> _Task | None:
         if self._failed is not None:
@@ -255,20 +266,3 @@ def _owners(steps: Sequence[dict[str, Any]]) -> list[str | None]:
             owner = ((step.get("extra") or {}).get(PROFILE_KEY) or {}).get("task_id", owner)
         owners.append(owner)
     return owners
-
-
-def _referenced(steps: Sequence[dict[str, Any]], subagents: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The embedded sub-agent trajectories ``steps`` reference, and those they reference in turn, in document
-    order."""
-    by_id = {sub["trajectory_id"]: sub for sub in subagents}
-    wanted: set[str] = set()
-    frontier = list(steps)
-    while frontier:
-        step = frontier.pop()
-        for result in (step.get("observation") or {}).get("results", []):
-            for ref in result.get("subagent_trajectory_ref") or ():
-                trajectory_id = ref.get("trajectory_id")
-                if trajectory_id in by_id and trajectory_id not in wanted:
-                    wanted.add(trajectory_id)
-                    frontier.extend(by_id[trajectory_id]["steps"])
-    return [sub for sub in subagents if sub["trajectory_id"] in wanted]

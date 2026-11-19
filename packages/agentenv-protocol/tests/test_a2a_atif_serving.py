@@ -153,6 +153,18 @@ async def _turn(request: TaskRequest, hold: _Hold) -> TaskResult:
         log.append({"type": "result", "id": f"{tag}-task", "out": "two files"})
         log.append({"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer found two files"})
         return TaskResult.text(f"{tag}: the explorer found two files")
+    if scenario == "grow":
+        log.append({"type": "call", "step": f"{tag}-1", "id": f"{tag}-task", "name": "Task", "args": {"goal": "ls"}})
+        log.append({"type": "spawn", "id": f"{tag}-task", "agent": f"{tag}-sub", "name": "explorer"})
+        log.append({"type": "say", "step": f"{tag}-s1", "text": "sub: listing", "agent": f"{tag}-sub"})
+        log.append({"type": "say", "step": f"{tag}-s2", "text": "sub: still listing", "agent": f"{tag}-sub"})
+        log.append({"type": "result", "id": f"{tag}-task", "out": "listing"})
+        log.append({"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer is listing"})
+        log.append({"type": "say", "step": f"{tag}-3", "text": f"{tag}: waiting"})
+        await hold.wait()
+        log.append({"type": "say", "step": f"{tag}-s3", "text": "sub: two files", "agent": f"{tag}-sub"})
+        log.append({"type": "say", "step": f"{tag}-4", "text": f"{tag}: two files"})
+        return TaskResult.text(f"{tag}: two files")
     if scenario == "orphan":
         log.append({"type": "call", "step": f"{tag}-1", "id": f"{tag}-task", "name": "Task", "args": {"goal": "ls"}})
         log.append({"type": "spawn", "id": f"{tag}-task", "agent": f"{tag}-sub", "name": "explorer"})
@@ -226,10 +238,12 @@ def _grant() -> dict[str, Any]:
 
 
 def _rebuild(pages: list[dict[str, Any]]) -> dict[str, Any]:
-    """A document from cursor pages: the last page's header, every page's steps and their sub-agents."""
+    """A document from cursor pages: the last page's header, every page's steps, and each sub-agent's latest copy."""
     document = dict(pages[-1]["header"])
     document["steps"] = [step for page in pages for step in page["events"]]
-    subagents = {sub["trajectory_id"]: sub for page in pages for sub in page["subagents"]}
+    subagents: dict[str, Any] = {}
+    for page in pages:
+        subagents.update({sub["trajectory_id"]: sub for sub in page["subagents"]})
     if subagents:
         document["subagent_trajectories"] = list(subagents.values())
     return document
@@ -472,7 +486,7 @@ def test_an_adapter_error_stops_the_copy_not_the_turn() -> None:
     assert error["code"] == "atif_unavailable" and "no-such-call" in error["message"]
 
 
-def test_cursor_pages_carry_the_header_and_the_sub_agents_they_reference() -> None:
+def test_cursor_pages_carry_the_header_and_their_tasks_sub_agents() -> None:
     with TestClient(_toy().create_app()) as client:
         task_id = _send(client, "spawn t1", "m-1")
         _ended(client, task_id)
@@ -490,6 +504,26 @@ def test_cursor_pages_carry_the_header_and_the_sub_agents_they_reference() -> No
     spawning = next(page for page in pages if any(
         "subagent_trajectory_ref" in result for result in page["events"][0].get("observation", {}).get("results", [])))
     assert [sub["trajectory_id"] for sub in spawning["subagents"]] == ["t1-sub"]
+    assert _rebuild(pages) == _strip_final_metrics(document)
+
+
+def test_a_reader_following_the_cursor_gets_the_steps_a_sub_agent_writes_after_its_result() -> None:
+    hold = _Hold()
+    pages = []
+    with TestClient(_toy(hold).create_app()) as client:
+        task_id = _send(client, "grow t1", "m-1")
+        hold.reached()
+        while not pages or pages[-1]["has_more"]:
+            pages.append(_atif(client, context_id="ctx-1", after=pages[-1]["next"] if pages else 0))
+        early = [sub["steps"] for page in pages for sub in page["subagents"]]
+        hold.resume.set()
+        _ended(client, task_id)
+        while pages[-1]["has_more"] or pages[-1]["state"] != "completed":
+            pages.append(_atif(client, context_id="ctx-1", after=pages[-1]["next"]))
+        document = _atif(client, task_id=task_id)["trajectory"]
+    # While the task ran the sub-agent had one closed step; the page that served the task's last step had all three.
+    assert [len(steps) for steps in early][-1] == 1
+    assert [len(sub["steps"]) for sub in pages[-1]["subagents"]] == [3]
     assert _rebuild(pages) == _strip_final_metrics(document)
 
 
