@@ -35,6 +35,7 @@ from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.computer.utils import builder, inside
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
@@ -86,10 +87,19 @@ def base():
 
 @pytest.fixture(scope="module")
 def desktop(tmp_path_factory):
-    """The shipped desktop example's computer env, composed for the module in stores of the module's own: an image for
-    each arch this machine's Docker builds, the native one probed by gate 3."""
+    """The shipped desktop example's computer env, composed for the module in stores of the module's own as a run on
+    this machine composes it: the container of each arch this machine's Docker builds, the native one probed by gate 3.
+    A deploy of its disk form composes that first."""
     bundle = find_bundle("desktop")
     yield from _composed(tmp_path_factory.mktemp("desktop"), parse_bundle(bundle.root, id_root=bundle.id_root))
+
+
+@pytest.fixture(scope="module")
+def desktop_with_disk(tmp_path_factory):
+    """``desktop`` with its disk forms composed too, for a test that boots its disk image itself."""
+    bundle = find_bundle("desktop")
+    yield from _composed(tmp_path_factory.mktemp("desktop"), parse_bundle(bundle.root, id_root=bundle.id_root),
+                         disks=True)
 
 
 @pytest.fixture(scope="module")
@@ -158,7 +168,9 @@ def cdp_clients(tmp_path_factory) -> Path:
     return folder
 
 
-def _composed(root: Path, bundle, env_id: str | None = None):
+def _composed(root: Path, bundle, env_id: str | None = None, disks: bool = False):
+    """``bundle`` written and its computers composed as a run on this machine composes them, its containers alone,
+    unless ``disks``, which composes every form of each base too."""
     patch = pytest.MonkeyPatch()
     patch.chdir(root)
     patch.setenv("XDG_STATE_HOME", str(root / "state"))
@@ -170,7 +182,8 @@ def _composed(root: Path, bundle, env_id: str | None = None):
     with namespace_routing():
         plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
         try:
-            materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
+            materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)),
+                        composing=Composing() if disks else Composing.for_run(None))
         finally:
             package_cache.keep()
         yield Env.get(env_id or f"{bundle.id_root}/desktop")
