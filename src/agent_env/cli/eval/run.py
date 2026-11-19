@@ -44,6 +44,7 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     from agent_env.eval import Eval
     from agent_env.task import Task
+    from agent_env.task.lint import Severity, lint
 
     click.echo(f"Fetching eval: id={eval_id} version={eval_version or 'latest'}...")
     eval_obj = Eval.get(eval_id, version=eval_version)
@@ -55,6 +56,20 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         version_note = " (resolved from latest)" if et.task_version is None else ""
         click.echo(f"  Loaded task: {task.id} v{task.version} ({len(task.steps)} steps){version_note}")
         tasks.append(task)
+
+    refused = []
+    for task in tasks:
+        for finding in lint(task):
+            line = f"{task.id} v{task.version}: {finding.text}"
+            if finding.severity is Severity.ERROR:
+                refused.append(line)
+            else:
+                click.echo(f"  Warning: {line}")
+    if refused:
+        click.echo(f"Task lint found {len(refused)} error(s), so no run started:", err=True)
+        for line in refused:
+            click.echo(f"  - {line}", err=True)
+        raise SystemExit(1)
 
     print_banner()
 

@@ -366,8 +366,9 @@ def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its
 
     run_bundle(bundle_dir, tasks=["agent"], on_progress=lines.append)
 
-    assert lines[:5] == [
+    assert lines[:6] == [
         CONFIGURED_WITH_AGENT,
+        "tasks/agent.json: warning: no step grades this task, so a run has no score",
         "agents/solver (Dockerfile image): building with docker, which can take minutes",
         "agents/solver (Dockerfile image): v1 (new)",
         "agents/solver: v1 (new)",
@@ -553,6 +554,8 @@ def test_the_cli_dry_run_prints_what_the_run_would_write_and_run_and_exits_0(bun
     assert result.output == (
         DRY_RUN
         + f"{CONFIGURED}\n"
+        "tasks/c.json: warning: no step grades this task, so a run has no score\n"
+        "tasks/code.json: warning: no step grades this task, so a run has no score\n"
         "artifacts/script: v1 (new)\n"
         "tasks/a.json: v1 (new)\n"
         "tasks/b.json: v1 (new)\n"
@@ -596,6 +599,7 @@ def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinn
     assert result.output.startswith(
         DRY_RUN
         + f"{CONFIGURED}\n"
+        "tasks/agent.json: warning: no step grades this task, so a run has no score\n"
         f"agents/solver: v2 (artifact {image} has a new version in the store (v1 → v2))\n"
         "tasks/agent.json: v1, unchanged\n"
         "\n"
@@ -615,6 +619,7 @@ def test_the_cli_dry_run_lists_an_image_it_would_write_and_builds_nothing(bundle
     assert result.output == (
         DRY_RUN
         + f"{CONFIGURED_WITH_AGENT}\n"
+        "tasks/agent.json: warning: no step grades this task, so a run has no score\n"
         "agents/solver (Dockerfile image): v1 (new)\n"
         "agents/solver: v1 (new)\n"
         "tasks/agent.json: v1 (new)\n"

@@ -65,6 +65,14 @@ class AgentPromptResponseVerifierTaskStep(VerifierTaskStep):
         base["verifier_id"] = self.verifier_id
         return base
 
+    def config_problems(self) -> list[str]:
+        """The criteria a run would refuse when it grades: an unknown type, an empty ``needles`` or ``pattern``, a
+        pattern that doesn't compile, or a flag ``re`` doesn't have."""
+        problems = super().config_problems()
+        for idx, criterion in enumerate(self.criteria):
+            problems.extend(f"criterion #{idx}: {problem}" for problem in _criterion_problems(criterion))
+        return problems
+
     @classmethod
     def from_dict(cls, data: dict) -> "AgentPromptResponseVerifierTaskStep":
         return cls(**cls._base_from_dict(data), prompt_id=data["prompt_id"], criteria=data.get("criteria"))
@@ -143,3 +151,25 @@ class AgentPromptResponseVerifierTaskStep(VerifierTaskStep):
                 "justification": "pattern matched" if passed else f"no match for pattern {pattern!r}",
             }
         raise RuntimeError(f"unhandled criterion type {rtype}")
+
+
+def _criterion_problems(criterion: dict) -> list[str]:
+    rtype = criterion.get("type")
+    if rtype not in _HANDLED_TYPES:
+        return [f"unknown type {rtype!r}; handled types: {sorted(_HANDLED_TYPES)}"]
+    if rtype == "response_contains":
+        return [] if criterion.get("needles") else ["response_contains needs non-empty needles"]
+    pattern = criterion.get("pattern")
+    if not pattern:
+        return ["response_regex_present needs a non-empty pattern"]
+    names = criterion.get("flags")
+    if names is not None and (unknown := [n for n in names if not isinstance(getattr(re, str(n), None), re.RegexFlag)]):
+        return [f"flags {unknown!r} aren't re flags"]
+    flags = re.DOTALL if names is None else 0
+    for name in names or ():
+        flags |= getattr(re, name)
+    try:
+        re.compile(pattern, flags)
+    except re.error as e:
+        return [f"pattern {pattern!r} doesn't compile: {e}"]
+    return []

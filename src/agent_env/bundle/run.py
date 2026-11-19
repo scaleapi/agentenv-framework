@@ -484,8 +484,8 @@ def refuse_store_tasks(plan: Plan) -> None:
 
 def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring) -> None:
     """Say what each agent, env and artifact alias names, what the solver deploys in place of the tasks' agents, the
-    ids what --set changes is written under, and what plugin packages the bundle uses that its bundle.toml doesn't
-    require, as ``declaring`` says (``declare``)."""
+    ids what --set changes is written under, what plugin packages the bundle uses that its bundle.toml doesn't
+    require, as ``declaring`` says (``declare``), and each task's lint warnings."""
     for use in (use for uses in plan.alias_uses.values() for use in uses.values()):
         say(_aliased(use))
     if plan.agent is not None:
@@ -498,6 +498,8 @@ def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring) -> N
         say(f"{variant.typed}: {_changed(plan)} written under ids ending in ({variant.label})")
     for line in declare(plan.bundle, declaring):
         say(line)
+    for warning in plan.lint_warnings:
+        say(warning)
 
 
 def _changed(plan: Plan) -> str:

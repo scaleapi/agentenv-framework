@@ -57,6 +57,7 @@ from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.routing import namespace_routing_enabled
+from agent_env.task.lint import Severity, lint
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
@@ -198,6 +199,7 @@ class Plan:
     alias_uses: Mapping[EntityKind, Mapping[str, AliasUse]] = field(default_factory=dict)
     agent: AgentOverride | None = None  # the agent --agent names for the solver
     variant: Varied | None = None  # what --set changes, written under its variant's ids
+    lint_warnings: tuple[str, ...] = ()  # each selected task's task lint warnings, as "<path>: warning: ..."
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
@@ -248,6 +250,7 @@ class _Planner:
         self.resolved = resolved
         self.default_agents = default_agents
         self.problems: list[str] = []
+        self.lint_warnings: list[str] = []
         self.nodes: dict[_Key, ResolvedEntry | BundleImage] = {}
         self.rank: dict[_Key, int] = {}
         self.edges: dict[_Key, list[_Key]] = {}
@@ -575,7 +578,7 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
             override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
-        self._build_tasks(closure)
+        self._build_tasks(closure, linted=True)
         self._check_files(closure)
         self._check_cli_loads(closure)
         self._check_env_types(closure)
@@ -587,7 +590,8 @@ class _Planner:
         writes = self._ordered(closure)
         return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
                     dict(self.origins), self._published(writes),
-                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override)
+                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override,
+                    lint_warnings=tuple(self.lint_warnings))
 
     def check(self) -> None:
         """The checks a run makes before it reads a store. A bundle with nothing to run passes only when its
@@ -1122,8 +1126,11 @@ class _Planner:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
 
-    def _build_tasks(self, closure: set[_Key]) -> None:
-        """Build each task's steps the way a write will, so a bad step fails before anything is written."""
+    def _build_tasks(self, closure: set[_Key], *, linted: bool = False) -> None:
+        """Build each task's steps the way a write will, so a bad step fails before anything is written. ``linted``,
+        for a run or registration, adds task lint: its errors are problems and its warnings ``lint_warnings``. The
+        store-free check leaves it out, since a folder ``bundle init`` writes leaves user-scoped fields for its runner
+        to fill in."""
         registry = get_task_step_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
@@ -1140,10 +1147,16 @@ class _Planner:
             self.steps[key] = steps
             if not failed:
                 try:
-                    Task(id=source.entry.id, version=None, steps=steps,
-                         headline_verifiers=source.entry.headline_verifiers)
+                    task = Task(id=source.entry.id, version=None, steps=steps,
+                                headline_verifiers=source.entry.headline_verifiers)
                 except ValueError as e:
                     self.problems.append(f"{self._path(source.entry)}: {e}")
+                    continue
+                for finding in lint(task, source.config, unpinned=False) if linted else ():
+                    if finding.severity is Severity.ERROR:
+                        self.problems.append(f"{self._path(source.entry)}: {finding.text}")
+                    else:
+                        self.lint_warnings.append(f"{self._path(source.entry)}: {finding}")
 
     # Order
 

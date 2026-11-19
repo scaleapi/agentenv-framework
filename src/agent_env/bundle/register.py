@@ -115,6 +115,8 @@ def register_bundle(
             raise BundleError(problems)
         requires = tuple(declare(resolved, declaring or declaring_for(bundle.root, installed=False, dry_run=dry_run)))
         say = on_progress or (lambda line: None)
+        for warning in plan.lint_warnings:
+            say(f"  {warning}")
         materialization = materialize(
             registered, dry_run=dry_run, ledger=ledger,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -241,8 +243,9 @@ def _slug(name: str) -> str:
 
 
 # The fields of a Plan that hold no ``@local`` id, so a translated plan keeps them: the store's latest versions, by store
-# id, and the agent ``--agent`` names, which a registration plans without.
-_KEPT = frozenset({"store_latest", "agent", "variant"})
+# id, the agent ``--agent`` names, which a registration plans without, and task lint's warnings, which name the bundle's
+# files.
+_KEPT = frozenset({"store_latest", "agent", "variant", "lint_warnings"})
 
 
 def translated(plan: Plan, ids: Mapping[str, str]) -> Plan:

@@ -145,6 +145,23 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
             raise ValueError(f"run_container_unit_tests_verifier '{id}': result paths in env '{env_id}' are relative "
                              f"to its session user's home, not {absolute}")
 
+    def config_problems(self) -> list[str]:
+        """A negative ``timeout_sec``, which ``timeout`` refuses, so the tests never run."""
+        problems = super().config_problems()
+        if self.timeout_sec < 0:
+            problems.append(f"timeout_sec {self.timeout_sec} is negative; give the tests at least 1 s")
+        return problems
+
+    def config_warnings(self) -> list[str]:
+        """What runs without testing anything: an empty ``command``, which exits 0 and so passes without a
+        ``reward_path``, and a ``timeout_sec`` of 0, which ``timeout`` reads as no limit."""
+        warnings = super().config_warnings()
+        if not self.command.strip() and self.reward_path is None:
+            warnings.append("command is empty, so it exits 0 and the tests pass without running anything")
+        if self.timeout_sec == 0:
+            warnings.append("timeout_sec 0 means no time limit, so a hung test runs until the sandbox's own TTL")
+        return warnings
+
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["sandbox_name"] = self.sandbox_name

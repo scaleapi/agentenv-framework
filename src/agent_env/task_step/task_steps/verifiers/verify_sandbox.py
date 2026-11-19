@@ -103,6 +103,38 @@ class VerifySandboxTaskStep(VerifierTaskStep):
         base["verifier_id"] = self.verifier_id
         return base
 
+    def config_problems(self) -> list[str]:
+        """The criteria that fail their row whatever the sandbox holds: a probe with no paths, a ``probe_file_contains``
+        pattern that doesn't compile, a ``bash_cmd_succeeds`` with no command."""
+        problems = super().config_problems()
+        for idx, criterion in enumerate(self.criteria):
+            rtype = criterion.get("type")
+            paths = criterion.get("paths") or []
+            if rtype in ("probe_file_exists", "probe_dir_exists", "probe_file_contains") and not paths:
+                problems.append(f"criterion #{idx}: {rtype} needs paths")
+            if rtype == "probe_file_contains":
+                pattern = criterion.get("expected") or criterion.get("value") or ""
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    problems.append(f"criterion #{idx}: expected {pattern!r} doesn't compile as a regex: {e}")
+            if rtype == "bash_cmd_succeeds" and not (criterion.get("bash_cmd") or "").strip():
+                problems.append(f"criterion #{idx}: bash_cmd_succeeds needs a bash_cmd")
+        return problems
+
+    def config_warnings(self) -> list[str]:
+        """The criteria a run grades as nothing: a type this step doesn't handle, which it skips, and a
+        ``probe_file_contains`` with no expected text, which any file passes."""
+        warnings = super().config_warnings()
+        for idx, criterion in enumerate(self.criteria):
+            rtype = criterion.get("type")
+            if rtype not in _HANDLED_TYPES:
+                warnings.append(f"criterion #{idx}: type {rtype!r} isn't one verify_sandbox checks, so a run skips "
+                                f"it; it checks {sorted(_HANDLED_TYPES)}")
+            elif rtype == "probe_file_contains" and not (criterion.get("expected") or criterion.get("value")):
+                warnings.append(f"criterion #{idx}: probe_file_contains has no expected text, so any file passes")
+        return warnings
+
     @classmethod
     def from_dict(cls, data: dict) -> "VerifySandboxTaskStep":
         return cls(
