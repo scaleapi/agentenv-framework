@@ -174,6 +174,12 @@ class Sandbox(ABC):
     # The host other containers on its provider's private network reach it at, ready for a URL; None when it's on none.
     private_host: str | None = None
 
+    @property
+    def walls_verified(self) -> bool:
+        """Whether the framework itself set up and tested the walls between slots on this sandbox, so stacks of
+        different runs may share it. False for every sandbox today: nothing sets up those walls yet."""
+        return False
+
     def url_from_sandbox(self, url: str) -> str:
         """``url``, of a service this process reaches, as this sandbox reaches it."""
         return url

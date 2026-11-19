@@ -123,6 +123,7 @@ case ${AGENT_TRUST_ENV:-} in *SSL_CERT_FILE=*) needs_cas= ;; esac
     printf '%s=%s\n' "$name" "$(quoted "${!name:-}")"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
+  [ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\n' "$(quoted "$AGENTENV_CONTROL_TOKEN")"
   [ -z "$needs_cas" ] || printf 'SSL_CERT_FILE=%s\n' "$(quoted "$certifi")"
   printf 'A2A_PORT=%s\nCODEX_HOME=%s\nCODEX_WORKSPACE_DIR=%s\n' \
     "$(quoted "$port")" "$(quoted "$root/codex")" "$(quoted "$workspace")"

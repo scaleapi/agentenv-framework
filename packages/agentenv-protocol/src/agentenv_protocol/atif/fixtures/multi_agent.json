@@ -1,0 +1,118 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-1",
+ "agent": {
+  "name": "toy",
+  "version": "1.0",
+  "model_name": "claude-opus-5-5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-04T18:01:40.530Z",
+   "source": "user",
+   "message": "[Email from Priya Shah] Board review moved to 3:00pm today.\n\nUgh. Can you make sure my 1:1 with Sam doesn't clash?",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-1",
+     "task_id": "task-b2",
+     "message_id": "msg-b2",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-04T18:01:46.902Z",
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "",
+   "reasoning_content": "Board is now 3-4pm; the 1:1 is at 3pm. Move the 1:1 to 4pm.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_9a",
+     "function_name": "calendar_update_event",
+     "arguments": {
+      "event_id": "evt_1on1_sam",
+      "start": "2026-03-12T16:00:00-05:00",
+      "end": "2026-03-12T16:30:00-05:00"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_9a",
+      "content": "Updated evt_1on1_sam: 4:00pm-4:30pm"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 9120,
+    "cached_tokens": 0,
+    "completion_tokens": 144,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 59,
+       "visibility": "raw",
+       "signature": "ErUBCkYIBRgCKkAx"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-04T18:01:52.812Z",
+   "source": "agent",
+   "model_name": "claude-opus-5-5",
+   "message": "Moved your 1:1 with Sam to 4:00pm, right after the board review.",
+   "metrics": {
+    "prompt_tokens": 9402,
+    "cached_tokens": 0,
+    "completion_tokens": 31,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 18522,
+  "total_completion_tokens": 175,
+  "total_cached_tokens": 0,
+  "total_steps": 3,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "toy-events/1",
+   "adapter": {
+    "name": "toy-events-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

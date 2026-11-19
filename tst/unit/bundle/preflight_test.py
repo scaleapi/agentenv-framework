@@ -22,6 +22,8 @@ from agent_env.bundle.run import _write_bundle, prepare_bundle
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
+from agent_env.config.errors import ConfigError
+from agent_env.config.model import ENV_BASE_URL
 from agent_env.config.runtime import Config
 from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
 from agent_env.env import bootstrap
@@ -40,6 +42,7 @@ from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.bundle._support import layout, local_store, shipped_agent
+from tst.util.config import config_with_document
 
 LOCAL = ("localhost:5000/local/img:v1", "file:///state/img-v1.tar.gz")
 REMOTE = ("123456789012.dkr.ecr.us-west-2.amazonaws.com/img:v1", "s3://bucket/img-v1.tar.gz")
@@ -1217,6 +1220,63 @@ def test_an_agent_or_agent_judge_needs_a_model_endpoint_unless_its_step_gives_on
                               "calls the model endpoint, and its API key can't be read: No model API key configured")
     monkeypatch.setenv("LITELLM_API_KEY", "sk-1")
     assert len(dry_run_bundle(bundle_dir, sandbox="local").runs) == 2
+
+
+@pytest.mark.parametrize("model", [{"base_url": "http://models:4000", "roles": {"agent": "a", "solver": "s"}},
+                                   {"base_url": "http://models:4000", "endpoints": {}}], ids=["role-twice", "unknown-key"])
+def test_a_model_table_that_doesn_t_parse_says_why_rather_than_reading_as_a_missing_endpoint(no_model, monkeypatch,
+                                                                                             model):
+    monkeypatch.setattr(preflight_module, "get_config", lambda: config_with_document({"model": model}))
+    with pytest.raises(ConfigError, match="sets both|unknown keys"):
+        MODEL_ENDPOINT_MISSING(frozenset({ENV_BASE_URL}))
+
+
+def test_a_deploy_sending_the_configured_key_to_another_url_is_refused_before_anything_runs(bundle_dir, monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://models:4000/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-1")
+    _agent("solver")
+    with namespace_routing():
+        A2AAgent.put(id="own-url", docker_image_artifact=_image("own-url-image"),
+                     default_env_vars={"LITELLM_BASE_URL": "http://other:5001"})
+    tests = {"id": "tests", "type": "run_container_unit_tests_verifier", "sandbox_name": "h", "container_name": "c",
+             "command": "true", "depends_on": [], "env_vars": {"ANTHROPIC_BASE_URL": "http://other:5001"}}
+    _task(bundle_dir, [{**AGENT, "litellm_base_url": "http://other:5001"}], name="step-url")
+    _task(bundle_dir, [{**AGENT, "env_vars": {"LITELLM_BASE_URL": "http://other:5001"}}], name="env-url")
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "own-url"}], name="own-url")
+    _task(bundle_dir, [tests], name="unit-tests")
+    _task(bundle_dir, [{**AGENT, "litellm_base_url": "http://MODELS:4000/"},
+                       {**AGENT, "id": "keyed", "litellm_base_url": "http://other:5001",
+                        "env_vars": {"LITELLM_API_KEY": "theirs"}},
+                       {**tests, "env_vars": {"ANTHROPIC_BASE_URL": "http://other:5001", "ANTHROPIC_API_KEY": "x"}}],
+          name="fine")
+
+    refused = "other:5001 isn't the configured model endpoint, so the configured key isn't sent there"
+    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local",
+                                                tasks=["step-url", "env-url", "own-url", "unit-tests", "fine"]))
+    assert sorted(problem.split(": ")[0] for problem in problems) == [
+        "tasks/env-url.json", "tasks/own-url.json", "tasks/unit-tests.json"]
+    assert any(problem.startswith("tasks/env-url.json: step 'agent' (and 1 more deploy): deploys agent 'solver'")
+               for problem in problems)  # step-url's, the same problem
+    assert all(refused in problem for problem in problems)
+    assert any("step 'agent': deploys agent 'own-url', but other:5001" in problem for problem in problems)
+    assert any("step 'tests': ANTHROPIC_BASE_URL: other:5001" in problem for problem in problems)
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["fine"], sandbox="local").runs] == ["fine"]
+    asks = {"id": "ask", "type": "prompt_agent", "prompt_id": "agent", "prompt": "go", "depends_on": ["agent"]}
+    _task(bundle_dir, [{**AGENT, "litellm_base_url": "http://other:5001"}, asks], name="trained")
+    with namespace_routing():  # a trainer gives the solver its own endpoint and key
+        assert prepare_bundle(bundle_dir, tasks=["trained"], sandbox="local", solver_endpoint=True)
+
+
+def test_an_agent_that_takes_no_credentials_needs_no_endpoint_or_key_wherever_its_step_points_it(bundle_dir, no_model):
+    with namespace_routing():
+        A2AAgent.put(id="stored-bare", docker_image_artifact=_image("stored-bare-image"),
+                     metadata={"takes_credentials": False})
+    layout(bundle_dir, {"agents/folder-bare/agent.toml": 'image = { ref = "docker.io/library/python:3.12-slim" }\n\n'
+                                                         '[metadata]\ntakes_credentials = false\n'})
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "stored-bare", "litellm_base_url": "http://other:5001"},
+                       {**AGENT, "id": "folder", "a2a_agent_id": "folder-bare"}], name="bare")
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["bare"], sandbox="local").runs] == ["bare"]
 
 
 def test_an_agent_declaring_the_model_variables_itself_needs_no_endpoint_but_its_judge_does(bundle_dir, no_model):

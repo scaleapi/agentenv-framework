@@ -271,7 +271,7 @@ class RateUserSatisfactionTaskStep(TaskStep):
             # prompt_agent's fetch uses nothing of its step, so the run's own code stores it.
             return await asyncio.wait_for(PromptAgentTaskStep._fetch_trajectory(
                 None, agent.a2a_url or agent.api_url, ext, task_id, session.trajectory_prefix, message_id,
-                card=card, sandbox_type=agent.sandbox_type),
+                card=card, sandbox_type=agent.sandbox_type, headers=agent.control_headers),
                 max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")

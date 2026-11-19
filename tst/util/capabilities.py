@@ -23,8 +23,8 @@ MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
 MODEL_ENDPOINT = "model_endpoint_configured"
 
 #: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail_vm``, ``tensorlake``, ``tenki``,
-#: ``vercel``, ``boxd``, ``coreweave``, ``daytona``, ``boat``, ``agent37``) need credentials the resolved config may not
-#: carry; the local default never does.
+#: ``vercel``, ``boxd``, ``coreweave``, ``daytona``, ``boat``, ``agent37``, ``kosa8``) need
+#: credentials the resolved config may not carry; the local default never does.
 REMOTE_SANDBOX = "remote_sandbox"
 
 #: The A2A agent a ``deploy_agent`` step without an id resolves to (``default_a2a_agent_id``); the
@@ -78,6 +78,10 @@ WINDOWS_MEDIA = "windows_media"
 #: Composing an Omarchy computer builds its base from Omarchy's own VM image, which a run fetches into this machine's
 #: cache once, about 4 GB; a test that composes one needs it there already, and KVM, which boots linux/amd64 disks.
 OMARCHY_IMAGE = "omarchy_image"
+#: The agent clock end to end (FD-5916) runs over agent images built from the branch beforehand, which
+#: ``AGENTENV_E2E_AGENT_IMAGES`` names one per agent (``claude-code=<tag>,codex=<tag>``): no CI job builds agent images.
+AGENT_CLOCK_IMAGE = "agent_clock_image"
+AGENT_CLOCK_IMAGES_ENV = "AGENTENV_E2E_AGENT_IMAGES"
 #: The shipped Omarchy base, whose source the capability looks for.
 OMARCHY_ARTIFACT = Path(__file__).parents[2] / "src" / "agent_env" / "computers" / "artifacts" / "omarchy-4.5" / "artifact.toml"
 
@@ -122,17 +126,17 @@ def skip_without_model_endpoint() -> pytest.MarkDecorator:
 
 def remote_sandbox_is_available(provider: str) -> bool:
     """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail_vm`` /
-    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``coreweave`` / ``daytona`` / ``boat`` / ``agent37`` sandbox provider, credentials included.
+    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``coreweave`` / ``daytona`` / ``boat`` / ``agent37`` / ``kosa8`` sandbox provider, credentials included.
 
     Modal: any failure to resolve the credentials answers False. E2B, Sail, Tensorlake, Tenki, Vercel, boxd,
-    CoreWeave, Daytona, boat and Agent37: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
+    CoreWeave, Daytona, boat, Agent37 and kosa8: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
     only a ``ConfigError`` (absent or incomplete config, or the provider's extra not installed) answers
     False, any other failure answers True and lets the test fail on the real problem, as
     ``model_endpoint_is_configured`` does. Vercel, which builds without credentials, also needs them in
     its config or the environment."""
-    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat", "agent37"):
+    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat", "agent37", "kosa8"):
         raise ValueError(f"unknown remote sandbox provider {provider!r}")
-    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat", "agent37"):
+    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat", "agent37", "kosa8"):
         from agent_env.config.errors import ConfigError
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
@@ -239,6 +243,17 @@ def omarchy_image_is_available() -> bool:
     artifact = OMARCHY_ARTIFACT.read_text()
     sha256 = tomllib.loads(artifact)["forms"]["disk"]["source"]["sha256"]
     return "linux/amd64" in LocalSandboxProvider.disk_image_platforms() and source_path(sha256).exists()
+
+
+def agent_clock_image(agent: str) -> str:
+    """The image ``AGENTENV_E2E_AGENT_IMAGES`` names for ``agent``, or ''."""
+    named = dict(entry.split("=", 1) for entry in os.environ.get(AGENT_CLOCK_IMAGES_ENV, "").split(",") if "=" in entry)
+    return named.get(agent, "").strip()
+
+
+def skip_without_agent_clock_image(agent: str) -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for a test that runs over ``agent``'s image built with the agent clock."""
+    return pytest.mark.skipif(not agent_clock_image(agent), reason=missing_capability_reason(AGENT_CLOCK_IMAGE))
 
 
 def skip_without_omarchy_image() -> pytest.MarkDecorator:

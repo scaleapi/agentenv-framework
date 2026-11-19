@@ -48,6 +48,7 @@ from agent_env.utils.paths import validate_relative_filename
 if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
@@ -164,9 +165,22 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         fields["apps"], fields["app_settings"] = _listed_apps(fields.get("apps", []), ctx)
         try:
-            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, **fields)
+            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, compose=ctx.compose,
+                           **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a computer env naming its base, driver and apps, each app with its settings beside it, which
+        ``from_toml`` reads back as it. What it composed isn't written: a run of the folder composes it."""
+        toml = {"type": self.type, "environment_name": self.environment_name, "computer": out.ref(self.computer),
+                "driver": out.ref(self.driver)}
+        if self.apps:
+            toml["apps"] = [_app_entry(out.ref(app), self.app_settings.get(app.environment_name)) for app in self.apps]
+        for key in ("display", "network", "computer_settings", "tools"):
+            if value := getattr(self, key):
+                toml[key] = value
+        return toml
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
@@ -508,6 +522,13 @@ def _listed_apps(refs: list, ctx: AuthoringContext) -> tuple[list[ComputerAppEnv
     if problems:
         ctx.refuse(problems)
     return apps, app_settings
+
+
+def _app_entry(ref: str | dict, settings: Optional[dict]) -> str | dict:
+    """An env.toml's ``apps`` entry: the app's ref, in a table with its ``settings`` beside it when it has some."""
+    if not settings:
+        return ref
+    return {**(ref if isinstance(ref, dict) else {"env": ref}), "settings": dict(settings)}
 
 
 def _not_an_app(env: Env) -> str | None:

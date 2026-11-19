@@ -197,6 +197,12 @@ class Recordings:
             self.ended.popitem(last=False)
         return manifest
 
+    async def listed(self) -> list[dict]:
+        """Each recording still recording, by id and start time: the ones counted against ``max_concurrent``."""
+        async with self._lock:
+            return [{"recording_id": rid, "started_at": _iso(r.requested_at)}
+                    for rid, r in self.running.items() if not r.done]
+
     async def end_all(self, reason: str) -> list[dict]:
         """End every recording not yet ended, each uploading under the grant it was started with; their manifests."""
         return [await self.end(recording_id, None, reason) for recording_id in list(self.running)]

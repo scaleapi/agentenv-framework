@@ -4,10 +4,15 @@ install_commands use `{name}` placeholders (Python str.format) for everything th
 varies per install — container name, work dir, agent build context, A2A port, and
 config-sourced creds. The runner resolves each declared `required_params` entry
 via the registry below, `shlex.quote`s the value, and `cmd.format(**resolved)`s
-each command before exec. No host env vars are exported.
+each command before exec.
 
 To add a new param: register it in `_build_param_resolvers` (and document what
 it returns); the agent's extension declares it in `required_params` to opt in.
+
+`optional_params` lists what an install takes only from a runner that has it, as an
+environment variable of every install command rather than a placeholder, so a runner
+that doesn't know it still installs the agent: `control_token` is exported as
+`AGENTENV_CONTROL_TOKEN`, the token the agent's extension routes then take.
 """
 
 from __future__ import annotations
@@ -24,7 +29,9 @@ import httpx
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
+from agent_env.config.model import ModelRole
 from agent_env.entity.scopes import FieldScope
+from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.sandbox_providers.local_docker.provider import (
     LOCAL_TRUST_DIR,
     LOCAL_TRUST_ENV,
@@ -36,6 +43,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agentenv_protocol.types import CONTROL_TOKEN_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +51,8 @@ INSTALL_COMMANDS_KEY = "install_commands"
 INSTALL_COMMANDS_HOST_KEY = "install_commands_host"
 REQUIRED_PARAMS_KEY = "required_params"
 REQUIRED_PARAMS_HOST_KEY = "required_params_host"
+OPTIONAL_PARAMS_KEY = "optional_params"
+OPTIONAL_PARAMS_HOST_KEY = "optional_params_host"
 A2A_PORT_KEY = "a2a_port"
 WORKDIR_HOST_KEY = "workdir_host"
 USER_HOST_KEY = "user_host"
@@ -277,6 +287,7 @@ class InstallAgentTaskStep(TaskStep):
         install_commands = params.get(commands_key)
         a2a_port = self.a2a_port or params.get(A2A_PORT_KEY)
         required_params = params.get(REQUIRED_PARAMS_HOST_KEY if host_mode else REQUIRED_PARAMS_KEY) or []
+        optional_params = params.get(OPTIONAL_PARAMS_HOST_KEY if host_mode else OPTIONAL_PARAMS_KEY) or []
         if host_mode and not install_commands:
             raise RuntimeError(
                 f"Agent {agent.id} v{agent.version} install/v1 params have no '{INSTALL_COMMANDS_HOST_KEY}'; "
@@ -288,6 +299,8 @@ class InstallAgentTaskStep(TaskStep):
             raise RuntimeError(f"Agent {agent.id} v{agent.version} install/v1 params missing '{A2A_PORT_KEY}' (int) and the step has no a2a_port override")
         if not isinstance(required_params, list):
             raise RuntimeError(f"Agent {agent.id} v{agent.version} install/v1 params 'required_params' must be a list")
+        if not isinstance(optional_params, list):
+            raise RuntimeError(f"Agent {agent.id} v{agent.version} install/v1 params 'optional_params' must be a list")
 
         if not ds.tunnel_urls or str(a2a_port) not in ds.tunnel_urls:
             raise RuntimeError(
@@ -339,6 +352,9 @@ class InstallAgentTaskStep(TaskStep):
                 raise RuntimeError(f"Failed to resolve required_param {name!r}: {e}") from e
             resolved[name] = shlex.quote(raw)
 
+        control_token = new_control_token()
+        exported = f"export {CONTROL_TOKEN_ENV}={shlex.quote(control_token)}\n" if "control_token" in optional_params else ""
+
         target = "the VM host" if host_mode else f"container '{self.container_name}'"
         logger.info(
             f"Running {len(install_commands)} install command(s) against {target} "
@@ -354,14 +370,14 @@ class InstallAgentTaskStep(TaskStep):
                 )
             # The template, not the command: resolved params carry the model key and headers.
             logger.info(f"  [{i}/{len(install_commands)}] {cmd.splitlines()[0][:140]}")
-            await sandbox.exec_script(formatted)
+            await sandbox.exec_script(exported + formatted)
         if not host_mode:  # copied into the container; a host install may run from it
             await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)}")
 
         agent_card = await self._wait_for_agent_card(a2a_url)
         logger.info(f"Agent '{self.agent_name}' reachable at {a2a_url} (card name={agent_card.get('name')})")
 
-        deployed = self._register_instance(agent, a2a_url, ds, agent_card)
+        deployed = self._register_instance(agent, a2a_url, ds, agent_card, control_token)
 
         context.deployed_agents.append(DeployedAgent(
             agent_name=self.agent_name,
@@ -373,9 +389,10 @@ class InstallAgentTaskStep(TaskStep):
             instance_id=deployed.instance_id,
             on_host=host_mode,
             installed_container=container,
+            control_token=deployed.control_token,
         ))
 
-        default_model = agent.metadata.get("default_model") or get_config().get_model_for_role("agent")
+        default_model = get_config().resolve_model(ModelRole.SOLVER, agent=agent.metadata.get("default_model")).model
         if default_model and not context.default_agent_model:
             context.default_agent_model = default_model
             logger.info(f"Set context.default_agent_model to '{default_model}'")
@@ -420,7 +437,7 @@ class InstallAgentTaskStep(TaskStep):
             )
         return HostPlace(workdir.format(agent_name=self.agent_name), user.format(agent_name=self.agent_name))
 
-    def _register_instance(self, agent, a2a_url: str, ds, agent_card: dict):
+    def _register_instance(self, agent, a2a_url: str, ds, agent_card: dict, control_token: str):
         """Register the installed agent in the instance store, same as A2AAgent.deploy(),
         so store-resolving consumers (AddSkillsTaskStep, the a2a-agent CLIs) can find it."""
         from agent_env.a2a_agent.a2a_agent import DeployedA2AAgent
@@ -434,6 +451,7 @@ class InstallAgentTaskStep(TaskStep):
                 sandbox_id=ds.sandbox_id,
                 agent_card=agent_card,
                 sandbox_type=ds.sandbox_type,
+                control_token=control_token,
             ),
             ttl_seconds=self._instance_ttl_seconds(ds),
         )

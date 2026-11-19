@@ -1,7 +1,8 @@
 """A fake OpenAI Chat Completions endpoint, so an agent that calls the model through LiteLLM runs with no model key:
 ``POST .../chat/completions`` is answered by a responder, as one JSON completion or, to a request that asks for a
-stream, as server-sent chunks, and every request is recorded. A fault queued with ``fail_next`` replaces the next
-answer: an HTTP error, or an answer that stalls."""
+stream, as server-sent chunks, and every request is recorded. Each answer carries the usage ``usage`` gives for its
+request, none when it gives None. A fault queued with ``fail_next`` replaces the next answer: an HTTP error, or an
+answer that stalls."""
 
 import json
 import threading
@@ -81,6 +82,7 @@ def tool_result_text(body: dict) -> str | None:
 class FakeOpenAI:
     host: str = "127.0.0.1"
     respond: Responder = field(default_factory=lambda: answer("ok"))
+    usage: Callable[[dict], dict | None] = lambda body: USAGE
     seen: list[Seen] = field(default_factory=list)
     _faults: deque = field(default_factory=deque)
     _server: ThreadingHTTPServer | None = None
@@ -118,7 +120,7 @@ class FakeOpenAI:
                     return
                 if fault is not None and fault.kind == "stall":
                     time.sleep(fault.seconds)
-                completion = _completion(body, fake.respond(body))
+                completion = _completion(body, fake.respond(body), fake.usage(body))
                 if body.get("stream"):
                     self._stream(completion)
                 else:
@@ -157,7 +159,8 @@ class FakeOpenAI:
 
 
 def _chunks(completion: dict) -> list[dict]:
-    """``completion`` as the chunks a stream sends: its message whole as one delta, its finish, then its usage."""
+    """``completion`` as the chunks a stream sends: its message whole as one delta, its finish, then its usage if it
+    has one."""
     (choice,) = completion["choices"]
     message = choice["message"]
     delta = {"role": "assistant", "content": message["content"]}
@@ -167,11 +170,11 @@ def _chunks(completion: dict) -> list[dict]:
     return [
         {**head, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
         {**head, "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
-        {**head, "choices": [], "usage": completion["usage"]},
+        *([{**head, "choices": [], "usage": completion["usage"]}] if "usage" in completion else []),
     ]
 
 
-def _completion(body: dict, reply: Text | ToolCall) -> dict:
+def _completion(body: dict, reply: Text | ToolCall, usage: dict | None) -> dict:
     if isinstance(reply, Text):
         message, finish = {"role": "assistant", "content": reply.text}, "stop"
     else:
@@ -181,4 +184,4 @@ def _completion(body: dict, reply: Text | ToolCall) -> dict:
         finish = "tool_calls"
     return {"id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion", "created": int(time.time()),
             "model": body.get("model", ""), "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-            "usage": USAGE}
+            **({"usage": usage} if usage is not None else {})}

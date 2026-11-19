@@ -26,7 +26,8 @@ from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.env.env import DeployedGatewayEnv, _mcp_url
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, _mcp_url
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
@@ -3111,3 +3112,40 @@ def test_a_site_image_without_curl_passes_its_health_probe_once_its_health_path_
 
 def test_a_site_answering_only_errors_fails_its_health_probe(tmp_path):
     assert _run_probe(tmp_path, {"/.well-known/agent-env.json": 500, "/api/health": 503}) != 0
+
+
+@pytest.mark.asyncio
+async def test_a_reattach_takes_back_the_slot_layout_its_record_kept():
+    sandboxes = {i: _FakeSandbox(i, 18765, f"https://{i}") for i in ("gw", "srv", "db", "pg")}
+    record = dataclasses.replace(_multi_record([]), stack_layout=StackLayout.for_slot(2).to_record())
+    gp = EnvironmentGatewayProvider()
+    with patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=AsyncMock(side_effect=sandboxes.get))):
+        await gp._reattach(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp("slack")]), record)
+    assert gp.stack_layout == StackLayout.for_slot(2)
+
+
+@pytest.mark.asyncio
+async def test_a_reattach_of_a_record_with_no_layout_uses_the_default_stack():
+    sandboxes = {i: _FakeSandbox(i, 18765, f"https://{i}") for i in ("gw", "srv", "db", "pg")}
+    gp = EnvironmentGatewayProvider()
+    gp._stack_layout = StackLayout.for_slot(1)
+    with patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=AsyncMock(side_effect=sandboxes.get))):
+        await gp._reattach(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp("slack")]), _multi_record([]))
+    assert gp.stack_layout is DEFAULT_STACK_LAYOUT
+
+
+@pytest.mark.asyncio
+async def test_a_reattach_of_a_damaged_layout_raises_before_touching_any_sandbox():
+    get_sandbox = AsyncMock()
+    record = dataclasses.replace(_multi_record([]), stack_layout={"compose_project": "s1"})
+    with patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=get_sandbox)), \
+         pytest.raises(ValueError):
+        await EnvironmentGatewayProvider()._reattach(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp("slack")]), record)
+    get_sandbox.assert_not_awaited()
+
+
+def test_a_gateway_record_keeps_its_slot_layout_through_storage_and_an_older_record_has_none():
+    record = dataclasses.replace(_multi_record([]), stack_layout=StackLayout.for_slot(4).to_record())
+    assert DeployedEnv.from_dict(dataclasses.asdict(record)).stack_layout == StackLayout.for_slot(4).to_record()
+    older = {k: v for k, v in dataclasses.asdict(_multi_record([])).items() if k != "stack_layout"}
+    assert DeployedEnv.from_dict(older).stack_layout is None
