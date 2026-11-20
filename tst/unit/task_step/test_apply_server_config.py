@@ -931,8 +931,10 @@ async def test_a_reply_that_reveals_nothing_enables_nothing(reply):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tools", ["slack_export", ["slack_export", 3], [""], ["*"], ["slack_export", "*"]],
-                         ids=["string", "non-string", "empty-name", "wildcard", "wildcard-among-names"])
+@pytest.mark.parametrize("tools", ["slack_export", ["slack_export", 3], [""], ["*"], ["slack_export", "*"],
+                                   False, "", 0, {}],
+                         ids=["string", "non-string", "empty-name", "wildcard", "wildcard-among-names",
+                              "false", "empty-string", "zero", "empty-object"])
 async def test_a_malformed_reveal_list_fails_the_step_after_recording_the_applied_directive(tools):
     gw = _RevealingGateway({"ok": True, "reveal_tools": tools})
     ctx = await _revealing_context()
@@ -953,6 +955,29 @@ async def test_a_failing_enable_fails_the_step():
 
 
 _RealAsyncClient = httpx.AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_a_reveal_on_an_env_with_no_tool_access_to_change_enables_nothing():
+    from agent_env.env.gateway.constants import EXT_ENABLE_TOOL_URI
+
+    def without_enable(node):
+        if isinstance(node, list):
+            return [without_enable(item) for item in node
+                    if not (isinstance(item, dict) and item.get("uri") == EXT_ENABLE_TOOL_URI)]
+        if isinstance(node, dict):
+            return {key: without_enable(value) for key, value in node.items()}
+        return node
+
+    ctx = await _revealing_context()
+    ctx.deployed_envs[0].environment_card = without_enable(ctx.deployed_envs[0].environment_card)
+    gw = _RevealingGateway({"ok": True, "reveal_tools": ["slack_export"]})
+    with patch("httpx.AsyncClient", return_value=gw):
+        out = await _step().execute(ctx)
+
+    assert [url for url, _ in gw.post_calls] == [f"{_CARD}/svc/mcp-slack/agentenv/ext/set_errors"]
+    assert "revealed_tools" not in out.metadata["server_config_changes"][0]
+    assert "tool_access_changes" not in out.metadata
 
 
 class _GatewayForwarder(_RevealingGateway):

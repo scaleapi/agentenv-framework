@@ -313,6 +313,10 @@ class ApplyServerConfigStep(TaskStep):
                 f"Applying {directive.uri!r} on service {directive.service!r} (env={self.env_id}): its reply's "
                 f"{REVEAL_TOOLS_KEY!r} must be a list of tool names, got {tools!r}"
             )
+        if deployed.environment_card is not None and not deployed.supports(EXT_ENABLE_TOOL_URI, TOOL_ENABLE_ACTION):
+            # No gateway in front of the server, so nothing hides the tools.
+            logger.info(f"apply_server_config: env={self.env_id} has no tool access to change; {tools} stay as listed")
+            return []
         try:
             body = await deployed.invoke(EXT_ENABLE_TOOL_URI, TOOL_ENABLE_ACTION, {"role": WILDCARD, "tools": tools})
         except Exception as e:

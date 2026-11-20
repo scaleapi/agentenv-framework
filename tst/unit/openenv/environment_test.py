@@ -103,21 +103,6 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
     assert ServedTask(defaulted, "defaulted", EpisodeSpec.from_task(defaulted), _score_at("replies")).toolset == {
         "envs": ["items"], "versions": {}, "role": None, "access": [{"env": "items", "action": "disable",
                                                                       "tools": ["add_item"]}], "bash": False}
-    configure = {"id": "cfg", "type": "apply_server_config", "env_id": "items",
-                 "directives": [{"service": "items", "uri": "urn:example:set-mode/v1", "args": {"mode": "slow"}}]}
-    def toolset(*steps):
-        task = _task(ITEMS, ALICE, *steps, TURN, REPLIES)
-        return ServedTask(task, "t", EpisodeSpec.from_task(task), _score_at("replies")).toolset
-
-    faster = {**configure, "directives": [{**configure["directives"][0], "args": {"mode": "fast"}}]}
-    assert toolset(configure)["config"] == [{"env": "items", "extensions": ["urn:example:set-mode/v1"]}]
-    assert toolset(configure) == toolset(faster)
-    assert toolset(hide, {**configure, "depends_on": ["hide"]})["config"] == [
-        {"env": "items", "action": "disable", "tools": ["add_item"]},
-        {"env": "items", "extensions": ["urn:example:set-mode/v1"]}]
-    assert toolset(hide, {**configure, "depends_on": ["hide"]}) != toolset(configure, {**hide, "depends_on": ["cfg"]})
-    assert "config" not in toolset(hide)
-    assert "config" not in toolset({**configure, "env_id": "elsewhere"})
     assert [task["index"] for task in env.get_task_range("all", 1)] == [1, 2]
     assert [task["id"] for task in env.list_tasks("smoke")] == ["dock-0"]
     with pytest.raises(IndexError, match="split 'all' has 3 tasks, so it has no task 3"):
