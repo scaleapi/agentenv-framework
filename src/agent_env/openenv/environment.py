@@ -69,8 +69,9 @@ class ServedTask:
         """Where the played agent's tools come from: the envs it works in and the versions the task deploys, its role
         in them, the changes the task makes to that role's tool access, whether its turns offer ``bash`` in its
         sandbox, and whether it applies server config there (``config``, only when it does), whose replies can reveal
-        tools. Tasks that agree on it offer the same tools unless their configs reveal different ones, so a trainer
-        can group them."""
+        tools. Tasks that agree on it offer the same tools, so a trainer can group them, except tasks with config:
+        their replies can reveal different tools, and a revealed tool depends on whether a per-role deny of it
+        comes before or after the config."""
         agent = self.spec.trainer_agents[0]
         [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
         role, envs = getattr(deploy, "role", None), list(getattr(deploy, "env_ids", None) or [])

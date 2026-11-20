@@ -981,15 +981,18 @@ async def test_a_reveal_on_an_env_with_no_tool_access_to_change_enables_nothing(
 
 
 @pytest.mark.asyncio
-async def test_a_reveal_on_a_record_with_no_stored_card_fails_the_step():
+@pytest.mark.parametrize("stored", [None, {}], ids=["missing", "empty"])
+async def test_a_reveal_on_a_record_with_no_stored_card_fails_the_step(stored):
     class _Revealing(_MockGateway):
         async def request(self, method, url, *, json=None, timeout=None, headers=None):
             return _resp(200, url, {"ok": True, "reveal_tools": ["slack_export"]})
 
     gw = _Revealing({"slack": _card(_ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors"))})
+    ctx = _make_context()
+    ctx.deployed_envs[0].environment_card = stored
     with _patch_httpx(gw):
         with pytest.raises(ApplyServerConfigError, match="Enabling the tools \\['slack_export'\\]"):
-            await _step().execute(_make_context())
+            await _step().execute(ctx)
 
 
 class _GatewayForwarder(_RevealingGateway):
