@@ -50,12 +50,14 @@ from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
+from agent_env.config.errors import ConfigError
 from agent_env.store import EcrImageStore, NotFoundError
 from tst.unit.providers.env_state.fakes import (
     EXTERNAL_READINESS_SERVICE,
     EXTERNAL_STATE_TYPE,
     registered_external_provider as registered_external_provider,
 )
+from tst.util.config import config_with_document
 from tst.util.sandbox_providers import CONTAINERS, VMS_AND_CONTAINERS
 
 
@@ -3167,6 +3169,27 @@ async def test_a_deploy_without_consoles_or_a_token_asks_the_gateway_nothing(mon
     monkeypatch.setattr(httpx, "AsyncClient", MagicMock(side_effect=AssertionError("asked the gateway")))
     assert await EnvironmentGatewayProvider()._served_consoles("https://gw.example", consoles, token) == {}
 
+
+
+@pytest.mark.parametrize("gateway, ancestors", [
+    ({}, None),
+    ({"console_frame_ancestors": ["https://app.example.com", "https://*.example.org"]},
+     "https://app.example.com https://*.example.org")], ids=["none", "two"])
+def test_the_gateway_takes_the_configured_frame_ancestors_with_its_consoles(monkeypatch, gateway, ancestors):
+    monkeypatch.setattr(env_gateway_provider, "get_config", lambda: config_with_document({"gateway": gateway}))
+    environment = env_gateway_provider.consoles_environment({"pgweb": "http://pgweb:8081"})
+    assert environment.get("CONSOLE_FRAME_ANCESTORS") == ancestors
+    assert environment["CONSOLE_URLS"] == "pgweb=http://pgweb:8081"
+    assert env_gateway_provider.consoles_environment({}) == {}
+
+
+@pytest.mark.parametrize("value", ["https://app.example.com", ["app.example.com"], ["https://app.example.com/x"], [1]],
+                         ids=["not-a-list", "no-scheme", "a-path", "not-a-string"])
+def test_a_frame_ancestors_setting_that_is_not_a_list_of_origins_is_refused(monkeypatch, value):
+    monkeypatch.setattr(env_gateway_provider, "get_config",
+                        lambda: config_with_document({"gateway": {"console_frame_ancestors": value}}))
+    with pytest.raises(ConfigError, match="console_frame_ancestors"):
+        env_gateway_provider.consoles_environment({"pgweb": "http://pgweb:8081"})
 
 @pytest.mark.parametrize("images, consoles", [
     ({"db_web_image": "pgweb:1", "db_mcp_image": "db-mcp:1"}, "pgweb=http://pgweb:8081,db-mcp=http://db-mcp:8000"),
