@@ -47,7 +47,7 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
     rule, which a stored task can't break since storing drops unknown fields. ``config`` adds each step's own
     ``config_problems`` as errors; a caller that runs ``Task.preflight`` already has them. ``unpinned`` warns for a store
     entity read with no version; a bundle's plan leaves it out, since a plan records each version it reads and a
-    registration pins it. Reads no store."""
+    registration pins it. Reads no store itself; a step's ``config_problems`` may, as load_artifact's do."""
     findings = [
         *(unknown_fields(step_dicts) if step_dicts is not None else ()),
         *(_step_configs(task.steps) if config else ()),

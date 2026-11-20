@@ -17,9 +17,10 @@ def lint(path: Path | None, task_id: str | None, task_version: int | None):
     Errors are configs that can't run or grade correctly: an unknown field, a step's
     own config problems, a headline that isn't a verifier, an aggregate source no
     verifier writes. They also refuse agent-env run, bundle register, task create and
-    eval run. Warnings block nothing. Exits non-zero when there are errors. A task
-    file on its own is checked without a store; a bundle folder is planned as a run
-    plans it and --id reads the stored task, so both read the configured stores.
+    eval run. Warnings block nothing. Exits non-zero when there are errors. A bundle
+    folder is planned as a run plans it and --id reads the stored task, so both read
+    the configured stores; a task file on its own reads them only where a step's own
+    checks look up what it names, as load_artifact's do.
     """
     if (path is None) == (task_id is None):
         raise click.UsageError("give a bundle folder or task file, or --id, but not both")

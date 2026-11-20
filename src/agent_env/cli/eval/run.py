@@ -36,7 +36,7 @@ def _write_context(context, task_id, output_dir, prefix=""):
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--skip-lint", is_flag=True,
-              help="Run tasks agent-env task lint refuses for its own rules (a field no step reads, a headline or aggregate source that grades nothing), saying them; a step's own config problems still refuse it.")
+              help="Run tasks agent-env task lint finds errors in, saying them, as eval run did before it linted")
 def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, skip_lint: bool):
     """Run all tasks in an eval through the configured [runner], concurrently."""
     if k < 1:
@@ -60,10 +60,9 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         tasks.append(task)
 
     findings = [(f"{task.id} v{task.version}", finding) for task in tasks for finding in lint(task)]
-    refused = [(task, f) for task, f in findings if refuses(f, skip_lint=skip_lint)]
+    refused = [] if skip_lint else [(task, f) for task, f in findings if refuses(f)]
     if refused:
-        liftable = " (--skip-lint runs anyway)" if any(not refuses(f, skip_lint=True) for _, f in refused) else ""
-        click.echo(f"Task lint found {len(refused)} error(s), so no run started{liftable}:", err=True)
+        click.echo(f"Task lint found {len(refused)} error(s), so no run started (--skip-lint runs anyway):", err=True)
         for task, finding in refused:
             click.echo(f"  - {task}: {finding.text}", err=True)
         raise SystemExit(1)

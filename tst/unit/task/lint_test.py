@@ -8,17 +8,21 @@ from typing import ClassVar
 import pytest
 from click.testing import CliRunner
 
-from agent_env.bundle import BundleKind, parse_bundle
+from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle.installed import CORE, installed_bundles
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import build_step, resolve_bundle
+from agent_env.bundle.run import planned_tasks
 from agent_env.cli import cli
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
+from agent_env.openenv import app
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.lint import Finding, Severity, lint, said
 from agent_env.task_step.task_step import TaskStep
+from agent_env.training import harness, trl
+from agent_env.training.nemo_gym import __main__ as nemo_cli, prepare
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import (
     AgentPromptResponseVerifierTaskStep,
 )
@@ -383,17 +387,76 @@ def test_eval_run_with_skip_lint_says_the_error_and_goes_on_to_run(local_stores,
     assert "  t v1: error: headline_verifiers names 'box', a deploy_sandbox step, which grades nothing" in result.output
 
 
-def test_eval_run_with_skip_lint_still_refuses_a_steps_config_problem(local_stores, monkeypatch):
+def test_eval_run_with_skip_lint_runs_past_a_steps_config_problem_as_it_did_before_it_linted(local_stores,
+                                                                                             monkeypatch):
     task = _task(BOX, {**TESTS, "criteria": [{"type": "probe_file_exists", "criterion": "x"}]})
     listed = Eval(id="e", version=1, tasks=[EvalTask(task_id="t", task_version=1)])
     monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: listed))
     monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: task))
+    monkeypatch.setattr(importlib.import_module("agent_env.cli.eval.run"), "print_banner",
+                        lambda: (_ for _ in ()).throw(SystemExit(7)))
 
-    result = CliRunner().invoke(cli, ["eval", "run", "--id", "e", "--skip-lint"])
+    refused = CliRunner().invoke(cli, ["eval", "run", "--id", "e"])
+    skipped = CliRunner().invoke(cli, ["eval", "run", "--id", "e", "--skip-lint"])
 
-    assert result.exit_code == 1, result.output
-    assert "Task lint found 1 error(s), so no run started:\n  - t v1: step 'tests': criterion #0: probe_file_exists" in (
-        result.output)
+    assert refused.exit_code == 1, refused.output
+    assert "so no run started (--skip-lint runs anyway):\n  - t v1: step 'tests': criterion #0: probe_file_exists" in (
+        refused.output)
+    assert skipped.exit_code == 7, skipped.output
+    assert "  t v1: error: step 'tests': criterion #0: probe_file_exists needs paths" in skipped.output
+
+
+class _Planned(Exception):
+    """What a stand-in for a planning call raises once it has recorded the arguments it was given."""
+
+
+def _recording(calls):
+    def record(*args, **kwargs):
+        calls.append(kwargs)
+        raise _Planned()
+    return record
+
+
+def test_planning_a_bundle_for_a_trainer_takes_skip_lint_as_a_run_does(bundle_dir):
+    _write(bundle_dir, "t", {"headline_verifiers": ["box"], "steps": [BOX, TESTS]})
+
+    with namespace_routing():
+        with pytest.raises(BundleError, match="which grades nothing"):
+            planned_tasks(bundle_dir)
+        assert [entry.entry.name for entry in planned_tasks(bundle_dir, skip_lint=True)] == ["t"]
+
+
+@pytest.mark.parametrize("serves", ["build_app", "trl", "harness", "nemo_gym"])
+def test_each_way_a_trainer_serves_a_bundle_passes_skip_lint_to_its_plan(serves, bundle_dir, tmp_path, monkeypatch):
+    calls = []
+    if serves == "build_app":
+        monkeypatch.setattr(app, "prepare_bundle", _recording(calls))
+        serve = lambda skip: app.build_app(bundle_dir, skip_lint=skip)  # noqa: E731
+    elif serves == "trl":
+        monkeypatch.setattr(trl, "build_app", _recording(calls))
+        serve = lambda skip: trl.AgentEnv.local(bundle_dir, skip_lint=skip)  # noqa: E731
+    elif serves == "harness":
+        monkeypatch.setattr(harness, "planned_tasks", _recording(calls))
+        serve = lambda skip: harness._trained(bundle_dir, (), (), None, skip)  # noqa: E731
+    else:
+        monkeypatch.setattr(prepare, "build_app", _recording(calls))
+        serve = lambda skip: prepare.write_server(bundle_dir, tmp_path / "gym", skip_lint=skip)  # noqa: E731
+
+    for skip in (False, True):
+        with pytest.raises(_Planned):
+            serve(skip)
+
+    assert [call["skip_lint"] for call in calls] == [False, True]
+
+
+def test_nemo_gyms_cli_takes_skip_lint_and_its_server_config_keeps_it(bundle_dir, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(nemo_cli, "write_server", lambda *args, **kwargs: calls.append(kwargs) or tmp_path)
+
+    result = CliRunner().invoke(nemo_cli.main, [str(bundle_dir), str(tmp_path / "gym"), "--skip-lint"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["skip_lint"] is True
 
 
 def test_the_cli_takes_a_path_or_an_id_but_not_both(bundle_dir):

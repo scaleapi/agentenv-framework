@@ -299,6 +299,7 @@ def prepare_bundle(
     played: bool = False,
     agent: str | None = None,
     solver_endpoint: bool = False,
+    skip_lint: bool = False,
 ) -> PreparedBundle:
     """Do what ``run_bundle`` with these arguments does before its first task runs, and stop there. ``played``
     leaves out what each task's only prompted agent would deploy, for a caller that plays that agent itself
@@ -310,7 +311,7 @@ def prepare_bundle(
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
     composing = _composing(sandbox)
     return _prepare(root, tasks, evals, sandbox, id_root, agent, played, _progress(on_progress), _hint(id_root),
-                    composing, solver_endpoint=solver_endpoint)
+                    composing, solver_endpoint=solver_endpoint, skip_lint=skip_lint)
 
 
 def _write_bundle(
@@ -451,11 +452,11 @@ def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
 
 
 def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                  agent: str | None = None) -> tuple[ResolvedEntry, ...]:
+                  agent: str | None = None, skip_lint: bool = False) -> tuple[ResolvedEntry, ...]:
     """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything.
     Namespace routing must be on, as for ``plan_bundle``."""
     plan = plan_bundle(resolve_bundle(parse_bundle(Path(root))), tasks=tasks, evals=evals, installed=installed_bundles,
-                       agent=agent)
+                       agent=agent, skip_lint=skip_lint)
     selected = set(_to_run(plan))
     return tuple(write.source for write in plan.writes if write.kind is BundleKind.TASK and write.source.entry in selected)
 
