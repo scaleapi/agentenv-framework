@@ -556,8 +556,8 @@ class PromptAgentTaskStep(TaskStep):
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
-            # Again each turn, so an agent that restarted since deploy_agent sent it doesn't get its own tools back.
-            "builtin_tools": card.get("builtin_tools"),
+            # Again, so an agent that restarted since deploy_agent sent them doesn't get its tools back.
+            **A2AAgent.tool_settings(card),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         model_params = get_config().get_model_params(self.model_params)
@@ -576,13 +576,17 @@ class PromptAgentTaskStep(TaskStep):
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
+            await resend_tool_settings(user_sim, user_url)
             context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
             usage.start(ModelRole.USER_SIMULATOR, built_in[0].get("model"), user_sim)
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
-            negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
+            user_card = user_sim.a2a_card or {}
+            # Its own tools and peer tools as deploy_agent set them, again, as for the agent above.
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items()
+                           if v is not None} | A2AAgent.tool_settings(user_card)
+            negotiated = A2AAgent.negotiate_agent_config(user_card, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
                                                  headers=user_sim.control_headers)
@@ -1419,6 +1423,15 @@ async def prescribe_formats(context: TaskStepContext, step_id: str, agent: Deplo
         logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed, so it builds what "
                        f"it was last prescribed (continuing): {failure}")
         return
+
+
+async def resend_tool_settings(agent: DeployedAgent, url: str) -> None:
+    """Send ``agent`` its own-tool and peer-tools settings again, as deploy_agent stamped them on its card, for a user
+    sim whose model and prompt deploy_user_sim_agent already set; nothing when it has none, or its card takes neither."""
+    card = agent.a2a_card or {}
+    negotiated = A2AAgent.negotiate_agent_config(card, A2AAgent.tool_settings(card))
+    if negotiated:
+        await protocol.post_agent_config(url + negotiated.endpoint, negotiated.fields, headers=agent.control_headers)
 
 
 class StoredTrajectory(NamedTuple):
