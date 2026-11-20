@@ -221,6 +221,43 @@ def test_an_error_response_logs_the_litellm_routing_headers_that_are_present(cap
     assert "x-litellm-model-api-base" not in message and "x-litellm-response-cost" not in message
 
 
+# ── the env's date on an armed clock ─────────────────────────────────────────────
+
+# The CLI's environment context as 0.38.2 sends it, its date line worded by its own clock, which is real time.
+_CONTEXT = ("<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\n"
+            "Today's date is Friday, November 20, 2026 (formatted according to the user's locale).\n"
+            "My operating system is: linux\n</session_context>")
+_DATED = {"contents": [{"role": "user", "parts": [{"text": _CONTEXT}]},
+                       {"role": "user", "parts": [{"text": "Today's date is what, by your clock?"}]}]}
+ENV_TODAY = "Tuesday, March 3, 2031"
+
+
+@pytest.mark.parametrize("today", [None, ENV_TODAY], ids=["unarmed", "armed"])
+def test_the_clis_date_line_names_the_envs_date_on_an_armed_clock_and_is_forwarded_as_sent_otherwise(
+        upstream, agent, client, today):
+    """The CLI stays on real time on an armed clock, so its date line is real; the model sees the env's date there
+    instead, as its commands do, and nothing else in the call changes."""
+    agent._routes[TOKEN] = a2a_server._Route(None, None, None, today)
+    sent = json.dumps(_DATED).encode()
+
+    client.post(GENERATE, content=sent)
+
+    (request,) = upstream.requests
+    assert request.content == (sent if today is None else sent.replace(b"Friday, November 20, 2026", today.encode()))
+
+
+def test_the_chat_completions_bridge_names_the_envs_date_too(vertex, agent, client):
+    agent._routes[TOKEN] = a2a_server._Route("vertex_ai/global/gemini-3.1-pro-preview", "p-1", None, ENV_TODAY)
+
+    client.post(GENERATE, json=_DATED)
+
+    (request,) = vertex.requests
+    messages = json.loads(request.content)["messages"]
+    assert f"Today's date is {ENV_TODAY} (formatted" in messages[0]["content"]
+    assert "November 20, 2026" not in request.content.decode()
+    assert messages[1]["content"] == "Today's date is what, by your clock?"
+
+
 # ── provider-prefixed models: the chat-completions bridge ────────────────────────
 
 

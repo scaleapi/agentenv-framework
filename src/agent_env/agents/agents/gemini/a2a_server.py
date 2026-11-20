@@ -69,6 +69,7 @@ from gemini_bridge import (
     cli_model,
     clock_armed,
     detect_format,
+    env_today,
     find_session_file,
     gemini_request_to_openai,
     get_last_attribution_snapshot,
@@ -83,6 +84,7 @@ from gemini_bridge import (
     run_gemini,
     transcript_session_id,
     wants_sse,
+    with_date,
 )
 from gemini_changelog import (
     HOOK_TIMEOUT_S,
@@ -198,11 +200,13 @@ class GeminiConfig(AgentConfig):
 
 @dataclass(frozen=True)
 class _Route:
-    """What the proxy forwards one run's model calls with."""
+    """What the proxy forwards one run's model calls with: on an armed clock, ``today``, the env's date as the run
+    started, which the CLI's date line names in place of its own, on real time."""
 
     model: str | None
     project_id: str | None
     task_id: str | None
+    today: str | None = None
 
 
 # install.sh, from the build context install_agent unpacks, brings Node, the Gemini CLI and a Python of the agent's
@@ -363,16 +367,16 @@ def _answer(uploaded: Uploaded) -> dict[str, Any]:
 
 
 async def _vertex_openai_bridge(
-    rest: str, request: Request, base: str, route_model: str, project_id: str | None, task_id: str | None,
+    rest: str, request: Request, body: bytes, base: str, route_model: str, project_id: str | None,
+    task_id: str | None,
 ) -> Response:
-    """Translate the CLI's native-Gemini generate call into an OpenAI
+    """Translate the CLI's native-Gemini generate call, ``body``, into an OpenAI
     /v1/chat/completions call whose `model` is the provider-prefixed route
     string (e.g. vertex_ai/global/gemini-3.1-pro-preview) — the only endpoint
     that reaches Vertex — then translate the response back to a single native
     Gemini GenerateContentResponse (SSE-framed when the CLI asked for
     streamGenerateContent). Attribution headers are injected identically to the
     passthrough path so cost tagging is preserved."""
-    body = await request.body()
     try:
         greq = json.loads(body) if body else {}
     except json.JSONDecodeError:
@@ -545,9 +549,10 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
             async with self._context_locks_guard:
                 self._active_contexts.add(context_id)
             token = uuid.uuid4().hex
-            self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id)
             own = self.session_ref_for_context(context_id)
             try:
+                armed = clock_armed()
+                self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id, env_today() if armed else None)
                 with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt) as settings:
                     base_url = None
                     if os.environ.get("LITELLM_BASE_URL"):
@@ -567,8 +572,7 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                         attachment_paths=attachment_paths or None,
                         timeout_s=cfg.timeout_seconds,
                         event_callback=lambda event: self._on_event(event, request),
-                        env=cli_env(os.environ, system_settings=settings, base_url=base_url,
-                                    clock_armed=clock_armed(),
+                        env=cli_env(os.environ, system_settings=settings, base_url=base_url, clock_armed=armed,
                                     mcp_urls=[str(info.get("url") or "") for info in (request.mcp_servers or {}).values()]),
                         cwd=GEMINI_CWD,
                         other_sessions=lambda: {*self.bound_session_refs(), *self._claimed_sessions} - {own},
@@ -754,7 +758,8 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         return ObjectSnapshotLoadResponse(context_id=new_context_id)
 
     async def litellm_gemini_proxy(self, request: Request) -> Response:
-        """Forward one run's model call to LiteLLM with that run's attribution headers."""
+        """Forward one run's model call to LiteLLM with that run's attribution headers, its date line naming the env's
+        date when the run started on an armed clock."""
         route = self._routes.get(request.path_params["token"])
         if route is None:
             raise HTTPException(status_code=404, detail="no running turn has this proxy route")
@@ -767,13 +772,13 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         # OpenAI-compat endpoint instead. Everything else (countTokens, the native
         # AI-Studio models) keeps the verbatim passthrough below.
         route_model = (route.model or "").strip()
+        body = with_date(await request.body(), route.today)
         if needs_openai_route(route_model) and is_generate_path(rest):
-            return await _vertex_openai_bridge(rest, request, base, route_model, route.project_id, route.task_id)
+            return await _vertex_openai_bridge(rest, request, body, base, route_model, route.project_id, route.task_id)
         fwd_headers = _upstream_headers(
             {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_DROP_REQ_HEADERS},
             route.project_id, route.task_id,
         )
-        body = await request.body()
         try:
             async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT_S) as client:
                 upstream = await client.request(

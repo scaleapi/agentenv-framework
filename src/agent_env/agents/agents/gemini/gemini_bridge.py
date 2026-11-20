@@ -14,7 +14,10 @@ import json
 import logging
 import os
 import re
+import shlex
+import shutil
 import signal
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -24,7 +27,7 @@ from pathlib import Path
 
 # clock_armed is re-exported: a2a_server reads the clock page through this module.
 from agent_egress import clock_armed as clock_armed, egress_env
-from gemini_config import SYSTEM_SETTINGS_ENV, gemini_home
+from gemini_config import SYSTEM_SETTINGS_ENV, commands_env_path, gemini_home
 
 logger = logging.getLogger(__name__)
 
@@ -276,30 +279,65 @@ def model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
-#: The proxy variables the CLI itself reads (its config's proxy): it routes every request it makes through that proxy,
-#: NO_PROXY or not, so its model calls to the attribution proxy on 127.0.0.1 and its MCP servers would meet a proxy
-#: that refuses them.
-_CLI_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+#: agent-env's libfaketime keeps a process started with this marker on real time, and takes it out of the environment
+#: that process's children inherit, so they follow the clock.
+REAL_TIME_ENV = "AGENTENV_REAL_TIME"
 
 
 def cli_env(environ: Mapping[str, str], *, system_settings: Path, base_url: str | None,
             mcp_urls: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment for one run: this process's, with the endpoint's key under the name the CLI reads, its
     model calls sent to ``base_url`` (the attribution proxy, for this run) unless the environment names its own
-    endpoint, and the run's own system settings. On an armed clock (``clock_armed``) the commands the model runs go
-    out through the egress proxy (``egress_env``, given the model endpoint's URL and the env's MCP servers', ``mcp_urls``),
-    by ALL_PROXY alone; the CLI itself, which would send everything through a proxy it's handed, NO_PROXY or not, goes
-    out directly."""
+    endpoint, and the run's own system settings.
+
+    On an armed clock (``clock_armed``) the CLI itself stays on real time, with no relaunch of its own, whose child
+    would inherit no marker: it compares its locks', sessions' and logs' real file times, and its MCP servers'
+    certificates, with real time, and goes out directly, as it must, since it would send every request through a proxy
+    it's handed, loopback ones included. Only the commands the model runs follow the clock, and they go out through the
+    egress proxy by ``egress_env`` (given the model endpoint's URL and the env's MCP servers', ``mcp_urls``), from a file
+    beside the run's settings that every bash the CLI starts reads first (BASH_ENV)."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("GEMINI_API_KEY"):
         env["GEMINI_API_KEY"] = env["LITELLM_API_KEY"]
     if base_url and not environ.get("GOOGLE_GEMINI_BASE_URL"):
         env["GOOGLE_GEMINI_BASE_URL"] = base_url
     env[SYSTEM_SETTINGS_ENV] = str(system_settings)
+    if not clock_armed:
+        return env
+    env.update({REAL_TIME_ENV: "1", "GEMINI_CLI_NO_RELAUNCH": "true"})
     urls = [env.get("GOOGLE_GEMINI_BASE_URL", ""), env.get("LITELLM_BASE_URL", ""), *mcp_urls]
-    egress = egress_env(environ, urls, armed=clock_armed)
-    env.update({name: value for name, value in egress.items() if name not in _CLI_PROXY_VARS})
+    if egress := egress_env(environ, urls, armed=True):
+        commands = commands_env_path(system_settings)
+        commands.write_text("".join(f"export {name}={shlex.quote(value)}\n" for name, value in egress.items()))
+        env["BASH_ENV"] = str(commands)
     return env
+
+
+def cli_program(env: Mapping[str, str] | None) -> list[str]:
+    """What starts the CLI: ``gemini``, or, for one kept on real time, its script run by node itself, since ``gemini``
+    starts with ``#!/usr/bin/env node`` and env, started with the marker, would stay on real time and hand node an
+    environment without it."""
+    if not env or env.get(REAL_TIME_ENV) != "1":
+        return ["gemini"]
+    path = env.get("PATH")
+    return [shutil.which("node", path=path), os.path.realpath(shutil.which("gemini", path=path))]
+
+
+# The date line of the CLI's environment context, which it words from its own clock.
+_DATE_LINE = re.compile(rb"(Today's date is )[^\"\\]{1,80}?( \(formatted according to the user's locale\)\.)")
+
+
+def env_today() -> str:
+    """Today on the env's clock, worded as the CLI's date line words it in the image's locale: from ``date``, which,
+    as a child of this process kept on real time, follows the clock as the model's commands do."""
+    return subprocess.run(["date", "+%A, %B %-d, %Y"], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def with_date(body: bytes, today: str | None) -> bytes:
+    """A model call's body with the CLI's date line naming ``today``, the env's; the body as it came without one."""
+    if today is None:
+        return body
+    return _DATE_LINE.sub(lambda match: match[1] + today.encode() + match[2], body)
 
 
 @dataclass
@@ -534,7 +572,7 @@ async def run_gemini(
         prompt = f"{prompt}\n\n{refs}" if prompt else refs
 
     cmd = [
-        "gemini", "-p", prompt,
+        *cli_program(env), "-p", prompt,
         "--output-format", "stream-json",
         "--approval-mode", "yolo",
     ]

@@ -59,6 +59,11 @@ def _server_entry(url: str, headers: Mapping[str, str] | None, role: str | None)
     return entry
 
 
+def commands_env_path(settings: Path) -> Path:
+    """Where a run's commands get their environment from, beside its settings, which take it with them."""
+    return settings.with_suffix(".sh")
+
+
 def _default_system_settings() -> dict[str, Any]:
     try:
         settings = json.loads(_DEFAULT_SYSTEM_SETTINGS.read_text())
@@ -72,8 +77,8 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
                  system_prompt: str | None) -> Iterator[Path]:
     """One run's system settings, in an owner-only file of its own that names `servers` with `role`; with a
     `system_prompt`, also a context file the CLI layers on its own system prompt (the CLI has no flag for one, and
-    replacing its system prompt would lose its tool protocol). The settings go when the run ends, the context file
-    when the last run naming it does."""
+    replacing its system prompt would lose its tool protocol). The settings go when the run ends, with the commands'
+    environment written beside them, and the context file when the last run naming it does."""
     home = gemini_home()
     runs = home / "agentenv-runs"
     runs.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -91,6 +96,7 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
                 "fileName": [_WORKSPACE_CONTEXT_FILE, context.name],
             }
         path = runs / f"{token}.json"
+        stack.callback(commands_env_path(path).unlink, missing_ok=True)
         # It carries the MCP servers' headers.
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
             stack.callback(path.unlink, missing_ok=True)
