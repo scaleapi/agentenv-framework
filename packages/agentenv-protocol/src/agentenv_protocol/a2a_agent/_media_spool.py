@@ -5,6 +5,7 @@ pulls them at each turn's end (``TRAJECTORY_V1.media``), so the bytes never wait
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import shutil
 import tempfile
@@ -12,11 +13,14 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 class MediaSpool:
     """Each context's media files on disk. Safe to fill from the agent's thread while the loop pushes them; the folder
     is made on the first file and removed by ``close``. Each hold has its own number, so an upload that outlives its
-    context's copy (a restore, an eviction) releases only the hold it began with, never a later copy's."""
+    context's copy (a restore, an eviction) releases only the hold it began with, never a later copy's. A file that
+    can't be written, on a full disk say, is left out: a push reports it missing, and the copy goes on."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -30,11 +34,19 @@ class MediaSpool:
 
         def write(path: str, data: bytes) -> None:
             with self._lock:
-                file = self._file(path)
-                if not file.exists():
-                    part = file.with_name(f"{file.name}.{os.getpid()}.part")
-                    part.write_bytes(data)
-                    os.replace(part, file)
+                try:
+                    file = self._file(path)
+                    if not file.exists():
+                        part = file.with_name(f"{file.name}.{os.getpid()}.part")
+                        try:
+                            part.write_bytes(data)
+                            os.replace(part, file)
+                        finally:
+                            part.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("the atif/1 copy of context %s keeps no file for %s, which a push reports "
+                                   "missing: %s", context_id, path, exc)
+                    return
                 self._held.setdefault(context_id, {}).setdefault(path, next(self._holds))
 
         return write

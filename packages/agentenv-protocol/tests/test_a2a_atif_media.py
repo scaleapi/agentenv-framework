@@ -245,6 +245,27 @@ def test_a_spooled_file_that_no_longer_matches_its_name_never_reaches_the_store(
     assert pushed["failed"][_path(SHOT, ".png")].startswith("the spooled file's sha256 is ")
 
 
+def test_a_file_the_spool_cant_write_is_reported_missing_and_the_copy_goes_on(
+        store: dict[str, bytes], tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    other = _png(2, 2)
+    with TestClient(_shooting().create_app()) as client:
+        spool = client.app.state.agentenv_a2a.services.task_trajectories.media
+        spool._folder = tmp_path / "removed"
+        _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
+        spool._folder = None
+        task_id = _send(client, "again", "m-2", extra_parts=[_file(other, "image/png")])
+        _ended(client, task_id)
+        document = _atif(client, task_id=task_id)["trajectory"]
+        pushed = _media(client, {_path(SHOT, ".png"): "image/png", _path(other, ".png"): "image/png"}).json()
+    assert pushed == {"objects": {_path(other, ".png"): {"size_bytes": len(other),
+                                                         "sha256": hashlib.sha256(other).hexdigest()}},
+                      "missing": [_path(SHOT, ".png")], "failed": {}}
+    paths = {part["source"]["path"] for step in document["steps"] for part in step.get("message") or []
+             if isinstance(part, dict) and part.get("type") == "image"}
+    assert paths == {_path(SHOT, ".png"), _path(other, ".png")}
+    assert f"keeps no file for {_path(SHOT, '.png')}" in caplog.text
+
+
 def test_a_media_call_takes_only_media_paths() -> None:
     with TestClient(_shooting().create_app()) as client:
         for path in ("../../etc/passwd", "media/abc.png", "https://elsewhere.example.test/x.png",
