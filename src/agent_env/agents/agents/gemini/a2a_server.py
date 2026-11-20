@@ -67,7 +67,7 @@ from gemini_bridge import (
     chats_dir_for_cwd,
     cli_env,
     cli_model,
-    clock_armed,
+    cli_on_real_time,
     detect_format,
     env_today,
     find_session_file,
@@ -551,7 +551,7 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
             token = uuid.uuid4().hex
             own = self.session_ref_for_context(context_id)
             try:
-                armed = clock_armed()
+                armed = cli_on_real_time(os.environ)
                 self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id, env_today() if armed else None)
                 with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt) as settings:
                     base_url = None
@@ -572,8 +572,10 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                         attachment_paths=attachment_paths or None,
                         timeout_s=cfg.timeout_seconds,
                         event_callback=lambda event: self._on_event(event, request),
-                        env=cli_env(os.environ, system_settings=settings, base_url=base_url, clock_armed=armed,
-                                    mcp_urls=[str(info.get("url") or "") for info in (request.mcp_servers or {}).values()]),
+                        env=cli_env(
+                            os.environ, system_settings=settings, base_url=base_url, clock_armed=armed,
+                            mcp_urls=[str(info.get("url") or "") for info in (request.mcp_servers or {}).values()],
+                        ),
                         cwd=GEMINI_CWD,
                         other_sessions=lambda: {*self.bound_session_refs(), *self._claimed_sessions} - {own},
                     )

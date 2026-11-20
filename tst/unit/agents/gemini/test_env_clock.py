@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -138,6 +139,20 @@ def _installed_like_the_image(root: Path) -> tuple[Path, Path]:
     return node, script
 
 
+def _spawned(monkeypatch, env: dict[str, str]) -> tuple[list[str], dict]:
+    """The command one turn starts the CLI with, and how."""
+    started = []
+
+    async def fake_exec(*cmd, **kwargs):
+        started.append((list(cmd), kwargs))
+        return FakeCLI(b'{"type":"result","status":"success","stats":{}}\n')
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(gemini_bridge.run_gemini(prompt="hi", session_id=None, env=env))
+    ((cmd, kwargs),) = started
+    return cmd, kwargs
+
+
 @pytest.mark.parametrize("armed", [False, True])
 def test_a_cli_on_real_time_is_started_as_its_script_run_by_node_so_the_marker_reaches_node(
         monkeypatch, tmp_path, run_settings, armed):
@@ -145,33 +160,72 @@ def test_a_cli_on_real_time_is_started_as_its_script_run_by_node_so_the_marker_r
     start node without it."""
     node, script = _installed_like_the_image(tmp_path)
     env = _env({"PATH": str(node.parent), agent_egress.EGRESS_PROXY_ENV: PROXY}, run_settings, clock_armed=armed)
-    started = []
 
-    async def fake_exec(*cmd, **kwargs):
-        started.append((list(cmd), kwargs["env"]))
-        return FakeCLI(b'{"type":"result","status":"success","stats":{}}\n')
+    cmd, spawned = _spawned(monkeypatch, env)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    asyncio.run(gemini_bridge.run_gemini(prompt="hi", session_id=None, env=env))
-
-    ((cmd, spawned),) = started
     program = [str(node), os.path.realpath(script)] if armed else ["gemini"]
     assert cmd == [*program, "-p", "hi", "--output-format", "stream-json", "--approval-mode", "yolo"]
-    assert spawned.get("AGENTENV_REAL_TIME") == ("1" if armed else None)
+    assert spawned["env"].get("AGENTENV_REAL_TIME") == ("1" if armed else None)
+
+
+def _installed_by_install_sh(root: Path) -> Path:
+    """`gemini` as install.sh writes it: a shell script that runs the CLI under the install's own node."""
+    install = (AGENT_DIR / "install.sh").read_text()
+    quoted = re.search(r"^quoted\(\) \{.*\}$", install, re.MULTILINE)[0]
+    launcher = re.search(r"^printf '#!/bin/sh.*?> \"\$stage/gemini\"$", install, re.MULTILINE | re.DOTALL)[0]
+    stage = root / "bin"
+    stage.mkdir()
+    subprocess.run(["bash", "-c", f"{quoted}\n{launcher}"], check=True,
+                   env={"PATH": os.environ["PATH"], "root": str(root), "stage": str(stage)})
+    (stage / "gemini").chmod(0o755)
+    return stage / "gemini"
+
+
+def test_an_installs_gemini_which_node_cant_run_is_started_as_it_is(tmp_path):
+    """Handed install.sh's launcher, node would fail on its first line, a shell's: a target that runs an egress proxy
+    of its own, with its page armed, starts that CLI as before."""
+    launcher = _installed_by_install_sh(tmp_path)
+    assert launcher.read_text().startswith("#!/bin/sh\n")
+
+    assert gemini_bridge.cli_program({"PATH": str(launcher.parent), "AGENTENV_REAL_TIME": "1"}) == ["gemini"]
 
 
 @pytest.mark.parametrize("armed", [False, True])
+def test_the_cli_reads_no_input_from_the_servers_stdin(monkeypatch, tmp_path, run_settings, armed):
+    """Under supervisord, the server's stdin is a pipe that never closes, which the CLI would wait 500 ms on for piped
+    input every turn; under Docker, before supervisord, it was /dev/null."""
+    node, _ = _installed_like_the_image(tmp_path)
+    env = _env({"PATH": str(node.parent), agent_egress.EGRESS_PROXY_ENV: PROXY}, run_settings, clock_armed=armed)
+
+    _, spawned = _spawned(monkeypatch, env)
+
+    assert spawned["stdin"] == asyncio.subprocess.DEVNULL
+
+
+def test_the_cli_is_the_version_whose_date_line_the_relay_names_the_envs_date_in():
+    """The relay finds the CLI's date line by 0.38.2's wording (gemini_bridge._DATE_LINE), in a bundle no CI job builds:
+    a CLI bump checks that wording in the new bundle, then moves this pin."""
+    lock = json.loads((AGENT_DIR / "package-lock.json").read_text())
+
+    assert lock["packages"]["node_modules/@google/gemini-cli"]["version"] == "0.38.2"
+
+
+@pytest.mark.parametrize("armed, image", [(False, True), (True, True), (True, False)],
+                         ids=["unarmed", "armed", "installed-under-an-armed-page"])
 def test_a_turn_on_an_armed_clock_starts_its_cli_on_real_time_and_names_the_envs_date(
-        monkeypatch, tmp_path, home, agent, client, armed):
-    """The call site: the turn reads the clock page, and on an armed one hands the CLI the marker, its commands the
-    proxy for the env's MCP server over TLS, and its model calls the env's date for the whole turn."""
+        monkeypatch, tmp_path, home, agent, client, armed, image):
+    """The call site: the turn reads the clock page, and on the image's armed one hands the CLI the marker, its
+    commands the proxy for the env's MCP server over TLS, and its model calls the env's date for the whole turn. An
+    install has no egress proxy of the image's, and its page, a computer's say, follows a clock the agent never opted in
+    to: its turns run as before."""
     page = tmp_path / "agentenv-clock"
     page.write_bytes(_page(int(armed)))
     monkeypatch.setattr(agent_egress.clockpage, "PAGE", str(page))
     monkeypatch.setattr(a2a_server, "env_today", lambda: ENV_TODAY)
-    for name in PROXY_VARS:
+    for name in (*PROXY_VARS, agent_egress.EGRESS_PROXY_ENV):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(agent_egress.EGRESS_PROXY_ENV, PROXY)
+    if image:
+        monkeypatch.setenv(agent_egress.EGRESS_PROXY_ENV, PROXY)
     monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.com")
     for name, url in zip(("modal", "gateway"), MCP_URLS):
         client.post(a2a_server.MCP_CONFIG_V1.endpoint, json={"url": url, "name": name})
@@ -188,9 +242,9 @@ def test_a_turn_on_an_armed_clock_starts_its_cli_on_real_time_and_names_the_envs
 
     env, commands = seen["env"], seen["commands"]
     assert not PROXY_VARS & set(env)
-    if not armed:
+    if not (armed and image):
         assert "AGENTENV_REAL_TIME" not in env and "BASH_ENV" not in env and seen["route"].today is None
-        assert not PROXY_VARS & set(commands)
+        assert not PROXY_VARS & set(commands) and gemini_bridge.cli_program(env) == ["gemini"]
         return
     assert (env["AGENTENV_REAL_TIME"], seen["route"].today) == ("1", ENV_TODAY)
     direct = commands["NO_PROXY"].split(",")

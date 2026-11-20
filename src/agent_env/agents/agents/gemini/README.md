@@ -49,8 +49,9 @@ egress proxy, each as its own user, and the A2A server as the `agent` user, on r
 The image can follow a task env's clock as Claude Code's does, with agent-env's libfaketime preloaded for the `agent`
 user and the computer base's follower and egress proxy (`src/agent_env/agents/README.md`), and only once a
 `sync_env_clock` sets `agent_clock`. Unarmed, the CLI runs exactly as it did before it could: the same environment, and
-started as `gemini`. On an armed clock the CLI itself stays on real time, and only the commands the model runs follow
-the clock:
+started as `gemini`. So does an install's (`install/v1`), which has no egress proxy of the image's: its clock page, a
+computer's say, follows a clock the agent never opted in to. On an armed clock the CLI itself stays on real time, and
+only the commands the model runs follow the clock:
 
 - **The CLI, on real time.** Each turn starts the CLI's script with node itself, with agent-env's real-time marker and
   `GEMINI_CLI_NO_RELAUNCH`, so neither `gemini`'s `#!/usr/bin/env node` line nor the CLI's relaunch of itself hands node

@@ -25,8 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-# clock_armed is re-exported: a2a_server reads the clock page through this module.
-from agent_egress import clock_armed as clock_armed, egress_env
+from agent_egress import EGRESS_PROXY_ENV, clock_armed, egress_env
 from gemini_config import SYSTEM_SETTINGS_ENV, commands_env_path, gemini_home
 
 logger = logging.getLogger(__name__)
@@ -310,14 +309,23 @@ def cli_env(environ: Mapping[str, str], *, system_settings: Path, base_url: str 
     return env
 
 
+def cli_on_real_time(environ: Mapping[str, str]) -> bool:
+    """Whether a turn starting now keeps its CLI on real time: in the image, whose root.conf hands its server the egress
+    proxy, once its clock page is armed, which there only sync_env_clock's ``agent_clock`` does. An install's page, a
+    computer's say, follows a clock the agent never opted in to, so there the CLI runs as it did before."""
+    return bool(environ.get(EGRESS_PROXY_ENV)) and clock_armed()
+
+
 def cli_program(env: Mapping[str, str] | None) -> list[str]:
-    """What starts the CLI: ``gemini``, or, for one kept on real time, its script run by node itself, since ``gemini``
-    starts with ``#!/usr/bin/env node`` and env, started with the marker, would stay on real time and hand node an
-    environment without it."""
+    """What starts the CLI: ``gemini``, or, for one kept on real time, its script run by node itself, since the image's
+    ``gemini`` links to a script that starts with ``#!/usr/bin/env node``, and env, started with the marker, would stay
+    on real time and hand node an environment without it. An install's ``gemini`` is a shell launcher, which node can't
+    run, so it's started as it is."""
     if not env or env.get(REAL_TIME_ENV) != "1":
         return ["gemini"]
     path = env.get("PATH")
-    return [shutil.which("node", path=path), os.path.realpath(shutil.which("gemini", path=path))]
+    script = os.path.realpath(shutil.which("gemini", path=path))
+    return [shutil.which("node", path=path), script] if script.endswith(".js") else ["gemini"]
 
 
 # The date line of the CLI's environment context, which it words from its own clock.
@@ -585,6 +593,8 @@ async def run_gemini(
     started = time.time()
     proc = await _started(asyncio.create_subprocess_exec(
         *cmd,
+        # Not the server's, which under supervisord is a pipe that never closes: the CLI would wait 500 ms for input.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=dict(env) if env is not None else None,

@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import tomllib
 
 from tst.unit.agents.gemini.agent import AGENT_DIR
@@ -125,3 +126,19 @@ def test_tls_checks_stay_on():
 def test_the_image_starts_through_cmd_which_modal_passes_its_env_to():
     assert 'CMD ["/usr/local/bin/start-agent"]' in DOCKERFILE
     assert not re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE)
+
+
+def test_root_conf_starts_the_server_as_entrypoint_sh_does():
+    """root.conf runs uvicorn itself, for the marker to reach it, so it repeats entrypoint.sh's arguments, the graceful
+    shutdown that ends running turns' CLIs among them, on the port the image's ENV names, in its working directory."""
+    conf = (AGENT_DIR / "root.conf").read_text()
+    section = re.search(r"^\[program:agent\]\n(.*?)(?=^\[|\Z)", conf, re.MULTILINE | re.DOTALL)[1]
+    program = dict(line.split("=", 1) for line in section.splitlines() if "=" in line and not line.startswith(";"))
+    entrypoint = (AGENT_DIR / "entrypoint.sh").read_text()
+    started = shlex.split(re.search(r"^exec (uvicorn .+)$", entrypoint, re.MULTILINE)[1])
+
+    command = shlex.split(program["command"])
+    assert command[:3] == ["/usr/local/bin/python3", "-m", "uvicorn"]
+    assert command[3:] == [arg.replace("${A2A_PORT:-8000}", "%(ENV_A2A_PORT)s") for arg in started[1:]]
+    assert re.search(r"^ENV .*\bA2A_PORT=8000\b", DOCKERFILE, re.MULTILINE)
+    assert program["directory"] == re.findall(r"^WORKDIR (\S+)$", DOCKERFILE, re.MULTILINE)[-1]
