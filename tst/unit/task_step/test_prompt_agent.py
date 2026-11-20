@@ -25,7 +25,7 @@ from agentenv_protocol.transfers import HttpPutGrant
 from agent_env.a2a_agent.object_transfer import DEFAULT_TRAJECTORY_MAX_BYTES
 from agent_env.config import configure
 from agent_env.store.object_store import LocalFilesystemObjectStore
-from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture
 from agent_env.task_step.task_steps import prompt_agent as pa
 from agent_env.task_step.task_steps.prompt_agent import (
@@ -294,6 +294,111 @@ async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_i
     assert requests == [{"task_id": "task-1", "format": "echo/1"}]
     assert response.target_agent_per_turn_trajectories == [{"native_format": "echo/1", "atif": None}]
     assert json.loads(store.get(response.agent_trajectory_object_url)) == [{"type": "echo"}]
+
+
+def test_a_runs_override_names_the_formats_it_prescribes_over_config(monkeypatch):
+    monkeypatch.setattr(pa, "get_config", lambda: SimpleNamespace(get_trajectory_formats=lambda: ("from-config/1",)))
+    assert pa.prescribed_formats(TaskStepContext()) == ("from-config/1",)
+    overridden = TaskStepContext(metadata={"user_overrides": {"trajectory_formats": ["atif/1"]}})
+    assert pa.prescribed_formats(overridden) == ("atif/1",)
+    assert pa.prescribed_formats(TaskStepContext(metadata={"user_overrides": {"trajectory_formats": []}})) == ()
+    with pytest.raises(StepContextError, match="trajectory_formats must be a list of format names"):
+        pa.prescribed_formats(TaskStepContext(metadata={"user_overrides": {"trajectory_formats": "atif/1"}}))
+
+
+def _prescribing_agent(*, method: bool = True) -> DeployedAgent:
+    methods = {"get": {"request": {}}, **({"prescribe": {"request": {}}} if method else {})}
+    extension = {"uri": TRAJECTORY_V1.uri, "params": {
+        "formats": ["echo/1", "atif/1"] if method else ["echo/1"], "native": "echo/1", "default": "echo/1",
+        "methods": methods}}
+    return DeployedAgent(agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test",
+                         a2a_card={"capabilities": {"extensions": [extension]}})
+
+
+def _prescribing(*formats: str) -> TaskStepContext:
+    return TaskStepContext(metadata={"user_overrides": {"trajectory_formats": list(formats)}})
+
+
+@pytest.mark.asyncio
+async def test_an_agent_is_prescribed_only_formats_its_card_offers_and_the_step_records_what_it_builds(
+        monkeypatch, caplog):
+    sent: list[tuple[str, dict]] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"formats": ["echo/1", "atif/1"]})
+
+    FakeA2AAgents({}, other=answer).serve(monkeypatch)
+    context = _prescribing("atif/1", "atif1")
+
+    await pa.prescribe_formats(context, "solve", _prescribing_agent(), "http://agent.test")
+
+    assert sent == [("/ext/trajectory/prescribe", {"formats": ["atif/1"]})]
+    assert context.metadata[pa.TRAJECTORY_FORMATS_KEY] == {"solve": {
+        "agent": "solver", "prescribed": ["atif/1", "atif1"], "built": ["echo/1", "atif/1"]}}
+    assert "agent 'solver' can't build ['atif1'], which the run prescribes: it builds ['echo/1', 'atif/1']" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_prescribes_atif_to_an_agent_that_cant_build_it_says_so(monkeypatch, caplog):
+    FakeA2AAgents({}, other=lambda request: pytest.fail(f"unexpected request to {request.url}")).serve(monkeypatch)
+    context = _prescribing("atif/1")
+
+    await pa.prescribe_formats(context, "solve", _prescribing_agent(method=False), "http://agent.test")
+
+    assert context.metadata[pa.TRAJECTORY_FORMATS_KEY]["solve"] == {
+        "agent": "solver", "prescribed": ["atif/1"], "built": None}
+    assert "agent 'solver' can't build ['atif/1'], which the run prescribes: it builds ['echo/1']" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_agent_on_an_older_sdk_that_offers_atif_unasked_gets_no_call_and_no_warning(monkeypatch, caplog):
+    """Its card lists atif/1 without ``prescribe``: it builds atif/1 for every conversation, so it isn't warned of."""
+    agent = _prescribing_agent(method=False)
+    agent.a2a_card["capabilities"]["extensions"][0]["params"]["formats"] = ["echo/1", "atif/1"]
+    FakeA2AAgents({}, other=lambda request: pytest.fail(f"unexpected request to {request.url}")).serve(monkeypatch)
+    context = _prescribing("atif/1")
+
+    await pa.prescribe_formats(context, "solve", agent, "http://agent.test")
+
+    assert context.metadata[pa.TRAJECTORY_FORMATS_KEY]["solve"]["built"] is None
+    assert "can't build" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_prescription_the_agent_cant_be_reached_for_is_tried_again(monkeypatch):
+    monkeypatch.setattr(pa, "_PRESCRIBE_RETRY_SECONDS", 0)
+    tries: list[int] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        tries.append(1)
+        if len(tries) < 3:
+            raise httpx.ConnectError("agent restarting", request=request)
+        return httpx.Response(200, json={"formats": ["echo/1", "atif/1"]})
+
+    FakeA2AAgents({}, other=flaky).serve(monkeypatch)
+    context = _prescribing("atif/1")
+
+    await pa.prescribe_formats(context, "solve", _prescribing_agent(), "http://agent.test")
+
+    assert len(tries) == 3 and context.metadata[pa.TRAJECTORY_FORMATS_KEY]["solve"]["built"] == ["echo/1", "atif/1"]
+
+
+@pytest.mark.asyncio
+async def test_a_prescription_that_fails_leaves_the_run_going_and_records_why(monkeypatch, caplog):
+    monkeypatch.setattr(pa, "_PRESCRIBE_RETRY_SECONDS", 0)
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("agent gone", request=request)
+
+    FakeA2AAgents({}, other=refuse).serve(monkeypatch)
+    context = _prescribing("atif/1")
+
+    await pa.prescribe_formats(context, "solve", _prescribing_agent(), "http://agent.test")
+
+    record = context.metadata[pa.TRAJECTORY_FORMATS_KEY]["solve"]
+    assert (record["built"], record["error"]) == (None, "ConnectError: agent gone")
+    assert "prescribing trajectory formats ['atif/1'] failed, so it builds what it was last prescribed" in caplog.text
 
 
 def test_a_prompt_step_is_a_prompt_agent_or_a_subclass_whether_a_step_or_its_config():

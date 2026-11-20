@@ -60,6 +60,10 @@ agent_default = "local"   # agents too
 # default_a2a_agent_id = "my-agent"   # what a deploy_agent step that names no agent deploys; by default the
 #                                     # agents bundle's Claude Code, @local/agentenv-framework/agents/claude-code
 
+# [trajectories]
+# formats = ["atif/1"]   # the formats beside native a run prescribes to each agent whose trajectory it reads;
+#                        # none by default, so agents build native only. Per run: user_overrides.trajectory_formats
+
 # [envs]
 # default_gateway_env_id = "default"                 # the gateway every gateway deploy runs
 # default_service_db_env_id = "default-db"           # the service-db local Postgres state runs from
