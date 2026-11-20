@@ -1,8 +1,8 @@
 """An agent image on a task env's clock (FD-5916), end to end on local Docker: the agent deployed with the env serves
 clock/v1 sync_time; sync_env_clock declares it a follower at the real gateway and hands it its config; from then on
-every program the agent's user runs, its CLI included, reads the env's time while the A2A server stays on real time; a
-clock write that waits for followers waits for it; and once teardown_sandboxes takes it down, writes stop waiting for
-it. An agent whose CLI speaks a protocol the stub endpoint serves also runs one real turn.
+every program the agent's user runs reads the env's time while the A2A server, and the Gemini CLI it starts, stay on
+real time; a clock write that waits for followers waits for it; and once teardown_sandboxes takes it down, writes stop
+waiting for it. An agent whose CLI speaks a protocol a stub endpoint serves also runs one real turn.
 
 Runs over images built beforehand, from this branch: AGENTENV_E2E_AGENT_IMAGES names one per agent, as
 ``claude-code=<tag>,codex=<tag>``; an agent it doesn't name is skipped as a missing capability."""
@@ -40,6 +40,7 @@ from tst.integration.task_step.test_prompt_agent_live_trajectory_local import (
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
 from tst.util.capabilities import agent_clock_image, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
+from tst.util.fake_gemini import FakeGemini, shell_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -75,21 +76,42 @@ async def _claude_turn(context: TaskStepContext, endpoint: FakeAnthropic) -> Non
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
 
+async def _gemini_turn(context: TaskStepContext, endpoint: FakeGemini) -> None:
+    """One turn of the real Gemini CLI, which stays on real time while the model's commands follow the clock: the date
+    line the model gets is the env's, which the agent's model relay writes in, and a `date` the model runs shows the
+    env's time, with the egress proxy's variables and no marker, under a CLI node runs itself."""
+    endpoint.respond = shell_then_answer(
+        'date -u +%FT%TZ; echo "proxy=${HTTPS_PROXY:-} marker=[${AGENTENV_REAL_TIME:-}] '
+        'cli=$(tr "\\0" " " < /proc/$PPID/cmdline)"', prefix="the shell said: ")
+    await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
+                              max_conversation_turns=1).execute(context)
+    dated = {m for call in endpoint.generate_calls()
+             for m in re.findall(r"Today's date is ([^(\"]+?) \(formatted", json.dumps(call.body))}
+    results = endpoint.tool_results()
+    print("the CLI's date line:", dated, "shell:", results)
+    assert dated == {"Tuesday, March 4, 2031"}, dated
+    assert any(VIRTUAL in r and "proxy=http://127.0.0.1:3128" in r and "marker=[]" in r for r in results), results
+    assert any("node /opt/agent/node_modules/@google/gemini-cli/bundle/gemini.js" in r for r in results), results
+
+
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
-    must return under the preloaded library), and a turn against the stub endpoint, for a CLI that speaks its protocol."""
+    must return under the preloaded library), and a turn against the stub endpoint of its protocol, for a CLI one
+    serves."""
 
     bridge: str
     version: tuple[str, ...]
     shows: str
-    turn: Callable[[TaskStepContext, FakeAnthropic], Awaitable[None]] | None = None
+    turn: Callable[[TaskStepContext, FakeAnthropic | FakeGemini], Awaitable[None]] | None = None
+    endpoint: type[FakeAnthropic] | type[FakeGemini] = FakeAnthropic
 
 
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
-    "gemini": Agent(bridge="gemini_bridge", version=("gemini", "--version"), shows="0.38.2"),
+    "gemini": Agent(bridge="gemini_bridge", version=("gemini", "--version"), shows="0.38.2", turn=_gemini_turn,
+                    endpoint=FakeGemini),
     "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
 }
 
@@ -121,11 +143,11 @@ async def _followers(deployed) -> dict:
 @pytest.mark.parametrize("name", [pytest.param(name, marks=skip_without_agent_clock_image(name)) for name in AGENTS])
 @pytest.mark.asyncio
 async def test_an_agent_image_follows_the_envs_clock_until_it_is_torn_down(local_registry, name):
-    with FakeAnthropic(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
+    with AGENTS[name].endpoint(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
         await _follows_until_torn_down(name, AGENTS[name], agent_clock_image(name), endpoint)
 
 
-async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: FakeAnthropic) -> None:
+async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: FakeAnthropic | FakeGemini) -> None:
     _seed_bootstrap_envs()
     env, deployed, _ = await _deploy_items("agentclock")
     uid = uuid.uuid4().hex[:8]
