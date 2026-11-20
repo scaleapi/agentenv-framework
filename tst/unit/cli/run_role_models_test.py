@@ -21,7 +21,7 @@ pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 class _Recorded:
     """Records each context it runs with."""
 
-    id, version, steps, requires = "t", 1, [], None
+    id, version, steps, requires, headline_verifiers = "t", 1, [], None, None
 
     def __init__(self):
         self.contexts = []

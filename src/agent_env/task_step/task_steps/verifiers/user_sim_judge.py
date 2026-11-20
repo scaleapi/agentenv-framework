@@ -104,8 +104,10 @@ What it writes, all in one place, ``metadata["verifications"][verifier_id]``:
   "the judge couldn't decide any check — check its setup" when every check is undecided.
 - ``run_step_id``, ``run_kind``, ``user_sim``, ``judge_model``; ``instructions`` (``source``, ``prompt_sha256``,
   ``recorded_prompt_sha256``, ``matches``); ``rubric_persona`` (when ``rubric_persona_sha256`` is set); ``notes``
-  (what the judge was told about gaps in the record); ``graded_turns``, ``turns``; ``calls``, ``usage``, ``cost``; and
-  rubrics_verifier's ``judge_output_retries`` / ``judge_output_discrepancies`` / ``judge_batches``.
+  (what the judge was told about gaps in the record); ``graded_turns``, ``turns``; ``calls``, ``usage``, ``cost`` (the
+  calls' costs summed, each what the endpoint billed, else LiteLLM's price map's figure; None when no call's has one)
+  and ``unpriced_calls`` (the calls whose cost has no figure, when there are some); and rubrics_verifier's
+  ``judge_output_retries`` / ``judge_output_discrepancies`` / ``judge_batches``.
 - ``skipped`` instead, with ``score`` None and no rows, for a run that isn't judged: one that ended in an error (the
   always_on record's or the prompt response's ``error_type``: every verifier skips its prompt anyway), a chat run
   whose user sim never read, and a run with no graded turn.
@@ -148,6 +150,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional
 
+from agent_env.config import model_call
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers import user_sim_judge_core as core
@@ -205,7 +208,8 @@ class _ThisRun:
     first_error: Optional[BaseException] = None  # what the first call raised, if it did
     calls: int = 0
     usage: list[Any] = field(default_factory=list)
-    cost: float = 0.0
+    cost: float = 0.0  # the calls' costs that have a figure
+    unpriced: int = 0  # the calls whose cost has none
 
 
 class UserSimJudge(RubricsVerifierTaskStep):
@@ -383,7 +387,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
             else:
                 error["fails_task"] = True
         output = {**judged.output, **entry, "user_sim_error": error, "calls": this.calls,
-                  "usage": core.usage_total(this.usage), "cost": round(this.cost, COST_DECIMALS)}
+                  "usage": core.usage_total(this.usage), **_cost(this)}
         if error["value"] == "unknown":
             checks = [r for r in rows if r["id"] in core.CHECKS]
             output["flag"] = FLAG_NONE_DECIDED if checks and all(r["verdict"] == "error" for r in checks) \
@@ -447,7 +451,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 cached_prefix=head)
             this.calls += 1
             this.usage.append(got.get("usage"))
-            this.cost += got.get("cost") or 0.0
+            if got.get("cost_usd") is None:
+                this.unpriced += 1
+            else:
+                this.cost += got["cost_usd"]
             return got
 
         if this.first is None:
@@ -500,20 +507,20 @@ def _root(e: BaseException) -> BaseException:
 
 
 def _setup_error(e: BaseException) -> Optional[BaseException]:
-    """The setup error behind a failed judge call, or None for a flaky one. Setup: agent-env's ConfigError (no key,
-    missing config) and LiteLLM's AuthenticationError, PermissionDeniedError, NotFoundError (an unknown model),
-    BadRequestError (with its kinds: an unknown provider, unsupported params, a prompt over the context window),
-    UnprocessableEntityError and BudgetExceededError. Anything else is flaky (Timeout, RateLimitError,
-    ServiceUnavailableError, InternalServerError, BadGatewayError, APIConnectionError, an agent judge's TimeoutError,
-    JudgeTimeoutError or AgentUnreachableError, an answer still unusable after its retries) and leaves the call's rows
-    undecided."""
-    import litellm
-
-    from agent_env.config.errors import ConfigError
-
-    setup = (ConfigError, litellm.AuthenticationError, litellm.PermissionDeniedError, litellm.NotFoundError,
-             litellm.BadRequestError, litellm.UnprocessableEntityError, litellm.BudgetExceededError)
+    """The setup error behind a failed judge call (``model_call.setup_errors``), or None for a flaky one. Anything
+    else is flaky (Timeout, RateLimitError, ServiceUnavailableError, InternalServerError, BadGatewayError,
+    APIConnectionError, an agent judge's TimeoutError, JudgeTimeoutError or AgentUnreachableError, an answer still
+    unusable after its retries) and leaves the call's rows undecided."""
+    setup = model_call.setup_errors()
     return next((x for x in _chain(e) if isinstance(x, setup)), None)
+
+
+def _cost(this: _ThisRun) -> dict[str, Any]:
+    """The run's ``cost``: its calls' costs summed, None when no call's cost has a figure, and ``unpriced_calls``, the
+    calls left out of the sum, when there are some."""
+    priced = this.calls - this.unpriced
+    total = round(this.cost, COST_DECIMALS) if priced or not this.calls else None
+    return {"cost": total, **({"unpriced_calls": this.unpriced} if this.unpriced else {})}
 
 
 def _problems(model: Any, items: Any, gate: Any, rubric_persona: Any = None) -> list[str]:

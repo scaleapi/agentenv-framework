@@ -103,11 +103,13 @@ class AgentEnv:
     @classmethod
     def local(cls, bundle: str | Path | Mapping[str, str | Path], split: str = "all", *,
               reward: str | Callable[[dict[str, float]], float] | None = None, sandbox: str | None = None,
-              max_concurrent_envs: int = 8, tool_timeout: float = 60.0, reset_timeout: float = 600.0) -> AgentEnv:
+              max_concurrent_envs: int = 8, tool_timeout: float = 60.0, reset_timeout: float = 600.0,
+              skip_lint: bool = False) -> AgentEnv:
         """``bundle`` served by ``build_app`` in this process on a loopback port, for a trainer on a machine that can
-        deploy its envs. ``max_concurrent_envs`` must cover the rollouts the trainer generates at once. The server
-        stops at ``close``, or when the process exits, ending its episodes."""
-        server = Server(build_app(bundle, reward=reward, sandbox=sandbox, max_concurrent_envs=max_concurrent_envs))
+        deploy its envs. ``max_concurrent_envs`` must cover the rollouts the trainer generates at once; ``skip_lint`` is
+        ``build_app``'s. The server stops at ``close``, or when the process exits, ending its episodes."""
+        server = Server(build_app(bundle, reward=reward, sandbox=sandbox, max_concurrent_envs=max_concurrent_envs,
+                                  skip_lint=skip_lint))
         _servers.add(server)
         try:
             env = cls(server.url, split, tool_timeout=tool_timeout, reset_timeout=reset_timeout)
