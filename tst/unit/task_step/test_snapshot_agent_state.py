@@ -107,7 +107,7 @@ async def test_capture_universe_state_publishes_unsigned_object_urls(monkeypatch
 
     monkeypatch.setattr(protocol_v1, "supports_v1", _supports_v1)
 
-    async def _export_state(_gw, name):
+    async def _export_state(_gw, name, headers=None):
         return {"service": name, "rows": 1}
 
     monkeypatch.setattr(legacy_protocol, "export_state", _export_state)
@@ -139,7 +139,7 @@ async def test_each_service_state_uploads_off_the_event_loop(monkeypatch):
     async def _no_v1(_base):
         return False
 
-    async def _export_state(_gw, name):
+    async def _export_state(_gw, name, headers=None):
         return {"service": name}
 
     monkeypatch.setattr(protocol_v1, "supports_v1", _no_v1)
@@ -171,7 +171,7 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
         got.append(base)
         return GetDataResponse(parts=[DataPart(data={"rows": 1})])
 
-    async def _export_state(gw, name):
+    async def _export_state(gw, name, headers=None):
         legacy.append((gw, name))
         return {"rows": 1}
 
