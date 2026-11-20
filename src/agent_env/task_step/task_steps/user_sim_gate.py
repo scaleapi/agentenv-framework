@@ -156,9 +156,9 @@ _JUDGE_SCHEMA = {
 
 
 def render_history(history: list[tuple[str, str]], turns: int, max_chars: int) -> str:
-    """The last ``turns`` messages as ``USER:`` / ``ASSISTANT:`` blocks, each cut to ``max_chars``."""
+    """The last ``turns`` messages as ``USER:`` / ``ASSISTANT:`` blocks, each cut to ``max_chars``; none for 0."""
     out = []
-    for role, text in history[-turns:]:
+    for role, text in (history[-turns:] if turns else []):  # history[-0:] would be all of it
         body = text if len(text) <= max_chars else text[:max_chars] + f"\n[… {len(text) - max_chars} more characters]"
         out.append(f"{role.upper()}:\n{body}")
     return "\n\n".join(out) or "(nothing yet)"

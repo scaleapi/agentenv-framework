@@ -58,6 +58,7 @@ def test_the_history_shows_the_last_turns_each_cut_to_size():
     assert shown.startswith("ASSISTANT:\nxxxxxxxxxx\n[… 40 more characters]")
     assert "first" not in shown and shown.endswith("ASSISTANT:\nthird")
     assert render_history([], turns=4, max_chars=10) == "(nothing yet)"
+    assert render_history(history, turns=0, max_chars=10) == "(nothing yet)"   # context_turns 0: no history
 
 
 def test_the_rewrite_request_names_why_and_says_it_is_not_from_the_assistant():
