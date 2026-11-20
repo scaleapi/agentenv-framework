@@ -1,0 +1,914 @@
+{
+ "gpt_through_the_endpoint": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "claude_through_the_endpoint": {
+  "requests": [
+   {
+    "model": "claude-sonnet-4-6",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "anthropic_prefixed_through_a_base_without_v1": {
+  "requests": [
+   {
+    "model": "anthropic/claude-sonnet-4-6",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "gemini_through_the_endpoint_as_openai": {
+  "requests": [
+   {
+    "model": "openai/gemini-2.5-flash",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "a_name_litellm_cant_place": {
+  "requests": [
+   {
+    "model": "openai/qwen3:8b",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "a_prefixed_name_with_no_endpoint": {
+  "requests": [
+   {
+    "model": "openai/gpt-4o",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "params_and_headers": {
+  "requests": [
+   {
+    "model": "claude-sonnet-4-6",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "custom_llm_provider": "openai",
+    "temperature": 0,
+    "extra_headers": {
+     "X-Team": "evals"
+    },
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "the_judges_own_url_and_key": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "judge-secret",
+    "api_base": "https://judge.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "the_runs_url_on_the_endpoint": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "extra_headers": {
+     "X-Team": "evals"
+    },
+    "api_base": "https://GW.test/v1/",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "the_steps_url_elsewhere_with_the_runs_key": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "run-key",
+    "api_base": "https://step.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "a_url_elsewhere_without_a_key": {
+  "requests": [],
+  "raised": "rubrics_verifier 'v': x.test isn't the configured model endpoint, so the configured key isn't sent there, and no key was given with it. Pass one with it: judge_litellm_api_key, or litellm_api_key, in the run's overrides. Any non-empty value works for a server that needs no key."
+ },
+ "screenshots": {
+  "requests": [
+   {
+    "model": "claude-sonnet-4-6",
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "THE RUN then the check"
+       },
+       {
+        "type": "image_url",
+        "image_url": {
+         "url": "data:image/png;base64,iVBORw0KGgo="
+        }
+       }
+      ]
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "screenshots_refused_with_the_schema": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "THE RUN then the check"
+       },
+       {
+        "type": "image_url",
+        "image_url": {
+         "url": "data:image/png;base64,iVBORw0KGgo="
+        }
+       }
+      ]
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   },
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "THE RUN then the check"
+       },
+       {
+        "type": "image_url",
+        "image_url": {
+         "url": "data:image/png;base64,iVBORw0KGgo="
+        }
+       }
+      ]
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1"
+   }
+  ],
+  "raised": null
+ },
+ "a_system_message_and_a_cached_run": {
+  "requests": [
+   {
+    "model": "claude-sonnet-4-6",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You check the run."
+     },
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "THE RUN",
+        "cache_control": {
+         "type": "ephemeral"
+        }
+       },
+       {
+        "type": "text",
+        "text": " then the check"
+       }
+      ]
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "a_cached_run_on_a_model_without_a_prompt_cache": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 1000,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ },
+ "a_timeout": {
+  "requests": [
+   {
+    "model": "gpt-4.1-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "THE RUN then the check"
+     }
+    ],
+    "timeout": 42,
+    "api_key": "configured-key",
+    "api_base": "https://gw.test/v1",
+    "response_format": {
+     "type": "json_schema",
+     "json_schema": {
+      "name": "rubrics_verification",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "results": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "score": {
+            "type": "number"
+           },
+           "justification": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "id",
+           "score",
+           "justification"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "results"
+       ],
+       "additionalProperties": false
+      },
+      "strict": true
+     }
+    }
+   }
+  ],
+  "raised": null
+ }
+}
