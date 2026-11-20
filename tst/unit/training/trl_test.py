@@ -294,6 +294,23 @@ def test_a_rollout_whose_config_reveals_fewer_tools_than_its_classs_stops_traini
         assert environment.get_reward() == 1.0
 
 
+def test_a_rollout_revealing_at_its_first_turn_what_its_classs_first_task_reveals_later_stops_training(
+        served, reveals):
+    env = served({"a": [ITEMS, ALICE, TURN, {**reveals("take_item"), "depends_on": ["turn"]},
+                        {**AGAIN, "depends_on": ["cfg"]}, REPLIES],
+                  "b": [ITEMS, ALICE, reveals("take_item"), {**TURN, "depends_on": ["cfg"]}, AGAIN, REPLIES]})
+    environment = env.factory()
+
+    environment.reset(**env.dataset[1])
+    with pytest.raises(RuntimeError) as stopped:
+        environment.get_reward()
+
+    assert str(stopped.value) == (
+        "task 'b' offers the tools ['add_item', 'end_turn', 'take_item'], not the ['add_item', 'end_turn'] its "
+        "toolset's first task does. TRL shows every task of a toolset the tools found by playing its first task, so "
+        "this toolset misses what tells its tasks apart")
+
+
 class _Slow(TaskStep):
     """Takes a second, as a verifier that grades the episode after its last turn does."""
 
