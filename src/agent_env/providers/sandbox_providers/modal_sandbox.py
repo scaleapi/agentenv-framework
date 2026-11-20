@@ -100,6 +100,10 @@ def _tunnel_url(t) -> str:
 #: The Modal sandbox tag that marks a VM as a shared box, several tasks' slots on one VM; its value is the box's id.
 SHARED_BOX_TAG = "agent_env_shared_box"
 SHARED_BOX_TAG_READ_FAILED_EVENT = "agent_env.modal_shared_box_tag_read_failed"
+#: The Modal sandbox tag that says a shared box's walls between its slots passed their self-test; its value is the
+#: WALLS_VERSION they passed. Only ``modal_vm_sandbox._mark_walls_verified`` writes it.
+WALLS_TAG = "agent_env_walls"
+WALLS_VERSION = "walls-v1"
 _TAG_READ_ATTEMPTS, _TAG_READ_BACKOFF_SECONDS = 3, 1.0
 
 
@@ -125,23 +129,42 @@ class SharedBoxTerminateRefused(Exception):
         super().__init__(f"Modal sandbox {sandbox_id} {why}; it was not terminated")
 
 
-async def _read_shared_box(sb: modal.Sandbox) -> Optional[str]:
-    """The shared box ``sb`` is tagged as, if any. A read that keeps failing raises, so a terminate fails closed;
-    NotFoundError raises at once."""
+class SharedBoxMismatch(LookupError):
+    """A sandbox reached as shared box ``expected`` is tagged as another box, or as none."""
+
+    def __init__(self, sandbox_id: str, box_id: Optional[str], expected: str):
+        self.sandbox_id, self.box_id, self.expected = sandbox_id, box_id, expected
+        found = f"shared box {box_id!r}" if box_id else "no shared box"
+        super().__init__(f"Modal sandbox {sandbox_id} is {found}, not shared box {expected!r}")
+
+
+async def _read_tags(sb: modal.Sandbox) -> dict[str, str]:
+    """``sb``'s tags, the read retried; one that keeps failing raises, and NotFoundError raises at once."""
     attempt = 1
     while True:
         try:
-            return (await sb.get_tags.aio()).get(SHARED_BOX_TAG)
+            return dict(await sb.get_tags.aio())
         except modal.exception.NotFoundError:
             raise
-        except Exception as e:
+        except Exception:
             if attempt == _TAG_READ_ATTEMPTS:
-                logger.warning(f"Modal sandbox {sb.object_id} was not terminated: its tags, which say whether it's a "
-                               f"shared box, couldn't be read: {fmt_exc(e)}",
-                               extra={"event": SHARED_BOX_TAG_READ_FAILED_EVENT, "modal_sandbox_id": sb.object_id})
                 raise
         await asyncio.sleep(_TAG_READ_BACKOFF_SECONDS * 2 ** (attempt - 1))
         attempt += 1
+
+
+async def _read_shared_box(sb: modal.Sandbox) -> Optional[str]:
+    """The shared box ``sb`` is tagged as, if any. A read that keeps failing raises, so a terminate fails closed;
+    NotFoundError raises at once."""
+    try:
+        return (await _read_tags(sb)).get(SHARED_BOX_TAG)
+    except modal.exception.NotFoundError:
+        raise
+    except Exception as e:
+        logger.warning(f"Modal sandbox {sb.object_id} was not terminated: its tags, which say whether it's a "
+                       f"shared box, couldn't be read: {fmt_exc(e)}",
+                       extra={"event": SHARED_BOX_TAG_READ_FAILED_EVENT, "modal_sandbox_id": sb.object_id})
+        raise
 
 
 async def _terminate(sb: modal.Sandbox, box: SharedBox, *, ending_box: Optional[str] = None) -> None:
@@ -667,6 +690,9 @@ def _attribution_tags(attribution: Attribution) -> dict[str, str]:
             raise ValueError(f"attribution key {key!r} can't be a Modal tag: use 1-63 of a-z A-Z 0-9 . _ -")
         if key == SHARED_BOX_TAG:
             raise ValueError(f"attribution key {key!r} is the tag that marks a shared box; only create_shared_box sets it")
+        if key == WALLS_TAG:
+            raise ValueError(f"attribution key {key!r} is the tag that says a shared box's walls passed their "
+                             "self-test; only that self-test sets it")
         tags[key] = _modal_tag_value(value)
     return tags
 

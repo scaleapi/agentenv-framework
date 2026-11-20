@@ -197,7 +197,7 @@ async def test_a_slot_is_never_deployed_on_a_vm_whose_walls_are_not_verified():
     assert vm.calls == []
 
 
-def test_no_sandbox_has_verified_walls_today():
+def test_only_a_modal_vm_sandbox_can_have_verified_walls():
     import importlib
     import pkgutil
 
@@ -214,7 +214,8 @@ def test_no_sandbox_has_verified_walls_today():
         subclasses += (children := pending.pop().__subclasses__())
         pending += children
     assert subclasses
-    assert [c.__name__ for c in subclasses if c.walls_verified is not Sandbox.walls_verified] == []
+    ours = [c for c in subclasses if c.__module__.startswith(package.__name__)]
+    assert [c.__name__ for c in ours if "walls_verified" in vars(c)] == ["ModalVmSandbox"]
 
 
 def test_a_provider_subclass_that_skips_init_keeps_the_default_layout():

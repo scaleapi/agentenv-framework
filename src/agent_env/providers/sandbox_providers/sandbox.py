@@ -177,7 +177,7 @@ class Sandbox(ABC):
     @property
     def walls_verified(self) -> bool:
         """Whether the framework itself set up and tested the walls between slots on this sandbox, so stacks of
-        different runs may share it. False for every sandbox today: nothing sets up those walls yet."""
+        different runs may share it. False here; only a Modal VM shared box whose walls passed their self-test says so."""
         return False
 
     def url_from_sandbox(self, url: str) -> str:

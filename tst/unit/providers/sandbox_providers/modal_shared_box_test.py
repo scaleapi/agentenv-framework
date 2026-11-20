@@ -4,8 +4,10 @@ terminate reads whether its sandbox is one, unless this process made it, and ref
 from __future__ import annotations
 
 import ast
+import json
 import re
 import logging
+import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,13 +17,22 @@ import pytest
 from agent_env.attribution import PIPELINE_STEP_KEY
 from agent_env.config import get_config, reset_config
 from agent_env.providers.sandbox_providers import modal_sandbox
+from agent_env.providers.sandbox_providers import modal_vm_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import (
     SHARED_BOX_TAG,
     SHARED_BOX_TAG_READ_FAILED_EVENT,
+    UNREAD,
+    WALLS_TAG,
+    WALLS_VERSION,
     ModalSandboxProvider,
+    SharedBoxMismatch,
     SharedBoxTerminateRefused,
 )
-from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
+from agent_env.providers.sandbox_providers.modal_vm_sandbox import (
+    ModalVmSandbox,
+    ModalVmSandboxProvider,
+    _mark_walls_verified,
+)
 from tst.unit.store.fakes import FakeImageStore
 
 BOX = {SHARED_BOX_TAG: "box-1"}
@@ -40,6 +51,7 @@ def modal_sb(tags=None, *, tag_reads=None, sandbox_id="sb-1") -> MagicMock:
     sb = MagicMock(object_id=sandbox_id)
     sb.get_tags.aio = AsyncMock(side_effect=tag_reads) if tag_reads else AsyncMock(return_value=dict(tags or {}))
     sb.terminate.aio = AsyncMock()
+    sb.set_tags.aio = AsyncMock()
     sb.tunnels.aio = AsyncMock(return_value={})
     sb.wait_until_ready.aio = AsyncMock()
     sb._get_task_id.aio = AsyncMock(return_value="ta-1")
@@ -285,3 +297,209 @@ async def test_a_shared_box_is_never_rebooted_under_its_slots(modal_api):
     with pytest.raises(SharedBoxTerminateRefused):
         await vm_provider.reset_vm(box, image="disk", env={})
     box._exec_with_stdin.assert_not_called()
+
+
+WALLED = {**BOX, WALLS_TAG: WALLS_VERSION}
+
+
+def test_a_shared_box_runs_from_the_vm_image_plus_a_pinned_checksummed_runsc_and_its_dockerd_config():
+    [install, configure] = modal_vm_sandbox._SHARED_BOX_BUILD
+    tarball = (f"https://storage.googleapis.com/gvisor/releases/release/{modal_vm_sandbox._GVISOR_RELEASE}"
+               "/x86_64/gvisor.tar.bz2")
+
+    assert re.fullmatch(r"\d{8}\.\d+", modal_vm_sandbox._GVISOR_RELEASE)
+    assert re.fullmatch(r"[0-9a-f]{128}", modal_vm_sandbox._GVISOR_TARBALL_SHA512)
+    assert install.index(tarball) < install.index(f"{modal_vm_sandbox._GVISOR_TARBALL_SHA512}  /tmp/gvisor.tar.bz2' "
+                                                  "| sha512sum -c -") < install.index("tar -xjf")
+    written = shlex.split(configure.split("printf '%s\\n' ", 1)[1].split(" > ")[0])[0]
+    assert configure.endswith("> /etc/docker/daemon.json")
+    assert json.loads(written) == {
+        "default-runtime": "runsc",
+        "runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}},
+        "userns-remap": "default",
+        "no-new-privileges": True,
+        "userland-proxy": False,
+        "default-address-pools": [{"base": "10.251.0.0/16", "size": 24}],
+    }
+    assert modal_vm_sandbox._SHARED_BOX_IMAGE is not modal_vm_sandbox._VM_IMAGE
+
+
+@pytest.mark.asyncio
+async def test_only_a_shared_box_gets_the_box_image(modal_api):
+    modal_api.sb = modal_sb()
+    p = provider(ModalVmSandboxProvider)
+
+    await p.create_shared_box("box-1", setup_for_gateway=False)
+    await p.create_vm(setup_for_gateway=False)
+
+    box, vm = (c.kwargs["image"] for c in modal_api.create.call_args_list)
+    assert (box, vm) == (modal_vm_sandbox._SHARED_BOX_IMAGE, modal_vm_sandbox._VM_IMAGE)
+
+
+@pytest.mark.parametrize("shared_box_id, walled", [("box-1", True), (None, False), (UNREAD, False)])
+@pytest.mark.asyncio
+async def test_setting_up_a_shared_box_walls_its_slots_once_dockerd_is_up(monkeypatch, shared_box_id, walled):
+    calls = []
+    monkeypatch.setattr(modal_vm_sandbox, "apply_walls_firewall", AsyncMock(side_effect=lambda s: calls.append("walls")))
+    handle = ModalVmSandbox(modal_sb(), {}, shared_box_id=shared_box_id)
+    handle._ensure_dockerd_running = AsyncMock(side_effect=lambda: calls.append("dockerd"))
+
+    await handle.setup_vm_for_gateway([])
+
+    assert calls == (["dockerd", "walls"] if walled else ["dockerd"])
+
+
+@pytest.mark.parametrize("shared_box_id, walls, verified", [
+    pytest.param("box-1", WALLS_VERSION, True, id="box with current walls"),
+    pytest.param("box-1", None, False, id="box, walls unread or untagged"),
+    pytest.param("box-1", "walls-v0", False, id="box with an older walls version"),
+    pytest.param(None, WALLS_VERSION, False, id="no box"),
+    pytest.param(UNREAD, WALLS_VERSION, False, id="box unread"),
+])
+def test_walls_are_verified_only_on_a_shared_box_tagged_with_the_current_version(shared_box_id, walls, verified):
+    assert ModalVmSandbox(modal_sb(), {}, shared_box_id=shared_box_id, walls=walls).walls_verified is verified
+
+
+@pytest.mark.asyncio
+async def test_a_created_shared_box_has_walls_not_yet_verified(modal_api):
+    modal_api.sb = modal_sb(WALLED)
+
+    handle = await provider(ModalVmSandboxProvider).create_shared_box("box-1", setup_for_gateway=False)
+
+    assert handle.walls_verified is False
+
+
+@pytest.mark.asyncio
+async def test_get_shared_box_reads_the_tags_once_for_both_the_box_and_its_walls(modal_api):
+    modal_api.sb = modal_sb(WALLED)
+
+    handle = await provider(ModalVmSandboxProvider).get_shared_box("sb-1", "box-1")
+
+    assert (handle.shared_box_id, handle.walls_verified) == ("box-1", True)
+    modal_api.sb.get_tags.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_shared_box_of_a_box_with_older_walls_is_unverified(modal_api):
+    modal_api.sb = modal_sb({**BOX, WALLS_TAG: "walls-v0"})
+
+    handle = await provider(ModalVmSandboxProvider).get_shared_box("sb-1", "box-1")
+
+    assert (handle.shared_box_id, handle.walls_verified) == ("box-1", False)
+
+
+@pytest.mark.parametrize("tags, found", [
+    pytest.param({SHARED_BOX_TAG: "box-2", WALLS_TAG: WALLS_VERSION}, "box-2", id="another box"),
+    pytest.param({WALLS_TAG: WALLS_VERSION}, None, id="no box"),
+])
+@pytest.mark.asyncio
+async def test_get_shared_box_refuses_a_sandbox_that_isnt_that_box(modal_api, tags, found):
+    modal_api.sb = modal_sb(tags)
+
+    with pytest.raises(SharedBoxMismatch) as mismatch:
+        await provider(ModalVmSandboxProvider).get_shared_box("sb-1", "box-1")
+
+    assert (mismatch.value.box_id, mismatch.value.expected) == (found, "box-1")
+
+
+@pytest.mark.asyncio
+async def test_get_shared_box_raises_when_the_tags_cant_be_read(modal_api):
+    modal_api.sb = modal_sb(tag_reads=modal.exception.ConnectionError("reset"))
+
+    with pytest.raises(modal.exception.ConnectionError):
+        await provider(ModalVmSandboxProvider).get_shared_box("sb-1", "box-1")
+
+
+@pytest.mark.asyncio
+async def test_a_box_reached_through_get_sandbox_never_claims_verified_walls(modal_api):
+    modal_api.sb = modal_sb(WALLED)
+
+    handle = await provider(ModalVmSandboxProvider).get_sandbox("sb-1")
+
+    assert handle.walls_verified is False
+    modal_api.sb.get_tags.aio.assert_not_called()
+
+
+@pytest.mark.parametrize("create", [
+    pytest.param(lambda p: p.create_vm(attribution={WALLS_TAG: WALLS_VERSION}), id="vm"),
+    pytest.param(lambda p: p.create_shared_box("box-1", attribution={WALLS_TAG: WALLS_VERSION}), id="shared box"),
+])
+@pytest.mark.asyncio
+async def test_no_sandbox_can_be_given_the_walls_tag_through_its_attribution(modal_api, create):
+    with pytest.raises(ValueError, match="walls"):
+        await create(provider(ModalVmSandboxProvider))
+
+    modal_api.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_marking_the_walls_verified_keeps_every_other_tag(modal_api):
+    modal_api.sb = modal_sb({**BOX, PIPELINE_STEP_KEY: "t_s", WALLS_TAG: "walls-v0"})
+    box = ModalVmSandbox(modal_api.sb, {}, shared_box_id="box-1")
+
+    await _mark_walls_verified(box)
+
+    modal_api.sb.set_tags.aio.assert_awaited_once_with({**BOX, PIPELINE_STEP_KEY: "t_s", WALLS_TAG: WALLS_VERSION})
+    assert box.walls_verified is True
+
+
+@pytest.mark.parametrize("shared_box_id, tags, error", [
+    pytest.param(None, {}, ValueError, id="handle is no box"),
+    pytest.param(UNREAD, BOX, ValueError, id="handle's box unread"),
+    pytest.param("box-1", {SHARED_BOX_TAG: "box-2"}, SharedBoxMismatch, id="sandbox is another box"),
+    pytest.param("box-1", None, modal.exception.ConnectionError, id="tags can't be read"),
+])
+@pytest.mark.asyncio
+async def test_marking_the_walls_verified_writes_nothing_unless_the_sandbox_is_that_box(shared_box_id, tags, error):
+    sb = modal_sb(tags) if tags is not None else modal_sb(tag_reads=modal.exception.ConnectionError("reset"))
+    box = ModalVmSandbox(sb, {}, shared_box_id=shared_box_id)
+
+    with pytest.raises(error):
+        await _mark_walls_verified(box)
+
+    sb.set_tags.aio.assert_not_called()
+    assert box.walls_verified is False
+
+
+_WALLS_WRITER = "_mark_walls_verified"
+#: Functions that may name WALLS_TAG without writing it: its refusal in attribution and the reattach that reads it.
+_WALLS_READERS = {"_attribution_tags", "get_shared_box"}
+
+
+def test_only_the_walls_writer_writes_the_walls_tag_or_sets_a_sandboxs_tags():
+    """WALLS_TAG is named only in its definition, in imports, by the functions that read or refuse it, and by its one
+    writer, the only one to put it in a dict or assign it. Its value is spelled nowhere else. ``set_tags`` is called
+    only on a Modal App, named ``app``, or by the writer."""
+    package = Path(modal_sandbox.__file__).parents[2]
+    stray = []
+    for source in package.rglob("*.py"):
+        text = source.read_text()
+        if f'"{WALLS_TAG}"' in text and source != Path(modal_sandbox.__file__):
+            stray.append(f"{source.name} spells the walls tag's value")
+        tree = ast.parse(text)
+        owner = {}
+        for function in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            for node in ast.walk(function):
+                owner.setdefault(id(node), function.name)
+        writes = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                writes |= {id(k) for k in node.keys if k is not None}
+            if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+                writes.add(id(node.slice))
+        for node in ast.walk(tree):
+            where = f"{source.name}:{getattr(node, 'lineno', '?')} in {owner.get(id(node), 'module scope')}"
+            if isinstance(node, ast.Name) and node.id == "WALLS_TAG":
+                function = owner.get(id(node))
+                if function is None and isinstance(node.ctx, ast.Store):
+                    continue
+                if function == _WALLS_WRITER or (function in _WALLS_READERS and id(node) not in writes):
+                    continue
+                stray.append(f"{where} names WALLS_TAG")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "aio" \
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "set_tags":
+                receiver = node.func.value.value
+                if owner.get(id(node)) == _WALLS_WRITER or (isinstance(receiver, ast.Name) and receiver.id == "app"):
+                    continue
+                stray.append(f"{where} sets tags")
+    assert stray == []
