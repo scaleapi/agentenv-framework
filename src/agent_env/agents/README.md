@@ -61,7 +61,9 @@ The A2A server starts with the real-time marker, so it and its records stay on r
 - **One rule for every clocked agent.** That rule is `agent_egress.py` in `utils/agent_clock`, which only agent images
   take (`agent_clock = "utils/agent_clock"` in `shared_sources.toml`), so changing it rebuilds no computer base. The
   bridge imports it, and the image and `install.sh` copy it beside the bridge with the clock's `clockpage.py`, whose
-  layout and check it reads the page by, so every agent put on the clock, OpenCode's too, goes out the same way.
+  layout and check it reads the page by, so every agent put on the clock, OpenCode's and Gemini's too, goes out the
+  same way. Gemini's image follows the clock in its own way: its CLI stays on real time, and only the commands the
+  model runs follow the clock and go out by that rule, as its folder's `README.md` says.
 
 Started as a user other than root, the image runs the A2A server alone, on real time, as before.
 
@@ -94,8 +96,9 @@ by its id, `@local/agentenv-framework/agents/gemini`. It calls the `[model]` end
 `<base>/gemini`, which a LiteLLM gateway serves, through a proxy in the agent that adds the run's attribution; a model
 named with a provider prefix, such as `vertex_ai/...`, goes to `<base>/v1/chat/completions` instead. It takes its
 model from the prompt, so its smoke task needs `[model] default` (or the `agent` role) set. It declares `install/v1`
-too, into a container or onto a `vm` sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions
-it implements.
+too, into a container or onto a `vm` sandbox's Linux host, with glibc. Its image can follow a task env's clock, as
+Claude Code's does, once a `sync_env_clock` sets `agent_clock`. Its folder's `README.md` covers the extensions it
+implements and how it follows the clock.
 
 `agents/opencode/` runs the [OpenCode](https://github.com/anomalyco/opencode) CLI behind the protocol's A2A agent
 framework: each turn is one `opencode run --format json` run, resumed in the context's OpenCode session, the task env's

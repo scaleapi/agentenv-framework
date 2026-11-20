@@ -37,7 +37,39 @@ CLI by its last segment, and the proxy translates its generate calls to `/v1/cha
 | `attribution-probe/v1` | the `project_id` and `task_id` the proxy last sent |
 | `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/workspace`) or onto a `vm` sandbox's Linux host: Node and uv checked against their checksums, the CLI from `package-lock.json` and the agent's requirements in a Python of its own, which the target's own Node and Python are never replaced by; the model's commands get the agent's where the target has none. Node's builds need glibc |
 | `triggers/v1` | SDK default |
+| `clock/v1` | the framework's `sync_time`, in the image, which runs the clock follower |
 
 The image is `python:3.11-slim` with Node, the CLI, the agent and the Python packages `model-requirements.txt` pins for
-the model's scripts, running as the `agent` user; the CLI's state is in
-`/home/agent/.gemini` (`GEMINI_CLI_HOME`) whatever the uid.
+the model's scripts. It starts as root, whose supervisord (`start-agent`, `root.conf`) runs the clock follower and the
+egress proxy, each as its own user, and the A2A server as the `agent` user, on real time; the CLI's state is in
+`/home/agent/.gemini` (`GEMINI_CLI_HOME`) whatever the uid. Started as another user, it runs the A2A server alone.
+
+## The env's clock
+
+The image can follow a task env's clock as Claude Code's does, with agent-env's libfaketime preloaded for the `agent`
+user and the computer base's follower and egress proxy (`src/agent_env/agents/README.md`), and only once a
+`sync_env_clock` sets `agent_clock`. Unarmed, the CLI runs exactly as it did before it could: the same environment, and
+started as `gemini`. On an armed clock the CLI itself stays on real time, and only the commands the model runs follow
+the clock:
+
+- **The CLI, on real time.** Each turn starts the CLI's script with node itself, with agent-env's real-time marker and
+  `GEMINI_CLI_NO_RELAUNCH`, so neither `gemini`'s `#!/usr/bin/env node` line nor the CLI's relaunch of itself hands node
+  an environment the marker is gone from. It judges its `projects.json` lock stale, its sessions, tool outputs and logs
+  old and its credentials expired by real file and server times, which would be wrong on the env's clock, and it checks
+  certificates against real time, so it reaches its model relay and the env's MCP servers directly, an HTTPS server on
+  Modal included, whatever the clock shows. It keeps Node's default heap, which its relaunch would have raised to half
+  the host's memory.
+- **The model's commands, on the env's clock.** Every bash the CLI starts, each command the model runs and each hook,
+  first reads a file beside the run's settings (`BASH_ENV`) that exports the egress proxy by the rule every clocked
+  agent shares (`agent_egress.egress_env`): every TLS host through the proxy but loopback, `host.docker.internal`, the
+  deploy's `NO_PROXY` hosts and hosts reached over plain HTTP alone. The CLI itself is handed no proxy, since it would
+  send every request through one, `NO_PROXY` or not, its loopback relay included.
+- **The env's date.** The CLI words its "Today's date is" line from its own clock, so the model relay names the env's
+  date there instead, read as the turn starts from `date`, which follows the clock as the model's commands do. A CLI
+  that calls no relay, with no `LITELLM_BASE_URL` or with a `GOOGLE_GEMINI_BASE_URL` of its own, shows the real date
+  there. The commands' `date` and the gateway's `get_time` show the env's time.
+- **The changelog, on real time.** The capture hook and its `tar` run with the marker: the hook checks its grant's
+  expiry, and tar the times its incremental snapshot compares, against real time, as both are.
+
+A clock armed while a turn runs reaches that turn's CLI, which was started to follow it, without the proxy; the next
+turn starts as above.
