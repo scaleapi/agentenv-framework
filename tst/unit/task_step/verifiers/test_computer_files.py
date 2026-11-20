@@ -1,4 +1,4 @@
-"""cua_files: each format a CUA task's agent leaves as the judge reads it: documents, slides, spreadsheets and PDFs
+"""The computer verifier's files: each format a CUA task's agent leaves as the judge reads it: documents, slides, spreadsheets and PDFs
 dumped as text, text as it is and cut at the limit, anything else by its size and digest, and a format whose library
 isn't installed, a file its library can't read, or an Office file that expands past the limit, named as not rendered;
 a long PDF read up to its page limit; a damaged one named as unreadable; and a rendering in its own process, killed when
@@ -17,8 +17,8 @@ import pptx
 import pypdf
 import pytest
 
-from agent_env.task_step.task_steps.verifiers.judge_utils import cua_files
-from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render, render_isolated
+from agent_env.task_step.task_steps.verifiers.computer import files as computer_files
+from agent_env.task_step.task_steps.verifiers.computer.files import render, render_isolated
 
 
 def _docx() -> bytes:
@@ -129,7 +129,7 @@ def test_an_office_file_that_expands_past_the_limit_is_named_not_opened(monkeypa
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr("word/document.xml", b"\0" * (4 * 1024 * 1024))
     bomb, memo = out.getvalue(), _docx()
-    monkeypatch.setattr(cua_files, "MAX_EXPANDED_BYTES", 1024 * 1024)
+    monkeypatch.setattr(computer_files, "MAX_EXPANDED_BYTES", 1024 * 1024)
     assert render("memo.docx", memo, 1000).kind == "docx"
     opened = []
     monkeypatch.setattr(docx, "Document", lambda *a: opened.append(a))
@@ -146,7 +146,7 @@ def test_a_long_pdf_is_read_up_to_its_page_limit(monkeypatch):
         writer.add_blank_page(width=200, height=200)
     out = io.BytesIO()
     writer.write(out)
-    monkeypatch.setattr(cua_files, "MAX_PDF_PAGES", 2)
+    monkeypatch.setattr(computer_files, "MAX_PDF_PAGES", 2)
 
     shown = render("long.pdf", out.getvalue(), 10_000)
 
@@ -175,8 +175,8 @@ async def test_a_rendering_runs_in_its_own_process():
     (("sh", "-c", "exit 9"), "ran out of memory or failed, exit 9"),
 ])
 async def test_a_rendering_that_runs_too_long_or_fails_is_named_not_rendered(monkeypatch, command, problem):
-    monkeypatch.setattr(cua_files, "RENDER_COMMAND", command)
-    monkeypatch.setattr(cua_files, "RENDER_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(computer_files, "RENDER_COMMAND", command)
+    monkeypatch.setattr(computer_files, "RENDER_TIMEOUT_S", 0.2)
 
     shown = await render_isolated("memo.docx", _docx(), 1000)
 
@@ -186,7 +186,7 @@ async def test_a_rendering_that_runs_too_long_or_fails_is_named_not_rendered(mon
 @pytest.mark.asyncio
 async def test_a_cancelled_rendering_kills_its_process(monkeypatch, tmp_path):
     pid_file = tmp_path / "pid"
-    monkeypatch.setattr(cua_files, "RENDER_COMMAND", ("sh", "-c", f"echo $$ > {pid_file}; exec sleep 30"))
+    monkeypatch.setattr(computer_files, "RENDER_COMMAND", ("sh", "-c", f"echo $$ > {pid_file}; exec sleep 30"))
 
     rendering = asyncio.ensure_future(render_isolated("memo.docx", b"x", 1000))
     for _ in range(100):

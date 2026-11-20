@@ -1,11 +1,11 @@
-"""cua_verifier: a computer-use task's rubric, graded by rubrics_verifier's judge on what the agent left in the computer.
+"""computer_verifier: a computer-use task's rubric, graded by rubrics_verifier's judge on what the agent left in the computer.
 
 The rubric is a list of criteria (or ``{"criteria": [...]}``) with an ``id``, a ``title`` and a ``weight`` (0 when left
 out), each a ``must-pass`` gate, a ``negative`` one (a failure mode, its weight a penalty) or a regular one, by its
 ``annotations``' ``criteria_type`` / ``criteria_category``; a ``visual`` category, and ``target_result_files`` /
 ``target_GT_files``, say how to grade it. What the judge reads is what the agent left in the computer: each of
 ``result_files``, read through the computer's driver (computer-exec/v1 ``run``, the control route the agent can't call)
-and rendered as text (``judge_utils/cua_files.py``), a file that isn't there named as one the agent did not produce; the
+and rendered as text (``computer/files.py``), a file that isn't there named as one the agent did not produce; the
 golden files of ``expected_artifact_id``, for reference only; the output of each of ``state_commands`` run in the
 computer, such as a mock website's state, marked incomplete when it was cut; and ``instruction``, the task as the agent
 was given it. With no ``prompt_id`` the judge grades those alone; with one it also sees that prompt's response. Files
@@ -33,14 +33,14 @@ from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_steps.computer.computer_exec import computer_problem, find_computer
-from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render_isolated
+from agent_env.task_step.task_steps.verifiers.computer.files import render_isolated
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerdict, RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
 
 #: Where the step records what the judge was shown, by step id.
-RECORDS_KEY = "cua_verifier"
+RECORDS_KEY = "computer_verifier"
 #: How the judge grades when the step names no ``guidance`` of its own.
 DEFAULT_GUIDANCE = """Give each criterion 1.0 if what is shown above meets it and 0.0 if it doesn't, and say \
 where you found the evidence.
@@ -108,7 +108,7 @@ def criteria_from_rubric(rubric: Any) -> list[dict]:
     return criteria
 
 
-def cua_rubric_score(rows: list[dict]) -> float:
+def computer_rubric_score(rows: list[dict]) -> float:
     """A rubric's score: 0 when a must-pass criterion fails; else the weighted average of the regular
     and must-pass criteria, less the negative criteria's penalties, clamped to [0, 1]; with no positive weight, 1 less
     the penalties when there are must-pass gates, else 0."""
@@ -142,7 +142,7 @@ def _stored_os_problem(env: Any, computer: Optional[str]) -> Optional[str]:
         return None
     os_type = getattr(getattr(target.computer, "os", None), "type", None)
     if os_type in UNSUPPORTED_OS:
-        return (f"env {env.id!r}'s computer is {os_type}, which cua_verifier can't read: it reads files and runs state "
+        return (f"env {env.id!r}'s computer is {os_type}, which computer_verifier can't read: it reads files and runs state "
                 "commands through sh and POSIX tools")
     return None
 
@@ -152,8 +152,8 @@ def _passed(row: dict) -> bool:
     return isinstance(score, (int, float)) and not isinstance(score, bool) and score >= 1.0 - SCORE_TOLERANCE
 
 
-class CuaVerifierTaskStep(RubricsVerifierTaskStep):
-    type: ClassVar[str] = "cua_verifier"
+class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
+    type: ClassVar[str] = "computer_verifier"
     entity_refs = (*RubricsVerifierTaskStep.entity_refs, EntityRef.env("env_id"),
                    EntityRef.artifact("expected_artifact_id", version_field="expected_artifact_version"))
     context_paths = RubricsVerifierTaskStep.context_paths
@@ -169,8 +169,8 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
                  judge_batch_size: Optional[int] = None, judge_batch_concurrency: Optional[int] = None,
                  **fields: Any):
         """``criteria`` is what ``rubric`` becomes (``criteria_from_rubric``), never read from a stored step; the rest is
-        rubrics_verifier's, but for ``score_aggregator``, which is this step's own (``cua_rubric_score``)."""
-        where = f"cua_verifier '{id}'"
+        rubrics_verifier's, but for ``score_aggregator``, which is this step's own (``computer_rubric_score``)."""
+        where = f"computer_verifier '{id}'"
         for name, text in (("guidance", guidance), ("golden_note", golden_note)):
             if text is not None and (not isinstance(text, str) or not text.strip()):
                 raise ValueError(f"{where}: {name} must be text, or left out for the default")
@@ -217,7 +217,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
                 "instruction": self.instruction, "guidance": self.guidance, "golden_note": self.golden_note}
 
     @classmethod
-    def from_dict(cls, data: dict) -> CuaVerifierTaskStep:
+    def from_dict(cls, data: dict) -> ComputerVerifierTaskStep:
         fields = cls._rubrics_fields({**data, "criteria": None, "prompt_id": data.get("prompt_id")})
         fields.update(use_trajectory=data.get("use_trajectory", False), env_id=data["env_id"], rubric=data["rubric"],
                       result_files=data.get("result_files") or [], computer=data.get("computer"),
@@ -228,7 +228,7 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         return cls(**fields)
 
     def score_rows(self, rows: list[dict]) -> float:
-        return cua_rubric_score(rows)
+        return computer_rubric_score(rows)
 
     def graded_response(self, context: TaskStepContext) -> Optional[PromptResponse]:
         """The prompt's response; for a step that grades the files alone, a stand-in of its own, which never joins the
@@ -252,10 +252,10 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
 
     async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
         """The files and state the agent left in the computer, the golden files, the instruction and how to grade;
-        what was read is recorded under ``cua_verifier``."""
+        what was read is recorded under ``computer_verifier``."""
         deployed = find_computer(context, self.env_id, self.computer)
         if (os_type := _deployed_os(deployed)) in UNSUPPORTED_OS:
-            raise RuntimeError(f"cua_verifier '{self.id}': env {self.env_id!r} is a {os_type} computer, which it can't "
+            raise RuntimeError(f"computer_verifier '{self.id}': env {self.env_id!r} is a {os_type} computer, which it can't "
                                "read: it reads files and runs state commands through sh and POSIX tools")
         record: dict = {"files": [], "golden_files": [], "state": []}
         sections = []
@@ -328,9 +328,9 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
             try:
                 piece = base64.b64decode("".join((chunk.get("stdout") or "").split()), validate=True)
             except binascii.Error as e:
-                raise RuntimeError(f"cua_verifier '{self.id}': {path} in env {self.env_id!r} came back unreadable") from e
+                raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} came back unreadable") from e
             if len(piece) != min(READ_CHUNK_BYTES, size - len(data)):
-                raise RuntimeError(f"cua_verifier '{self.id}': {path} in env {self.env_id!r} gave {len(piece)} bytes "
+                raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} gave {len(piece)} bytes "
                                    f"from byte {len(data)} of its {size}; it changed or couldn't be read while it was")
             data += piece
         return bytes(data)
@@ -340,12 +340,12 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
         finding no file."""
         from agent_env.env.envs.computer.utils import inside
 
-        answer = await inside.run(deployed, ["sh", "-c", script, "cua_verifier", *args], timeout_s=READ_TIMEOUT_S)
+        answer = await inside.run(deployed, ["sh", "-c", script, "computer_verifier", *args], timeout_s=READ_TIMEOUT_S)
         if answer.get("exit_code") in (0, _NOT_THERE) and not answer.get("timed_out") and not answer.get("truncated"):
             return answer
         why = ("came back cut by the computer's driver" if answer.get("truncated")
                else f"couldn't be read: {(answer.get('stderr') or '').strip()[-ERROR_TAIL_CHARS:]}")
-        raise RuntimeError(f"cua_verifier '{self.id}': {path} in env {self.env_id!r} {why}")
+        raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} {why}")
 
     async def _state(self, deployed: Any, command: dict) -> dict:
         from agent_env.env.envs.computer.utils import inside

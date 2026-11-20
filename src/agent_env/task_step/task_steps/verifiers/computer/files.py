@@ -1,5 +1,5 @@
 """Files a CUA task's agent produced, and their golden counterparts, as text a rubric judge reads in its prompt
-(``cua_verifier``): text formats as they are; spreadsheets, documents, slides and PDFs dumped by the libraries the
+(``computer_verifier``): text formats as they are; spreadsheets, documents, slides and PDFs dumped by the libraries the
 ``cua`` extra installs (openpyxl, python-docx, python-pptx, pypdf), or named as not rendered without them; anything else
 by its size and digest. Each rendering is cut at ``max_chars``. ``render_isolated`` renders in a child process held to
 ``RENDER_MEMORY_BYTES`` and killed after ``RENDER_TIMEOUT_S``, since a crafted file can make a library's work large."""

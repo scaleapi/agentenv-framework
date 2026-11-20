@@ -1,4 +1,4 @@
-"""cua_verifier: a computer-use task's rubric as rubrics_verifier's criteria, its score (binary criteria, weights,
+"""computer_verifier: a computer-use task's rubric as rubrics_verifier's criteria, its score (binary criteria, weights,
 negative penalties, must-pass gates), and a run against a computer at its driver's boundary (``tst.unit.computer_home``)
 with the judge faked: the files the agent left read through the driver and rendered into the judge's prompt, a missing
 one named, the golden files and the state commands' output beside them, the caller's guidance or the default, and the
@@ -20,16 +20,16 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps.verifiers import cua_verifier
+from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
 from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
-from agent_env.task_step.task_steps.verifiers.cua_verifier import (
+from agent_env.task_step.task_steps.verifiers.computer.computer_verifier import (
     DEFAULT_GOLDEN_NOTE,
     DEFAULT_GUIDANCE,
     MAX_FILE_CHARS,
     RECORDS_KEY,
-    CuaVerifierTaskStep,
+    ComputerVerifierTaskStep,
     criteria_from_rubric,
-    cua_rubric_score,
+    computer_rubric_score,
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.computer_home import CARD, Computer
@@ -82,13 +82,13 @@ def _rows(**scores) -> list[dict]:
     ({"total": 0.9}, 33 / 83),                   # binary: anything short of 1 is 0
 ])
 def test_the_score_is_the_gated_weighted_average_less_the_penalties(scores, expected):
-    assert cua_rubric_score(_rows(**scores)) == pytest.approx(expected)
+    assert computer_rubric_score(_rows(**scores)) == pytest.approx(expected)
 
 
 def test_gates_alone_score_one_less_the_penalties():
     rows = [{"id": "g", "kind": "must-pass", "weight": 0.0, "score": 1.0},
             {"id": "n", "kind": "negative", "weight": -0.25, "score": 0.0}]
-    assert cua_rubric_score(rows) == pytest.approx(0.75)
+    assert computer_rubric_score(rows) == pytest.approx(0.75)
 
 
 @pytest.fixture
@@ -107,19 +107,19 @@ def _workbook() -> bytes:
     return out.getvalue()
 
 
-def _step(**fields) -> CuaVerifierTaskStep:
+def _step(**fields) -> ComputerVerifierTaskStep:
     params = dict(id="grade", version=None, env_id="desk", rubric=RUBRIC, use_agent_judge=False,
                   verifier_id="cua", result_files=["/HOME/Desktop/report.xlsx", "~/notes.txt", "~/missing.pdf"],
                   instruction="Total the amounts in report.xlsx and leave a note.")
     params.update(fields)
-    return CuaVerifierTaskStep(**params)
+    return ComputerVerifierTaskStep(**params)
 
 
 def _prompted_ids(prompt: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r'"id": "(c\d+)"', prompt)))
 
 
-def _judge(step: CuaVerifierTaskStep, prompts: list[str], failing: tuple[str, ...] = ()) -> None:
+def _judge(step: ComputerVerifierTaskStep, prompts: list[str], failing: tuple[str, ...] = ()) -> None:
     """A judge that fails the criteria ``failing`` names and meets the rest, each with a justification of its own."""
     short = {f"c{i}": c["id"] for i, c in enumerate(step.criteria, start=1)}
 
@@ -190,10 +190,10 @@ async def test_a_failed_must_pass_gate_zeroes_the_score_is_named_and_cant_be_poo
 
 @pytest.mark.asyncio
 async def test_a_file_is_read_in_chunks_and_one_too_large_is_named_not_read(computer, monkeypatch):
-    from agent_env.task_step.task_steps.verifiers import cua_verifier
+    from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
 
-    monkeypatch.setattr(cua_verifier, "READ_CHUNK_BYTES", 10)
-    monkeypatch.setattr(cua_verifier, "MAX_READ_BYTES", 100)
+    monkeypatch.setattr(computer_verifier, "READ_CHUNK_BYTES", 10)
+    monkeypatch.setattr(computer_verifier, "MAX_READ_BYTES", 100)
     (computer.home / "notes.txt").write_text("0123456789abcdefghijklmnopqrstuvwxyz\n")
     (computer.home / "huge.txt").write_text("x" * 101)
     step = _step(result_files=["~/notes.txt", "~/huge.txt"])
@@ -211,7 +211,7 @@ async def test_a_file_is_read_in_chunks_and_one_too_large_is_named_not_read(comp
 
 @pytest.mark.asyncio
 async def test_a_dash_prefixed_file_is_read_whole_and_a_short_read_is_refused(computer, monkeypatch):
-    from agent_env.task_step.task_steps.verifiers import cua_verifier
+    from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
 
     (computer.home / "--report.csv").write_text("total,1500\n")
     step = _step(result_files=["~/--report.csv"])
@@ -222,7 +222,7 @@ async def test_a_dash_prefixed_file_is_read_whole_and_a_short_read_is_refused(co
 
     assert "total,1500" in prompts[0]
 
-    monkeypatch.setattr(cua_verifier, "_SIZE", 'test -f "$1" || exit 3; echo 999')  # a file that shrank since
+    monkeypatch.setattr(computer_verifier, "_SIZE", 'test -f "$1" || exit 3; echo 999')  # a file that shrank since
     with pytest.raises(RuntimeError, match=r"gave 11 bytes from byte 0 of its 999"):
         await _step(result_files=["~/--report.csv"]).execute(TaskStepContext(deployed_envs=[computer.deployed()]))
 
@@ -262,7 +262,7 @@ async def test_with_a_prompt_id_the_judge_also_sees_that_prompts_response(comput
 def test_it_round_trips_through_the_registry_keeping_a_files_only_grade():
     step = _step(computer="desk", guidance="Be strict.", state_commands=[{"name": "s", "command": ["cat", "/tmp/s.json"]}])
     data = step.to_dict()
-    again = get_task_step_registry()["cua_verifier"].from_dict(data)
+    again = get_task_step_registry()["computer_verifier"].from_dict(data)
 
     assert data["prompt_id"] is None and again.grades_files_alone and again.to_dict() == data
     assert again.criteria == step.criteria and again.score_rows is not None
@@ -319,11 +319,11 @@ def test_preflight_refuses_a_stored_windows_computer(monkeypatch):
     desk = ComputerEnv.__new__(ComputerEnv)
     desk.id, desk.environment_name = "desk", "desk"
     desk.computer = SimpleNamespace(os=SimpleNamespace(type="windows"))
-    monkeypatch.setattr(cua_verifier, "stored_env", lambda env_id: desk)
+    monkeypatch.setattr(computer_verifier, "stored_env", lambda env_id: desk)
     monkeypatch.setattr(RubricsVerifierTaskStep, "preflight", lambda self: [])
 
     assert _step(result_files=["~/a.txt"]).preflight() == [
-        "step 'grade': env 'desk''s computer is windows, which cua_verifier can't read: it reads files and runs state "
+        "step 'grade': env 'desk''s computer is windows, which computer_verifier can't read: it reads files and runs state "
         "commands through sh and POSIX tools"]
     desk.computer = SimpleNamespace(os=SimpleNamespace(type="linux"))
     assert _step(result_files=["~/a.txt"]).preflight() == []

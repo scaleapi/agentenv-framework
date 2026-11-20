@@ -2,7 +2,7 @@
   {"id": "env", "type": "deploy_env", "env_id": "desk"},
   {"id": "work", "type": "computer_exec", "env_id": "desk", "depends_on": ["env"],
    "command": "mkdir -p Desktop && printf 'item,amount\\nrent,1200\\nfood,300\\ntotal,1500\\n' > Desktop/budget.csv && echo 'Budget done: the total is 1500.' > notes.txt && echo '{\"sent\": [{\"to\": \"ana@example.com\", \"subject\": \"Budget\", \"body\": \"The total is 1500.\"}]}' > /tmp/mail_mock.json"},
-  {"id": "grade", "type": "cua_verifier", "env_id": "desk", "depends_on": ["work"], "verifier_id": "cua",
+  {"id": "grade", "type": "computer_verifier", "env_id": "desk", "depends_on": ["work"], "verifier_id": "cua",
    "use_agent_judge": false,
    "instruction": "Write ~/Desktop/budget.csv with rent 1200 and food 300 and their total, leave a note in ~/notes.txt, and email the total to ana@example.com.",
    "result_files": ["~/Desktop/budget.csv", "~/notes.txt"],
@@ -16,7 +16,7 @@
       "annotations": {"criteria_type": "REGULAR"}},
      {"id": "wrong", "title": "Any file or email states a total other than 1500.", "weight": 20,
       "annotations": {"criteria_type": "NEGATIVE"}}]}},
-  {"id": "gate", "type": "cua_verifier", "env_id": "desk", "depends_on": ["work"], "verifier_id": "cua-gate",
+  {"id": "gate", "type": "computer_verifier", "env_id": "desk", "depends_on": ["work"], "verifier_id": "cua-gate",
    "use_agent_judge": false, "result_files": ["~/Desktop/report.pdf", "~/notes.txt"],
    "rubric": [
      {"id": "pdf", "title": "Provides a PDF report at ~/Desktop/report.pdf.", "weight": 5,

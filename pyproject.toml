@@ -54,7 +54,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# cua_verifier renders a CUA task's spreadsheets, documents, slides and PDFs as text for its judge; without them it names
+# computer_verifier renders a CUA task's spreadsheets, documents, slides and PDFs as text for its judge; without them it names
 # each such file as not rendered.
 cua = [
     "openpyxl>=3.1",

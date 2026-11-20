@@ -26,7 +26,7 @@ const STEP_COLORS: Record<string, string> = {
   collect_artifacts: '#14b8a6',
   rubrics_verifier: '#10b981',
   always_on_agent_verifier: '#10b981',
-  cua_verifier: '#10b981',
+  computer_verifier: '#10b981',
   env_outcome_verifier: '#10b981',
   run_code: '#84cc16',
   publish: '#6366f1',

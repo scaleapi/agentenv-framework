@@ -1,4 +1,4 @@
-"""cua_verifier end to end on a real computer, its judge faked at its call boundary: an ubuntu-24.04 computer with the
+"""computer_verifier end to end on a real computer, its judge faked at its call boundary: an ubuntu-24.04 computer with the
 reference driver deployed, files and a mock mailbox's state left in it as an agent would leave them (by computer_exec),
 and a CUA rubric graded on them. The files and state are read through the driver into the judge's prompt; the fake
 judge meets each criterion unless it names a file the prompt lists as not produced, so every criterion met scores 1,
@@ -12,12 +12,12 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.cli import cli
-from agent_env.task_step.task_steps.verifiers.cua_verifier import DEFAULT_GUIDANCE, CuaVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.computer.computer_verifier import DEFAULT_GUIDANCE, ComputerVerifierTaskStep
 from tst.integration.computer.conftest import run_context
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
-BUNDLE = Path(__file__).parent / "cua_verifier"
+BUNDLE = Path(__file__).parent / "computer_verifier"
 _CRITERION = re.compile(r'"id": "(c\d+)",\s*"title": "((?:[^"\\]|\\.)*)"')
 
 
@@ -36,9 +36,9 @@ def _fake_judge(prompts: list[str]):
     return judge
 
 
-def test_a_cua_rubric_is_graded_on_what_the_agent_left_in_the_computer(state, monkeypatch):
+def test_a_rubric_is_graded_on_what_the_agent_left_in_the_computer(state, monkeypatch):
     prompts: list[str] = []
-    monkeypatch.setattr(CuaVerifierTaskStep, "_prompt_llm_judge", _fake_judge(prompts))
+    monkeypatch.setattr(ComputerVerifierTaskStep, "_prompt_llm_judge", _fake_judge(prompts))
 
     ran = CliRunner().invoke(cli, ["run", str(BUNDLE), "--task", "grade", "--no-emulate"])
 
@@ -46,13 +46,13 @@ def test_a_cua_rubric_is_graded_on_what_the_agent_left_in_the_computer(state, mo
     graded = next(p for p in prompts if "budget.csv" in p and "mailbox" in p)
     assert "total,1500" in graded and '"to": "ana@example.com"' in graded and DEFAULT_GUIDANCE in graded
     metadata = run_context(ran.output)["metadata"]
-    files = metadata["cua_verifier"]["grade"]["files"]
+    files = metadata["computer_verifier"]["grade"]["files"]
     assert [(f["path"], f["rendered_as"]) for f in files] == [("~/Desktop/budget.csv", "text"),
                                                               ("~/notes.txt", "text")], files
-    assert metadata["cua_verifier"]["grade"]["state"] == [
+    assert metadata["computer_verifier"]["grade"]["state"] == [
         {"name": "mailbox", "exit_code": 0, "timed_out": False, "cut": False, "truncated": False}]
     graded = metadata["verifications"]["cua"]
     assert graded["score"] == 1.0 and graded["gate_passed"], graded["results"]
     gated = metadata["verifications"]["cua-gate"]
-    assert metadata["cua_verifier"]["gate"]["files"][0] == {"path": "~/Desktop/report.pdf", "missing": True}
+    assert metadata["computer_verifier"]["gate"]["files"][0] == {"path": "~/Desktop/report.pdf", "missing": True}
     assert gated["score"] == 0.0 and not gated["gate_passed"] and gated["gates_failed"] == ["pdf"], gated["results"]
