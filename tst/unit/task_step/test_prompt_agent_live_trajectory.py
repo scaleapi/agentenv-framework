@@ -16,6 +16,7 @@ from agentenv_protocol.a2a_agent import (
     a2a_agent,
     enable,
 )
+from agentenv_protocol.atif import FORMAT as ATIF, Adapter, atif_adapter, native
 
 from agent_env.config import configure
 from agent_env.store.object_store import LocalFilesystemObjectStore
@@ -29,13 +30,23 @@ _EVENTS = [{"type": "system", "subtype": "init"}, {"type": "assistant", "step": 
 _MORE = [{"type": "assistant", "step": 1}, {"type": "result", "result": "done"}]
 
 
-def _agent(store: LocalFilesystemObjectStore, *, live: bool, wait_for_chunk: bool, native: str | None = None
-           ) -> AgentEnvAgent:
-    """Appends two events, optionally waits until a chunk of them is stored, then two more."""
+@atif_adapter(native_format="test-events/1", version="1", input_includes_cache=False)
+class _Events(Adapter):
+    @native(type="assistant")
+    def assistant(self, record: dict, turn) -> None:
+        turn.message(step=f"s{record['step']}", content=[f"step {record['step']}"])
+        turn.step(key=f"s{record['step']}", llm_call_count=1)
+
+
+def _agent(store: LocalFilesystemObjectStore, *, live: bool, wait_for_chunk: bool, native: str | None = None,
+           atif: bool = False) -> AgentEnvAgent:
+    """Appends two events, optionally waits until a chunk of them is stored, then two more; with ``atif``, it can
+    build atif/1 copies of them."""
+    formats = {"native": native, **({"atif": _Events} if atif else {})} if native else {}
 
     @a2a_agent(
         identity=AgentIdentity(name="solver", description="test", version="1"),
-        extensions=(enable(TRAJECTORY_V1, live=live, **({"native": native} if native else {})),),
+        extensions=(enable(TRAJECTORY_V1, live=live, **formats),),
     )
     class Agent(AgentEnvAgent):
         async def run(self, request: TaskRequest) -> TaskResult:
@@ -59,22 +70,28 @@ def _chunk_keys(store: LocalFilesystemObjectStore) -> list[str]:
 
 class _Run:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path, *, live: bool, wait_for_chunk: bool,
-                 native: str | None = None) -> None:
+                 native: str | None = None, atif: bool = False) -> None:
         self.store = LocalFilesystemObjectStore(str(tmp_path))
         configure(object_store=self.store)
         for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task", "mark_closed", "get_conversation"):
             monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
-        app = _agent(self.store, live=live, wait_for_chunk=wait_for_chunk, native=native).create_app()
+        app = _agent(self.store, live=live, wait_for_chunk=wait_for_chunk, native=native, atif=atif).create_app()
         self.card = app.state.agentenv_a2a.card.model_dump(mode="json", exclude_none=True)
         self.cursor_reads: list[dict] = []
         self.final_reads: list[dict] = []
+        #: Every request the step sent, in order: its path and, for a JSON-RPC call, its method.
+        self.sent: list[str] = []
+        self.prescriptions: list[dict] = []
         transport = httpx.ASGITransport(app=app)
         real_client = httpx.AsyncClient
 
         async def record(request: httpx.Request) -> None:
+            body = json.loads(await request.aread()) if request.method == "POST" else {}
+            self.sent.append(body.get("method", request.url.path) if isinstance(body, dict) else request.url.path)
             if request.url.path == "/ext/trajectory":
-                body = json.loads(await request.aread())
                 (self.cursor_reads if "after" in body else self.final_reads).append(body)
+            elif request.url.path == "/ext/trajectory/prescribe":
+                self.prescriptions.append(body)
 
         monkeypatch.setattr(
             httpx,
@@ -94,6 +111,36 @@ class _Run:
             id="solve", version=None, prompt="go", agent_name="solver", poll_interval_seconds=0,
             trajectory_output_prefix=self.store.object_url(_PREFIX), **kwargs,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("formats", [[ATIF], None])
+async def test_a_prompt_step_prescribes_the_runs_formats_before_its_first_message(monkeypatch, tmp_path, formats):
+    """So the agent builds atif/1 for the step's conversation only when the run prescribes it."""
+    run = _Run(monkeypatch, tmp_path, live=False, wait_for_chunk=False, native="test-events/1", atif=True)
+    context = TaskStepContext(instance_id="ti-1")
+    if formats is not None:
+        context.metadata["user_overrides"] = {"trajectory_formats": formats}
+
+    await run.execute(run.step(), context)
+
+    assert run.prescriptions == [{"formats": formats or []}]
+    assert run.sent.index("/ext/trajectory/prescribe") < run.sent.index("message/send")
+    assert context.metadata["trajectory_formats"]["solve"]["built"] == ["test-events/1", *(formats or [])]
+    [final] = run.final_reads
+    async with httpx.AsyncClient() as client:
+        read = await client.post("http://agent.test/ext/trajectory", json={"task_id": final["task_id"], "format": ATIF})
+    assert read.status_code == (200 if formats else 409)
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_step_prescribes_nothing_to_an_agent_whose_card_offers_no_prescription(monkeypatch, tmp_path):
+    run = _Run(monkeypatch, tmp_path, live=False, wait_for_chunk=False, native="test-events/1")
+    context = TaskStepContext(instance_id="ti-1", metadata={"user_overrides": {"trajectory_formats": [ATIF]}})
+
+    await run.execute(run.step(), context)
+
+    assert run.prescriptions == [] and "/ext/trajectory/prescribe" not in run.sent
 
 
 @pytest.mark.asyncio

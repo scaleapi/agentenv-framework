@@ -50,6 +50,9 @@ PULLED_HERE = ("localhost:5000/local/img:v1", None)  # no tar.gz, so a sandbox p
 ARM64_HERE = (*LOCAL, "linux/arm64")  # built here on Apple silicon, as the infra bootstrap builds it
 HERE = "localhost:5000/local/img:v1 is in a registry on this machine, which a sandbox elsewhere can't pull from"
 
+# The lint warning a task with no verifier gets, which a run says before it writes.
+_NO_GRADE = "tasks/t.json: warning: no step grades this task, so a run has no score"
+
 
 @pytest.fixture
 def bundle_dir(tmp_path, monkeypatch, local_stores):
@@ -1044,7 +1047,7 @@ def test_a_run_builds_its_infra_after_its_writes_and_before_its_tasks(bundle_dir
 
     run_bundle(bundle_dir, on_progress=lambda line: events.append(("say", line)))
 
-    assert events[:3] == [("say", "tasks/t.json: v1 (new)"), ("bootstrap", ["gateway", "service-db"]),
+    assert events[:4] == [("say", _NO_GRADE), ("say", "tasks/t.json: v1 (new)"), ("bootstrap", ["gateway", "service-db"]),
                           ("say", "[tasks/t.json] step 1/1 env (deploy_env)")]
     assert ("deploy", "crm") in events
 
@@ -1065,7 +1068,7 @@ def test_write_bundle_writes_and_sets_up_the_infra_its_tasks_deploy_on_and_runs_
 
     materialization = _write_bundle(bundle_dir, on_progress=lambda line: events.append(("say", line)))
 
-    assert events == [("say", "tasks/t.json: v1 (new)"), ("bootstrap", ["gateway", "service-db"])]
+    assert events == [("say", _NO_GRADE), ("say", "tasks/t.json: v1 (new)"), ("bootstrap", ["gateway", "service-db"])]
     assert [done.write.kind for done in materialization.writes] == [BundleKind.TASK]
 
 # The walk resolves each deploy's provider as its step does

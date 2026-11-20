@@ -277,6 +277,7 @@ _FILE_SECTIONS: tuple[FileSection, ...] = (
     FileSection("model", ("model",), "config.runtime", dict.fromkeys(f.name for f in fields(ModelConfig))),
     FileSection("conversations", ("conversations",), "config.runtime", _resolved_keys("conversations")),
     FileSection("agents", ("agents",), "config.runtime", _resolved_keys("agents"), validated_agents_section),
+    FileSection("trajectories", ("trajectories",), "config.runtime", _resolved_keys("trajectories")),
     FileSection("sandbox", ("sandbox",), "providers.sandbox_providers.sandbox_provider",
                 {"default": None, "agent_default": None, "attribution": None, "providers": Named(_SEAM)}),
     FileSection("state", ("state",), "providers.env_state.env_state_provider", {"providers": Named(_SEAM)}),

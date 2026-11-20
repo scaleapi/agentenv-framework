@@ -567,7 +567,7 @@ async def test_the_judge_fails_a_message_the_patterns_pass_and_sees_the_conversa
     Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
                         USER: [sim(_TAKEOVER), sim("shorter, please")]})
     ctx = _context(user_card=_USER_SIM_CARD)
-    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", lambda self, model, **kw: None, raising=False)
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", lambda model, **kw: None)
 
     await _gated(judge_model="judge-model").execute(ctx)
 
@@ -587,7 +587,7 @@ async def test_a_judge_that_errors_leaves_the_patterns_verdict(monkeypatch):
     monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
     Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter, please")]})
     ctx = _context(user_card=_USER_SIM_CARD)
-    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", lambda self, model, **kw: None, raising=False)
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", lambda model, **kw: None)
 
     await _gated(judge_model="judge-model").execute(ctx)
 
@@ -622,11 +622,11 @@ async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_
         called.append(candidate)
         return {"in_role": True}
 
-    def no_endpoint(self, model, **kw):
+    def no_endpoint(model, **kw):
         raise KeyError("no endpoint configured for judge-model")
 
     monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
-    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", no_endpoint, raising=False)
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", no_endpoint)
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
                                 USER: [sim(_SWAP), sim("shorter, please")]})
     ctx = _context(user_card=_USER_SIM_CARD)
@@ -642,10 +642,10 @@ async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_
 
 @pytest.mark.asyncio
 async def test_a_judge_only_gate_whose_setup_fails_sends_the_message_on_with_the_error_recorded(monkeypatch):
-    def no_endpoint(self, model, **kw):
+    def no_endpoint(model, **kw):
         raise KeyError("no endpoint configured for judge-model")
 
-    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", no_endpoint, raising=False)
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", no_endpoint)
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter, please")]})
     ctx = _context(user_card=_USER_SIM_CARD)
 

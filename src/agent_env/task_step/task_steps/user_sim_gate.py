@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
@@ -236,33 +236,22 @@ class UserSimGate:
                 verdict.passed = False
         return verdict
 
-    async def _judge(self, candidate: str, history: list[tuple[str, str]], call_config) -> Optional[dict]:
-        import litellm
-
-        from agent_env.config.model import ModelParam
-        from agent_env.task_step.task_steps.verifiers.rubrics_verifier import _judge_route
+    async def _judge(self, candidate: str, history: list[tuple[str, str]], route) -> Optional[dict]:
+        """One judge call through core's one model-call path (config/model_call.py), on ``route``
+        (``judge_call_config``'s), or on the configured endpoint when none was given."""
+        from agent_env.config import model_call
 
         prompt = _JUDGE_PROMPT.format(
             history=render_history(history, self.context_turns, self.context_chars),
             candidate=candidate[: self.context_chars * 2],
         )
-        # Routed as the rubrics verifier routes its judge: through an endpoint, a Claude model drops the base's
-        # trailing /v1 and a bare name litellm can't place goes as openai/<name>.
-        model = self.judge_model
-        if call_config is not None:
-            model, route_base = _judge_route(model, call_config.api_base, litellm.get_llm_provider,
-                                             call_config.params.get("custom_llm_provider"))
-            call_config = replace(call_config, api_base=route_base)
-        response = await litellm.acompletion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=self.judge_timeout_seconds,
-            **{ModelParam.RESPONSE_FORMAT: {"type": "json_schema",
-                                            "json_schema": {"name": "user_sim_gate", "schema": _JUDGE_SCHEMA,
-                                                            "strict": True}}},
-            **(call_config.client_kwargs() if call_config is not None else {}),
-        )
-        return parse_judge(response.choices[0].message.content or "")
+        if route is None:
+            route = judge_call_config(self, {})
+        reply = await model_call.complete(
+            route, [{"role": "user", "content": prompt}], timeout=self.judge_timeout_seconds,
+            response_format={"type": "json_schema",
+                             "json_schema": {"name": "user_sim_gate", "schema": _JUDGE_SCHEMA, "strict": True}})
+        return parse_judge(reply.content)
 
 
 @dataclass
@@ -344,17 +333,19 @@ async def run_gate(
     return outcome
 
 
+JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
+
+
 def judge_call_config(gate: UserSimGate, user_overrides: dict):
-    """The model call settings for the gate's judge, honoring a run's judge or LiteLLM overrides the way the
-    rubrics verifier does; None without a judge."""
+    """The route of the gate's judge calls (a ``model_call.ModelRoute``), honoring a run's judge or LiteLLM
+    overrides as the rubrics verifier does; None without a judge. Raises ConfigError, as a setup failure, for an
+    endpoint the run gives no key for."""
     if not gate.judge_model:
         return None
-    from agent_env.store import get_config
+    from agent_env.config import model_call
 
-    config = get_config()
-    return config.resolve_model_call(
+    return model_call.resolve_route(
         gate.judge_model,
-        default_api_key=config.resolve_reference(
-            user_overrides.get("judge_litellm_api_key") or user_overrides.get("litellm_api_key")),
-        base_override=user_overrides.get("judge_litellm_base_url") or user_overrides.get("litellm_base_url"),
-    )
+        api_key=user_overrides.get("judge_litellm_api_key") or user_overrides.get("litellm_api_key"),
+        api_base=user_overrides.get("judge_litellm_base_url") or user_overrides.get("litellm_base_url"),
+        who="user_sim_gate", key_how=JUDGE_KEY_HOW)

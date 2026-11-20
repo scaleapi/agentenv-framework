@@ -171,41 +171,30 @@ def test_a_judge_that_couldnt_be_set_up_isnt_called_and_the_patterns_verdict_sta
         assert (verdict.passed, verdict.judge_error) == (True, "judge setup: KeyError: x")
 
 
-def _judge_call(monkeypatch, model, api_base, params=None):
-    """The model and api_base the gate's judge handed litellm, for a judge ``model`` through ``api_base``."""
+def test_the_judge_calls_through_the_one_model_call_path_on_the_runs_route(monkeypatch):
+    """The gate's judge goes through config/model_call.py (route and complete), so its routing (a Claude model drops
+    an endpoint's trailing /v1, an unplaceable name goes as openai/<name>) and its cost record are core's."""
     import asyncio
-    import json
-    from types import SimpleNamespace
 
-    import litellm
+    from agent_env.config import model_call
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config
 
-    from agent_env.config.model import ModelCallConfig
-    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+    resolved, sent = [], []
 
-    sent = {}
+    def resolve_route(model, *, api_key, api_base, who, key_how):
+        resolved.append((model, api_key, api_base, who))
+        return "route"
 
-    async def acompletion(**kwargs):
-        sent.update(kwargs)
-        content = json.dumps({"in_role": True, "reason": "ok"})
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    async def complete(route, messages, *, timeout, response_format=None):
+        sent.append((route, timeout, response_format["json_schema"]["name"]))
+        return model_call.ModelReply('{"in_role": true, "reason": "ok"}', "m", None, None, None)
 
-    monkeypatch.setattr(litellm, "acompletion", acompletion)
-    config = ModelCallConfig(api_key="k", api_base=api_base, params=params or {})
-    asyncio.run(UserSimGate(judge_model=model)._judge("thanks, looks good", [], config))
-    return sent["model"], sent.get("api_base")
+    monkeypatch.setattr(model_call, "resolve_route", resolve_route)
+    monkeypatch.setattr(model_call, "complete", complete)
+    gate = UserSimGate(judge_model="claude-sonnet-5-5", judge_timeout_seconds=45)
+    route = judge_call_config(gate, {"judge_litellm_api_key": "secret:k", "litellm_base_url": "https://llm.example/v1"})
 
+    judged = asyncio.run(gate._judge("thanks, looks good", [], route))
 
-def test_a_claude_judge_through_an_endpoint_drops_the_bases_trailing_v1(monkeypatch):
-    assert _judge_call(monkeypatch, "claude-sonnet-5-5", "https://llm.example/v1") == (
-        "claude-sonnet-5-5", "https://llm.example")
-
-
-def test_a_bare_judge_name_litellm_cant_place_goes_through_the_endpoint_as_openai(monkeypatch):
-    assert _judge_call(monkeypatch, "qwen3:8b", "https://llm.example/v1") == (
-        "openai/qwen3:8b", "https://llm.example/v1")
-
-
-def test_a_judge_with_no_endpoint_or_a_provider_prefix_keeps_its_route(monkeypatch):
-    assert _judge_call(monkeypatch, "claude-sonnet-5-5", None) == ("claude-sonnet-5-5", None)
-    assert _judge_call(monkeypatch, "openai/gpt-x", "https://llm.example/v1") == (
-        "openai/gpt-x", "https://llm.example/v1")
+    assert resolved == [("claude-sonnet-5-5", "secret:k", "https://llm.example/v1", "user_sim_gate")]
+    assert sent == [("route", 45, "user_sim_gate")] and judged["in_role"] is True
