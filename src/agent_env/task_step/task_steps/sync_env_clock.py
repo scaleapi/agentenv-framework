@@ -93,7 +93,8 @@ class SyncEnvClockTaskStep(TaskStep):
         told the zone (a server that cannot take it fails the step).
 
         agent_clock = have every agent registered with the env follow its clock, and an agent deploy_agent deploys
-        later on it too; off, they keep real time.
+        later on it too; off, agents that don't already follow keep real time, while one an earlier step had follow
+        goes on following, re-armed with the clock.
 
         require_agent_clock = fail the step when an agent registered with the env can't follow its clock, rather than
         skip it; apart from tolerate_missing_sync_time, which is about the env's servers. It implies agent_clock."""
