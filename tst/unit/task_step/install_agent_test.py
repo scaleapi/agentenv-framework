@@ -193,6 +193,7 @@ async def test_install_logs_show_the_command_template_not_the_model_key_headers_
     [script] = [s for s in sandbox.scripts if "start " in s]
     assert script.startswith(f"export AGENTENV_CONTROL_TOKEN={token}\nstart --key sk-never-logged --headers ")
     assert "org-never-logged" in script and context.deployed_agents[0].control_token == token
+    assert context.deployed_agents[0].model_endpoint_host == "localhost:4000"
     assert "start --key {litellm_api_key} --headers {litellm_extra_headers}" in caplog.text
     assert "never-logged" not in caplog.text and token not in caplog.text
 
