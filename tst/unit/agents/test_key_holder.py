@@ -143,6 +143,11 @@ async def call(holder, method: str, target: str, *, headers: dict[str, str] | No
     return answer
 
 
+def _logged_call(capsys) -> dict:
+    """The key holder's log line for the last call."""
+    return [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"event": "call"' in line][-1]
+
+
 def _messages(model: str = MODEL, **extra) -> dict:
     return {"model": model, "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}], **extra}
 
@@ -308,7 +313,8 @@ def test_a_token_is_a_context_token():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content_type", ["application/json", "text/plain", None,
                                           "application/x-www-form-urlencoded"])
-async def test_another_model_is_pinned_to_the_contexts_whatever_the_content_type(holder, upstream, content_type):
+async def test_another_model_is_pinned_to_the_contexts_whatever_the_content_type(holder, upstream, capsys,
+                                                                                  content_type):
     headers = {"content-type": content_type} if content_type else {"content-type": ""}
 
     answer = await call(holder, "POST", "/v1/messages", headers=headers, body=_messages(OTHER))
@@ -316,7 +322,8 @@ async def test_another_model_is_pinned_to_the_contexts_whatever_the_content_type
     assert answer.status == 200
     assert upstream.body()["model"] == MODEL
     assert upstream.last.headers["content-type"] == "application/json"
-    assert holder.stats["pinned"] == 1
+    logged = _logged_call(capsys)
+    assert (logged["model"], logged["pinned_to"]) == (OTHER, MODEL)
 
 
 @pytest.mark.asyncio
@@ -329,13 +336,14 @@ async def test_a_call_naming_no_model_gets_the_contexts(holder, upstream):
 
 
 @pytest.mark.asyncio
-async def test_a_model_the_context_names_goes_unchanged(upstream):
+async def test_a_model_the_context_names_goes_unchanged(upstream, capsys):
     holder = _holder(upstream, models=(MODEL, OTHER))
     raw = json.dumps(_messages(OTHER), indent=1).encode()
 
     assert (await call(holder, "POST", "/v1/messages", body=raw)).status == 200
     assert upstream.last.content == raw
-    assert holder.stats["pinned"] == 0
+    logged = _logged_call(capsys)
+    assert logged["model"] == OTHER and "pinned_to" not in logged
 
 
 @pytest.mark.asyncio

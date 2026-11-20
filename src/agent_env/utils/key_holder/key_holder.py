@@ -19,9 +19,9 @@ import secrets
 import stat
 import sys
 import time
-from collections import Counter
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -62,6 +62,46 @@ REDACTED = b"[agentenv-redacted]"
 CONTEXT_DIGEST_CHARS = 12
 #: Characters of a requested model name a log line keeps.
 LOGGED_MODEL_CHARS = 200
+
+
+class Kind(StrEnum):
+    """Which API a model call is to: where it names its model, and which header its key goes in."""
+
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+    #: A stored Responses API object, by its id: read, cancelled or listed, naming no model of its own.
+    OPENAI_OBJECT = "openai_object"
+    GEMINI = "gemini"
+    #: A model listing, answered from the context's models.
+    MODELS = "models"
+
+
+_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+_ALLOWED = (
+    ("POST", re.compile(r"/v1/messages(/count_tokens)?"), Kind.ANTHROPIC),
+    ("POST", re.compile(r"(/openai)?/v1/(responses|chat/completions|completions)"), Kind.OPENAI),
+    ("POST", re.compile(r"(/openai)?/v1/responses/[A-Za-z0-9_.=-]+(/[a-z_]+)?"), Kind.OPENAI_OBJECT),
+    ("GET", re.compile(r"(/openai)?/v1/responses/[A-Za-z0-9_.=-]+(/[a-z_]+)?"), Kind.OPENAI_OBJECT),
+    ("GET", re.compile(r"(/openai)?/v1/models"), Kind.MODELS),
+    ("POST", re.compile(r"(/gemini)?/v1(beta)?/models/[A-Za-z0-9_.@-]+:(generateContent|streamGenerateContent|"
+                        r"countTokens)"), Kind.GEMINI),
+    ("GET", re.compile(r"(/gemini)?/v1(beta)?/models"), Kind.MODELS),
+)
+#: What a decoded path can't hold: a query, a fragment, an escape left after decoding, a backslash or a control.
+_UNSAFE_PATH = re.compile(r"[?#%\\\x00-\x20\x7f]")
+_GEMINI_MODEL = re.compile(r"/models/([^/:]+):")
+#: Body parameters with which an endpoint (LiteLLM's client-side credentials) would call another endpoint or key.
+_ENDPOINT_PARAMS = frozenset({"api_key", "api_base", "base_url"})
+_DROP_REQUEST = frozenset({
+    "host", "content-length", "content-type", "content-encoding", "connection", "keep-alive", "transfer-encoding",
+    "te", "upgrade", "trailer", "accept-encoding", "proxy-authorization", "proxy-connection", "authorization",
+    "x-api-key", "x-goog-api-key", "api-key", "x-litellm-api-key", "x-litellm-customer-id", "x-litellm-tags",
+    "x-http-method-override",
+})
+_DROP_RESPONSE = frozenset({"content-length", "content-encoding", "connection", "keep-alive", "transfer-encoding"})
+#: What ``aiter_bytes`` decodes with the standard library alone, so the scrub reads the answer as sent; httpx passes any
+#: other name through undecoded, ``x-gzip`` included.
+_DECODABLE = frozenset({"identity", "gzip", "deflate"})
 
 
 class SealError(Exception):
@@ -199,7 +239,7 @@ def load_sealed(path: Path = SEALED_FILE) -> Sealed:
         return Sealed.from_json(file.read())
 
 
-def model_call_kind(method: str, path: str) -> str | None:
+def model_call_kind(method: str, path: str) -> Kind | None:
     """Which API a request for the decoded ``path`` calls, if it's a model call the key holder forwards; ``None`` for
     anything else. A path with an empty, ``.`` or ``..`` segment, or a character the endpoint would read as more than
     a path, is never one: the endpoint would resolve it to a route the pattern didn't mean."""
@@ -220,7 +260,6 @@ class KeyHolder:
         self.route = sealed.model_routes.get(DEFAULT_ROUTE)
         self.tokens = tokens if tokens is not None else Tokens()
         self.max_body_bytes = max_body_bytes
-        self.stats: Counter[str] = Counter()
         self._sealed_values = _scrub_forms([self.route.key, *self.route.headers.values()] if self.route else [])
         self._client = httpx.AsyncClient(transport=transport, follow_redirects=False,
                                          timeout=httpx.Timeout(CONNECT_TIMEOUT_S, read=READ_TIMEOUT_S))
@@ -234,60 +273,70 @@ class KeyHolder:
 
     async def _forward(self, request: Request) -> Response:
         call = _Call(request.method, time.monotonic())
+        try:
+            kind, context = self._admit(request, call)
+            if kind is Kind.MODELS:
+                return call.done(200, JSONResponse(_model_list(request.scope["path"], context.models)))
+            outgoing = await self._prepare(request, kind, context, call)
+            return await self._send(request, kind, context, outgoing, call)
+        except _Refused as refusal:
+            return call.answer(refusal.status, refusal.message)
+
+    def _admit(self, request: Request, call: _Call) -> tuple[Kind, Context]:
+        """The call's API and its token's context, if it's a model call with a token the key holder holds, to a box
+        with a model endpoint."""
         path = request.scope["path"]
         kind = model_call_kind(request.method, path)
         if kind is None:
-            self.stats["refused"] += 1
-            return call.answer(403, f"{request.method} {path} is not a model call the key holder forwards")
+            raise _Refused(403, f"{request.method} {path} is not a model call the key holder forwards")
         call.kind = kind
         context = self._context(request.headers)
         if context is None:
-            self.stats["unauthorized"] += 1
-            return call.answer(401, "a model call needs the context's key holder token")
+            raise _Refused(401, "a model call needs the context's key holder token")
         call.context = _digest(context.context_id)
         if self.route is None:
-            return call.answer(503, "this box has no model endpoint")
-        if kind == "models":
-            return call.done(200, JSONResponse(_model_list(path, context.models)))
+            raise _Refused(503, "this box has no model endpoint")
+        return kind, context
+
+    async def _prepare(self, request: Request, kind: Kind, context: Context, call: _Call) -> _Outgoing:
+        """What goes upstream: an uncompressed body under the cap, a JSON object pinned to the context's models."""
         if request.headers.get("content-encoding", "identity").strip().lower() != "identity":
-            return call.answer(415, "the key holder forwards only uncompressed model calls")
-        body = b""
-        if request.method == "POST":
-            try:
-                body = await self._body(request)
-            except _TooLarge:
-                return call.answer(413, f"a model call's body is limited to {self.max_body_bytes} bytes")
-            if not context.models:
-                return call.answer(503, "this run names no model")
-            try:
-                if len(body) > THREADED_PARSE_BYTES:
-                    body, call.model, call.pinned_to = await asyncio.to_thread(self._pinned_body, body, kind, context)
-                else:
-                    body, call.model, call.pinned_to = self._pinned_body(body, kind, context)
-            except ValueError as error:
-                self.stats["refused"] += 1
-                return call.answer(400, str(error))
-            if kind == "gemini":
-                path, call.model, call.pinned_to = self._pinned_path(path, context)
-            if call.pinned_to:
-                self.stats["pinned"] += 1
-        self.stats[kind] += 1
-        call.bytes_in = len(body)
-        url = self._url(path, request.query_params.multi_items())
+            raise _Refused(415, "the key holder forwards only uncompressed model calls")
+        outgoing = _Outgoing(request.scope["path"])
+        if request.method != "POST":
+            return outgoing
+        outgoing.body = await self._body(request)
+        if not context.models:
+            raise _Refused(503, "this run names no model")
+        try:
+            if len(outgoing.body) > THREADED_PARSE_BYTES:
+                await asyncio.to_thread(outgoing.pin_body, kind, context)
+            else:
+                outgoing.pin_body(kind, context)
+        except ValueError as error:
+            raise _Refused(400, str(error)) from error
+        if kind is Kind.GEMINI:
+            outgoing.pin_path(context)
+        call.model, call.pinned_to, call.bytes_in = outgoing.model, outgoing.pinned_to, len(outgoing.body)
+        return outgoing
+
+    async def _send(self, request: Request, kind: Kind, context: Context, outgoing: _Outgoing,
+                    call: _Call) -> Response:
+        """``outgoing`` sent to the sealed route, its answer streamed back scrubbed."""
+        url = self._url(outgoing.path, request.query_params.multi_items())
         upstream = self._client.build_request(request.method, url, headers=self._headers(request, kind, context),
-                                              content=body if request.method == "POST" else None)
+                                              content=outgoing.body if request.method == "POST" else None)
         try:
             response = await self._client.send(upstream, stream=True)
         except httpx.HTTPError as error:
-            self.stats["upstream_errors"] += 1
             call.error = type(error).__name__
-            return call.answer(502, f"the model endpoint is unreachable: {call.error}")
+            raise _Refused(502, f"the model endpoint is unreachable: {call.error}") from error
         encodings = [value.strip().lower() for value in response.headers.get_list("content-encoding",
                                                                                    split_commas=True)]
         if not set(encodings) <= _DECODABLE:
             await response.aclose()
             call.error = f"content-encoding {', '.join(encodings)}"
-            return call.answer(502, "the model endpoint answered in an encoding the key holder can't scrub")
+            raise _Refused(502, "the model endpoint answered in an encoding the key holder can't scrub")
         headers = {name: self._scrubbed_text(value) for name, value in response.headers.items()
                    if name.lower() not in _DROP_RESPONSE}
         call.status = response.status_code
@@ -301,55 +350,24 @@ class KeyHolder:
         return next(iter(contexts.values())) if len(contexts) == 1 else None
 
     async def _body(self, request: Request) -> bytes:
+        limit = f"a model call's body is limited to {self.max_body_bytes} bytes"
         declared = request.headers.get("content-length", "")
         if declared.isdigit() and int(declared) > self.max_body_bytes:
-            raise _TooLarge
+            raise _Refused(413, limit)
         chunks, size = [], 0
         async for chunk in request.stream():
             size += len(chunk)
             if size > self.max_body_bytes:
-                raise _TooLarge
+                raise _Refused(413, limit)
             chunks.append(chunk)
         return b"".join(chunks)
-
-    @staticmethod
-    def _pinned_body(body: bytes, kind: str, context: Context) -> tuple[bytes, str | None, str | None]:
-        """``body`` with its model pinned to the context's first one unless the context names it; read as JSON whatever
-        its content type says, since it goes upstream as JSON. The requested model and what it was pinned to."""
-        if not body and kind == "openai_object":
-            return body, None, None
-        try:
-            data = json.loads(body)
-        except ValueError as error:
-            raise ValueError("a model call's body must be a JSON object") from error
-        if not isinstance(data, dict):
-            raise ValueError("a model call's body must be a JSON object")
-        if named := sorted(_ENDPOINT_PARAMS.intersection(data)):
-            raise ValueError(f"a model call can't name its own endpoint or key ({', '.join(named)})")
-        model = data.get("model")
-        if model is not None and not isinstance(model, str):
-            raise ValueError("a model call names its model as a string")
-        if model in context.models or (model is None and kind in ("openai_object", "gemini")):
-            return body, model, None
-        data["model"] = context.models[0]
-        return json.dumps(data, ensure_ascii=False).encode(), model, context.models[0]
-
-    @staticmethod
-    def _pinned_path(path: str, context: Context) -> tuple[str, str, str | None]:
-        """A Gemini call's path, which names its model, pinned to the context's first model unless it names one of the
-        context's; the model it named and what it was pinned to."""
-        match = _GEMINI_MODEL.search(path)
-        if match.group(1) in {model.rsplit("/", 1)[-1] for model in context.models}:
-            return path, match.group(1), None
-        pinned = context.models[0].rsplit("/", 1)[-1]
-        return path[:match.start(1)] + pinned + path[match.end(1):], match.group(1), pinned
 
     def _url(self, path: str, query: Iterable[tuple[str, str]]) -> httpx.URL:
         base = httpx.URL(self.route.upstream)
         params = [*base.params.multi_items(), *((name, value) for name, value in query if name != "key")]
         return base.copy_with(path=base.path.rstrip("/") + path, query=None).copy_merge_params(params)
 
-    def _headers(self, request: Request, kind: str, context: Context) -> dict[str, str]:
+    def _headers(self, request: Request, kind: Kind, context: Context) -> dict[str, str]:
         """The client's headers less its credentials, its attribution and any the route seals, then the route's headers
         with the context's attribution over them and the route's key."""
         sealed = {name.lower(): value for name, value in self.route.headers.items()}
@@ -357,9 +375,9 @@ class KeyHolder:
                    if name not in _DROP_REQUEST and name not in sealed}
         headers.update(_with_attribution(sealed, _attribution(context.project_id, context.task_id)))
         headers["authorization"] = f"Bearer {self.route.key}"
-        if kind == "anthropic":
+        if kind is Kind.ANTHROPIC:
             headers["x-api-key"] = self.route.key
-        elif kind == "gemini":
+        elif kind is Kind.GEMINI:
             headers["x-goog-api-key"] = self.route.key
         headers["accept-encoding"] = "identity"
         if request.method == "POST":
@@ -400,6 +418,49 @@ class _Relayed(StreamingResponse):
         finally:
             await self._upstream.aclose()
             self._call.log()
+
+
+@dataclass
+class _Outgoing:
+    """What goes upstream for one call: its path and body, the model the client named, and what that was pinned to
+    (``None`` when the context names it)."""
+
+    path: str
+    body: bytes = b""
+    model: str | None = None
+    pinned_to: str | None = None
+
+    def pin_body(self, kind: Kind, context: Context) -> None:
+        """The body's model pinned to the context's first one unless the context names it; read as JSON whatever its
+        content type says, since it goes upstream as JSON."""
+        if not self.body and kind is Kind.OPENAI_OBJECT:
+            return
+        try:
+            data = json.loads(self.body)
+        except ValueError as error:
+            raise ValueError("a model call's body must be a JSON object") from error
+        if not isinstance(data, dict):
+            raise ValueError("a model call's body must be a JSON object")
+        if named := sorted(_ENDPOINT_PARAMS.intersection(data)):
+            raise ValueError(f"a model call can't name its own endpoint or key ({', '.join(named)})")
+        model = data.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError("a model call names its model as a string")
+        self.model = model
+        if model in context.models or (model is None and kind in (Kind.OPENAI_OBJECT, Kind.GEMINI)):
+            return
+        data["model"] = self.pinned_to = context.models[0]
+        self.body = json.dumps(data, ensure_ascii=False).encode()
+
+    def pin_path(self, context: Context) -> None:
+        """A Gemini call's path, which names its model, pinned to the context's first model unless it names one of the
+        context's."""
+        match = _GEMINI_MODEL.search(self.path)
+        self.model = match.group(1)
+        if self.model in {model.rsplit("/", 1)[-1] for model in context.models}:
+            return
+        self.pinned_to = context.models[0].rsplit("/", 1)[-1]
+        self.path = self.path[:match.start(1)] + self.pinned_to + self.path[match.end(1):]
 
 
 @dataclass
@@ -465,8 +526,12 @@ class _Scrubber:
         return held
 
 
-class _TooLarge(Exception):
-    pass
+class _Refused(Exception):
+    """A call the key holder answers itself, with ``status`` and ``message``, rather than forwarding."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status, self.message = status, message
 
 
 def log(event: str, **fields: Any) -> None:
@@ -602,34 +667,6 @@ def _describe(sealed: Sealed) -> dict[str, Any]:
 def _origin(url: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
-
-
-_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-_ALLOWED = (
-    ("POST", re.compile(r"/v1/messages(/count_tokens)?"), "anthropic"),
-    ("POST", re.compile(r"(/openai)?/v1/(responses|chat/completions|completions)"), "openai"),
-    ("POST", re.compile(r"(/openai)?/v1/responses/[A-Za-z0-9_.=-]+(/[a-z_]+)?"), "openai_object"),
-    ("GET", re.compile(r"(/openai)?/v1/responses/[A-Za-z0-9_.=-]+(/[a-z_]+)?"), "openai_object"),
-    ("GET", re.compile(r"(/openai)?/v1/models"), "models"),
-    ("POST", re.compile(r"(/gemini)?/v1(beta)?/models/[A-Za-z0-9_.@-]+:(generateContent|streamGenerateContent|"
-                        r"countTokens)"), "gemini"),
-    ("GET", re.compile(r"(/gemini)?/v1(beta)?/models"), "models"),
-)
-#: What a decoded path can't hold: a query, a fragment, an escape left after decoding, a backslash or a control.
-_UNSAFE_PATH = re.compile(r"[?#%\\\x00-\x20\x7f]")
-_GEMINI_MODEL = re.compile(r"/models/([^/:]+):")
-#: Body parameters with which an endpoint (LiteLLM's client-side credentials) would call another endpoint or key.
-_ENDPOINT_PARAMS = frozenset({"api_key", "api_base", "base_url"})
-_DROP_REQUEST = frozenset({
-    "host", "content-length", "content-type", "content-encoding", "connection", "keep-alive", "transfer-encoding",
-    "te", "upgrade", "trailer", "accept-encoding", "proxy-authorization", "proxy-connection", "authorization",
-    "x-api-key", "x-goog-api-key", "api-key", "x-litellm-api-key", "x-litellm-customer-id", "x-litellm-tags",
-    "x-http-method-override",
-})
-_DROP_RESPONSE = frozenset({"content-length", "content-encoding", "connection", "keep-alive", "transfer-encoding"})
-#: What ``aiter_bytes`` decodes with the standard library alone, so the scrub reads the answer as sent; httpx passes any
-#: other name through undecoded, ``x-gzip`` included.
-_DECODABLE = frozenset({"identity", "gzip", "deflate"})
 
 
 if __name__ == "__main__":
