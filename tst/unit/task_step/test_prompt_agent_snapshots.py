@@ -1296,6 +1296,9 @@ class _Conversation:
             def resolve_model(self, role, **layers):
                 return resolve_model(role, **layers)
 
+            def get_trajectory_formats(self):
+                return ()
+
         monkeypatch.setattr(pa_mod, "get_config", lambda: _Cfg())
 
     def context(self) -> TaskStepContext:

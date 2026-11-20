@@ -25,6 +25,7 @@ from agent_env.env.env import (
     _GATEWAY_ONLY_FIELDS, DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, Env, EnvCapabilityUnsupported, EnvNeedsGateway,
     EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox, website_child,
 )
+from agent_env.env.gateway.console_session import ConsoleSession
 from agent_env.env.gateway.constants import (
     EXT_CHANGES_URI, EXT_CLOCK_URI, EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI, EXT_STATE_URI, EXT_STEP_URI, EXT_TRAJECTORY_URI, EXT_TRIGGERS_URI,
     WELL_KNOWN_PATH,
@@ -414,3 +415,19 @@ async def test_readiness_of_a_record_with_no_card_url_cannot_be_asked(sent, site
     with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'ready' on urn:agentenv:website/v1"):
         await dataclasses.replace(_record(sites), environment_card_url=None).readiness()
     assert sent == []
+
+
+def test_a_pgweb_link_opens_the_gateways_pgweb_once_and_carries_no_token():
+    record = dataclasses.replace(_record(None), db_web_gateway_url="https://gw.example/svc/pgweb/", control_token="t0k")
+    url = record.pgweb_link(60)
+    base, _, link = url.partition("?pgweb_link=")
+    assert base == "https://gw.example/svc/pgweb/" and "t0k" not in url
+    session = ConsoleSession("t0k")
+    assert session.opens(link) and not session.opens(link)
+
+
+@pytest.mark.parametrize("changes", [{"db_web_gateway_url": None, "control_token": "t0k"},
+                                     {"db_web_gateway_url": "https://gw.example/svc/pgweb/", "control_token": None}],
+                         ids=["no-pgweb", "no-token"])
+def test_a_record_without_pgweb_at_its_gateway_or_a_token_has_no_pgweb_link(changes):
+    assert dataclasses.replace(_record(None), **changes).pgweb_link() is None

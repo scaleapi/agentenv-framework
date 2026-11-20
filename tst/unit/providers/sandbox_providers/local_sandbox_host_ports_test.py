@@ -110,6 +110,15 @@ async def test_tunnel_urls_stay_keyed_by_container_port(fake_ports):
         assert sandbox.tunnel_urls[port] == f"http://127.0.0.1:{sandbox.host_port(port)}"
 
 
+@pytest.fixture(autouse=True)
+def machine_temp(tmp_path, monkeypatch):
+    """The machine's /tmp, which holds the cursor: this test's own, so parallel workers don't share it."""
+    folder = tmp_path / "machine-tmp"
+    folder.mkdir()
+    monkeypatch.setattr(local_sandbox_module, "_MACHINE_TMP", folder)
+    return folder
+
+
 @pytest.fixture
 def busy(monkeypatch):
     """Ports the stand-in bind probe finds in use; every other port is free."""
@@ -119,9 +128,7 @@ def busy(monkeypatch):
 
 
 def _last_handed_out(port: int | str) -> None:
-    cursor = state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR
-    cursor.parent.mkdir(parents=True, exist_ok=True)
-    cursor.write_text(str(port))
+    local_sandbox_module._host_port_cursor().write_text(str(port))
 
 
 def test_host_ports_are_handed_out_in_turn_skipping_those_in_use(busy):
@@ -146,15 +153,44 @@ def test_a_missing_or_unreadable_cursor_starts_at_a_random_port(busy, monkeypatc
     assert local_sandbox_module._free_host_port() == 25000
 
 
-def test_the_first_port_of_a_state_root_does_not_follow_a_reseeded_random(busy, tmp_path, monkeypatch):
-    """A trainer reseeds ``random``; fresh state roots must still start apart in the range."""
+def test_the_first_port_on_a_machine_does_not_follow_a_reseeded_random(busy, tmp_path, monkeypatch):
+    """A trainer reseeds ``random``; fresh machines must still start apart in the range."""
     starts = []
-    for root in ("a", "b", "c"):
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / root))
+    for machine in ("a", "b", "c"):
+        (tmp_path / machine).mkdir()
+        monkeypatch.setattr(local_sandbox_module, "_MACHINE_TMP", tmp_path / machine)
         random.seed(0)
         starts.append(local_sandbox_module._free_host_port())
 
     assert len(set(starts)) > 1
+
+
+def test_processes_with_their_own_state_roots_or_temp_folders_hand_out_host_ports_in_turn(busy, tmp_path, monkeypatch):
+    """As each xdist worker does: a port one drew isn't drawn by the next before docker binds it."""
+    _last_handed_out(20100)
+    drawn = []
+    for root in ("a", "b", "c"):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / root))
+        monkeypatch.setenv("TMPDIR", str(tmp_path / root))
+        drawn.append(local_sandbox_module._free_host_port())
+
+    assert drawn == [20101, 20102, 20103]
+
+
+def test_a_machine_tmp_it_cant_make_its_folder_in_leaves_the_cursor_in_the_state_root(busy, tmp_path, monkeypatch):
+    """A file where /tmp would be, so not even root makes the folder."""
+    (tmp_path / "not-a-folder").write_text("")
+    monkeypatch.setattr(local_sandbox_module, "_MACHINE_TMP", tmp_path / "not-a-folder")
+
+    assert local_sandbox_module._host_port_cursor() == state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR
+
+
+def test_a_machine_folder_others_can_write_leaves_the_cursor_in_the_state_root(busy, machine_temp, monkeypatch):
+    folder = machine_temp / f"agentenv-{os.getuid()}"
+    folder.mkdir(mode=0o777)
+    folder.chmod(0o777)
+
+    assert local_sandbox_module._host_port_cursor() == state_root() / "locks" / local_sandbox_module._HOST_PORT_CURSOR
 
 
 def test_concurrent_draws_never_share_a_host_port(busy):
