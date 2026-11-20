@@ -1,8 +1,9 @@
 """An agent image on a task env's clock (FD-5916), end to end on local Docker: the agent deployed with the env serves
 clock/v1 sync_time; sync_env_clock declares it a follower at the real gateway and hands it its config; from then on
-every program the agent's user runs, its CLI included, reads the env's time while the A2A server stays on real time; a
-clock write that waits for followers waits for it; and once teardown_sandboxes takes it down, writes stop waiting for
-it. An agent whose CLI speaks a protocol the stub endpoint serves also runs one real turn.
+every program the agent's user runs, its CLI included unless it's a static binary as Codex's is, reads the env's time
+while the A2A server stays on real time; a clock write that waits for followers waits for it; and once
+teardown_sandboxes takes it down, writes stop waiting for it. An agent whose CLI speaks a protocol a stub endpoint
+serves also runs one real turn.
 
 Runs over images built beforehand, from this branch: AGENTENV_E2E_AGENT_IMAGES names one per agent, as
 ``claude-code=<tag>,codex=<tag>``; an agent it doesn't name is skipped as a missing capability."""
@@ -16,6 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from agentenv_protocol.client import ExtensionCallError
@@ -40,6 +42,7 @@ from tst.integration.task_step.test_prompt_agent_live_trajectory_local import (
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
 from tst.util.capabilities import agent_clock_image, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
+from tst.util.fake_responses import FakeResponses, shell_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -75,21 +78,39 @@ async def _claude_turn(context: TaskStepContext, endpoint: FakeAnthropic) -> Non
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
 
+async def _codex_turn(context: TaskStepContext, endpoint: FakeResponses) -> None:
+    """One turn of the real Codex CLI, which stays on real time: the date the agent tells the model before the prompt
+    and a shell `date` the model runs are the env's, while the CLI's own <environment_context> date is the host's. The
+    model is one the CLI's catalog doesn't know, so it gets the shell tool directly rather than in code mode."""
+    endpoint.respond = shell_then_answer("date -u +%FT%TZ", prefix="the shell said: ")
+    await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
+                              model="stand-in", max_conversation_turns=1).execute(context)
+    bodies = [json.dumps(seen.body) for seen in endpoint.requests()]
+    told = {m for body in bodies for m in re.findall(r"Today is ([0-9]{4}-[0-9]{2}-[0-9]{2})", body)}
+    hosts = {m for body in bodies for m in re.findall(r"<current_date>([0-9-]+)</current_date>", body)}
+    print("the agent's date line:", told, "the CLI's own:", hosts, "shell date:", endpoint.tool_results())
+    assert told == {VIRTUAL[:10]}, told
+    assert hosts and VIRTUAL[:10] not in hosts, hosts
+    assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
+
+
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
-    must return under the preloaded library), and a turn against the stub endpoint, for a CLI that speaks its protocol."""
+    must return under the preloaded library), and a turn against a stub endpoint of the protocol its CLI speaks."""
 
     bridge: str
     version: tuple[str, ...]
     shows: str
-    turn: Callable[[TaskStepContext, FakeAnthropic], Awaitable[None]] | None = None
+    turn: Callable[[TaskStepContext, Any], Awaitable[None]] | None = None
+    endpoint: type = FakeAnthropic
 
 
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
-    "codex": Agent(bridge="codex_bridge", version=("codex", "--version"), shows="codex-cli"),
+    "codex": Agent(bridge="codex_bridge", version=("codex", "--version"), shows="codex-cli", turn=_codex_turn,
+                   endpoint=FakeResponses),
     "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
 }
 
@@ -121,11 +142,11 @@ async def _followers(deployed) -> dict:
 @pytest.mark.parametrize("name", [pytest.param(name, marks=skip_without_agent_clock_image(name)) for name in AGENTS])
 @pytest.mark.asyncio
 async def test_an_agent_image_follows_the_envs_clock_until_it_is_torn_down(local_registry, name):
-    with FakeAnthropic(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
+    with AGENTS[name].endpoint(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
         await _follows_until_torn_down(name, AGENTS[name], agent_clock_image(name), endpoint)
 
 
-async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: FakeAnthropic) -> None:
+async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: Any) -> None:
     _seed_bootstrap_envs()
     env, deployed, _ = await _deploy_items("agentclock")
     uid = uuid.uuid4().hex[:8]
