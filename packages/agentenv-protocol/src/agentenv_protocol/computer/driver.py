@@ -65,7 +65,8 @@ class DriverDeclaration(BaseModel):
 
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):
     """Subclass it and mark the methods that capture and send input (see ``operations``); the class is checked when
-    it is defined. Features are class attributes, on the card. A subclass's ``__init__`` calls ``super().__init__()``.
+    it is defined. Features are class attributes, on the card; ``screenshot_delay_ms``, how long an input's screenshot
+    waits, is a class attribute that isn't. A subclass's ``__init__`` calls ``super().__init__()``.
     """
 
     buttons: ClassVar[tuple[str, ...]] = ("left",)
@@ -174,17 +175,20 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     def create_app(self) -> Any:
         self._computer_require_init()
-        return self._computer_front_apps(super().create_app())
+        return self._computer_finish_app(super().create_app())
 
     def mount(self, app: Any) -> Any:
         self._computer_require_init()
-        return self._computer_front_apps(super().mount(app))
+        return self._computer_finish_app(super().mount(app))
 
     async def children_environments(self) -> list[EnvironmentCard] | None:
         """The computer's apps, from the folders it composed them into."""
         return await apps.children(self._computer.apps) if self._computer.apps else None
 
-    def _computer_front_apps(self, app: Any) -> Any:
+    def _computer_finish_app(self, app: Any) -> Any:
+        """The app with the computer's apps' routes in front of them; it also logs the screenshot delay, once FastMCP has
+        set logging up."""
+        _log.info("an input's screenshot is taken %d ms after it", self._computer.effective_screenshot_delay_ms())
         app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(self._computer_forward)
         add_websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
         for logger in svc.SERVER_LOGGERS:

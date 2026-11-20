@@ -671,7 +671,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
   taken `screenshot_delay_ms` after the input, so a smooth scroll or the page a key opens, which renders a couple
   of hundred milliseconds after the input returns, shows: the driver class's `screenshot_delay_ms` (500 unless it
-  sets its own), or the deploy's setting of that name, 0 capturing at once. Click and scroll leave out `x` and `y`
+  sets its own), or the deploy's setting of that name, 0 capturing at once. A driver's own tools don't wait: they keep
+  their own timing. Click and scroll leave out `x` and `y`
   to act at the pointer on a computer with
   `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
   group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
