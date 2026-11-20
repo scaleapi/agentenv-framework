@@ -81,7 +81,7 @@ from ..types import error_body
 from . import clock as agent_clock
 from .control_token import REFUSAL, carries_control_token, log_guard, log_refusal, take_control_token
 from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
-from .registry import RegisteredOperation, build_registry
+from .registry import RegisteredOperation, _discover_bindings, build_registry
 from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
 from .tasks.v1 import (
     AgentConfig,
@@ -1041,11 +1041,25 @@ class _SdkServices:
             raise HTTPException(status_code=exc.STATUS, detail=f"{exc.CODE}: {exc}") from exc
 
 
-def _with_clock(definition: _AgentDefinition) -> _AgentDefinition:
-    """``definition`` serving clock/v1 where the agent's image runs the clock follower, so every agent in such an
-    image follows the env's clock with no code of its own, and takes back the task's zone if it restarted mid-run;
-    unchanged elsewhere, or where the agent declares it."""
-    if not agent_clock.follows() or any(a.definition.uri == CLOCK_V1.uri for a in definition.extensions):
+def _with_clock(definition: _AgentDefinition, agent: Any = None) -> _AgentDefinition:
+    """``definition`` serving clock/v1, its opt-in ``use_env_time`` (feature ``env_time``) included, where the agent's
+    image runs the clock follower, so every agent in such an image can follow the env's clock with no code of its own,
+    and takes back the task's zone if it restarted mid-run. An agent that declares clock/v1 itself and leaves its
+    operations to the SDK gets ``use_env_time`` too, as the SDK's ``sync_time`` keeps real time until it; one that
+    serves an operation of its own keeps its declaration as it is. Unchanged where the image has no follower."""
+    if not agent_clock.follows():
+        return definition
+    declared = next((a for a in definition.extensions if a.definition.uri == CLOCK_V1.uri), None)
+    if declared is not None:
+        own = agent is not None and any(binding.extension.uri == CLOCK_V1.uri
+                                        for binding, _ in _discover_bindings(agent))
+        if own or "env_time" in declared.features:
+            return definition
+        agent_clock.restore_zone()
+        opted = dataclasses.replace(declared, features=declared.features | {"env_time"})
+        return dataclasses.replace(definition, extensions=tuple(opted if a is declared else a
+                                                                for a in definition.extensions))
+    if agent is not None and any(binding.extension.uri == CLOCK_V1.uri for binding, _ in _discover_bindings(agent)):
         return definition
     agent_clock.restore_zone()  # a server restarted mid-run takes back the task's zone
     return dataclasses.replace(definition, extensions=(*definition.extensions,
@@ -1165,7 +1179,7 @@ class A2AAgentApplication:
                 "agent instance is already bound to an application; create a new "
                 "agent instance for each application"
             )
-        definition = _with_clock(definition)
+        definition = _with_clock(definition, agent)
         self.agent = agent
         self.definition = definition
         self.rpc_path = _rpc_path(definition.identity.url)

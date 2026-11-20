@@ -217,6 +217,17 @@ def test_an_agent_that_serves_its_own_sync_time_still_starts_without_use_env_tim
         assert client.post("/ext/clock/use-env-time").status_code == 404
 
 
+def test_an_agent_that_declares_the_clock_and_leaves_it_to_the_sdk_serves_use_env_time_too(image):
+    """Its sync_time is the SDK's, which keeps real time until use_env_time, so it must serve that too."""
+    with _app(extensions=(CLOCK_V1,)) as client:
+        assert set(_clock(client)["params"]["methods"]) == {"sync_time", "use_env_time"}
+        _synced(image, client)
+        _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+        assert client.post("/ext/clock/use-env-time").status_code == 200
+
+    assert _env_time(image) is True
+
+
 def test_sync_time_alone_has_the_follower_follow_on_real_time(image):
     with _app() as client:
         _synced(image, client)
