@@ -49,9 +49,8 @@ and a clock write that waits for followers waits for the agent. Without `agent_c
 files' modification times do, and reads the env's time only from the gateway's `get_time`: a CLI that judges a file's
 age by those times, as Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the
 env's date is ahead. An agent that follows goes on following for the rest of the run: a later `sync_env_clock` without
-`agent_clock` re-arms the clock it follows, and only agents that never followed keep real time. While the clock is
-armed the CLI goes out through the egress proxy, which keeps TLS
-working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts
+`agent_clock` re-arms the clock it follows, and only agents that never followed keep real time. While the agent
+follows an armed clock, the CLI goes out through the egress proxy, which keeps TLS working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts
 (the peer-agents MCP server's), `host.docker.internal`, the hosts the agent's `NO_PROXY` names and the hosts it reaches
 by plain HTTP alone, which have no certificate to check, go direct. `NO_PROXY` goes by host, not scheme, so a host the
 agent also reaches over TLS stays behind the proxy. The image's proxy reaches private networks too
