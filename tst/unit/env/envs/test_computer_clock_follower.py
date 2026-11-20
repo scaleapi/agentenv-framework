@@ -167,6 +167,27 @@ def test_it_follows_the_gateway_its_config_names_and_acknowledges_each_version_w
         gateway.close()
 
 
+def test_a_config_without_env_time_is_acknowledged_on_real_time_until_it_opts_in(follower):
+    """An agent's config names env_time false until clock/v1 use_env_time: the follower acknowledges the gateway's
+    versions, so clock writes can wait for it, while every program keeps real time."""
+    gateway = Gateway()
+    try:
+        gateway.set("boot:1", datetime(2020, 1, 1, tzinfo=timezone.utc), 1.0)
+        config = {"watch_url": gateway.url, "name": "agent-solver", "token": "t"}
+        follower.configure({**config, "env_time": False})
+
+        status = follower.until(lambda: (s := follower.status()).get("version") == "boot:1" and s)
+        assert (status["armed"], status["env_time"]) == (False, False)
+        assert abs(follower.universe() - time.time()) < 2
+        follower.until(lambda: ("boot:1", "agent-solver", "Bearer t") in gateway.watches)
+
+        follower.configure({**config, "env_time": True})
+        follower.until(lambda: follower.status().get("env_time") is True and follower.status().get("armed"))
+        assert abs(follower.universe() - datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()) < 2
+    finally:
+        gateway.close()
+
+
 def test_a_changed_config_is_followed_at_once_during_a_held_watch(follower):
     first, second = Gateway(hold=30), Gateway(hold=30)
     try:

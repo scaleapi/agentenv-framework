@@ -1480,7 +1480,7 @@ CLOCK_V1 = ExtensionDefinition(
                     "POST",
                     "/ext/clock/use-env-time",
                     SDK,
-                    response_required=("env_time", "preloaded"),
+                    response_required=("env_time", "follower"),
                 )
             }
         )

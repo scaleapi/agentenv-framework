@@ -46,12 +46,10 @@ the agent at the gateway as a follower with a read token of its own and calls th
 config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is armed.
 Without it the agent's CLI runs on real time, as its files' modification times are: a CLI that judges a file's age by
 them, as Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the env's date is
-ahead. After `sync_time`, core calls clock/v1's `use_env_time`, the agent's opt-in, where its card serves it: in an
-image whose clock is opt-in, that is what loads agent-env's libfaketime. The image names its clock libraries
-(`AGENTENV_CLOCK_PRELOAD`) and preloads them into nothing, and `use_env_time` puts them in `LD_PRELOAD` for every
-program the server starts from then on (`agentenv_protocol.a2a_agent.clock.preload`), as a server restarted mid-run
-does again. Claude Code's and OpenCode's images still preload them into every process of the agent's user
-(`/etc/ld.so.preload`), where an unarmed page leaves the time real, until they move over. From then on the CLI, its own
+ahead. After `sync_time`, which has the follower follow the gateway with
+`env_time` off, so it acknowledges each version while the page stays real time, core calls clock/v1's `use_env_time`,
+the agent's opt-in, where its card serves it: the follower then arms the page as the gateway's clock is. libfaketime is
+preloaded for the agent's user either way and reads real time from an unarmed page. From then on the CLI, its own
 "Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
 followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
 working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts
