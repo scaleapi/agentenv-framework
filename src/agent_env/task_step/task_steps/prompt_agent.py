@@ -567,7 +567,7 @@ class PromptAgentTaskStep(TaskStep):
         if negotiated:
             await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
                                              headers=agent.control_headers)
-        await prescribe_formats(agent, target_url, prescribed_formats(context))
+        await prescribe_formats(context, self.id, agent, target_url)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
         solver_model = negotiated.fields.get("model") if negotiated else None
         context.record_model(ModelRole.SOLVER.record_key, self.id, solver_model)
@@ -1359,8 +1359,13 @@ class _BuiltInUserSim:
 
 # How long one user sim trajectory fetch may take, as in always_on.
 _USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
-#: How long an agent may take to answer a trajectory prescription.
+#: How long an agent may take to answer a trajectory prescription, and how often one that can't be reached is tried,
+#: the wait growing by this many seconds each time.
 _PRESCRIBE_TIMEOUT_SECONDS = 30.0
+_PRESCRIBE_ATTEMPTS = 3
+_PRESCRIBE_RETRY_SECONDS = 1.0
+#: Where each step records the trajectory formats it prescribed and what its agent said it builds.
+TRAJECTORY_FORMATS_KEY = "trajectory_formats"
 
 
 def prescribed_formats(context: TaskStepContext) -> tuple[str, ...]:
@@ -1374,25 +1379,46 @@ def prescribed_formats(context: TaskStepContext) -> tuple[str, ...]:
     return tuple(formats)
 
 
-async def prescribe_formats(agent: DeployedAgent, a2a_url: str, formats: tuple[str, ...]) -> None:
-    """Have the agent build ``formats`` (those its card offers) beside native for the conversations it starts from
-    now on, when its card offers the trajectory extension's ``prescribe``; an agent whose SDK predates it builds what it
-    always has. After a failure the agent builds what it was last prescribed, native only unless an earlier step
-    prescribed more, and the run goes on: its judges read native either way."""
+async def prescribe_formats(context: TaskStepContext, step_id: str, agent: DeployedAgent, a2a_url: str) -> None:
+    """Have the agent build the run's trajectory formats (``prescribed_formats``) beside native for the conversations it
+    starts from now on, when its card offers the trajectory extension's ``prescribe``; an agent whose SDK predates it
+    builds what it always has. What was prescribed and what the agent builds go into
+    ``metadata["trajectory_formats"][step_id]``, and a prescribed format the agent can't build is warned of.
+
+    A connection error is retried; after a failure the agent builds what it was last prescribed, native only unless an
+    earlier step prescribed more, and the run goes on: its judges read native either way."""
+    formats = prescribed_formats(context)
     extension = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_TRAJECTORY)
     method, path = A2AAgent.operation(extension, "prescribe")
-    if method is None or path is None:
+    offered = TrajectoryFormats.of(extension).formats if method is not None and path is not None else ()
+    record: dict[str, Any] = {"agent": agent.agent_name, "prescribed": list(formats), "built": None}
+    context.metadata.setdefault(TRAJECTORY_FORMATS_KEY, {})[step_id] = record
+    unbuildable = [format for format in formats if format not in offered]
+    if unbuildable:
+        logger.warning(f"agent '{agent.agent_name}' can't build {unbuildable}, which the run prescribes: it builds "
+                       f"{list(offered) if offered else 'only its native trajectory'}")
+    if not offered:
         return
-    offered = TrajectoryFormats.of(extension).formats
     wanted = [format for format in formats if format in offered]
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(a2a_url + path, json={"formats": wanted}, headers=agent.control_headers,
-                                         timeout=_PRESCRIBE_TIMEOUT_SECONDS)
-        protocol.raise_for_extension_status(response, operation="trajectory prescribe")
-    except (httpx.HTTPError, ValueError) as e:
+    for attempt in range(1, _PRESCRIBE_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(a2a_url + path, json={"formats": wanted}, headers=agent.control_headers,
+                                             timeout=_PRESCRIBE_TIMEOUT_SECONDS)
+            protocol.raise_for_extension_status(response, operation="trajectory prescribe")
+            record["built"] = response.json()["formats"]
+            return
+        except httpx.TransportError as e:
+            if attempt < _PRESCRIBE_ATTEMPTS:
+                await asyncio.sleep(_PRESCRIBE_RETRY_SECONDS * attempt)
+                continue
+            failure: Exception = e
+        except (httpx.HTTPError, ValueError, KeyError) as e:
+            failure = e
+        record["error"] = f"{type(failure).__name__}: {failure}"
         logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed, so it builds what "
-                       f"it was last prescribed (continuing): {e}")
+                       f"it was last prescribed (continuing): {failure}")
+        return
 
 
 class StoredTrajectory(NamedTuple):

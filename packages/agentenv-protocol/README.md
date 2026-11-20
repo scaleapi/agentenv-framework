@@ -1633,8 +1633,12 @@ card offers; it answers every format the agent now builds, native first).
 - A prescription holds for each A2A context started after it. A context keeps the
   formats it started with, so no copy misses its first turns, and a later call
   sets them for the contexts after it.
+- It's one setting for the whole agent. An agent that serves several runs builds,
+  for each new context, what the last call prescribed, whichever run made it.
 - With no call the agent builds native only: no ATIF document, no media spool,
-  no turn count.
+  and no turn count of its own. A snapshot restored into it still records the
+  count the snapshot carries, so a context prescribed `atif/1` later numbers its
+  turns on from there.
 - An `atif/1` read of a context that wasn't prescribed it is refused with `409
   format_not_prescribed`. A read that names no format always gets native.
 

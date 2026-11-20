@@ -122,7 +122,6 @@ from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     fetch_native_trajectory,
     prescribe_formats,
-    prescribed_formats,
 )
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
@@ -602,7 +601,7 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.agent.control_headers)
-        await prescribe_formats(self.agent, self.target_url, prescribed_formats(ctx))
+        await prescribe_formats(ctx, step.id, self.agent, self.target_url)
         solver_model = negotiated.fields.get("model") if negotiated else None
         ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
         self.usage.start(ModelRole.SOLVER, solver_model, self.agent)
