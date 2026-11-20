@@ -44,8 +44,12 @@ _TURN = json.loads((RECORDED / "turn_claude_code.json").read_text())
 TURNS = [json.dumps(_TURN[: len(_TURN) // 2]), json.dumps(_TURN)]
 
 
+#: How many lines a long tool output has: enough for the default trajectory filter to compact it.
+_LONG_OUTPUT_LINES = 400
+
+
 def _tool_span(n: int) -> dict:
-    output = f"line {n}\n" * 400 if n % 2 else "ok"
+    output = f"line {n}\n" * _LONG_OUTPUT_LINES if n % 2 else "ok"
     return {"name": f"tool_{n}", "attributes": {"gen_ai.operation.name": "execute_tool",
                                                 "gen_ai.prompt": json.dumps({"tool": f"tool_{n}", "input": {"n": n}}),
                                                 "gen_ai.completion": json.dumps({"output": output})}}
