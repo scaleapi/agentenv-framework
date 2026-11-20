@@ -25,6 +25,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import time
 from ipaddress import ip_address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
@@ -117,7 +118,8 @@ LOCAL_TRUST_ENV = trust_env(LOCAL_TRUST_DIR)
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
-# A CLI failure can leave the daemon still creating this container; absence alone does not confirm its removal.
+# A launch whose outcome is unknown (its docker timed out or was killed) can leave the daemon still creating this
+# container, so a lookup that finds none confirms nothing until _UNCONFIRMED_START_SECONDS have passed.
 _CONTAINER_START_MARKER = ".container-start-pending"
 # The sandbox's container port -> host port map, so a sandbox rebuilt from its id publishes and finds the same ports.
 _PORT_MAP_FILE = ".port-map.json"
@@ -440,12 +442,16 @@ class LocalSandbox(VmSandbox):
         if code != 0:
             raise RuntimeError(f"Could not list sandbox {self.sandbox_id}'s container: "
                                f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+        pending = self._work_dir / _CONTAINER_START_MARKER
         if containers := stdout.split():
             await self.exec_script(f"docker rm -f {shlex.join(containers)} >/dev/null")
-            (self._work_dir / _CONTAINER_START_MARKER).unlink(missing_ok=True)
-        elif (self._work_dir / _CONTAINER_START_MARKER).exists():
-            raise RuntimeError(f"Container creation for sandbox {self.sandbox_id} is not confirmed; "
-                               f"retain {self.work_dir} and retry teardown")
+            pending.unlink(missing_ok=True)
+        elif pending.exists():
+            if time.time() - pending.stat().st_mtime < _UNCONFIRMED_START_SECONDS:
+                raise RuntimeError(f"Container creation for sandbox {self.sandbox_id} is not confirmed; retain "
+                                   f"{self.work_dir} and retry teardown, which finds it settled "
+                                   f"{_UNCONFIRMED_START_SECONDS // 60} min after its launch")
+            pending.unlink()
 
     async def _remove_labeled(self) -> None:
         """Remove labeled containers and networks; images can still be shared and are best-effort."""
@@ -866,9 +872,16 @@ class LocalSandboxProvider(SandboxProvider):
         pending.write_text(sandbox.container_name)
 
         def start() -> None:
-            docker("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-                   *publish, *machine.args, *state_args, *launcher_args(ports, env, size["cpu"], size["memory"]),
-                   *(_grant_args(*grants) if grants else ()), machine.image, timeout=_DOCKER_START_SECONDS)
+            try:
+                docker("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
+                       *publish, *machine.args, *state_args, *launcher_args(ports, env, size["cpu"], size["memory"]),
+                       *(_grant_args(*grants) if grants else ()), machine.image, timeout=_DOCKER_START_SECONDS)
+            except DockerFailed as failed:
+                # A docker that exited with an error made the container already or never will; one a signal killed
+                # may have left the daemon creating it.
+                if failed.returncode > 0:
+                    pending.unlink(missing_ok=True)
+                raise
             pending.unlink(missing_ok=True)
 
         running = asyncio.ensure_future(asyncio.to_thread(start))
@@ -1145,6 +1158,9 @@ def _forward_grants(container: str, port: int) -> None:
 _DOCKER_QUERY_SECONDS = 30
 # Starting a disk container also mounts its image; give creation its own bounded budget.
 _DOCKER_START_SECONDS = 120
+# How long after a launch its docker gave up on a container the daemon may still create it: past it, a lookup that
+# finds none confirms there is none.
+_UNCONFIRMED_START_SECONDS = 600
 #: How long a reset may take: longer than the minute the launcher's reset waits for the computer to start again.
 _RESET_SECONDS = 90
 #: Where a disk's launcher finds the local transfer CA's trust files.

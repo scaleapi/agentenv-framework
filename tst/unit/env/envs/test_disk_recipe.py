@@ -712,7 +712,8 @@ async def test_a_disk_start_can_outlast_a_query_and_records_ownership_before_lau
 @pytest.fixture
 def uncertain_disk(launched, monkeypatch):
     state = SimpleNamespace(visible=False, daemon="up", remove_error=None, folder=None, sandbox_id=None,
-                            owned_at_start=False, lookups=[], removals=[], entered=threading.Event(), release=None)
+                            owned_at_start=False, lookups=[], removals=[], entered=threading.Event(), release=None,
+                            start_error=None)
 
     def docker(*args, timeout=None):
         name = args[args.index("--name") + 1]
@@ -723,7 +724,7 @@ def uncertain_disk(launched, monkeypatch):
         state.entered.set()
         if state.release is not None:
             assert state.release.wait(5)
-        raise subprocess.TimeoutExpired(["docker", "run"], timeout)
+        raise state.start_error or subprocess.TimeoutExpired(["docker", "run"], timeout)
 
     async def exec_with_output(sandbox, *args):
         if args[:2] == ("docker", "version"):
@@ -770,6 +771,45 @@ async def test_a_timed_out_create_keeps_ownership_until_a_late_container_is_remo
 
     assert uncertain_disk.removals == [f"docker rm -f {rebuilt.container_name} >/dev/null"]
     assert not (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert local_sandbox.remove_local_work_dir(uncertain_disk.sandbox_id) == uncertain_disk.folder
+
+
+@pytest.mark.asyncio
+async def test_a_launch_docker_refused_is_cleaned_up_with_nothing_left_to_retry(uncertain_disk):
+    """The daemon unreachable for the launch, as when it can't pass /dev/kvm: no container, now or later."""
+    uncertain_disk.start_error = DockerFailed("docker run failed: Cannot connect to the Docker daemon", 125)
+
+    with pytest.raises(DockerFailed):
+        await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert uncertain_disk.owned_at_start
+    assert not uncertain_disk.folder.exists()
+    assert len(uncertain_disk.lookups) == 1 and uncertain_disk.removals == []
+
+
+@pytest.mark.asyncio
+async def test_a_launch_whose_docker_a_signal_killed_stays_unconfirmed(uncertain_disk):
+    uncertain_disk.start_error = DockerFailed("docker run failed: ", -2)
+
+    with pytest.raises(DockerFailed) as failure:
+        await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert any("creation" in note and "not confirmed" in note for note in failure.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_launch_settles_once_its_container_can_no_longer_appear(uncertain_disk):
+    provider = LocalSandboxProvider()
+    with pytest.raises(subprocess.TimeoutExpired):
+        await provider.create_vm(image="disk", exposed_ports=[18765], env={})
+    pending = uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER
+    launched_at = time.time() - local_sandbox._UNCONFIRMED_START_SECONDS - 1
+    os.utime(pending, (launched_at, launched_at))
+
+    await provider.terminate_sandbox(uncertain_disk.sandbox_id)
+
+    assert not pending.exists() and uncertain_disk.removals == []
     assert local_sandbox.remove_local_work_dir(uncertain_disk.sandbox_id) == uncertain_disk.folder
     assert not uncertain_disk.folder.exists()
 

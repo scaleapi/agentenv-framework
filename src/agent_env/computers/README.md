@@ -194,8 +194,9 @@ no ISO. A compose installs a base afresh once fewer than 7 days of its evaluatio
 link serves then. Name it as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.
 
 Docker opens `/dev/kvm` for the QEMU launcher. The user running agent-env needs access to Docker,
-but does not need read or write permission on that device. If Docker cannot pass the device to the launcher,
-the container fails to start and the compose reports the error.
+but does not need read or write permission on that device. The launcher runs as that user with the device's group
+added, so the device must be writable by its group, as udev's `kvm` rule makes it (`crw-rw---- root kvm`). If Docker
+cannot pass the device to the launcher, the container fails to start and the compose reports the error.
 
 A Windows computer env is composed on the same machine as a thin disk (`env/envs/computer/utils/thin_disk.py`, with
 what's Windows' own in `windows_disk.py`): the base booted on an overlay kept in a folder of its own, each layer
