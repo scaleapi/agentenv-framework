@@ -782,9 +782,11 @@ async def _spawn_claude(
     except asyncio.TimeoutError:
         _kill_cli(proc)
         await _reap(proc)
+        # A CLI that wrote its `result` and then hung keeps the usage it reported.
+        run_usage, unreported_calls = _usage_of_run(trajectory)
         return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
-                            error=f"claude CLI timed out after {timeout_s}s",
-                            unreported_calls=_usage_of_run(trajectory)[1])
+                            error=f"claude CLI timed out after {timeout_s}s", run_usage=run_usage,
+                            unreported_calls=unreported_calls)
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.
         _kill_cli(proc)

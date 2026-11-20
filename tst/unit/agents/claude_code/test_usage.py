@@ -8,6 +8,7 @@ import json
 from agentenv_protocol.a2a_agent import Usage
 
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
+from tst.unit.agents.claude_code.support import FakeCLI
 from tst.unit.agents.claude_code.test_claude_bridge_retry import _event, _write_session, scripted  # noqa: F401
 
 # The two calls' usage as the proxy answered them.
@@ -92,3 +93,23 @@ def test_run_claude_keeps_each_runs_usage_across_a_resume(scripted):  # noqa: F8
 
     assert result.attempts == 2 and result.run_usage == [first, second] and result.unreported_calls == 0
     assert json.loads(json.dumps(a2a_server._usage(result).to_dict()))["input_tokens"] == 67997
+
+
+def test_a_run_that_hangs_after_its_result_keeps_the_usage_it_reported(monkeypatch):
+    """A CLI that wrote its `result` and then never closed its output times out, but what it reported still counts;
+    a run that hung before its `result` counts its calls as unreported."""
+    reported = (_event(type="system", subtype="init", session_id="s")
+                + _event(type="result", subtype="success", result="42", session_id="s", usage=RUN)).encode()
+    streamed = _event(type="assistant", message={"id": "m1", "content": [], "usage": {"output_tokens": 3}}).encode()
+    results = []
+    for printed in (reported, streamed):
+        async def hung(*cmd, printed=printed, **kwargs):
+            return FakeCLI(printed, 0, hang=True)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", hung)
+        results.append(asyncio.run(claude_bridge._spawn_claude(prompt="p", session_id="s", resume=False,
+                                                               timeout_s=0.2)))
+
+    after, before = results
+    assert after.error and (after.run_usage, after.unreported_calls) == ([RUN], 0)
+    assert before.error and (before.run_usage, before.unreported_calls) == ([], 1)
