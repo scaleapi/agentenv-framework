@@ -978,7 +978,7 @@ class Gateway:
         card = await self._site_card(app)
         if card is None:
             return self._json_response({"error": "website card unavailable"}, 503)
-        if reserved_site_request(request, self._site_reserved(card)):
+        if reserved_site_request(request, self._site_reserved(card), self.website_urls.get(app, "http://site")):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls, site_names=self._names(app, card))
         engine = self._trigger_engine
@@ -1003,7 +1003,8 @@ class Gateway:
         if card is None:
             await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
             return
-        if reserved_site_request(websocket, self._site_reserved(card)):
+        if reserved_site_request(websocket, self._site_reserved(card),
+                                 self.website_urls.get(service_name, "http://site")):
             await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
             return
         base_url = self.website_urls.get(service_name)
@@ -2021,23 +2022,29 @@ def site_reserved_paths(card: dict, base: str = "") -> frozenset[str]:
     return frozenset(p for p in paths if p != "/")
 
 
-def site_request_path(request: HTTPConnection) -> str | None:
-    """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
-    by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
-    (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
-    refuses it."""
+def site_request_path(request: HTTPConnection, base_url: str = "http://site") -> str | None:
+    """The path a site's server receives for a request on its route, relative to the path of its address
+    ``base_url``: the raw path forwarded, decoded and its dot segments removed, with the address's path taken off. It differs from the path as routed here when an encoded slash sits beside a dot segment
+    (``public%2Fx/../api`` reaches ``/api``), or when dot segments climb out of the address's path and back into it
+    (``../base/api`` under ``/base`` reaches ``/api``). A path that climbs out and stays out is given whole. None for
+    a request-target the proxy can't build a URL for: ``forward()`` refuses it."""
     try:
-        return httpx.URL(upstream_url("http://site", request)).path
+        sent = _normalized(httpx.URL(upstream_url(base_url.rstrip("/"), request)).path)
+        under = _normalized(httpx.URL(base_url).path).rstrip("/")
     except (ValueError, httpx.InvalidURL):
         return None
+    if under and (sent == under or sent.startswith(under + "/")):
+        return sent[len(under):] or "/"
+    return sent
 
 
-def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset()) -> bool:
+def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset(),
+                          base_url: str = "http://site") -> bool:
     """Whether a request or WebSocket on a site's route reaches its data plane or env card, or one of the paths
-    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server receives
-    (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved here: ``forward()``
-    refuses it."""
+    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server at
+    ``base_url`` receives (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved
+    here: ``forward()`` refuses it."""
     if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
         return True
-    sent = site_request_path(request)
+    sent = site_request_path(request, base_url)
     return sent is not None and reserved_site_path(sent, reserved)

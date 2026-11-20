@@ -203,3 +203,27 @@ async def test_a_cors_preflight_on_a_sites_route_reaches_the_site(monkeypatch):
     assert (await _http(gw, "OPTIONS", "/website/api/items", headers=preflight))[0] == 200
     assert (await _http(gw, "OPTIONS", "/website/api", headers=preflight))[0] == 200
     assert ("OPTIONS", "/items") in reached and ("OPTIONS", "/") in reached
+
+
+@pytest.mark.asyncio
+async def test_a_site_behind_a_base_path_refuses_its_reserved_paths_when_a_path_climbs_out_of_the_base_and_back(monkeypatch):
+    reached = []
+    card = {"name": "shop", "url": "/agentenv",
+            "additionalInterfaces": [{"url": "http://shop-website-backend:8000/base/mcp", "transport": "mcp"}]}
+
+    def site(request):
+        reached.append(request.url.path)
+        if request.url.path == f"/base{WELL_KNOWN_PATH}":
+            return httpx.Response(200, json=card)
+        return httpx.Response(200, content=_streamed())
+
+    transport = httpx.MockTransport(site)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(_Changelog(), website_urls={"shop": "http://shop-website-backend:8000/base"},
+                  rest_proxy_urls={"shop": "http://shop-website-backend:8000/base"})
+
+    for path in ("../base/agentenv", "../base/mcp", "../base/.well-known/agent-env.json", "x/../../base/agentenv",
+                 "..%2Fbase/agentenv"):
+        assert (await _http(gw, "POST", f"/website/shop/{path}", body=b"{}"))[0] == 404, path
+    assert (await _http(gw, "GET", "/website/shop/../base/orders"))[0] == 200
+    assert reached == [f"/base{WELL_KNOWN_PATH}", "/base/orders"]
