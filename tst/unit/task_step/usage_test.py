@@ -1,10 +1,13 @@
-"""A role's step usage entry: the sums, what they leave out, and where the entry is kept."""
+"""A role's step usage entry: the sums, what they leave out, how they're priced, and where the entry is kept."""
 
+import pytest
 from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config.model import ModelRole
+from agent_env.config.model_pricing import ModelPrice, PriceTable
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
+from agent_env.task_step import usage as usage_module
 from agent_env.task_step.usage import RoleUsage, StepUsage
 
 
@@ -80,3 +83,77 @@ def test_an_entry_keeps_the_first_turns_unreadable_values_and_counts_them_all():
     entry = role.entry()
 
     assert entry["unparsed"] == [{"input_tokens": -n} for n in range(5)] and entry["unparsed_turns"] == 8
+
+
+PRICES = PriceTable({"gpt-4o-mini": ModelPrice(input=0.15, output=0.6, cache_read=0.075)}, "litellm@test")
+
+
+def _step_entry(monkeypatch) -> dict:
+    """The entry a step records for one solver turn on openai/gpt-4o-mini that reported a million input tokens, a
+    hundred thousand output tokens and its own cost of $0.50."""
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "openai/gpt-4o-mini",
+                DeployedAgent(agent_name="a", api_url="u"))
+    usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
+        input_tokens=1_000_000, output_tokens=100_000, input_includes_cache=True, cost_usd=0.5)))
+    [entry] = context.metadata["step_usage"]["solve"]
+    return entry
+
+
+def test_usage_on_the_configured_endpoint_is_priced_with_the_agents_own_cost_kept_beside_it(monkeypatch):
+    entry = _step_entry(monkeypatch)
+
+    assert entry["cost_usd"] == pytest.approx(0.15 + 0.06)
+    assert (entry["cost_status"], entry["cost_source"], entry["reported_cost_usd"]) == (
+        "priced", PRICES.source, 0.5)
+    assert entry["unit_prices"] == {"input": 0.15, "output": 0.6, "cache_read": 0.075, "cache_write": 0.15}
+    assert "cost_assumed" not in entry and "unpriced_reason" not in entry
+
+
+def test_turns_that_disagree_on_whether_input_counts_the_cache_are_each_charged_for_their_cached_input_once(
+        monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u"))
+    for turn in (Usage(input_tokens=100, output_tokens=1, cache_read_tokens=80, input_includes_cache=True),
+                 Usage(input_tokens=20, output_tokens=1, cache_read_tokens=80, input_includes_cache=False)):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["input_tokens"], entry["cache_read_tokens"], entry["input_includes_cache"]) == (120, 160, None)
+    assert entry["uncached_input_tokens"] == 40 and "cost_assumed" not in entry
+    assert entry["cost_usd"] == pytest.approx((40 * 0.15 + 2 * 0.6 + 160 * 0.075) / 1_000_000)
+
+
+@pytest.mark.parametrize("second, why", [
+    (Usage(output_tokens=20), "no_tokens"),
+    (Usage(input_tokens=20), "no_tokens"),
+    (Usage(total_tokens=20), "no_tokens"),
+], ids=["output-only", "input-only", "total-only"])
+def test_a_turn_without_input_or_output_leaves_the_entry_unpriced_rather_than_priced_short(
+        monkeypatch, second, why):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u"))
+    for turn in (Usage(input_tokens=100, output_tokens=10), second):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["cost_usd"], entry["cost_status"], entry["unpriced_reason"]) == (None, "unpriced", why)
+
+
+def test_a_turn_that_reported_no_tokens_beside_priced_ones_leaves_a_partial_lower_bound(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u"))
+    for turn in (Usage(input_tokens=1_000_000, output_tokens=0), Usage(tool_call_count=2), None):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["cost_status"], entry["partial"], entry["uncached_input_tokens"]) == ("priced", True, 1_000_000)
+    assert entry["cost_usd"] == pytest.approx(0.15)
