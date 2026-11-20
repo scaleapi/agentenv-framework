@@ -71,3 +71,38 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
         tool_call_count=0, input_tokens=120 + 123 + 14, output_tokens=18, total_tokens=127 + 132 + 16,
         cache_read_tokens=210, cache_write_tokens=20, input_includes_cache=True, cost_usd=0.02,
         provider_details={"model_calls": 3, "unreported": {"cache_write_tokens": 2, "cost_usd": 2}})
+
+
+@pytest.mark.asyncio
+async def test_a_played_agents_usage_is_never_priced_from_the_table_and_keeps_its_trainers_cost(
+        local_backends, monkeypatch, tmp_path):
+    """The proxy takes no model credentials, so its trainer's calls don't go through the configured endpoint: the
+    table doesn't price them though it lists the model, and the stored entry's cost is the figure the trainer
+    reported, as the agent's own."""
+    config = tmp_path / "prices.toml"
+    config.write_text('[model.prices]\n"policy-model" = { input = 1.0, output = 2.0, cache_read = 0.5 }\n')
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
+    reset_config()
+    configure()
+    task = Task.from_dict({"id": "usage", "steps": [
+        {"id": "policy", "type": "deploy_agent", "agent_name": "policy", "env_ids": []},
+        {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Say hi.",
+         "model": "policy-model", "timeout_seconds": 60},
+    ]})
+    episode = await EpisodeSpec.from_task(task, trainer_agents=["policy"]).start()
+    try:
+        turn = await episode.next_turn()
+        await turn.record_model_call("Hi.", model="policy-model", usage=REPORTED)
+        await turn.end("Hi.")
+        await episode.result()
+    finally:
+        await episode.abandon("the test ended")
+
+    record = Task.get_instance(episode.id)
+    [agent] = record.context["deployed_agents"]
+    [play] = record.context["prompt_responses"]
+    [entry] = play["usage"]
+    assert agent.get("on_configured_endpoint") is not True
+    assert {key: entry.get(key) for key in ("cost_usd", "cost_status", "cost_source", "reported_cost_usd")} == {
+        "cost_usd": 0.02, "cost_status": "reported", "cost_source": "harness", "reported_cost_usd": 0.02}
+    assert "unit_prices" not in entry and (entry["input_tokens"], entry["cache_read_tokens"]) == (14, 10)
