@@ -452,11 +452,12 @@ def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
 
 
 def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                  agent: str | None = None, skip_lint: bool = False) -> tuple[ResolvedEntry, ...]:
-    """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything.
-    Namespace routing must be on, as for ``plan_bundle``."""
+                  agent: str | None = None) -> tuple[ResolvedEntry, ...]:
+    """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything,
+    task lint included: a caller that keeps some checks those as it prepares them. Namespace routing must be on, as
+    for ``plan_bundle``."""
     plan = plan_bundle(resolve_bundle(parse_bundle(Path(root))), tasks=tasks, evals=evals, installed=installed_bundles,
-                       agent=agent, skip_lint=skip_lint)
+                       agent=agent, lint=False)
     selected = set(_to_run(plan))
     return tuple(write.source for write in plan.writes if write.kind is BundleKind.TASK and write.source.entry in selected)
 

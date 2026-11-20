@@ -215,16 +215,17 @@ class Plan:
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
                 installed: Installed | None = None, agent: str | None = None, default_agents: bool = True,
-                skip_lint: bool = False) -> Plan:
+                skip_lint: bool = False, lint: bool = True) -> Plan:
     """Plan a run of ``tasks`` and ``evals``, each a name or id in this bundle. With neither, the
     run is every eval or, in a bundle without evals, every task. ``installed`` lists the installed bundles whose
     entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. ``agent`` names
     the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Without
     ``default_agents``, a step that leaves its agent unset pulls in no configured default, as for a task written to
     run wherever another's default applies. With ``skip_lint``, the errors of task lint's own rules are findings it
-    keeps (``Plan.lint_findings``), not problems; a step's config problems stay problems. Raises BundleError listing
-    every problem found."""
-    return _Planner(resolved, installed, default_agents, skip_lint).plan(tasks, evals, agent)
+    keeps (``Plan.lint_findings``), not problems; a step's config problems stay problems. Without ``lint``, task lint
+    doesn't run, for a caller that only selects tasks and checks those it keeps. Raises BundleError listing every
+    problem found."""
+    return _Planner(resolved, installed, default_agents, skip_lint, lint).plan(tasks, evals, agent)
 
 
 def plan_entities(resolved: ResolvedBundle, ids: Sequence[str], *, installed: Installed | None = None) -> Plan:
@@ -252,10 +253,10 @@ class _Pullable:
 
 class _Planner:
     def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None, default_agents: bool = True,
-                 skip_lint: bool = False):
+                 skip_lint: bool = False, lint: bool = True):
         self.resolved = resolved
         self.default_agents = default_agents
-        self.skip_lint = skip_lint
+        self.skip_lint, self.lint = skip_lint, lint
         self.problems: list[str] = []
         self.lint_findings: list[tuple[str, Finding]] = []
         self.lint_refused = 0
@@ -586,7 +587,7 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
             override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
-        self._build_tasks(closure, linted=True)
+        self._build_tasks(closure, linted=self.lint)
         self._check_files(closure)
         self._check_cli_loads(closure)
         self._check_env_types(closure)

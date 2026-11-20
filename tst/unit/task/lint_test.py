@@ -21,7 +21,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.lint import Finding, Severity, lint, said
 from agent_env.task_step.task_step import TaskStep
-from agent_env.training import harness, trl
+from agent_env.training import trl
 from agent_env.training.nemo_gym import __main__ as nemo_cli, prepare
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import (
     AgentPromptResponseVerifierTaskStep,
@@ -417,16 +417,16 @@ def _recording(calls):
     return record
 
 
-def test_planning_a_bundle_for_a_trainer_takes_skip_lint_as_a_run_does(bundle_dir):
+def test_selecting_a_bundles_tasks_lints_none_of_them_for_its_caller_checks_those_it_keeps(bundle_dir):
     _write(bundle_dir, "t", {"headline_verifiers": ["box"], "steps": [BOX, TESTS]})
 
     with namespace_routing():
+        assert [entry.entry.name for entry in planned_tasks(bundle_dir)] == ["t"]
         with pytest.raises(BundleError, match="which grades nothing"):
-            planned_tasks(bundle_dir)
-        assert [entry.entry.name for entry in planned_tasks(bundle_dir, skip_lint=True)] == ["t"]
+            plan_bundle(resolve_bundle(parse_bundle(bundle_dir)), tasks=["t"])
 
 
-@pytest.mark.parametrize("serves", ["build_app", "trl", "harness", "nemo_gym"])
+@pytest.mark.parametrize("serves", ["build_app", "trl", "nemo_gym"])
 def test_each_way_a_trainer_serves_a_bundle_passes_skip_lint_to_its_plan(serves, bundle_dir, tmp_path, monkeypatch):
     calls = []
     if serves == "build_app":
@@ -435,9 +435,6 @@ def test_each_way_a_trainer_serves_a_bundle_passes_skip_lint_to_its_plan(serves,
     elif serves == "trl":
         monkeypatch.setattr(trl, "build_app", _recording(calls))
         serve = lambda skip: trl.AgentEnv.local(bundle_dir, skip_lint=skip)  # noqa: E731
-    elif serves == "harness":
-        monkeypatch.setattr(harness, "planned_tasks", _recording(calls))
-        serve = lambda skip: harness._trained(bundle_dir, (), (), None, skip)  # noqa: E731
     else:
         monkeypatch.setattr(prepare, "build_app", _recording(calls))
         serve = lambda skip: prepare.write_server(bundle_dir, tmp_path / "gym", skip_lint=skip)  # noqa: E731

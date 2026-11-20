@@ -50,13 +50,13 @@ _SANDBOX = "local"
 
 
 def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                agent: str | None = None) -> list[dict[str, Any]]:
-    """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments: a system line
-    naming the task, which is how the factory finds it, then the task's first prompt, for TRL's logs. The model never
-    sees this prompt: the task's own agent builds its own."""
+                agent: str | None = None, skip_lint: bool = False) -> list[dict[str, Any]]:
+    """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments, ``skip_lint``
+    among them: a system line naming the task, which is how the factory finds it, then the task's first prompt, for
+    TRL's logs. The model never sees this prompt: the task's own agent builds its own."""
     return [{"prompt": [{"role": "system", "content": f"AgentEnv task {index}: {task.id}"},
                         {"role": "user", "content": _first_prompt(task)}], "task_id": task.id}
-            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, agent))]
+            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, agent, skip_lint))]
 
 
 class AgentEnvSessionFactory(ResourceSessionFactory):
@@ -184,10 +184,10 @@ def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str], age
              skip_lint: bool = False) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
     """The selected tasks that can train their solver, prepared as ``agent-env run`` prepares them, each with its
     solver's deploys and their step params, ``agent``'s if it swaps the solver. The others are left out before they're
-    checked, so what they alone need can't stop the rest."""
+    checked, task lint included, so what they alone need can't stop the rest."""
     with namespace_routing():
         kept = []
-        for entry in planned_tasks(bundle, tasks=tasks, evals=evals, agent=agent, skip_lint=skip_lint):
+        for entry in planned_tasks(bundle, tasks=tasks, evals=evals, agent=agent):
             if why := _untrainable(entry.config):
                 logger.warning("%s is left out: %s", entry.entry.name, why)
             else:
