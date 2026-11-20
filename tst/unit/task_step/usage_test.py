@@ -145,3 +145,19 @@ def test_a_model_config_that_cant_be_read_leaves_usage_unpriced_without_failing_
     [entry] = context.metadata["step_usage"]["solve"]
     assert (entry["cost_status"], entry["unpriced_reason"]) == ("unpriced", "no_price")
     assert "usage stays unpriced, since [model] can't be read: [model] base_url names env:UNSET" in caplog.text
+
+
+def test_turns_that_disagree_on_whether_input_counts_the_cache_are_each_charged_for_their_cached_input_once(
+        monkeypatch, local_stores):
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(prices=PRICES))
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=True))
+    for turn in (Usage(input_tokens=100, output_tokens=1, cache_read_tokens=80, input_includes_cache=True),
+                 Usage(input_tokens=20, output_tokens=1, cache_read_tokens=80, input_includes_cache=False)):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["input_tokens"], entry["cache_read_tokens"], entry["input_includes_cache"]) == (120, 160, None)
+    assert entry["uncached_input_tokens"] == 40 and "cost_assumed" not in entry
+    assert entry["cost_usd"] == pytest.approx((40 * 0.15 + 2 * 0.6 + 160 * 0.075) / 1_000_000)

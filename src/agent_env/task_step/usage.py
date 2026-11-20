@@ -5,7 +5,9 @@ step that raises keeps its finished turns. An entry's counts have ``Usage``'s ke
 from __future__ import annotations
 
 import logging
+import operator
 from dataclasses import dataclass, field
+from functools import reduce
 from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 
 from agentenv_protocol.a2a_agent import Usage
@@ -13,7 +15,7 @@ from agentenv_protocol.a2a_agent import Usage
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.config.model import ModelRole
-from agent_env.config.prices import PriceTable, ReportedBy, price
+from agent_env.config.prices import PriceTable, ReportedBy, Tokens, price
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
 if TYPE_CHECKING:
@@ -32,8 +34,9 @@ _UNPARSED_TURNS_KEPT = 5
 class UsageEntry(TypedDict):
     """One role's usage in one step, as ``PromptResponse.usage`` and ``metadata["step_usage"]`` hold it. A count or
     a cost is None when nothing reported it, never 0. ``cost_usd`` is the cost ``cost_status`` and ``cost_source``
-    describe: priced from ``[model.prices]`` at ``unit_prices``, the agent's own figure, or None when unpriced, with
-    the agent's figure always in ``reported_cost_usd``."""
+    describe: priced from ``[model.prices]``, the ``uncached_input_tokens`` and the cache and output counts each at
+    its ``unit_prices`` rate, the agent's own figure, or None when unpriced, with the agent's figure always in
+    ``reported_cost_usd``."""
 
     role: str
     model: Optional[str]
@@ -51,6 +54,7 @@ class UsageEntry(TypedDict):
     cost_status: str
     cost_source: Optional[str]
     reported_cost_usd: Optional[float]
+    uncached_input_tokens: NotRequired[int]
     unit_prices: NotRequired[dict[str, float]]
     cost_assumed: NotRequired[list[str]]
     unpriced_reason: NotRequired[str]
@@ -81,7 +85,9 @@ class RoleUsage:
 
     def entry(self, prices: PriceTable = PriceTable(), reported_first: bool = False) -> UsageEntry:
         """The turns summed and priced: each count the sum of the turns that reported it, None when none did, never
-        0, and the sum's cost by ``price`` from ``prices``, the agent's own figure first when ``reported_first``.
+        0, and the sum's cost by ``price`` from ``prices``, the agent's own figure first when ``reported_first``; each
+        turn's tokens are read by its own ``input_includes_cache`` before they're summed, so turns that disagree on it
+        are still charged for their cached input once.
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
         (``unreported_calls``, which the entry sums, or a proxy's ``unreported``)."""
@@ -98,7 +104,8 @@ class RoleUsage:
                    or any(usage.provider_details.get("unreported") for usage in reported))
         counts = {name: total(name) for name in _COUNTERS}
         includes = flags.pop() if len(flags) == 1 else None
-        cost = price({**counts, "input_includes_cache": includes, "cost_usd": total("cost_usd")}, model=self.model,
+        charged = [tokens for usage in reported if (tokens := Tokens.of(usage.to_dict())) is not None]
+        cost = price(reduce(operator.add, charged) if charged else None, total("cost_usd"), model=self.model,
                      prices=prices, on_endpoint=self.on_endpoint, reported_first=reported_first,
                      reported_by=ReportedBy.HARNESS)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,

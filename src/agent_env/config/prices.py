@@ -103,15 +103,50 @@ class PriceTable:
 
 
 @dataclass(frozen=True)
+class Tokens:
+    """The tokens a usage record is charged for, each at its own rate: its input outside the cache, its output, and
+    its cache reads and writes. They add up across records, so a step's turns are each read by their own
+    ``input_includes_cache`` before they're summed; ``assumed_uncached`` says some record's cache tokens were taken as
+    outside its input, an upper bound."""
+
+    uncached_input: int
+    output: int
+    cache_read: int = 0
+    cache_write: int = 0
+    assumed_uncached: bool = False
+
+    @classmethod
+    def of(cls, usage: Mapping[str, Any]) -> Optional[Tokens]:
+        """``usage``'s tokens (``Usage.to_dict``'s keys); None without input and output counts.
+        ``input_includes_cache`` says whether ``input_tokens`` counts the cache tokens. Unknown, it's taken not to (an
+        upper bound) unless the counts prove it, input being fewer than the cache tokens."""
+        inputs, outputs = usage.get("input_tokens"), usage.get("output_tokens")
+        if inputs is None or outputs is None:
+            return None
+        read, write = usage.get("cache_read_tokens") or 0, usage.get("cache_write_tokens") or 0
+        cached = read + write
+        includes = usage.get("input_includes_cache")
+        if includes is True and inputs >= cached:
+            return cls(inputs - cached, outputs, read, write)
+        return cls(inputs, outputs, read, write, includes is None and 0 < cached <= inputs)
+
+    def __add__(self, other: Tokens) -> Tokens:
+        return Tokens(self.uncached_input + other.uncached_input, self.output + other.output,
+                      self.cache_read + other.cache_read, self.cache_write + other.cache_write,
+                      self.assumed_uncached or other.assumed_uncached)
+
+
+@dataclass(frozen=True)
 class Cost:
     """A usage record's cost: its figure (None when unpriced), where it came from, and the agent's or endpoint's own
-    figure kept beside it; a priced one also has the unit prices it used, the assumed ones filled in, and what was
-    assumed, which makes it an upper bound."""
+    figure kept beside it; a priced one also has the uncached input and the unit prices it was charged at, the assumed
+    rates filled in, and what was assumed, which makes it an upper bound."""
 
     usd: Optional[float]
     status: CostStatus
     source: Optional[str]
     reported_usd: Optional[float]
+    uncached_input: Optional[int] = None
     unit_prices: Optional[dict[str, float]] = None
     assumed: tuple[Assumed, ...] = ()
     unpriced: Optional[Unpriced] = None
@@ -120,7 +155,8 @@ class Cost:
         """The cost as a usage entry's keys."""
         record: dict[str, Any] = {"cost_usd": self.usd, "cost_status": self.status.value, "cost_source": self.source,
                                   "reported_cost_usd": self.reported_usd}
-        if self.unit_prices is not None:
+        if self.status is CostStatus.PRICED:
+            record["uncached_input_tokens"] = self.uncached_input
             record["unit_prices"] = self.unit_prices
         if self.assumed:
             record["cost_assumed"] = [assumed.value for assumed in self.assumed]
@@ -130,7 +166,8 @@ class Cost:
 
 
 def price(
-    usage: Mapping[str, Any],
+    tokens: Optional[Tokens],
+    reported: Optional[float],
     *,
     model: Optional[str],
     prices: PriceTable,
@@ -138,53 +175,40 @@ def price(
     reported_first: bool,
     reported_by: ReportedBy,
 ) -> Cost:
-    """The cost of ``usage`` (``Usage.to_dict``'s keys, ``cost_usd`` the reported figure) on ``model``. The table
-    prices it only for calls through the configured endpoint (``on_endpoint``). The table's price comes first and the
-    reported figure second, or the other way round with ``reported_first``: an agent's harness figure follows
-    ``[model] prefer_reported_cost``, and a judge's proxy figure always comes first. Neither gives ``unpriced``."""
-    reported = usage.get("cost_usd")
+    """The cost of ``tokens`` on ``model``, given the ``reported`` figure. The table prices them only for calls
+    through the configured endpoint (``on_endpoint``). The table's price comes first and the reported figure second,
+    or the other way round with ``reported_first``: an agent's harness figure follows ``[model]
+    prefer_reported_cost``, and a judge's proxy figure always comes first. Neither gives ``unpriced``."""
     listed = prices.lookup(model) if model and on_endpoint else None
-    computed = _priced(usage, listed) if listed else None
-    as_reported = (Cost(reported, CostStatus.REPORTED, reported_by.value, reported)
-                   if reported is not None else None)
-    as_priced = (Cost(computed[0], CostStatus.PRICED, prices.source, reported, computed[1], computed[2])
-                 if computed else None)
+    as_reported = Cost(reported, CostStatus.REPORTED, reported_by.value, reported) if reported is not None else None
+    as_priced = _priced(tokens, listed, prices.source, reported) if listed and tokens else None
     first, second = (as_reported, as_priced) if reported_first else (as_priced, as_reported)
     chosen = first or second
     if chosen is not None:
         return chosen
-    why =(Unpriced.NO_MODEL if not model else Unpriced.OTHER_ENDPOINT if not on_endpoint
+    why = (Unpriced.NO_MODEL if not model else Unpriced.OTHER_ENDPOINT if not on_endpoint
            else Unpriced.NO_PRICE if listed is None else Unpriced.NO_TOKENS)
     return Cost(None, CostStatus.UNPRICED, None, None, unpriced=why)
 
 
-def _priced(usage: Mapping[str, Any], rates: ModelPrice) -> Optional[tuple[float, dict[str, float], tuple]]:
-    """``usage`` at ``rates``: the cost, the unit prices used and what was assumed; None without input and output
-    counts. Cached input is charged once, at its own rate: ``input_includes_cache`` says whether ``input_tokens``
-    counts it. Unknown, it's taken not to (an upper bound, marked) unless the counts prove it, input being fewer than
-    the cache tokens; and a cache rate the table lacks is the input rate (an upper bound, marked)."""
-    inputs, outputs = usage.get("input_tokens"), usage.get("output_tokens")
-    if inputs is None or outputs is None:
-        return None
-    read, write = usage.get("cache_read_tokens") or 0, usage.get("cache_write_tokens") or 0
+def _priced(tokens: Tokens, rates: ModelPrice, source: str, reported: Optional[float]) -> Cost:
+    """``tokens`` at ``rates``, a cache rate the table lacks taken as the input rate (an upper bound, marked)."""
     assumed = []
     read_rate, write_rate = rates.cache_read, rates.cache_write
     if read_rate is None:
         read_rate = rates.input
-        if read:
+        if tokens.cache_read:
             assumed.append(Assumed.CACHE_READ_RATE)
     if write_rate is None:
         write_rate = rates.input
-        if write:
+        if tokens.cache_write:
             assumed.append(Assumed.CACHE_WRITE_RATE)
-    cached = read + write
-    includes = usage.get("input_includes_cache")
-    uncached = inputs - cached if includes is True and inputs >= cached else inputs
-    if includes is None and cached and inputs >= cached:
+    if tokens.assumed_uncached:
         assumed.append(Assumed.INPUT_EXCLUDES_CACHE)
-    usd = (uncached * rates.input + outputs * rates.output + read * read_rate + write * write_rate) / PER_MILLION
+    usd = (tokens.uncached_input * rates.input + tokens.output * rates.output + tokens.cache_read * read_rate
+           + tokens.cache_write * write_rate) / PER_MILLION
     unit = {"input": rates.input, "output": rates.output, "cache_read": read_rate, "cache_write": write_rate}
-    return usd, unit, tuple(assumed)
+    return Cost(usd, CostStatus.PRICED, source, reported, tokens.uncached_input, unit, tuple(assumed))
 
 
 @dataclass(frozen=True)

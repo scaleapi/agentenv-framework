@@ -12,6 +12,7 @@ from agent_env.config.prices import (
     PlannedModel,
     PriceTable,
     ReportedBy,
+    Tokens,
     Unpriced,
     price,
     unpriced,
@@ -33,13 +34,13 @@ USAGE = {"input_tokens": 1_000_000, "output_tokens": 100_000, "cache_read_tokens
 
 
 def _agent(usage, model="gpt-4o-mini", *, table=TABLE, on_endpoint=True, prefer=False):
-    return price(usage, model=model, prices=table, on_endpoint=on_endpoint, reported_first=prefer,
-                 reported_by=ReportedBy.HARNESS)
+    return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=table, on_endpoint=on_endpoint,
+                 reported_first=prefer, reported_by=ReportedBy.HARNESS)
 
 
 def _judge(usage, model="gpt-4o-mini", *, on_endpoint=True):
-    return price(usage, model=model, prices=TABLE, on_endpoint=on_endpoint, reported_first=True,
-                 reported_by=ReportedBy.PROVIDER)
+    return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=TABLE, on_endpoint=on_endpoint,
+                 reported_first=True, reported_by=ReportedBy.PROVIDER)
 
 
 def test_an_entry_parses_and_a_routing_prefix_is_stripped_to_find_it():
@@ -173,6 +174,19 @@ def test_counts_that_prove_input_leaves_out_the_cache_are_priced_so_unmarked():
     assert proven.assumed == ()
 
 
+def test_records_that_disagree_on_whether_input_counts_the_cache_add_up_to_their_own_uncached_input():
+    counted = Tokens.of({"input_tokens": 100, "output_tokens": 1, "cache_read_tokens": 80, "input_includes_cache": True})
+    apart = Tokens.of({"input_tokens": 20, "output_tokens": 1, "cache_read_tokens": 80, "input_includes_cache": False})
+    unknown = Tokens.of({"input_tokens": 50, "output_tokens": 1, "cache_read_tokens": 30, "input_includes_cache": None})
+
+    assert counted + apart == Tokens(uncached_input=40, output=2, cache_read=160)
+    assert counted + apart + unknown == Tokens(uncached_input=90, output=3, cache_read=190, assumed_uncached=True)
+    cost = price(counted + apart, None, model="gpt-4o-mini", prices=TABLE, on_endpoint=True, reported_first=False,
+                 reported_by=ReportedBy.HARNESS)
+    assert cost.usd == pytest.approx((40 * 0.15 + 2 * 0.6 + 160 * 0.075) / PER_MILLION) and cost.assumed == ()
+    assert cost.fields()["uncached_input_tokens"] == 40
+
+
 def test_cache_tokens_with_no_cache_rate_take_the_input_rate_and_are_marked():
     cost = _agent({**USAGE, "input_tokens": 1000, "output_tokens": 0, "cache_read_tokens": 400,
                    "cache_write_tokens": 100, "input_includes_cache": False}, "my-finetune")
@@ -190,7 +204,8 @@ def test_a_cost_keeps_what_it_was_priced_at_so_editing_the_table_changes_no_old_
     repriced = _table('[model.prices]\n"gpt-4o-mini" = { input = 5, output = 9, cache_read = 1, cache_write = 2 }\n')
 
     rates = record["unit_prices"]
-    again = ((3000 - 950) * rates["input"] + 700 * rates["output"] + 900 * rates["cache_read"]
+    assert record["uncached_input_tokens"] == 3000 - 950
+    again = (record["uncached_input_tokens"] * rates["input"] + 700 * rates["output"] + 900 * rates["cache_read"]
              + 50 * rates["cache_write"]) / PER_MILLION
     assert record["cost_usd"] == pytest.approx(again)
     assert record["cost_source"] == TABLE.source != repriced.source
