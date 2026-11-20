@@ -23,6 +23,8 @@ to native exactly.
 
 - One document per agent per A2A context. Each A2A task starts at a `source: user` step that holds the inbound
   message, with the task's ids in that step's profile. Steps number from 1 across the whole document.
+- A served document leaves out the secrets its agent's SDK knows: each is written `[redacted:<length>]` wherever it
+  occurs, in any string, the aux log and turn context served with it included. The native log keeps them.
 - A context's record may span several documents: after an agent instance restarts or drops the context from memory,
   after a snapshot restore, and when long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
   index, and each earlier document names the next in `continued_trajectory_ref`. The worker that stores the earlier
@@ -106,7 +108,10 @@ One vocabulary, in three places:
   `[video: media/<sha256>.mp4, 4.4 MB, 31 s]`. That covers video, documents, images other than JPEG, PNG, GIF and WebP
   (such as HEIC or SVG), audio outside ATIF's eight types, and other files.
 - Each file's details go in the `media` map of the profile of the object that holds the part (Step for a message,
-  ObservationResult for a result), keyed by its path.
+  ObservationResult for a result), keyed by its path. A PNG, JPEG, GIF or WebP image's `width` and `height` are read
+  from its header when the producer gives none.
+- A reader takes a part path only as `media/<sha256>.<ext>` in the document's own folder, never another path or a URL,
+  and checks each file's bytes against its name (`media_file`, `check_media`).
 
 ## Fields
 
