@@ -129,6 +129,10 @@ class VerifySandboxTaskStep(VerifierTaskStep):
         base["verifier_id"] = self.verifier_id
         return base
 
+    def criterion_rows(self) -> Optional[int]:
+        """The criteria of a type it checks; the others are skipped rows, which a pool leaves out."""
+        return sum(isinstance(c, dict) and c.get("type") in _HANDLED_TYPES for c in self.criteria)
+
     def config_problems(self) -> list[str]:
         """The criteria a run can't read, or that fail their row whatever the sandbox holds: one that isn't an object or
         whose type isn't a string, a probe without a list of paths, a ``probe_file_contains`` pattern that doesn't

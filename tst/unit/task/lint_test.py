@@ -237,6 +237,74 @@ def test_an_aggregate_source_no_verifier_writes_is_an_error_unless_a_step_lint_c
     assert _found(_task(BOX, TESTS, MORE, FINAL, headline_verifiers=["final"])) == []
 
 
+RUBRIC = {"id": "rubric", "type": "rubrics_verifier", "prompt_id": "ask", "verifier_id": "rubric",
+          "criteria": [{"criterion": f"criterion {n}"} for n in range(20)]}
+UNIT = {"id": "unit", "type": "run_container_unit_tests_verifier", "sandbox_name": "box", "container_name": "c",
+        "command": "pytest", "verifier_id": "unit"}
+
+
+def _combined(**fields):
+    return {"id": "final", "type": "aggregate_verifiers", "verifier_id": "final", **fields}
+
+
+@pytest.mark.parametrize(("steps", "said"), [
+    ([BOX, TESTS, _combined(sources=["tests", "nope"])], "sources names 'nope', which is no step in this task"),
+    ([BOX, TESTS, _combined(gates=["box"])], "gates names 'box', a deploy_sandbox step, which writes no named grade"),
+    ([BOX, ASSESS, _combined(sources=["assess"])],
+     "sources names 'assess', a verify_mcp_env_assessment step, which writes no named grade"),
+    ([BOX, _combined(sources=["tests"]), TESTS],
+     "sources names 'tests', which doesn't run before 'final', so its grade isn't there when the aggregate reads it"),
+    ([BOX, TESTS, {**MORE, "depends_on": ["box"]}, _combined(sources=["tests"], depends_on=["more"])],
+     "sources names 'tests', which doesn't run before 'final'"),
+])
+def test_a_source_or_gate_an_aggregate_names_by_step_id_must_be_a_verifier_on_the_base_that_runs_before_it(steps, said):
+    found = _found(_task(*steps, headline_verifiers=["final"]))
+
+    assert any(rule == "aggregate-source" and said in text for _, rule, text in found), found
+
+
+def test_an_aggregate_of_sources_that_run_before_it_by_step_id_passes():
+    assert _found(_task(BOX, TESTS, MORE, _combined(combine="weighted_mean", sources=["tests"], gates=["more"]),
+                        headline_verifiers=["final"])) == []
+
+
+def test_a_pooled_source_under_a_tenth_of_the_rows_warns_and_names_weighted_mean():
+    pooled = _found(_task(BOX, RUBRIC, UNIT, _combined(sources=["rubric", "unit"]), headline_verifiers=["final"]))
+    older = _found(_task(BOX, RUBRIC, UNIT, _combined(verifier_ids=["rubric", "unit"]), headline_verifiers=["final"]))
+
+    assert pooled == [("warning", "lopsided-pooling", "step 'final': sources source 'unit' is 1 of the 21 rows it pools "
+                                                      "(5%), so it barely moves the score; combine: weighted_mean weighs "
+                                                      "each source equally")]
+    assert older[0][2].endswith("naming the sources in sources with combine: weighted_mean weighs each equally")
+
+
+def test_pooling_an_aggregate_by_verifier_ids_warns_that_it_adds_no_rows():
+    inner = _combined(id="inner", verifier_id="inner", sources=["tests"])
+    found = _found(_task(BOX, TESTS, MORE, inner, _combined(verifier_ids=["more", "inner"]),
+                         headline_verifiers=["final"]))
+
+    assert ("warning", "lopsided-pooling", "step 'final': verifier_ids source 'inner' adds no rows to the pool, so it "
+            "doesn't move the score; naming the sources in sources with combine: weighted_mean weighs each equally"
+            ) in found
+
+
+@pytest.mark.parametrize("fields", [
+    {"sources": ["rubric", "unit"], "combine": "weighted_mean"},
+    {"sources": ["rubric", "unit"], "score_aggregator": "all_pass"},
+    {"sources": ["tests", "unit"]},
+])
+def test_a_weighted_mean_an_all_pass_or_a_balanced_pool_doesnt_warn(fields):
+    found = _found(_task(BOX, RUBRIC, TESTS, UNIT, _combined(**fields), headline_verifiers=["final"]))
+
+    assert not [f for f in found if f[1] == "lopsided-pooling"]
+
+
+def test_with_no_headline_an_aggregate_naming_every_other_verifier_by_step_id_is_the_one_to_name():
+    found = _found(_task(BOX, TESTS, MORE, _combined(combine="weighted_mean", sources=["tests"], gates=["more"])))
+
+    assert found[0][2].endswith("'final' aggregates the others, so name it in headline_verifiers")
+
+
 def test_a_store_entity_read_with_no_version_warns_and_a_pinned_or_local_one_doesnt():
     pinned = {**NOTES, "artifact_id": None, "artifacts": [{"id": "shared-notes", "version": 2}]}
     local = {**NOTES, "artifact_id": "@local/~/triage/notes"}
@@ -261,7 +329,7 @@ def test_a_task_that_grades_nothing_warns_and_several_grades_without_a_headline_
 
 
 def test_errors_come_before_warnings():
-    found = lint(_task(BOX, NOTES, TESTS, FINAL), [BOX, NOTES, TESTS, {**FINAL, "sources": ["tests"]}])
+    found = lint(_task(BOX, NOTES, TESTS, FINAL), [BOX, NOTES, TESTS, {**FINAL, "verifier_idz": ["tests"]}])
 
     assert [f.severity for f in found] == sorted((f.severity for f in found), key=lambda s: s is not Severity.ERROR)
     assert {f.rule for f in found} == {"unknown-field", "aggregate-source", "unpinned-reference", "no-headlines"}

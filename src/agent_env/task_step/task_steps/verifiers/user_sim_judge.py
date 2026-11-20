@@ -257,6 +257,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
         self._run: Optional[_ThisRun] = None
 
     # ---- settings ----------------------------------------------------------------------------------------------
+    def criterion_rows(self) -> Optional[int]:
+        """Its rows follow the conversation, not its criteria alone."""
+        return None
+
     def config_problems(self) -> list[str]:
         return _problems(self.judge_model, self.rubric_items, self.fail_task_when_not_passing,
                          self.rubric_persona_sha256)

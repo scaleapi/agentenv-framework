@@ -15,9 +15,10 @@ from agent_env.store.ids import is_local_id
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import StepRole, TaskStep, attach_base_fields
-from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
+from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import POOLED, AggregateVerifiersTaskStep
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, trajectory_mistakes_key
+from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 from agent_env.task_step.task_steps.verifiers.verifier import VerifierTaskStep
 
 
@@ -56,6 +57,7 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
         *_step_warnings(task.steps),
         *_headlines(task),
         *_aggregate_sources(task.steps),
+        *_lopsided(task.steps),
         *(_unpinned(task.steps) if unpinned else ()),
         *_coverage(task),
     ]
@@ -65,6 +67,8 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
 #: How many of the tasks a finding is in a run names, before how many more.
 SHOWN_TASKS = 3
 UNPINNED = "unpinned-reference"
+#: A pooled source's share of the rows below which it barely moves the score.
+LOPSIDED_SHARE = 0.10
 
 
 def said(findings: Iterable[tuple[str, Finding]]) -> list[str]:
@@ -235,7 +239,9 @@ def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
                     and step.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES):
                 written.add(trajectory_mistakes_key(step.verifier_id))
     for step in steps:
-        if isinstance(step, AggregateVerifiersTaskStep):
+        if isinstance(step, AggregateVerifiersTaskStep) and step.names_steps:
+            yield from _named_sources(step, steps)
+        elif isinstance(step, AggregateVerifiersTaskStep):
             missing = [source for source in step.verifier_ids if source not in written]
             if missing and not unseen:
                 yield Finding(Severity.ERROR, "aggregate-source",
@@ -246,6 +252,78 @@ def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
                               f"verifier_ids names {missing!r}, which no verifier in this task names as its "
                               f"verifier_id; unless {unseen!r} write it, under keys lint can't see, the aggregate fails "
                               "when it grades", step.id)
+
+
+def _named_sources(aggregate: AggregateVerifiersTaskStep, steps: Sequence[TaskStep]) -> Iterator[Finding]:
+    """Each source or gate an aggregate names by step id that a run can't read a grade of: no step in the task, a step
+    off the VerifierTaskStep base, which writes none, or one that doesn't run before it. Its own config problems, such
+    as naming itself, are its ``config_problems``."""
+    by_id, before = {step.id: step for step in steps}, _upstream(steps)[aggregate.id]
+    for field in ("sources", "gates"):
+        names = getattr(aggregate, field)
+        if not isinstance(names, list):
+            continue
+        for name in dict.fromkeys(name for name in names if isinstance(name, str) and name != aggregate.id):
+            source = by_id.get(name)
+            if source is None:
+                problem = "which is no step in this task"
+            elif not isinstance(source, VerifierTaskStep):
+                problem = (f"a {source.type} step, which writes no named grade: an aggregate's {field} are verifiers "
+                           "on the VerifierTaskStep base, and one of other steps' entries names them in verifier_ids")
+            elif name not in before:
+                problem = (f"which doesn't run before {aggregate.id!r}, so its grade isn't there when the aggregate "
+                           "reads it")
+            else:
+                continue
+            yield Finding(Severity.ERROR, "aggregate-source", f"{field} names {name!r}, {problem}", aggregate.id)
+
+
+def _upstream(steps: Sequence[TaskStep]) -> dict[str, set[str]]:
+    """Each step's id, mapped to the ids of the steps that run before it: those its ``depends_on`` names and theirs, or,
+    naming none, every step before it."""
+    before: dict[str, set[str]] = {}
+    for index, step in enumerate(steps):
+        if step.depends_on is None:
+            before[step.id] = {earlier.id for earlier in steps[:index]}
+        else:
+            before[step.id] = set().union(*({dep.task_step_id} | before.get(dep.task_step_id, set())
+                                            for dep in step.depends_on))
+    return before
+
+
+def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:
+    """A pooled, weighted-average aggregate one of whose sources is under ``LOPSIDED_SHARE`` of its rows, so it barely
+    moves the score, counting only the sources whose rows their config says (``criterion_rows``). An aggregate of
+    ``verifier_ids`` reads a nested aggregate's entry, which has none, so that source adds nothing."""
+    by_id = {step.id: step for step in steps}
+    by_verifier_id = {step.verifier_id: step for step in steps if isinstance(getattr(step, "verifier_id", None), str)}
+    for step in steps:
+        if (not isinstance(step, AggregateVerifiersTaskStep)
+                or step.score_aggregator is not ScoreAggregator.WEIGHTED_AVERAGE):
+            continue
+        if step.names_steps:
+            if (step.combine or POOLED) != POOLED or not isinstance(step.sources, list):
+                continue
+            field, sources = "sources", {name: by_id.get(name) for name in step.sources}
+        else:
+            field, sources = "verifier_ids", {vid: by_verifier_id.get(vid) for vid in step.verifier_ids}
+        rows = {}
+        for name, source in sources.items():
+            if isinstance(source, AggregateVerifiersTaskStep) and not step.names_steps:
+                rows[name] = 0
+            elif isinstance(source, VerifierTaskStep) and (count := source.criterion_rows()) is not None:
+                rows[name] = count
+        total = sum(rows.values())
+        if len(rows) < 2 or not total:
+            continue
+        name, count = min(rows.items(), key=lambda item: item[1])
+        if count / total >= LOPSIDED_SHARE:
+            continue
+        moves = ("adds no rows to the pool, so it doesn't move the score" if not count else
+                 f"is {count} of the {total} rows it pools ({count / total:.0%}), so it barely moves the score")
+        fix = ("combine: weighted_mean weighs each source equally" if step.names_steps else
+               "naming the sources in sources with combine: weighted_mean weighs each equally")
+        yield Finding(Severity.WARNING, "lopsided-pooling", f"{field} source {name!r} {moves}; {fix}", step.id)
 
 
 def _unpinned(steps: Sequence[TaskStep]) -> Iterator[Finding]:
@@ -265,15 +343,16 @@ def _coverage(task: Task) -> Iterator[Finding]:
     if not verifiers and all(_own(step) for step in task.steps):
         yield Finding(Severity.WARNING, "no-verifier", "no step grades this task, so a run has no score")
     elif len(verifiers) > 1 and not task.headline_verifiers:
-        yield Finding(Severity.WARNING, "no-headlines", _no_headlines(verifiers))
+        yield Finding(Severity.WARNING, "no-headlines", _no_headlines(verifiers, task.steps))
 
 
-def _no_headlines(verifiers: list[TaskStep]) -> str:
+def _no_headlines(verifiers: list[TaskStep], steps: Sequence[TaskStep]) -> str:
     """Several verifiers and no headline: every grade is top-line. Name the aggregate that covers the others, if one
     does."""
-    ids = {step.verifier_id for step in verifiers if isinstance(getattr(step, "verifier_id", None), str)}
+    graders = {step.id for step in verifiers
+               if isinstance(step, VerifierTaskStep) or isinstance(getattr(step, "verifier_id", None), str)}
     covering = [step.id for step in verifiers if isinstance(step, AggregateVerifiersTaskStep)
-                and ids - {step.verifier_id} <= set(step.verifier_ids)]
+                and graders - {step.id} <= set(step.source_steps(steps))]
     suggestion = (f"; {covering[0]!r} aggregates the others, so name it in headline_verifiers" if covering
                   else "; name the one that is its reward in headline_verifiers")
     return (f"{len(verifiers)} verifiers and no headline_verifiers, so every grade is top-line and anything that needs "

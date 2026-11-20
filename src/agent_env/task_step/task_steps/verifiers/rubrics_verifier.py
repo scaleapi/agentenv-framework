@@ -674,6 +674,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         overrides = context.metadata.get("user_overrides") or {}
         return get_config().resolve_model(ModelRole.JUDGE, run=overrides.get("judge_model"), step=self.default_model).model
 
+    def criterion_rows(self) -> Optional[int]:
+        return len(self.criteria) if isinstance(self.criteria, list) else None
+
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["verifier_id"] = self.verifier_id

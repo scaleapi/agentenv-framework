@@ -201,6 +201,27 @@ def test_a_task_file_with_a_field_its_step_doesnt_read_is_refused_before_anythin
     assert "tasks/hello.json v1: passed" in output
 
 
+def test_an_aggregate_naming_its_sources_by_step_id_weighs_and_gates_their_grades_in_a_run(bundle, quiet_logs):
+    steps = json.loads((bundle / "tasks/hello.json").read_text())
+    control = {**steps[2], "id": "control", "verifier_id": "control", "score_aggregator": "weighted_average",
+               "criteria": [
+        {"type": "probe_file_exists", "criterion": "has the greeting", "paths": ["hello.txt"]},
+        {"type": "probe_file_exists", "criterion": "has a farewell", "paths": ["goodbye.txt"]}]}
+    final = {"id": "final", "type": "aggregate_verifiers", "combine": "weighted_mean", "sources": ["hello", "control"],
+             "weights": {"hello": 3, "control": 1}, "gates": ["hello"], "min_passing_score": 0.8}
+    (bundle / "tasks/hello.json").write_text(json.dumps({"headline_verifiers": ["final"],
+                                                         "steps": [*steps, control, final]}))
+
+    output = _run(bundle)
+
+    (instance_id,) = re.findall(r"instance (@local/~/my-hello/hello-[a-z0-9]{8})\b", output)
+    with namespace_routing():
+        grades = Task.get_instance(instance_id).context["metadata"]["grades"]
+    assert (grades["control"]["score"], grades["hello"]["passed"]) == (0.5, True)
+    assert (grades["final"]["score"], grades["final"]["passed"]) == (0.875, True)
+    assert grades["final"]["verifier_output"]["gates"]["hello"]["passed"] is True
+
+
 @skip_without_gnu_stat()
 def test_a_bundle_task_collects_from_its_sandbox_into_a_universe_named_after_the_run(bundle, quiet_logs):
     steps = json.loads((bundle / "tasks/hello.json").read_text())

@@ -174,6 +174,10 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
     # s a turn) bounds it near here anyway.
     DEFAULT_JUDGE_MAX_TURNS: ClassVar[int] = 400
 
+    def criterion_rows(self) -> Optional[int]:
+        """Its rows follow the run's timeline, not its criteria alone."""
+        return None
+
     def __init__(
         self,
         id: str,
