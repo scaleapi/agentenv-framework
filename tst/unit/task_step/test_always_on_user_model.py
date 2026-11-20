@@ -27,7 +27,7 @@ CONFIG_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG
 async def test_the_run_s_user_model_sets_the_user_sim_agent_s_model(monkeypatch, tmp_path, overrides, model, source):
     posted: list[tuple[str, dict]] = []
 
-    async def post(url, fields):
+    async def post(url, fields, headers=None):
         posted.append((url, fields))
 
     monkeypatch.setattr(ao.protocol, "post_agent_config", post)

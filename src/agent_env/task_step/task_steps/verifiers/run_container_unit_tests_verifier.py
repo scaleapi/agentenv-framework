@@ -17,11 +17,10 @@ The command and env are resolved per run from ``step_overrides`` and
 ``metadata["seed"]`` (see ``_resolve_command``), so one stored task can be pointed
 at a different input without a new task version.
 
-A non-zero exit (or timeout) raises after the entry has been recorded — so the
-run instance has the verification context even when the verifier aborts the
-task. Verifiers that always exit 0 and encode pass/fail inside a result JSON
-(Harbor-style test.sh) will always look "passed" at the step level; downstream
-consumers must read `extracted_files` to grade.
+A timeout fails the step's grade, and a non-zero exit without ``reward_path`` grades it 0; both raise once the grade
+and the entry are recorded, so the run instance has the verification context even when the verifier aborts the task.
+Verifiers that always exit 0 and encode pass/fail inside a result JSON (Harbor-style test.sh) will always look "passed"
+at the step level; downstream consumers must read `extracted_files` to grade.
 """
 
 from __future__ import annotations
@@ -36,11 +35,11 @@ import shlex
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar, Optional
 
 from agent_env.config import ConfigError, get_config
-from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.config.model import MODEL_HEADERS_ENV, api_root, no_key_for
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import require_sandbox
 from agent_env.env.envs.computer.utils import inside
@@ -51,8 +50,10 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
 from agent_env.task_step.context import StepContextError, TaskStepContext, dual_keyed
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import TaskStepDependency
 from agent_env.task_step.task_steps.run_code import _DriverTarget
+from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
+from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierTaskStep
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ _RESERVED_ENV_KEYS = frozenset({
 _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
 
 
-class RunContainerUnitTestsVerifierTaskStep(TaskStep):
+class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
     type: ClassVar[str] = "run_container_unit_tests_verifier"
     entity_refs = (EntityRef.env("env_id"),)
 
@@ -107,8 +108,11 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         reward_path: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        score_aggregator: Optional[ScoreAggregator | str] = None,
+        min_passing_score: Optional[float] = None,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id, score_aggregator=score_aggregator, min_passing_score=min_passing_score)
         container = (sandbox_name, container_name)
         if (env_id is None and None in container) or (env_id is not None and container != (None, None)):
             raise ValueError(f"run_container_unit_tests_verifier '{id}': set env_id, or sandbox_name and "
@@ -120,7 +124,6 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         self.container_name = container_name
         self.env_id = env_id
         self.command = command
-        self.verifier_id = verifier_id or id
         self.setup_commands = list(setup_commands or [])
         self.user = user
         self.timeout_sec = timeout_sec
@@ -166,7 +169,6 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             container_name=data.get("container_name"),
             command=data["command"],
             env_id=data.get("env_id"),
-            verifier_id=data.get("verifier_id"),
             setup_commands=data.get("setup_commands"),
             user=data.get("user"),
             timeout_sec=data.get("timeout_sec", 300),
@@ -174,6 +176,20 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             result_paths=data.get("result_paths"),
             reward_path=data.get("reward_path"),
         )
+
+    def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
+        """Its fields with a run's ``step_params`` ``command`` in place of its own, and the names of the env vars it sets,
+        never their values; read without ``_resolve_command``, which raises on a name it refuses."""
+        settings = super().verifier_settings(context)
+        overrides = self.step_param_overrides(context)
+        override_env = {key: str(value) for key, value in (overrides.get("env_vars") or {}).items()}
+        overridden = [key for key, changed in (
+            ("command", "command" in overrides and overrides["command"] != self.command),
+            ("env_vars", any(self.env_vars.get(key) != value for key, value in override_env.items())),
+        ) if changed]
+        settings["command"] = overrides.get("command", self.command)
+        settings["env_vars"] = sorted({*self.env_vars, *override_env})
+        return {**settings, "overridden": overridden}
 
     def _resolve_command(self, context: TaskStepContext) -> tuple[str, dict[str, str]]:
         """Resolve ``(command, extra_env)`` for this run, so a value can vary without a
@@ -228,7 +244,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             extra_env[env_key] = str(value)
         return command, extra_env
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def verify(self, context: TaskStepContext) -> Verification:
         # The outputs are named after the run: refuse an id they can't take before the tests run.
         if context.instance_id and is_local_id(context.instance_id):
             validate_local_id(derive_id(context.instance_id, f"verifier-stdout-{self.id}"))
@@ -276,7 +292,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             object_url=store.object_url(f"{outputs}/stderr.txt"),
         )
 
-        # Record on context (shape compatible with aggregate_verifiers).
+        # The entry's shape is the one aggregate_verifiers reads.
         # Harbor-style verifiers (reward_path set) grade by the reward file, not
         # the exit code: test.sh exits 0 and encodes pass/fail in the reward.
         passed_surrogate = exit_code == 0 and not timed_out
@@ -299,16 +315,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             result_bool = passed_surrogate
             message = f"exit_code={exit_code} timed_out={timed_out}"
             result_id = "exit_code"
-        context.metadata.setdefault("verifications", {})[self.verifier_id] = {
-            "results": [
-                {
-                    "id": result_id,
-                    "score": score,
-                    "result": result_bool,
-                    "message": message,
-                },
-            ],
-            "score": score,
+        output = {
             "command": command,
             "exit_code": exit_code,
             "timed_out": timed_out,
@@ -326,27 +333,39 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             "stderr_head": stderr[:_OUTPUT_PREVIEW_CHARS],
             "extracted_files": extracted_files,
         }
+        verification = Verification(criteria=[{"id": result_id, "score": score, "result": result_bool,
+                                               "message": message}], score=score, output=output)
 
         # Raise on timeout / non-zero exit AFTER recording. In reward mode a
         # non-zero exit is graded by the reward file this run wrote (score 0 when
         # it wrote none), not a step error — only an unfinished (timed-out) run is
-        # unreliable.
+        # unreliable, so its grade is failed.
         if timed_out:
-            raise RuntimeError(
-                f"Verifier '{self.verifier_id}' timed out after {self.timeout_sec}s"
-            )
-        if exit_code != 0 and self.reward_path is None:
-            raise RuntimeError(
+            verification.error = f"Verifier '{self.verifier_id}' timed out after {self.timeout_sec}s"
+            verification.raise_after = RuntimeError(verification.error)
+        elif exit_code != 0 and self.reward_path is None:
+            verification.raise_after = RuntimeError(
                 f"Verifier '{self.verifier_id}' exited {exit_code}; "
                 f"stderr (last {_ERROR_TAIL_CHARS} chars):\n{stderr[-_ERROR_TAIL_CHARS:]}"
             )
+        return verification
 
-        return context
+    def model_key_problem(self, extra_env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+        """Why the commands can't be given the configured key: a model URL among ``env_vars`` and ``extra_env``
+        that isn't the configured endpoint, with no key of its own beside it; None when there's none."""
+        given = {**self.env_vars, **(extra_env or {})}
+        for url_name, key_name in (("LITELLM_BASE_URL", "LITELLM_API_KEY"), ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")):
+            url = given.get(url_name)
+            if url and key_name not in given and not get_config().is_model_endpoint(url):
+                return f"{url_name}: {no_key_for(url, f'{key_name} in the env_vars of the step or its step_params')}"
+        return None
 
     def _merged_env(self, config, sandbox_type: Optional[str], extra_env: dict[str, str]) -> dict[str, str]:
         """The commands' environment: the model endpoint's key and URL from agent-env's config, every sandbox
         provider's container env, ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as
-        ``sandbox_type``'s containers reach it."""
+        ``sandbox_type``'s containers reach it. A URL other than the configured endpoint needs its key beside it."""
+        if problem := self.model_key_problem(extra_env):
+            raise ConfigError(f"{self.type} '{self.id}': {problem}")
         merged_env: dict[str, str] = {}
         try:
             litellm_key = config.get_litellm_api_key()
@@ -357,7 +376,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         try:
             litellm_url = config.get_litellm_base_url()
             merged_env["LITELLM_BASE_URL"] = litellm_url
-            merged_env["ANTHROPIC_BASE_URL"] = litellm_url
+            merged_env["ANTHROPIC_BASE_URL"] = api_root(litellm_url)
         except (KeyError, ConfigError):
             logger.warning("LITELLM_BASE_URL unavailable; verifier won't have LLM base URL")
         merged_env.update(all_sandbox_container_env())

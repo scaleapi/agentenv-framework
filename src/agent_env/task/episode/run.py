@@ -8,11 +8,13 @@ from typing import Any
 import httpx
 from agentenv_protocol import EnvironmentTool, ToolResult
 from agentenv_protocol.a2a_agent import (
+    REPORTED_USAGE_KEY,
     ProxyBashAction,
     ProxyBashResult,
     ProxySkill,
     ProxyTextPart,
     ProxyToolAction,
+    Usage,
 )
 
 from agent_env.a2a_agent import protocol
@@ -66,11 +68,14 @@ class Turn:
         return TurnTools(self, timeout)
 
     async def record_model_call(self, message: str | dict[str, Any], *, model: str | None = None,
-                                usage: dict[str, Any] | None = None) -> None:
+                                usage: Usage | dict[str, Any] | None = None) -> None:
         """Record one of the model's calls, once it has returned: an OpenAI chat message, an Anthropic message or a
         string. From then on each call to the turn's tools must be one the last recorded call made, and all must run
         before the next is recorded or the turn ends; else ``EpisodeError``. Calls to tools the turn doesn't offer
-        aren't checked."""
+        aren't checked. ``usage`` is the call's: a ``Usage``, taken as given, from a caller that knows what its counts
+        hold, or the response's own usage, which the proxy reads with ``Usage.from_model_response``."""
+        if isinstance(usage, Usage):
+            usage = {REPORTED_USAGE_KEY: usage.to_dict()}
         await self._checked(self._proxy.record(self._task_id, message, model, usage))
 
     async def end(self, response: str | None = None) -> None:
@@ -303,7 +308,7 @@ class Episode:
 
     async def _attach(self, agent: str, deployed: DeployedAgent) -> None:
         """Claim ``agent``'s proxy and hand out the turns it opens."""
-        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {})
+        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {}, headers=deployed.control_headers)
         self._proxies.append(proxy)
         await proxy.claim()
         self._drains.append(asyncio.create_task(self._drain(agent, proxy)))

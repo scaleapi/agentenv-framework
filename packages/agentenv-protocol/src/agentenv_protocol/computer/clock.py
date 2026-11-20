@@ -24,6 +24,9 @@ FOLLOWER = "/usr/local/lib/agentenv-clock/clock-follower"
 FOLLOWER_USER = "agentenv-clock"
 CONFIG = "/etc/agentenv/clock/follower.json"
 STATUS = "/run/agentenv-clock/status.json"
+#: The follower's clock file, replaced whole at each write: ``@<universe s> x<rate> ^<anchor s>`` while the clock is
+#: armed (the universe at real time ``anchor``, running at ``rate``), ``+0 x1`` on real time.
+CLOCK_FILE = "/run/agentenv-clock/clock"
 #: What a disk form's guest has, made from the computer's container image: core's root channel reaches its launcher,
 #: not the guest, so it can't configure a follower there, and a disk computer stays on real time for now.
 DISK_GUEST = "/etc/agentenv/vm/image.env"
@@ -38,6 +41,21 @@ def follows() -> bool:
     return os.path.exists(FOLLOWER) and not os.path.exists(DISK_GUEST)
 
 
+def session_time() -> float:
+    """The time this machine's session programs read, in epoch seconds: the universe's, from the follower's clock file,
+    while the clock is armed, else real time. A process that stays on real time, as an agent's A2A server does, reads
+    its programs' time here."""
+    now = time.time()
+    try:
+        spec = Path(CLOCK_FILE).read_text().split()
+    except FileNotFoundError:
+        return now
+    if not spec[0].startswith("@"):
+        return now
+    universe, rate, anchor = float(spec[0][1:]), float(spec[1][1:]), float(spec[2][1:])
+    return universe if rate == 0 or now <= anchor else universe + (now - anchor) * rate
+
+
 def session_zone() -> str:
     """The zone the computer booted with, which every session program is in."""
     try:
@@ -47,11 +65,17 @@ def session_zone() -> str:
 
 
 def follower_status() -> dict:
+    return _status_written()[0]
+
+
+def _status_written() -> tuple[dict, int]:
+    """The follower's status and when it wrote it (``st_mtime_ns``; 0 when there is none)."""
     try:
-        status = json.loads(Path(STATUS).read_text())
+        path = Path(STATUS)
+        written, status = path.stat().st_mtime_ns, json.loads(path.read_text())
     except (OSError, ValueError):
-        return {}
-    return status if isinstance(status, dict) else {}
+        return {}, 0
+    return (status, written) if isinstance(status, dict) else ({}, 0)
 
 
 def gateway_version(watch_url: str) -> str:
@@ -60,7 +84,10 @@ def gateway_version(watch_url: str) -> str:
         return json.loads(answer.read())["version"]
 
 
-def _why(status: dict, current: Optional[str], unread: Optional[str]) -> str:
+def _why(status: dict, current: Optional[str], unread: Optional[str], stale: bool = False) -> str:
+    if stale:
+        return (f"it still shows the config it had, the gateway at {status.get('url')} as {status.get('name')!r}, "
+                f"not the one just written")
     if status.get("error"):
         return f"it can't reach the gateway at {status.get('url')}: {status['error']}"
     if not status.get("url"):
@@ -82,19 +109,35 @@ async def sync_time(env_get_time_url: str, timezone: Optional[str] = None) -> di
     if timezone is not None and timezone.strip() != zone:
         raise InvalidArgument(f"the task's clock is in {timezone.strip()!r} and this computer's session in {zone!r}; "
                               f"deploy it with computer_settings.timezone = {timezone.strip()!r}")
-    deadline = time.monotonic() + CONNECT_WAIT_S
+    follower = await following("this computer's clock follower")
+    return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url, "follower": follower}
+
+
+async def following(whose: str, wait_s: float = CONNECT_WAIT_S, *, url: Optional[str] = None,
+                    name: Optional[str] = None, since_ns: int = 0) -> dict:
+    """The follower's status once it shows the gateway's current version; TargetUnavailable saying why ``whose``
+    doesn't within ``wait_s``. A computer's ``sync_time`` and an agent's (``agentenv_protocol.a2a_agent.clock``) both answer
+    with it. An agent's, which has just written the follower's config, names it: only a status of that ``url`` and
+    ``name`` the follower wrote since ``since_ns`` counts, so what it showed of a config before is never taken for
+    this one's."""
+    deadline = time.monotonic() + wait_s
+
+    def read() -> tuple[dict, bool]:
+        status, written = _status_written()
+        stale = bool(status) and (written < since_ns or (url is not None and status.get("url") != url)
+                                  or (name is not None and status.get("name") != name))
+        return status, stale
+
     while True:
-        status, current, unread = follower_status(), None, None
-        if status.get("connected") and status.get("url"):
+        (status, stale), current, unread = read(), None, None
+        if not stale and status.get("connected") and status.get("url"):
             try:
                 current = await asyncio.to_thread(gateway_version, status["url"])
             except Exception as e:  # noqa: BLE001 - away or answering something else: said as why, tried again
                 unread = f"{type(e).__name__}: {e}"[:300]
-            status = follower_status()
-            if current is not None and status.get("connected") and status.get("version") == current:
-                return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url,
-                        "follower": {key: status.get(key) for key in ("name", "url", "version", "armed")}}
+            status, stale = read()
+            if not stale and current is not None and status.get("connected") and status.get("version") == current:
+                return {key: status.get(key) for key in ("name", "url", "version", "armed")}
         if time.monotonic() >= deadline:
-            raise TargetUnavailable("this computer's clock follower isn't following the gateway: "
-                                    + _why(status, current, unread))
+            raise TargetUnavailable(f"{whose} isn't following the gateway: " + _why(status, current, unread, stale))
         await asyncio.sleep(0.1)

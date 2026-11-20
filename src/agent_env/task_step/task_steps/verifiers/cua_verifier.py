@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+from dataclasses import replace
 from typing import Any, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
@@ -33,7 +34,7 @@ from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_steps.computer.computer_exec import computer_problem, find_computer
 from agent_env.task_step.task_steps.verifiers.judge_utils.cua_files import render_isolated
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerdict, RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
@@ -238,18 +239,16 @@ class CuaVerifierTaskStep(RubricsVerifierTaskStep):
                               response="(Not graded: grade the files and state below, which are what the agent "
                                        "produced.)")
 
-    def _write_entries(self, context: TaskStepContext, verification_results: list[dict], judge_call_fields: dict,
-                       **kwargs: Any) -> None:
-        """rubrics_verifier's entry, with ``gate_passed``, whether every must-pass criterion was met, and when one
-        wasn't, ``gates_failed``, their ids: written in the same breath as the entry, since a step beside this one
-        stores what it sees of the context when it ends. (A run's stored context never gains an empty list, so there's
-        no ``gates_failed`` when none failed.)"""
-        super()._write_entries(context, verification_results, judge_call_fields, **kwargs)
-        entry = context.metadata["verifications"][self.verifier_id]
-        failed = [row.get("id") for row in entry["results"] if row.get("kind") == "must-pass" and not _passed(row)]
-        entry["gate_passed"] = not failed
-        if failed:
-            entry["gates_failed"] = failed
+    async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
+        """rubrics_verifier's verdict, its output with ``gate_passed``, whether every must-pass criterion was met, and
+        when one wasn't, ``gates_failed``, their ids; the base writes them into the entry with the rest. (A run's stored
+        context never gains an empty list, so there's no ``gates_failed`` when none failed.)"""
+        verdict = await super()._judged(context)
+        if verdict.skipped is not None:
+            return verdict
+        failed = [row.get("id") for row in verdict.criteria if row.get("kind") == "must-pass" and not _passed(row)]
+        return replace(verdict, output={**(verdict.output or {}), "gate_passed": not failed,
+                                        **({"gates_failed": failed} if failed else {})})
 
     async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
         """The files and state the agent left in the computer, the golden files, the instruction and how to grade;

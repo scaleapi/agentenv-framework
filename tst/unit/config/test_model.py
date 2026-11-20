@@ -4,10 +4,19 @@ import pytest
 
 from agent_env.config.errors import ConfigError
 from agent_env.config.model import (
+    JUDGE_FALLBACK_MODEL,
     MODEL_PARAMS_RESERVED,
     ModelCallConfig,
     ModelConfig,
     ModelParam,
+    ModelRole,
+    ModelSource,
+    ResolvedModel,
+    api_root,
+    config_model,
+    named_model,
+    resolve_model,
+    same_endpoint,
 )
 
 
@@ -98,6 +107,72 @@ def test_a_role_asked_for_without_the_default_is_only_the_one_the_config_names()
     assert cfg.model_for_role("judge", or_default=False) is None
 
 
+@pytest.mark.parametrize("roles", [{"solver": "m-s", "user_simulator": "m-u"}, {"agent": "m-s", "user": "m-u"}],
+                         ids=["canonical", "synonyms"])
+def test_a_role_is_found_under_its_name_or_its_synonym_whichever_is_asked(roles):
+    cfg = ModelConfig.from_section({"roles": roles}, secret_resolver=_secrets({}))
+    for asked in ("solver", "agent", ModelRole.SOLVER):
+        assert cfg.role_model(asked) == "m-s"
+    for asked in ("user_simulator", "user", ModelRole.USER_SIMULATOR):
+        assert cfg.role_model(asked) == "m-u"
+
+
+def test_a_plugin_s_own_role_is_looked_up_by_its_name():
+    assert ModelConfig(roles={"reviewer": "m-r"}).model_for_role("reviewer") == "m-r"
+
+
+@pytest.mark.parametrize("roles, problem", [
+    ({"agent": "a", "solver": "s"}, "sets both 'solver' and 'agent'"),
+    ({"user": "a", "user_simulator": "s"}, "sets both 'user_simulator' and 'user'"),
+    ({"judge": {"endpoint": "local", "model": "fast"}}, "maps each role to a model name"),
+    ("claude", "maps each role to a model name"),
+], ids=["solver-twice", "user-simulator-twice", "table", "not-a-table"])
+def test_from_section_refuses_a_role_named_twice_or_mapped_to_anything_but_a_model(roles, problem):
+    with pytest.raises(ConfigError, match=problem):
+        ModelConfig.from_section({"roles": roles}, secret_resolver=_secrets({}))
+
+
+# --- resolve_model ------------------------------------------------------------
+
+_LAYERS = ("step_params", "run", "step", "agent")
+
+
+@pytest.mark.parametrize("first", range(len(_LAYERS)), ids=_LAYERS)
+@pytest.mark.parametrize("role", list(ModelRole))
+def test_the_first_layer_that_names_a_model_wins(role, first):
+    given = {layer: f"m-{layer}" for layer in _LAYERS[first:]}
+    resolved = resolve_model(role, config=ModelConfig(default="m-default", roles={role.value: "m-role"}), **given)
+    assert resolved == ResolvedModel(role, f"m-{_LAYERS[first]}", ModelSource(_LAYERS[first]))
+
+
+@pytest.mark.parametrize("role, config, expected", [
+    (ModelRole.SOLVER, ModelConfig(default="D", roles={"agent": "A"}), ("A", ModelSource.CONFIG_ROLE)),
+    (ModelRole.SOLVER, ModelConfig(default="D"), ("D", ModelSource.CONFIG_DEFAULT)),
+    (ModelRole.SOLVER, ModelConfig(), (None, None)),
+    (ModelRole.USER_SIMULATOR, ModelConfig(default="D", roles={"user": "U"}), ("U", ModelSource.CONFIG_ROLE)),
+    (ModelRole.USER_SIMULATOR, ModelConfig(default="D"), (None, None)),
+    (ModelRole.JUDGE, ModelConfig(default="D", roles={"judge": "J"}), ("J", ModelSource.CONFIG_ROLE)),
+    (ModelRole.JUDGE, ModelConfig(default="D"), ("D", ModelSource.CONFIG_DEFAULT)),
+    (ModelRole.JUDGE, ModelConfig(), (JUDGE_FALLBACK_MODEL, ModelSource.FALLBACK)),
+    (ModelRole.JUDGE, None, (JUDGE_FALLBACK_MODEL, ModelSource.FALLBACK)),
+    (ModelRole.SOLVER, None, (None, None)),
+], ids=["solver-role", "solver-default", "solver-none", "user-role", "user-never-the-default", "judge-role",
+        "judge-default", "judge-fallback", "judge-without-config", "solver-without-config"])
+def test_with_no_layer_the_config_decides_per_role(role, config, expected):
+    resolved = resolve_model(role, config=config)
+    assert (resolved.model, resolved.source) == expected
+
+
+def test_resolving_reads_no_environment_and_no_secret(monkeypatch):
+    def refuse(key):
+        raise AssertionError(f"resolution read the secret {key!r}")
+
+    monkeypatch.setattr("os.environ", {})
+    cfg = ModelConfig.from_section({"api_key": "secret:litellm_api_key", "headers": {"X-Org": "secret:org"},
+                                    "default": "D", "roles": {"judge": "J"}}, secret_resolver=refuse)
+    assert [resolve_model(role, config=cfg).model for role in ModelRole] == ["D", None, "J"]
+
+
 # --- resolve_api_key ----------------------------------------------------------
 
 def test_api_key_env_wins_and_refs_stay_lazy(monkeypatch):
@@ -125,24 +200,6 @@ def test_api_key_unconfigured_raises_actionable():
 
 # --- resolve_call -------------------------------------------------------------
 
-def test_resolve_call_inline_override_wins():
-    call = ModelConfig().resolve_call(
-        "m",
-        model_overrides={"m": {"secret_key": "k", "base_url": "https://ov"}},
-        secret_resolver=_secrets({"k": "sk-k"}),
-    )
-    assert call == ModelCallConfig(api_key="sk-k", api_base="https://ov", params={})
-
-
-def test_resolve_call_override_with_missing_secret_raises():
-    with pytest.raises(ConfigError, match="no value"):
-        ModelConfig().resolve_call(
-            "m",
-            model_overrides={"m": {"secret_key": "absent", "base_url": "https://ov"}},
-            secret_resolver=_secrets({}),
-        )
-
-
 def test_resolve_call_bare_model_without_endpoint_raises_actionable():
     with pytest.raises(ConfigError, match=r"\[model\] base_url"):
         ModelConfig().resolve_call("claude-sonnet-4-6", secret_resolver=_secrets({}))
@@ -162,17 +219,16 @@ def test_resolve_call_api_key_ref_resolves_lazily():
     assert call == ModelCallConfig(api_key="sk-secret", api_base="https://gw/v1", params={})
 
 
-def test_base_override_to_a_foreign_url_does_not_inherit_the_configured_key():
-    """The configured key is scoped to the configured endpoint — a caller-supplied
-    override URL must not receive the configured proxy's credential."""
-    call = ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
-        "m", base_override="https://elsewhere.example", secret_resolver=_secrets({"k": "sk-proxy"})
-    )
-    assert call.api_key is None
-    assert call.api_base == "https://elsewhere.example"
+def test_base_override_to_a_foreign_url_without_a_key_is_refused():
+    """The configured key is scoped to the configured endpoint, and a call there with no key would have litellm send
+    whatever provider key the environment holds."""
+    with pytest.raises(ConfigError, match="elsewhere.example isn't the configured model endpoint"):
+        ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
+            "m", base_override="https://elsewhere.example", secret_resolver=_secrets({"k": "sk-proxy"}))
 
 
-@pytest.mark.parametrize("override", ["https://proxy.example", "https://proxy.example/"])
+@pytest.mark.parametrize("override", ["https://proxy.example", "https://proxy.example/", "https://proxy.example/v1",
+                                      "HTTPS://Proxy.Example:443"])
 def test_base_override_equal_to_the_configured_base_keeps_the_key(override):
     call = ModelConfig(base_url="https://proxy.example", api_key="secret:k").resolve_call(
         "m", base_override=override, secret_resolver=_secrets({"k": "sk-proxy"})
@@ -252,9 +308,8 @@ def test_a_header_ref_that_cant_be_sent_fails_loud(secrets, problem):
 
 @pytest.mark.parametrize("call, expected", [
     ({}, {"extra_headers": _RESOLVED}),
-    ({"base_override": "https://elsewhere.example"}, {}),
-    ({"model_overrides": {"m": {"secret_key": "k", "base_url": "https://gw/v1"}}}, {}),
-], ids=["configured", "foreign-override", "model-override"])
+    ({"base_override": "https://elsewhere.example", "default_api_key": "theirs"}, {}),
+], ids=["configured", "foreign-override"])
 def test_resolve_call_sends_the_headers_only_to_the_configured_endpoint(call, expected):
     assert _WITH_HEADERS.resolve_call("m", secret_resolver=_secrets({"org": "acme", "k": "sk"}), **call).params == expected
 
@@ -265,3 +320,57 @@ def test_params_extra_headers_win_per_header_whatever_its_case():
     call = cfg.resolve_call("m", secret_resolver=_secrets({}))
     assert call.params == {"temperature": 0, "extra_headers": {"X-Plain": "v", "x-bill-to": "other"}}
     assert cfg.params == {"temperature": 0, "extra_headers": {"x-bill-to": "other"}}
+
+
+def test_each_role_records_under_the_key_metadata_models_has_always_used():
+    assert {role: role.record_key for role in ModelRole} == {
+        ModelRole.SOLVER: "solver", ModelRole.USER_SIMULATOR: "user simulator", ModelRole.JUDGE: "judge"}
+
+
+def test_no_named_layer_leaves_the_role_to_its_config():
+    assert named_model(ModelRole.SOLVER) is None
+    assert config_model(ModelRole.SOLVER, ModelConfig(default="D")) == ResolvedModel(
+        ModelRole.SOLVER, "D", ModelSource.CONFIG_DEFAULT)
+
+
+@pytest.mark.parametrize("a, b", [
+    ("https://gw.example/v1", "https://gw.example"),
+    ("https://gw.example/v1/", "https://gw.example/"),
+    ("HTTPS://GW.Example/v1", "https://gw.example/v1"),
+    ("https://gw.example:443/v1", "https://gw.example/v1"),
+    ("http://gw.example:80", "http://gw.example"),
+    ("https://gw.example/litellm/v1", "https://gw.example/litellm"),
+    (" https://gw.example ", "https://gw.example"),
+], ids=["v1", "slashes", "case", "https-default-port", "http-default-port", "path-prefix", "whitespace"])
+def test_same_endpoint_reads_one_endpoint_spelled_two_ways_as_one(a, b):
+    assert same_endpoint(a, b) and same_endpoint(b, a)
+
+
+@pytest.mark.parametrize("url, root", [
+    ("https://gw.example/v1", "https://gw.example"),
+    ("https://gw.example/v1/", "https://gw.example"),
+    ("https://gw.example/", "https://gw.example"),
+    ("https://gw.example", "https://gw.example"),
+    ("https://gw.example/litellm/v1", "https://gw.example/litellm"),
+    ("https://gw.example/v1/v1", "https://gw.example/v1"),
+    ("http://localhost:4000/v1?team=a", "http://localhost:4000?team=a"),
+    ("HTTPS://GW.Example/v1", "https://GW.Example"),
+], ids=["v1", "v1-slash", "slash", "bare", "path-prefix", "one-v1-only", "port-and-query", "case-kept"])
+def test_api_root_drops_a_trailing_slash_and_one_trailing_v1(url, root):
+    assert api_root(url) == root
+
+
+@pytest.mark.parametrize("a, b", [
+    ("https://gw.example", "http://gw.example"),
+    ("https://gw.example", "https://gw.example:8443"),
+    ("https://gw.example", "https://other.example"),
+    ("https://gw.example/team-a", "https://gw.example/team-b"),
+    ("https://gw.example/Team", "https://gw.example/team"),
+    ("https://gw.example/v1/v1", "https://gw.example"),
+    ("https://gw.example?team=a", "https://gw.example?team=b"),
+    ("https://gw.example", None),
+    (None, None),
+    ("", ""),
+], ids=["scheme", "port", "host", "path", "path-case", "two-v1s", "query", "none", "both-none", "both-empty"])
+def test_same_endpoint_tells_two_endpoints_apart(a, b):
+    assert not same_endpoint(a, b)

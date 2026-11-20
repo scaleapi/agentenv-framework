@@ -45,6 +45,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
 from agent_env.env.gateway.constants import AGENT_ENV_COMPUTER_HEADER
+from agent_env.env.gateway.rest_proxy import fallback_name, served_names
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
@@ -163,13 +164,6 @@ def covers(strong: str, weak: str) -> bool:
     """Whether every host ``weak`` names is one ``strong`` names."""
     return strong == weak or (strong.startswith("*.") and not weak.startswith("*.")
                               and weak.partition(".")[2] == strong[2:])
-
-
-def fallback_name(site: str) -> str:
-    """The name a synthetic site declaring none is reached by: its name on ``.localhost``, lowercase, each ``_`` a
-    ``-``, and no ``-`` at either end of the label (``My_Site`` is ``my-site.localhost``). Two sites it gives one name
-    are refused as any two claiming it."""
-    return f"{site.lower().replace('_', '-')[:63].strip('-')}.localhost"
 
 
 def claims(sites: Iterable[Site], allow_hosts: Iterable[str] = ()) -> list[Claim]:
@@ -424,13 +418,25 @@ class RootChannel:
         if isinstance(self.sandbox, VmSandbox):
             return await self.sandbox.exec_script(f"docker exec -u 0 {shlex.quote(self.sandbox.container_name)} "
                                                   f"{shlex.join(argv)}")
+        await self._check_root()
+        return await self._exec(argv)
+
+    async def exec(self, argv: list[str]) -> tuple[int, str, str]:
+        """``argv`` run as root: its exit code, stdout and stderr, whatever the code."""
+        if isinstance(self.sandbox, VmSandbox):
+            return await self.sandbox.exec_with_output(
+                "sudo", "bash", "-c", f"docker exec -u 0 {shlex.quote(self.sandbox.container_name)} {shlex.join(argv)}")
+        await self._check_root()
+        return await self.sandbox.exec_with_output(*argv)
+
+    async def _check_root(self) -> None:
         if not self.checked:
             uid = (await self._exec(["id", "-u"])).strip()
             if uid != "0":
-                raise RuntimeError(f"site routing installs as root, and the {getattr(self.sandbox, 'type', 'given')} "
-                                   f"sandbox runs the computer's commands as uid {uid}; deploy it on a VM sandbox")
+                raise RuntimeError(f"root in the computer runs through its sandbox, and the "
+                                   f"{getattr(self.sandbox, 'type', 'given')} sandbox runs the computer's commands as "
+                                   f"uid {uid}; deploy it on a VM sandbox")
             self.checked = True
-        return await self._exec(argv)
 
     async def _exec(self, argv: list[str]) -> str:
         code, stdout, stderr = await self.sandbox.exec_with_output(*argv)
@@ -594,11 +600,9 @@ def serves_websites(record: DeployedEnv) -> bool:
 def _served_names(sites: list[tuple[str, dict]]) -> list[dict]:
     """One env's ``sites``, each with the name it's served as: named by their cards, unless two cards share a name, as
     two websites of one image whose cards name it can; then each is named as it's served, its environment_name, which
-    the env's gateway gives each a route of its own by."""
-    names = [site["name"] for _, site in sites]
-    if len(set(names)) == len(names):
-        return [site for _, site in sites]
-    return [{**site, "name": service} for service, site in sites]
+    the env's gateway gives each a route of its own by (``served_names``, which its gateway lists them by too)."""
+    named = served_names({service: site["name"] for service, site in sites})
+    return [{**site, "name": named[service]} for service, site in sites]
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:

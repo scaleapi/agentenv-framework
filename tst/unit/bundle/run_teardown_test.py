@@ -3,6 +3,7 @@ is torn down, and every run that started on Ctrl-C or SIGTERM, which marks it ca
 the teardown. ``agent-env run`` prints what it tore down, what it keeps up and what is still up."""
 
 import asyncio
+import importlib
 import json
 import logging
 import re
@@ -17,8 +18,10 @@ from agent_env.bundle import Outcome, RunInterrupted, run_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
-from agent_env.store.document_store import Filter
+from agent_env.store.document_store import Filter, UpdateSpec
 from agent_env.task import TaskInstanceStore, teardown
+from agent_env.task.store import register_task_instance, seed_task_instance_context
+from agent_env.store import routing
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
@@ -26,6 +29,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvid
 from tst.unit.bundle._support import layout, local_store
 
 pytestmark = pytest.mark.usefixtures("sigint_handled")
+teardown_command = importlib.import_module("agent_env.cli.task.teardown")  # the package's ``teardown`` is the command
 
 
 class _Deploys(TaskStep):
@@ -287,7 +291,156 @@ def test_the_cli_prints_a_sandbox_it_couldnt_tear_down_as_still_up(bundle_dir, t
 
     assert result.exit_code == 0, result.output
     assert "[tasks/ok.json] couldn't tear down sb-ok: RuntimeError: stuck\n" in result.output
-    assert result.output.endswith("\nStill up, 1 sandbox:\n  sb-ok  fake\n")
+    assert result.output.endswith(f"\nStill up, 1 sandbox:\n  sb-ok  fake\nTear down what's left with:\n"
+                                  f"  agent-env task teardown --instance {_instance(result.output, 'ok')}\n")
+
+
+def _instance(output: str, name: str) -> str:
+    return re.search(rf"instance (@local/\S+/{name}-\w+)", output).group(1)
+
+
+def _stored_context(instance_id: str) -> TaskStepContext:
+    return TaskStepContext.from_dict(local_store().find_one("task_instances", Filter.of(instance_id=instance_id))["context"])
+
+
+def test_a_teardown_a_second_signal_stopped_is_finished_by_the_command_the_run_names(bundle_dir, terminated,
+                                                                                     quiet_logs):
+    layout(bundle_dir, {"tasks/a.json": _task(nap=30, send="SIGINT")})
+    terminated.second_signal.add("sb-a")
+
+    stopped = CliRunner().invoke(cli, ["run", str(bundle_dir)])
+    instance = _instance(stopped.output, "a")
+    terminated.second_signal.clear()
+    finished = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+    again = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    assert stopped.exit_code == 130, stopped.output
+    assert stopped.output.endswith(f"Tear down what's left with:\n  agent-env task teardown --instance {instance}\n")
+    assert (finished.exit_code, terminated) == (0, ["sb-a"]), finished.output
+    assert finished.output == f"Tearing down 1 sandbox of instance {instance} (Ctrl-C to stop)\nTore down 1 sandbox\n"
+    assert (again.exit_code, again.output) == (0, f"Nothing instance {instance} recorded is still up.\n")
+
+
+def test_a_failed_teardown_is_recorded_on_the_instance_and_the_command_tries_again(bundle_dir, terminated,
+                                                                                   quiet_logs):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    terminated.failing.add("sb-ok")
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+    recorded = _stored_context(instance).metadata
+
+    still_stuck = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+    terminated.failing.clear()
+    finished = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    assert (recorded.get(teardown.TORN_DOWN_KEY), recorded[teardown.LEFT_UP_KEY]) == (None, ["sb-ok"])
+    assert still_stuck.exit_code == 1 and "Couldn't tear down sb-ok: RuntimeError: stuck" in still_stuck.output
+    assert (finished.exit_code, terminated) == (0, ["sb-ok"]), finished.output
+    assert _stored_context(instance).metadata[teardown.TORN_DOWN_KEY] == ["sb-ok"]
+
+
+def test_a_finished_teardown_is_recorded_so_the_command_finds_nothing_and_terminates_nothing_again(
+        bundle_dir, terminated, quiet_logs):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    instance = CliRunner().invoke(cli, ["run", str(bundle_dir)]).output
+    instance = re.search(r"instance (@local/\S+/ok-\w+)", instance).group(1)
+
+    again = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    recorded = _stored_context(instance).metadata
+    assert (recorded[teardown.TORN_DOWN_KEY], recorded[teardown.LEFT_UP_KEY]) == (["sb-ok"], [])
+    assert (again.exit_code, again.output) == (0, f"Nothing instance {instance} recorded is still up.\n")
+    assert terminated == ["sb-ok"]
+
+
+def test_a_sandbox_terminated_whose_folder_wasnt_removed_is_still_up_and_the_command_removes_only_its_folder(
+        bundle_dir, terminated, quiet_logs, monkeypatch):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    monkeypatch.setattr(SandboxProvider, "ON_THIS_MACHINE", True)
+    removals = []
+
+    def remove(sandbox_id):
+        removals.append(sandbox_id)
+        if len(removals) == 1:
+            raise OSError("busy")
+
+    monkeypatch.setattr(teardown, "remove_local_work_dir", remove)
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+
+    finished = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    assert finished.exit_code == 0, finished.output
+    assert finished.output == f"Tearing down 1 sandbox of instance {instance} (Ctrl-C to stop)\nTore down 1 sandbox\n"
+    assert (terminated, removals) == (["sb-ok"], ["sb-ok", "sb-ok"])
+    assert _stored_context(instance).metadata[teardown.LEFT_UP_KEY] == []
+
+
+def test_a_local_sandbox_whose_folder_is_gone_counts_as_gone_as_the_run_lists_it(bundle_dir, quiet_logs):
+    """As an instance recorded before its run kept what its teardown took down: the folder goes last."""
+    task_id = "@local/~/lifecycle/old"
+    instance = f"{task_id}-12345678"
+    context = TaskStepContext(metadata={"task_id": task_id})
+    context.deployed_sandboxes.append(DeployedSandbox(sandbox_name="box", sandbox_id="local-gone", sandbox_mode="vm",
+                                                      sandbox_type="local"))
+    with routing.namespace_routing(), routing.run_scope(task_id):
+        register_task_instance(task_id, 1, 1, instance_id=instance)
+        seed_task_instance_context(instance, context)
+        local_store().update("task_instances", Filter.of(instance_id=instance), UpdateSpec(set={"status": "completed"}))
+
+    result = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+
+    assert (result.exit_code, result.output) == (0, f"Nothing instance {instance} recorded is still up.\n")
+
+
+def test_the_command_tears_down_inside_the_runs_namespace(bundle_dir, terminated, quiet_logs, monkeypatch):
+    """So a recording it ends, or registers, uses the run's own stores."""
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    terminated.failing.add("sb-ok")
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+    terminated.failing.clear()
+    seen, real = [], teardown_command.teardown_run
+
+    async def watched(context):
+        seen.append(routing.local_run_namespace())
+        return await real(context)
+
+    monkeypatch.setattr(teardown_command, "teardown_run", watched)
+
+    assert CliRunner().invoke(cli, ["task", "teardown", "--instance", instance]).exit_code == 0
+    assert seen == ["local"]
+
+
+def test_a_teardown_record_doesnt_overwrite_an_attempt_that_took_the_instance_over_meanwhile(bundle_dir, terminated,
+                                                                                            quiet_logs):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    terminated.failing.add("sb-ok")
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+    later = _stored_context(instance)
+    later.metadata["attempt"] = "later"
+    with routing.namespace_routing():
+        took_over_at = teardown.attempt_epoch(instance) + 1
+        local_store().update("task_instances", Filter.of(instance_id=instance),
+                             UpdateSpec(set={"attempt_epoch": took_over_at}))
+        teardown.record_teardown(instance, later, teardown.TeardownReport(), took_over_at)
+        teardown.record_teardown(instance, _stored_context(instance), teardown.TeardownReport(), took_over_at - 1)
+
+    assert _stored_context(instance).metadata["attempt"] == "later"
+
+
+def test_the_command_leaves_a_run_recorded_running_alone_unless_forced_and_refuses_an_unknown_instance(
+        bundle_dir, terminated, quiet_logs):
+    layout(bundle_dir, {"tasks/ok.json": _task()})
+    terminated.failing.add("sb-ok")
+    instance = _instance(CliRunner().invoke(cli, ["run", str(bundle_dir)]).output, "ok")
+    terminated.failing.clear()
+    local_store().update("task_instances", Filter.of(instance_id=instance), UpdateSpec(set={"status": "running"}))
+
+    refused = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance])
+    forced = CliRunner().invoke(cli, ["task", "teardown", "--instance", instance, "--force"])
+    unknown = CliRunner().invoke(cli, ["task", "teardown", "--instance", "@local/~/nope/t-12345678"])
+
+    assert refused.exit_code == 1 and "is recorded running" in refused.output and "--force" in refused.output
+    assert (forced.exit_code, terminated) == (0, ["sb-ok"]), forced.output
+    assert unknown.exit_code == 1 and "no task instance '@local/~/nope/t-12345678'" in unknown.output
 
 
 def test_the_cli_keep_prints_the_endpoints_holds_and_tears_down_on_ctrl_c(bundle_dir, terminated, quiet_logs,
@@ -336,7 +489,7 @@ def test_the_keep_listing_names_every_sandbox_it_counts_with_the_records_behind_
         deployed_sandboxes=[DeployedSandbox(sandbox_name="box", sandbox_id="sb-box", sandbox_mode="vm",
                                             sandbox_type="fake", tunnel_urls={"8080": "http://t"})],
         deployed_envs=[DeployedGatewayEnv(env_id="shop", env_version=1, gateway_url="http://g", mcp_url="http://m",
-                                          db_web_url="http://pgweb", sandbox_id="sb-gw", sandbox_type="fake",
+                                          db_web_gateway_url="http://gw/svc/pgweb/", sandbox_id="sb-gw", sandbox_type="fake",
                                           sandbox_ids={"service_db": {"orders": "sb-db"}})],
         deployed_agents=[DeployedAgent(agent_name="solver", api_url="http://a", a2a_url="http://a2a",
                                        sandbox_id="sb-box", sandbox_type="fake")],
@@ -349,7 +502,7 @@ def test_the_keep_listing_names_every_sandbox_it_counts_with_the_records_behind_
         "sb-gw  fake  env shop",
         "  mcp  http://m",
         "  gateway  http://g",
-        "  pgweb  http://pgweb",
+        "  pgweb  http://gw/svc/pgweb/",
         "sb-db  fake  env shop",
     ]
 

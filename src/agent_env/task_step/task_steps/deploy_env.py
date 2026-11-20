@@ -239,6 +239,7 @@ class DeployEnvTaskStep(TaskStep):
                 a2a_url=agent_info.get("a2a_url"),
                 a2a_card=agent_info.get("a2a_card"),
                 instance_id=agent_info.get("instance_id") or deployed_env.instance_id,
+                control_token=agent_info.get("control_token"),
             ))
         return context
 

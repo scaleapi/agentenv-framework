@@ -46,8 +46,9 @@ GEMINI_NUDGE = json.dumps([
 @pytest.fixture
 def run():
     """The recorded four wakes: wake 2's turn a Claude Code one and a nudge after it, wake 3's trajectory never
-    fetched, wake 1's unreadable, and wake 4 with 250 app changes. ``turns`` is built in an order unlike the wakes',
-    so only a turn's url can match it to its wake."""
+    fetched, wake 1's unreadable, and wake 4 a PSI neutral harness v7 wake (Claude's: a save turn, a compaction, then
+    its own turn) with 250 app changes. ``turns`` is built in an order unlike the wakes', so only a turn's url can
+    match it to its wake."""
     timeline = _timeline()
     wake2, wake4 = _url(timeline, 2), _url(timeline, 4)
     for e in timeline:
@@ -63,7 +64,7 @@ def run():
     changes["changes"] = [{**changes["changes"][0], "id": i, "summary": f"Updated: order {i} " + "x" * 300}
                           for i in range(250)]
     turns = {"mem://nudge.json": turn_events(GEMINI_NUDGE),
-             wake4: turn_events((RECORDED / "turn_otel_wake4.json").read_bytes()),
+             wake4: turn_events((RECORDED / "turn_otel_v7_compaction_claude.json").read_bytes()),
              wake2: turn_events((RECORDED / "turn_claude_code.json").read_text())}
     return timeline, turns
 
@@ -80,7 +81,7 @@ def test_each_turn_is_in_its_wake_by_url_and_a_nudge_in_its_wake(run):
     assert wake2[nudge_at + 1]["tool"] == "message_user" and wake2[nudge_at + 1]["turn"] == "nudge"
     assert [line["call"] for line in wake2 if line["event"] == "tool_call"] == list(range(1, len(tools) + 1))
     wake4 = _lines(files, "wakes/wake_004.jsonl")
-    assert "porchbite_spending_by_month" in [line.get("tool") for line in wake4]
+    assert "slow_search" in [line.get("tool") for line in wake4]
     assert staged.record["formats"] == {"claude-code-stream-json": 1, "otel": 1, "gemini-stream-json": 1}
 
 
@@ -316,3 +317,153 @@ def test_judge_reads_tells_one_pass_over_every_wake_file():
 
     reads = judge_reads(judge)
     assert reads["read_all_wakes"] is True and reads["wakes_opened"] == [1] and reads["helpers_started"] == 1
+
+
+def _v7_run(run, keep_changes: bool = True):
+    """The recorded run with wake 4's turn a PSI neutral harness v7 wake (GPT's, from a fake-model run): a save turn,
+    a compaction, the harness's messages, then the wake's own turn."""
+    timeline, turns = run
+    if not keep_changes:
+        timeline = [e for e in timeline if e["event"] != "app_changes"]
+    turns[_url(timeline, 4)] = turn_events((RECORDED / "turn_otel_v7_compaction_gpt.json").read_text())
+    return timeline, turns
+
+
+def test_a_v7_wake_s_harness_parts_are_marked_and_come_before_the_wake_s_input_as_they_happened(run):
+    staged = stage_run(*_v7_run(run))
+
+    wake4 = _lines(staged.files, "wakes/wake_004.jsonl")
+    order = [(line["event"], line.get("step"), line.get("tool")) for line in wake4
+             if line["event"] in ("woke", "user_message", "wake_input", "harness_note", "tool_call", "assistant_text",
+                                  "assistant_thinking", "turn_end")]
+    assert order == [
+        ("woke", None, None),
+        ("harness_note", "pre_compaction_save", None), ("assistant_thinking", "pre_compaction_save", None),
+        ("tool_call", "pre_compaction_save", "memory_add"), ("assistant_thinking", "pre_compaction_save", None),
+        ("assistant_text", "pre_compaction_save", None),
+        ("harness_note", None, None), ("harness_note", "after_compaction", None),
+        *[(e, None, None) for e in ("user_message", "wake_input") if any(line["event"] == e for line in wake4)],
+        ("assistant_thinking", None, None), ("tool_call", None, "slow_search"), ("assistant_thinking", None, None),
+        ("assistant_text", None, None), ("turn_end", None, None)]
+    compaction = next(line for line in wake4 if "compaction" in line)
+    assert compaction.get("text_preview", compaction.get("text")).startswith(
+        "Compaction summary (written by the assistant's own model")
+    turn_end = next(line for line in wake4 if line["event"] == "turn_end")
+    assert turn_end["tool_calls"] == 1 and turn_end["save_turn_tool_calls"] == 1
+    assert f"({len(wake4)} lines, 1 tool calls, plus 1 in the harness save turn)" in staged.files[INDEX_FILE]
+    assert staged.record["agent_labeled_trajectories"] == 1
+    assert staged.record["compaction_summaries_written_by"] == {"assistant": 1}
+
+
+@pytest.mark.parametrize("keep_changes", [True, False])
+def test_a_tool_the_harness_provides_is_internal_and_never_an_action(run, keep_changes):
+    staged = stage_run(*_v7_run(run, keep_changes))
+
+    index = staged.files[INDEX_FILE]
+    assert "memory_add" not in index[index.index("## Wake 4 "):]
+    [call] = [line for line in _lines(staged.files, "wakes/wake_004.jsonl")
+              if line["event"] == "tool_call" and line["tool"] == "memory_add"]
+    assert call["internal"] is True and call["step"] == "pre_compaction_save"
+
+
+def test_an_unmarked_tool_of_the_same_name_is_read_as_an_app_s(run):
+    def unmarked(r, keep_changes):
+        timeline, turns = _v7_run(copy.deepcopy(r), keep_changes)
+        for e in turns[_url(timeline, 4)].events:
+            e.pop("internal", None)
+        return stage_run(timeline, turns)
+
+    with_log = unmarked(run, True).files[INDEX_FILE]
+    without_log = unmarked(run, False)
+
+    # No app change names memory_add, so with change logs it is a possible action; without them, an action.
+    assert "- possible action (no app change names this tool): memory_add fact=Saved before summary. " in with_log[
+        with_log.index("## Wake 4 "):]
+    index = without_log.files[INDEX_FILE]
+    assert "- action: memory_add fact=Saved before summary. " in index[index.index("## Wake 4 "):]
+    assert not any(line.get("internal") for line in _lines(without_log.files, "wakes/wake_004.jsonl"))
+
+
+def test_judge_reads_does_not_count_a_wake_the_agent_read_back_with_history_read(run):
+    timeline, turns = _v7_run(run)
+    events = turns[_url(timeline, 4)]
+    view = next(e for e in events.events if e["type"] == "tool_call")
+    events.events.append({**view, "tool": "history_read", "input": {"wake": 2}, "result": "wake 2 (Mon Mar 2) …"})
+    wake4 = stage_run(timeline, turns).files["wakes/wake_004.jsonl"]
+    judge = turn_events(json.dumps(_judge(("Read", {"file_path": "/tmp/r/wakes/wake_004.jsonl"}, wake4))))
+
+    assert judge_reads(judge)["wakes_opened"] == [4]
+
+
+def test_the_index_has_a_line_for_a_compaction_naming_its_wakes_and_pointing_at_its_note(run):
+    staged = stage_run(*_v7_run(run))
+    index = staged.files[INDEX_FILE]
+
+    block = index[index.index("## Wake 4 "):]
+    line = next(line for line in block.splitlines() if line.startswith("- compaction"))
+    assert line.startswith("- compaction by the harness, before this wake's turn, its summary written by the "
+                           "assistant's own model: wakes 1–3 are now in the summary; wakes 4–5 kept word for word (")
+    path, n = line.rsplit("(", 1)[1].rstrip(")").split(":")
+    note = _lines(staged.files, path)[int(n) - 1]
+    assert note["event"] == "harness_note" and note["compaction"] == {
+        "written_by": "assistant", "wakes_summarized": 3, "wakes_kept": 2, "first_kept_wake": 4}
+
+
+def test_judge_reads_counts_no_wake_0_from_a_glob_over_the_wake_files():
+    # Two real judge calls (Tree Removal, Silent Week, Nov 13 re-grade): globs whose prefix "wake_0" names no wake.
+    judge = turn_events(json.dumps(_judge(
+        ("Bash", {"command": "cd /tmp/always_on_run/0cf1e88465f5; grep -n '5550148' wakes/wake_00[1-4].jsonl | "
+                             "cut -c1-300 | head; grep -n 'assistant_thinking' wakes/wake_004.jsonl | cut -c1-2500 | "
+                             "head -3"}, "wakes/wake_004.jsonl:9:{\"event\": \"assistant_thinking\", \"wake\": 4}"),
+        ("Bash", {"command": "cd /tmp/always_on_run/b9e9bfc715ed; grep -o '\"note\": \"Routine sweep[^\"]*\"' "
+                             "wakes/wake_001.jsonl | head -1; grep -il \"storynest\" wakes/wake_0*.jsonl | head"},
+         "wakes/wake_009.jsonl"))))
+
+    assert judge_reads(judge)["wakes_opened"] == [1, 4]
+
+
+def test_turns_staged_by_position_are_named_by_position_and_a_firing_names_no_wake(run):
+    _, turns = run
+    timeline = []
+    for n, url in enumerate(turns, 1):
+        timeline += [{"event": "wake", "n": n, "parts_text": f"[Fri Nov 6, 8:00 PM UTC] alert {n}"},
+                     {"event": "agent_turn_end", "n": n, "trajectory_url": url}]
+    t = datetime.fromisoformat("2026-11-06T20:30:00+00:00")
+    firing = Firing(trigger_id="tess-text", source="env:world", turn=1, at=t, virtual_time=t, ok=True, provoked_by=None)
+
+    staged = stage_run(timeline, turns, firings=[firing], by_position=True)
+
+    index = staged.files[INDEX_FILE]
+    assert index.startswith("# The run, wake by wake\n\n3 turns of the assistant, in the order they ran. The run kept "
+                            "no timeline, so each wake file is one turn by its position")
+    assert "## Turn 2 · wakes/wake_002.jsonl (" in index and "## Wake" not in index
+    assert "without the run's timeline its app changes aren't here, so this is a guess from the name" in index
+    assert _lines(staged.files, "wakes/wake_003.jsonl")[1] == {
+        "event": "wake_input", "wake": 3, "text": "[Fri Nov 6, 8:00 PM UTC] alert 3"}
+    assert _lines(staged.files, TRIGGERS_FILE)[0]["after_wake"] is None
+    assert staged.record["turns_by_position"] is True
+
+
+def test_a_turn_staged_by_position_keeps_how_it_ended_failed_included():
+    ok = turn_events(json.dumps([
+        {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-opus-5-5", "tools": []},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Booked the 7pm table."}]}},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Booked the 7pm table."}]))
+    failed = turn_events(json.dumps([
+        {"type": "system", "subtype": "init", "session_id": "s2", "model": "claude-opus-5-5", "tools": []},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Checking the reservation."}]}},
+        {"type": "result", "subtype": "error_during_execution", "is_error": True,
+         "result": "API Error: 429 Quota exceeded for model claude-opus-5-5"}]))
+    turns = {"u1": ok, "u2": failed}
+    timeline = []
+    for n, url in enumerate(turns, 1):
+        timeline += [{"event": "wake", "n": n, "parts_text": f"alert {n}"},
+                     {"event": "agent_turn_end", "n": n, "trajectory_url": url}]
+
+    staged = stage_run(timeline, turns, by_position=True)
+
+    ends = [next(line for line in _lines(staged.files, f"wakes/wake_00{n}.jsonl") if line["event"] == "turn_end")
+            for n in (1, 2)]
+    assert (ends[0]["state"], ends[0]["closing_reply"]) == ("completed", "Booked the 7pm table.")
+    assert ends[1]["state"] == "failed" and "Quota exceeded" in ends[1]["closing_reply"]
+    assert "- error: its turn ended failed" in staged.files[INDEX_FILE]

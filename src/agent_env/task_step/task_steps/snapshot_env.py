@@ -35,7 +35,7 @@ from agent_env.store.routing import in_local_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.entity.scopes import FieldScope
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 if TYPE_CHECKING:
     from agent_env.env.legacy_protocol import BackingServer
@@ -184,6 +184,7 @@ class SnapshotEnvTaskStep(TaskStep):
     """
 
     type: ClassVar[str] = "snapshot_env"
+    step_role = StepRole.EVIDENCE
     entity_refs = (
         EntityRef.env("env_id"),
         EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),

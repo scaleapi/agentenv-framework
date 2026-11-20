@@ -2,8 +2,8 @@
 
 This project is licensed under the Apache License, Version 2.0, but depends on third-party
 software identified below. These dependencies are installed separately from the Python Package
-Index and imported at runtime. Third-party source code is not incorporated into or statically
-linked with the source repository.
+Index and imported at runtime. Apart from Harbor's ATIF models, described below, third-party source
+code is not incorporated into or statically linked with the source repository.
 
 Each third-party component remains subject to its applicable license. Copyright notices, license
 files, source-code offers, and other materials accompanying each component form part of its
@@ -253,6 +253,18 @@ The runtime dependencies of `agentenv-protocol` and its `agent` extra, at the ve
 - Copyright: Copyright © 2017-present, [Encode OSS Ltd](https://www.encode.io/).
 - Source: <https://github.com/Kludex/uvicorn>
 - [License text 11](#license-text-11)
+
+## Harbor's ATIF models
+
+`src/agentenv_protocol/atif/models/` holds the trajectory models of [Harbor](https://github.com/harbor-framework/harbor) 0.26.0, the 11 modules
+of its `harbor/models/trajectories/`, copied from Harbor's wheel on PyPI. Each copy's first line says where it's from
+and that it was changed; the only change is its import paths. They are licensed as Harbor is, under the Apache License,
+Version 2.0: the folder's `LICENSE` is the license file Harbor's wheel ships, which has no NOTICE file. The folder's
+`VENDORED.md` records the wheel's sha256 and each upstream file's.
+
+- Source: <https://github.com/harbor-framework/harbor> (`harbor` 0.26.0 on PyPI)
+- Author: Alex Shaw
+- License: Apache-2.0
 
 ## License texts
 

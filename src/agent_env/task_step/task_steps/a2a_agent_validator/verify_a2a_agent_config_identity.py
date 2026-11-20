@@ -10,13 +10,14 @@ import httpx
 from agent_env.a2a_agent import A2AAgent
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
 
 class VerifyA2AAgentConfigIdentityStep(TaskStep):
     type: ClassVar[str] = "verify_a2a_agent_config_identity"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
 
     def __init__(self, id: str, version: Optional[int], a2a_agent_id: str, a2a_agent_version: Optional[int] = None, depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
@@ -46,7 +47,8 @@ class VerifyA2AAgentConfigIdentityStep(TaskStep):
             endpoint = a2a_url + (ext.get("params") or {}).get("endpoint", "/ext/agent-config")
             try:
                 async with httpx.AsyncClient() as client:
-                    (await client.post(endpoint, json={"name": name, "description": desc}, timeout=30)).raise_for_status()
+                    (await client.post(endpoint, json={"name": name, "description": desc},
+                                       headers=deployed.control_headers, timeout=30)).raise_for_status()
                     card_resp = await client.get(f"{a2a_url}/.well-known/agent.json", timeout=30)
                     card_resp.raise_for_status()
                     card = card_resp.json() or {}

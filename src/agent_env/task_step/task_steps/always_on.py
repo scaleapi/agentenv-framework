@@ -110,11 +110,13 @@ from agent_env.env.gateway.constants import (
     EXT_TRIGGERS_URI,
     EXT_USER_CHAT_URI,
 )
+from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
@@ -378,6 +380,8 @@ class _Run:
         self.per_turn_trajectory_urls: list[Optional[str]] = []
         self.per_turn_parts: list[Optional[list[dict]]] = []
         self.tool_calls: Optional[int] = None
+        # Each role's turns' usage, recorded as each turn ends.
+        self.usage = StepUsage(context, step.id)
         self.all_messages: list[dict] = []
         self.final_task_id = ""
         self.error: Optional[str] = None
@@ -591,8 +595,11 @@ class _Run:
             desired["model_params"] = model_params
         negotiated = A2AAgent.negotiate_agent_config(card, desired)
         if negotiated:
-            await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields)
-        ctx.record_model("solver", step.id, negotiated.fields.get("model") if negotiated else None)
+            await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
+                                             headers=self.agent.control_headers)
+        solver_model = negotiated.fields.get("model") if negotiated else None
+        ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
+        self.usage.start(ModelRole.SOLVER, solver_model, self.agent)
         self.rules_in_system_prompt = bool(desired.get("system_prompt") and negotiated
                                            and "system_prompt" in negotiated.fields)
         if desired.get("system_prompt") and not self.rules_in_system_prompt:
@@ -602,6 +609,7 @@ class _Run:
         if self.us.get("prompt_set"):  # deploy_user_sim_agent set the user sim's prompt and model at deploy
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
             self.user_setup = dict(self.us["setup"])
+            self.usage.start(ModelRole.USER_SIMULATOR, self.user_model, self.user_agent)
             return
         setup = self.plugin.setup(self.version, self.person)
         self.user_model, self.user_model_from = self._user_model()
@@ -610,9 +618,12 @@ class _Run:
         user_config = {k: v for k, v in user_config.items() if v is not None}
         negotiated = A2AAgent.negotiate_agent_config(self.user_agent.a2a_card or {}, user_config)
         if negotiated:
-            await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields,
+                                             headers=self.user_agent.control_headers)
         accepted = sorted(negotiated.fields) if negotiated else []
-        ctx.record_model("user simulator", step.id, negotiated.fields.get("model") if negotiated else None)
+        user_model = negotiated.fields.get("model") if negotiated else None
+        ctx.record_model(ModelRole.USER_SIMULATOR.record_key, step.id, user_model)
+        self.usage.start(ModelRole.USER_SIMULATOR, user_model, self.user_agent)
         self.user_setup = {"model": self.user_model, "model_from": self.user_model_from,
                            "user_sim_step_model": self.us.get("model"),
                            "model_set": "model" in accepted,  # else the agent ran its own
@@ -704,11 +715,7 @@ class _Run:
         prompt_agent's ``_resolve_user_model`` honours it), else the user_sim step's ``model``."""
         overrides = self.ctx.metadata.get("user_overrides") or {}
         own = ((overrides.get("step_params") or {}).get(self.us.get("step_id")) or {}).get("model")
-        if own:
-            return own, "user_sim_step_params"
-        if overrides.get("user_model"):
-            return overrides["user_model"], "run_user_model"
-        return self.us["model"], "user_sim_step"
+        return user_sim_model(own=own, run=overrides.get("user_model"), step=self.us["model"])
 
     async def _configure_checks(self) -> None:
         """Give the agent's role scheduled checks (notifications/v1) on each env whose clock is set: by default when
@@ -1272,6 +1279,7 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
+        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
         traj = None
@@ -1281,7 +1289,8 @@ class _Run:
             try:
                 traj = await asyncio.wait_for(
                     step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type), TRAJECTORY_FETCH_SECONDS)
+                                           card=card, sandbox_type=self.agent.sandbox_type,
+                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
             except Exception as e:
                 logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1351,6 +1360,7 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
+        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
         traj = None
@@ -1360,7 +1370,8 @@ class _Run:
             try:
                 traj = await asyncio.wait_for(
                     step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type), TRAJECTORY_FETCH_SECONDS)
+                                           card=card, sandbox_type=self.agent.sandbox_type,
+                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
             except Exception as e:
                 logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1556,10 +1567,11 @@ class _Run:
         except TimeoutError as e:
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
         status = (result.get("status") or {})
-        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
-            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
         msg = status.get("message") or {}
         term = protocol.TerminalResponse.from_message(msg)
+        self.usage.turn(ModelRole.USER_SIMULATOR, term)
+        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
+            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
         raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output
         if structured is None:
@@ -1575,7 +1587,8 @@ class _Run:
                 traj = await asyncio.wait_for(
                     self.step._fetch_trajectory(self.user_url, traj_ext, user_task_id,
                                                 self.step._trajectory_prefix() + "user_sim/", msg_id,
-                                                card=card, sandbox_type=self.user_agent.sandbox_type),
+                                                card=card, sandbox_type=self.user_agent.sandbox_type,
+                                                headers=self.user_agent.control_headers),
                     max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
             except Exception as e:
                 logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
@@ -1734,7 +1747,8 @@ class _Run:
             source_agent_per_turn_prompt_parts=self.per_turn_parts or None, tool_call_count=self.tool_calls,
             model=self.model, error_type=self.error_type, error_code=self.error_code, error_message=self.error,
             agent_session_id=self.final_task_id,
-            a2a_context_id=self.solver_context_id, agent_name=step.agent_name, step_id=step.id))
+            a2a_context_id=self.solver_context_id, agent_name=step.agent_name, step_id=step.id,
+            usage=self.usage.entries()))
 
 
 # ==================================================================================================================
