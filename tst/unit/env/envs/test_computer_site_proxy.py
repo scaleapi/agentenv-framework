@@ -9,6 +9,7 @@ import base64
 import contextlib
 import dataclasses
 import email.message
+import gc
 import io
 import json
 import os
@@ -856,6 +857,45 @@ async def test_dns_answers_a_sites_wildcard_name_with_loopback_and_passes_every_
     assert struct.unpack("!HHHH", a[:8]) == (0x1234, 0x8580, 1, 1) and a.endswith(socket.inet_aton("127.0.0.1"))
     assert struct.unpack("!HHHH", aaaa[:8]) == (0x1234, 0x8580, 1, 0)
     assert passed == [_query("example.org", 1)] and other[2:4] == b"\x81\x80"
+
+
+@pytest.mark.asyncio
+async def test_dns_over_udp_answers_every_query_a_client_sends_while_a_slow_nameserver_holds_them_open():
+    loop = asyncio.get_running_loop()
+
+    class Nameserver(asyncio.DatagramProtocol):
+        def connection_made(self, transport):
+            self.transport = transport
+
+        def datagram_received(self, data, addr):
+            loop.call_later(0.2, self.transport.sendto, data[:2] + b"\x81\x80" + data[4:], addr)
+
+    class Client(asyncio.DatagramProtocol):
+        def datagram_received(self, data, addr):
+            answered.append(data)
+
+    answered = []
+    upstream, _ = await loop.create_datagram_endpoint(Nameserver, local_addr=("127.0.0.1", 0))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(site_proxy, "NAMESERVER_PORT", upstream.get_extra_info("sockname")[1])
+        config = Config(user=None, sites=[Site("chat", "http://gw/website/chat/", ["*.chat.test"])],
+                        nameservers=["127.0.0.1"])
+        server, _ = await loop.create_datagram_endpoint(lambda: site_proxy.Resolver(config),
+                                                        local_addr=("127.0.0.1", 0))
+        client, _ = await loop.create_datagram_endpoint(Client, remote_addr=server.get_extra_info("sockname"))
+        try:
+            client.sendto(_query("eu.chat.test", 1))
+            for _ in range(20):
+                client.sendto(_query("example.org", 1))
+            for _ in range(20):
+                gc.collect()
+                await asyncio.sleep(0.05)
+        finally:
+            for transport in (client, server, upstream):
+                transport.close()
+
+    assert len(answered) == 21
+    assert sum(answer.endswith(socket.inet_aton("127.0.0.1")) for answer in answered) == 1
 
 
 @pytest.mark.asyncio
