@@ -242,7 +242,7 @@ def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
         if isinstance(step, AggregateVerifiersTaskStep) and step.names_steps:
             yield from _named_sources(step, steps)
         elif isinstance(step, AggregateVerifiersTaskStep):
-            missing = [source for source in step.verifier_ids if source not in written]
+            missing = [source for source in step.verifier_ids if isinstance(source, str) and source not in written]
             if missing and not unseen:
                 yield Finding(Severity.ERROR, "aggregate-source",
                               f"verifier_ids names {missing!r}, which no verifier in this task writes (it has "
@@ -304,9 +304,10 @@ def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:
         if step.names_steps:
             if (step.combine or POOLED) != POOLED or not isinstance(step.sources, list):
                 continue
-            field, sources = "sources", {name: by_id.get(name) for name in step.sources}
+            field, sources = "sources", {name: by_id.get(name) for name in step.sources if isinstance(name, str)}
         else:
-            field, sources = "verifier_ids", {vid: by_verifier_id.get(vid) for vid in step.verifier_ids}
+            field, sources = "verifier_ids", {vid: by_verifier_id.get(vid) for vid in step.verifier_ids
+                                              if isinstance(vid, str)}
         rows = {}
         for name, source in sources.items():
             if isinstance(source, AggregateVerifiersTaskStep) and not step.names_steps:

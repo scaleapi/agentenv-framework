@@ -299,6 +299,13 @@ def test_a_weighted_mean_an_all_pass_or_a_balanced_pool_doesnt_warn(fields):
     assert not [f for f in found if f[1] == "lopsided-pooling"]
 
 
+@pytest.mark.parametrize("sources", [[{}], [{"step": "tests"}, "unit"], [["tests"]]])
+def test_sources_given_as_objects_are_a_config_error_not_a_crash(sources):
+    found = _found(_task(BOX, TESTS, UNIT, _combined(sources=sources, combine="weighted_mean", weights={"unit": 1})))
+
+    assert ("error", "step-config", f"step 'final': sources must be a list of step ids, not {sources!r}") in found
+
+
 def test_with_no_headline_an_aggregate_naming_every_other_verifier_by_step_id_is_the_one_to_name():
     found = _found(_task(BOX, TESTS, MORE, _combined(combine="weighted_mean", sources=["tests"], gates=["more"])))
 

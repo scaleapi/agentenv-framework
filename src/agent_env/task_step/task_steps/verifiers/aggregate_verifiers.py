@@ -14,6 +14,7 @@ newer fields.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from typing import Any, ClassVar, Optional, Sequence
 
@@ -81,7 +82,8 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
             if isinstance(verifier_id, str):
                 by_verifier_id.setdefault(verifier_id, step.id)
                 by_verifier_id.setdefault(f"{verifier_id}-trajectory-mistakes", step.id)
-        return list(dict.fromkeys(by_verifier_id[vid] for vid in self.verifier_ids if vid in by_verifier_id))
+        return list(dict.fromkeys(by_verifier_id[vid] for vid in self.verifier_ids
+                                  if isinstance(vid, str) and vid in by_verifier_id))
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -117,6 +119,8 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
         above 0. The steps a source names are lint's to check, as they're the task's."""
         problems = super().config_problems()
         if not self.names_steps:
+            if not all(isinstance(vid, str) and vid for vid in self.verifier_ids):
+                problems.append(f"verifier_ids must be a list of verifier ids, not {self.verifier_ids!r}")
             return problems if self.verifier_ids else [*problems, "it combines nothing: name sources or gates"]
         if self.verifier_ids:
             problems.append("verifier_ids is the older form and takes none of sources, gates, combine or weights; "
@@ -138,10 +142,12 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
             return ["weights are for a weighted_mean; pooled rows carry their own"]
         if not isinstance(self.weights, dict):
             return [f"weights must map each source's step id to a number, not {self.weights!r}"]
-        problems = [f"weights gives {key!r} {weight!r}; a weight is a number of at least 0"
+        problems = [f"weights gives {key!r} {weight!r}; a weight is a finite number of at least 0"
                     for key, weight in self.weights.items()
-                    if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight < 0]
-        sources = self.sources if isinstance(self.sources, list) else []
+                    if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight)
+                    or weight < 0]
+        listed = self.sources if isinstance(self.sources, list) else []
+        sources = [source for source in listed if isinstance(source, str)]
         if unknown := [key for key in self.weights if key not in sources]:
             problems.append(f"weights names {unknown!r}, which aren't in sources")
         if missing := [source for source in sources if source not in self.weights]:
