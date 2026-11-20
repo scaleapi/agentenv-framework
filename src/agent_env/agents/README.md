@@ -40,9 +40,12 @@ its own user under root's supervisord (`start-agent`, `root.conf`), with agent-e
 agent's user.
 The A2A server starts with the real-time marker, so it and its records stay on real time, and serves clock/v1's
 `sync_time`, which the protocol's framework serves on the card of any agent in an image with the follower
-(`agentenv_protocol.a2a_agent.clock`). Once `sync_env_clock` has armed the clock, it declares the agent at the gateway
-as a follower with a read token of its own and calls that `sync_time` with the follower's config, which the server
-writes; `deploy_agent` does the same for an agent it deploys while the clock is armed. From then on the CLI, its own
+(`agentenv_protocol.a2a_agent.clock`). An agent follows the env's clock only when the task opts in: once a
+`sync_env_clock` with `agent_clock` (off by default; `require_agent_clock` implies it) has armed the clock, it declares
+the agent at the gateway as a follower with a read token of its own and calls that `sync_time` with the follower's
+config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is armed.
+Without it the agent keeps real time, as its files' modification times do: a CLI that judges a file's age by them, as
+Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the env's date is ahead. From then on the CLI, its own
 "Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
 followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
 working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts

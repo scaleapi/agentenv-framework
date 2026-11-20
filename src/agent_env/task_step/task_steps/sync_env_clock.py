@@ -5,10 +5,11 @@ stored env card declares clock/v1, then invokes sync_time on each backing server
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
 An env whose card offers no set_time has no gateway clock to arm, as a computer deployed alone, and is refused
 saying to deploy it in a multi env; a record that kept no card is refused saying so.
-Then has every agent registered with the env whose card serves clock/v1 sync_time follow the clock as a computer does
-(``agent_env.a2a_agent.clock``), so every program it runs reads the env's time and later clock writes can wait for it.
-An agent that can't is skipped, as every agent is until its image runs the follower, or fails the step with
-require_agent_clock.
+With agent_clock (off by default), then has every agent registered with the env whose card serves clock/v1 sync_time
+follow the clock as a computer does (``agent_env.a2a_agent.clock``), so every program it runs reads the env's time and
+later clock writes can wait for it. An agent that can't is skipped, as every agent is until its image runs the follower,
+or fails the step with require_agent_clock. Without it, agents keep real time: a CLI that judges its files' age by
+their modification times, which stay real, would take a fresh file for one as old as the env's date is ahead.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
 and start it with set_env_clock_rate right before prompt_agent.
@@ -82,6 +83,7 @@ class SyncEnvClockTaskStep(TaskStep):
         timeout_seconds: int = 30,
         timezone: Optional[str] = None,
         require_agent_clock: bool = False,
+        agent_clock: bool = False,
     ):
         """virtual_seconds_per_real_second = clock speed (1.0 real time, 0 frozen, 86400 cap =
         1 real s -> 1 virtual day). For ~V virtual seconds over an ~R-real-second task, pass V/R.
@@ -90,8 +92,11 @@ class SyncEnvClockTaskStep(TaskStep):
         that zone, the gateway's clock is armed in it, so its get_time answers in it too, and every synced server is
         told the zone (a server that cannot take it fails the step).
 
+        agent_clock = have every agent registered with the env follow its clock, and an agent deploy_agent deploys
+        later on it too; off, they keep real time.
+
         require_agent_clock = fail the step when an agent registered with the env can't follow its clock, rather than
-        skip it; apart from tolerate_missing_sync_time, which is about the env's servers."""
+        skip it; apart from tolerate_missing_sync_time, which is about the env's servers. It implies agent_clock."""
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not isinstance(virtual_time, str):
             raise ValueError("virtual_time must be an RFC3339 string")
@@ -101,6 +106,7 @@ class SyncEnvClockTaskStep(TaskStep):
         self.virtual_seconds_per_real_second = virtual_seconds_per_real_second
         self.tolerate_missing_sync_time = tolerate_missing_sync_time
         self.require_agent_clock = require_agent_clock
+        self.agent_clock = agent_clock or require_agent_clock
         self.timeout_seconds = timeout_seconds
         self.timezone = timezone.strip() if isinstance(timezone, str) else timezone
         self.armed_virtual_time = resolve_virtual_time(virtual_time, self.timezone)
@@ -117,6 +123,8 @@ class SyncEnvClockTaskStep(TaskStep):
             base["timezone"] = self.timezone
         if self.require_agent_clock:
             base["require_agent_clock"] = True
+        if self.agent_clock:
+            base["agent_clock"] = True
         return base
 
     @classmethod
@@ -131,6 +139,7 @@ class SyncEnvClockTaskStep(TaskStep):
             timeout_seconds=data.get("timeout_seconds", 30),
             timezone=data.get("timezone"),
             require_agent_clock=data.get("require_agent_clock", False),
+            agent_clock=data.get("agent_clock", False),
         )
 
     async def _backing_servers(self, deployed) -> list[BackingServer]:
@@ -177,13 +186,13 @@ class SyncEnvClockTaskStep(TaskStep):
             entry = {"service": service, "environment": service, **({} if server.mcp else {"website": True}), **outcome}
             (synced if outcome.get("synced") else skipped).append(entry)
 
-        agents = await self._follow_agents(context, deployed, env_get_time_url)
+        agents = await self._follow_agents(context, deployed, env_get_time_url) if self.agent_clock else []
         configuration = {
             "step_id": self.id, "env_id": self.env_id,
             "deploy_step_id": (deployed.metadata or {}).get("deploy_step_id"),
             "virtual_time": self.virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
             "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped, "agents": agents,
-            "require_agent_clock": self.require_agent_clock,
+            "require_agent_clock": self.require_agent_clock, "agent_clock": self.agent_clock,
         }
         if self.timezone is not None:
             configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time,
