@@ -387,28 +387,74 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
 
 _RUN_COUNTS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 _CACHE_WRITE_SPLIT = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+# `modelUsage`'s names for _RUN_COUNTS, the cache writes' split, the thinking tokens and the cost.
+_TALLY = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+          "cache_read_input_tokens": "cacheReadInputTokens", "cache_creation_input_tokens": "cacheCreationInputTokens",
+          "ephemeral_5m_input_tokens": "cacheCreationEphemeral5mInputTokens",
+          "ephemeral_1h_input_tokens": "cacheCreationEphemeral1hInputTokens", "thinking_tokens": "thinkingTokens",
+          "cost_usd": "costUSD"}
+
+
+def _number(value: Any) -> float | None:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _turn_tally(result: ClaudeResult) -> dict[str, dict[str, float]] | None:
+    """The turn's own tally by model: the CLI's ``modelUsage`` at its last `result` less the session's before the turn,
+    which a resume restores into it. None when either is missing."""
+    if result.model_usage is None or result.session_base is None:
+        return None
+    turn = {}
+    for model, now in result.model_usage.items():
+        before = result.session_base.get(model) or {}
+        counts = {ours: (_number(now.get(theirs)) or 0) - (_number(before.get(theirs)) or 0)
+                  for ours, theirs in _TALLY.items()}
+        if any(counts.values()):
+            turn[model] = counts
+    return turn
 
 
 def _usage(result: ClaudeResult) -> Usage:
-    """The turn's tool calls and token counts: its runs' usage summed (a resumed turn has several runs), each as its
-    `result` event gave it, in Anthropic's shape, so ``input_tokens`` gets the cache added. The cache writes' 5-minute
-    and 1-hour split and the thinking tokens are kept in ``provider_details``. The CLI's own cost isn't reported: after
-    a resume it counts the whole session, whether the session was restored depends on the CLI's saved state, and
-    agent-env prices the tokens. A run cut off before its `result` counts its model calls in ``unreported_calls``."""
-    details: dict[str, Any] = {"unreported_calls": result.unreported_calls} if result.unreported_calls else {}
-    if not result.run_usage:
+    """The turn's tool calls and token counts, with ``input_tokens`` counting the cache. The counts are the CLI's own
+    tally for the turn (``_turn_tally``), which covers every call, its subagents' too, and its cost; the turn's
+    `result` events count only the main agent's calls, so the tally is used only when it covers at least those. When it
+    can't be (a resumed session this process hasn't run before), the counts are the `result` events', and the
+    subagents' calls are counted in ``unreported_calls``, which makes the turn a lower bound. A run cut off before its
+    `result` counts its model calls there too. The cache writes' 5-minute and 1-hour split, the thinking tokens and
+    each model's own counts are kept in ``provider_details``."""
+    unreported = result.unreported_calls
+    if not result.run_usage and not result.model_usage:
+        details = {"unreported_calls": unreported + result.subagent_calls} if unreported + result.subagent_calls else {}
         return Usage(tool_call_count=result.tool_call_count, provider_details=details)
 
     def total(read: Any) -> int:
         return sum(value for run in result.run_usage if isinstance(value := read(run), int) and not isinstance(value, bool))
 
-    summed: dict[str, Any] = {key: total(lambda run, key=key: run.get(key)) for key in _RUN_COUNTS}
-    summed["cache_creation"] = {key: total(lambda run, key=key: (run.get("cache_creation") or {}).get(key))
-                                for key in _CACHE_WRITE_SPLIT}
-    thinking = total(lambda run: (run.get("output_tokens_details") or {}).get("thinking_tokens"))
-    usage = Usage.from_model_response(summed)
-    return replace(usage, tool_call_count=result.tool_call_count, provider_details={
-        **usage.provider_details, **details, **({"reasoning_tokens": thinking} if thinking else {})})
+    main = {key: total(lambda run, key=key: run.get(key)) for key in _RUN_COUNTS}
+    turn = _turn_tally(result)
+    tally = {key: sum(model[key] for model in turn.values()) for key in _TALLY} if turn is not None else None
+    cost, models = None, None
+    if tally is not None and all(tally[key] >= main[key] for key in _RUN_COUNTS) and min(tally.values()) >= 0:
+        counted = {key: int(tally[key]) for key in _RUN_COUNTS}
+        counted["cache_creation"] = {key: int(tally[key]) for key in _CACHE_WRITE_SPLIT}
+        thinking, cost = int(tally["thinking_tokens"]), tally["cost_usd"] or None
+        models = {model: {"input_tokens": int(counts["input_tokens"] + counts["cache_read_input_tokens"]
+                                              + counts["cache_creation_input_tokens"]),
+                          "output_tokens": int(counts["output_tokens"]),
+                          "cache_read_tokens": int(counts["cache_read_input_tokens"]),
+                          "cache_write_tokens": int(counts["cache_creation_input_tokens"]),
+                          **({"cost_usd": counts["cost_usd"]} if counts["cost_usd"] else {})}
+                  for model, counts in turn.items()}
+    else:
+        counted = dict(main)
+        counted["cache_creation"] = {key: total(lambda run, key=key: (run.get("cache_creation") or {}).get(key))
+                                     for key in _CACHE_WRITE_SPLIT}
+        thinking = total(lambda run: (run.get("output_tokens_details") or {}).get("thinking_tokens"))
+        unreported += result.subagent_calls
+    usage = Usage.from_model_response(counted)
+    return replace(usage, tool_call_count=result.tool_call_count, cost_usd=cost, provider_details={
+        **usage.provider_details, **({"unreported_calls": unreported} if unreported else {}),
+        **({"reasoning_tokens": thinking} if thinking else {}), **({"models": models} if models else {})})
 
 
 @a2a_agent(

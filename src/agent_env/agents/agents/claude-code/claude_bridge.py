@@ -154,9 +154,16 @@ class ClaudeResult:
     structured_output: dict | None = None
     # How many `claude -p` runs the turn took; more than one means it was resumed.
     attempts: int = 1
-    # Each run's token usage, from its `result` event, which counts that run alone (after a resume its
-    # `total_cost_usd` and `modelUsage` count the whole session, so neither is kept).
+    # Every `result` event's `usage`, across the turn's runs: the main agent's calls, never a subagent's.
     run_usage: list[dict] = field(default_factory=list)
+    # The CLI's own tally, `modelUsage`, at the turn's last `result`: every call, subagents' too, over the whole
+    # session, since a resume restores the session's tally.
+    model_usage: dict | None = None
+    # The session's tally before the turn: empty for a new session, None when it isn't known (a resumed session this
+    # process hasn't run before), so the turn's own tally is ``model_usage`` less this.
+    session_base: dict | None = None
+    # The subagents' model calls the turn's runs streamed, by message id.
+    subagent_calls: int = 0
     # The model calls of runs that ended without a `result`, by message id: their usage is unknown.
     unreported_calls: int = 0
 
@@ -310,15 +317,63 @@ def _endpoint_hint(trajectory: list[dict]) -> str | None:
             "(<base>/v1/messages), such as a LiteLLM gateway, that knows the model")
 
 
-def _usage_of_run(trajectory: list[dict]) -> tuple[list[dict], int]:
-    """A run's token usage, from its `result` event; or, for a run cut off before one, how many model calls it made,
-    by message id, whose usage is then unknown. An assistant event's own usage is no substitute: it is written as the
-    message streams, before its output is counted."""
-    event = _terminal_result(trajectory)
-    if event is not None and isinstance(event.get("usage"), dict):
-        return [event["usage"]], 0
-    ids = {(event.get("message") or {}).get("id") for event in trajectory if event.get("type") == "assistant"}
-    return [], len(ids - {None})
+@dataclass(frozen=True)
+class RunUsage:
+    """What one run of the CLI says it used: each of its `result` events' ``usage`` (a run that hands work to a
+    subagent writes one, then another once the subagent answers), its last ``modelUsage``, the subagents' model calls
+    those `result` events span, and the model calls after its last `result` (all of them, for a run cut off before
+    any), which no `result` counts, so their usage is unknown. Calls are counted by message id; an assistant event's
+    own usage is no account of a call, being written as the message streams."""
+
+    results: list[dict]
+    model_usage: dict | None
+    subagent_calls: int
+    unreported_calls: int
+
+
+def _usage_of_run(trajectory: list[dict]) -> RunUsage:
+    last = max((index for index, event in enumerate(trajectory) if event.get("type") == "result"), default=-1)
+    results = [event for event in trajectory[:last + 1] if event.get("type") == "result"]
+    usage = [event["usage"] for event in results if isinstance(event.get("usage"), dict)]
+    tally = next((event["modelUsage"] for event in reversed(results) if isinstance(event.get("modelUsage"), dict)),
+                 None)
+
+    def calls(events: list[dict], subagent: bool | None = None) -> int:
+        return len({(event.get("message") or {}).get("id") for event in events if event.get("type") == "assistant"
+                    and (subagent is None or bool(event.get("parent_tool_use_id")) == subagent)} - {None})
+
+    return RunUsage(usage, tally, calls(trajectory[:last + 1], subagent=True), calls(trajectory[last + 1:]))
+
+
+# Each session's last tally (`modelUsage`) in this process: the base of its next turn when its transcript can't say.
+_SESSION_TALLIES: dict[str, dict] = {}
+
+
+def saved_session_tally(session_id: str) -> dict | None:
+    """The tally a resume of ``session_id`` starts from: the ``modelUsage`` of the last `cost-state` record in the
+    session's transcript, which the CLI writes as a run exits and restores on a resume, so a run killed before it
+    exited isn't in it. Empty for a session with no transcript or no model call yet; None when the transcript can't be
+    read, or has model calls but no `cost-state`."""
+    try:
+        data = session_jsonl_path(session_id).read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    tally, called = None, False
+    for raw_line in data.splitlines():
+        if b'"cost-state"' not in raw_line and b'"assistant"' not in raw_line:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "cost-state" and isinstance(record.get("modelUsage"), dict):
+            tally = record["modelUsage"]
+        called = called or record.get("type") == "assistant"
+    return tally if tally is not None else (None if called else {})
 
 
 def _ends_in_result(trajectory: list[dict]) -> bool:
@@ -470,7 +525,12 @@ async def run_claude(
     trajectory: list[dict] = []
     tool_calls = 0
     run_usage: list[dict] = []
-    unreported_calls = 0
+    model_usage: dict | None = None
+    session_base: dict | None = {}
+    if resume:
+        saved = await in_thread_to_its_end(saved_session_tally, session_id)
+        session_base = saved if saved is not None else _SESSION_TALLIES.get(session_id)
+    subagent_calls = unreported_calls = 0
     attempts = 0
     first_failure: str | None = None
 
@@ -489,7 +549,11 @@ async def run_claude(
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)
         tool_calls += result.tool_call_count
         run_usage += result.run_usage
+        model_usage = result.model_usage or model_usage
+        subagent_calls += result.subagent_calls
         unreported_calls += result.unreported_calls
+        if result.model_usage is not None and result.session_id:
+            _SESSION_TALLIES[result.session_id] = result.model_usage
 
         failure = _resumable_api_failure(result)
         budget_left = deadline - time.monotonic()
@@ -506,7 +570,8 @@ async def run_claude(
             error = result.error and _failure_message(result.error, result.error_detail, attempts, first_failure)
             return replace(result, response=_redact(result.response) if error else result.response,
                            tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error,
-                           run_usage=run_usage, unreported_calls=unreported_calls)
+                           run_usage=run_usage, model_usage=model_usage, session_base=session_base,
+                           subagent_calls=subagent_calls, unreported_calls=unreported_calls)
 
         trajectory.extend(_without_terminal_result(result.trajectory))
         first_failure = first_failure or result.error_detail
@@ -783,10 +848,11 @@ async def _spawn_claude(
         _kill_cli(proc)
         await _reap(proc)
         # A CLI that wrote its `result` and then hung keeps the usage it reported.
-        run_usage, unreported_calls = _usage_of_run(trajectory)
+        used = _usage_of_run(trajectory)
         return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
-                            error=f"claude CLI timed out after {timeout_s}s", run_usage=run_usage,
-                            unreported_calls=unreported_calls)
+                            error=f"claude CLI timed out after {timeout_s}s", run_usage=used.results,
+                            model_usage=used.model_usage, subagent_calls=used.subagent_calls,
+                            unreported_calls=used.unreported_calls)
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.
         _kill_cli(proc)
@@ -809,11 +875,12 @@ async def _spawn_claude(
     if structured_output is not None:
         final_response = json.dumps(structured_output)
 
-    run_usage, unreported_calls = _usage_of_run(trajectory)
+    used = _usage_of_run(trajectory)
     return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
-                        error_detail=detail, structured_output=structured_output, run_usage=run_usage,
-                        unreported_calls=unreported_calls)
+                        error_detail=detail, structured_output=structured_output, run_usage=used.results,
+                        model_usage=used.model_usage, subagent_calls=used.subagent_calls,
+                        unreported_calls=used.unreported_calls)
 
 
 _TAGS_HEADER = "x-litellm-tags"

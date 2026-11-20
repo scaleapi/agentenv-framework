@@ -572,10 +572,11 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
 
 
 def _usage(result: CodexResult) -> Usage:
-    """The turn's tool calls and token counts: the CLI's own, for this turn alone (``token_usage``). OpenAI counts the
-    cache in a call's input, so ``input_tokens`` holds the cached reads and writes, and the reasoning is part of
-    ``output_tokens``. A turn the CLI gave no counts for, as one stopped before ``turn.completed`` or whose counters
-    went back, reports none, its model requests counted in ``unreported_calls`` rather than as nothing used."""
+    """The turn's tool calls and token counts: the CLI's own, for this turn alone, its subagents' included
+    (``token_usage``). OpenAI counts the cache in a call's input, so ``input_tokens`` holds the cached reads and writes,
+    and the reasoning is part of ``output_tokens``. A turn the CLI gave no counts for, as one whose counters went back,
+    reports none, its model requests counted in ``unreported_calls`` rather than as nothing used; a turn the bridge
+    stopped counts there too the request that was in flight, which the CLI never counted."""
     counts = result.token_usage or {}
     details: dict[str, Any] = {}
     if result.model_requests is not None:
@@ -584,9 +585,11 @@ def _usage(result: CodexResult) -> Usage:
         details["reasoning_tokens"] = counts["reasoning_output_tokens"]
     inputs, outputs = counts.get("input_tokens"), counts.get("output_tokens")
     if inputs is None or outputs is None:
-        if result.model_requests:
-            details["unreported_calls"] = result.model_requests
+        if result.model_requests or result.unreported_calls:
+            details["unreported_calls"] = (result.model_requests or 0) + result.unreported_calls
         return Usage(tool_call_count=result.tool_call_count, provider_details=details)
+    if result.unreported_calls:
+        details["unreported_calls"] = result.unreported_calls
     return Usage(tool_call_count=result.tool_call_count, input_tokens=inputs, output_tokens=outputs,
                  total_tokens=inputs + outputs, cache_read_tokens=counts.get("cached_input_tokens"),
                  cache_write_tokens=counts.get("cache_write_input_tokens"), input_includes_cache=True,
