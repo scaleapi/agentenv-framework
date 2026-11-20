@@ -62,6 +62,8 @@ def _webp(data: bytes) -> tuple[int, int] | None:
     if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
         return None
     chunk = data[12:16]
+    if len(data) < 30:
+        return None
     if chunk == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
         width, height = struct.unpack("<HH", data[26:30])
         return width & 0x3FFF, height & 0x3FFF

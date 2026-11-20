@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -149,6 +150,14 @@ def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
             raise TypeError(f"AgentConfig fields have duplicate alias {wire_name!r}")
         result[field_name] = wire_name
     return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _config_write_only_wire_names(config: type[AgentConfig]) -> set[str]:
@@ -982,21 +991,32 @@ class _SdkServices:
         gate = asyncio.Semaphore(MAX_PARALLEL_MEDIA_PUSHES)
 
         async def push(path: str, target: Any) -> None:
-            file = media.held(request.context_id, path)
-            if file is None:
+            held = media.held(request.context_id, path)
+            if held is None:
                 missing.append(path)
                 return
+            file, hold = held
             async with gate:
+                # Checked before the bytes leave, so a spool file that no longer matches its name never reaches the
+                # store, and after, for bytes that changed in transit.
+                try:
+                    digest = await asyncio.to_thread(_sha256_file, file)
+                except OSError as exc:
+                    failed[path] = f"the spooled file can't be read: {exc.strerror}"
+                    return
+                if digest != media_file(path):
+                    failed[path] = f"the spooled file's sha256 is {digest}"
+                    return
                 try:
                     done = await upload(target, file)
                 except TransferError as exc:
                     failed[path] = f"{exc.code}: {exc}"
                     return
-            if done.sha256 is not None and done.sha256 != media_file(path):
+            if done.sha256 is not None and done.sha256 != digest:
                 failed[path] = f"the upload's sha256 is {done.sha256}"
                 return
             uploaded[path] = done
-            media.release(request.context_id, path)
+            media.release(request.context_id, path, hold)
 
         await asyncio.gather(*(push(path, target) for path, target in request.objects.items()))
         return TrajectoryMediaResponse(objects=uploaded, missing=sorted(missing), failed=failed).model_dump(

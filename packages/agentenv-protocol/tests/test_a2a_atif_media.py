@@ -18,6 +18,8 @@ from test_a2a_atif_serving import _atif, _ended, _send
 
 from agentenv_protocol.a2a_agent import (
     TRAJECTORY_V1,
+    TaskObjectTrajectoryRequest,
+    TaskTrajectoryRequest,
     AgentEnvAgent,
     AgentIdentity,
     TaskRequest,
@@ -27,8 +29,10 @@ from agentenv_protocol.a2a_agent import (
     Uploaded,
     a2a_agent,
     enable,
+    extension,
     framework,
 )
+from agentenv_protocol.a2a_agent._media_spool import MediaSpool
 from agentenv_protocol.a2a_agent._atif_copy import TurnStart
 from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
 from agentenv_protocol.atif import Adapter, AtifError, atif_adapter, check_media, errors_in, media_file, native, validate
@@ -116,8 +120,8 @@ def test_a_copys_images_are_spooled_by_sha256_with_their_size_and_pushed_once_as
         document = _atif(client, task_id=task_id)["trajectory"]
         spool = client.app.state.agentenv_a2a.services.task_trajectories.media
         path = _path(SHOT, ".png")
-        held = spool.held("ctx-1", path)
-        assert held is not None and held.read_bytes() == SHOT
+        held, _ = spool.held("ctx-1", path)
+        assert held.read_bytes() == SHOT
         pushed = _media(client, {path: "image/png"})
         assert pushed.status_code == 200, pushed.text
         assert spool.held("ctx-1", path) is None and not held.exists()
@@ -184,6 +188,63 @@ def test_a_path_the_context_doesnt_hold_and_a_failed_upload_dont_stop_the_rest(
     assert other_context == {"objects": {}, "missing": [_path(SHOT, ".png")], "failed": {}}
 
 
+def test_an_agent_that_serves_its_own_trajectory_reads_still_has_the_sdks_media_and_cant_take_it_over(
+        store: dict[str, bytes]) -> None:
+    @a2a_agent(identity=AgentIdentity(name="own-reads", description="test", version="1"),
+               extensions=(enable(TRAJECTORY_V1, native=NATIVE, atif=Shots),))
+    class OwnReads(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            request.trajectory.set_format(NATIVE)
+            return TaskResult.text("done")
+
+        @extension(TRAJECTORY_V1.get)
+        async def trajectory(self, request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest) -> dict[str, Any]:
+            return {"trajectory": []}
+
+    with TestClient(OwnReads().create_app()) as client:
+        _ended(client, _send(client, "look", "m-1", extra_parts=[_file(SHOT, "image/png")]))
+        assert list(_media(client, {_path(SHOT, ".png"): "image/png"}).json()["objects"]) == [_path(SHOT, ".png")]
+
+    @a2a_agent(identity=AgentIdentity(name="takes-media", description="test", version="1"),
+               extensions=(enable(TRAJECTORY_V1, live=True, native=NATIVE, atif=Shots),))
+    class TakesMedia(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("done")
+
+        @extension(TRAJECTORY_V1.media.media)
+        async def media(self, request: Any) -> dict[str, Any]:
+            return {"objects": {}}
+
+    with pytest.raises(ValueError, match="served by the SDK alone"):
+        TakesMedia().create_app()
+
+
+def test_an_upload_that_outlives_its_copy_releases_only_the_hold_it_began_with() -> None:
+    spool = MediaSpool()
+    path = _path(SHOT, ".png")
+    spool.sink("ctx")(path, SHOT)
+    _, old = spool.held("ctx", path)
+    spool.drop("ctx")
+    spool.sink("ctx")(path, SHOT)
+    spool.release("ctx", path, old)
+    file, new = spool.held("ctx", path)
+    assert new != old and file.read_bytes() == SHOT
+    spool.release("ctx", path, new)
+    assert spool.held("ctx", path) is None and not file.exists()
+    spool.close()
+
+
+def test_a_spooled_file_that_no_longer_matches_its_name_never_reaches_the_store(store: dict[str, bytes]) -> None:
+    with TestClient(_shooting().create_app()) as client:
+        _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
+        spool = client.app.state.agentenv_a2a.services.task_trajectories.media
+        file, _ = spool.held("ctx-1", _path(SHOT, ".png"))
+        file.write_bytes(b"changed on disk")
+        pushed = _media(client, {_path(SHOT, ".png"): "image/png"}).json()
+    assert pushed["objects"] == {} and store == {}
+    assert pushed["failed"][_path(SHOT, ".png")].startswith("the spooled file's sha256 is ")
+
+
 def test_a_media_call_takes_only_media_paths() -> None:
     with TestClient(_shooting().create_app()) as client:
         for path in ("../../etc/passwd", "media/abc.png", "https://elsewhere.example.test/x.png",
@@ -230,7 +291,7 @@ def test_a_context_evicted_or_restored_over_drops_its_media_but_what_another_hol
 
     other = _png(1, 1)
     play("a1", "context-a", SHOT)
-    file = trajectories.media.held("context-a", _path(SHOT, ".png"))
+    file, _ = trajectories.media.held("context-a", _path(SHOT, ".png"))
     play("b1", "context-b", other)
     assert trajectories.media.held("context-a", _path(SHOT, ".png")) is None and not file.exists()
     play("b2", "context-b", SHOT)
@@ -275,9 +336,12 @@ def _webp(kind: bytes, body: bytes) -> bytes:
     (_webp(b"VP8X", b"\x00" * 4 + (1919).to_bytes(3, "little") + (1079).to_bytes(3, "little")), "image/webp",
      (1920, 1080)),
     (b"\x89PNG not really", "image/png", None),
+    (_webp(b"VP8X", b""), "image/webp", None),
+    (_webp(b"VP8X", b"\x00" * 4 + b"\x01\x02"), "image/webp", None),
     (b"\xff\xd8\xff\xda", "image/jpeg", None),
     (_png(8, 8), "image/heic", None),
-], ids=["png", "jpeg", "gif", "webp-lossy", "webp-lossless", "webp-extended", "bad-png", "jpeg-without-frame",
+], ids=["png", "jpeg", "gif", "webp-lossy", "webp-lossless", "webp-extended", "bad-png", "truncated-webp",
+        "half-a-webp-size", "jpeg-without-frame",
         "not-an-atif-image-type"])
 def test_an_images_size_is_read_from_its_header(data: bytes, media_type: str, size: tuple[int, int] | None) -> None:
     assert image_size(data, media_type) == size

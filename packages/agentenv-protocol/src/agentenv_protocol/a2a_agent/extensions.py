@@ -844,6 +844,9 @@ class OperationDefinition:
     implementation: ImplementationOwner
     request: RequestDefinition | type[BaseModel] | None = None
     response: FieldSchema | type[BaseModel] | None = None
+    #: Served by the SDK alone, from state only it holds: no agent overrides it, and an agent that overrides the
+    #: extension's other SDK operations needn't override it with them.
+    sdk_only: bool = False
     response_model: type[BaseModel] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -1132,6 +1135,7 @@ def _op(
     response_required: Iterable[str] = (),
     response_optional: Iterable[str] = (),
     variants: Iterable[RequestVariant] = (),
+    sdk_only: bool = False,
 ) -> OperationDefinition:
     response_required = _tuple(response_required)
     response_optional = _tuple(response_optional)
@@ -1151,6 +1155,7 @@ def _op(
         implementation=owner,
         request=request,
         response=response,
+        sdk_only=sdk_only,
     )
 
 
@@ -1381,6 +1386,8 @@ TRAJECTORY_V1 = ExtensionDefinition(
                     SDK,
                     request_model=TrajectoryMediaRequest,
                     response_model=TrajectoryMediaResponse,
+                    # The spool it reads is the SDK's, so an agent that serves its own trajectory reads still has it.
+                    sdk_only=True,
                 ),
             }
         )
