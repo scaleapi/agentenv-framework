@@ -12,7 +12,7 @@ import secrets
 import shlex
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
@@ -37,6 +37,7 @@ from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, Gat
 from agent_env.env.gateway.constants import (
     CLOCK_FOLLOWERS_ENV,
     COMPUTERS_ENV,
+    CONSOLE_URLS_ENV,
     CONTROL_TOKEN_CHILDREN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
@@ -48,6 +49,7 @@ from agent_env.env.gateway.constants import (
     tool_name_clashes_text,
 )
 from agent_env.env.envs.service_db import (
+    CONSOLE_SERVICE_NAMES,
     DATABASE_SERVICE_NAME,
     DB_MCP_CONTAINER_PORT,
     DB_MCP_PORT,
@@ -143,6 +145,8 @@ class DeployedGateway:
     mcp_url: str
     db_web_url: str
     db_mcp_url: str | None = None
+    db_web_gateway_url: str | None = None
+    db_mcp_gateway_url: str | None = None
     website_frontend_urls: dict[str, str] | None = None
     mcp_server_name: str | None = None
     # Ids of the EnvStateInstance record(s) this deploy acquired; the caller records them
@@ -205,6 +209,25 @@ class SidecarConfig:
         """The local image tag compose references — the same tag ``load_docker_images``
         restores on the VM (the artifact's agent-env image name)."""
         return self.image_artifact.image_name
+
+
+async def _console_answer(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> int | str:
+    """The status ``url`` answers, or the name of the error when it doesn't answer. A console still booting, or a
+    sandbox tunnel dropping a connection, leaves a timeout, a connection error or a 502-504, so such an answer is asked
+    again, ``_CONSOLE_ATTEMPTS`` times in all."""
+    answer: int | str = "unasked"
+    for attempt in range(_CONSOLE_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_CONSOLE_RETRY_PAUSE_S)
+        try:
+            answer = (await client.get(url, headers=headers)).status_code
+            if answer not in (502, 503, 504):
+                return answer
+        except httpx.TransportError as e:
+            answer = type(e).__name__
+        except httpx.HTTPError as e:
+            return type(e).__name__
+    return answer
 
 
 class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
@@ -547,6 +570,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
+        gateway_env.extend(f"      - {key}={value}" for key, value in consoles_environment(state_provider.console_urls()).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}"
@@ -701,6 +725,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sandbox_id=self._sandbox.sandbox_id, sandbox_type=self._sandbox.type,
             sandbox_ids=self._sandbox_ids(always_name_gateway=topology.names_gateway_on_vm),
             db_mcp_url=deployed.db_mcp_url,
+            db_web_gateway_url=deployed.db_web_gateway_url,
+            db_mcp_gateway_url=deployed.db_mcp_gateway_url,
             environment_card_url=f"{deployed.gateway_url}{WELL_KNOWN_PATH}",
             environment_card=deployed.environment_card,
             environment_card_read_at_utc=deployed.environment_card_read_at_utc,
@@ -1010,6 +1036,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
+        consoles = await self._served_consoles(gateway_url, sidecar_names, control_token)
 
         website_frontend_urls = _frontend_urls(gateway_url, website_configs)
         for svc_name, url in (website_frontend_urls or {}).items():
@@ -1018,6 +1045,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         logger.info(f"Gateway URL: {gateway_url}")
         return DeployedGateway(
             gateway_url=gateway_url, mcp_url=mcp_url, db_web_url=db_web_url, db_mcp_url=db_mcp_url,
+            db_web_gateway_url=consoles.get(PGWEB_SERVICE_NAME), db_mcp_gateway_url=consoles.get(DB_MCP_SERVICE_NAME),
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
             environment_card=card, environment_card_read_at_utc=card_read_at_utc, control_token=control_token,
@@ -1101,6 +1129,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_results: list[tuple[str, "Sandbox"]] = []
             pgweb_sb = None
             db_mcp_sb = None
+            consoles: dict[str, str] = {}
             errors: list[BaseException] = []
             for i, r in enumerate(all_results):
                 if isinstance(r, BaseException):
@@ -1115,6 +1144,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                     external = r
                 else:
                     spec = sidecar_specs[i - len(mcp_coros)]
+                    if r.private_host:
+                        consoles[spec.name] = f"http://{r.private_host}:{spec.port}"
                     if spec.name == PGWEB_SERVICE_NAME:
                         pgweb_sb = r
                         self._pgweb_sandbox = r
@@ -1141,6 +1172,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                                              *(f"{c.name}={sandbox_provider.url_from_sandbox(c.base_url)}" for c in external)]),
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
+                **consoles_environment(consoles),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
                 **control_environment(control_token),
                 **clock_followers_environment(external),
@@ -1170,11 +1202,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
             db_web_url = pgweb_sb.tunnel_urls[DB_WEB_PORT] + "/" if pgweb_sb else None
             db_mcp_url = db_mcp_sb.tunnel_urls[DB_MCP_CONTAINER_PORT] + "/mcp" if db_mcp_sb else None
+            served = await self._served_consoles(gateway_url, consoles, control_token)
             return DeployedGateway(
                 gateway_url=gateway_url,
                 mcp_url=_mcp_url(gateway_url, card),
                 db_web_url=db_web_url,
                 db_mcp_url=db_mcp_url,
+                db_web_gateway_url=served.get(PGWEB_SERVICE_NAME),
+                db_mcp_gateway_url=served.get(DB_MCP_SERVICE_NAME),
                 website_frontend_urls=None,
                 mcp_server_name=mcp_server_name,
                 env_state_instance_ids=[state_instance.instance_id],
@@ -1185,6 +1220,32 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         except Exception:
             await self.close()
             raise
+
+    async def _served_consoles(self, gateway_url: str, consoles: Iterable[str],
+                               control_token: str | None) -> dict[str, str]:
+        """Each of ``consoles`` at the gateway, by key, that the gateway guards and reaches: it refuses a request without
+        its control token, and with the token it gets the console's answer rather than a 5xx. An older gateway image
+        answers 404, and a console the gateway can't reach (a server bound to an address family the private network
+        lacks) leaves it a 502, so the record names neither."""
+        keys = list(consoles)
+        if not keys or not control_token:
+            return {}
+
+        async def served(client: httpx.AsyncClient, key: str) -> bool:
+            url = f"{gateway_url}/svc/{key}/"
+            if (bare := await _console_answer(client, url, {})) != 401:
+                logger.warning(f"the gateway answered {bare}, not 401, at /svc/{key}/: the record names no {key}")
+                return False
+            if not isinstance(answer := await _console_answer(client, url, control_headers(control_token)), int) \
+                    or answer >= 500:
+                logger.warning(f"the gateway answered {answer} with its token at /svc/{key}/: it can't reach {key}, so "
+                               f"the record names none")
+                return False
+            return True
+
+        async with httpx.AsyncClient(timeout=_CONSOLE_PROBE_TIMEOUT_S) as client:
+            found = await asyncio.gather(*(served(client, key) for key in keys))
+        return {key: f"{gateway_url}/svc/{key}{_CONSOLE_PATHS[key]}" for key, ok in zip(keys, found) if ok}
 
     async def _refuse_tool_name_clashes(self, gateway_url: str) -> None:
         """Refuse the deploy when the gateway reports tool names more than one of its sources serves, which leaves it
@@ -1741,6 +1802,8 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
     problems += [f"two of its services would both be named {name!r}" for name, count in services.items() if count > 1]
     problems += [f"environment name {name!r} is one a gateway deploy names its own containers "
                  f"({', '.join(sorted(GATEWAY_SERVICE_NAMES))})" for name in services if name in GATEWAY_SERVICE_NAMES]
+    problems += [f"website name {w.environment_name!r} is the /svc key of a SQL console the gateway serves"
+                 for w in website_configs or [] if w.environment_name in CONSOLE_SERVICE_NAMES]
     return problems
 
 
@@ -1800,6 +1863,10 @@ def _http_probe(port: int, *paths: str) -> str:
     return f"{pick}else exit 1; fi; for u in {urls}; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"
 
 
+# Where each SQL console's users open it under its /svc/<key>/ route: pgweb's UI, db-mcp's MCP endpoint.
+_CONSOLE_PATHS = {PGWEB_SERVICE_NAME: "/", DB_MCP_SERVICE_NAME: "/mcp"}
+
+
 def _network_lines(*networks: str) -> list[str]:
     return ["    networks:", *(f"      - {network}" for network in networks)]
 
@@ -1832,6 +1899,12 @@ def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
     return {COMPUTERS_ENV: names} if names else {}
 
 
+def consoles_environment(consoles: Mapping[str, str]) -> dict[str, str]:
+    """The env's SQL consoles the gateway serves behind its control token, each at its address on the env's network."""
+    value = ",".join(f"{name}={url}" for name, url in consoles.items())
+    return {CONSOLE_URLS_ENV: value} if value else {}
+
+
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:
     """Each synthetic site's page route through the gateway, by its environment name; None with none, as when every
     site is live."""
@@ -1857,6 +1930,10 @@ def _seconds(seconds: float) -> str:
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
 # time, if startup's didn't complete.
 _STATE_READ_TIMEOUT_S = 60.0
+# Asking the gateway for each SQL console at deploy: each request's budget, and how often and how far apart it asks.
+_CONSOLE_PROBE_TIMEOUT_S = 30.0
+_CONSOLE_RETRY_PAUSE_S = 5.0
+_CONSOLE_ATTEMPTS = 4
 
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0
