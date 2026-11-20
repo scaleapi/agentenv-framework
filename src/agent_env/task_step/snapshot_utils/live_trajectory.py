@@ -89,9 +89,11 @@ class LiveTurn:
         poll_interval_seconds: float,
         previous_turn_id: str | None,
         headers: Mapping[str, str],
+        format: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._headers = headers
+        self._format = format
         self._store = store
         self._prefix_key = prefix_key
         self._turn_id = turn_id
@@ -115,7 +117,7 @@ class LiveTurn:
             asyncio.create_task(
                 follow_trajectory(
                     self._endpoint, task_id, sink, poll_interval_seconds=self._poll_interval_seconds, stop=self.stop,
-                    headers=self._headers,
+                    headers=self._headers, format=self._format,
                 )
             )
         )
@@ -135,6 +137,7 @@ async def following_live_trajectory(
     poll_interval_seconds: float,
     headers: Mapping[str, str],
     previous_turn_id: str | None = None,
+    format: str | None = None,
 ) -> AsyncIterator[LiveTurn]:
     """Yield the turn whose task is followed once its message is sent; then ``previous_turn_id``'s
     ``next.json`` names it.
@@ -144,7 +147,7 @@ async def following_live_trajectory(
     end the follower did not read is marked ended in the state the body reported, else ``canceled``
     for a cancelled step or ``failed``, so readers do not wait on it. A follower's own failure is
     logged and never fails the turn."""
-    turn = LiveTurn(endpoint, store, prefix_key, turn_id, poll_interval_seconds, previous_turn_id, headers)
+    turn = LiveTurn(endpoint, store, prefix_key, turn_id, poll_interval_seconds, previous_turn_id, headers, format)
     stopped_as = TrajectoryState.FAILED
 
     try:
@@ -184,9 +187,10 @@ class LiveTurns:
     ``next.json``, and ``end`` marks the last turn sent as the step's last."""
 
     def __init__(self, endpoint: str, store: ObjectStore, prefix_key: str, *, poll_interval_seconds: float,
-                 headers: Mapping[str, str]) -> None:
+                 headers: Mapping[str, str], format: str | None = None) -> None:
         self._endpoint = endpoint
         self._headers = headers
+        self._format = format
         self._store = store
         self._prefix_key = prefix_key
         self._poll_interval_seconds = poll_interval_seconds
@@ -203,6 +207,7 @@ class LiveTurns:
             poll_interval_seconds=self._poll_interval_seconds,
             headers=self._headers,
             previous_turn_id=self._last_sent,
+            format=self._format,
         ) as turn:
             try:
                 yield turn
