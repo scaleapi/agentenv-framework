@@ -87,7 +87,8 @@ class RoleUsage:
         """The turns summed and priced: each count the sum of the turns that reported it, None when none did, never
         0, and the sum's cost by ``price`` from ``prices``, the agent's own figure first when ``reported_first``; each
         turn's tokens are read by its own ``input_includes_cache`` before they're summed, so turns that disagree on it
-        are still charged for their cached input once.
+        are still charged for their cached input once. The table prices the entry only when every turn that reported a
+        token count gave input and output; otherwise its sums can't be charged in full, and it isn't priced short.
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
         (``unreported_calls``, which the entry sums, or a proxy's ``unreported``)."""
@@ -104,8 +105,9 @@ class RoleUsage:
                    or any(usage.provider_details.get("unreported") for usage in reported))
         counts = {name: total(name) for name in _COUNTERS}
         includes = flags.pop() if len(flags) == 1 else None
-        charged = [tokens for usage in reported if (tokens := Tokens.of(usage.to_dict())) is not None]
-        cost = price(reduce(operator.add, charged) if charged else None, total("cost_usd"), model=self.model,
+        charged = [Tokens.of(usage.to_dict()) for usage in counted]
+        tokens = reduce(operator.add, charged) if charged and None not in charged else None
+        cost = price(tokens, total("cost_usd"), model=self.model,
                      prices=prices, on_endpoint=self.on_endpoint, reported_first=reported_first,
                      reported_by=ReportedBy.HARNESS)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,

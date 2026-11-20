@@ -161,3 +161,34 @@ def test_turns_that_disagree_on_whether_input_counts_the_cache_are_each_charged_
     assert (entry["input_tokens"], entry["cache_read_tokens"], entry["input_includes_cache"]) == (120, 160, None)
     assert entry["uncached_input_tokens"] == 40 and "cost_assumed" not in entry
     assert entry["cost_usd"] == pytest.approx((40 * 0.15 + 2 * 0.6 + 160 * 0.075) / 1_000_000)
+
+
+@pytest.mark.parametrize("second, why", [
+    (Usage(output_tokens=20), "no_tokens"),
+    (Usage(input_tokens=20), "no_tokens"),
+    (Usage(total_tokens=20), "no_tokens"),
+], ids=["output-only", "input-only", "total-only"])
+def test_a_turn_without_input_or_output_leaves_the_entry_unpriced_rather_than_priced_short(
+        monkeypatch, local_stores, second, why):
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(prices=PRICES))
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=True))
+    for turn in (Usage(input_tokens=100, output_tokens=10), second):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["cost_usd"], entry["cost_status"], entry["unpriced_reason"]) == (None, "unpriced", why)
+
+
+def test_a_turn_that_reported_no_tokens_beside_priced_ones_leaves_a_partial_lower_bound(monkeypatch, local_stores):
+    monkeypatch.setattr(local_stores, "_model_cfg", ModelConfig(prices=PRICES))
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=True))
+    for turn in (Usage(input_tokens=1_000_000, output_tokens=0), Usage(tool_call_count=2), None):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["cost_status"], entry["partial"], entry["uncached_input_tokens"]) == ("priced", True, 1_000_000)
+    assert entry["cost_usd"] == pytest.approx(0.15)
