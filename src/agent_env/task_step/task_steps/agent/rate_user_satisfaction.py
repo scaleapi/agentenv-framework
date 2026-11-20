@@ -369,6 +369,10 @@ async def _prompt_agent_session(context: TaskStepContext, run_id: str, response:
     if response.error_type == "user_sim_error":
         session.skipped = f"the user sim failed: {(response.error_message or '').removeprefix(SIM_FAILED_PREFIX)}"
         return session
+    if response.error_type == "user_sim_invalid":
+        # The user-sim gate cut the conversation off: the user sim, not the agent, broke it.
+        session.skipped = "the user sim's message still read as the assistant's after its rewrites"
+        return session
     if response.error_type or response.error_message:
         session.skipped = "the agent's turn failed"
         return session

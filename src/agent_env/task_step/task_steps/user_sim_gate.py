@@ -12,6 +12,9 @@ Two checks, either of which can fail a message:
 - ``judge_model``: one model call that reads the last turns and the candidate message and says whether
   the message is written as the user.
 
+With both, a judge that reads the message as the user's clears a hit on a phrase alone (``PHRASE_REASONS``), which
+counts at any length; a hit on a report's shape and length stays a failure.
+
 Opt in with ``user_sim_gate`` on a ``prompt_agent`` step whose user is a user-sim agent-env deployed: a peer
 user-sim, or the built-in one deploy_user_sim_agent deploys, whose rewrite is parsed as its own answer. ``always_on``
 applies it to each of the built-in user-sim's answers. A step type that runs its own conversation loop applies the gate
@@ -46,23 +49,24 @@ _WORK_DONE = re.compile(
     r"rewrote|built|calculated|ran)\b",
     re.I,
 )
-_NOW_LIVE = re.compile(r"\b(?:now live|is now (?:up|live|updated)|has been (?:updated|created|sent|posted))\b", re.I)
+_NOW_LIVE = re.compile(r"\b(?:now live|is now (?:up|live))\b", re.I)
+# A user says these about someone else's work too ("the invoice has been sent to me already"), so they count only on a
+# message long enough to be a report.
 _DELIVERED = re.compile(
     r"\b(?:(?:emails?|messages?|drafts?|replies|invites?|notes?) (?:sent|drafted|posted|scheduled)\b|incorporated\b|"
-    r"(?:the|a|my) (?:cleaner|updated|revised|corrected|final) version\b)",
+    r"(?:the|a|my) (?:cleaner|updated|revised|corrected|final) version\b|has been (?:updated|created|sent|posted))",
     re.I,
 )
+# Phrases the assistant says and a user doesn't, at any length. A user does say "I don't have access to that folder",
+# "Should I send you the spreadsheet?", "I'll pull the numbers tonight", "I can send it to you", "I apologize for the
+# confusion" and "send me the results", so those aren't here.
 _AS_ASSISTANT = re.compile(
     r"\b(?:as an ai|i'?m an? (?:ai|assistant|language model)|my previous (?:answer|response|reply)|"
-    r"i apologi[sz]e for (?:the|my)|let me know if you'?d like me to|"
-    r"would you like me to|want me to (?:draft|send|update|create|go ahead)|"
+    r"i apologi[sz]e for my (?:previous|earlier|last) (?:answer|response|reply|message)|"
+    r"let me know if you'?d like me to|would you like me to|want me to (?:draft|send|update|create|go ahead)|"
     r"standing by|ready when you are|parked until|"
     r"anything else (?:you(?:'d)? (?:want|like) (?:me )?to|to (?:cover|look at|dig into))|"
-    r"what do you want (?:me )?to do next|should i (?:send|draft|go ahead)|"
-    r"i'll (?:draft|fold|pull|search|put together|pick (?:it |this )?up|rerun|re-run)|"
-    r"i can (?:send|draft|search|pull) (?:it|that|them)|"
-    r"i (?:don't|do not) have (?:the )?(?:tools|access)|corrections (?:noted|taken)|"
-    r"(?:send|drop) me (?:whatever|that phrase|the results)|"
+    r"what do you want (?:me )?to do next|corrections (?:noted|taken)|"
     r"how (?:can|may) i (?:help|assist)|i'?m (?:here|ready) to help|what would you like (?:me )?to (?:work on|do) today)\b",
     re.I,
 )
@@ -85,17 +89,24 @@ class PatternLimits:
     WORK_REPORT_MIN_PHRASES: ClassVar[int] = 2
 
 
+TALKS_LIKE_THE_ASSISTANT = "it talks like the assistant (offers to do the work, waits on the user, or speaks as the AI)"
+NOW_LIVE = "it says something is now live"
+# The reasons a phrase gives at any length: a judge that reads the message as the user's clears them. The rest need a
+# report's shape and length, and stay failures whatever the judge says.
+PHRASE_REASONS = frozenset({TALKS_LIKE_THE_ASSISTANT, NOW_LIVE})
+
+
 def pattern_reasons(text: str) -> list[str]:
     """Why ``text`` reads as the assistant's message, one reason per pattern that matched; empty if none."""
     lim = PatternLimits
     reasons = []
     n = len(text)
     if _AS_ASSISTANT.search(text):
-        reasons.append("it talks like the assistant (offers to do the work, waits on the user, or speaks as the AI)")
+        reasons.append(TALKS_LIKE_THE_ASSISTANT)
     if _REPORT_OPENING.search(text) and n > lim.REPORT_OPENING_MIN_CHARS:
         reasons.append("it opens like a report of work done")
     if _NOW_LIVE.search(text):
-        reasons.append("it says something is now live or updated")
+        reasons.append(NOW_LIVE)
     if _DELIVERED.search(text) and n > lim.DELIVERED_MIN_CHARS:
         reasons.append("it reports something delivered or revised")
     formatted = (_TABLE.search(text) or len(_HEADER.findall(text)) >= lim.FORMATTED_MIN_HEADERS
@@ -189,10 +200,24 @@ class UserSimGate:
     RECORDED_REASON_CHARS: ClassVar[int] = 500
 
     def __post_init__(self) -> None:
-        if self.on_fail not in ON_FAIL:
-            raise ValueError(f"user_sim_gate.on_fail must be one of {ON_FAIL}, not {self.on_fail!r}")
-        if self.max_rewrites < 0:
-            raise ValueError("user_sim_gate.max_rewrites must be >= 0")
+        """Refuse a setting of the wrong type or range here, when the task loads, rather than mid-conversation."""
+        def need(ok: bool, name: str, what: str) -> None:
+            if not ok:
+                raise ValueError(f"user_sim_gate.{name} must be {what}, not {getattr(self, name)!r}")
+
+        def whole(v: object) -> bool:  # an int, and not a bool (which is one in Python)
+            return isinstance(v, int) and not isinstance(v, bool)
+
+        need(isinstance(self.patterns, bool), "patterns", "true or false")
+        need(self.judge_model is None or (isinstance(self.judge_model, str) and bool(self.judge_model.strip())),
+             "judge_model", "a model name or null")
+        need(whole(self.max_rewrites) and self.max_rewrites >= 0, "max_rewrites", "a whole number >= 0")
+        need(self.on_fail in ON_FAIL, "on_fail", f"one of {ON_FAIL}")
+        need(whole(self.context_turns) and self.context_turns >= 0, "context_turns", "a whole number >= 0")
+        need(whole(self.judge_min_chars) and self.judge_min_chars >= 0, "judge_min_chars", "a whole number >= 0")
+        need(whole(self.context_chars) and self.context_chars > 0, "context_chars", "a whole number > 0")
+        need(isinstance(self.judge_timeout_seconds, (int, float)) and not isinstance(self.judge_timeout_seconds, bool)
+             and self.judge_timeout_seconds > 0, "judge_timeout_seconds", "a number > 0")
         if not self.patterns and not self.judge_model:
             raise ValueError("user_sim_gate needs patterns, a judge_model, or both")
 
@@ -213,8 +238,9 @@ class UserSimGate:
     async def check(self, candidate: str, history: list[tuple[str, str]], *, call_config=None,
                     judge_unavailable: Optional[str] = None) -> GateVerdict:
         """Check one message. ``history`` is the conversation so far as ``(role, text)``, role user/assistant.
-        A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict stands. So does a
-        judge that couldn't be set up (``judge_unavailable``, the reason), which isn't called."""
+        A judge that reads the message as the user's clears a hit on a phrase alone (``PHRASE_REASONS``); a shape hit
+        stays a failure. A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict
+        stands. So does a judge that couldn't be set up (``judge_unavailable``, the reason), which isn't called."""
         reasons = pattern_reasons(candidate) if self.patterns else []
         verdict = GateVerdict(passed=not reasons, pattern_reasons=reasons)
         if self.judge_model and judge_unavailable is not None:
@@ -234,6 +260,9 @@ class UserSimGate:
             verdict.judge_reason = str(judged.get("reason", ""))[: self.RECORDED_REASON_CHARS]
             if not judged["in_role"] and (reasons or len(candidate) >= self.judge_min_chars):
                 verdict.passed = False
+            elif judged["in_role"] and reasons and set(reasons) <= PHRASE_REASONS:
+                verdict.passed = True  # a phrase alone, which the judge reads as the user's
+                verdict.cleared_by_judge = True
         return verdict
 
     async def _judge(self, candidate: str, history: list[tuple[str, str]], route) -> Optional[dict]:
@@ -261,6 +290,7 @@ class GateVerdict:
     judge_in_role: Optional[bool] = None
     judge_reason: Optional[str] = None
     judge_error: Optional[str] = None
+    cleared_by_judge: Optional[bool] = None  # the judge read a phrase-only hit as the user's
 
     def reasons(self) -> list[str]:
         out = list(self.pattern_reasons)
@@ -334,6 +364,17 @@ async def run_gate(
 
 
 JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
+
+
+def judge_setup_failed(gate: UserSimGate, error: Exception) -> str:
+    """What a step records when the gate's judge can't be set up (``judge_call_config`` raised), so the patterns'
+    verdict stands. With patterns off nothing would check the user sim's messages for the rest of the run, and a
+    setup failure won't recover, so that raises instead."""
+    reason = f"judge setup: {type(error).__name__}: {error}"
+    if not gate.patterns:
+        raise RuntimeError(f"user_sim_gate: {reason}; with patterns off, nothing would check the user sim's "
+                           "messages, so the step fails rather than run unchecked") from error
+    return reason[: gate.RECORDED_ERROR_CHARS]
 
 
 def judge_call_config(gate: UserSimGate, user_overrides: dict):

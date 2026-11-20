@@ -441,7 +441,8 @@ async def test_the_gate_holds_back_a_built_in_users_answer_that_reads_as_the_ass
     verdicts = ctx.metadata["user_sim_gate"]["talk"]
     assert [(v["turn"], v["attempt"], v["passed"]) for v in verdicts] == [(1, 0, False), (1, 1, True), (2, 0, True)]
     first = _reads(ctx)[0]
-    assert first["message"] == _SWAP          # the read keeps what she first answered, for whoever grades her
+    # As in always_on: the read holds what reached the agent, and keeps what she first answered for whoever grades her.
+    assert (first["message"], first["first_message"]) == ("do those numbers hold up?", _SWAP)
     assert [(r["outcome"], r["message"], r["used"]) for r in first["gate_rewrites"]] == [
         ("reply", "do those numbers hold up?", "D1")]
     assert "user_sim_invalid" not in ctx.metadata
@@ -458,6 +459,9 @@ async def test_a_built_in_users_answer_that_still_fails_ends_the_run_and_fails_t
     assert [v["passed"] for v in ctx.metadata["user_sim_gate"]["talk"]] == [False, False, False]
     assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1
     assert len(_reads(ctx)[0]["gate_rewrites"]) == 2
+    # Nothing reached the agent, so the read is a no_reply with no message, as in always_on.
+    read = _reads(ctx)[0]
+    assert (read["outcome"], read["message"], read["first_message"]) == ("no_reply", "", _SWAP)
     # Verifiers skip a response with an error_type, so a cut-off conversation isn't graded as the agent's answer.
     assert ctx.prompt_responses[-1].error_type == "user_sim_invalid"
     assert ctx.prompt_responses[-1].error_message.startswith("user_sim_gate: user-sim message at turn 1")

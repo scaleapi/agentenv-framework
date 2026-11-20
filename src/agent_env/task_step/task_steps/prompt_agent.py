@@ -50,7 +50,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
-from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, run_gate
+from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, judge_setup_failed, run_gate
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
@@ -1279,12 +1279,12 @@ class _UserSide:
         answer shaped as ``ask``'s, up to the gate's limit (``run_gate``)."""
         gate = self._gate
         if self._gate_call_config is None and self._gate_judge_setup_error is None and gate.judge_model:
-            # Judge setup (its key, its endpoint) can fail as the judge call can: like a call, it never takes the
-            # conversation down; the patterns' verdict stands, with the error recorded on it (run_gate).
+            # Judge setup (its key, its endpoint) failing leaves the patterns' verdict standing, with the error
+            # recorded on it (run_gate); with patterns off it fails the step (judge_setup_failed).
             try:
                 self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
             except Exception as e:
-                self._gate_judge_setup_error = f"judge setup: {type(e).__name__}: {e}"[: gate.RECORDED_ERROR_CHARS]
+                self._gate_judge_setup_error = judge_setup_failed(gate, e)
                 logger.warning(f"user-sim gate {self._gate_judge_setup_error}; using patterns only")
         latest = {"answer": answer}
 
@@ -1306,6 +1306,8 @@ class _UserSide:
             return latest["answer"]
         self._context.metadata.setdefault("user_sim_invalid", {})[self._step.id] = {
             "turn": number, "reasons": outcome.reasons()}
+        if self._built_in is not None:
+            self._built_in.withhold()
         if gate.on_fail == "fail":
             self.gate_failure = (f"user-sim message at turn {number} still reads as the assistant's after "
                                  f"{gate.max_rewrites} rewrite(s): {'; '.join(outcome.reasons())[:500]}")
@@ -1439,10 +1441,20 @@ class _BuiltInUserSim:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
         return {"end": "user_done" if outcome == "done" else "user_no_reply"}
 
+    def withhold(self) -> None:
+        """The gate held the read's answer back for good (its rewrites failed too): as in always_on, the read's record
+        becomes a no_reply with no message, keeping ``first_message`` and ``gate_rewrites``."""
+        reads = self._context.metadata.get("user_sim_reads", {}).get(self._step.id) or []
+        if reads:
+            reads[-1].setdefault("first_message", reads[-1].get("message"))
+            reads[-1].update(outcome="no_reply", message="", used=None)
+
     async def rewrite(self, number: int, note: str, ask_user_sim) -> dict:
         """The user's answer again, after the user-sim gate held its message back with ``note``, in the same session;
         shaped as ``ask``'s. It replaces the held answer in the reply count, so ``max_replies`` holds whichever answer is
-        sent. The read's record keeps what the user sim first answered and lists each rewrite under ``gate_rewrites``."""
+        sent. As always_on's does, the read's record holds the answer delivered (``outcome``, ``message``, ``used``,
+        ``schema_errors`` are the latest rewrite's), keeps what the user sim first answered as ``first_message``, and
+        lists each rewrite under ``gate_rewrites``."""
         got = await ask_user_sim(note)
         ans = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
         error = got.get("error")
@@ -1450,7 +1462,9 @@ class _BuiltInUserSim:
         rewrite.update(user_sim_error=error, user_sim_trajectory_url=got.get("trajectory_url"))
         reads = self._context.metadata.get("user_sim_reads", {}).get(self._step.id) or []
         if reads:
+            reads[-1].setdefault("first_message", reads[-1].get("message"))
             reads[-1].setdefault("gate_rewrites", []).append(rewrite)
+            reads[-1].update({k: v for k, v in rewrite.items() if k in ("outcome", "message", "used", "schema_errors")})
         outcome, said = ans.get("outcome"), (ans.get("message") or "").strip()
         if self.history:
             held = self.history[-1]["answer"]

@@ -129,7 +129,7 @@ from agent_env.task_step.task_steps.prompt_agent import (
     fetch_native_trajectory,
     prescribe_formats,
 )
-from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, run_gate
+from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, judge_setup_failed, run_gate
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
@@ -1555,7 +1555,10 @@ class _Run:
                          user_sim_turns=ans.get("turns", len(calls)), shown=ans.get("shown"),
                          past_turn_cap=ans.get("past_turn_cap"), last_read=last,
                          retried=ans.get("retried"), first_answer=ans.get("first_answer"),
-                         **({"user_sim_gate": gate_record} if gate_record else {}))
+                         **({"user_sim_gate": gate_record} if gate_record else {}),
+                         # as prompt_agent's read: what reached the agent is ``message``, what she first wrote this
+                         **({"first_message": gate_record["first_message"]}
+                            if gate_record and "first_message" in gate_record else {}))
         outcome = ans.get("outcome")
         said = (ans.get("message") or "").strip()
         hook = {"hook": HOOK_NAME, "turn": self.wakes, "read_at": _iso(now),
@@ -1601,8 +1604,8 @@ class _Run:
         if self.gate_call_config is None and self.gate_setup_error is None and gate.judge_model:
             try:
                 self.gate_call_config = judge_call_config(gate, self.ctx.metadata.get("user_overrides", {}))
-            except Exception as e:  # as in prompt_agent: the patterns' verdict stands, with the error on it
-                self.gate_setup_error = f"judge setup: {type(e).__name__}: {e}"[: gate.RECORDED_ERROR_CHARS]
+            except Exception as e:  # as in prompt_agent: the patterns' verdict stands; with patterns off, it raises
+                self.gate_setup_error = judge_setup_failed(gate, e)
                 logger.warning(f"always_on: user-sim gate {self.gate_setup_error}; using patterns only")
         latest = {"ans": ans}
         verdicts: list[dict] = []

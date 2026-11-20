@@ -520,6 +520,21 @@ async def test_a_prompt_agent_chat_the_user_sim_broke_is_not_rated(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_prompt_agent_chat_the_user_sim_gate_cut_off_is_not_rated_and_the_agent_isnt_blamed(monkeypatch):
+    from agent_env.task_step.context import PromptResponse
+
+    ctx = await _context(monkeypatch)
+    ctx.metadata.setdefault("a2a_conversations", {})["talk"] = None
+    ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="draft", error_type="user_sim_invalid",
+                                               error_message="user_sim_gate: user-sim message at turn 1 ...",
+                                               step_id="talk"))
+    await _hannah_rater().execute(ctx)
+    rating = ctx.metadata[SATISFACTION_KEY]["talk"]
+    assert rating["skipped"] == "the user sim's message still read as the assistant's after its rewrites"
+    assert rating["score"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_prompt_agent_chat_whose_agent_turn_failed_is_not_rated(monkeypatch):
     Peers(monkeypatch, {AGENT: [("failed", text("it broke"))], USER: []})
     ctx = await _context(monkeypatch)

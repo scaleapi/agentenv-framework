@@ -641,7 +641,9 @@ async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_
 
 
 @pytest.mark.asyncio
-async def test_a_judge_only_gate_whose_setup_fails_sends_the_message_on_with_the_error_recorded(monkeypatch):
+async def test_a_judge_only_gate_whose_setup_fails_fails_the_step_before_any_unchecked_message_reaches_the_agent(
+        monkeypatch):
+    # A setup failure won't recover, and with patterns off nothing else would check the user sim's messages.
     def no_endpoint(model, **kw):
         raise KeyError("no endpoint configured for judge-model")
 
@@ -649,8 +651,7 @@ async def test_a_judge_only_gate_whose_setup_fails_sends_the_message_on_with_the
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter, please")]})
     ctx = _context(user_card=_USER_SIM_CARD)
 
-    await _gated(patterns=False, judge_model="judge-model").execute(ctx)
+    with pytest.raises(RuntimeError, match="judge setup: KeyError.*with patterns off"):
+        await _gated(patterns=False, judge_model="judge-model").execute(ctx)
 
-    (verdict,) = ctx.metadata["user_sim_gate"]["talk"]
-    assert verdict["passed"] is True and verdict["judge_error"].startswith("judge setup: KeyError")
-    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter, please"), "<id3>", "<ctx>")
+    assert not any(r == send(AGENT, text("shorter, please"), "<id3>", "<ctx>") for r in peers.requests(ctx))

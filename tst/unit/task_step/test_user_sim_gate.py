@@ -1,5 +1,7 @@
 """The user-sim gate's own checks: the patterns, the judge's output parsing and the history it is shown."""
 
+import pytest
+
 from agent_env.task_step.task_steps.user_sim_gate import (
     GateVerdict, parse_judge, pattern_reasons, render_history, rewrite_request)
 
@@ -13,6 +15,14 @@ def test_the_patterns_pass_what_users_write():
         "Here's the email my manager sent, pasted so you have it:\n\n> Please hold the order until Friday." + _FILLER,
         "No, go ahead and send it. Use the second draft.",
         "I checked my inbox and there's nothing from them yet.",
+        "I don't have access to that folder.",
+        "Should I send you the spreadsheet?",
+        "I'll pull the numbers from my bank tonight.",
+        "I can send it to you after lunch.",
+        "I apologize for the confusion, I meant March.",
+        "The invoice has been sent to me already.",
+        "My manager said the page has been updated.",
+        "ok, send me the results when you have them",
     ]:
         assert pattern_reasons(message) == [], message
 
@@ -24,7 +34,8 @@ def test_the_patterns_catch_the_assistants_side():
         "Understood. Standing by.": "it talks like the assistant",
         "Want me to draft the reply to them now?": "it talks like the assistant",
         "I'm ready to help! What would you like to work on today?": "it talks like the assistant",
-        "The page is now live, with the corrected totals." : "it says something is now live or updated",
+        "The page is now live, with the corrected totals." : "it says something is now live",
+        "I apologize for my previous answer, here is the corrected one.": "it talks like the assistant",
         "Thanks for those corrections, incorporated. The cleaner version:" + _FILLER: "it reports something delivered",
         "| Item | Was | Is |\n|---|---|---|\n| A | 1 | 2 |\n" + _FILLER * 2: "it is a formatted deliverable",
         "I've reviewed the contract and I've compared it with the invoice." + _FILLER: "it reports checking or building",
@@ -198,3 +209,47 @@ def test_the_judge_calls_through_the_one_model_call_path_on_the_runs_route(monke
 
     assert resolved == [("claude-sonnet-5-5", "secret:k", "https://llm.example/v1", "user_sim_gate")]
     assert sent == [("route", 45, "user_sim_gate")] and judged["in_role"] is True
+
+
+
+def _judged(in_role):
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    class Gate(UserSimGate):
+        async def _judge(self, candidate, history, call_config):
+            return {"in_role": in_role, "reason": "judged"}
+
+    return Gate(judge_model="judge-model")
+
+
+def test_a_judge_reading_it_as_the_user_clears_a_phrase_but_not_a_reports_shape():
+    import asyncio
+
+    phrase = "Understood. Standing by."
+    shape = "Done. Here's what I found when I went through the files." + _FILLER
+    cleared = asyncio.run(_judged(True).check(phrase, []))
+    assert (cleared.passed, cleared.cleared_by_judge) == (True, True) and cleared.pattern_reasons
+    assert asyncio.run(_judged(True).check(shape, [])).passed is False  # shape + length: a failure whatever the judge
+    assert asyncio.run(_judged(False).check(phrase, [])).passed is False
+
+
+
+@pytest.mark.parametrize("settings, field", [
+    ({"max_rewrites": 1.5}, "max_rewrites"), ({"max_rewrites": True}, "max_rewrites"),
+    ({"max_rewrites": -1}, "max_rewrites"), ({"judge_min_chars": None}, "judge_min_chars"),
+    ({"patterns": "false"}, "patterns"), ({"context_turns": "4"}, "context_turns"),
+    ({"context_chars": 0}, "context_chars"), ({"judge_timeout_seconds": 0}, "judge_timeout_seconds"),
+    ({"judge_model": ""}, "judge_model"), ({"on_fail": "skip"}, "on_fail"),
+], ids=lambda v: str(v))
+def test_a_setting_of_the_wrong_type_or_range_is_refused_when_the_task_loads(settings, field):
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    with pytest.raises(ValueError, match=f"user_sim_gate.{field} must be"):
+        UserSimGate.from_dict(settings)
+
+
+def test_good_settings_load_and_round_trip():
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    gate = UserSimGate.from_dict({"patterns": False, "judge_model": "j", "max_rewrites": 0, "judge_timeout_seconds": 30})
+    assert UserSimGate.from_dict(gate.to_dict()) == gate

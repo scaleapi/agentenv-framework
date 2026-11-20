@@ -50,6 +50,7 @@ async def test_an_answer_that_reads_as_the_assistants_is_held_back_and_the_rewri
     gate = read["user_sim_gate"]
     assert [(v["attempt"], v["passed"]) for v in gate["verdicts"]] == [(0, False), (1, True)]
     assert gate["first_message"] == _SWAP and gate["invalid"] is False
+    assert read["first_message"] == _SWAP   # where prompt_agent's read keeps it too
     assert [r["message"] for r in gate["rewrites"]] == ["do those numbers hold up?"]
     assert "user_sim_invalid" not in ctx.metadata
     assert rig.record(ctx)["end_reason"] != "user_sim_invalid"
@@ -103,3 +104,19 @@ async def test_without_the_gate_nothing_is_checked(monkeypatch, tmp_path):
     ctx = await plain.run(plain.step(max_wakes=4))
     assert "user_sim_gate" not in plain.events(ctx, "user_sim_read")[0]
     assert _got(plain, "None of the three reported numbers")   # unchanged without the gate
+
+
+
+@pytest.mark.asyncio
+async def test_a_judge_only_gate_whose_judge_cant_be_set_up_fails_the_step(monkeypatch, tmp_path):
+    # A setup failure won't recover, and with patterns off nothing else would check her answers.
+    def no_endpoint(model, **kw):
+        raise KeyError("no endpoint configured for judge-model")
+
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", no_endpoint)
+    rig = Rig(monkeypatch, tmp_path, agent=_messages_once, answers=[{"outcome": "reply", "message": "looks good"}])
+    await rig.arm()
+
+    with pytest.raises(Exception, match="judge setup: KeyError.*with patterns off"):
+        await rig.run(rig.step(max_wakes=4, user_sim_gate={"patterns": False, "judge_model": "judge-model"}))
+    assert not _got(rig, "looks good")
