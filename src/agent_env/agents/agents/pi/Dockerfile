@@ -1,4 +1,3 @@
-# docker build -t pi-a2a src/agent_env/agents/agents/pi
 # The env's clock: the egress proxy, one static Go binary, and agent-env's libfaketime and its TLS shim, taken from
 # agent-env's sources as clock/ and egress/ (shared_sources.toml) and built for this image's libc (Ubuntu 24.04's, on
 # the image's own base) in stages of their own, so no toolchain is left in the image.
