@@ -348,30 +348,38 @@ _ANNOTATING = {**_CARD, "capabilities": {"extensions": [{**_CARD["capabilities"]
 
 
 @pytest.mark.asyncio
-async def test_annotate_reaches_the_driver_only_when_a_step_asks_for_it(store):
-    computer, plain = _Computer(store), _Computer(store)
-    computer.environment_card = plain.environment_card = _ANNOTATING
-    await _start(annotate={}).execute(_context(computer))
-    await _start().execute(_context(plain))
+async def test_a_recording_draws_its_inputs_unless_its_annotation_settings_turn_it_off(store):
+    on, off = _Computer(store), _Computer(store)
+    on.environment_card = off.environment_card = _ANNOTATING
+    started = (await _start().execute(_context(on))).metadata[RECORDINGS_KEY]["desk"]
+    plain = (await _start("plain", annotation_settings={"is_enabled": False}).execute(_context(off))).metadata[
+        RECORDINGS_KEY]["plain"]
 
-    [(_, annotated)], [(_, unannotated)] = computer.calls, plain.calls
-    assert annotated["annotate"] == {} and "annotate" not in unannotated
+    [(_, annotated)], [(_, unannotated)] = on.calls, off.calls
+    assert annotated["annotate"] == {} and started["annotated"] is True
+    assert "annotate" not in unannotated and plain["annotated"] is False
 
 
 @pytest.mark.asyncio
-async def test_annotating_on_a_driver_whose_card_lists_no_annotate_fails_the_start_best_effort_or_fatally(store):
+async def test_a_driver_that_cant_draw_inputs_is_recorded_plain_with_a_warning_even_when_its_failures_are_fatal(
+        store, caplog):
+    """A computer composed before agent-env drew inputs lists no annotate on its card."""
     computer = _Computer(store)
-    context = await _start(annotate={}).execute(_context(computer))
+    with caplog.at_level("WARNING"):
+        context = await _start(fail_task_on_error=True).execute(_context(computer))
     entry = context.metadata[RECORDINGS_KEY]["desk"]
 
-    assert entry["state"] == "failed" and "can't annotate a recording" in entry["error"] and computer.calls == []
-    with pytest.raises(RuntimeError, match="lists no annotate"):
-        await _start(annotate={}, fail_task_on_error=True).execute(_context(_Computer(store)))
+    [(_, started)] = computer.calls
+    assert entry["state"] == "open" and entry["annotated"] is False and "annotate" not in started
+    assert "can't draw inputs" in caplog.text and "recording it plain" in caplog.text
 
 
-def test_annotate_round_trips_only_when_set_and_is_an_object():
-    annotated = _start(annotate={})
-    assert StartComputerRecordingTaskStep.from_dict(annotated.to_dict()).annotate == {}
-    assert "annotate" not in _start().to_dict()
-    with pytest.raises(ValueError, match="annotate is an object of options"):
-        _start(annotate=True)
+def test_annotation_settings_round_trip_only_when_set_and_take_a_boolean_is_enabled():
+    off = _start(annotation_settings={"is_enabled": False})
+    assert StartComputerRecordingTaskStep.from_dict(off.to_dict()).annotation_settings == {"is_enabled": False}
+    assert not off.annotates and _start().annotates and _start(annotation_settings={}).annotates
+    assert "annotation_settings" not in _start().to_dict()
+    for settings, problem in (({"is_enabled": "no"}, "is true or false"), ({"marks": []}, "takes is_enabled"),
+                              (True, "is an object")):
+        with pytest.raises(ValueError, match=problem):
+            _start(annotation_settings=settings)
