@@ -87,6 +87,7 @@ def test_the_server_start_writes_the_model_endpoint_into_config_toml(codex, monk
     config = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
     assert config == {
         "features": {"multi_agent_v2": True},
+        "tools": {"update_plan": {"enabled": True}},
         "model_provider": "litellm",
         "model_providers": {"litellm": {
             "name": "LiteLLM proxy",
@@ -102,7 +103,7 @@ def test_the_server_start_writes_the_model_endpoint_into_config_toml(codex, monk
     }
 
 
-def test_without_an_endpoint_only_the_features_are_written(codex, monkeypatch):
+def test_without_an_endpoint_no_model_provider_is_written(codex, monkeypatch):
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
 
     async def exercise():
@@ -112,7 +113,7 @@ def test_without_an_endpoint_only_the_features_are_written(codex, monkeypatch):
     asyncio.run(exercise())
 
     config = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
-    assert config == {"features": {"multi_agent_v2": True}}
+    assert config == {"features": {"multi_agent_v2": True}, "tools": {"update_plan": {"enabled": True}}}
 
 
 def test_turns_of_different_roles_share_one_config_and_each_cli_gets_its_own_role(codex, monkeypatch):
