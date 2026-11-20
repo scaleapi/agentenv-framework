@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 // The longest common name X.509 allows (ub-common-name).
@@ -86,7 +85,7 @@ func (l *Leaves) For(host string, sans []string, trusted bool) (*tls.Certificate
 	template := &x509.Certificate{
 		SerialNumber:          serial(),
 		Subject:               pkix.Name{CommonName: truncate(host, commonNameLimit)},
-		NotBefore:             latest(by.cert.NotBefore.Add(LeafInset), LeafFrom),
+		NotBefore:             by.cert.NotBefore.Add(LeafInset),
 		NotAfter:              by.cert.NotAfter.Add(-LeafInset),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
@@ -139,13 +138,6 @@ func mintCA(name string) (signer, error) {
 		return signer{}, err
 	}
 	return signer{cert: cert, key: key}, nil
-}
-
-func latest(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-	return b
 }
 
 func parseSigner(certPEM, keyPEM []byte) (signer, error) {

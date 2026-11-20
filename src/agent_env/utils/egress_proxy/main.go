@@ -71,10 +71,6 @@ const PrivateEnv = "AGENTENV_EGRESS_PRIVATE"
 var (
 	CAFrom  = time.Date(1950, 1, 1, 0, 0, 0, 0, time.UTC)
 	CAUntil = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
-
-	// The earliest a leaf starts, however early its CA does: rustls (webpki, as in the Codex CLI) refuses any
-	// certificate dated before the Unix epoch as badly encoded.
-	LeafFrom = time.Unix(0, 0).UTC()
 )
 
 func main() {
