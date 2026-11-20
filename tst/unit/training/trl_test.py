@@ -23,6 +23,7 @@ from agent_env.training.trl import AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, PANTRY, PANTRY_MCP, REPLIES, TURN, _tool_sessions
+from tst.unit.training._support import revealing
 from tst.unit.training.tools_test import called_by_qwen3, shown_to_qwen3
 
 PLAYED = [ITEMS, ALICE, TURN, REPLIES]
@@ -276,6 +277,39 @@ def test_a_rollout_whose_tools_arent_its_classs_stops_training(served, monkeypat
     with pytest.raises(RuntimeError, match=r"task 'a' offers the tools \['add_item', 'end_turn', 'take_item'\], not "
                                            r"the \['add_item', 'end_turn'\] its toolset's first task does"):
         environment.get_reward()
+
+
+@pytest.mark.parametrize("later, stops", [(["take_item"], False), ([], True)], ids=["same-reveal", "fewer"])
+def test_a_rollout_whose_config_reveals_fewer_tools_than_its_classs_stops_training(served, reveals, later, stops):
+    env = served({"a": revealing(reveals, "take_item", rate=0.1), "b": revealing(reveals, *later, rate=0.5)})
+    environment = env.factory()
+
+    environment.reset(**env.dataset[1])
+    environment.add_item(item="crate")
+    environment.end_turn(response="Added a crate.")
+    if stops:
+        with pytest.raises(RuntimeError, match=r"its toolset's first task does there, so serve them in separate bundles\. "
+                                                r"TRL shows every task"):
+            environment.get_reward()
+    else:
+        assert environment.get_reward() == 1.0
+
+
+def test_a_rollout_revealing_at_its_first_turn_what_its_classs_first_task_reveals_later_stops_training(
+        served, reveals):
+    env = served({"a": [ITEMS, ALICE, TURN, {**reveals("take_item"), "depends_on": ["turn"]},
+                        {**AGAIN, "depends_on": ["cfg"]}, REPLIES],
+                  "b": [ITEMS, ALICE, reveals("take_item"), {**TURN, "depends_on": ["cfg"]}, AGAIN, REPLIES]})
+    environment = env.factory()
+
+    environment.reset(**env.dataset[1])
+    with pytest.raises(RuntimeError) as stopped:
+        environment.get_reward()
+
+    assert str(stopped.value) == (
+        "task 'b' offers the tools ['add_item', 'end_turn', 'take_item'], not the ['add_item', 'end_turn'] its "
+        "toolset's first task does. TRL shows every task of a toolset the tools found by playing its first task, so "
+        "this toolset misses what tells its tasks apart")
 
 
 class _Slow(TaskStep):

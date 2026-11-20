@@ -16,7 +16,17 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.skyrl.env runs in SkyRL's trainer: install 'agentenv-framework[skyrl]' into "
                       "SkyRL's environment") from exc
 
-from agent_env.training._openenv import CLOSE_SECONDS, GRACE_SECONDS, Rollout, Session, Shared, on_session_loop, token_in
+from agent_env.training._openenv import (
+    CLOSE_SECONDS,
+    FIRST_TURN_TOOLS,
+    GRACE_SECONDS,
+    Rollout,
+    Session,
+    Shared,
+    exactly,
+    on_session_loop,
+    token_in,
+)
 from agent_env.training.skyrl.calls import Call, Unparsed, parse
 
 logger = logging.getLogger(__name__)
@@ -37,7 +47,8 @@ class AgentEnvTextEnv(BaseTextEnv):
             + 2 * GRACE_SECONDS + CLOSE_SECONDS
         self._session = _Session(Shared(server["url"], frozenset(self._tools), server["tool_timeout"],
                                         server["reset_timeout"], patience=server["reset_timeout"],
-                                        waits_for_server=True, token=token_in(server.get("token_var"))))
+                                        waits_for_server=True, token=token_in(server.get("token_var")),
+                                        exactly=exactly(self._episode.get(FIRST_TURN_TOOLS))))
         self._scores: dict[str, float] = {}
         self._run = self._unparsed = 0
         self._failed = False
@@ -90,8 +101,8 @@ class AgentEnvTextEnv(BaseTextEnv):
         if rollout.failure is not None:
             if rollout.misgrouped:
                 self.close()
-                raise ValueError(f"{self._task()}: {rollout.failure}. Its row lists the tools of its toolset's first "
-                                 "task, so a task must offer no tool that one doesn't")
+                raise ValueError(f"{self._task()}: {rollout.failure}. Its row lists the tools found by playing its "
+                                 "toolset's first task, so its toolset misses what tells its tasks apart")
             raise _Failed(rollout.failure)
         if not rollout.done:
             return BaseTextEnvStepOutput(observations=answers, reward=0.0, done=False, metadata={})

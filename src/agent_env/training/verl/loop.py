@@ -23,7 +23,7 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.verl.loop runs in verl's agent loop workers: install "
                       "'agentenv-framework[verl]' into verl's environment") from exc
 
-from agent_env.training._openenv import Rollout, Session, Shared, attempt_numbers, token_in
+from agent_env.training._openenv import FIRST_TURN_TOOLS, Rollout, Session, Shared, attempt_numbers, exactly, token_in
 
 logger = logging.getLogger(__name__)
 #: The tools whose answers verl was seen to cut, each warned of once a process.
@@ -82,7 +82,8 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         row = self._row = kwargs["extra_info"]
         schemas = json.loads(row["tools"])
         shared = Shared(self._url, frozenset(schema["function"]["name"] for schema in schemas), self._tool_timeout,
-                        self._reset_timeout, patience=self._reset_timeout, waits_for_server=True, token=self._token)
+                        self._reset_timeout, patience=self._reset_timeout, waits_for_server=True, token=self._token,
+                        exactly=exactly(row.get(FIRST_TURN_TOOLS)))
         for attempt in attempt_numbers(self._attempts, self._reset_timeout):
             session = _Session(shared)
             try:

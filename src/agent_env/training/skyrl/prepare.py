@@ -13,7 +13,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from transformers import AutoTokenizer
 
-from agent_env.training._openenv import function_tool, key, longest_prompt, messages, tasks_and_tools, token_in
+from agent_env.training._openenv import (
+    FIRST_TURN_TOOLS,
+    function_tool,
+    key,
+    longest_prompt,
+    messages,
+    tasks_and_tools,
+    token_in,
+)
 from agent_env.training.skyrl.calls import FORMATS
 
 #: The ``env_class`` every row plays under, and the id the env is registered at.
@@ -24,7 +32,7 @@ ROW = pa.schema([
     ("env_class", pa.string()),
     ("data_source", pa.string()),
     ("episode", pa.struct([("split", pa.string()), ("index", pa.int64()), ("task_id", pa.string()),
-                           ("tools", pa.string())])),
+                           ("tools", pa.string()), (FIRST_TURN_TOOLS, pa.string())])),
     ("server", pa.struct([("url", pa.string()), ("tool_timeout", pa.float64()), ("reset_timeout", pa.float64()),
                           ("attempts", pa.int64()), ("tool_format", pa.string()), ("token_var", pa.string())])),
 ])
@@ -52,8 +60,8 @@ def write_dataset(url: str, out: str | Path, *, tokenizer: str, tool_format: str
     if tool_format not in FORMATS:
         raise ValueError(f"tool_format must be one of {', '.join(FORMATS)}, not {tool_format!r}")
     url = url.rstrip("/")
-    env_name, tasks, probed = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
-                                              timeout=reset_timeout, token=token_in(token_var))
+    env_name, tasks, probed, firsts = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app "
+                                                      "first", timeout=reset_timeout, token=token_in(token_var))
     template = AutoTokenizer.from_pretrained(tokenizer)
     kwargs = chat_template_kwargs or {}
     tools = {each: [function_tool(tool) for tool in found] for each, found in probed.items()}
@@ -64,7 +72,7 @@ def write_dataset(url: str, out: str | Path, *, tokenizer: str, tool_format: str
         "env_class": AGENT,
         "data_source": f"{AGENT}/{env_name}",
         "episode": {"split": split, "index": task["index"], "task_id": task["id"],
-                    "tools": json.dumps(tools[key(task)])},
+                    "tools": json.dumps(tools[key(task)]), FIRST_TURN_TOOLS: json.dumps(firsts[key(task)]) if key(task) in firsts else None},
         "server": server,
     } for task in described] for split, described in tasks.items()}
     longest = _longest(rows, template, max_prompt_length, kwargs)

@@ -119,6 +119,21 @@ def test_a_rollout_the_env_fails_every_time_raises_so_verl_leaves_it_out(serve, 
     broken.stop()
 
 
+def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_tools_is_refused_and_a_match_plays(
+        serve, tmp_path, tokenizer):
+    server = serve({"a": PLAYED})
+    row = _row(write_dataset(server.url, tmp_path))
+    row["extra_info"]["first_turn_tools"] = json.dumps(["add_item", "end_turn", "take_item"])
+
+    with pytest.raises(verl_loop.RolloutFailed, match="its toolset's first task does there, so serve them in separate bundles"):
+        asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, attempts=1))
+    row["extra_info"]["first_turn_tools"] = json.dumps(["add_item", "end_turn"])
+    output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, attempts=1))
+    server.stop()
+
+    assert output.reward_score == 1.0
+
+
 def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tokenizer, monkeypatch):
     server = serve({"a": PLAYED})
     row = _row(write_dataset(server.url, tmp_path))

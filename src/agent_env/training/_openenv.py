@@ -28,6 +28,7 @@ from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS
 FAILED = "The environment failed to answer, so this episode won't be scored."
 ENDED = "The episode has ended."
 END_TURN = END_TURN_TOOL.name
+FIRST_TURN_TOOLS = "first_turn_tools"
 CONNECT_SECONDS = 60.0
 CLOSE_SECONDS = 300.0
 #: How much longer than a call's deadline the client waits for the server to end the call, before dropping the session.
@@ -64,8 +65,9 @@ class NamedToolset:
 class Shared:
     """What a session needs of its server: where it is, the tools the model is shown, which an episode's first turn
     must offer no more than, the deadlines, how long to wait for room on the server, whether to wait for a server that
-    refuses connections, as one restarting does, as long as a reset may take, and the token it asks for. The key makes
-    it equal to its pickled copies only."""
+    refuses connections, as one restarting does, as long as a reset may take, the token it asks for, and for a toolset
+    whose tasks apply server config, the tools its probed task offered at its first turn, which an episode's first turn
+    must offer exactly. The key makes it equal to its pickled copies only."""
 
     url: str
     offered: frozenset[str]
@@ -74,6 +76,7 @@ class Shared:
     patience: float = REOPEN_PATIENCE
     waits_for_server: bool = False
     token: str | None = field(default=None, repr=False)
+    exactly: frozenset[str] | None = None
     key: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -90,8 +93,8 @@ class AtCapacity(RuntimeError):
 
 
 class Misgrouped(Failed):
-    """An episode offering a tool the model isn't shown: a toolset that misses what tells tasks apart, which no rollout
-    fixes."""
+    """An episode offering a tool the model isn't shown, or with server config offering other first-turn tools than its
+    toolset's probed task: a toolset that misses what tells tasks apart, which no rollout fixes."""
 
 
 @dataclass
@@ -156,6 +159,10 @@ class Session:
         if not (offered := frozenset(tool["name"] for tool in listed.observation["tools"])) <= self._shared.offered:
             raise Misgrouped(f"task {played!r} offers the tools {sorted(offered)}, not the "
                              f"{sorted(self._shared.offered)} {self.offered_by}")
+        if (exactly := self._shared.exactly) is not None and offered != exactly:
+            raise Misgrouped(f"task {played!r} offers the tools {sorted(offered)} at its first turn, not the "
+                             f"{sorted(exactly)} its toolset's first task does there, so serve them in separate "
+                             "bundles")
 
     async def _step(self, name: str, arguments: dict[str, Any]) -> str:
         async with self._lock:
@@ -391,16 +398,31 @@ def read_tasks(url: str, *, local: str, token: str | None = None) -> tuple[str, 
 
 
 def tasks_and_tools(url: str, *, local: str, timeout: float, token: str | None = None
-                    ) -> tuple[str, dict[str, list[dict[str, Any]]], dict[str, tuple[dict[str, Any], ...]]]:
+                    ) -> tuple[str, dict[str, list[dict[str, Any]]], dict[str, tuple[dict[str, Any], ...]],
+                               dict[str, list[str]]]:
     """What a writer of a split's rows reads: the server's env name, each split's tasks, refusing a split whose name
-    can't name a data file, and every tool each toolset's turns offer, by the toolset's key, found by playing its
-    first task through (``probe``), so reading deploys those."""
+    can't name a data file, every tool each toolset's turns offer, by the toolset's key, found by playing its first
+    task through (``probe``), so reading deploys those, and for each toolset whose tasks apply server config, the
+    tools that task offered at its first turn, which a row carries as ``FIRST_TURN_TOOLS``."""
     name, tasks = read_tasks(url, local=local, token=token)
     if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
         raise ValueError(f"the server's splits {unfit} can't name a data file: a split's name must be letters, "
                          "digits, '.', '_' and '-', not starting with '.'")
-    return name, tasks, {each: asyncio.run(probe(url, toolset, timeout, token=token))[1]
-                         for each, toolset in toolsets(name, tasks).items()}
+    probed = {each: asyncio.run(probe(url, toolset, timeout, token=token))
+              for each, toolset in toolsets(name, tasks).items()}
+    return (name, tasks, {each: tools for each, (_, tools) in probed.items()},
+            {each: sorted(first) for each, (first, _) in probed.items() if applies_config(each)})
+
+
+def applies_config(each: str) -> bool:
+    toolset: Toolset = json.loads(each)
+    return toolset.get("config", False)
+
+
+def exactly(names: list[str] | str | None) -> frozenset[str] | None:
+    if isinstance(names, str):
+        names = json.loads(names)
+    return None if names is None else frozenset(names)
 
 
 def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, NamedToolset]:

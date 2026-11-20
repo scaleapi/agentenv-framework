@@ -153,13 +153,15 @@ share.
 Shared:
 - `_openenv.py`: the session on a server `openenv/` makes that each helper plays an episode through (`Session`: a
   background start, tool calls, the turns left open ended until scored), with the Task API reads, the per-toolset probe,
-  `tasks_and_tools` (what the row writers read: the tasks, the split names checked, each toolset's tools) and an
-  in-process `Server`.
+  `tasks_and_tools` (what the row writers read: the tasks, the split names checked, each toolset's tools, and for a
+  toolset whose tasks apply server config the probed task's first-turn tools, which rows carry as `first_turn_tools`
+  and an episode's first turn must then offer exactly) and an in-process `Server`.
 - `_tools.py`: turns an env's tools into typed, documented Python methods from their JSON Schema, as transformers'
   `get_json_schema` reads them.
 - `_chat.py`, the rows and episode the Miles and slime helpers share:
   - `write_rows` and its `command` write a server's tasks as `<split>.jsonl` rows of chat `messages` and `metadata`
-    (the episode's split, index, task id and tools, and the server it plays on with its deadlines and turn cap).
+    (the episode's split, index, task id and tools, `first_turn_tools` when its task applies server config, and the
+    server it plays on with its deadlines and turn cap).
   - `play` plays a row's episode, the model chatting at a trainer's OpenAI chat endpoint that records its turns, with
     the row's tools. It answers a call whose arguments aren't a JSON object as the model's error, and returns the reward,
     or flags an episode the env or the session failed, whose model missed the row's `model_timeout` or that ended
@@ -180,14 +182,14 @@ Per trainer:
   - `python -m agent_env.training.nemo_gym SOURCE ROOT` writes a bundle's NeMo Gym resources server into a Gym root,
     `NEMO_GYM_EXTRA_ROOTS`'s or a Gym checkout's: `app.py`; a `pyproject.toml`, since uv applies the nearest one's
     `[tool.uv]` and a checkout's `exclude-dependencies` would drop `cryptography`; a config with `simple_agent` and the
-    `legacy_agent` environment server; and `data/<split>.jsonl` rows with each task's tools.
+    `legacy_agent` environment server; and `data/<split>.jsonl` rows with each task's tools (and `first_turn_tools` when it applies server config).
   - `server.AgentEnvResourcesServer` is that server, run in the venv Gym builds: a row's seed starts its episode, a
     catch-all route calls its tools, and `verify` ends the turns left open with the model's last reply and returns the
     reward, masking a rollout the environment failed. With `reward_components` it also returns each score by step id,
     their sum the reward, for NeMo RL's GDPO.
 - `verl/` (`verl` extra, installed into verl's own environment):
   - `python -m agent_env.training.verl URL OUT` writes a server's tasks as verl's `<split>.parquet` rows (the task's
-    prompt, `agent_name: agentenv`, the row's tools in `extra_info`) and `agent_loop.yaml`. It reads a server that asks
+    prompt, `agent_name: agentenv`, the row's tools and `first_turn_tools`, null without server config, in `extra_info`) and `agent_loop.yaml`. It reads a server that asks
     for a token with the one `--token-var` names, and with `--tokenizer` counts each prompt with its tools as verl
     renders it (`--chat-template-kwargs`), refusing rows over `--max-prompt-length` before writing.
   - `loop.AgentEnvAgentLoop` is verl's `ToolAgentLoop` with the row's tools: each call a call on the row's episode, the
@@ -201,7 +203,8 @@ Per trainer:
     `max_tool_response_length`.
 - `skyrl/` (`skyrl` extra, installed into SkyRL's own environment):
   - `python -m agent_env.training.skyrl URL OUT --tokenizer MODEL` writes a server's tasks as SkyRL's `<split>.parquet`
-    rows (`env_class: agentenv`, the episode's split, index, task id and tools, the server's settings). Each row has its
+    rows (`env_class: agentenv`, the episode's split, index, task id, tools and `first_turn_tools` (null without
+    server config), the server's settings). Each row has its
     tools rendered into its system prompt by the model's chat template, checked to render as `tools=` would, since
     SkyRL's generator passes the template no tools; rows over `--max-prompt-length`, counted as SkyRL's filter and
     generator count them, are refused.

@@ -70,6 +70,8 @@ def test_end_turn_answers_with_the_next_turns_prompt_and_a_turn_left_open_ends_e
     ({"a": PLAYED}, {"task_id": "b"}, "the episode plays task 'a', not the row's 'b'"),
     ({"a": PLAYED}, {"tools": [FUNCTION_END_TURN]},
      "task 'a' offers the tools ['add_item', 'end_turn'], not the ['end_turn'] the row shows the model"),
+    ({"a": PLAYED}, {"first_turn_tools": ["add_item", "end_turn", "take_item"]},
+     "at its first turn, not the ['add_item', 'end_turn', 'take_item'] its toolset's first task does"),
 ])
 def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(serve, tasks, row, why):
     server = serve(tasks)
@@ -264,9 +266,9 @@ def _app(**config):
     ).setup_webserver()
 
 
-def _row(task_id="a", tools=(ADD_ITEM, FUNCTION_END_TURN)):
+def _row(task_id="a", tools=(ADD_ITEM, FUNCTION_END_TURN), **extra):
     return {"responses_create_params": {"input": [{"role": "user", "content": "Add a crate."}], "tools": list(tools)},
-            "split": "all", "index": 0, "task_id": task_id}
+            "split": "all", "index": 0, "task_id": task_id, **extra}
 
 
 def _verify(client, row, reply):
