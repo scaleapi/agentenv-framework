@@ -770,7 +770,8 @@ class MyDriver(ComputerDriverEnvironment):
   segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
 - **Annotations.** `start` with `annotate`, an object of options (`{}` for none; the card lists those a
   driver takes under its params' `annotate.options`), draws each input over the frames captured while it
-  shows, in the colour of the role that sent it (the agent's first): a ring where a click landed, round a
+  shows, in the colour of the role that sent it (the agent's always the same; another role's picked by its
+  name, so it's the same on every recording unless a role that acted earlier there has it): a ring where a click landed, round a
   hollow dot that leaves the pointer's tip in sight (a square for the right button, a ring for each click
   of a double or triple), a trail for a drag, an
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and

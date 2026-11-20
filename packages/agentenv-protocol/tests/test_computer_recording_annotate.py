@@ -38,6 +38,7 @@ from agentenv_protocol.computer.annotate import (  # noqa: E402
     PointerMove,
     draw,
     input_marks,
+    role_colour,
     tool_mark,
 )
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
@@ -184,7 +185,28 @@ async def test_each_role_draws_in_its_own_colour():
     sent, _manifest, frames = await _clicked(Recorded(), {"annotate": {}}, meta={ROLE_META_KEY: "user"})
 
     _before, after = _split(frames, sent)
-    assert all(_marked(image, CLICK, COLOURS[1]) > 20 and not _marked(image, CLICK, COLOURS[0]) for image in after)
+    assert all(_marked(image, CLICK, role_colour("user")) > 20 and not _marked(image, CLICK, COLOURS[0])
+               for image in after)
+
+
+def test_a_role_has_the_same_colour_on_every_recording_whatever_acted_first():
+    first, second = Annotations(), Annotations()
+    for recording, roles in ((first, ("user", "executor")), (second, ("executor", "user"))):
+        for role in roles:
+            recording.add([tool_mark("click", {}, role=role, at=T0)])
+
+    assert first.colours == second.colours
+    assert first.colours["default"] == COLOURS[0] and first.colours["user"] == role_colour("user")
+
+
+def test_two_roles_whose_colours_are_alike_draw_in_different_ones_on_one_recording():
+    rivals = [role for role in (f"role{n}" for n in range(100)) if role_colour(role) == role_colour("user")]
+    annotations = Annotations()
+    for role in ("user", rivals[0]):
+        annotations.add([tool_mark("click", {}, role=role, at=T0)])
+
+    assert annotations.colours["user"] == role_colour("user")
+    assert annotations.colours[rivals[0]] not in (role_colour("user"), COLOURS[0])
 
 
 @pytest.mark.asyncio
@@ -254,9 +276,9 @@ def test_a_mark_shows_from_its_input_until_it_ends_and_is_then_forgotten():
     annotations = Annotations()
     annotations.add(input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100)))
 
-    assert annotations.showing(T0 - timedelta(milliseconds=10)) == []
-    assert len(annotations.showing(T0 + timedelta(milliseconds=500))) == 1
-    assert annotations.showing(T0 + timedelta(seconds=1)) == [] and annotations.marks == []
+    assert annotations.next_frame(T0 - timedelta(milliseconds=10)) == []
+    assert len(annotations.next_frame(T0 + timedelta(milliseconds=500))) == 1
+    assert annotations.next_frame(T0 + timedelta(seconds=1)) == [] and annotations.marks == []
 
 
 def test_a_mark_lands_at_its_point_on_a_frame_of_any_size():
@@ -266,7 +288,7 @@ def test_a_mark_lands_at_its_point_on_a_frame_of_any_size():
     at = T0 + timedelta(milliseconds=400)
 
     for size in ((1000, 500), (400, 200), (2000, 1000)):
-        image = draw(PILImage.new("RGB", size, (255, 255, 255)), annotations.showing(at))
+        image = draw(PILImage.new("RGB", size, (255, 255, 255)), annotations.next_frame(at))
         cx, cy = size[0] // 2, size[1] // 2
         reach = round(STYLE.dot * max(size) / UNIT_EDGE) + 3  # the click's hollow dot, around its point
         assert any(image.getpixel((cx + dx, cy + dy)) == COLOURS[0]
@@ -280,10 +302,10 @@ def test_a_mark_no_frame_caught_while_it_lasted_shows_fully_on_the_first_frame_a
     [click] = input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100))
     annotations.add([click])
 
-    [(mark, _colour, age)] = annotations.showing(T0 + timedelta(seconds=3))
+    [(mark, _colour, age)] = annotations.next_frame(T0 + timedelta(seconds=3))
     span = (click.until - click.at).total_seconds()
     assert mark is click and age == pytest.approx(span - FADE_S)
-    assert annotations.showing(T0 + timedelta(seconds=4)) == [] and annotations.marks == []
+    assert annotations.next_frame(T0 + timedelta(seconds=4)) == [] and annotations.marks == []
 
 
 def test_marks_no_frame_draws_are_kept_only_so_long():
@@ -327,11 +349,11 @@ def test_chips_past_the_most_a_frame_shows_wait_for_a_later_frame_rather_than_go
     for n in range(6):
         annotations.add([tool_mark(f"tool{n}", {}, role=None, at=T0 + timedelta(milliseconds=n))])
 
-    first = [mark.label for mark, _colour, _age in annotations.showing(T0 + timedelta(milliseconds=100))]
-    later = [mark.label for mark, _colour, _age in annotations.showing(T0 + timedelta(seconds=3))]
+    first = [mark.label for mark, _colour, _age in annotations.next_frame(T0 + timedelta(milliseconds=100))]
+    later = [mark.label for mark, _colour, _age in annotations.next_frame(T0 + timedelta(seconds=3))]
 
     assert first == ["tool2", "tool3", "tool4", "tool5"] and later == ["tool0", "tool1"]
-    assert annotations.showing(T0 + timedelta(seconds=4)) == [] and annotations.marks == []
+    assert annotations.next_frame(T0 + timedelta(seconds=4)) == [] and annotations.marks == []
 
 
 @pytest.mark.asyncio
@@ -393,7 +415,7 @@ def test_the_pointer_follows_the_last_input_before_each_frame_from_the_first_inp
 
     def pointer(seconds):
         return [(move.was, move.path[-1]) for move, _colour, _age in
-                annotations.showing(T0 + timedelta(seconds=seconds)) if isinstance(move, PointerMove)]
+                annotations.next_frame(T0 + timedelta(seconds=seconds)) if isinstance(move, PointerMove)]
 
     assert pointer(-1) == []
     assert pointer(0.5) == [((0.1, 0.1), (0.1, 0.1))]
@@ -407,7 +429,7 @@ def test_each_role_and_pointer_has_a_pointer_the_last_mover_on_top_each_named_wh
 
     def pointers(seconds):
         return [(move.role, move.pointer, move.path[-1], move.faded, move.label) for move, _colour, _age in
-                annotations.showing(T0 + timedelta(seconds=seconds)) if isinstance(move, PointerMove)]
+                annotations.next_frame(T0 + timedelta(seconds=seconds)) if isinstance(move, PointerMove)]
 
     assert pointers(0.5) == [("default", "default", (0.1, 0.1), False, "")]
     annotations.add(input_marks("click", (50, 50, "left", 1, []), role="user", at=T0 + timedelta(seconds=1),

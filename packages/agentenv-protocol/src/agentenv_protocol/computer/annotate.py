@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import itertools
 import math
-from collections.abc import Mapping, Sequence
+import zlib
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional, Union
@@ -25,8 +27,9 @@ from .errors import InvalidArgument
 DEFAULT_ROLE = "default"
 #: The pointer an input acts through when it names none: the computer's own, the only one the SDK drives yet.
 DEFAULT_POINTER = "default"
-#: Each role's colour: the agent's first, then each other role's in the order it first acts on the recording.
-COLOURS = ((255, 138, 0), (0, 184, 148), (175, 82, 222), (255, 59, 105), (52, 120, 246), (250, 204, 21))
+#: The roles' colours: the agent's the first; another role's one of the rest, picked by its name so it is the same on
+#: every recording (``role_colour``), unless a role that acted earlier on the recording has it.
+COLOURS =((255, 138, 0), (0, 184, 148), (175, 82, 222), (255, 59, 105), (52, 120, 246), (250, 204, 21))
 #: How long a mark shows from its input, in seconds; a drag's, after its moves. A mark's kind is its operation's name,
 #: or chip for one drawn as a caption.
 SHOW_S = {"click": 0.8, "pointer_down": 0.8, "pointer_up": 0.8, "pointer_move": 0.5, "scroll": 0.9, "drag": 0.8,
@@ -137,18 +140,25 @@ class Annotations:
     left it: the one that moved last at full strength, the others fainter, each named once there are several."""
 
     def __init__(self, pointer: bool = False) -> None:
-        self.marks: list[Mark] = []
-        self.drawn: set[int] = set()
+        self._kept: dict[int, Mark] = {}  # each mark by the number it was added as, oldest first
+        self._added = itertools.count()
+        self._drawn: set[int] = set()  # the numbers of the kept marks a frame has drawn
         self.colours: dict[str, tuple[int, int, int]] = {DEFAULT_ROLE: COLOURS[0]}
         self.pointer = pointer
         self.moves: dict[tuple[str, str], list[PointerMove]] = {}  # each role's and pointer's, oldest first
 
+    @property
+    def marks(self) -> list[Mark]:
+        """The marks kept, oldest first."""
+        return list(self._kept.values())
+
     def add(self, marks: Sequence[Mark]) -> None:
         for mark in marks:
-            self.colours.setdefault(mark.role, COLOURS[len(self.colours) % len(COLOURS)])
+            if mark.role not in self.colours:
+                self.colours[mark.role] = _free_colour(mark.role, set(self.colours.values()))
             stale = mark.at - timedelta(seconds=KEEP_S)
-            self._keep([kept for kept in self.marks if kept.until > stale])
-            self.marks.append(mark)
+            self._keep(lambda _number, kept: kept.until > stale)
+            self._kept[next(self._added)] = mark
             if self.pointer and mark.kind in POINTED:
                 moves = self.moves.setdefault((mark.role, mark.pointer), [])
                 path = mark.points if mark.kind == "drag" else mark.points[-1:]
@@ -170,30 +180,52 @@ class Annotations:
                                      label=_pointer_label(move) if several else "") for move in current]
         return [(move, self.colours[move.role], (at - move.at).total_seconds()) for move in shown]
 
-    def showing(self, at: datetime) -> list[Shown]:
-        """The marks a frame captured ``at`` shows, each with its colour and the age, in seconds, it is drawn at: a
-        mark over by then that no frame has drawn yet is drawn once, at the age it is last fully shown. A stream's
-        frames come in the order they were captured, so a mark that is over and drawn is over for every later one."""
+    def next_frame(self, at: datetime) -> list[Shown]:
+        """What the next frame, captured ``at``, draws, each mark with its colour and the age, in seconds, it is drawn
+        at, then the pointers; and notes it drawn. Called once per frame, in the order the frames were captured: a mark
+        over by then that no frame has drawn yet is drawn once, at the age it is last fully shown, and a mark that is
+        over and drawn, or a pointer's move another has followed, isn't drawn on any later frame."""
         due = []
-        for mark in self.marks:
+        for number, mark in self._kept.items():
             if mark.at > at:
                 continue
             age = (at - mark.at).total_seconds()
             if at >= mark.until:
-                if id(mark) in self.drawn:
+                if number in self._drawn:
                     continue
                 age = max(0.0, (mark.until - mark.at).total_seconds() - FADE_S)
-            due.append((mark, self.colours[mark.role], age))
-        chips = [mark for mark, _colour, _age in due if mark.kind == "chip"]
-        waiting = {id(mark) for mark in chips[:-MOST_CHIPS]}  # older chips than a frame shows wait for a later one
-        shown = [entry for entry in due if id(entry[0]) not in waiting]
-        self.drawn |= {id(mark) for mark, _colour, _age in shown}
-        self._keep([mark for mark in self.marks if mark.until > at or id(mark) not in self.drawn])
-        return shown + (self._pointers(at) if self.pointer else [])
+            due.append((number, (mark, self.colours[mark.role], age)))
+        chips = [number for number, (mark, _colour, _age) in due if mark.kind == "chip"]
+        waiting = set(chips[:-MOST_CHIPS])  # older chips than a frame shows wait for a later one
+        shown = [(number, entry) for number, entry in due if number not in waiting]
+        self._drawn |= {number for number, _entry in shown}
+        self._keep(lambda number, mark: mark.until > at or number not in self._drawn)
+        return [entry for _number, entry in shown] + (self._pointers(at) if self.pointer else [])
 
-    def _keep(self, marks: list[Mark]) -> None:
-        self.marks = marks
-        self.drawn &= {id(mark) for mark in marks}
+    def _keep(self, keeps: Callable[[int, Mark], bool]) -> None:
+        """Keep only the marks ``keeps`` says to, by their number and the mark."""
+        self._kept = {number: mark for number, mark in self._kept.items() if keeps(number, mark)}
+        self._drawn &= self._kept.keys()
+
+
+def role_colour(role: str) -> tuple[int, int, int]:
+    """The colour ``role`` draws in on every recording no other role took it on first: the agent's the first of
+    COLOURS, another role's one of the rest, picked by its name."""
+    if role == DEFAULT_ROLE:
+        return COLOURS[0]
+    return COLOURS[1 + zlib.crc32(role.encode()) % (len(COLOURS) - 1)]
+
+
+def _free_colour(role: str, taken: set[tuple[int, int, int]]) -> tuple[int, int, int]:
+    """``role``'s colour on a recording whose roles have ``taken`` theirs: its own, else the next of the rest none has,
+    else its own again once every one is taken."""
+    own = role_colour(role)
+    if own not in taken:
+        return own
+    rest = COLOURS[1:]
+    start = rest.index(own)
+    return next((colour for colour in (rest[(start + step) % len(rest)] for step in range(1, len(rest)))
+                 if colour not in taken), own)
 
 
 def input_marks(operation: str, args: tuple, *, role: Optional[str], at: datetime, size: tuple[int, int],

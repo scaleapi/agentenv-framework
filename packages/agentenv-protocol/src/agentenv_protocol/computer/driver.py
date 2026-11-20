@@ -15,9 +15,9 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
 
-from ..agent_env_environment import (_CARD_CONFIG_ATTR, _ENV_NAME_TOKEN, _TOOL_ATTR, _TOOL_OPTIONS_ATTR,
-                                     AgentEnvEnvironment, AgentEnvFastMCPApplication, AgentEnvError, _error_response,
-                                     _marked_members, add_websocket_route, control_check, environment_card)
+from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
+                                     AgentEnvError, _error_response, _marked_members, add_websocket_route,
+                                     control_check, environment_card, read_only_tools)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import _linux, annotate, apps, card, svc
@@ -144,20 +144,12 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return None
 
     def _computer_tool_acts(self, name: str) -> bool:
-        """Whether the driver's own or forwarded tool ``name`` may act: its annotations don't say it only reads. A
-        tool named with ``{environment_name}`` is served under that name filled in from the card, as the SDK fills
-        it in when it mounts the tools."""
-        acting = self.__dict__.get("_computer_acting")
-        if acting is None:
-            acting = {forwarded.tool.name: not _reads_only(forwarded.annotations)
-                      for forwarded in self.forwarded_tools()}
-            environment_name = self.mounted_card().name
-            for member, marker in _marked_members(self, _TOOL_ATTR):
-                options = getattr(member, _TOOL_OPTIONS_ATTR, None)
-                acting[marker.name.replace(_ENV_NAME_TOKEN, environment_name)] = not _reads_only(
-                    options.annotations if options is not None else None)
-            self._computer_acting = acting
-        return acting.get(name, True)
+        """Whether the driver's own or forwarded tool ``name``, by the name it is mounted under, may act: its
+        annotations don't say it only reads."""
+        reading = self.__dict__.get("_computer_reading")
+        if reading is None:
+            reading = self._computer_reading = read_only_tools(self, self.mounted_card().name)
+        return name not in reading
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
@@ -286,10 +278,3 @@ def computer_driver(name: str | None = None, *, supports: list | None = None) ->
             cls.supports = list(supports)
         return environment_card(name=name)(cls) if name else cls
     return deco
-
-
-def _reads_only(annotations: Any) -> bool:
-    """Whether a tool's MCP annotations, as a dict or a ``ToolAnnotations``, say it only reads."""
-    if isinstance(annotations, dict):
-        return annotations.get("readOnlyHint") is True
-    return getattr(annotations, "readOnlyHint", None) is True

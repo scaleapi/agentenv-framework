@@ -371,7 +371,7 @@ class Video:
 
     async def _add_frame(self, item: RecordedFrame) -> None:
         at = item.captured_at
-        marks = self.annotations.showing(at) if self.annotations is not None else []
+        marks = self.annotations.next_frame(at) if self.annotations is not None else []
         frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge, marks)
         if self.encoder is not None and ((frame.width, frame.height) != self.encoder.size
                                          or (at - self.encoder.last_at).total_seconds() > GAP_S
