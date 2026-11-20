@@ -267,8 +267,8 @@ if __name__ == "__main__":
 '''
 _DEFAULT_CONFIG_LINE = 'CFG = "/tmp/changelog/config.json"'
 # The hook decides by its own clock whether the grant it uploads with has expired, so it runs on real time, not the
-# CLI's: the CLI runs a hook's command through a shell, which hands the hook this assignment.
-_REAL_TIME_PREFIX = "AGENTENV_REAL_TIME=1"
+# CLI's. env, started without the marker, sets it for the interpreter it execs, with or without a shell around it.
+_REAL_TIME_LAUNCH = ("/usr/bin/env", "AGENTENV_REAL_TIME=1")
 
 
 def _real_time_env() -> dict[str, str]:
@@ -427,7 +427,7 @@ class Changelog:
         self.snar = f"{directory}/state.snar"
         self.config_path = f"{directory}/config.json"
         self.capture_path = f"{directory}/capture.py"
-        self.hook_command = f"{_REAL_TIME_PREFIX} {shlex.quote(sys.executable)} {shlex.quote(self.capture_path)}"
+        self.hook_command = shlex.join([*_REAL_TIME_LAUNCH, sys.executable, self.capture_path])
 
     def capture_script(self) -> str:
         """``CAPTURE_SCRIPT`` reading this changelog's config."""

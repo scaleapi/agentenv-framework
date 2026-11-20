@@ -142,7 +142,7 @@ def test_the_hook_waits_long_enough_for_its_turn_and_the_script_reads_its_own_co
     assert tar_changelog.HOOK_TIMEOUT_S == 600
     assert f"CFG = {json.dumps(str(tmp_path / 'changelog' / 'config.json'))}" in log.capture_script()
     capture = str(tmp_path / "changelog" / "capture.py")
-    assert shlex.split(log.hook_command) == ["AGENTENV_REAL_TIME=1", sys.executable, capture]
+    assert shlex.split(log.hook_command) == ["/usr/bin/env", "AGENTENV_REAL_TIME=1", sys.executable, capture]
 
 
 def test_the_changelog_directory_is_one_per_port():
@@ -242,9 +242,11 @@ def test_the_changelogs_tar_runs_on_real_time(tmp_path, staging, monkeypatch):
     assert [("-cf" in run["args"], run["real_time"]) for run in runs] == [(True, "1"), (False, "1")]
 
 
-def test_the_hook_the_cli_runs_through_a_shell_starts_on_real_time(tmp_path, staging, monkeypatch):
+@pytest.mark.parametrize("through_shell", [True, False], ids=["shell", "no-shell"])
+def test_the_hook_starts_on_real_time_with_or_without_a_shell(tmp_path, staging, monkeypatch, through_shell):
     """The hook decides by its own clock whether the grant it uploads with has expired: on an env clock past the
-    grant's expiry it refused every upload. A sitecustomize on the hook's path records the environment it started in."""
+    grant's expiry it refused every upload. A sitecustomize records the environment the hook started in, through a
+    shell as the CLI runs it, and without one, where a bare assignment prefix wouldn't start the hook at all."""
     seen = tmp_path / "hook-started-with.json"
     probe = tmp_path / "probe"
     probe.mkdir()
@@ -259,8 +261,9 @@ def test_the_hook_the_cli_runs_through_a_shell_starts_on_real_time(tmp_path, sta
     changelog, _, _, _ = _changelog(tmp_path, roots=[str(root)])
     _enable(changelog)
 
+    command = ["/bin/sh", "-c", changelog.hook_command] if through_shell else shlex.split(changelog.hook_command)
     result = subprocess.run(
-        ["/bin/sh", "-c", changelog.hook_command], input=json.dumps({"tool_name": "Bash", "session_id": "s"}),
+        command, input=json.dumps({"tool_name": "Bash", "session_id": "s"}),
         capture_output=True, text=True, timeout=120,
         env={**os.environ, "A2A_PORT": str(staging.port), "PYTHONPATH": str(probe),
              "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"},
