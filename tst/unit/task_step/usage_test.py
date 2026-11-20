@@ -88,14 +88,14 @@ def test_an_entry_keeps_the_first_turns_unreadable_values_and_counts_them_all():
 PRICES = PriceTable({"gpt-4o-mini": ModelPrice(input=0.15, output=0.6, cache_read=0.075)}, "litellm@test")
 
 
-def _step_entry(monkeypatch, *, on_endpoint=True) -> dict:
+def _step_entry(monkeypatch) -> dict:
     """The entry a step records for one solver turn on openai/gpt-4o-mini that reported a million input tokens, a
     hundred thousand output tokens and its own cost of $0.50."""
     monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
     context = TaskStepContext()
     usage = StepUsage(context, "solve")
     usage.start(ModelRole.SOLVER, "openai/gpt-4o-mini",
-                DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=on_endpoint))
+                DeployedAgent(agent_name="a", api_url="u"))
     usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
         input_tokens=1_000_000, output_tokens=100_000, input_includes_cache=True, cost_usd=0.5)))
     [entry] = context.metadata["step_usage"]["solve"]
@@ -112,19 +112,12 @@ def test_usage_on_the_configured_endpoint_is_priced_with_the_agents_own_cost_kep
     assert "cost_assumed" not in entry and "unpriced_reason" not in entry
 
 
-@pytest.mark.parametrize("on_endpoint", [False, None], ids=["other-endpoint", "recorded-before-prices"])
-def test_an_agent_not_known_to_call_the_configured_endpoint_is_never_priced_from_list_prices(monkeypatch, on_endpoint):
-    entry = _step_entry(monkeypatch, on_endpoint=on_endpoint)
-
-    assert (entry["cost_usd"], entry["cost_status"], entry["cost_source"]) == (0.5, "reported", "harness")
-
-
 def test_turns_that_disagree_on_whether_input_counts_the_cache_are_each_charged_for_their_cached_input_once(
         monkeypatch):
     monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
     context = TaskStepContext()
     usage = StepUsage(context, "solve")
-    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=True))
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u"))
     for turn in (Usage(input_tokens=100, output_tokens=1, cache_read_tokens=80, input_includes_cache=True),
                  Usage(input_tokens=20, output_tokens=1, cache_read_tokens=80, input_includes_cache=False)):
         usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
@@ -145,7 +138,7 @@ def test_a_turn_without_input_or_output_leaves_the_entry_unpriced_rather_than_pr
     monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
     context = TaskStepContext()
     usage = StepUsage(context, "solve")
-    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=True))
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u"))
     for turn in (Usage(input_tokens=100, output_tokens=10), second):
         usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
 
@@ -157,7 +150,7 @@ def test_a_turn_that_reported_no_tokens_beside_priced_ones_leaves_a_partial_lowe
     monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
     context = TaskStepContext()
     usage = StepUsage(context, "solve")
-    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u", on_configured_endpoint=True))
+    usage.start(ModelRole.SOLVER, "gpt-4o-mini", DeployedAgent(agent_name="a", api_url="u"))
     for turn in (Usage(input_tokens=1_000_000, output_tokens=0), Usage(tool_call_count=2), None):
         usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=turn))
 

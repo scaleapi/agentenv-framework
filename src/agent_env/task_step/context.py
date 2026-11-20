@@ -142,9 +142,6 @@ class DeployedAgent:
     # (localhost to host.docker.internal), so one endpoint has one name; never a key or a URL's userinfo. None when
     # unknown.
     model_endpoint_host: str | None = None
-    # Whether its model calls go through the configured endpoint (or route natively with none configured), by
-    # ``same_endpoint``, so they're priced from list prices; None when unknown, which prices nothing.
-    on_configured_endpoint: bool | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployedAgent:
@@ -164,7 +161,6 @@ class DeployedAgent:
             env_bindings=dict(data.get("env_bindings") or {}),
             control_token=data.get("control_token"),
             model_endpoint_host=data.get("model_endpoint_host"),
-            on_configured_endpoint=data.get("on_configured_endpoint"),
         )
 
     @property

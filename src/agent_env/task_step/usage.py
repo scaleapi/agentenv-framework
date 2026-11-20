@@ -61,13 +61,12 @@ class UsageEntry(TypedDict):
 
 @dataclass
 class RoleUsage:
-    """One role's turns in one step: the model it ran, the host of the endpoint it called and whether that's the
-    configured one, the attempt epoch the step ran under, and each turn's usage, None for a turn that reported none."""
+    """One role's turns in one step: the model it ran, the host of the endpoint it called, the attempt epoch the step
+    ran under, and each turn's usage, None for a turn that reported none."""
 
     role: str
     model: Optional[str] = None
     endpoint_host: Optional[str] = None
-    on_endpoint: bool = False
     attempt: Optional[int] = field(default_factory=ATTEMPT_EPOCH.get)
     turns: list[Optional[Usage]] = field(default_factory=list)
     unparsed: list[dict] = field(default_factory=list)
@@ -103,7 +102,7 @@ class RoleUsage:
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
         cost = price(tokens, total("cost_usd"), model=self.model,
-                     prices=prices, on_endpoint=self.on_endpoint, reported_by=ReportedBy.HARNESS)
+                     prices=prices, reported_by=ReportedBy.HARNESS)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
@@ -137,7 +136,7 @@ class StepUsage:
         ``metadata.model_endpoints``, under the role's own name."""
         host = agent.model_endpoint_host if agent else None
         self._context.record_model_endpoint(role.value, self._step_id, model, host)
-        self._roles[role] = RoleUsage(role.value, model, host, bool(agent and agent.on_configured_endpoint))
+        self._roles[role] = RoleUsage(role.value, model, host)
 
     def turn(self, role: ModelRole, reply: TerminalResponse) -> None:
         """One finished turn of ``role``, written at once, so a step that raises later keeps it. A role that wasn't

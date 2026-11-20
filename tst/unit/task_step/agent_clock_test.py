@@ -420,9 +420,6 @@ async def test_an_agent_deployed_unbound_stays_on_the_deployment_it_got_when_ano
         def model_base_url(self, env_vars, config):
             return None
 
-        def on_configured_endpoint(self, env_vars, config):
-            return False
-
     monkeypatch.setattr(a2a_agent_package.A2AAgent, "get", classmethod(lambda cls, *a, **k: _Agent()))
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
     _no_servers(monkeypatch)

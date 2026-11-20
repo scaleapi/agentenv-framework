@@ -36,14 +36,12 @@ USAGE = {"input_tokens": 1_000_000, "output_tokens": 100_000, "cache_read_tokens
          "cache_write_tokens": None, "input_includes_cache": None, "cost_usd": None}
 
 
-def _agent(usage, model="gpt-4o-mini", *, table=TABLE, on_endpoint=True):
-    return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=table, on_endpoint=on_endpoint,
-                 reported_by=ReportedBy.HARNESS)
+def _agent(usage, model="gpt-4o-mini", *, table=TABLE):
+    return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=table, reported_by=ReportedBy.HARNESS)
 
 
-def _judge(usage, model="gpt-4o-mini", *, on_endpoint=True):
-    return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=TABLE, on_endpoint=on_endpoint,
-                 reported_by=ReportedBy.PROVIDER)
+def _judge(usage, model="gpt-4o-mini"):
+    return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=TABLE, reported_by=ReportedBy.PROVIDER)
 
 
 def test_the_map_is_read_per_million_tokens_keeping_only_entries_with_an_input_and_an_output_price():
@@ -100,21 +98,19 @@ def test_a_model_the_map_lists_as_free_costs_nothing():
 
 
 AGENT_BRANCHES = {
-    # name: (model, on_endpoint, reported) -> (status, source, usd)
-    "priced": (("gpt-4o-mini", True, None), (CostStatus.PRICED, "litellm@test", 0.15 + 0.06)),
-    "priced-keeps-reported-beside": (("gpt-4o-mini", True, 9.0), (CostStatus.PRICED, "litellm@test", 0.21)),
-    "reported-without-a-price": (("gpt-4o", True, 9.0), (CostStatus.REPORTED, "harness", 9.0)),
-    "unpriced": (("gpt-4o", True, None), (CostStatus.UNPRICED, None, None)),
-    "other-endpoint-reported": (("gpt-4o-mini", False, 9.0), (CostStatus.REPORTED, "harness", 9.0)),
-    "other-endpoint-unpriced": (("gpt-4o-mini", False, None), (CostStatus.UNPRICED, None, None)),
-    "no-model": ((None, True, None), (CostStatus.UNPRICED, None, None)),
+    # name: (model, reported) -> (status, source, usd)
+    "priced": (("gpt-4o-mini", None), (CostStatus.PRICED, "litellm@test", 0.15 + 0.06)),
+    "priced-keeps-reported-beside": (("gpt-4o-mini", 9.0), (CostStatus.PRICED, "litellm@test", 0.21)),
+    "reported-without-a-price": (("gpt-4o", 9.0), (CostStatus.REPORTED, "harness", 9.0)),
+    "unpriced": (("gpt-4o", None), (CostStatus.UNPRICED, None, None)),
+    "no-model": ((None, None), (CostStatus.UNPRICED, None, None)),
 }
 
 
 @pytest.mark.parametrize("given, expected", AGENT_BRANCHES.values(), ids=AGENT_BRANCHES.keys())
 def test_an_agents_cost(given, expected):
-    model, on_endpoint, reported = given
-    cost = _agent({**USAGE, "cost_usd": reported}, model, on_endpoint=on_endpoint)
+    model, reported = given
+    cost = _agent({**USAGE, "cost_usd": reported}, model)
     assert (cost.status, cost.source) == expected[:2]
     assert cost.usd == pytest.approx(expected[2]) if expected[2] is not None else cost.usd is None
     assert cost.reported_usd == reported
@@ -135,15 +131,14 @@ def test_a_judges_cost(given, expected):
     assert cost.usd == pytest.approx(expected[2]) if expected[2] is not None else cost.usd is None
 
 
-@pytest.mark.parametrize("usage, model, on_endpoint, why", [
-    (USAGE, None, True, Unpriced.NO_MODEL),
-    (USAGE, "gpt-4o-mini", False, Unpriced.OTHER_ENDPOINT),
-    (USAGE, "gpt-4o", True, Unpriced.NO_PRICE),
-    ({**USAGE, "input_tokens": None}, "gpt-4o-mini", True, Unpriced.NO_TOKENS),
-    ({**USAGE, "output_tokens": None}, "gpt-4o-mini", True, Unpriced.NO_TOKENS),
+@pytest.mark.parametrize("usage, model, why", [
+    (USAGE, None, Unpriced.NO_MODEL),
+    (USAGE, "gpt-4o", Unpriced.NO_PRICE),
+    ({**USAGE, "input_tokens": None}, "gpt-4o-mini", Unpriced.NO_TOKENS),
+    ({**USAGE, "output_tokens": None}, "gpt-4o-mini", Unpriced.NO_TOKENS),
 ])
-def test_an_unpriced_cost_says_why(usage, model, on_endpoint, why):
-    cost = _agent(usage, model, on_endpoint=on_endpoint)
+def test_an_unpriced_cost_says_why(usage, model, why):
+    cost = _agent(usage, model)
     assert cost.fields() == {"cost_usd": None, "cost_status": "unpriced", "cost_source": None,
                              "reported_cost_usd": None, "unpriced_reason": why.value}
 
@@ -182,8 +177,7 @@ def test_records_that_disagree_on_whether_input_counts_the_cache_add_up_to_their
 
     assert counted + apart == Tokens(uncached_input=40, output=2, cache_read=160)
     assert counted + apart + unknown == Tokens(uncached_input=90, output=3, cache_read=190, assumed_uncached=True)
-    cost = price(counted + apart, None, model="gpt-4o-mini", prices=TABLE, on_endpoint=True,
-                 reported_by=ReportedBy.HARNESS)
+    cost = price(counted + apart, None, model="gpt-4o-mini", prices=TABLE, reported_by=ReportedBy.HARNESS)
     assert cost.usd == pytest.approx((40 * 0.15 + 2 * 0.6 + 160 * 0.075) / PER_MILLION) and cost.assumed == ()
     assert cost.fields()["uncached_input_tokens"] == 40
 

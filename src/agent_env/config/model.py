@@ -175,13 +175,6 @@ class ModelConfig:
         ``same_endpoint``: the only URL the configured key and headers go to."""
         return same_endpoint(url, os.getenv(ENV_BASE_URL) or self.base_url)
 
-    def prices_apply(self, url: Optional[str]) -> bool:
-        """Whether a cost may be priced from list prices for calls to ``url``: the configured endpoint's, or with none
-        configured, a native route's (no ``url``), but never another URL's, which may serve anything under a model's
-        name, a fine-tune or a free local model among them."""
-        configured = os.getenv(ENV_BASE_URL) or self.base_url
-        return same_endpoint(url, configured) if url else not configured
-
     def headers_for(self, base_url: Optional[str], *, secret_resolver: SecretResolver) -> dict[str, str]:
         """``[model.headers]``, resolved, for a call or an agent pointed at ``base_url``: none unless
         that is the configured endpoint, since a header may carry a credential."""

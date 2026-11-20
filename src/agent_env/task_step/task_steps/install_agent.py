@@ -403,7 +403,6 @@ class InstallAgentTaskStep(TaskStep):
             installed_container=container,
             control_token=deployed.control_token,
             model_endpoint_host=_installed_model_host(agent),
-            on_configured_endpoint=bool(agent.metadata.get(TAKES_CREDENTIALS, True)),
         ))
 
         default_model = get_config().resolve_model(ModelRole.SOLVER, agent=agent.metadata.get("default_model")).model

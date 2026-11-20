@@ -491,9 +491,6 @@ class Config:
     def is_model_endpoint(self, url: str | None) -> bool:
         return self._model_config().is_endpoint(url)
 
-    def prices_apply(self, url: str | None) -> bool:
-        return self._model_config().prices_apply(url)
-
     def resolve_model_call(
         self,
         model: str,

@@ -153,9 +153,6 @@ class _Agent:
     def model_base_url(self, env_vars, config):
         return env_vars.get("LITELLM_BASE_URL")
 
-    def on_configured_endpoint(self, env_vars, config):
-        return False
-
 
 @pytest.mark.asyncio
 async def test_no_key_or_userinfo_reaches_what_a_run_stores(monkeypatch):

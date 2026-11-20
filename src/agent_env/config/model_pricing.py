@@ -50,11 +50,10 @@ class Assumed(StrEnum):
 
 
 class Unpriced(StrEnum):
-    """Why a cost has no figure: no model, a URL other than the configured endpoint (or one not known to be it), no
-    price in the map for the model, or no input and output token counts to price."""
+    """Why a cost has no figure: no model, no price in the map for the model, or no input and output token counts to
+    price."""
 
     NO_MODEL = "no_model"
-    OTHER_ENDPOINT = "other_endpoint"
     NO_PRICE = "no_price"
     NO_TOKENS = "no_tokens"
 
@@ -186,13 +185,11 @@ def price(
     *,
     model: Optional[str],
     prices: PriceTable,
-    on_endpoint: bool,
     reported_by: ReportedBy,
 ) -> Cost:
-    """The cost of ``tokens`` on ``model``, given the ``reported`` figure. ``prices`` price them only for calls
-    through the configured endpoint (``on_endpoint``). Their price comes before a harness's figure, which is kept beside
-    it, and after the figure the endpoint billed. Neither gives ``unpriced``."""
-    listed = prices.lookup(model) if model and on_endpoint else None
+    """The cost of ``tokens`` on ``model``, given the ``reported`` figure. The map's price comes before a harness's
+    figure, which is kept beside it, and after the figure the endpoint billed. Neither gives ``unpriced``."""
+    listed = prices.lookup(model) if model else None
     as_reported = Cost(reported, CostStatus.REPORTED, reported_by.value, reported) if reported is not None else None
     as_priced = _priced(tokens, listed, prices.source, reported) if listed and tokens else None
     first, second = ((as_reported, as_priced) if reported_by is ReportedBy.PROVIDER
@@ -200,8 +197,7 @@ def price(
     chosen = first or second
     if chosen is not None:
         return chosen
-    why = (Unpriced.NO_MODEL if not model else Unpriced.OTHER_ENDPOINT if not on_endpoint
-           else Unpriced.NO_PRICE if listed is None else Unpriced.NO_TOKENS)
+    why = Unpriced.NO_MODEL if not model else Unpriced.NO_PRICE if listed is None else Unpriced.NO_TOKENS
     return Cost(None, CostStatus.UNPRICED, None, None, unpriced=why)
 
 
