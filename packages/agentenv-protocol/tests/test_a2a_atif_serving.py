@@ -7,6 +7,8 @@ import base64
 import json
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
@@ -290,6 +292,22 @@ def _read(client: TestClient, **payload: Any) -> Any:
     return client.post("/ext/trajectory", json=payload)
 
 
+def prescribe(client: TestClient, *formats: str) -> Any:
+    return client.post("/ext/trajectory/prescribe", json={"formats": list(formats)})
+
+
+@contextmanager
+def _serving(agent: Any, **kwargs: Any) -> Iterator[TestClient]:
+    """The agent served in-process with atif/1 prescribed when its card offers it, as a run that reads its atif/1
+    copies prescribes it before a conversation's first message."""
+    with TestClient(agent.create_app(), **kwargs) as client:
+        card = client.get("/.well-known/agent-card.json").json()
+        [trajectory] = [ext for ext in card["capabilities"]["extensions"] if ext["uri"] == TRAJECTORY_V1.uri] or [{}]
+        if "prescribe" in (trajectory.get("params") or {}).get("methods", {}):
+            assert prescribe(client, FORMAT).status_code == 200
+        yield client
+
+
 def _atif(client: TestClient, **payload: Any) -> dict[str, Any]:
     response = _read(client, format=FORMAT, **payload)
     assert response.status_code == 200, response.text
@@ -342,7 +360,7 @@ def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest
     monkeypatch.setattr(framework, "upload", capture)
     native_bodies = []
     for agent in (_toy(atif=None), _toy()):
-        with TestClient(agent.create_app()) as client:
+        with _serving(agent) as client:
             task_id = _send(client, "work t1", "m-1")
             _ended(client, task_id)
             bodies = [_read(client, **read).json() for read in (
@@ -351,7 +369,7 @@ def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest
             native_bodies.append(json.loads(json.dumps(bodies).replace(task_id, "TASK")))
     # Another agent's container, whose turn counts aren't the first one's.
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "another-container"))
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         task_id = _send(client, "work t1", "m-1")
         _ended(client, task_id)
         task = _atif(client, task_id=task_id)
@@ -386,7 +404,7 @@ def test_every_read_serves_both_formats_and_names_its_format(monkeypatch: pytest
     ("work", "completed"), ("failed", "failed"), ("raised", "failed"), ("canceled", "canceled")])
 def test_the_copy_validates_on_every_terminal_path(scenario: str, state: str) -> None:
     hold = _Hold()
-    with TestClient(_toy(hold).create_app()) as client:
+    with _serving(_toy(hold)) as client:
         task_id = _send(client, f"{scenario} t1", "m-1")
         if scenario == "canceled":
             hold.reached()
@@ -405,7 +423,7 @@ def test_the_copy_validates_on_every_terminal_path(scenario: str, state: str) ->
 
 
 def test_two_tasks_in_one_context_make_one_document() -> None:
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         first = _send(client, "work t1", "m-1")
         _ended(client, first)
         second = _send(client, "work t2", "m-2")
@@ -426,7 +444,7 @@ def test_two_tasks_in_one_context_make_one_document() -> None:
 def test_a_step_waiting_on_its_result_holds_back_the_steps_after_it() -> None:
     hold = _Hold()
     pages = []
-    with TestClient(_toy(hold).create_app()) as client:
+    with _serving(_toy(hold)) as client:
         task_id = _send(client, "late t1", "m-1")
         hold.reached(1)
         pages.append(_atif(client, context_id="ctx-1")["trajectory"])
@@ -454,7 +472,7 @@ def test_aux_records_reach_the_adapter_and_replay_gives_the_served_document(monk
     monkeypatch.setattr(framework, "upload", capture)
     grants = {name: {**_grant(), "write": {**_grant()["write"], "url": f"https://objects.example.test/{name}"}}
               for name in ("trajectory", "aux", "turn_context")}
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         tasks = []
         for tag in ("t1", "t2"):
             tasks.append(_send(client, f"hooks {tag}", f"m-{tag}"))
@@ -484,7 +502,7 @@ def test_aux_records_reach_the_adapter_and_replay_gives_the_served_document(monk
 
 
 def test_an_atif_context_read_goes_to_the_sdk_even_when_the_agent_binds_its_own() -> None:
-    with TestClient(_toy(bind_context=True).create_app()) as client:
+    with _serving(_toy(bind_context=True)) as client:
         task_id = _send(client, "work t1", "m-1")
         _ended(client, task_id)
         own = _read(client, context_id="ctx-1").json()
@@ -495,7 +513,7 @@ def test_an_atif_context_read_goes_to_the_sdk_even_when_the_agent_binds_its_own(
 
 def test_data_parts_are_written_as_the_conversation_or_the_profile() -> None:
     image = base64.b64encode(b"\x89PNG fake").decode()
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         task_id = _send(client, "data t1", "m-1", extra_parts=[
             {"kind": "data", "data": {"ticket": 42, "priority": "high"}},
             {"kind": "file", "file": {"name": "shot.png", "mimeType": "image/png", "bytes": image}},
@@ -516,7 +534,7 @@ def test_data_parts_are_written_as_the_conversation_or_the_profile() -> None:
 
 
 def test_an_adapter_agent_that_appends_and_returns_fails_the_turn() -> None:
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         task_id = _send(client, "both t1", "m-1")
         _ended(client, task_id, "failed")
         answer = client.post("/a2a", json={"jsonrpc": "2.0", "id": "g", "method": "tasks/get",
@@ -527,7 +545,7 @@ def test_an_adapter_agent_that_appends_and_returns_fails_the_turn() -> None:
 
 
 def test_a_returned_native_trajectory_runs_through_the_adapter_when_the_task_ends() -> None:
-    with TestClient(_toy(live=False).create_app()) as client:
+    with _serving(_toy(live=False)) as client:
         task_id = _send(client, "returned t1", "m-1")
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
@@ -538,7 +556,7 @@ def test_a_returned_native_trajectory_runs_through_the_adapter_when_the_task_end
 
 
 def test_an_adapter_error_stops_the_copy_not_the_turn() -> None:
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         task_id = _send(client, "broken t1", "m-1")
         _ended(client, task_id)
         native = _read(client, task_id=task_id)
@@ -552,7 +570,7 @@ def test_an_adapter_error_stops_the_copy_not_the_turn() -> None:
 
 
 def test_cursor_pages_carry_the_header_and_their_tasks_sub_agents() -> None:
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         task_id = _send(client, "spawn t1", "m-1")
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
@@ -575,7 +593,7 @@ def test_cursor_pages_carry_the_header_and_their_tasks_sub_agents() -> None:
 def test_a_reader_following_the_cursor_gets_the_steps_a_sub_agent_writes_after_its_result() -> None:
     hold = _Hold()
     pages = []
-    with TestClient(_toy(hold).create_app()) as client:
+    with _serving(_toy(hold)) as client:
         task_id = _send(client, "grow t1", "m-1")
         hold.reached()
         while not pages or pages[-1]["has_more"]:
@@ -594,7 +612,7 @@ def test_a_reader_following_the_cursor_gets_the_steps_a_sub_agent_writes_after_i
 
 def test_a_spawn_its_task_ended_without_answering_keeps_its_sub_agent_referenced() -> None:
     hold = _Hold()
-    with TestClient(_toy(hold).create_app()) as client:
+    with _serving(_toy(hold)) as client:
         task_id = _send(client, "orphan t1", "m-1")
         hold.reached()
         client.post("/a2a", json={"jsonrpc": "2.0", "id": "c", "method": "tasks/cancel", "params": {"id": task_id}})
@@ -608,7 +626,7 @@ def test_a_spawn_its_task_ended_without_answering_keeps_its_sub_agent_referenced
 
 def test_an_unknown_or_unfinished_read_is_not_found() -> None:
     hold = _Hold()
-    with TestClient(_toy(hold).create_app()) as client:
+    with _serving(_toy(hold)) as client:
         task_id = _send(client, "canceled t1", "m-1")
         hold.reached()
         unfinished = _read(client, task_id=task_id, format=FORMAT)
@@ -621,7 +639,7 @@ def test_an_unknown_or_unfinished_read_is_not_found() -> None:
 
 def test_two_messages_sent_at_once_in_one_context_are_two_tasks_of_one_document() -> None:
     # The second waits on the context's lock; the first is closed in the copy before that lock lets the second start.
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         first = _send(client, "work t1", "m-1")
         second = _send(client, "work t2", "m-2")
         _ended(client, first)
@@ -637,7 +655,7 @@ def test_an_agent_on_the_envs_clock_stamps_the_sdks_steps_with_the_time_its_prog
     clock_file.write_text(f"@1748768400.000000000 x1 ^{time.time()}\n")
     monkeypatch.setattr(follower, "CLOCK_FILE", str(clock_file))
     monkeypatch.setattr(agent_clock, "follows", lambda: True)
-    with TestClient(_toy().create_app()) as client:
+    with _serving(_toy()) as client:
         task_id = _send(client, "data t1", "m-1")
         _ended(client, task_id)
         answer = _atif(client, task_id=task_id)

@@ -567,6 +567,7 @@ class PromptAgentTaskStep(TaskStep):
         if negotiated:
             await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
                                              headers=agent.control_headers)
+        await prescribe_formats(agent, target_url, prescribed_formats(context))
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
         solver_model = negotiated.fields.get("model") if negotiated else None
         context.record_model(ModelRole.SOLVER.record_key, self.id, solver_model)
@@ -1358,6 +1359,38 @@ class _BuiltInUserSim:
 
 # How long one user sim trajectory fetch may take, as in always_on.
 _USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
+#: How long an agent may take to answer a trajectory prescription.
+_PRESCRIBE_TIMEOUT_SECONDS = 30.0
+
+
+def prescribed_formats(context: TaskStepContext) -> tuple[str, ...]:
+    """The trajectory formats beside native the run prescribes to each agent whose trajectory it reads: its
+    ``user_overrides.trajectory_formats``, else ``[trajectories] formats``; none means native only."""
+    formats = context.metadata.get("user_overrides", {}).get("trajectory_formats")
+    if formats is None:
+        return get_config().get_trajectory_formats()
+    if not isinstance(formats, list) or not all(isinstance(format, str) for format in formats):
+        raise StepContextError(f"user_overrides.trajectory_formats must be a list of format names, got {formats!r}")
+    return tuple(formats)
+
+
+async def prescribe_formats(agent: DeployedAgent, a2a_url: str, formats: tuple[str, ...]) -> None:
+    """Have the agent build ``formats`` (those its card offers) beside native for the conversations it starts from
+    now on, when its card offers the trajectory extension's ``prescribe``; an agent whose SDK predates it builds what it
+    always has. A failure leaves the agent building native only, and the run goes on."""
+    extension = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_TRAJECTORY)
+    method, path = A2AAgent.operation(extension, "prescribe")
+    if method is None or path is None:
+        return
+    offered = TrajectoryFormats.of(extension).formats
+    wanted = [format for format in formats if format in offered]
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(a2a_url + path, json={"formats": wanted}, headers=agent.control_headers,
+                                         timeout=_PRESCRIBE_TIMEOUT_SECONDS)
+        protocol.raise_for_extension_status(response, operation="trajectory prescribe")
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed (continuing): {e}")
 
 
 class StoredTrajectory(NamedTuple):

@@ -1623,9 +1623,23 @@ responses, the format it serves.
 enable(TRAJECTORY_V1, live=True, native="my-cli-events/1", atif=MyCliAtif)
 ```
 
-The card then lists `atif/1` in `formats` too; `default` stays `native`. The
-SDK keeps one ATIF document per A2A context, run through one adapter instance,
-and feeds it every event the agent appends, as it appends it. A native
+The card then lists `atif/1` in `formats` too; `default` stays `native`.
+
+The agent builds `atif/1` only when prescribed: a run that reads its copies
+says so first with the trajectory extension's `prescribe`
+(`POST /ext/trajectory/prescribe`, `{formats: ["atif/1"]}`, each a format the
+card offers; it answers every format the agent now builds, native first).
+
+- A prescription holds for each A2A context started after it. A context keeps the
+  formats it started with, so no copy misses its first turns, and a later call
+  sets them for the contexts after it.
+- With no call the agent builds native only: no ATIF document, no media spool,
+  no turn count.
+- An `atif/1` read of a context that wasn't prescribed it is refused with `409
+  format_not_prescribed`. A read that names no format always gets native.
+
+For a context prescribed `atif/1`, the SDK keeps one ATIF document, run through
+one adapter instance, and feeds it every event the agent appends, as it appends it. A native
 trajectory returned at task end runs through the adapter then. The agent's own
 code feeds the adapter's aux files, records that aren't in the native log such
 as a hook's notes, with `request.trajectory.aux(name, record)`, where they

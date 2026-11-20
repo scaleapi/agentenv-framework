@@ -103,6 +103,15 @@ def _validated_a2a_agent_id(value: object, source: str) -> str:
     return value
 
 
+_TRAJECTORIES_CONFIG_SECTION = "trajectories"
+
+
+def _validated_trajectory_formats(value: object, source: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(format, str) and format.strip() for format in value):
+        raise ConfigError(f"{source} must be a list of trajectory format names, such as [\"atif/1\"], got {value!r}")
+    return tuple(value)
+
+
 def _validated_env_id(value: object, source: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{source} must be a non-empty string env id, got {value!r}")
@@ -163,6 +172,8 @@ RESOLVED_KEYS: tuple[ResolvedKey, ...] = (
     *(ResolvedKey((_ENVS_CONFIG_SECTION, name), field=name, default=env_id,
                   default_label="built-in default in config.runtime")
       for name, env_id in _DEFAULT_ENV_IDS.items()),
+    ResolvedKey((_TRAJECTORIES_CONFIG_SECTION, "formats"), default=(),
+                default_label="built-in default in config.runtime: none, native only"),
 )
 _KEY_BY_NAME = {key.name: key for key in RESOLVED_KEYS}
 
@@ -425,6 +436,17 @@ class Config:
             resolved = config_loader.interpolate(layer.raw, secret_resolver=self._resolve_secret)
             return _validated_human_a2a_url(resolved, key.file_label)
         raise ConfigError(f"No human-A2A URL configured: set [{_HUMAN_A2A_CONFIG_SECTION}] {_HUMAN_A2A_CONFIG_KEY} or AGENT_ENV_HUMAN_A2A_URL")
+
+    def get_trajectory_formats(self) -> tuple[str, ...]:
+        """The trajectory formats beside native a run prescribes to each agent whose trajectory it reads:
+        ``[trajectories] formats`` in config.toml, else none, so agents build native only."""
+        key = _KEY_BY_NAME[f"{_TRAJECTORIES_CONFIG_SECTION}.formats"]
+        for layer in self.key_candidates(key):
+            if layer.kind == KIND_DEFAULT:
+                return tuple(layer.raw)
+            self.section(_TRAJECTORIES_CONFIG_SECTION)
+            return _validated_trajectory_formats(layer.raw, key.file_label)
+        return ()
 
     def get_default_env_id(self, name: str) -> str:
         """The default infra env id ``name`` (``default_gateway_env_id``, ``default_service_db_env_id`` or

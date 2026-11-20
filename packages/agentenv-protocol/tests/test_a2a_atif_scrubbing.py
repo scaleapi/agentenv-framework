@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import pytest
 from starlette.testclient import TestClient
-from test_a2a_atif_serving import _ended, _send
+from test_a2a_atif_serving import _ended, _send, _serving
 
 from agentenv_protocol.a2a_agent import (
     CDP_CONFIG_V1,
@@ -143,7 +143,7 @@ def _assert_redacted(reads: list[Any], secret: str) -> None:
 
 def test_a_secret_the_agent_registers_is_redacted_in_every_atif_read_and_kept_in_the_native_log(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    with TestClient(_echoing(register=SECRET).create_app()) as client:
+    with _serving(_echoing(register=SECRET)) as client:
         task_id = _turn(client, f"the key is {SECRET}")
         reads = _reads(client, task_id, monkeypatch)
         native_read = _native(client, task_id)
@@ -203,8 +203,11 @@ def test_a_secret_the_sdk_holds_or_is_handed_is_redacted(monkeypatch: pytest.Mon
 
     def client(**kwargs: Any) -> TestClient:
         nonlocal app
-        app = _echoing().create_app()
-        return TestClient(app, **kwargs).__enter__()
+        agent = _echoing()
+        opened = _serving(agent, **kwargs)
+        client = opened.__enter__()
+        app = client.app
+        return client
 
     opened, secret = handed(monkeypatch, client)
     try:
@@ -249,7 +252,7 @@ def test_a_write_only_mapping_is_redacted_by_its_credentials_alone(monkeypatch: 
     params = {"service_tier": "priority", "thinking": {"type": "enabled"},
               "extra_headers": {"Authorization": "Bearer params-0123456789", "X-Title": "toy agent app"},
               "auth": {"user": "bob-the-builder"}}
-    with caplog.at_level(logging.WARNING), TestClient(_echoing().create_app()) as client:
+    with caplog.at_level(logging.WARNING), _serving(_echoing()) as client:
         assert client.post("/ext/agent-config", json={"model_params": params}).status_code == 200
         task_id = _turn(client, "priority enabled toy agent app Bearer params-0123456789 bob-the-builder")
         document = client.post("/ext/trajectory", json={"task_id": task_id, "format": FORMAT}).json()["trajectory"]
@@ -324,7 +327,7 @@ def test_a_secret_is_redacted_in_mapping_keys_too() -> None:
 
 def test_a_non_ascii_secret_in_an_inbound_data_part_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
     secret = 'pä"ss-wörd-0123'
-    with TestClient(_echoing(register=secret).create_app()) as client:
+    with _serving(_echoing(register=secret)) as client:
         task_id = _send(client, "hello", "m-1", extra_parts=[{"kind": "data", "data": {"password": secret}}])
         _ended(client, task_id)
         reads = _reads(client, task_id, monkeypatch)
@@ -392,7 +395,7 @@ def test_a_cursor_page_counts_its_bytes_as_it_serves_them() -> None:
 
 
 def test_an_agent_that_serves_no_atif_registers_nothing_and_registering_before_its_app_is_refused() -> None:
-    with TestClient(_echoing(register=SECRET, atif=False).create_app()) as client:
+    with _serving(_echoing(register=SECRET, atif=False)) as client:
         task_id = _turn(client, f"the key is {SECRET}")
         assert _native(client, task_id) == [{"type": "say", "text": f"the key is {SECRET}"}]
     with pytest.raises(RuntimeError, match="after create_app"):

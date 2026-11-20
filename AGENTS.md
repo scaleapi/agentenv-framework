@@ -114,6 +114,11 @@ or one of them only where it is used.
   with websites adds. An id set in code, by `configure(...)` or the config attribute (as `agent-env env deploy
   --gateway` does), beats the file. Within a run, its `user_overrides` (`gateway_env_id`, `service_db_env_id`,
   `website_browser_env_id`) beat both. A multi env's `browser_envs` names its own website browser instead, `[]` none.
+- `[trajectories] formats`: the trajectory formats beside native, such as `atif/1`, that a run prescribes to each
+  agent whose trajectory it reads (prompt_agent and always_on call the trajectory extension's `prescribe` on the agent
+  they prompt before its conversation starts); a run's `user_overrides.trajectory_formats` beats it. None by default,
+  so an agent builds native only, and an `atif/1` read of a conversation not prescribed it is refused
+  (`format_not_prescribed`).
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
