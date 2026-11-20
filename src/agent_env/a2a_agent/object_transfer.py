@@ -190,19 +190,24 @@ async def invoke_transfer(
     try:
         if staged is not None:
             await staged.push()
-        async with httpx.AsyncClient() as client:
-            send = client.post if verb == "POST" else client.put
-            resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
         try:
-            raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
-        except httpx.HTTPStatusError as exc:
-            hint = _STAGING_UNREACHABLE if staged is not None else (
-                unreachable_hint(call.payload) if call.mode == "objects" else None
-            )
-            if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
-                raise
-            raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
-        body = resp.json()
+            async with httpx.AsyncClient() as client:
+                send = client.post if verb == "POST" else client.put
+                resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
+            try:
+                raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
+            except httpx.HTTPStatusError as exc:
+                hint = _STAGING_UNREACHABLE if staged is not None else (
+                    unreachable_hint(call.payload) if call.mode == "objects" else None
+                )
+                if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
+                    raise
+                raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
+            body = resp.json()
+        except Exception:
+            if staged is not None:
+                await _collect_staged(staged, operation)
+            raise
         if staged is not None:
             await staged.pull()
     finally:
@@ -211,6 +216,15 @@ async def invoke_transfer(
     if call.mode == "objects" and response_model is not None:
         return parse_response(response_model, body, operation=operation)
     return body
+
+
+async def _collect_staged(staged: StagedObjectStore, operation: str) -> None:
+    """Move what the agent wrote before its call failed into the store, as an upload through a grant reaches it
+    whether or not the answer does; best-effort, so the call's own error is the one raised."""
+    try:
+        await staged.pull()
+    except Exception as exc:
+        logger.warning(f"{operation}: collecting what the agent staged before the call failed: {exc}")
 
 
 def parse_response(model: type[_Response], body: Any, *, operation: str) -> _Response:

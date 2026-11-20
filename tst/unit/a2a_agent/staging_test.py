@@ -266,6 +266,41 @@ async def test_a_trajectory_upload_lands_in_the_store(agent, store):
     assert store.get(target) == b'[{"type": "result"}]'
 
 
+def _losing_answers_to(app, path: str):
+    """``app``, whose answers to requests for ``path`` are lost once it has served them."""
+
+    async def losing(scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == path:
+            async def dropped(message) -> None:
+                pass
+
+            await app(scope, receive, dropped)
+            await PlainTextResponse("the answer was lost", status_code=504)(scope, receive, send)
+            return
+        await app(scope, receive, send)
+
+    return losing
+
+
+@pytest.mark.asyncio
+async def test_what_the_agent_staged_reaches_the_store_when_its_answer_is_lost(agent, store, monkeypatch):
+    """As an upload through a grant does: the object the agent wrote is in the store whether or not its answer
+    arrives, so a caller that finds the agent has let go of it can still find it there."""
+    card = _card(agent)
+    _, path = _method(card, TRAJECTORY_V1.uri, "get")
+    real_async_client = httpx._client.AsyncClient  # the fixture already serves the agent through the patched one
+    losing = _losing_answers_to(agent, path)
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kwargs: real_async_client(transport=httpx.ASGITransport(app=losing), **kwargs))
+    granting = transfer_store(store, URL, card, sandbox_type="modal")
+    target = store.object_url("trajectories/t.json")
+
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 504"):
+        await fetch_trajectory(URL + path, {"task_id": "t"}, upload=TrajectoryUpload.to(granting, target), store=granting)
+
+    assert store.get(target) == b'[{"type": "result"}]'
+
+
 async def _enable_changelog(agent, store) -> tuple[str, staging.StagedNamespace]:
     card = _card(agent)
     granting = transfer_store(store, URL, card, sandbox_type="modal")

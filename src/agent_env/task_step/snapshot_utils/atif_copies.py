@@ -56,6 +56,8 @@ VALID, INVALID, NEWER, UNAVAILABLE = "valid", "invalid", "newer", "unavailable"
 #: A trajectory id the worker stores a document under: the agent mints it, so it must be a plain file name.
 _DOCUMENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+#: How much of an invalid copy's first finding its record keeps as the reason; ``rules`` names every rule broken.
+_REASON_CHARS = 300
 _VALIDATOR_VERSION = importlib.metadata.version("agentenv-framework-protocol")
 
 
@@ -176,7 +178,7 @@ class AtifCopies:
         return AtifRecord(
             url=url, through_step=last.get("step_id") if isinstance(last.get("step_id"), int) else None,
             status=status, rules=sorted({finding.rule for finding in errors}),
-            reason=str(errors[0])[:300] if errors else None, validator_version=_VALIDATOR_VERSION,
+            reason=str(errors[0])[:_REASON_CHARS] if errors else None, validator_version=_VALIDATOR_VERSION,
             adapter_version=adapter.get("version") if isinstance(adapter, Mapping) else None,
             aux_url=aux_url, turn_context_url=turn_context_url,
         )
