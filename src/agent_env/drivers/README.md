@@ -16,7 +16,8 @@ alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/drivers/
 `envs/page/` is the page driver, for a computer with no display on Linux (`amd64` and `arm64`), such as `ubuntu-24.04-browser`:
 its screen is the computer's one website browser's active tab, its `screen` feature `page`. A screenshot is the page,
 and input reaches it as CDP input events, both through `browser/v1`'s `page/*` operations on the browser's own server;
-a tab that paints nothing shows white. It serves the page group too: `computer_navigate`, `computer_history`,
+a tab that paints nothing shows white. An input's screenshot is taken 300 ms after it (`screenshot_delay_ms`), where the
+desktop drivers' is 500 ms: the page shows a key's scroll within 100 ms. It serves the page group too: `computer_navigate`, `computer_history`,
 `computer_tabs`, `computer_dialog` and `computer_upload`, and every frame names the page, its tab and what is open on
 it. The browser ending on its own fails the computer for good: its ready check is
 `final`, and its tools answer with why. Each call it makes to the browser for an agent's tool carries that call, its tool, id, arguments and the caller's role, in the `AgentEnv-Tool-Call` and `AgentEnv-Role` headers, so the browser's log credits the action to it. Each `browser_*` call is an entry too, begun and ended with `calls/begin` and `calls/end`, which Playwright MCP's CDP commands meanwhile, and the tab events they cause, name as `for`. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
