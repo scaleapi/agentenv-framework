@@ -235,7 +235,7 @@ def test_an_install_takes_its_steps_override_over_the_run_wide_one_and_the_store
 
     assert step._agent_ref(TaskStepContext(metadata={"user_overrides": {"a2a_agent_id": "run-wide", **solver}})) == (
         "solver", None)
-    assert step._agent_ref(TaskStepContext(metadata={"user_overrides": {"a2a_agent_id": "run-wide"}})) == ("run-wide", 3)
+    assert step._agent_ref(TaskStepContext(metadata={"user_overrides": {"a2a_agent_id": "run-wide"}})) == ("run-wide", None)
     assert step._agent_ref(TaskStepContext()) == ("stored", 3)
 
 
