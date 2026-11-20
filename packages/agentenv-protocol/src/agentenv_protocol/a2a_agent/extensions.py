@@ -1386,7 +1386,6 @@ TRAJECTORY_V1 = ExtensionDefinition(
                     SDK,
                     request_model=TrajectoryMediaRequest,
                     response_model=TrajectoryMediaResponse,
-                    # The spool it reads is the SDK's, so an agent that serves its own trajectory reads still has it.
                     sdk_only=True,
                 ),
             }

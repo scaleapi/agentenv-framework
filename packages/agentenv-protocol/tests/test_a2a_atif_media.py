@@ -4,6 +4,7 @@ which is how the worker pulls a turn's media at its end. Readers take a part pat
 only with the bytes that name."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import struct
@@ -30,14 +31,14 @@ from agentenv_protocol.a2a_agent import (
     a2a_agent,
     enable,
     extension,
-    framework,
 )
+from agentenv_protocol.a2a_agent import _media_spool
 from agentenv_protocol.a2a_agent._media_spool import MediaSpool
 from agentenv_protocol.a2a_agent._atif_copy import TurnStart
 from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
 from agentenv_protocol.atif import Adapter, AtifError, atif_adapter, check_media, errors_in, media_file, native, validate
 from agentenv_protocol.atif._image_size import image_size
-from agentenv_protocol.transfers import TransferError
+from agentenv_protocol.transfers import TransferError, WriteObject
 
 NATIVE = "shots/1"
 
@@ -104,8 +105,12 @@ def store(monkeypatch: pytest.MonkeyPatch) -> dict[str, bytes]:
         stored[target.write.url.removeprefix("https://objects.example.test/")] = data
         return Uploaded(size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
 
-    monkeypatch.setattr(framework, "upload", upload)
+    monkeypatch.setattr(_media_spool, "upload", upload)
     return stored
+
+
+def _spool(client: TestClient) -> MediaSpool:
+    return client.app.state.agentenv_a2a.services.task_trajectories.media
 
 
 def _media(client: TestClient, paths: dict[str, str], context_id: str = "ctx-1") -> Any:
@@ -118,9 +123,9 @@ def test_a_copys_images_are_spooled_by_sha256_with_their_size_and_pushed_once_as
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png", "inbound.png")])
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
-        spool = client.app.state.agentenv_a2a.services.task_trajectories.media
+        spool = _spool(client)
         path = _path(SHOT, ".png")
-        held, _ = spool.held("ctx-1", path)
+        held = spool.held("ctx-1", path)
         assert held.read_bytes() == SHOT
         pushed = _media(client, {path: "image/png"})
         assert pushed.status_code == 200, pushed.text
@@ -154,8 +159,7 @@ def test_the_same_bytes_added_twice_are_spooled_and_pushed_once(store: dict[str,
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png"), _file(SHOT, "image/png")])
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
-        folder = client.app.state.agentenv_a2a.services.task_trajectories.media._folder
-        assert sorted(file.name for file in folder.iterdir()) == [_path(SHOT, ".png").removeprefix("media/")]
+        assert sorted(file.name for file in _spool(client).folder.iterdir()) == [_path(SHOT, ".png").removeprefix("media/")]
         pushed = _media(client, {_path(SHOT, ".png"): "image/png"})
     paths = [part["source"]["path"] for step in document["steps"] for part in step.get("message") or []
              if isinstance(part, dict) and part.get("type") == "image"]
@@ -166,7 +170,7 @@ def test_the_same_bytes_added_twice_are_spooled_and_pushed_once(store: dict[str,
 def test_a_path_the_context_doesnt_hold_and_a_failed_upload_dont_stop_the_rest(
         store: dict[str, bytes], monkeypatch: pytest.MonkeyPatch) -> None:
     other = _png(2, 2)
-    stored = framework.upload
+    stored = _media_spool.upload
 
     async def upload(target, source) -> Uploaded:
         if target.write.url.endswith(_path(other, ".png")):
@@ -176,12 +180,11 @@ def test_a_path_the_context_doesnt_hold_and_a_failed_upload_dont_stop_the_rest(
     with TestClient(_shooting().create_app()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png"), _file(other, "image/png")])
         _ended(client, task_id)
-        monkeypatch.setattr(framework, "upload", upload)
+        monkeypatch.setattr(_media_spool, "upload", upload)
         never = _path(b"never added", ".png")
         pushed = _media(client, {_path(SHOT, ".png"): "image/png", _path(other, ".png"): "image/png",
                                  never: "image/png"}).json()
-        spool = client.app.state.agentenv_a2a.services.task_trajectories.media
-        assert spool.held("ctx-1", _path(other, ".png")) is not None
+        assert _spool(client).held("ctx-1", _path(other, ".png")) is not None
         other_context = _media(client, {_path(SHOT, ".png"): "image/png"}, context_id="ctx-2").json()
     assert list(pushed["objects"]) == [_path(SHOT, ".png")] and pushed["missing"] == [never]
     assert pushed["failed"] == {_path(other, ".png"): "grant_expired: The transfer grant expired."}
@@ -219,37 +222,50 @@ def test_an_agent_that_serves_its_own_trajectory_reads_still_has_the_sdks_media_
         TakesMedia().create_app()
 
 
-def test_an_upload_that_outlives_its_copy_releases_only_the_hold_it_began_with() -> None:
+def test_an_upload_that_outlives_its_copy_releases_only_the_hold_it_began_with(
+        monkeypatch: pytest.MonkeyPatch) -> None:
     spool = MediaSpool()
     path = _path(SHOT, ".png")
+
+    async def upload(target, source) -> Uploaded:
+        spool.drop("ctx")
+        spool.sink("ctx")(path, SHOT)
+        return Uploaded(size_bytes=len(SHOT), sha256=hashlib.sha256(SHOT).hexdigest())
+
+    monkeypatch.setattr(_media_spool, "upload", upload)
     spool.sink("ctx")(path, SHOT)
-    _, old = spool.held("ctx", path)
-    spool.drop("ctx")
-    spool.sink("ctx")(path, SHOT)
-    spool.release("ctx", path, old)
-    file, new = spool.held("ctx", path)
-    assert new != old and file.read_bytes() == SHOT
-    spool.release("ctx", path, new)
-    assert spool.held("ctx", path) is None and not file.exists()
+    pushed = asyncio.run(spool.push("ctx", {path: WriteObject.model_validate(_grant(path))}))
+    assert list(pushed.objects) == [path]
+    assert spool.held("ctx", path).read_bytes() == SHOT
     spool.close()
 
 
 def test_a_spooled_file_that_no_longer_matches_its_name_never_reaches_the_store(store: dict[str, bytes]) -> None:
     with TestClient(_shooting().create_app()) as client:
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
-        spool = client.app.state.agentenv_a2a.services.task_trajectories.media
-        file, _ = spool.held("ctx-1", _path(SHOT, ".png"))
-        file.write_bytes(b"changed on disk")
+        _spool(client).held("ctx-1", _path(SHOT, ".png")).write_bytes(b"changed on disk")
         pushed = _media(client, {_path(SHOT, ".png"): "image/png"}).json()
     assert pushed["objects"] == {} and store == {}
     assert pushed["failed"][_path(SHOT, ".png")].startswith("the spooled file's sha256 is ")
+
+
+def test_an_upload_whose_bytes_changed_in_transit_fails_and_its_file_stays_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def upload(target, source) -> Uploaded:
+        return Uploaded(size_bytes=len(SHOT), sha256="0" * 64)
+
+    with TestClient(_shooting().create_app()) as client:
+        _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
+        monkeypatch.setattr(_media_spool, "upload", upload)
+        pushed = _media(client, {_path(SHOT, ".png"): "image/png"}).json()
+        assert _spool(client).held("ctx-1", _path(SHOT, ".png")) is not None
+    assert pushed == {"objects": {}, "missing": [], "failed": {_path(SHOT, ".png"): f"the upload's sha256 is {'0' * 64}"}}
 
 
 def test_a_file_the_spool_cant_write_is_reported_missing_and_the_copy_goes_on(
         store: dict[str, bytes], tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     other = _png(2, 2)
     with TestClient(_shooting().create_app()) as client:
-        spool = client.app.state.agentenv_a2a.services.task_trajectories.media
+        spool = _spool(client)
         spool._folder = tmp_path / "removed"
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
         spool._folder = None
@@ -312,7 +328,7 @@ def test_a_context_evicted_or_restored_over_drops_its_media_but_what_another_hol
 
     other = _png(1, 1)
     play("a1", "context-a", SHOT)
-    file, _ = trajectories.media.held("context-a", _path(SHOT, ".png"))
+    file = trajectories.media.held("context-a", _path(SHOT, ".png"))
     play("b1", "context-b", other)
     assert trajectories.media.held("context-a", _path(SHOT, ".png")) is None and not file.exists()
     play("b2", "context-b", SHOT)
@@ -324,7 +340,7 @@ def test_a_context_evicted_or_restored_over_drops_its_media_but_what_another_hol
 def test_the_spool_goes_with_the_server(store: dict[str, bytes]) -> None:
     with TestClient(_shooting().create_app()) as client:
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
-        folder = client.app.state.agentenv_a2a.services.task_trajectories.media._folder
+        folder = _spool(client).folder
         assert folder.is_dir()
     assert not folder.exists()
 

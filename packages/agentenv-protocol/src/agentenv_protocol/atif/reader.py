@@ -95,8 +95,10 @@ def _parts(value: Any) -> list[Mapping[str, Any]]:
     return [p for p in value if isinstance(p, Mapping)] if isinstance(value, list) else []
 
 
+#: A media file's name, ``<sha256>.<ext>``: what its bytes are, never a secret.
+MEDIA_NAME = re.compile(r"(?P<sha256>[0-9a-f]{64})\.[A-Za-z0-9]+")
 #: The only path a media file of a document can have: ``media/<sha256>.<ext>``, in the document's own folder.
-MEDIA_PATH = re.compile(r"^media/(?P<sha256>[0-9a-f]{64})\.[A-Za-z0-9]+$")
+MEDIA_PATH = re.compile(rf"^media/{MEDIA_NAME.pattern}$")
 
 
 def media_file(path: str) -> str:

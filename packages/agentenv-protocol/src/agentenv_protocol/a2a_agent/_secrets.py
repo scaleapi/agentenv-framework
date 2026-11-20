@@ -16,6 +16,7 @@ from urllib.parse import quote, unquote_plus, urlsplit
 
 from pydantic import BaseModel, SecretStr
 
+from ..atif.reader import MEDIA_NAME
 from ..transfers import HttpGetGrant, HttpPostPolicyGrant, HttpPutGrant
 from .extensions import CdpAddRequest, ClockSyncTimeRequest, McpAddRequest
 from .tasks.v1 import AgentConfig
@@ -43,9 +44,6 @@ _NAME_WORD = re.compile(r"[a-z0-9]+")
 #: token is: longer than an ordinary path's words, unlike ``MIN_SECRET_LENGTH``, which bounds what is scrubbed at all.
 MIN_TOKEN_SEGMENT_LENGTH = 16
 _TOKEN_SEGMENT = re.compile(rf"[A-Za-z0-9_.=~+-]{{{MIN_TOKEN_SEGMENT_LENGTH},}}")
-#: A media file's name, ``<sha256>.<ext>``: a grant's path may name the file it writes, which names its bytes, not a
-#: credential, and which every atif/1 copy that holds the file must keep.
-_MEDIA_NAME = re.compile(r"[0-9a-f]{64}\.[A-Za-z0-9]+")
 
 T = TypeVar("T")
 
@@ -242,14 +240,14 @@ def _grant_secrets(grant: HttpGetGrant | HttpPutGrant | HttpPostPolicyGrant) -> 
 def _url_secrets(url: str) -> list[str]:
     """The parts of a URL that carry its credential: a presigned URL's credential-like query values, else its token-like
     path segments, as a grant server's (``/v1/grants/<token>``, with or without a plain query such as ``?download=1``),
-    and its password. Every copy of the URL, whole or as a request line, holds them, so redacting them is enough; the
+    but a media file's name, which the copies that hold the file keep, and its password. Every copy of the URL, whole or as a request line, holds them, so redacting them is enough; the
     rest (its host, its path, ``X-Amz-Algorithm``) isn't secret, and leaving it keeps each grant's share of the match
     to its signature: the session token and access key a role signs every grant with are each one secret."""
     parts = urlsplit(url)
     carried = _query_values(url)
     if not carried:
         carried = [segment for segment in parts.path.split("/")
-                   if _TOKEN_SEGMENT.fullmatch(segment) and not _MEDIA_NAME.fullmatch(segment)]
+                   if _TOKEN_SEGMENT.fullmatch(segment) and not MEDIA_NAME.fullmatch(segment)]
     return [*carried, *([parts.password] if parts.password else [])]
 
 

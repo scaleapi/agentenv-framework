@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import hashlib
 import inspect
 import json
 import logging
@@ -70,7 +69,6 @@ from .extensions import (
     AtifUploadedObjects,
     TrajectoryEventsResponse,
     TrajectoryMediaRequest,
-    TrajectoryMediaResponse,
     TrajectoryObjectsResponse,
     TrajectoryState,
     TrajectoryUploadedObjects,
@@ -78,7 +76,6 @@ from .extensions import (
     TriggerRegisterRequest,
     enable,
 )
-from ..atif import media_file
 from ..computer.errors import ComputerError
 from ..errors import AgentEnvError
 from ..types import error_body
@@ -105,7 +102,7 @@ from .tasks.v1 import (
 from .tasks.v1 import (
     TextPart as TaskTextPart,
 )
-from ..transfers import TransferError, Uploaded, serving_on, upload
+from ..transfers import TransferError, serving_on, upload
 
 logger = logging.getLogger(__name__)
 
@@ -129,10 +126,6 @@ class _ServingOnItsPort:
 _AGENT_DEFINITION = "_agentenv_a2a_definition"
 _AgentT = TypeVar("_AgentT", bound="AgentEnvAgent")
 _MAX_CACHED_CONTEXTS = 1_024
-#: How many of a media call's files upload at once.
-MAX_PARALLEL_MEDIA_PUSHES = 8
-#: How much of a spooled media file is read at a time to hash it before its upload.
-_MEDIA_HASH_BLOCK_BYTES = 1 << 20
 
 
 def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
@@ -152,14 +145,6 @@ def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
             raise TypeError(f"AgentConfig fields have duplicate alias {wire_name!r}")
         result[field_name] = wire_name
     return result
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for block in iter(lambda: file.read(_MEDIA_HASH_BLOCK_BYTES), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _config_write_only_wire_names(config: type[AgentConfig]) -> set[str]:
@@ -982,48 +967,9 @@ class _SdkServices:
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
 
     async def trajectory_media(self, request: TrajectoryMediaRequest) -> dict[str, Any]:
-        """Upload the media files of a context's atif/1 copy the worker asks for, each under its grant and from the
-        spool, ``MAX_PARALLEL_MEDIA_PUSHES`` at a time, checking each upload's bytes against its name. A path the
-        context holds no file for is ``missing``, an upload that fails is ``failed``, and neither stops the rest; a
-        file uploaded leaves the spool."""
-        media = self.task_trajectories.media
-        uploaded: dict[str, Uploaded] = {}
-        missing: list[str] = []
-        failed: dict[str, str] = {}
-        gate = asyncio.Semaphore(MAX_PARALLEL_MEDIA_PUSHES)
-
-        async def push(path: str, target: Any) -> None:
-            held = media.held(request.context_id, path)
-            if held is None:
-                missing.append(path)
-                return
-            file, hold = held
-            async with gate:
-                # Checked before the bytes leave, so a spool file that no longer matches its name never reaches the
-                # store, and after, for bytes that changed in transit.
-                try:
-                    digest = await asyncio.to_thread(_sha256_file, file)
-                except OSError as exc:
-                    failed[path] = f"the spooled file can't be read: {exc.strerror}"
-                    return
-                if digest != media_file(path):
-                    failed[path] = f"the spooled file's sha256 is {digest}"
-                    return
-                try:
-                    done = await upload(target, file)
-                except TransferError as exc:
-                    failed[path] = f"{exc.code}: {exc}"
-                    return
-            if done.sha256 is not None and done.sha256 != digest:
-                failed[path] = f"the upload's sha256 is {done.sha256}"
-                return
-            uploaded[path] = done
-            media.release(request.context_id, path, hold)
-
-        await asyncio.gather(*(push(path, target) for path, target in request.objects.items()))
-        return TrajectoryMediaResponse(objects=uploaded, missing=sorted(missing), failed=failed).model_dump(
-            mode="json", exclude_none=True
-        )
+        """Upload the media files of a context's atif/1 copy the worker asks for, from the spool (``MediaSpool.push``)."""
+        pushed = await self.task_trajectories.media.push(request.context_id, request.objects)
+        return pushed.model_dump(mode="json", exclude_none=True)
 
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
@@ -1205,7 +1151,6 @@ def _taking_the_control_token(
                 async with inner(app) as state:
                     yield state
         finally:
-            # The media the worker didn't pull go with the server.
             application.services.task_trajectories.media.close()
 
     return lifespan
