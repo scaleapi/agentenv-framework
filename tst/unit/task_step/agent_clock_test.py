@@ -21,6 +21,7 @@ AGENT_URL = "http://solver:8000"
 AGENT_CONTROL_TOKEN = "the-agents-control-token"
 SYNC_TIME = {"method": "POST", "endpoint": "/ext/clock/sync-time",
              "request": {"required": ["env_get_time_url"], "optional": ["timezone", "watch_url", "name", "read_token"]}}
+USE_ENV_TIME = {"method": "POST", "endpoint": "/ext/clock/use-env-time"}
 
 
 def _step(**kw) -> SyncEnvClockTaskStep:
@@ -28,8 +29,9 @@ def _step(**kw) -> SyncEnvClockTaskStep:
     return _sync_step(**{"agent_clock": True, **kw})
 
 
-def _agent(name="solver", sync_time=SYNC_TIME, env_ids=("e1",), env_step_id=None) -> DeployedAgent:
-    extensions = [{"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock", "methods": {"sync_time": sync_time}}}]
+def _agent(name="solver", sync_time=SYNC_TIME, env_ids=("e1",), env_step_id=None, use_env_time=None) -> DeployedAgent:
+    methods = {"sync_time": sync_time, **({"use_env_time": use_env_time} if use_env_time else {})}
+    extensions = [{"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock", "methods": methods}}]
     return DeployedAgent(agent_name=name, api_url=AGENT_URL, a2a_url=AGENT_URL, env_ids=list(env_ids),
                          env_bindings={env_id: env_step_id for env_id in env_ids} if env_step_id else {},
                          a2a_card={"capabilities": {"extensions": extensions if sync_time else []}},
@@ -66,6 +68,44 @@ async def test_an_agent_is_declared_a_follower_then_handed_its_config_with_the_s
                       "read_token": declaration["read_token"], "timezone": "America/Chicago"}
     [agent] = context.metadata["clock_configurations"][0]["agents"]
     assert (agent["agent"], agent["synced"], agent["follower"]) == ("solver", True, "agent-solver")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_card_serves_use_env_time_is_opted_in_after_sync_time(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_agent(use_env_time=USE_ENV_TIME))
+
+    await _step().execute(context)
+
+    assert [(r.method, "/" + "/".join(r.url.path.split("/")[-2:])) for r in sent][3:] == [
+        ("PUT", "/clock/followers"), ("POST", "/clock/sync-time"), ("POST", "/clock/use-env-time")]
+    assert sent[-1].headers[CONTROL_TOKEN_HEADER] == AGENT_CONTROL_TOKEN and sent[-1].content == b""
+    [agent] = context.metadata["clock_configurations"][0]["agents"]
+    assert agent["synced"] is True and "env_time" in agent
+
+
+@pytest.mark.asyncio
+async def test_a_use_env_time_that_fails_fails_the_step_and_its_follower_is_retired(monkeypatch):
+    import httpx
+
+    real, sent = httpx.AsyncClient, []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append((request.method, request.url.path))
+        if request.url.path == "/ext/clock/use-env-time":
+            return httpx.Response(400, json={"detail": "invalid_argument: no config"})
+        return httpx.Response(200, json={"env_get_time_url": CLOCK_URL} if request.url.path.endswith("/state") else {})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    _no_servers(monkeypatch)
+    context = await _context(_agent(use_env_time=USE_ENV_TIME))
+
+    with pytest.raises(RuntimeError, match="agent 'solver' doesn't follow the clock of env 'e1' \\(HTTP 400\\): .*no config"):
+        await _step().execute(context)
+
+    assert [(m, "/" + "/".join(p.split("/")[-2:])) for m, p in sent[-2:]] == [
+        ("POST", "/clock/use-env-time"), ("DELETE", "/clock/followers")]
 
 
 @pytest.mark.asyncio

@@ -686,6 +686,7 @@ class _SdkServices:
             (TRIGGERS_V1.uri, "decide"): self.triggers_decide,
             (TRIGGERS_V1.uri, "state"): self.triggers_state,
             (CLOCK_V1.uri, "sync_time"): self.clock_sync_time,
+            (CLOCK_V1.uri, "use_env_time"): self.clock_use_env_time,
         }
 
     async def agent_config_set(self, request: AgentConfig) -> dict[str, Any]:
@@ -1030,6 +1031,12 @@ class _SdkServices:
     async def clock_sync_time(self, request: ClockSyncTimeRequest) -> dict[str, Any]:
         try:
             return await agent_clock.sync_time(**request.model_dump())
+        except ComputerError as exc:
+            raise HTTPException(status_code=exc.STATUS, detail=f"{exc.CODE}: {exc}") from exc
+
+    async def clock_use_env_time(self) -> dict[str, Any]:
+        try:
+            return agent_clock.use_env_time()
         except ComputerError as exc:
             raise HTTPException(status_code=exc.STATUS, detail=f"{exc.CODE}: {exc}") from exc
 

@@ -1,7 +1,7 @@
 """An agent's side of clock/v1: in an image that runs the clock follower, every AgentEnvAgent serves sync_time with no
-code of its own; called by sync_env_clock, the opt-in, it writes the follower's config from the request, sets the
-task's zone and loads the image's clock libraries for what the server starts, and answers once the follower shows the
-gateway's current version, or says why it doesn't."""
+code of its own; called by sync_env_clock, it writes the follower's config from the request, sets the task's zone for
+what the server starts, and answers once the follower shows the gateway's current version, or says why it doesn't;
+use_env_time, the opt-in, then loads the image's clock libraries into what the server starts."""
 from __future__ import annotations
 
 import json
@@ -196,52 +196,75 @@ def test_a_server_restarted_mid_run_takes_back_the_tasks_zone(image, monkeypatch
     assert os.environ["TZ"] == "America/Chicago" and time.strftime("%Z") in {"CST", "CDT"}
 
 
-def test_until_sync_time_no_program_the_server_starts_loads_the_clock_libraries(image, opt_in):
+def _synced(image, client) -> None:
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+    assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
+
+
+def test_the_card_serves_use_env_time_beside_sync_time(image):
     with _app() as client:
-        assert _clock(client) is not None
+        methods = _clock(client)["params"]["methods"]
+
+    assert set(methods) == {"sync_time", "use_env_time"}
+    assert methods["use_env_time"]["method"] == "POST"
+
+
+def test_sync_time_alone_loads_the_clock_libraries_into_nothing(image, opt_in):
+    with _app() as client:
+        _synced(image, client)
 
     assert "LD_PRELOAD" not in os.environ and os.environ[agent_clock.REAL_TIME_ENV] == "1"
 
 
-def test_sync_time_loads_the_clock_libraries_into_what_the_server_starts_once_it_follows(image, opt_in, monkeypatch):
+def test_use_env_time_loads_the_clock_libraries_into_what_the_server_starts(image, opt_in, monkeypatch):
     monkeypatch.setenv("LD_PRELOAD", "/opt/other.so")
-    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
     with _app() as client:
-        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
-        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200  # again: nothing loaded twice
+        _synced(image, client)
+        answer = client.post("/ext/clock/use-env-time")
+        assert client.post("/ext/clock/use-env-time").status_code == 200  # again: nothing loaded twice
 
+    assert answer.status_code == 200 and answer.json() == {"env_time": True, "preloaded": True}
     assert os.environ["LD_PRELOAD"].split() == ["/opt/other.so", *LIBRARIES.split(":")]
     assert agent_clock.REAL_TIME_ENV not in os.environ
 
 
-def test_a_sync_time_the_follower_doesnt_take_loads_nothing(image, opt_in):
-    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:2")
+def test_use_env_time_before_sync_time_is_refused_and_loads_nothing(image, opt_in):
     with _app() as client:
-        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 404
+        answer = client.post("/ext/clock/use-env-time")
 
+    assert answer.status_code == 400 and "sync_time" in answer.text
     assert "LD_PRELOAD" not in os.environ
+
+
+def test_use_env_time_takes_no_request_fields(image, opt_in):
+    with _app() as client:
+        _synced(image, client)
+        assert client.post("/ext/clock/use-env-time", json={"x": 1}).status_code == 400
 
 
 def test_an_image_that_preloads_for_every_process_has_nothing_loaded(image, monkeypatch):
     monkeypatch.delenv(agent_clock.PRELOAD_ENV, raising=False)
     monkeypatch.delenv("LD_PRELOAD", raising=False)
-    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
     with _app() as client:
-        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
+        _synced(image, client)
+        answer = client.post("/ext/clock/use-env-time")
 
-    assert "LD_PRELOAD" not in os.environ
+    assert answer.json() == {"env_time": True, "preloaded": False} and "LD_PRELOAD" not in os.environ
 
 
-def test_a_server_restarted_mid_run_loads_the_clock_libraries_again(image, opt_in, monkeypatch):
-    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+@pytest.mark.parametrize("opted_in", [True, False])
+def test_a_server_restarted_mid_run_loads_the_clock_libraries_again_only_once_opted_in(image, opt_in, monkeypatch,
+                                                                                         opted_in):
     with _app() as client:
-        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
-    monkeypatch.delenv("LD_PRELOAD")  # the restarted server's environment: the image's
+        _synced(image, client)
+        if opted_in:
+            assert client.post("/ext/clock/use-env-time").status_code == 200
+    monkeypatch.delenv("LD_PRELOAD", raising=False)  # the restarted server's environment: the image's
 
     with _app() as client:
         assert client.get("/.well-known/agent.json").status_code == 200
 
-    assert os.environ["LD_PRELOAD"].split() == LIBRARIES.split(":")
+    assert (os.environ.get("LD_PRELOAD", "").split() == LIBRARIES.split(":")) is opted_in
 
 
 @pytest.mark.parametrize("config", ['{"watch_url": "u", "name": "n", "token": "t"}', '{"timezone": "Mars/Olympus"}',

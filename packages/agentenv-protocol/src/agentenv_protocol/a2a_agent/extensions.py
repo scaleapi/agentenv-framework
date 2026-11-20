@@ -1456,8 +1456,9 @@ TRIGGERS_V1 = ExtensionDefinition(
 CLOCK_V1 = ExtensionDefinition(
     uri="urn:agentenv:clock/v1",
     description=(
-        "Follow the env's clock: the agent's image runs the clock follower, so every program the agent runs reads "
-        "the env's time. Served where the image has the follower."
+        "Follow the env's clock: the agent's image runs the clock follower, which sync_time configures; "
+        "use_env_time, the opt-in, then has every program the agent starts read the env's time. Served where the "
+        "image has the follower."
     ),
     endpoint="/ext/clock",
     core_operations={
@@ -1468,6 +1469,13 @@ CLOCK_V1 = ExtensionDefinition(
             SDK,
             request_model=ClockSyncTimeRequest,
             response_required=("synced", "timezone", "follower"),
+        ),
+        "use_env_time": _op(
+            "use_env_time",
+            "POST",
+            "/ext/clock/use-env-time",
+            SDK,
+            response_required=("env_time", "preloaded"),
         ),
     },
 )

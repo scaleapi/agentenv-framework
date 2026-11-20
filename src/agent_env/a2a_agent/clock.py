@@ -55,6 +55,13 @@ def _sync_time(agent: DeployedAgent) -> tuple[Optional[dict], Optional[str]]:
     return A2AAgent.operation(A2AAgent.find_extension(agent.a2a_card or {}, EXT_CLOCK_URI), "sync_time")
 
 
+def _use_env_time(agent: DeployedAgent) -> Optional[str]:
+    """The path of the agent's clock/v1 ``use_env_time``, the opt-in that has what it starts read the env's time; None
+    for an image from before it, which has every program read it from boot."""
+    method, path = A2AAgent.operation(A2AAgent.find_extension(agent.a2a_card or {}, EXT_CLOCK_URI), "use_env_time")
+    return path if method is not None else None
+
+
 def _fields(method: dict) -> set[str]:
     request = method.get("request") or {}
     return {*request.get("required", ()), *request.get("optional", ()), *(request.get("properties") or {})}
@@ -70,7 +77,8 @@ def watch_url_for(agent: DeployedAgent, env: DeployedEnv) -> str:
 
 async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Optional[str],
                  timezone: Optional[str], timeout: float) -> dict:
-    """Have ``agent`` follow ``env``'s gateway clock. ``{"synced": False, "reason": ...}`` for an agent that can't:
+    """Have ``agent`` follow ``env``'s gateway clock: its ``sync_time``, then its ``use_env_time`` where its card serves
+    one, so what it starts reads the env's time. ``{"synced": False, "reason": ...}`` for an agent that can't:
     its card serves no ``sync_time`` (``not_advertised``) or one without the follower's fields
     (``no_follower_fields``), or the gateway takes no followers after it starts (``gateway_takes_no_followers``); raises
     for one that serves it and fails, having retired the follower it declared, or can't take the task's zone, as for
@@ -91,16 +99,23 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
         return {"synced": False, "reason": "gateway_takes_no_followers"}
     body = {"env_get_time_url": env_get_time_url or "", "watch_url": watch_url_for(agent, env), "name": name,
             "read_token": token, **({"timezone": timezone} if timezone is not None else {})}
-    url = (agent.a2a_url or agent.api_url).rstrip("/") + path
+    base = (agent.a2a_url or agent.api_url).rstrip("/")
+    opt_in = _use_env_time(agent)
     try:
         async with httpx.AsyncClient() as client:
-            answer = await client.post(url, json=body, timeout=timeout,
-                                       headers={**sandbox_request_headers_for_url(url), **agent.control_headers})
+            answer = await client.post(base + path, json=body, timeout=timeout,
+                                       headers={**sandbox_request_headers_for_url(base + path), **agent.control_headers})
+            if answer.status_code < 400 and opt_in is not None:
+                using = await client.post(base + opt_in, timeout=timeout,
+                                          headers={**sandbox_request_headers_for_url(base + opt_in), **agent.control_headers})
+                if using.status_code >= 400:
+                    answer = using
     except httpx.HTTPError as e:
         why = f"({type(e).__name__}): {e}"
     else:
         if answer.status_code < 400:
-            return {"synced": True, "follower": name, "result": answer.json()}
+            return {"synced": True, "follower": name, "result": answer.json(),
+                    **({"env_time": using.json()} if opt_in is not None else {})}
         why = f"(HTTP {answer.status_code}): {answer.text}"
     # Declared and not following: the gateway would wait for it on every later write, and nothing records it to retire.
     await _retire(env, name, timeout=RETIRE_TIMEOUT_S)
