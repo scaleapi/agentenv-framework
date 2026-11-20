@@ -28,7 +28,13 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.agents.claude_code.agent import claude_bridge
-from tst.util.fake_anthropic import FakeAnthropic, answer, delegate_then_answer, tool_then_answer
+from tst.util.fake_anthropic import (
+    FakeAnthropic,
+    answer,
+    background_then_answer,
+    delegate_then_answer,
+    tool_then_answer,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -260,6 +266,38 @@ def test_a_file_part_naming_a_stored_object_reaches_the_cli_through_a_grant(stat
         asyncio.run(run())
 
     assert endpoint.tool_results() == [notes]
+
+
+@pytest.mark.parametrize("first, then", [
+    ("ANSWER-ONE: the answer to the prompt.", "REMARK: the background command has finished."),
+    ("HOLDING-NOTE: the command is still running.", "ANSWER-TWO: the command has finished."),
+], ids=["answer-then-remark", "holding-note-then-answer"])
+def test_a_turn_the_cli_wakes_again_for_a_background_command_replies_with_every_answer(state, endpoint, first, then):
+    """The CLI wakes the model again when a command it ran in the background ends, and ends each wake with a
+    `result`, so one turn has two: the reply keeps both texts, in order."""
+    endpoint.respond = answer("pong")
+    # A bundle run writes the shipped agent and its image to this test's stores.
+    assert _run(_bundle(state / "one", "ask", _ask("Say pong.", "pong"))).exit_code == 0
+    endpoint.respond = background_then_answer("sleep 5; echo waited", first, then)
+    context = TaskStepContext()
+    steps = [DeployAgentTaskStep(id="agent", version=None, sandbox_type="local"),
+             PromptAgentTaskStep(id="ask", version=None, prompt_id="ask", prompt="Run the slow command, then answer.")]
+
+    async def run():
+        try:
+            for step in steps:
+                await step.execute(context)
+        finally:
+            await teardown_run(context)
+
+    with namespace_routing():
+        asyncio.run(run())
+        (response,) = context.prompt_responses
+        trajectory = json.loads(get_config().get_object_store().get(response.agent_trajectory_object_url))
+
+    results = [event.get("result") for event in trajectory if event.get("type") == "result"]
+    assert results == [first, then], (results, response.response)
+    assert response.response == f"{first}\n\n{then}", response.response
 
 
 def test_the_shipped_claude_code_delegates_to_its_peer_through_the_sdks_peer_tools(state, endpoint):
