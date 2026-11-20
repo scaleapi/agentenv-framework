@@ -1,0 +1,4 @@
+# The files an imported CUA task's download setup brings, as the environment of the computer desk: keyed by their
+# paths under its session user's home.
+type = "environment"
+environment_name = "desk"
