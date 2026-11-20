@@ -1,7 +1,8 @@
 """Claude Code's bridge on the env's clock: it hands the shared egress rule (tst/unit/agents/test_agent_egress.py) the
 model endpoint's URL and every MCP server's, so on an armed clock an env MCP server over TLS goes through the egress
-proxy and loopback and plain-HTTP hosts go direct; unarmed, the CLI goes out as before. What every clocked image shares
-is checked in tst/unit/agents/test_agent_clock_images.py."""
+proxy and loopback and plain-HTTP hosts go direct; unarmed, the CLI goes out as before. Every run keeps its transcripts,
+which the CLI's own cleanup would delete on a clock ahead of the files' real times. What every clocked image shares is
+checked in tst/unit/agents/test_agent_clock_images.py."""
 
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ from tst.unit.agents.claude_code.agent import AGENT_DIR, agent_egress, claude_br
 from tst.util.build_context import sent
 
 PROXY = "http://127.0.0.1:3128"
+# How many days a JavaScript date can be from 1970 either way (ECMAScript's time value range).
+JS_DATE_RANGE_DAYS = 100_000_000
 ARMED_PAGE = agent_egress.clockpage.encode(2, 1_900_000_000 * 10**9, 10**18, 1.0, 1, 3, 0, 0)
 
 
@@ -25,6 +28,15 @@ def test_on_an_armed_clock_the_cli_goes_out_through_the_proxy_and_to_loopback_di
     assert {env[name] for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "https_proxy")} == {PROXY}
     assert env["NO_PROXY"] == env["no_proxy"] == "localhost,127.0.0.1,::1,host.docker.internal"
     assert env["NODE_USE_ENV_PROXY"] == "1"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_every_cli_run_keeps_transcripts_whatever_date_the_clock_shows(resume):
+    command = claude_bridge._command("sess", resume, model=None, allowed_tools=None, mcp_servers=None,
+                                     system_prompt=None, output_format=None, role=None, effort=None, max_turns=None)
+
+    assert command[command.index("--setting-sources") + 1] == "user"
+    assert json.loads(command[command.index("--settings") + 1])["cleanupPeriodDays"] >= JS_DATE_RANGE_DAYS
 
 
 def _spawned_env(monkeypatch, tmp_path, armed: bool) -> dict[str, str]:
