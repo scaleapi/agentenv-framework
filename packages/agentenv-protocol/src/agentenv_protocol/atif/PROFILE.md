@@ -23,6 +23,8 @@ to native exactly.
 
 - One document per agent per A2A context. Each A2A task starts at a `source: user` step that holds the inbound
   message, with the task's ids in that step's profile. Steps number from 1 across the whole document.
+- A served document leaves out the secrets its agent's SDK knows: each is written `[redacted:<length>]` wherever it
+  occurs, in any string, the aux log and turn context served with it included. The native log keeps them.
 - A context's record may span several documents: after an agent instance restarts or drops the context from memory,
   after a snapshot restore, and when long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
   index, and each earlier document names the next in `continued_trajectory_ref`. The worker that stores the earlier

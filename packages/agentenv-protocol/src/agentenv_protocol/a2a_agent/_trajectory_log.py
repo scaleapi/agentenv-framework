@@ -6,9 +6,9 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
-from ..atif import Adapter, AuxEntry, ServedTurn
+from ..atif import Adapter
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
 from ._turn_index import TurnIndex
 from .extensions import TrajectoryState
@@ -60,8 +60,8 @@ class AtifTaskRead:
     """An ended task's atif/1 document as it stood when the task ended, its aux log and its served turn context."""
 
     document: dict[str, Any]
-    aux: list[AuxEntry]
-    turn: ServedTurn
+    aux: list[dict[str, Any]]
+    turn: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +87,7 @@ class TaskTrajectories:
         *,
         native: str | None = None,
         atif: type[Adapter] | None = None,
+        scrub: Callable[[Any], Any] | None = None,
     ) -> None:
         if max_contexts < 1:
             raise ValueError("max_contexts must be positive")
@@ -95,6 +96,8 @@ class TaskTrajectories:
         self._atif = atif
         #: Each context's count of started tasks, kept only for an agent that serves atif/1.
         self._turns = TurnIndex() if atif is not None else None
+        #: What every atif/1 read goes through: the agent's secrets redacted.
+        self._scrub = scrub
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
         self._copies: dict[str, AtifCopy] = {}
@@ -129,7 +132,9 @@ class TaskTrajectories:
         if self._atif is not None and turn is not None:
             copy = self._copies.get(record.context_id)
             if copy is None:
-                copy = self._copies[record.context_id] = AtifCopy(self._atif, record.context_id)
+                copy = self._copies[record.context_id] = AtifCopy(
+                    self._atif, record.context_id, **({"scrub": self._scrub} if self._scrub is not None else {})
+                )
             copy.start(task_id, self._turns.next(record.context_id), turn)
             record.log._atif = _CopySink(copy, task_id)
         self._touch(record.context_id)

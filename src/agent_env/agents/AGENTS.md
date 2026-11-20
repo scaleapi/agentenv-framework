@@ -147,7 +147,9 @@ must be in it. It needs a protocol floor that has `native`. A context read you b
 `format` in its response. `atif=<adapter class>` there, an `@atif_adapter` class for that native format, has the SDK
 serve `atif/1` too, built from your log as you append it: write the adapter (`agentenv_protocol.atif`, its
 `PROFILE.md`), feed records that aren't in the native log, such as hooks' notes, with
-`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both.
+`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both. Its reads leave out the
+secrets the SDK holds and is handed (the model key, write-only config, MCP and CDP credentials, grants); register any
+other with `self.register_secret(value)`, in `run` or later, and the SDK writes it `[redacted:<length>]` there.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime
