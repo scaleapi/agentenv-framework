@@ -21,6 +21,7 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.verifiers import cua_verifier
+from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
 from agent_env.task_step.task_steps.verifiers.cua_verifier import (
     DEFAULT_GOLDEN_NOTE,
     DEFAULT_GUIDANCE,
@@ -173,7 +174,7 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
 
 
 @pytest.mark.asyncio
-async def test_a_failed_must_pass_gate_zeroes_the_score_and_is_named(computer):
+async def test_a_failed_must_pass_gate_zeroes_the_score_is_named_and_cant_be_pooled(computer):
     step = _step(result_files=["~/notes.txt"])
     _judge(step, [], failing=("sheet-exists",))
     ctx = TaskStepContext(deployed_envs=[computer.deployed()])
@@ -182,6 +183,9 @@ async def test_a_failed_must_pass_gate_zeroes_the_score_and_is_named(computer):
 
     entry = ctx.metadata["verifications"]["cua"]
     assert entry["score"] == 0.0 and not entry["gate_passed"] and entry["gates_failed"] == ["sheet-exists"]
+    with pytest.raises(RuntimeError, match=r"\['cua'\] scored with must-pass gates"):
+        await AggregateVerifiersTaskStep(id="final", version=None, verifier_ids=["cua"]).execute(ctx)
+    assert ctx.metadata["grades"]["final"]["verifier_status"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,8 @@ applied across their combined criterion set.
 
 Use this to match Harbor's unified-aggregation behavior when filesystem
 criteria (verify_sandbox) and response criteria (rubrics_verifier) live in
-separate steps.
+separate steps. An entry with `gate_passed` (cua_verifier's) is refused: its score rests on must-pass gates and on
+criteria counted met or not, which pooling its rows would drop.
 """
 from __future__ import annotations
 
@@ -63,6 +64,13 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
                 f"AggregateVerifiers: verifier_id(s) not found in "
                 f"context.metadata.verifications: {missing}. "
                 f"Available: {list(all_verifications.keys())}"
+            )
+
+        gated = [vid for vid in self.verifier_ids if "gate_passed" in all_verifications[vid]]
+        if gated:
+            raise RuntimeError(
+                f"AggregateVerifiers: {gated} scored with must-pass gates, which pooling their rows would drop; "
+                "grade them on their own"
             )
 
         merged_results: list[dict] = []
