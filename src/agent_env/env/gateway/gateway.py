@@ -637,9 +637,10 @@ class Gateway:
                     await self._console_opened(scope)(scope, receive, send)
                     return
                 if scope["type"] == "http" and self._takes_control_token(scope) and not bearer and not session:
-                    error = ("this link is not valid for this env" if link is not None
-                             else "this route takes the env's control token")
-                    logger.warning("refused %s %s: %s", scope["method"], scope["path"], error)
+                    reason, error = (("its pgweb link is spent, expired or not this env's",
+                                      "this link is not valid for this env") if link is not None
+                                     else ("it takes the env's control token", "this route takes the env's control token"))
+                    logger.warning("refused %s %s: %s", scope["method"], scope["path"], reason)
                     await self._json_response({"ok": False, "error": error}, 401)(scope, receive, send)
                     return
                 # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
