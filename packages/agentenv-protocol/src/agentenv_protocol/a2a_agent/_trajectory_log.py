@@ -6,8 +6,9 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
+from ..atif import FORMAT as ATIF_FORMAT
 from ..atif import Adapter
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
 from ._media_spool import MediaSpool
@@ -19,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 MAX_CACHED_CONTEXTS = 1_024
 MAX_TRAJECTORY_READ_BYTES = 4 * 1024 * 1024
+
+
+class NotPrescribed(LookupError):
+    """A read of a format the conversation it names was not prescribed when it started."""
+
+    def __init__(self, context_id: str, format: str) -> None:
+        super().__init__(f"context {context_id!r} was not prescribed {format}, so it has no {format} copy")
+        self.context_id = context_id
+        self.format = format
 
 
 @dataclass(slots=True)
@@ -104,6 +114,16 @@ class TaskTrajectories:
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
         self._copies: dict[str, AtifCopy] = {}
+        #: The formats beside native a conversation started from now on is built in: none until prescribed.
+        self._prescribed: frozenset[str] = frozenset()
+        #: Each started conversation's formats beside native, fixed as its first task starts.
+        self._built: dict[str, frozenset[str]] = {}
+
+    def prescribe(self, formats: Iterable[str]) -> frozenset[str]:
+        """Build ``formats`` beside native for each conversation started from now on; one already started keeps the
+        formats it started with, so no copy misses its first turns."""
+        self._prescribed = frozenset(formats) - {self._native}
+        return self._prescribed
 
     def register(self, task_id: str, context_id: str) -> TrajectoryLog:
         """The task's log, created ``pending`` the first time the task is seen."""
@@ -132,7 +152,8 @@ class TaskTrajectories:
         started = sum(1 for other in order if self._tasks[other].started)
         order.insert(started, task_id)
         record.started = True
-        if self._atif is not None and turn is not None:
+        built = self._built.setdefault(record.context_id, self._prescribed)
+        if self._atif is not None and turn is not None and ATIF_FORMAT in built:
             copy = self._copies.get(record.context_id)
             if copy is None:
                 copy = self._copies[record.context_id] = AtifCopy(
@@ -153,6 +174,7 @@ class TaskTrajectories:
         new document, since the conversation is the snapshot's now; an agent that serves atif/1 only."""
         self._turns.set(context_id, turns)
         self._copies.pop(context_id, None)
+        self._built.pop(context_id, None)
         self.media.drop(context_id)
 
     def request_cancel(self, task_id: str) -> None:
@@ -281,7 +303,7 @@ class TaskTrajectories:
         """The ended task's atif/1 document as it stood when it ended, with its aux log and served
         turn context, or None when there is none."""
         record = self._tasks.get(task_id)
-        copy = self._copies.get(record.context_id) if record is not None else None
+        copy = self._copy(record.context_id) if record is not None else None
         if copy is None:
             return None
         self._touch(record.context_id)
@@ -290,7 +312,7 @@ class TaskTrajectories:
 
     def atif_context(self, context_id: str) -> dict[str, Any] | None:
         """The context's atif/1 live page, or None when it has no closed step yet."""
-        copy = self._copies.get(context_id)
+        copy = self._copy(context_id)
         if copy is None:
             return None
         self._touch(context_id)
@@ -301,7 +323,7 @@ class TaskTrajectories:
     ) -> AtifCursor | None:
         """A cursor page of the task's closed atif/1 steps, in the task's state."""
         record = self._tasks.get(task_id)
-        copy = self._copies.get(record.context_id) if record is not None else None
+        copy = self._copy(record.context_id) if record is not None else None
         if copy is None:
             return None
         self._touch(record.context_id)
@@ -314,13 +336,20 @@ class TaskTrajectories:
     ) -> AtifCursor | None:
         """A cursor page of the context's closed atif/1 steps, on the task the context is on and in
         the context's state."""
-        copy = self._copies.get(context_id)
+        copy = self._copy(context_id)
         records = self._context_records(context_id) if copy is not None else None
         if copy is None or records is None:
             return None
         task_id, state = self._context_progress(context_id, records)
         page = copy.page(after, max_steps, max_bytes)
         return AtifCursor(page=page, context_id=context_id, task_id=task_id, state=state)
+
+    def _copy(self, context_id: str) -> AtifCopy | None:
+        """The context's atif/1 copy, None before it has one; NotPrescribed when it started without atif/1."""
+        built = self._built.get(context_id)
+        if built is not None and ATIF_FORMAT not in built:
+            raise NotPrescribed(context_id, ATIF_FORMAT)
+        return self._copies.get(context_id)
 
     def _context_progress(
         self, context_id: str, records: list[_TaskRecord]
@@ -362,6 +391,7 @@ class TaskTrajectories:
                 continue
             del self._contexts[context_id]
             self._copies.pop(context_id, None)
+            self._built.pop(context_id, None)
             self.media.drop(context_id)
             for task_id in task_ids:
                 del self._tasks[task_id]

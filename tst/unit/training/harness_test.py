@@ -123,6 +123,35 @@ def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
                                       "tasks/self-judged.json": json.dumps([DEPLOY, ASK, JUDGE])})
 
 
+def test_a_task_left_out_isnt_linted_so_a_config_only_it_gets_wrong_cant_stop_the_rest(bundle, caplog):
+    unprobed = {"id": "files", "type": "verify_sandbox", "sandbox_name": "box",
+                "criteria": [{"type": "probe_file_exists", "criterion": "has it"}]}
+    (bundle / "tasks/sandboxed.json").write_text(json.dumps([DEPLOY, unprobed]))
+
+    with caplog.at_level(logging.WARNING, logger=harness.__name__):
+        rows = prompt_rows(bundle)
+
+    assert "sandboxed is left out" in caplog.text
+    assert not any(row["task_id"].endswith("sandboxed") for row in rows)
+
+
+def test_the_dataset_and_the_sessions_prepare_their_tasks_with_skip_lint_as_given(bundle, monkeypatch):
+    prepared = []
+
+    def prepare(*args, **kwargs):
+        prepared.append(kwargs["skip_lint"])
+        raise RuntimeError("prepared")
+
+    monkeypatch.setattr(harness, "prepare_bundle", prepare)
+    for skip in (False, True):
+        with pytest.raises(RuntimeError, match="prepared"):
+            prompt_rows(bundle, skip_lint=skip)
+        with pytest.raises(RuntimeError, match="prepared"):
+            AgentEnvSessionFactory(bundle, llm_url="http://127.0.0.1:1", model=MODEL, skip_lint=skip)
+
+    assert prepared == [False, False, True, True]
+
+
 def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_captured_and_scored(engine, bundle, caplog):
     with caplog.at_level(logging.WARNING, logger=harness.__name__):
         rows = prompt_rows(bundle)

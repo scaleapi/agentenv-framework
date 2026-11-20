@@ -32,7 +32,7 @@ _ROLE_VARIABLE = "AGENTENV_ROLE"
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
 
 # The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
-TOOLS_CLI_VERSION = "0.147.0"
+TOOLS_CLI_VERSION = "0.162.1"
 # The CLI's own tools, by the names its model sees, that a selection can turn off. Some only go together, as one
 # setting turns them on: the shell's two, the six collaboration tools `multi_agent_v2` brings, and the three goal tools.
 # `apply_patch` is turned off through the model catalog (`catalog_overrides`), the others by `_TOOL_SWITCHES`. Left out:
@@ -90,7 +90,7 @@ def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
 
 
 # No setting turns off `apply_patch`: a model's entry in the CLI's model catalog offers it when its
-# `apply_patch_tool_type` is set, as it is for every GPT model 0.147.0 ships with. A selection without it points the CLI,
+# `apply_patch_tool_type` is set, as it is for every GPT model 0.162.1 ships with. A selection without it points the CLI,
 # with `model_catalog_json`, at a copy of the catalog it would use whose models all have the field null. The copy is
 # made from the installed CLI's own catalog each time, so it follows the pinned version.
 CATALOG_WITHOUT_APPLY_PATCH = "model_catalog_without_apply_patch.json"
@@ -210,6 +210,8 @@ def write_base_config(environ: Mapping[str, str]) -> None:
     # Ships default-OFF, and the default-ON `multi_agent` is v1 scaffolding that
     # yields no collaboration tools on codex-family models.
     cfg.setdefault("features", {})["multi_agent_v2"] = True
+    # Off by default since 0.162.0; a selection turns it off again with a `-c` override.
+    cfg.setdefault("tools", {}).setdefault("update_plan", {})["enabled"] = True
     base_url = environ.get("LITELLM_BASE_URL") or ""
     if base_url:
         cfg["model_provider"] = "litellm"
@@ -236,6 +238,10 @@ def write_base_config(environ: Mapping[str, str]) -> None:
                    if name.lower() != "x-litellm-tags"}
         if headers:
             provider["http_headers"] = headers
+        # Codex compacts a custom provider's context locally by default, with a request that declares no tools, which
+        # a Responses API may refuse when the history replays encrypted tool-call arguments. Remote compaction sends
+        # the tools.
+        provider["capabilities"] = {"remote_compaction": "v2"}
         cfg.setdefault("model_providers", {})["litellm"] = provider
     _write(cfg)
 

@@ -8,7 +8,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
+from .console_session import frame_ancestor_problem
+from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
                         GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
                         WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
@@ -190,6 +191,14 @@ def parse_name_url_map(variable: str) -> dict[str, str]:
     return urls
 
 
+def parse_frame_ancestors(spec: str) -> tuple[str, ...]:
+    """``CONSOLE_FRAME_ANCESTORS``: the origins besides the gateway's own that may show pgweb in a frame."""
+    origins = tuple(spec.split())
+    if problems := [problem for origin in origins if (problem := frame_ancestor_problem(origin))]:
+        raise ValueError(f"invalid {CONSOLE_FRAME_ANCESTORS_ENV}: {'; '.join(problems)}")
+    return origins
+
+
 def parse_clock_followers(spec: str) -> dict[str, str]:
     """``CLOCK_FOLLOWER_TOKENS``: each computer that follows the clock as ``name=read token``, comma-separated."""
     followers: dict[str, str] = {}
@@ -241,6 +250,7 @@ if __name__ == "__main__":
         website_urls=website_urls,
         rest_proxy_urls=rest_proxy_urls,
         console_urls=parse_name_url_map(CONSOLE_URLS_ENV),
+        console_frame_ancestors=parse_frame_ancestors(os.environ.get(CONSOLE_FRAME_ANCESTORS_ENV, "")),
         gateway_mode=gateway_mode,
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
