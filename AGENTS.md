@@ -346,6 +346,10 @@ orchestrators call it the same way. What callers rely on:
 - Each step runs under `protocol_v1.authorized` for the deployed envs in its context: a protocol-client
   call the step makes to a deployed env's address, naming no headers of its own, sends that env's
   `DeployedEnv.control_headers`.
+- Each step runs with `task_step.context.ATTEMPT_EPOCH` set to the attempt epoch it was dispatched
+  under, in its own asyncio task, so the usage a prompt step records (`metadata["step_usage"]`,
+  `PromptResponse.usage`) says which attempt spent it. A runner that calls `step.execute()` itself, not
+  through `Task.run()`, sets it the same way, or its entries carry no attempt.
 - A runner records every run it accepts in the run index (`agent_env.runner.store`): `insert_run` at
   submit, `set_running` when it starts, `mark_terminal` when it ends. The explorer lists, counts and
   groups runs from that collection and never calls the runner to ask, so a run missing there is
