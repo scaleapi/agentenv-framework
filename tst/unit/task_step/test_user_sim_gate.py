@@ -169,3 +169,43 @@ def test_a_judge_that_couldnt_be_set_up_isnt_called_and_the_patterns_verdict_sta
         gate = NeverCalled(patterns=patterns, judge_model="judge-model")
         verdict = asyncio.run(gate.check("shorter, please", [], judge_unavailable="judge setup: KeyError: x"))
         assert (verdict.passed, verdict.judge_error) == (True, "judge setup: KeyError: x")
+
+
+def _judge_call(monkeypatch, model, api_base, params=None):
+    """The model and api_base the gate's judge handed litellm, for a judge ``model`` through ``api_base``."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    import litellm
+
+    from agent_env.config.model import ModelCallConfig
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    sent = {}
+
+    async def acompletion(**kwargs):
+        sent.update(kwargs)
+        content = json.dumps({"in_role": True, "reason": "ok"})
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    config = ModelCallConfig(api_key="k", api_base=api_base, params=params or {})
+    asyncio.run(UserSimGate(judge_model=model)._judge("thanks, looks good", [], config))
+    return sent["model"], sent.get("api_base")
+
+
+def test_a_claude_judge_through_an_endpoint_drops_the_bases_trailing_v1(monkeypatch):
+    assert _judge_call(monkeypatch, "claude-sonnet-5-5", "https://llm.example/v1") == (
+        "claude-sonnet-5-5", "https://llm.example")
+
+
+def test_a_bare_judge_name_litellm_cant_place_goes_through_the_endpoint_as_openai(monkeypatch):
+    assert _judge_call(monkeypatch, "qwen3:8b", "https://llm.example/v1") == (
+        "openai/qwen3:8b", "https://llm.example/v1")
+
+
+def test_a_judge_with_no_endpoint_or_a_provider_prefix_keeps_its_route(monkeypatch):
+    assert _judge_call(monkeypatch, "claude-sonnet-5-5", None) == ("claude-sonnet-5-5", None)
+    assert _judge_call(monkeypatch, "openai/gpt-x", "https://llm.example/v1") == (
+        "openai/gpt-x", "https://llm.example/v1")

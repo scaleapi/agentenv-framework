@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Awaitable, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
@@ -240,13 +240,21 @@ class UserSimGate:
         import litellm
 
         from agent_env.config.model import ModelParam
+        from agent_env.task_step.task_steps.verifiers.rubrics_verifier import _judge_route
 
         prompt = _JUDGE_PROMPT.format(
             history=render_history(history, self.context_turns, self.context_chars),
             candidate=candidate[: self.context_chars * 2],
         )
+        # Routed as the rubrics verifier routes its judge: through an endpoint, a Claude model drops the base's
+        # trailing /v1 and a bare name litellm can't place goes as openai/<name>.
+        model = self.judge_model
+        if call_config is not None:
+            model, route_base = _judge_route(model, call_config.api_base, litellm.get_llm_provider,
+                                             call_config.params.get("custom_llm_provider"))
+            call_config = replace(call_config, api_base=route_base)
         response = await litellm.acompletion(
-            model=self.judge_model,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             timeout=self.judge_timeout_seconds,
             **{ModelParam.RESPONSE_FORMAT: {"type": "json_schema",
