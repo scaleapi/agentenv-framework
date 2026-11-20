@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import sys
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,8 @@ class Answer:
     status: int
     headers: dict[str, str]
     chunks: list[bytes] = field(default_factory=list)
+    complete: bool = False
+    error: BaseException | None = None
 
     @property
     def body(self) -> bytes:
@@ -90,9 +93,11 @@ def holder(upstream: Upstream) -> key_holder.KeyHolder:
 
 
 async def call(holder, method: str, target: str, *, headers: dict[str, str] | None = None, body: bytes | dict = b"",
-               token: str | None = TOKEN, on_chunk=None, spec_version: str = "2.3") -> Answer:
+               token: str | None = TOKEN, on_chunk=None, spec_version: str = "2.3",
+               expect_error: bool = False) -> Answer:
     """``target`` (a raw path and query) sent to the key holder's ASGI app as uvicorn would, the path decoded;
-    each body chunk the app sends is kept apart, and ``on_chunk`` sees each as it is sent."""
+    each body chunk the app sends is kept apart, and ``on_chunk`` sees each as it is sent. An error the app raises is
+    kept on the answer when ``expect_error``, as uvicorn would abort the connection on it."""
     raw, _, query = target.partition("?")
     content = json.dumps(body).encode() if isinstance(body, dict) else body
     sent_headers = {"content-type": "application/json", **({"authorization": f"Bearer {token}"} if token else {}),
@@ -125,9 +130,15 @@ async def call(holder, method: str, target: str, *, headers: dict[str, str] | No
                 if on_chunk:
                     await on_chunk(message["body"])
             if not message.get("more_body"):
+                answer.complete = True
                 done.set()
 
-    await holder.app(scope, receive, send)
+    try:
+        await holder.app(scope, receive, send)
+    except Exception as error:
+        if not expect_error:
+            raise
+        answer.error = error
     return answer
 
 
@@ -530,9 +541,10 @@ async def test_a_client_gone_before_the_stream_starts_still_closes_the_endpoints
     async def gone(chunk):
         raise OSError("the client is gone")
 
-    with pytest.raises(Exception):
-        await call(holder, "POST", "/v1/messages", body=_messages(stream=True), on_chunk=gone,
-                   spec_version=spec_version)
+    answer = await call(holder, "POST", "/v1/messages", body=_messages(stream=True), on_chunk=gone,
+                        spec_version=spec_version, expect_error=True)
+
+    assert answer.error is not None
 
     await asyncio.wait_for(closed.wait(), timeout=5)
     assert [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()] == ["call"]
@@ -559,10 +571,54 @@ async def test_a_compressed_answer_is_decoded_so_its_scrubbed(holder, upstream):
 
 
 @pytest.mark.asyncio
-async def test_an_answer_in_an_encoding_it_cant_decode_is_refused(holder, upstream):
-    upstream.reply = lambda request: httpx.Response(200, headers={"content-encoding": "br"}, content=b"\x00\x01")
+@pytest.mark.parametrize("encodings", [["br"], ["x-gzip"], ["gzip, br"], ["gzip", "x-gzip"], ["compress"]])
+async def test_an_answer_in_an_encoding_it_cant_decode_is_refused(holder, upstream, encodings):
+    compressed = gzip.compress(f"bad key {KEY}".encode())
+    upstream.reply = lambda request: httpx.Response(
+        401, headers=[("content-encoding", encoding) for encoding in encodings], content=compressed)
 
-    assert (await call(holder, "POST", "/v1/messages", body=_messages())).status == 502
+    answer = await call(holder, "POST", "/v1/messages", body=_messages())
+
+    assert answer.status == 502
+    assert compressed not in answer.body
+
+
+@pytest.mark.asyncio
+async def test_an_answer_compressed_twice_is_decoded_twice(holder, upstream):
+    upstream.reply = lambda request: httpx.Response(200, headers=[("content-encoding", "gzip"), ("content-encoding",
+                                                                                                 "deflate")],
+                                                    content=zlib.compress(gzip.compress(KEY.encode())))
+
+    assert (await call(holder, "POST", "/v1/messages", body=_messages())).body == key_holder.REDACTED
+
+
+@pytest.mark.asyncio
+async def test_a_stream_the_endpoint_breaks_doesnt_end_as_if_complete(holder, upstream, capsys):
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"event: message_start\ndata: {}\n\n"
+            raise httpx.ReadError("the endpoint went away")
+
+    upstream.reply = lambda request: httpx.Response(200, stream=Broken())
+    capsys.readouterr()
+
+    answer = await call(holder, "POST", "/v1/messages", body=_messages(stream=True), expect_error=True)
+
+    assert isinstance(answer.error, httpx.ReadError)
+    assert answer.chunks == [b"event: message_start\ndata: {}\n\n"]
+    assert not answer.complete
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"] == "ReadError"
+
+
+@pytest.mark.asyncio
+async def test_a_long_model_name_is_cut_in_the_log(holder, capsys):
+    capsys.readouterr()
+
+    await call(holder, "POST", "/v1/messages", body=_messages("m" * 100_000))
+
+    line = capsys.readouterr().out.splitlines()[-1]
+    assert len(line) < 1000
+    assert json.loads(line)["model"].endswith("... (100000 characters)")
 
 
 # Tools are left alone (N3)

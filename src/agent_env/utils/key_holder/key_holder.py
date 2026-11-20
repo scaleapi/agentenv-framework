@@ -41,6 +41,8 @@ SEALED_FILE = SEALED_DIR / "sealed.json"
 SEALED_VERSION = 1
 DEFAULT_ROUTE = "default"
 TOKEN_PREFIX = "agentenv-ctx-"
+#: Random bytes in a context token, before its URL-safe encoding.
+TOKEN_BYTES = 24
 #: The model key's names; the first one set is sealed.
 KEY_NAMES = ("LITELLM_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
              "GOOGLE_API_KEY")
@@ -56,6 +58,10 @@ MIN_SCRUB_LENGTH = 8
 #: Larger bodies are read in a worker thread, so parsing one doesn't hold up other contexts' streams.
 THREADED_PARSE_BYTES = 256 * 1024
 REDACTED = b"[agentenv-redacted]"
+#: Hex characters of a context id's SHA-256 its calls are logged under.
+CONTEXT_DIGEST_CHARS = 12
+#: Characters of a requested model name a log line keeps.
+LOGGED_MODEL_CHARS = 200
 
 
 class SealError(Exception):
@@ -142,7 +148,7 @@ class Tokens:
 
 
 def new_token() -> str:
-    return TOKEN_PREFIX + secrets.token_urlsafe(24)
+    return TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES)
 
 
 def sealed_from_env(environ: Mapping[str, str]) -> Sealed:
@@ -276,10 +282,11 @@ class KeyHolder:
             self.stats["upstream_errors"] += 1
             call.error = type(error).__name__
             return call.answer(502, f"the model endpoint is unreachable: {call.error}")
-        encoding = response.headers.get("content-encoding", "identity").strip().lower()
-        if encoding not in _DECODABLE:
+        encodings = [value.strip().lower() for value in response.headers.get_list("content-encoding",
+                                                                                   split_commas=True)]
+        if not set(encodings) <= _DECODABLE:
             await response.aclose()
-            call.error = f"content-encoding {encoding}"
+            call.error = f"content-encoding {', '.join(encodings)}"
             return call.answer(502, "the model endpoint answered in an encoding the key holder can't scrub")
         headers = {name: self._scrubbed_text(value) for name, value in response.headers.items()
                    if name.lower() not in _DROP_RESPONSE}
@@ -371,6 +378,7 @@ class KeyHolder:
                 yield tail
         except httpx.HTTPError as error:
             call.error = type(error).__name__
+            raise
 
     def _scrubbed_text(self, text: str) -> str:
         for value in self._sealed_values:
@@ -430,6 +438,8 @@ class _Call:
         self.logged = True
         fields = {name: value for name, value in self.__dict__.items()
                   if name not in ("started", "logged") and value is not None}
+        if self.model is not None and len(self.model) > LOGGED_MODEL_CHARS:
+            fields["model"] = f"{self.model[:LOGGED_MODEL_CHARS]}... ({len(self.model)} characters)"
         log("call", **fields, ms=round((time.monotonic() - self.started) * 1000, 1))
 
 
@@ -541,7 +551,7 @@ def _bearer(value: str | None) -> str | None:
 
 
 def _digest(context_id: str) -> str:
-    return hashlib.sha256(context_id.encode()).hexdigest()[:12]
+    return hashlib.sha256(context_id.encode()).hexdigest()[:CONTEXT_DIGEST_CHARS]
 
 
 def _model_list(path: str, models: Iterable[str]) -> dict[str, Any]:
@@ -616,8 +626,9 @@ _DROP_REQUEST = frozenset({
     "x-http-method-override",
 })
 _DROP_RESPONSE = frozenset({"content-length", "content-encoding", "connection", "keep-alive", "transfer-encoding"})
-#: What ``aiter_bytes`` decodes with the standard library alone, so the scrub reads the answer as sent.
-_DECODABLE = frozenset({"identity", "gzip", "x-gzip", "deflate"})
+#: What ``aiter_bytes`` decodes with the standard library alone, so the scrub reads the answer as sent; httpx passes any
+#: other name through undecoded, ``x-gzip`` included.
+_DECODABLE = frozenset({"identity", "gzip", "deflate"})
 
 
 if __name__ == "__main__":
