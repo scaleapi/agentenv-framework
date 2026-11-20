@@ -68,8 +68,9 @@ class ServedTask:
     def toolset(self) -> Toolset:
         """Where the played agent's tools come from: the envs it works in and the versions the task deploys, its role
         in them, the changes the task makes to that role's tool access, whether its turns offer ``bash`` in its
-        sandbox, and the server config it applies (``config``, only when it applies any), whose replies can reveal
-        tools. Tasks that agree on it offer the same tools, so a trainer can group them."""
+        sandbox, and, when it applies server config (whose replies can reveal tools), its config extensions and those
+        tool-access changes in step order (``config``). Tasks that agree on it offer the same tools, so a trainer can
+        group them."""
         agent = self.spec.trainer_agents[0]
         [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
         role, envs = getattr(deploy, "role", None), list(getattr(deploy, "env_ids", None) or [])
@@ -80,10 +81,14 @@ class ServedTask:
                                   for step in self.task.steps
                                   if step.type == "modify_env_tool_access" and step.role == (role or DEFAULT_ROLE)],
                           bash=works_in_sandbox(self.task.steps, agent))
-        config = [{"env": step.env_id, "directives": [d.to_dict() for d in step.directives]}
-                  for step in self.task.steps if step.type == "apply_server_config" and step.env_id in envs]
-        if config:
-            toolset["config"] = config
+        if any(step.type == "apply_server_config" and step.env_id in envs for step in self.task.steps):
+            toolset["config"] = [
+                {"env": step.env_id, "action": step.action, "tools": step.tools}
+                if step.type == "modify_env_tool_access"
+                else {"env": step.env_id, "extensions": [directive.uri for directive in step.directives]}
+                for step in self.task.steps
+                if (step.type == "modify_env_tool_access" and step.role == (role or DEFAULT_ROLE))
+                or (step.type == "apply_server_config" and step.env_id in envs)]
         return toolset
 
 

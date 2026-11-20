@@ -950,3 +950,59 @@ async def test_a_failing_enable_fails_the_step():
     with patch("httpx.AsyncClient", return_value=gw):
         with pytest.raises(ApplyServerConfigError, match="Enabling the tools \\['slack_export'\\]"):
             await _step().execute(await _revealing_context())
+
+
+_RealAsyncClient = httpx.AsyncClient
+
+
+class _GatewayForwarder(_RevealingGateway):
+    """Replies to the config extension with `reply` and forwards the enable to a real in-process gateway."""
+
+    def __init__(self, reply: dict, gateway):
+        super().__init__(reply)
+        self.gateway = gateway
+
+    async def request(self, method, url, *, json=None, timeout=None, headers=None):
+        if not url.endswith("/tools/enable"):
+            return await super().request(method, url, json=json)
+        transport = httpx.ASGITransport(app=self.gateway._mcp.streamable_http_app())
+        async with _RealAsyncClient(transport=transport, base_url="http://gateway") as client:
+            return await client.request(method, "/tools/enable", json=json, headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_a_reply_reveals_is_listed_to_every_role_by_the_gateway():
+    from mcp.types import Tool as MCPTool
+
+    from agent_env.env.gateway import AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY, InternalMCPServer
+    from agent_env.env.gateway.caller import Caller
+    from agent_env.env.gateway.gateway import Gateway
+
+    tools = [MCPTool(name=name, description="", inputSchema={"type": "object", "properties": {}}, _meta=meta)
+             for name, meta in (("slack_send", None), ("slack_export", {AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY: True}))]
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="unit",
+                      internal_mcp_servers=[InternalMCPServer("slack", "http://slack/mcp")])
+
+    class _Session:
+        async def list_tools(self):
+            return SimpleNamespace(tools=tools)
+
+    async def open_session(server, stack, report):
+        return _Session()
+
+    gateway._sessions.open_session = open_session
+    await gateway._ensure_tools_discovered()
+
+    def listed(role: str) -> set[str]:
+        token = Caller(role=role).bind()
+        try:
+            return {tool.name for tool in gateway._mcp._tool_manager.list_tools()}
+        finally:
+            Caller.reset(token)
+
+    assert "slack_export" not in listed("grader")
+    forwarder = _GatewayForwarder({"ok": True, "reveal_tools": ["slack_export"]}, gateway)
+    with patch("httpx.AsyncClient", return_value=forwarder):
+        await _step().execute(await _revealing_context())
+    assert {"slack_send", "slack_export"} <= listed("grader") & listed("default")
+    await gateway._close_child_sessions()

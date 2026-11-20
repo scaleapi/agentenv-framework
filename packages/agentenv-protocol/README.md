@@ -94,9 +94,11 @@ A config extension can reveal hidden tools the config it applies makes usable: i
 `"reveal_tools": [names]`, the tools as the server lists them, and `apply_server_config` then names
 them for every role (`role: "*"`), as a tool-access step would, so the agent under test sees them too.
 A missing, `null` or empty list reveals nothing; any other value that is not a list of tool names (or
-names `"*"`) fails the step. A later step for every tool or a full reset hides them again. Because the
-reveal names every role, it also re-enables a revealed tool for a role an earlier step denied it to:
-apply per-role denies after `apply_server_config`.
+names `"*"`) fails the step. A later full reset (every tool, every role) hides them again. Because the
+reveal names every role, it also re-enables a revealed tool for a role an earlier step denied it to. Only
+a step that names the tool hides it from one role: a step for every tool skips tools listed hidden by
+default, in either order. To keep a revealed tool from a role, deny that tool by name after
+`apply_server_config`.
 
 `@tool(..., annotations={"readOnlyHint": True}, structured_output=True, meta={...})` lists the tool
 with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and on fastmcp alike.
