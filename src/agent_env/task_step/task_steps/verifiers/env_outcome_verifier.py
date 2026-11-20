@@ -126,6 +126,10 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             logger.info(f"Running verify() from artifact '{self.file_artifact_id}' against {deployed.mcp_url}")
             parameters = inspect.signature(module.verify).parameters
             keywords = {"env_url": deployed.environment_url} if "env_url" in parameters else {}
+            if "control_headers" in parameters:
+                # What a verifier's call to the env's framework-only routes sends (its older REST data routes
+                # included); an agent never gets them.
+                keywords["control_headers"] = deployed.control_headers
             if "run" in parameters:
                 keywords["run"] = await load_run_context(context, self._graded_prompt(context))
             if "trajectory" in parameters:

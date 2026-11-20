@@ -123,3 +123,16 @@ def test_a_script_whose_object_was_replaced_after_its_put_is_never_run(local_sto
     with pytest.raises(ValueError, match="no longer holds the bytes file artifact script v1 was put with"):
         asyncio.run(step.execute(ctx))
     assert not marker.exists()
+
+
+def test_a_control_headers_parameter_gets_the_deployments_control_token(monkeypatch):
+    script = b"async def verify(url, control_headers):\n    return [{'id': 'c', 'score': 1.0, 'headers': control_headers}]\n"
+    monkeypatch.setattr(FileArtifact, "get", staticmethod(lambda id, version=None: SimpleNamespace(load=lambda: script)))
+    ctx = TaskStepContext()
+    deployed = DeployedEnv(env_id="e", env_version=1, mcp_url="http://mcp", control_token="placeholder-token")
+    ctx.deployed_envs.append(deployed)
+    step = EnvOutcomeVerifierTaskStep(id="outcome", version=None, env_id="e", file_artifact_id="s", verifier_id="v")
+
+    results = asyncio.run(step.execute(ctx)).metadata["verifications"]["v"]["results"]
+
+    assert results[0]["headers"] == deployed.control_headers and results[0]["headers"]
