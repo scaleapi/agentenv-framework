@@ -8,6 +8,7 @@ import email.parser
 import email.policy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -140,8 +141,8 @@ def test_the_hook_waits_long_enough_for_its_turn_and_the_script_reads_its_own_co
     log, _, _, _ = _changelog(tmp_path)
     assert tar_changelog.HOOK_TIMEOUT_S == 600
     assert f"CFG = {json.dumps(str(tmp_path / 'changelog' / 'config.json'))}" in log.capture_script()
-    assert log.hook_command.endswith(f"{tmp_path / 'changelog' / 'capture.py'}")
-    assert log.hook_command.split()[0] == sys.executable
+    capture = str(tmp_path / "changelog" / "capture.py")
+    assert shlex.split(log.hook_command) == ["AGENTENV_REAL_TIME=1", sys.executable, capture]
 
 
 def test_the_changelog_directory_is_one_per_port():
@@ -239,6 +240,34 @@ def test_the_changelogs_tar_runs_on_real_time(tmp_path, staging, monkeypatch):
     assert result.returncode == 0 and "captured seq=0" in result.stderr, result.stderr
     runs = recording_tar.incremental_runs(log)
     assert [("-cf" in run["args"], run["real_time"]) for run in runs] == [(True, "1"), (False, "1")]
+
+
+def test_the_hook_the_cli_runs_through_a_shell_starts_on_real_time(tmp_path, staging, monkeypatch):
+    """The hook decides by its own clock whether the grant it uploads with has expired: on an env clock past the
+    grant's expiry it refused every upload. A sitecustomize on the hook's path records the environment it started in."""
+    seen = tmp_path / "hook-started-with.json"
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    (probe / "sitecustomize.py").write_text(
+        "import json, os, sys\n"
+        "if sys.argv[0].endswith('capture.py'):\n"
+        f"    open({str(seen)!r}, 'w').write(json.dumps(os.environ.get('AGENTENV_REAL_TIME')))\n")
+    recording_tar.install(tmp_path / "bin")
+    monkeypatch.delenv("AGENTENV_REAL_TIME", raising=False)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    changelog, _, _, _ = _changelog(tmp_path, roots=[str(root)])
+    _enable(changelog)
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", changelog.hook_command], input=json.dumps({"tool_name": "Bash", "session_id": "s"}),
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "A2A_PORT": str(staging.port), "PYTHONPATH": str(probe),
+             "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 0 and "captured seq=0" in result.stderr, result.stderr
+    assert json.loads(seen.read_text()) == "1"
 
 
 def test_enable_refuses_an_empty_root_list(tmp_path):

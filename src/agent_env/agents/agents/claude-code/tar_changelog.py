@@ -49,8 +49,8 @@ _TAR_STDERR_TAIL_CHARS = 2000
 _TAR_VERSION_TIMEOUT_S = 30
 _FAILED_INCREMENTS_LOGGED = 5
 
-# The post-tool hook, run by the agent's own Python, as a child of the CLI after every tool call, so an increment
-# includes that tool's writes. It exits 0 on a capture error, so the error never reaches the model.
+# The post-tool hook, run by the agent's own Python on real time, as a child of the CLI after every tool call, so an
+# increment includes that tool's writes. It exits 0 on a capture error, so the error never reaches the model.
 CAPTURE_SCRIPT = r'''import asyncio, fcntl, json, os, shutil, signal, subprocess, sys, time
 from pathlib import Path
 
@@ -266,6 +266,9 @@ if __name__ == "__main__":
     sys.exit(0)
 '''
 _DEFAULT_CONFIG_LINE = 'CFG = "/tmp/changelog/config.json"'
+# The hook decides by its own clock whether the grant it uploads with has expired, so it runs on real time, not the
+# CLI's: the CLI runs a hook's command through a shell, which hands the hook this assignment.
+_REAL_TIME_PREFIX = "AGENTENV_REAL_TIME=1"
 
 
 def real_time_env(environ: Mapping[str, str]) -> dict[str, str]:
@@ -424,7 +427,7 @@ class Changelog:
         self.snar = f"{directory}/state.snar"
         self.config_path = f"{directory}/config.json"
         self.capture_path = f"{directory}/capture.py"
-        self.hook_command = f"{shlex.quote(sys.executable)} {shlex.quote(self.capture_path)}"
+        self.hook_command = f"{_REAL_TIME_PREFIX} {shlex.quote(sys.executable)} {shlex.quote(self.capture_path)}"
 
     def capture_script(self) -> str:
         """``CAPTURE_SCRIPT`` reading this changelog's config."""
