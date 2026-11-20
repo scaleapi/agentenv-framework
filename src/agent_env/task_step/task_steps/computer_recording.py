@@ -75,7 +75,8 @@ class StartComputerRecordingTaskStep(TaskStep):
         self.environment_name = environment_name
         self.annotation_settings = annotation_settings
         try:
-            self.annotation = AnnotationSettings.model_validate(annotation_settings or {})
+            self.annotation = AnnotationSettings.model_validate({} if annotation_settings is None else
+                                                                annotation_settings)
         except ValidationError as e:
             raise ValueError(f"start_computer_recording's annotation_settings: "
                              f"{options_problem(e, AnnotationSettings)}") from None
@@ -229,6 +230,8 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Reco
     uploaded = [s for s in manifest.segments if s.uploaded]
     entry.update(state="ended", ended_by=manifest.ended_by, segments=len(uploaded),
                  missing_segments=len(manifest.segments) - len(uploaded))
+    if manifest.source is not None:  # the driver's own says whether it drew; one rebuilt from segments can't
+        entry["annotated"] = manifest.annotate is not None
     logger.info("recording %s: %d segments, ended by %s", name, len(uploaded), manifest.ended_by)
 
 
