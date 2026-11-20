@@ -348,7 +348,21 @@ async def test_a_run_that_prescribes_atif_to_an_agent_that_cant_build_it_says_so
 
     assert context.metadata[pa.TRAJECTORY_FORMATS_KEY]["solve"] == {
         "agent": "solver", "prescribed": ["atif/1"], "built": None}
-    assert "agent 'solver' can't build ['atif/1'], which the run prescribes: it builds only its native" in caplog.text
+    assert "agent 'solver' can't build ['atif/1'], which the run prescribes: it builds ['echo/1']" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_agent_on_an_older_sdk_that_offers_atif_unasked_gets_no_call_and_no_warning(monkeypatch, caplog):
+    """Its card lists atif/1 without ``prescribe``: it builds atif/1 for every conversation, so it isn't warned of."""
+    agent = _prescribing_agent(method=False)
+    agent.a2a_card["capabilities"]["extensions"][0]["params"]["formats"] = ["echo/1", "atif/1"]
+    FakeA2AAgents({}, other=lambda request: pytest.fail(f"unexpected request to {request.url}")).serve(monkeypatch)
+    context = _prescribing("atif/1")
+
+    await pa.prescribe_formats(context, "solve", agent, "http://agent.test")
+
+    assert context.metadata[pa.TRAJECTORY_FORMATS_KEY]["solve"]["built"] is None
+    assert "can't build" not in caplog.text
 
 
 @pytest.mark.asyncio

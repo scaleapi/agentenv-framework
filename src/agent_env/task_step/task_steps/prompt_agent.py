@@ -1390,14 +1390,14 @@ async def prescribe_formats(context: TaskStepContext, step_id: str, agent: Deplo
     formats = prescribed_formats(context)
     extension = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_TRAJECTORY)
     method, path = A2AAgent.operation(extension, "prescribe")
-    offered = TrajectoryFormats.of(extension).formats if method is not None and path is not None else ()
+    offered = TrajectoryFormats.of(extension).formats
     record: dict[str, Any] = {"agent": agent.agent_name, "prescribed": list(formats), "built": None}
     context.metadata.setdefault(TRAJECTORY_FORMATS_KEY, {})[step_id] = record
     unbuildable = [format for format in formats if format not in offered]
     if unbuildable:
         logger.warning(f"agent '{agent.agent_name}' can't build {unbuildable}, which the run prescribes: it builds "
                        f"{list(offered) if offered else 'only its native trajectory'}")
-    if not offered:
+    if method is None or path is None:
         return
     wanted = [format for format in formats if format in offered]
     for attempt in range(1, _PRESCRIBE_ATTEMPTS + 1):
