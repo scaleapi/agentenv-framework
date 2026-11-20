@@ -44,14 +44,11 @@ The A2A server starts with the real-time marker, so it and its records stay on r
 `sync_env_clock` with `agent_clock` (off by default; `require_agent_clock` implies it) has armed the clock, it declares
 the agent at the gateway as a follower with a read token of its own and calls that `sync_time` with the follower's
 config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is armed.
-Without it the agent's CLI runs on real time, as its files' modification times are: a CLI that judges a file's age by
-them, as Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the env's date is
-ahead. After `sync_time`, which has the follower follow the gateway with
-`env_time` off, so it acknowledges each version while the page stays real time, core calls clock/v1's `use_env_time`,
-the agent's opt-in, where its card serves it: the follower then arms the page as the gateway's clock is. libfaketime is
-preloaded for the agent's user either way and reads real time from an unarmed page. From then on the CLI, its own
-"Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
-followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
+From then on the CLI, its own "Today's date is" line included, and every command the model runs read the env's time,
+and a clock write that waits for followers waits for the agent. Without `agent_clock` the agent keeps real time, as its
+files' modification times do, and reads the env's time only from the gateway's `get_time`: a CLI that judges a file's
+age by those times, as Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the
+env's date is ahead. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
 working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts
 (the peer-agents MCP server's), `host.docker.internal`, the hosts the agent's `NO_PROXY` names and the hosts it reaches
 by plain HTTP alone, which have no certificate to check, go direct. `NO_PROXY` goes by host, not scheme, so a host the

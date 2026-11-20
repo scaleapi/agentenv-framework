@@ -7,9 +7,7 @@ neither write it nor stop it.
 Core writes its config, the gateway's watch URL as this computer reaches it, the computer's name and its read token,
 through the sandbox's root channel (``CONFIG``, readable by root and this user alone); never through the driver, which
 runs as the session user. It reads the config every quarter second, during a watch too, and follows a changed one at
-once. Until there is one, the clock stays as root made it at boot: real time. A config with ``env_time`` false, as an
-agent's is until it opts in (clock/v1 ``use_env_time``), is followed and acknowledged as any other while the page
-stays real time; a computer's names none and is armed as the gateway is. It reports how it's doing in ``STATUS``,
+once. Until there is one, the clock stays as root made it at boot: real time. It reports how it's doing in ``STATUS``,
 which anyone may read and which holds no token: the gateway it follows, whether it's connected, the version it shows,
 or its last error.
 
@@ -118,12 +116,10 @@ class Follower:
 
     def __init__(self, raw: bytes, config: dict):
         self.raw, self.url, self.name, self.token = raw, config["watch_url"], config["name"], config["token"]
-        # Whether the page follows the gateway's clock or stays real time while the follower acknowledges it.
-        self.env_time = config.get("env_time", True) is not False
         self.after, self.samples, self.written = "", [], None
         self.errors, self.backoff = 0, RETRY_FIRST_S
         self.status = {"url": self.url, "name": self.name, "connected": False, "version": None, "armed": False,
-                       "env_time": self.env_time, "error": None}
+                       "error": None}
 
     def report(self, **fields) -> None:
         self.status.update(fields)
@@ -175,7 +171,7 @@ class Follower:
         self.samples = (self.samples + [{"delay": max(0.0, (t4 - t1) - held),
                                          "theta": ((body["received"] - t1) + (body["sent"] - t4)) / 2}])[-SAMPLES:]
         theta, dropped = offset(self.samples)
-        armed, universe, rate, anchor = state_of(body if self.env_time else {}, theta)
+        armed, universe, rate, anchor = state_of(body, theta)
         meaning = (armed, rate, universe - rate * anchor if armed else 0.0)
         changed = body["version"] != self.after
         moved = (self.written is None or meaning[:2] != self.written[:2]

@@ -1,7 +1,6 @@
 """An agent's side of clock/v1: in an image that runs the clock follower, every AgentEnvAgent serves sync_time with no
-code of its own; called by sync_env_clock, it writes the follower's config from the request, on real time, sets the
-task's zone for what the server starts, and answers once the follower shows the gateway's current version, or says why
-it doesn't; use_env_time, the opt-in, then has the follower arm the page as the gateway's clock is."""
+code of its own; called by sync_env_clock, it writes the follower's config from the request, sets the task's zone for
+what the server starts, and answers once the follower shows the gateway's current version, or says why it doesn't."""
 from __future__ import annotations
 
 import json
@@ -21,8 +20,6 @@ from agentenv_protocol.a2a_agent import (
     TaskResult,
     a2a_agent,
 )
-from agentenv_protocol.a2a_agent import extension
-from agentenv_protocol.a2a_agent.extensions import ClockSyncTimeRequest
 from agentenv_protocol.computer import clock as follower
 
 REQUEST = {"env_get_time_url": "http://gw/clock/time", "watch_url": "http://gw/clock/watch", "name": "agent-solver",
@@ -118,7 +115,7 @@ def test_sync_time_writes_the_followers_config_sets_the_zone_and_answers_once_it
                                           "armed": True}}
     config = image / "follower.json"
     assert json.loads(config.read_text()) == {"watch_url": "http://gw/clock/watch", "name": "agent-solver",
-                                              "token": "token", "timezone": "America/Chicago", "env_time": False}
+                                              "token": "token", "timezone": "America/Chicago"}
     assert stat.S_IMODE(config.stat().st_mode) == 0o640
     assert os.environ["TZ"] == "America/Chicago" and time.strftime("%Z") in {"CST", "CDT"}
     assert [p.name for p in image.iterdir() if p.name.startswith("follower.json.")] == []
@@ -183,97 +180,6 @@ def test_a_server_restarted_mid_run_takes_back_the_tasks_zone(image, monkeypatch
         assert client.get("/.well-known/agent.json").status_code == 200
 
     assert os.environ["TZ"] == "America/Chicago" and time.strftime("%Z") in {"CST", "CDT"}
-
-
-def _synced(image, client, request=REQUEST) -> None:
-    _follows_the_next_config(image, connected=True, url=request["watch_url"], name=request["name"], version="b:3")
-    assert client.post("/ext/clock/sync-time", json=request).status_code == 200
-
-
-def _env_time(image):
-    return json.loads((image / "follower.json").read_text())["env_time"]
-
-
-def test_the_card_serves_use_env_time_beside_sync_time(image):
-    with _app() as client:
-        methods = _clock(client)["params"]["methods"]
-
-    assert set(methods) == {"sync_time", "use_env_time"}
-    assert methods["use_env_time"]["method"] == "POST"
-
-
-def test_an_agent_that_serves_its_own_sync_time_still_starts_without_use_env_time(image):
-    @a2a_agent(identity=AgentIdentity(name="own-clock", description="test", version="1"), extensions=(CLOCK_V1,))
-    class Agent(AgentEnvAgent):
-        async def run(self, request: TaskRequest) -> TaskResult:
-            return TaskResult.text("ok")
-
-        @extension(CLOCK_V1.sync_time)
-        async def sync_time(self, request: ClockSyncTimeRequest) -> dict:
-            return {"synced": True, "timezone": "UTC", "follower": {}}
-
-    with TestClient(Agent().create_app()) as client:
-        assert set(_clock(client)["params"]["methods"]) == {"sync_time"}
-        assert client.post("/ext/clock/use-env-time").status_code == 404
-
-
-def test_an_agent_that_declares_the_clock_and_leaves_it_to_the_sdk_serves_use_env_time_too(image):
-    """Its sync_time is the SDK's, which keeps real time until use_env_time, so it must serve that too."""
-    with _app(extensions=(CLOCK_V1,)) as client:
-        assert set(_clock(client)["params"]["methods"]) == {"sync_time", "use_env_time"}
-        _synced(image, client)
-        _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
-        assert client.post("/ext/clock/use-env-time").status_code == 200
-
-    assert _env_time(image) is True
-
-
-def test_sync_time_alone_has_the_follower_follow_on_real_time(image):
-    with _app() as client:
-        _synced(image, client)
-
-    assert _env_time(image) is False
-
-
-def test_use_env_time_has_the_follower_arm_the_page_and_answers_once_it_shows_that_config(image):
-    with _app() as client:
-        _synced(image, client)
-        _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver",
-                                 version="b:3", armed=True)
-        answer = client.post("/ext/clock/use-env-time")
-
-    assert answer.status_code == 200, answer.text
-    assert answer.json() == {"env_time": True, "follower": {"name": "agent-solver", "url": "http://gw/clock/watch",
-                                                            "version": "b:3", "armed": True}}
-    assert json.loads((image / "follower.json").read_text()) == {
-        "watch_url": "http://gw/clock/watch", "name": "agent-solver", "token": "token", "timezone": "UTC",
-        "env_time": True}
-
-
-def test_sync_time_again_keeps_env_time_for_the_same_gateway_and_name_and_not_for_another(image):
-    with _app() as client:
-        _synced(image, client)
-        _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
-        assert client.post("/ext/clock/use-env-time").status_code == 200
-        _synced(image, client, {**REQUEST, "read_token": "another-token"})
-        assert _env_time(image) is True
-        _synced(image, client, {**REQUEST, "watch_url": "http://other-gw/clock/watch"})
-
-    assert _env_time(image) is False
-
-
-def test_use_env_time_before_sync_time_is_refused_and_writes_nothing(image):
-    with _app() as client:
-        answer = client.post("/ext/clock/use-env-time")
-
-    assert answer.status_code == 400 and "sync_time" in answer.text
-    assert not (image / "follower.json").exists()
-
-
-def test_use_env_time_takes_no_request_fields(image):
-    with _app() as client:
-        _synced(image, client)
-        assert client.post("/ext/clock/use-env-time", json={"x": 1}).status_code == 400
 
 
 @pytest.mark.parametrize("config", ['{"watch_url": "u", "name": "n", "token": "t"}', '{"timezone": "Mars/Olympus"}',
