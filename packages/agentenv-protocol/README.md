@@ -668,7 +668,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
-  after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
+  after acting, once the screen has settled, so a smooth scroll or the page a key opens shows: captured every
+  100 ms, it has stayed the same for 0.2 s after changing from just before the input, or for 0.5 s from the input
+  on, within `screenshot_settle_ms` (2,000 by default; 0 captures at once). Click and scroll leave out `x` and `y` to act at the pointer on a computer with
   `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
   group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
   or `reload`s, `computer_tabs` lists, opens, switches and closes tabs by the browser's own ids and
@@ -719,8 +721,8 @@ other exception from an input operation is reported `delivery_failed` with `appl
 
 **Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
 (`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
-`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
-and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
+`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`,
+`exec_timeout_s` and `screenshot_settle_ms`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
 
 Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
 names the caller whose latest frame and others' input a call uses.

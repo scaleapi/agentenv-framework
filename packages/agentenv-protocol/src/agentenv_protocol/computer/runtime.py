@@ -30,6 +30,14 @@ if TYPE_CHECKING:
 
 #: How many finished command results are kept for a repeated request_id; a running command is always joined.
 KEEP_EXEC_RESULTS = 256
+#: How often the screen is captured while an after-action screenshot waits for it to settle.
+SETTLE_POLL_S = 0.1
+#: How long the screen must stay the same to have settled: longer than the gap between an animation's frames when
+#: the computer renders slowly, so a scroll isn't taken for settled halfway.
+SETTLE_STEADY_S = 0.2
+#: How long a screen that hasn't changed since the input must stay so before the input is taken to have changed
+#: nothing: a smooth scroll or the page a key opens renders a couple of hundred milliseconds after the input returns.
+SETTLE_QUIET_S = 0.5
 
 
 class ComputerRuntime:
@@ -79,17 +87,47 @@ class ComputerRuntime:
             raise Internal(f"@display returned {display!r}, not a Display with a positive size and scale")
         return display
 
-    async def capture(self, identity: str) -> Frame:
+    async def capture(self, identity: str, *, settle_from: bytes | None = None) -> Frame:
         """A new frame of the screen. The input count is taken before the capture, so input that lands while it runs
-        counts as after the frame, which the frame may not show."""
+        counts as after the frame, which the frame may not show. With ``settle_from``, the screen as it was before an
+        input, the frame is taken once the screen has settled (``_settled``)."""
         inputs = self.queue.snapshot()
         display = await self.display_now()
-        captured = await self.call("capture")
-        image = to_pil(captured, display)
+        if settle_from is None:
+            captured = await self.call("capture")
+            image = to_pil(captured, display)
+        else:
+            captured, image = await self._settled(settle_from, display)
         page = captured.page if isinstance(captured, Image) and isinstance(captured.page, PageState) else None
         if page is None and self.has("page"):
             page = await self.page_now()
         return self.frames.add(image, display, inputs, identity=identity, page=page)
+
+    async def _settled(self, before: bytes, display: Display) -> tuple[Any, Any]:
+        """The screen once it has settled after an input, as (capture, image): captured every ``SETTLE_POLL_S``, it has
+        settled when it has stayed the same for ``SETTLE_STEADY_S`` after differing from ``before`` (the pixels just
+        before the input), or for ``SETTLE_QUIET_S`` from the input on; else it's the last capture when
+        ``screenshot_settle_ms`` runs out. A capture taken at once can show the screen before the input."""
+        loop = asyncio.get_running_loop()
+        limit = self.driver.settings.screenshot_settle_ms / 1000
+        start = loop.time()
+        captured = await self.call("capture")
+        image = to_pil(captured, display)
+        pixels = image.tobytes()
+        changed, since = pixels != before, start
+        while loop.time() - start < limit:
+            await asyncio.sleep(SETTLE_POLL_S)
+            again = await self.call("capture")
+            now = to_pil(again, display)
+            fresh = now.tobytes()
+            if fresh != pixels:
+                since = loop.time()
+            pixels, captured, image = fresh, again, now
+            changed = changed or pixels != before
+            steady = loop.time() - since
+            if steady >= SETTLE_STEADY_S and (changed or steady >= SETTLE_QUIET_S):
+                break
+        return captured, image
 
     async def page_now(self) -> PageState:
         page = await self.call("page_state")
@@ -110,7 +148,8 @@ class ComputerRuntime:
                   hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None,
                   wrap: Callable[[InputResult, Any], InputResult] | None = None) -> CallToolResult:
         """One input call: its turn in the queue, the operation (after a move, repeated or held), then the result
-        with others' input since ``frame`` and, when asked, a fresh frame. Whatever the call's turn can change is read
+        with others' input since ``frame`` and, when asked, a fresh frame of the screen once it has settled from
+        what the input did, compared with a capture taken just before it. Whatever the call's turn can change is read
         once it has the turn: a point ``mapped`` from ``frame`` is checked again, since the display may have changed
         while it waited, and ``at_pointer`` reads the pointer and puts it before ``args``; input a page's open dialog
         blocks is refused. ``then`` runs as soon as the input is delivered, and ``wrap`` makes the result from the
@@ -129,6 +168,13 @@ class ComputerRuntime:
                 sx, sy = await self.pointer()
                 args, summary = (sx, sy, *args), f"{summary} at the pointer, screen ({sx}, {sy})"
             others = self.queue.others_since(frame.inputs, identity) if frame is not None else 0
+            before = None
+            if screenshot and self.driver.settings.screenshot_settle_ms:
+                try:
+                    before = to_pil(await self.call("capture"), display or await self.display_now()).tobytes()
+                except AgentEnvError as e:
+                    logger.warning("couldn't capture the screen before %s, so its screenshot won't wait for the screen "
+                                   "to settle: %s", operation, e.message)
             effect = None
             if self.recordings.annotating():
                 await self._annotate(ctx, operation, args, move_to, repeat, hold, display)
@@ -157,7 +203,7 @@ class ComputerRuntime:
         if not screenshot:
             return send(result)
         try:
-            new = await self.capture(identity)
+            new = await self.capture(identity, settle_from=before)
         except AgentEnvError as e:
             result.summary = f"{result.summary}; the screenshot after it failed ({e.code}: {e.message})"
             return send(result)
