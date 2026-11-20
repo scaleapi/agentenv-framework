@@ -271,10 +271,10 @@ _DEFAULT_CONFIG_LINE = 'CFG = "/tmp/changelog/config.json"'
 _REAL_TIME_PREFIX = "AGENTENV_REAL_TIME=1"
 
 
-def real_time_env(environ: Mapping[str, str]) -> dict[str, str]:
-    """``environ`` for the changelog's tar, whose start is the next capture's baseline, so on real time: the server is,
-    but libfaketime took the marker out of the server's environment, so what it starts isn't."""
-    return {**environ, "AGENTENV_REAL_TIME": "1"}
+def _real_time_env() -> dict[str, str]:
+    """This server's environment for the changelog's tar, whose start is the next capture's baseline, so on real time:
+    the server is, but libfaketime took the marker out of the server's environment, so what it starts isn't."""
+    return {**os.environ, "AGENTENV_REAL_TIME": "1"}
 
 
 def gnu_tar() -> bool:
@@ -475,7 +475,7 @@ class Changelog:
             subprocess.run(
                 ["tar", "--ignore-failed-read", f"--listed-incremental={self.snar}", f"--exclude={self.directory}",
                  "-cf", "/dev/null", *present],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=real_time_env(os.environ),
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_real_time_env(),
             )
 
     async def apply(self, request: ObjectChangelogApplyRequest) -> ObjectChangelogApplyResponse:
