@@ -445,7 +445,8 @@ class Config:
             if layer.kind == KIND_DEFAULT:
                 return tuple(layer.raw)
             self.section(_TRAJECTORIES_CONFIG_SECTION)
-            return _validated_trajectory_formats(layer.raw, key.file_label)
+            resolved = config_loader.interpolate(layer.raw, secret_resolver=self._resolve_secret)
+            return _validated_trajectory_formats(resolved, key.file_label)
         return ()
 
     def get_default_env_id(self, name: str) -> str:

@@ -16,6 +16,12 @@ def test_trajectories_formats_names_the_formats_a_run_prescribes():
     assert config_with_document({"trajectories": {"formats": []}}).get_trajectory_formats() == ()
 
 
+def test_trajectories_formats_resolves_env_references(monkeypatch):
+    monkeypatch.setenv("AGENTENV_TEST_TRAJECTORY_FORMAT", "atif/1")
+    formats = ["env:AGENTENV_TEST_TRAJECTORY_FORMAT", "env:AGENTENV_TEST_UNSET?other/2"]
+    assert config_with_document({"trajectories": {"formats": formats}}).get_trajectory_formats() == ("atif/1", "other/2")
+
+
 @pytest.mark.parametrize("formats", ["atif/1", [1], [""], {"atif/1": True}])
 def test_formats_that_arent_a_list_of_names_are_refused(formats):
     with pytest.raises(ConfigError, match=r"\[trajectories\] formats must be a list of trajectory format names"):

@@ -1377,7 +1377,8 @@ def prescribed_formats(context: TaskStepContext) -> tuple[str, ...]:
 async def prescribe_formats(agent: DeployedAgent, a2a_url: str, formats: tuple[str, ...]) -> None:
     """Have the agent build ``formats`` (those its card offers) beside native for the conversations it starts from
     now on, when its card offers the trajectory extension's ``prescribe``; an agent whose SDK predates it builds what it
-    always has. A failure leaves the agent building native only, and the run goes on."""
+    always has. After a failure the agent builds what it was last prescribed, native only unless an earlier step
+    prescribed more, and the run goes on: its judges read native either way."""
     extension = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_TRAJECTORY)
     method, path = A2AAgent.operation(extension, "prescribe")
     if method is None or path is None:
@@ -1390,7 +1391,8 @@ async def prescribe_formats(agent: DeployedAgent, a2a_url: str, formats: tuple[s
                                          timeout=_PRESCRIBE_TIMEOUT_SECONDS)
         protocol.raise_for_extension_status(response, operation="trajectory prescribe")
     except (httpx.HTTPError, ValueError) as e:
-        logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed (continuing): {e}")
+        logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed, so it builds what "
+                       f"it was last prescribed (continuing): {e}")
 
 
 class StoredTrajectory(NamedTuple):

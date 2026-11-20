@@ -8,6 +8,7 @@ import logging
 import random
 import re
 from datetime import datetime, timedelta, timezone
+from contextlib import ExitStack
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -199,23 +200,11 @@ def _cdp_url(monkeypatch: pytest.MonkeyPatch, client: Callable[[], TestClient]) 
                          ids=["model-key", "model-headers", "control-token", "write-only-config", "mcp-headers",
                               "cdp-url"])
 def test_a_secret_the_sdk_holds_or_is_handed_is_redacted(monkeypatch: pytest.MonkeyPatch, handed) -> None:
-    app = None
-
-    def client(**kwargs: Any) -> TestClient:
-        nonlocal app
-        agent = _echoing()
-        opened = _serving(agent, **kwargs)
-        client = opened.__enter__()
-        app = client.app
-        return client
-
-    opened, secret = handed(monkeypatch, client)
-    try:
+    with ExitStack() as serving:
+        opened, secret = handed(monkeypatch, lambda **kwargs: serving.enter_context(_serving(_echoing(), **kwargs)))
         task_id = _turn(opened, f"echo: {secret}")
         reads = _reads(opened, task_id, monkeypatch)
         assert _native(opened, task_id) == [{"type": "say", "text": f"echo: {secret}"}]
-    finally:
-        opened.__exit__(None, None, None)
     _assert_redacted(reads, secret)
 
 

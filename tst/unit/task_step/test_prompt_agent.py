@@ -338,7 +338,7 @@ async def test_a_prescription_that_fails_leaves_the_run_going(monkeypatch, caplo
 
     await pa.prescribe_formats(_prescribing_agent(), "http://agent.test", ("atif/1",))
 
-    assert "prescribing trajectory formats ['atif/1'] failed (continuing)" in caplog.text
+    assert "prescribing trajectory formats ['atif/1'] failed, so it builds what it was last prescribed" in caplog.text
 
 
 def test_a_prompt_step_is_a_prompt_agent_or_a_subclass_whether_a_step_or_its_config():
