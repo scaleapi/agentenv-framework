@@ -19,6 +19,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ from tar_changelog import (
 from claude_bridge import (
     CLAUDE_STATE_DIR,
     ClaudeCodeTools,
+    ClaudeResult,
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     kill_running_clis,
@@ -383,6 +385,32 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
             logger.info(f"Killed {stopped} claude CLI(s) still running a turn as the agent shut down")
 
 
+_RUN_COUNTS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+_CACHE_WRITE_SPLIT = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def _usage(result: ClaudeResult) -> Usage:
+    """The turn's tool calls and token counts: its runs' usage summed (a resumed turn has several runs), each as its
+    `result` event gave it, in Anthropic's shape, so ``input_tokens`` gets the cache added. The cache writes' 5-minute
+    and 1-hour split and the thinking tokens are kept in ``provider_details``. The CLI's own cost isn't reported: after
+    a resume it counts the whole session, whether the session was restored depends on the CLI's saved state, and
+    agent-env prices the tokens. A run cut off before its `result` counts its model calls in ``unreported_calls``."""
+    details: dict[str, Any] = {"unreported_calls": result.unreported_calls} if result.unreported_calls else {}
+    if not result.run_usage:
+        return Usage(tool_call_count=result.tool_call_count, provider_details=details)
+
+    def total(read: Any) -> int:
+        return sum(value for run in result.run_usage if isinstance(value := read(run), int) and not isinstance(value, bool))
+
+    summed: dict[str, Any] = {key: total(lambda run, key=key: run.get(key)) for key in _RUN_COUNTS}
+    summed["cache_creation"] = {key: total(lambda run, key=key: (run.get("cache_creation") or {}).get(key))
+                                for key in _CACHE_WRITE_SPLIT}
+    thinking = total(lambda run: (run.get("output_tokens_details") or {}).get("thinking_tokens"))
+    usage = Usage.from_model_response(summed)
+    return replace(usage, tool_call_count=result.tool_call_count, provider_details={
+        **usage.provider_details, **details, **({"reasoning_tokens": thinking} if thinking else {})})
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="Claude Code",
@@ -525,7 +553,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             .add_text(result.response or (result.error or ""))
             .add_data(data)
             .session_ref(session_id)
-            .usage(Usage(tool_call_count=result.tool_call_count))
+            .usage(_usage(result))
             .build()
         )
 

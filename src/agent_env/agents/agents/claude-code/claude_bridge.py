@@ -154,6 +154,11 @@ class ClaudeResult:
     structured_output: dict | None = None
     # How many `claude -p` runs the turn took; more than one means it was resumed.
     attempts: int = 1
+    # Each run's token usage, from its `result` event, which counts that run alone (after a resume its
+    # `total_cost_usd` and `modelUsage` count the whole session, so neither is kept).
+    run_usage: list[dict] = field(default_factory=list)
+    # The model calls of runs that ended without a `result`, by message id: their usage is unknown.
+    unreported_calls: int = 0
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -305,6 +310,17 @@ def _endpoint_hint(trajectory: list[dict]) -> str | None:
             "(<base>/v1/messages), such as a LiteLLM gateway, that knows the model")
 
 
+def _usage_of_run(trajectory: list[dict]) -> tuple[list[dict], int]:
+    """A run's token usage, from its `result` event; or, for a run cut off before one, how many model calls it made,
+    by message id, whose usage is then unknown. An assistant event's own usage is no substitute: it is written as the
+    message streams, before its output is counted."""
+    event = _terminal_result(trajectory)
+    if event is not None and isinstance(event.get("usage"), dict):
+        return [event["usage"]], 0
+    ids = {(event.get("message") or {}).get("id") for event in trajectory if event.get("type") == "assistant"}
+    return [], len(ids - {None})
+
+
 def _ends_in_result(trajectory: list[dict]) -> bool:
     return bool(trajectory) and trajectory[-1].get("type") == "result"
 
@@ -453,6 +469,8 @@ async def run_claude(
     attempt_prompt, attempt_resume, attempt_session = prompt, resume, session_id
     trajectory: list[dict] = []
     tool_calls = 0
+    run_usage: list[dict] = []
+    unreported_calls = 0
     attempts = 0
     first_failure: str | None = None
 
@@ -470,6 +488,8 @@ async def run_claude(
         if result.session_id != attempt_session:
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)
         tool_calls += result.tool_call_count
+        run_usage += result.run_usage
+        unreported_calls += result.unreported_calls
 
         failure = _resumable_api_failure(result)
         budget_left = deadline - time.monotonic()
@@ -485,7 +505,8 @@ async def run_claude(
             # The first attempt's `result` was dropped from the trajectory, so the error says how the turn began.
             error = result.error and _failure_message(result.error, result.error_detail, attempts, first_failure)
             return replace(result, response=_redact(result.response) if error else result.response,
-                           tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error)
+                           tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error,
+                           run_usage=run_usage, unreported_calls=unreported_calls)
 
         trajectory.extend(_without_terminal_result(result.trajectory))
         first_failure = first_failure or result.error_detail
@@ -762,7 +783,8 @@ async def _spawn_claude(
         _kill_cli(proc)
         await _reap(proc)
         return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
-                            error=f"claude CLI timed out after {timeout_s}s")
+                            error=f"claude CLI timed out after {timeout_s}s",
+                            unreported_calls=_usage_of_run(trajectory)[1])
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.
         _kill_cli(proc)
@@ -785,9 +807,11 @@ async def _spawn_claude(
     if structured_output is not None:
         final_response = json.dumps(structured_output)
 
+    run_usage, unreported_calls = _usage_of_run(trajectory)
     return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
-                        error_detail=detail, structured_output=structured_output)
+                        error_detail=detail, structured_output=structured_output, run_usage=run_usage,
+                        unreported_calls=unreported_calls)
 
 
 _TAGS_HEADER = "x-litellm-tags"
