@@ -187,7 +187,11 @@ def test_a_computer_name_of_fifteen_characters_is_taken():
      ["'mcp-slack' is the gateway's route to MCP server 'slack', and the gateway knows a computer by its name alone"]),
     (["mcp-slack"], {"websites": ["slack"]}, []),
     (["desktop"], {"mcp_servers": ["shop"], "websites": ["shop"]}, []),  # an MCP server and a website may share a name
-], ids=["two-computers", "a-server", "a-website", "a-servers-route", "a-websites-isnt", "server-and-website"])
+    (["pgweb", "db-mcp"], {},
+     ["'pgweb' is the gateway's route to a SQL console, and the gateway knows a computer by its name alone",
+      "'db-mcp' is the gateway's route to a SQL console, and the gateway knows a computer by its name alone"]),
+], ids=["two-computers", "a-server", "a-website", "a-servers-route", "a-websites-isnt", "server-and-website",
+        "a-console"])
 def test_a_computer_needs_a_name_no_other_child_env_or_route_of_the_gateways_has(computers, children, problems):
     assert _multi_computers.name_problems(computers, **children) == problems
 

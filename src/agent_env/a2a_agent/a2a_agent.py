@@ -633,6 +633,20 @@ class A2AAgent:
             return f"{how}: {problem}"
         return None
 
+    def model_base_url(self, env_vars: dict[str, str], config) -> Optional[str]:
+        """The model endpoint a deploy with ``env_vars`` gives this agent, by ``_with_model_credentials``'s rule:
+        theirs, else its ``default_env_vars``', else the configured one; None for an agent that takes no credentials,
+        which gets none, or with no endpoint configured."""
+        if not self.metadata.get(TAKES_CREDENTIALS, True):
+            return None
+        for given in (env_vars, self.default_env_vars):
+            if "LITELLM_BASE_URL" in given:
+                return given["LITELLM_BASE_URL"]
+        try:
+            return config.get_litellm_base_url()
+        except ConfigError:
+            return None
+
     def _with_model_credentials(self, env_vars: dict[str, str], config) -> dict[str, str]:
         """``env_vars`` with the model endpoint, key and headers each taken from config when neither they nor
         ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them. The

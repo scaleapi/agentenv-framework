@@ -312,6 +312,18 @@ def _netloc(url: str) -> str:
     return urlsplit(url).netloc.rpartition("@")[2] or url
 
 
+def endpoint_host(url: object) -> Optional[str]:
+    """The host, and port when it names one, a model call to ``url`` reaches, for a record: never the user or
+    password a URL may carry. None for anything but a URL with a host, never raising, so a record can't fail what it
+    records."""
+    if not isinstance(url, str):
+        return None
+    try:
+        return urlsplit(url.strip()).netloc.rpartition("@")[2] or None
+    except ValueError:
+        return None
+
+
 def no_key_for(url: str, how: str) -> str:
     """Why a model call or an agent pointed at ``url`` with no key of its own is refused, and ``how`` to give it one."""
     return (f"{_netloc(url)} isn't the configured model endpoint, so the configured key isn't sent there, and no key "

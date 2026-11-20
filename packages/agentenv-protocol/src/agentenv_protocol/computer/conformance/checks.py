@@ -6,15 +6,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import io
 import json
 import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from importlib import resources
 from typing import Any
 
+import av
 from mcp import ClientSession
 from mcp.types import CallToolResult
 from pydantic import ValidationError
@@ -36,7 +38,9 @@ from ..card import (
     GROUP_TOOLS,
     POINT_TOOLS,
 )
-from ..manifest import RecordingManifest
+from ..annotate import COLOURS as MARK_COLOURS
+from ..annotate import UNIT_EDGE
+from ..manifest import ManifestSegment, RecordingManifest
 from ..recording import RECORDINGS_DIR
 from .client import Driver, image
 from .mp4 import read_mp4
@@ -64,6 +68,18 @@ FIXTURE_START_S = 30.0
 NORM = 1000
 #: How long the probe records, and the frame rate it asks for.
 RECORD_S = 2.0
+#: How long an annotated recording runs before and after the probe's click, so it keeps frames on both sides.
+ANNOTATE_LEAD_S, ANNOTATE_TAIL_S = 1.0, 1.0
+#: How far, as the sum of its channels' differences, an encoded pixel may be from the colour drawn and still count.
+NEAR_COLOUR = 90
+#: How many pixels near the mark's colour around the click make a frame draw its mark.
+MARK_PIXELS = 20
+#: How far around the click, in pixels of a frame whose longer edge is the marks' UNIT_EDGE, the mark is looked for;
+#: and the least, on a smaller one.
+MARK_REACH, MARK_REACH_LEAST = 40, 8
+#: Where in the clicked cell its colour is read, left and up from its centre as a share of the cell: clear of the
+#: mark's dot and of a pointer at the click, real or drawn, which points from there down and right.
+CELL_INSIDE = 0.36
 #: How many times a check whose effect a busy desk can miss is tried before it fails: a desk starved through a drag
 #: sees its motion as one event, and keys sent while the click that focuses a box waits go wherever focus was.
 BUSY_DESK_ATTEMPTS = 2
@@ -164,6 +180,7 @@ class Probe:
             for check, section in (("P9", self._security), ("P3", self._geometry), ("P4", self._effects),
                                    ("P5", self._unchanged), ("P6", self._typing), ("P7", self._scroll_and_drag),
                                    ("X", self._pointer_input), ("X", self._data_add), ("X", self._recording),
+                                   ("X", self._annotation),
                                    ("X", self._page_tools)):
                 await self._guarded(check, section)
         finally:
@@ -1083,12 +1100,48 @@ class Probe:
             await self.check("X", "a repeated request_id joins the first recording", joined, COMPUTER_RECORDING)
             await self.check("X", "a recording past max_concurrent is refused", limited, COMPUTER_RECORDING)
         finally:
-            for recording_id in made:
-                with contextlib.suppress(Exception):
-                    await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": recording_id})
-                await self.driver.run(*(WIN_REMOVE if self.windows else ("rm", "-rf")), f"{RECORDINGS_DIR}/{recording_id}")
-            await self.driver.run(*((*WIN_RMDIR, RECORDINGS_DIR) if self.windows else
-                                    ("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")))
+            await self._remove_recordings(made)
+
+    async def _annotation(self) -> None:
+        if not self.driver.declares(COMPUTER_RECORDING):
+            return
+        params = self.driver.params(COMPUTER_RECORDING)
+        fps = min(RECORD_FPS, (params.get("fps") or {}).get("max") or RECORD_FPS)
+        made: list[str] = []
+
+        async def annotated() -> str | None:
+            """A recording with annotate draws the probe's click where it landed, from no later than the frame that
+            first shows the click's effect, and its first frame, captured before the click, draws none."""
+            if "annotate" not in params:
+                raise NotApplicable("the card lists no annotate in computer-recording/v1's params")
+            started = await self.driver.invoke(COMPUTER_RECORDING, "start", {
+                "request_id": f"{PROBE_ROLE}-annotated-{uuid.uuid4().hex[:8]}", "fps": fps, "annotate": {}})
+            made.append(started["recording_id"])
+            await asyncio.sleep(ANNOTATE_LEAD_S)
+            frame, scale, img = await self._base()
+            size = self.layout["cell"]
+            x, y = self._at("grid", scale, size + size / 2, 6 * size + size / 2)
+            inside = (x - math.floor(size * CELL_INSIDE * scale), y - math.floor(size * CELL_INSIDE * scale))
+            was = img.getpixel(inside)
+            await self.act("computer_click", {"x": x, "y": y, "frame_id": frame})
+            await asyncio.sleep(ANNOTATE_TAIL_S)
+            wire = await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": started["recording_id"]})
+            return await self._annotated_click(wire, img.size, (x, y), inside, was)
+
+        try:
+            await self.check("X", "an annotated recording draws a click where it landed, from the frame its effect "
+                                  "shows on", annotated, COMPUTER_RECORDING)
+        finally:
+            await self._remove_recordings(made)
+
+    async def _remove_recordings(self, made: list[str]) -> None:
+        """End each recording the probe started, and remove what it kept on the computer."""
+        for recording_id in made:
+            with contextlib.suppress(Exception):
+                await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": recording_id})
+            await self.driver.run(*(WIN_REMOVE if self.windows else ("rm", "-rf")), f"{RECORDINGS_DIR}/{recording_id}")
+        await self.driver.run(*((*WIN_RMDIR, RECORDINGS_DIR) if self.windows else
+                                ("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")))
 
     async def _segments_match(self, wire: dict, fps: int) -> str | None:
         """What is wrong with a recording without a grant, read back from the computer, or None."""
@@ -1110,22 +1163,9 @@ class Probe:
             if gap > 2 / fps:
                 return f"{gap:.2f} s between segments {before.index} and {after.index}"
         for segment in segments:
-            path = f"{RECORDINGS_DIR}/{segment.path}"
-            out = await self.driver.run("python3", "-c", READ_DIGEST, path)
-            if out.get("exit_code") != 0:
-                return f"segment {segment.index} couldn't be read back: {out.get('stderr', '')[-200:]}"
-            file = json.loads(out["stdout"])
-            if (file["size"], file["sha256"]) != (segment.bytes, segment.sha256):
-                return f"segment {segment.index}'s file is {file['size']} bytes, sha256 {file['sha256'][:12]}; " \
-                       f"the manifest says {segment.bytes}, {segment.sha256[:12]}"
-            data = b""
-            while len(data) < file["size"]:
-                chunk = await self.driver.run("python3", "-c", READ_CHUNK, path, str(len(data)), str(CHUNK_BYTES))
-                read = base64.b64decode(chunk["stdout"]) if chunk.get("exit_code") == 0 else b""
-                if not read:
-                    return f"segment {segment.index} stopped reading back at byte {len(data)} of {file['size']}: " \
-                           f"{chunk.get('stderr', '')[-200:]}"
-                data += read
+            data = await self._read_back(segment)
+            if isinstance(data, str):
+                return data
             mp4 = read_mp4(data)
             span = (_when(segment.ended_at) - _when(segment.started_at)).total_seconds()
             if ((mp4["width"], mp4["height"], mp4["frames"]) != (segment.width, segment.height, segment.frames)
@@ -1133,6 +1173,85 @@ class Probe:
                 return f"segment {segment.index}'s MP4 is {mp4}; the manifest says {segment.width}x" \
                        f"{segment.height}, {segment.frames} frames over {span:.2f} s"
         return None
+
+
+    async def _read_back(self, segment: ManifestSegment) -> bytes | str:
+        """A segment a recording without a grant kept on the computer, read back and matched to its manifest entry's
+        size and digest; what is wrong, as a string, when it can't be."""
+        path = f"{RECORDINGS_DIR}/{segment.path}"
+        out = await self.driver.run("python3", "-c", READ_DIGEST, path)
+        if out.get("exit_code") != 0:
+            return f"segment {segment.index} couldn't be read back: {out.get('stderr', '')[-200:]}"
+        file = json.loads(out["stdout"])
+        if (file["size"], file["sha256"]) != (segment.bytes, segment.sha256):
+            return f"segment {segment.index}'s file is {file['size']} bytes, sha256 {file['sha256'][:12]}; " \
+                   f"the manifest says {segment.bytes}, {segment.sha256[:12]}"
+        data = b""
+        while len(data) < file["size"]:
+            chunk = await self.driver.run("python3", "-c", READ_CHUNK, path, str(len(data)), str(CHUNK_BYTES))
+            read = base64.b64decode(chunk["stdout"]) if chunk.get("exit_code") == 0 else b""
+            if not read:
+                return f"segment {segment.index} stopped reading back at byte {len(data)} of {file['size']}: " \
+                       f"{chunk.get('stderr', '')[-200:]}"
+            data += read
+        return data
+
+    async def _annotated_click(self, wire: dict, size: tuple[int, int], point: tuple[int, int],
+                               inside: tuple[int, int], was: tuple[int, int, int]) -> str | None:
+        """What is wrong with an annotated recording of one click at frame pixel ``point`` of a frame ``size``, the
+        clicked cell showing ``was`` at ``inside`` before it, or None; NotApplicable for a recording of a native
+        recorder's finished segments, which the base class keeps as they came. All its times are the computer's own."""
+        manifest = RecordingManifest.model_validate(wire)
+        if manifest.annotate is None:
+            raise NotApplicable("its manifest names no annotate: the driver's recorder hands over finished segments, "
+                                "which aren't drawn on")
+        if manifest.annotate != {}:
+            return f"its manifest's annotate is {manifest.annotate!r}, not the {{}} it was started with"
+
+        def at(xy: tuple[int, int], shape: tuple[int, int]) -> tuple[int, int]:
+            return (min(shape[0] - 1, xy[0] * shape[0] // size[0]), min(shape[1] - 1, xy[1] * shape[1] // size[1]))
+
+        def marked(picture: Any, shape: tuple[int, int]) -> bool:
+            cx, cy = at(point, shape)
+            reach = max(MARK_REACH_LEAST, round(MARK_REACH * max(shape) / UNIT_EDGE))
+            near = sum(1 for px in range(max(0, cx - reach), min(shape[0], cx + reach))
+                       for py in range(max(0, cy - reach), min(shape[1], cy + reach))
+                       if _distance(picture.getpixel((px, py)), MARK_COLOURS[0]) < NEAR_COLOUR)
+            return near > MARK_PIXELS
+
+        def changed(picture: Any, shape: tuple[int, int]) -> bool:
+            return _distance(picture.getpixel(at(inside, shape)), was) >= NEAR_COLOUR
+
+        frames: list[tuple[datetime, bool, bool]] = []  # each frame's capture time, whether it draws the mark and
+        for segment in manifest.segments:  # whether it shows the click's effect; not the frames, which run large
+            data = await self._read_back(segment)
+            if isinstance(data, str):
+                return data
+            with av.open(io.BytesIO(data)) as container:
+                first: float | None = None
+                for f in container.decode(container.streams.video[0]):
+                    first = f.time if first is None else first
+                    picture, shape = f.to_image(), (f.width, f.height)
+                    frames.append((_when(segment.started_at) + timedelta(seconds=f.time - first),
+                                   marked(picture, shape), changed(picture, shape)))
+        if not frames:
+            return "it kept no frames"
+        first_marked = next((i for i, (_, mark, _) in enumerate(frames) if mark), None)
+        first_changed = next((i for i, (_, _, change) in enumerate(frames) if change), None)
+        if first_changed is None:
+            return f"the clicked cell never changed in its {len(frames)} frames, so the click can't be placed on them"
+        if first_marked is None:
+            return f"none of its {len(frames)} frames draws the click's mark at {point}"
+        if first_marked == 0:
+            return "its first frame, captured before the click, already draws a mark there"
+        if first_marked > first_changed:
+            late = (frames[first_marked][0] - frames[first_changed][0]).total_seconds()
+            return f"the mark first shows {late:.2f} s after the frame where the click's effect does"
+        return None
+
+
+def _distance(a: tuple, b: tuple) -> int:
+    return sum(abs(x - y) for x, y in zip(a[:3], b[:3]))
 
 
 def _when(iso: str) -> datetime:
