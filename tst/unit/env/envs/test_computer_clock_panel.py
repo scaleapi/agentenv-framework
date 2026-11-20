@@ -28,27 +28,31 @@ PANEL = {"/plugins/plugin-1": "applicationsmenu", "/plugins/plugin-12": "clock",
          "/plugins/plugin-13/style": "0", "/plugins/plugin-20": "clock", "/plugins/plugin-20/timezone": "Asia/Tokyo",
          "/plugins/plugin-22/base-directory": "/home/user"}
 #: xfconf-query on the panel's channel kept in a JSON file: it lists (``-l -v``), sets (``-s``) and resets (``-r``),
-#: recording each call, and fails the next reset while the failure marker is there, removing it.
+#: and fails the next reset while the failure marker is there, removing it. It records each call with when it began,
+#: once the call is done, and replaces the file whole, so a test that has seen a call reads the config it left.
 XFCONF = """#!@PYTHON@
 import json, os, sys, time
-args = sys.argv[1:]
-with open("@CALLS@", "a") as f:
-    f.write(json.dumps({"at": time.time(), "args": args}) + "\\n")
-with open("@STATE@") as f:
-    state = json.load(f)
-path = args[args.index("-p") + 1]
-if "-l" in args:
-    sys.stdout.write("".join(f"{key:<36}{value}\\n" for key, value in sorted(state.items())))
-    sys.exit(0)
-if "-r" in args and os.path.exists("@FAIL@"):
-    os.remove("@FAIL@")
-    sys.exit("Failed to init libxfconf: the bus went away")
-if "-r" in args:
-    state.pop(path, None)
-else:
-    state[path] = args[args.index("-s") + 1]
-with open("@STATE@", "w") as f:
-    json.dump(state, f)
+args, at = sys.argv[1:], time.time()
+try:
+    with open("@STATE@") as f:
+        state = json.load(f)
+    path = args[args.index("-p") + 1]
+    if "-l" in args:
+        sys.stdout.write("".join(f"{key:<36}{value}\\n" for key, value in sorted(state.items())))
+        sys.exit(0)
+    if "-r" in args and os.path.exists("@FAIL@"):
+        os.remove("@FAIL@")
+        sys.exit("Failed to init libxfconf: the bus went away")
+    if "-r" in args:
+        state.pop(path, None)
+    else:
+        state[path] = args[args.index("-s") + 1]
+    with open("@STATE@.tmp", "w") as f:
+        json.dump(state, f)
+    os.replace("@STATE@.tmp", "@STATE@")
+finally:
+    with open("@CALLS@", "a") as f:
+        f.write(json.dumps({"at": at, "args": args}) + "\\n")
 """
 TIMEZONE = "/plugins/plugin-12/timezone"
 SET = ["-c", "xfce4-panel", "-p", TIMEZONE, "-n", "-t", "string", "-s", ZONE]

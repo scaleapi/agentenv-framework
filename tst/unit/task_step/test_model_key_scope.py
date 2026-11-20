@@ -15,8 +15,9 @@ import pytest
 
 from agent_env.a2a_agent.a2a_agent import TAKES_CREDENTIALS, A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ModelConfig
+from agent_env.config.model import ModelConfig, endpoint_host
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.task_step.context import DeployedSandbox, PromptResponse, TaskStepContext
@@ -95,6 +96,23 @@ AGENT_CASES = {
 @pytest.mark.parametrize("passed, own, expected", AGENT_CASES.values(), ids=AGENT_CASES.keys())
 def test_an_agent_deploy_sends(monkeypatch, configured, passed, own, expected):
     assert _deploy(monkeypatch, passed, own) == expected
+
+
+@pytest.mark.parametrize("passed, own, expected", [case for case in AGENT_CASES.values() if case[2] != REFUSED],
+                         ids=[name for name, case in AGENT_CASES.items() if case[2] != REFUSED])
+def test_the_endpoint_an_agent_records_is_the_one_its_deploy_sends(configured, passed, own, expected):
+    agent = A2AAgent(id="solver", version=1, default_env_vars=own,
+                     docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img"))
+
+    assert agent.model_base_url(dict(passed or {}), get_config()) == expected["url"]
+
+
+def test_an_endpoints_recorded_host_carries_no_userinfo_and_an_agent_without_credentials_none(configured):
+    agent = A2AAgent(id="solver", version=1, metadata={TAKES_CREDENTIALS: False},
+                     docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img"))
+
+    assert endpoint_host("https://user:secret@gw.example.com:8443/v1") == "gw.example.com:8443"
+    assert agent.model_base_url({"LITELLM_BASE_URL": ELSEWHERE}, get_config()) is None
 
 
 def test_an_agent_that_takes_no_credentials_gets_none(monkeypatch, configured):
