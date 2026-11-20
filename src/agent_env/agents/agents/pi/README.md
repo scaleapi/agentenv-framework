@@ -65,8 +65,10 @@ and the A2A server as `agent` with the real-time marker, and agent-env's libfake
   the env's time: `date`, `datetime.now()` and the timestamps its programs write. Files keep real modification times,
   as libfaketime is built without faking `stat`.
 - **pi itself stays on real time.** The bridge starts pi with the real-time marker, which libfaketime takes out of
-  pi's environment, so what pi starts follows the clock (`cli_env`). pi can't follow it: before 1970 its compaction
-  throws, as it makes a UUIDv7 from its clock, and its file locks compare its clock with their modification times.
+  pi's environment, so what pi starts follows the clock (`cli_env`). It hands pi's script to `node` itself
+  (`PI_COMMAND`): run through its `#!/usr/bin/env node`, `env` would take the marker and start node without it. pi
+  can't follow the clock: before 1970 its compaction throws, as it makes a UUIDv7 from its clock, and its file locks
+  compare its clock with their modification times.
   pi 1.1.0's own prompt carries no date (pi dropped it upstream), so nothing pi shows the model gives another time
   than the env's; its trajectory's timestamps and its timings are real time.
 - **Through the egress proxy.** While the clock is armed, pi and its commands go out by the rule every clocked agent

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from tst.unit.agents.pi.agent import AGENT_DIR, agent_egress, pi_agent
+from tst.unit.agents.pi.agent import AGENT_DIR, a2a_server, agent_egress, pi_agent
 
 PROXY = "http://127.0.0.1:3128"
 ENDPOINT = "https://litellm.example.com"
@@ -49,6 +49,12 @@ def test_pi_stays_on_real_time_wherever_the_image_runs_the_clock_and_the_command
     env = pi_agent.cli_env({agent_egress.EGRESS_PROXY_ENV: PROXY}, ENDPOINT, armed=armed)
 
     assert env[pi_agent.REAL_TIME_ENV] == "1"
+
+
+def test_the_server_hands_pis_script_to_node_so_the_marker_reaches_pi_and_not_env():
+    """pi's bin is a ``#!/usr/bin/env node`` script: run as it is, env would be started with the marker, take it, and
+    start node faked."""
+    assert a2a_server.agent.pi_command == pi_agent.PI_COMMAND == ("node", "/opt/pi/bin/pi")
 
 
 @pytest.mark.parametrize("armed", [False, True])

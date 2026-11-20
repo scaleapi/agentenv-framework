@@ -93,6 +93,9 @@ PEER_RUN_ENV = "AGENTENV_MCP_PEER_RUN"
 # agent-env's libfaketime keeps a process started with this marker on real time and takes it out of the process's
 # environment, so every process that one starts reads the env's clock.
 REAL_TIME_ENV = "AGENTENV_REAL_TIME"
+# pi's script handed to node rather than run by its ``#!/usr/bin/env node``: the marker reaches only the process it's
+# started with, and env would start node without it. install.sh installs pi here for the image and install/v1 alike.
+PI_COMMAND = ("node", "/opt/pi/bin/pi")
 # Deltas are reconstructible from the message_end records, so they are left out of the trajectory.
 _UNRECORDED_EVENTS = frozenset({"message_update", "tool_execution_update"})
 # A context id passes through as its session id only when it has none of pi's ``.`` and ``_``; every derived id
@@ -436,7 +439,7 @@ class PiAgent(AgentEnvAgent):
         *,
         home: Path | None = None,
         workspace: Path | None = None,
-        pi_command: Sequence[str] = ("pi",),
+        pi_command: Sequence[str] = PI_COMMAND,
     ) -> None:
         self.home = home or Path.home() / ".pi-a2a"
         self.workspace = workspace or Path("/workspace")

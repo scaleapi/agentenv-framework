@@ -106,3 +106,17 @@ def test_install_sh_pins_node_by_its_checksum_and_pi_by_the_version_the_bridge_n
     assert set(sums) == {"X64", "ARM64"}
     assert 'echo "$node_sha256  $node_archive" | sha256sum -c -' in INSTALL_SH
     assert re.search(r"^PI_VERSION=(\S+)$", INSTALL_SH, re.MULTILINE).group(1) == pi_agent.PI_VERSION
+
+
+def test_the_bridge_starts_the_pi_and_the_node_install_sh_installs():
+    """The bridge hands pi's bin to node itself, so node is the process the real-time marker reaches; the image and
+    start.sh put install.sh's Node first among the nodes on the PATH."""
+    node, script = pi_agent.PI_COMMAND
+
+    assert node == "node" and script == "/opt/pi/bin/pi"
+    assert '--prefix /opt/pi --ignore-scripts \\\n  "@earendil-works/pi-coding-agent@${PI_VERSION}"' in INSTALL_SH
+    assert 'ln -sfn "/opt/node-v${NODE_VERSION}-linux-${arch}" /opt/node' in INSTALL_SH
+    for path in (re.search(r'^ENV PATH="([^"]+)"$', DOCKERFILE, re.MULTILINE).group(1),
+                 re.search(r'^export PATH="([^"]+)"$', (AGENT_DIR / "start.sh").read_text(), re.MULTILINE).group(1)):
+        entries = path.split(":")
+        assert "/opt/node/bin" in entries and not any("node" in entry for entry in entries[:entries.index("/opt/node/bin")])
