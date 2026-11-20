@@ -11,6 +11,7 @@ Runs over images built beforehand, from this branch: AGENTENV_E2E_AGENT_IMAGES n
 import asyncio
 import json
 import re
+import shlex
 import subprocess
 import time
 import uuid
@@ -78,11 +79,30 @@ async def _claude_turn(context: TaskStepContext, endpoint: FakeAnthropic) -> Non
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
 
+# For each mcp-remote the CLI runs, whether Node was started with the real-time marker: libfaketime changed the marker
+# in its environment block to AGENTENV_REAL_TIME=0, which the block keeps. A `#!/usr/bin/env node` start hands Node a
+# block without it.
+_MCP_REMOTE_MARKED = """
+import pathlib
+marked = []
+for proc in pathlib.Path("/proc").glob("[0-9]*"):
+    try:
+        argv = (proc / "cmdline").read_bytes().split(b"\\0")
+        if any(arg.endswith((b"mcp-remote/dist/proxy.js", b"bin/mcp-remote")) for arg in argv[:2]):
+            marked.append(b"AGENTENV_REAL_TIME=0" in (proc / "environ").read_bytes().split(b"\\0"))
+    except OSError:
+        pass
+print("mcp-remote on real time:", marked)
+"""
+
+
 async def _codex_turn(context: TaskStepContext, endpoint: FakeResponses) -> None:
     """One turn of the real Codex CLI, which stays on real time: the date the agent tells the model before the prompt
-    and a shell `date` the model runs are the env's, while the CLI's own <environment_context> date is the host's. The
-    model is one the CLI's catalog doesn't know, so it gets the shell tool directly rather than in code mode."""
-    endpoint.respond = shell_then_answer("date -u +%FT%TZ", prefix="the shell said: ")
+    and a shell `date` the model runs are the env's, while the CLI's own <environment_context> date is the host's, and
+    the env's MCP server's mcp-remote is on real time. The model is one the CLI's catalog doesn't know, so it gets the
+    shell tool directly rather than in code mode."""
+    endpoint.respond = shell_then_answer(f"date -u +%FT%TZ; python3 -c {shlex.quote(_MCP_REMOTE_MARKED)}",
+                                         prefix="the shell said: ")
     await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
                               model="stand-in", max_conversation_turns=1).execute(context)
     bodies = [json.dumps(seen.body) for seen in endpoint.requests()]
@@ -92,6 +112,8 @@ async def _codex_turn(context: TaskStepContext, endpoint: FakeResponses) -> None
     assert told == {VIRTUAL[:10]}, told
     assert hosts and VIRTUAL[:10] not in hosts, hosts
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
+    marked = [re.search(r"mcp-remote on real time: (\[.*\])", result) for result in endpoint.tool_results()]
+    assert [m.group(1) for m in marked if m] == ["[True]"], endpoint.tool_results()
 
 
 @dataclass(frozen=True)

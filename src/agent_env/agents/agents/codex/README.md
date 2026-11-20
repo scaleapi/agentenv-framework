@@ -49,9 +49,11 @@ binary the library doesn't reach, so the CLI and what it keeps (rollouts, `state
 and it checks the model endpoint's certificate on real time and reaches it directly. On an armed clock each CLI run
 also gets:
 
-- `-c mcp_servers.<name>.env.AGENTENV_REAL_TIME="1"` for each MCP server, so `mcp-remote` stays on real time: the
-  expiry of its cookies and tokens and the age of its leases are server times or real file times. It checks
-  certificates on real time too, so it reaches the servers directly.
+- each MCP server's `mcp-remote` started by Node itself (`-c mcp_servers.<name>.command` and `.args`) with
+  `AGENTENV_REAL_TIME=1` in its environment, so it stays on real time: the expiry of its cookies and tokens and the age
+  of its leases are server times or real file times. Its `#!/usr/bin/env node` would start `env` first, which takes the
+  marker out of what it hands Node. On real time it checks certificates against the real date, so it reaches the
+  servers directly.
 - `-c shell_environment_policy.set.<name>=...` with the egress proxy's variables (`agent_egress.egress_env`), so the
   model's commands, which check certificates on the env's date, go out through the proxy, all but loopback, the hosts
   `NO_PROXY` names and the model endpoint's and MCP servers' hosts served over plain HTTP alone.
@@ -59,7 +61,8 @@ also gets:
   date in its `<environment_context>`, and the note says so, and that a clock tool and `Date` in JavaScript the model
   runs in code mode read real time too.
 
-Unarmed, a CLI run is as before.
+Unarmed, a CLI run is as before. So is one of an agent installed with `install/v1`, which runs as root, whose
+commands libfaketime doesn't fake, whatever the clock of a computer it's installed in.
 
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;
 config.toml stays as it is. `{"disable": "*"}` turns off every setting below, `{"only": [...]}` every one but those whose

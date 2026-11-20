@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import threading
 import time
@@ -21,9 +22,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from agent_egress import clock_armed, egress_env
-from codex_config import MODEL_HEADERS_ENV, model_headers
+from agent_egress import EGRESS_PROXY_ENV, clock_armed, egress_env
+from codex_config import MODEL_HEADERS_ENV, model_headers, server_args
 
 logger = logging.getLogger(__name__)
 WORKSPACE_DIR = os.environ.get("CODEX_WORKSPACE_DIR", "/app")
@@ -116,20 +118,39 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
     return env
 
 
-def clock_overrides(environ: Mapping[str, str], mcp_servers: Mapping[str, str], *, armed: bool) -> list[str]:
+def clock_followed() -> bool:
+    """Whether the model's commands follow an armed clock: only where the image's root.conf starts this server, as the
+    user agent-env's libfaketime fakes, with the egress proxy in its environment. An agent installed with install/v1
+    runs as root, whose commands stay on real time beside a computer's armed clock."""
+    return bool(os.environ.get(EGRESS_PROXY_ENV)) and clock_armed()
+
+
+def _real_time_mcp_remote(name: str, info: Mapping[str, Any]) -> list[str]:
+    """One MCP server's mcp-remote started by Node itself with the real-time marker: its `#!/usr/bin/env node` would
+    start env first, which libfaketime loads into, keeps on real time and takes the marker out of what it hands Node."""
+    node, script = shutil.which("node"), os.path.realpath(shutil.which("mcp-remote"))
+    return [f"mcp_servers.{name}.command={json.dumps(node)}",
+            f"mcp_servers.{name}.args={json.dumps([script, *server_args(info['url'], info.get('headers'))])}",
+            f'mcp_servers.{name}.env.{REAL_TIME_ENV}="1"']
+
+
+def clock_overrides(environ: Mapping[str, str], mcp_servers: Mapping[str, Mapping[str, Any]], *,
+                    armed: bool) -> list[str]:
     """The `-c` overrides an armed clock adds to a CLI run. The CLI, a static binary libfaketime can't reach, and
     mcp-remote, whose cookie and token expiry and leases are server or real file times, stay on real time and go out
     directly; the model's commands follow the env's clock, so they get the egress proxy (``egress_env``)."""
     if not armed:
         return []
-    proxy = egress_env(environ, [environ.get("LITELLM_BASE_URL", ""), *mcp_servers.values()], armed=True)
-    return [*(f'mcp_servers.{name}.env.{REAL_TIME_ENV}="1"' for name in mcp_servers),
-            *(f"shell_environment_policy.set.{name}={json.dumps(value)}" for name, value in proxy.items())]
+    urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in mcp_servers.values())]
+    return [*(override for name, info in mcp_servers.items() for override in _real_time_mcp_remote(name, info)),
+            *(f"shell_environment_policy.set.{name}={json.dumps(value)}"
+              for name, value in egress_env(environ, urls, armed=True).items())]
 
 
 async def clock_note() -> str:
     """The env's date, put before a turn's prompt on an armed clock: the CLI renders the host's real date into its own
-    context, so the model is told the date `date` shows, which, run by this real-time server, follows the env's clock."""
+    context, so the model is told the date `date` shows, which, run by this real-time server, follows the env's
+    clock."""
     proc = await asyncio.create_subprocess_exec("date", "+%Y-%m-%d (%A)", stdout=asyncio.subprocess.PIPE)
     shown, _ = await proc.communicate()
     zone = os.environ.get("TZ") or "UTC"
@@ -752,9 +773,9 @@ async def _run_codex_once(
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
     prior_tool_calls: int = 0,
-    mcp_servers: Mapping[str, str] | None = None,
+    mcp_servers: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> CodexResult:
-    armed = clock_armed()
+    armed = clock_followed()
     if armed:
         prompt = await clock_note() + prompt
     # JSON Schema: codex's `--output-schema` flag takes a FILE PATH (unlike
@@ -930,7 +951,7 @@ async def run_codex(
     event_callback: Callable[[dict], None] | None = None,
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
-    mcp_servers: Mapping[str, str] | None = None,
+    mcp_servers: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> CodexResult:
     """Run one logical turn with bounded transient recovery.
 

@@ -258,16 +258,12 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
     concurrent turns of different roles share it.
     """
     registered = ""
-    args: list[str] = [url, "--allow-http"]
     for k, v in (headers or {}).items():
         if k.lower() == ROLE_HEADER.lower():
             registered = v
-        else:
-            args += ["--header", f"{k}: {v}"]
-    args += ["--header", f"{ROLE_HEADER}: ${{{_ROLE_VARIABLE}}}"]
     return {
         "command": "mcp-remote",
-        "args": args,
+        "args": server_args(url, headers),
         "env": {_ROLE_VARIABLE: registered},
         "env_vars": list(_TRUST_ENV),
         "startup_timeout_sec": 60,
@@ -276,6 +272,15 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
         # server that fails to connect aborts session creation entirely.
         "required": True,
     }
+
+
+def server_args(url: str, headers: Mapping[str, str] | None = None) -> list[str]:
+    """mcp-remote's arguments for one server, as its config table gives them."""
+    args = [url, "--allow-http"]
+    for k, v in (headers or {}).items():
+        if k.lower() != ROLE_HEADER.lower():
+            args += ["--header", f"{k}: {v}"]
+    return [*args, "--header", f"{ROLE_HEADER}: ${{{_ROLE_VARIABLE}}}"]
 
 
 async def write_mcp_servers(servers: Mapping[str, Mapping[str, Any]]) -> None:
