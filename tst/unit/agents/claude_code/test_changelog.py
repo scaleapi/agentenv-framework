@@ -22,6 +22,7 @@ from starlette.testclient import TestClient
 
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge, tar_changelog
 from tst.unit.agents.claude_code.support import expiry, extension_methods, read_grant
+from tst.util import recording_tar
 
 GNU_TAR = shutil.which("tar") is not None and tar_changelog.gnu_tar()
 needs_gnu_tar = pytest.mark.skipif(not GNU_TAR, reason="the changelog is a GNU incremental tar")
@@ -217,6 +218,27 @@ def test_enable_writes_the_script_and_config_baselines_and_installs_the_hook(tmp
     assert not any((directory / stale).exists() for stale in ("seq", "turn", "namespace.json", "held.3", "state.snar.2"))
     # The config holds the grant, so no other user reads the directory.
     assert directory.stat().st_mode & 0o777 == 0o700
+
+
+def test_the_changelogs_tar_runs_on_real_time(tmp_path, staging, monkeypatch):
+    """tar keeps the time it starts at as the next capture's baseline and archives only the files changed since, by
+    their real mtimes: on an env clock ahead of real time it left every later edit out. No process hands its children
+    the marker, which libfaketime takes out of the environment it's given in, so the server and the hook give tar it."""
+    log = recording_tar.install(tmp_path / "bin")
+    path = f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.delenv("AGENTENV_REAL_TIME", raising=False)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    changelog, _, _, _ = _changelog(tmp_path, roots=[str(root)])
+
+    _enable(changelog)
+    (root / "edited.txt").write_text("after")
+    result = _capture(changelog, staging.port, path=path)
+
+    assert result.returncode == 0 and "captured seq=0" in result.stderr, result.stderr
+    runs = recording_tar.incremental_runs(log)
+    assert [("-cf" in run["args"], run["real_time"]) for run in runs] == [(True, "1"), (False, "1")]
 
 
 def test_enable_refuses_an_empty_root_list(tmp_path):

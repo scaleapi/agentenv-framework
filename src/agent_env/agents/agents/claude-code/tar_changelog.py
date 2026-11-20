@@ -63,6 +63,10 @@ TOOL_NAME_CHARS = 40
 # tar's exit status when a file changed as it read it: the archive is still whole.
 TAR_FILE_CHANGED_RC = 1
 SIGTERM_EXIT_CODE = 143
+# tar keeps the time it starts at as the next capture's baseline and archives only the files changed since, by their
+# real mtimes, so it runs on real time. libfaketime takes the marker out of the environment of the process it's given
+# to, so no child inherits it.
+REAL_TIME_ENV = dict(os.environ, AGENTENV_REAL_TIME="1")
 
 
 def _read_int(path):
@@ -221,6 +225,7 @@ def main():
                     ["tar", "--ignore-failed-read", "--listed-incremental=" + work, "--exclude=" + changelog_dir,
                      "-czf", local, *members],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, pass_fds=(lock.fileno(),),
+                    env=REAL_TIME_ENV,
                 )
                 archived = True
                 try:
@@ -261,6 +266,12 @@ if __name__ == "__main__":
     sys.exit(0)
 '''
 _DEFAULT_CONFIG_LINE = 'CFG = "/tmp/changelog/config.json"'
+
+
+def real_time_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """``environ`` for the changelog's tar, whose start is the next capture's baseline, so on real time: the server is,
+    but libfaketime took the marker out of the server's environment, so what it starts isn't."""
+    return {**environ, "AGENTENV_REAL_TIME": "1"}
 
 
 def gnu_tar() -> bool:
@@ -461,7 +472,7 @@ class Changelog:
             subprocess.run(
                 ["tar", "--ignore-failed-read", f"--listed-incremental={self.snar}", f"--exclude={self.directory}",
                  "-cf", "/dev/null", *present],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=real_time_env(os.environ),
             )
 
     async def apply(self, request: ObjectChangelogApplyRequest) -> ObjectChangelogApplyResponse:
