@@ -23,7 +23,7 @@ from tst.unit.task.episode.run_test import (
     TURN,
     _tool_sessions,
 )
-from tst.unit.training._support import PLAYED
+from tst.unit.training._support import PLAYED, revealing
 
 STYLE = {**REPLIES, "id": "style", "verifier_id": "style"}
 ADD_ITEM = {"type": "function", "name": "add_item", "description": "add_item.", "parameters": {"type": "object"},
@@ -82,6 +82,16 @@ def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(serve, tmp_p
             for row in _rows(folder / "data" / "all.jsonl")] == [
         ["add_item", "end_turn"], ["take_item", "end_turn"], ["add_item", "end_turn"]]
     assert len(teardowns.finished) == 2
+
+
+def test_a_row_of_a_task_with_server_config_keeps_its_toolsets_first_turn_tools(serve, tmp_path, reveals):
+    server = serve({"a": revealing(reveals, "take_item"), "plain": PLAYED})
+
+    folder = write_server(server.url, tmp_path, name="dock")
+    server.stop()
+
+    assert [row.get("first_turn_tools") for row in _rows(folder / "data" / "all.jsonl")] == [
+        ["add_item", "end_turn", "take_item"], None]
 
 
 def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_written(serve, tmp_path):

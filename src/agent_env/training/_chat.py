@@ -14,7 +14,17 @@ from typing import Any
 import click
 import httpx
 
-from agent_env.training._openenv import Session, Shared, function_tool, key, messages, tasks_and_tools, token_in
+from agent_env.training._openenv import (
+    FIRST_TURN_TOOLS,
+    Session,
+    Shared,
+    exactly,
+    function_tool,
+    key,
+    messages,
+    tasks_and_tools,
+    token_in,
+)
 
 
 @click.command()
@@ -50,8 +60,8 @@ def write_rows(url: str, out: str | Path, *, tool_timeout: float = 60.0, reset_t
     rollout may take, and the environment variable holding the token a server given one asks for, read in each of the
     trainer's rollout processes."""
     url = url.rstrip("/")
-    _, tasks, probed = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
-                                       timeout=reset_timeout, token=token_in(token_var))
+    _, tasks, probed, firsts = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
+                                               timeout=reset_timeout, token=token_in(token_var))
     tools = {each: [function_tool(tool) for tool in found] for each, found in probed.items()}
     server = {"url": url, "tool_timeout": tool_timeout, "reset_timeout": reset_timeout, "model_timeout": model_timeout,
               "max_turns": max_turns, **({"token_var": token_var} if token_var else {})}
@@ -61,6 +71,7 @@ def write_rows(url: str, out: str | Path, *, tool_timeout: float = 60.0, reset_t
         (out / f"{split}.jsonl").write_text("".join(json.dumps({
             "messages": messages(task["system_prompt"], task["prompt"]),
             "metadata": {"split": split, "index": task["index"], "task_id": task["id"], "tools": tools[key(task)],
+                         **({FIRST_TURN_TOOLS: firsts[key(task)]} if key(task) in firsts else {}),
                          "agentenv": server},
         }) + "\n" for task in described))
     return out
@@ -89,7 +100,8 @@ async def play(base_url: str, prompt: list[dict[str, Any]], request_kwargs: dict
     server, tools = row["agentenv"], row["tools"]
     episode = _Episode(Shared(server["url"], frozenset(tool["function"]["name"] for tool in tools),
                               server["tool_timeout"], server["reset_timeout"], patience=server["reset_timeout"],
-                              waits_for_server=True, token=token_in(server.get("token_var"))))
+                              waits_for_server=True, token=token_in(server.get("token_var")),
+                              exactly=exactly(row.get(FIRST_TURN_TOOLS))))
     counts = {"agentenv_tool_calls": 0, "agentenv_invalid_calls": 0}
     try:
         await episode._start(row["split"], int(row["index"]), row["task_id"])

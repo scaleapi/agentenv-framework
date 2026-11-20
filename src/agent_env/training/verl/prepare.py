@@ -14,7 +14,15 @@ import pyarrow.parquet as pq
 import yaml
 from transformers import AutoTokenizer
 
-from agent_env.training._openenv import function_tool, key, longest_prompt, messages, tasks_and_tools, token_in
+from agent_env.training._openenv import (
+    FIRST_TURN_TOOLS,
+    function_tool,
+    key,
+    longest_prompt,
+    messages,
+    tasks_and_tools,
+    token_in,
+)
 
 #: The ``agent_name`` every row plays under, and the name ``agent_loop.yaml`` registers the loop at.
 AGENT = "agentenv"
@@ -25,7 +33,7 @@ ROW = pa.schema([
     ("prompt", pa.list_(pa.struct([("role", pa.string()), ("content", pa.string())]))),
     ("agent_name", pa.string()),
     ("extra_info", pa.struct([("split", pa.string()), ("index", pa.int64()), ("task_id", pa.string()),
-                              ("tools", pa.string())])),
+                              ("tools", pa.string()), (FIRST_TURN_TOOLS, pa.string())])),
 ])
 
 
@@ -58,15 +66,15 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
     if tokenizer is None and (max_prompt_length is not None or chat_template_kwargs):
         raise ValueError("max_prompt_length and chat_template_kwargs count tokens, so they take the model's tokenizer")
     url = url.rstrip("/")
-    env_name, tasks, probed = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
-                                              timeout=reset_timeout, token=token_in(token_var))
+    env_name, tasks, probed, firsts = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app "
+                                                      "first", timeout=reset_timeout, token=token_in(token_var))
     tools = {each: [function_tool(tool) for tool in found] for each, found in probed.items()}
     rows = {split: [{
         "data_source": f"agentenv/{env_name}",
         "prompt": messages(task["system_prompt"], task["prompt"]),
         "agent_name": AGENT,
         "extra_info": {"split": split, "index": task["index"], "task_id": task["id"],
-                       "tools": json.dumps(tools[key(task)])},
+                       "tools": json.dumps(tools[key(task)]), FIRST_TURN_TOOLS: json.dumps(firsts[key(task)]) if key(task) in firsts else None},
     } for task in described] for split, described in tasks.items()}
     longest = None if tokenizer is None else _longest(rows, AutoTokenizer.from_pretrained(tokenizer), max_prompt_length,
                                                       chat_template_kwargs or {})

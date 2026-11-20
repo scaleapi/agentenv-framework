@@ -5,11 +5,12 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from transformers import AutoTokenizer
 
-from agent_env.training.skyrl.prepare import token_vars, write_dataset
+from agent_env.training.skyrl.prepare import ROW, token_vars, write_dataset
 from tst.unit.task.episode import run_test
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
 from tst.unit.training._support import PLAYED
@@ -234,6 +235,19 @@ def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tool_f
     server.stop()
 
     assert (output["env_metrics"][0]["failed"], output["env_metrics"][0]["attempts"]) == (1, 1)
+
+
+def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_tools_raises(
+        serve, tmp_path, tool_format, tokenizer):
+    server = serve({"a": PLAYED})
+    rows = _rows(server.url, tmp_path, tool_format)
+    written = pq.read_table(rows).to_pylist()
+    written[0]["episode"]["first_turn_tools"] = json.dumps(["add_item", "end_turn", "take_item"])
+    pq.write_table(pa.Table.from_pylist(written, schema=ROW), rows)
+
+    with pytest.raises(ValueError, match="their server configs reveal different tools"):
+        _generate(rows, _Engine(tokenizer, adds_a_crate(tool_format)), tokenizer)
+    server.stop()
 
 
 def test_an_episode_that_ends_without_failing_or_a_reward_raises(serve, tmp_path, tool_format, tokenizer):

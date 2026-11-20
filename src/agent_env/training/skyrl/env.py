@@ -16,7 +16,17 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.skyrl.env runs in SkyRL's trainer: install 'agentenv-framework[skyrl]' into "
                       "SkyRL's environment") from exc
 
-from agent_env.training._openenv import CLOSE_SECONDS, GRACE_SECONDS, Rollout, Session, Shared, on_session_loop, token_in
+from agent_env.training._openenv import (
+    CLOSE_SECONDS,
+    FIRST_TURN_TOOLS,
+    GRACE_SECONDS,
+    Rollout,
+    Session,
+    Shared,
+    exactly,
+    on_session_loop,
+    token_in,
+)
 from agent_env.training.skyrl.calls import Call, Unparsed, parse
 
 logger = logging.getLogger(__name__)
@@ -37,7 +47,8 @@ class AgentEnvTextEnv(BaseTextEnv):
             + 2 * GRACE_SECONDS + CLOSE_SECONDS
         self._session = _Session(Shared(server["url"], frozenset(self._tools), server["tool_timeout"],
                                         server["reset_timeout"], patience=server["reset_timeout"],
-                                        waits_for_server=True, token=token_in(server.get("token_var"))))
+                                        waits_for_server=True, token=token_in(server.get("token_var")),
+                                        exactly=exactly(self._episode.get(FIRST_TURN_TOOLS))))
         self._scores: dict[str, float] = {}
         self._run = self._unparsed = 0
         self._failed = False

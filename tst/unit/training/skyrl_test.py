@@ -24,7 +24,7 @@ from tst.unit.task.episode.run_test import (
     TURN,
     _tool_sessions,
 )
-from tst.unit.training._support import PLAYED
+from tst.unit.training._support import PLAYED, revealing
 
 ADD_ITEM = {"type": "function", "function": {"name": "add_item", "description": "add_item.",
                                              "parameters": {"type": "object"}}}
@@ -87,7 +87,8 @@ def test_a_servers_tasks_become_a_row_per_task_with_its_tools_in_its_system_prom
                    {"role": "user", "content": "Add a barrel."}],
         "env_class": "agentenv",
         "data_source": "agentenv/Dock Yard",
-        "episode": {"split": "smoke", "index": 0, "task_id": "b", "tools": [ADD_ITEM, FUNCTION_END_TURN]},
+        "episode": {"split": "smoke", "index": 0, "task_id": "b", "tools": [ADD_ITEM, FUNCTION_END_TURN],
+                    "first_turn_tools": None},
         "server": {"url": server.url, "tool_timeout": 30.0, "reset_timeout": 90.0, "attempts": 2,
                    "tool_format": "qwen3_coder", "token_var": None},
     }
@@ -129,6 +130,16 @@ def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(serve, tmp_p
         ["add_item", "end_turn"], ["take_item", "end_turn"], ["add_item", "end_turn"]]
     assert ['"name": "take_item"' in row["prompt"][0]["content"] for row in rows] == [False, True, False]
     assert len(teardowns.finished) == 2
+
+
+def test_a_row_of_a_task_with_server_config_keeps_its_toolsets_first_turn_tools(serve, tmp_path, tokenizer, reveals):
+    server = serve({"a": revealing(reveals, "take_item"), "plain": PLAYED})
+
+    out = write_dataset(server.url, tmp_path, tokenizer=tokenizer()).folder
+    server.stop()
+
+    assert [row["episode"]["first_turn_tools"] for row in _rows(out / "all.parquet")] == [
+        json.dumps(["add_item", "end_turn", "take_item"]), None]
 
 
 def test_a_split_the_server_keeps_empty_has_a_rows_columns(serve, tmp_path, tokenizer):

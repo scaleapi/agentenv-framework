@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from agent_env.openenv import build_app
-from agent_env.training._openenv import Server, key, messages, tasks_and_tools
+from agent_env.training._openenv import FIRST_TURN_TOOLS, Server, key, messages, tasks_and_tools
 
 #: The routes a resources server serves itself, which a tool's route can't take.
 GYM_ROUTES = frozenset({"seed_session", "verify", "close_session", "aggregate_metrics", "reverify_mode"})
@@ -67,8 +67,8 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
     served = None if url else Server(build_app(source, reward=summed if reward_components else reward, sandbox=sandbox,
                                                max_concurrent_envs=1))
     try:
-        env_name, tasks, probed = tasks_and_tools(url or served.url, local="name the bundle's folder instead of its "
-                                                  "server", timeout=reset_timeout)
+        env_name, tasks, probed, firsts = tasks_and_tools(url or served.url, local="name the bundle's folder instead "
+                                                          "of its server", timeout=reset_timeout)
         tools = {each: [_function(tool) for tool in found] for each, found in probed.items()}
     finally:
         if served is not None:
@@ -96,6 +96,7 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
             "responses_create_params": {"input": messages(task["system_prompt"], task["prompt"]),
                                         "tools": tools[key(task)]},
             "agent_ref": agent, "split": split, "index": task["index"], "task_id": task["id"],
+            **({FIRST_TURN_TOOLS: firsts[key(task)]} if key(task) in firsts else {}),
         }) + "\n" for task in described))
     return server
 

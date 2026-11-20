@@ -4,12 +4,14 @@ and model replies they play it with."""
 
 import pytest
 
+from agent_env.config.runtime import Config
 from agent_env.openenv.app import _app
 from agent_env.openenv.reward import _score_at
 from agent_env.openenv.environment import Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
+from agent_env.task_step.task_step import TaskStep
 from agent_env.training._openenv import Server
-from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
+from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _Env
 
 #: A task the model plays by adding a crate and saying so, which its verifier scores 1.
 PLAYED = [ITEMS, ALICE, TURN, REPLIES]
@@ -41,3 +43,59 @@ def serve(teardowns, tools):
     yield served
     for server in servers:
         server.stop()
+
+
+class _Config(TaskStep):
+    """Stands in for ``apply_server_config`` on ``env_id``, whose reply reveals the tools ``reveal``."""
+
+    type = "apply_server_config"
+    entity_refs = ()
+    revealed: list[str] = []
+    applied = 0
+
+    def __init__(self, id, version, env_id="items", reveal=(), depends_on=None, fail_task_on_error=True):
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        self.env_id, self.reveal = env_id, list(reveal)
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**cls._base_from_dict(data), env_id=data.get("env_id", "items"), reveal=data.get("reveal", ()))
+
+    async def execute(self, context):
+        _Config.revealed[:] = self.reveal
+        _Config.applied += 1
+        return context
+
+
+class _Offered:
+    def __iter__(self):
+        return iter(["add_item", *_Config.revealed])
+
+
+@pytest.fixture
+def reveals(monkeypatch, tools):
+    """A config step whose reply reveals ``reveal``, given ``args``; each episode starts with nothing revealed, and
+    ``reveals.applied()`` counts the config steps run."""
+    registry = Config().task_step_registry()
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: {**registry, _Config.type: _Config})
+    deploy = _Env.execute
+
+    async def deploying(self, context):
+        _Config.revealed.clear()
+        return await deploy(self, context)
+
+    monkeypatch.setattr(_Env, "execute", deploying)
+    monkeypatch.setattr(_Config, "revealed", [])
+    monkeypatch.setattr(_Config, "applied", 0)
+    tools().offered = _Offered()
+
+    def config(*reveal, **args):
+        return {"id": "cfg", "type": _Config.type, "env_id": "items", "reveal": list(reveal),
+                "directives": [{"service": "items", "uri": "urn:example:set-errors/v1", "args": args}]}
+
+    config.applied = lambda: _Config.applied
+    return config
+
+
+def revealing(config, *reveal, **args):
+    return [ITEMS, ALICE, config(*reveal, **args), TURN, REPLIES]

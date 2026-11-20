@@ -153,13 +153,15 @@ share.
 Shared:
 - `_openenv.py`: the session on a server `openenv/` makes that each helper plays an episode through (`Session`: a
   background start, tool calls, the turns left open ended until scored), with the Task API reads, the per-toolset probe,
-  `tasks_and_tools` (what the row writers read: the tasks, the split names checked, each toolset's tools) and an
-  in-process `Server`.
+  `tasks_and_tools` (what the row writers read: the tasks, the split names checked, each toolset's tools, and for a
+  toolset whose tasks apply server config the probed task's first-turn tools, which rows carry as `first_turn_tools`
+  and an episode's first turn must then offer exactly) and an in-process `Server`.
 - `_tools.py`: turns an env's tools into typed, documented Python methods from their JSON Schema, as transformers'
   `get_json_schema` reads them.
 - `_chat.py`, the rows and episode the Miles and slime helpers share:
   - `write_rows` and its `command` write a server's tasks as `<split>.jsonl` rows of chat `messages` and `metadata`
-    (the episode's split, index, task id and tools, and the server it plays on with its deadlines and turn cap).
+    (the episode's split, index, task id and tools, `first_turn_tools` when its task applies server config, and the
+    server it plays on with its deadlines and turn cap).
   - `play` plays a row's episode, the model chatting at a trainer's OpenAI chat endpoint that records its turns, with
     the row's tools. It answers a call whose arguments aren't a JSON object as the model's error, and returns the reward,
     or flags an episode the env or the session failed, whose model missed the row's `model_timeout` or that ended

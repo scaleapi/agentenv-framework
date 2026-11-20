@@ -41,7 +41,7 @@ except ModuleNotFoundError as exc:
                       "Python 3.13.14 or later as NeMo Gym is") from exc
 
 from agent_env.openenv import build_app
-from agent_env.training._openenv import STOP_SECONDS, Server, Session, Shared
+from agent_env.training._openenv import STOP_SECONDS, Server, Session, Shared, exactly
 from agent_env.training.nemo_gym.prepare import REWARD_AND_COMPONENTS, summed
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,8 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class AgentEnvSeedSessionRequest(BaseSeedSessionRequest):
-    """A row: the tools it shows the model, and the task it plays."""
+    """A row: the tools it shows the model, the task it plays, and for a task that applies server config, the tools its
+    first turn must offer exactly."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -97,6 +98,7 @@ class AgentEnvSeedSessionRequest(BaseSeedSessionRequest):
     split: str
     index: int
     task_id: str | None = None
+    first_turn_tools: list[str] | None = None
 
 
 class AgentEnvVerifyRequest(BaseVerifyRequest):
@@ -139,7 +141,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         offered = frozenset(tool["name"] for tool in body.responses_create_params.get("tools") or ())
         session = _Session(Shared(self._url, offered, self.config.tool_timeout, self.config.reset_timeout,
-                                  patience=self.config.reset_timeout))
+                                  patience=self.config.reset_timeout, exactly=exactly(body.first_turn_tools)))
         if (previous := self._sessions.pop(session_id, None)) is not None:
             await previous.close()
         self._sessions[session_id] = session

@@ -23,7 +23,7 @@ from tst.unit.task.episode.run_test import (
     TURN,
     _tool_sessions,
 )
-from tst.unit.training._support import PLAYED
+from tst.unit.training._support import PLAYED, revealing
 
 ADD_ITEM = {"type": "function", "function": {"name": "add_item", "description": "add_item.",
                                              "parameters": {"type": "object"}}}
@@ -50,7 +50,8 @@ def test_a_servers_tasks_become_a_row_per_task_of_each_split_and_the_agent_loop_
         "data_source": "agentenv/Dock Yard",
         "prompt": [{"role": "system", "content": "You keep the items."}, {"role": "user", "content": "Add a barrel."}],
         "agent_name": "agentenv",
-        "extra_info": {"split": "smoke", "index": 0, "task_id": "b", "tools": [ADD_ITEM, FUNCTION_END_TURN]},
+        "extra_info": {"split": "smoke", "index": 0, "task_id": "b", "tools": [ADD_ITEM, FUNCTION_END_TURN],
+                       "first_turn_tools": None},
     }
     assert [(row["extra_info"]["index"], row["extra_info"]["task_id"]) for row in _rows(out / "all.parquet")] == [
         (0, "a"), (1, "b")]
@@ -67,6 +68,16 @@ def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(serve, tmp_p
     assert [[tool["function"]["name"] for tool in row["extra_info"]["tools"]] for row in _rows(out / "all.parquet")] == [
         ["add_item", "end_turn"], ["take_item", "end_turn"], ["add_item", "end_turn"]]
     assert len(teardowns.finished) == 2
+
+
+def test_a_row_of_a_task_with_server_config_keeps_its_toolsets_first_turn_tools(serve, tmp_path, reveals):
+    server = serve({"a": revealing(reveals, "take_item"), "plain": PLAYED})
+
+    out = write_dataset(server.url, tmp_path).folder
+    server.stop()
+
+    assert [row["extra_info"]["first_turn_tools"] for row in _rows(out / "all.parquet")] == [
+        json.dumps(["add_item", "end_turn", "take_item"]), None]
 
 
 def test_a_split_the_server_keeps_empty_has_a_rows_columns(serve, tmp_path):

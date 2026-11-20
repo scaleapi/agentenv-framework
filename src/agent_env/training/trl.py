@@ -39,6 +39,7 @@ from agent_env.training._openenv import (
     Server,
     Session,
     Shared,
+    applies_config,
     key,
     messages,
     on_session_loop,
@@ -153,12 +154,12 @@ class AgentEnv:
                 _stop(self._server)
 
     async def _environments(self) -> list[type[_Environment]]:
-        return [await self._environment(toolset) for toolset in self._toolsets.values()]
+        return [await self._environment(toolset, applies_config(each)) for each, toolset in self._toolsets.items()]
 
-    async def _environment(self, toolset: NamedToolset) -> type[_Environment]:
+    async def _environment(self, toolset: NamedToolset, config: bool) -> type[_Environment]:
         first, tools = await probe(self.url, toolset, self._reset_timeout)
         shared = Shared(url=self.url, offered=first, tool_timeout=self._tool_timeout, reset_timeout=self._reset_timeout,
-                        waits_for_server=True)
+                        waits_for_server=True, exactly=first if config else None)
         self._shared.append(shared)
         return _environment_class(toolset.name, tools, shared)
 

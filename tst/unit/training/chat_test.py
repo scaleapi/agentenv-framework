@@ -5,6 +5,7 @@ each chat request from a script and records it; with the reward hook and the fil
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -19,8 +20,9 @@ from agent_env.training._openenv import Server
 from agent_env.training.miles.__main__ import main as miles_main
 from agent_env.training._chat import keep_scored_groups, play, reward, write_rows
 from agent_env.training.slime.__main__ import main as slime_main
+from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training._support import PLAYED
+from tst.unit.training._support import PLAYED, revealing
 
 ADD_ITEM = {"type": "function", "function": {"name": "add_item", "description": "add_item.",
                                              "parameters": {"type": "object"}}}
@@ -105,6 +107,70 @@ def test_the_agent_plays_a_rows_task_through_the_session_and_returns_its_reward(
     assert second["messages"] == [*row["messages"], _call('{"item": "crate"}'),
                                   {"role": "tool", "tool_call_id": "call_1", "content": second["messages"][-1]["content"]}]
     assert second["messages"][-1]["content"]
+
+
+def _rows(server, tmp_path):
+    folder = write_rows(server.url, tmp_path / "rows")
+    return {row["metadata"]["task_id"]: row for row in map(json.loads, (folder / "all.jsonl").read_text().splitlines())}
+
+
+def _played(model, row):
+    return asyncio.run(play(model.base_url, row["messages"], SAMPLING, row["metadata"]))
+
+
+@pytest.mark.parametrize("reveal", [("take_item",), ()], ids=["reveal-the-same", "reveal-nothing"])
+def test_tasks_whose_configs_reveal_the_same_tools_share_one_probe_whatever_their_args_and_play(
+        serve, session, tmp_path, reveals, reveal):
+    server = serve({"a": revealing(reveals, *reveal, rate=0.1), "b": revealing(reveals, *reveal, rate=0.5),
+                    "plain": PLAYED})
+    rows = _rows(server, tmp_path)
+    probes = reveals.applied()
+    model = session(_call('{"item": "crate"}'), _says("Added a crate."))
+
+    played = _played(model, rows["b"])
+    server.stop()
+
+    assert probes == 1
+    assert rows["a"]["metadata"]["first_turn_tools"] == rows["b"]["metadata"]["first_turn_tools"] == sorted(
+        ["add_item", "end_turn", *reveal])
+    assert "first_turn_tools" not in rows["plain"]["metadata"]
+    assert played["reward"] == 1.0
+
+
+def test_a_config_between_turns_is_compared_on_the_first_turns_tools_not_on_every_turns(serve, session, tmp_path,
+                                                                                         reveals):
+    server = serve({"a": [ITEMS, ALICE, TURN, {**reveals("take_item"), "depends_on": ["turn"]},
+                          {**AGAIN, "depends_on": ["cfg"]}, REPLIES]})
+    row = _rows(server, tmp_path)["a"]
+    model = session(_call('{"item": "crate"}'), _says("Added a crate."))
+
+    played = _played(model, row)
+    server.stop()
+
+    assert [tool["function"]["name"] for tool in row["metadata"]["tools"]] == ["add_item", "end_turn", "take_item"]
+    assert row["metadata"]["first_turn_tools"] == ["add_item", "end_turn"]
+    assert "agentenv_failure" not in played
+
+
+@pytest.mark.parametrize("probed, later, refusal", [
+    (["take_item"], [], r"\['add_item', 'end_turn'\] at its first turn, not the \['add_item', 'end_turn', "
+                        r"'take_item'\] its toolset's first task does: their server configs reveal different tools"),
+    ([], ["take_item"], r"offers the tools \['add_item', 'end_turn', 'take_item'\], not the \['add_item', 'end_turn'\]"),
+], ids=["fewer", "more"])
+def test_a_task_whose_config_reveals_other_tools_than_its_probed_tasks_is_refused_and_an_older_row_plays(
+        serve, session, tmp_path, reveals, probed, later, refusal):
+    server = serve({"a": revealing(reveals, *probed), "b": revealing(reveals, *later)})
+    rows = _rows(server, tmp_path)
+    model = session(_call('{"item": "crate"}'), _says("Added a crate."))
+
+    refused = _played(model, rows["b"])
+    older = {**rows["b"], "metadata": {k: v for k, v in rows["b"]["metadata"].items() if k != "first_turn_tools"}}
+    played = _played(model, older)
+    server.stop()
+
+    assert refused["reward"] == 0.0
+    assert re.search(refusal, refused["agentenv_failure"])
+    assert ("agentenv_failure" in played) == (later != [])
 
 
 def test_a_call_whose_arguments_arent_an_object_is_answered_and_the_episode_goes_on(serve, session, tmp_path):
