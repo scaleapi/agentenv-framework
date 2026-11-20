@@ -68,20 +68,23 @@ async def follow_trajectory(
     stop: asyncio.Event,
     client: httpx.AsyncClient | None = None,
     headers: Mapping[str, str] | None = None,
+    format: str | None = None,
 ) -> None:
     """Read task ``task_id``'s trajectory from its first event, handing ``sink`` each page that has
-    events and the last one, until the task has ended and every event is read.
+    events and the last one, until the task has ended and every event is read. Each read names
+    ``format`` when given: only to a card that offers formats.
 
     Between reads it waits ``poll_interval_seconds``, or less once ``stop`` is set. Transport errors
     and 5xx answers are retried with backoff until ``stop`` is set, and end following after it; a
     task the agent no longer knows (404) ends following."""
     after = 0
     failures = 0
+    named = {"format": format} if format is not None else {}
     async with nullcontext(client) if client is not None else httpx.AsyncClient() as http:
         while True:
             try:
                 response = await http.post(
-                    endpoint, json={"task_id": task_id, "after": after}, headers=headers,
+                    endpoint, json={"task_id": task_id, "after": after, **named}, headers=headers,
                     timeout=_READ_TIMEOUT_SECONDS,
                 )
                 if response.status_code == 404:

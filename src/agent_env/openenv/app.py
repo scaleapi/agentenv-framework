@@ -37,6 +37,7 @@ def build_app(
     sandbox: str | None = None,
     max_concurrent_envs: int = 8,
     token: str | None = None,
+    skip_lint: bool = False,
 ) -> FastAPI:
     """The OpenEnv server for ``bundle``'s tasks: a folder, an installed bundle's name or an ``hf://`` reference, as
     ``agent-env run BUNDLE`` reads it, served as the split ``all`` and a split per eval; or a mapping of split name to
@@ -45,14 +46,15 @@ def build_app(
 
     ``reward`` makes the reward of a task's scores: a step id, or a function of the scores by step id; without it a
     task that records one score has that one. Each bundle is prepared as ``agent-env run`` prepares it before its
-    first task, without the agent a client plays, so every task must pass its checks; one that can't run as an
-    episode is then left out and logged. Namespace routing is on from the app's startup to its shutdown, which tears
-    down every open episode. With ``token``, every request and WebSocket but ``/health`` must carry
+    first task, without the agent a client plays, so every task must pass its checks, but for task lint's own rules
+    with ``skip_lint``, as ``agent-env run --skip-lint``; one that can't run as an episode is then left out and
+    logged. Namespace routing is on from the app's startup to its shutdown, which tears down every open episode.
+    With ``token``, every request and WebSocket but ``/health`` must carry
     ``Authorization: Bearer <token>``, for a server others can reach: without it, anyone who reaches the server
     deploys and drives its envs. Raises BundleError when a bundle can't be prepared or serves no task, and ValueError
     when ``reward`` can't score every task."""
     with namespace_routing():
-        prepared = {split: _prepared(source, sandbox) for split, source in _sources(bundle).items()}
+        prepared = {split: _prepared(source, sandbox, skip_lint) for split, source in _sources(bundle).items()}
         served = Served(splits=_served(_splits(bundle, prepared), reward), sandbox=sandbox)
     return _app(served, _env_name(prepared), max_concurrent_envs, token)
 
@@ -102,14 +104,14 @@ def _sources(bundle: _Source | Mapping[str, _Source]) -> dict[str | None, _Sourc
     return dict(bundle) if isinstance(bundle, Mapping) else {None: bundle}
 
 
-def _prepared(source: _Source, sandbox: str | None) -> PreparedBundle:
+def _prepared(source: _Source, sandbox: str | None, skip_lint: bool = False) -> PreparedBundle:
     """``source`` prepared with every task and eval selected, so ``all`` holds every task, evals or not."""
     root, id_root = (source, None) if isinstance(source, Path) else locate_bundle(source)[:2]
     entries = parse_bundle(Path(root), id_root=id_root).entries
     return prepare_bundle(
         root, tasks=[entry.name for entry in entries if entry.kind is BundleKind.TASK],
         evals=[entry.name for entry in entries if entry.kind is BundleKind.EVAL], sandbox=sandbox,
-        on_progress=logger.info, id_root=id_root, played=True)
+        on_progress=logger.info, id_root=id_root, played=True, skip_lint=skip_lint)
 
 
 def _splits(bundle: _Source | Mapping[str, _Source],

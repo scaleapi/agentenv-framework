@@ -29,12 +29,13 @@ _EVENTS = [{"type": "system", "subtype": "init"}, {"type": "assistant", "step": 
 _MORE = [{"type": "assistant", "step": 1}, {"type": "result", "result": "done"}]
 
 
-def _agent(store: LocalFilesystemObjectStore, *, live: bool, wait_for_chunk: bool) -> AgentEnvAgent:
+def _agent(store: LocalFilesystemObjectStore, *, live: bool, wait_for_chunk: bool, native: str | None = None
+           ) -> AgentEnvAgent:
     """Appends two events, optionally waits until a chunk of them is stored, then two more."""
 
     @a2a_agent(
         identity=AgentIdentity(name="solver", description="test", version="1"),
-        extensions=(enable(TRAJECTORY_V1, live=live),),
+        extensions=(enable(TRAJECTORY_V1, live=live, **({"native": native} if native else {})),),
     )
     class Agent(AgentEnvAgent):
         async def run(self, request: TaskRequest) -> TaskResult:
@@ -57,22 +58,23 @@ def _chunk_keys(store: LocalFilesystemObjectStore) -> list[str]:
 
 
 class _Run:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path, *, live: bool, wait_for_chunk: bool) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path, *, live: bool, wait_for_chunk: bool,
+                 native: str | None = None) -> None:
         self.store = LocalFilesystemObjectStore(str(tmp_path))
         configure(object_store=self.store)
         for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task", "mark_closed", "get_conversation"):
             monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
-        app = _agent(self.store, live=live, wait_for_chunk=wait_for_chunk).create_app()
+        app = _agent(self.store, live=live, wait_for_chunk=wait_for_chunk, native=native).create_app()
         self.card = app.state.agentenv_a2a.card.model_dump(mode="json", exclude_none=True)
         self.cursor_reads: list[dict] = []
+        self.final_reads: list[dict] = []
         transport = httpx.ASGITransport(app=app)
         real_client = httpx.AsyncClient
 
         async def record(request: httpx.Request) -> None:
             if request.url.path == "/ext/trajectory":
                 body = json.loads(await request.aread())
-                if "after" in body:
-                    self.cursor_reads.append(body)
+                (self.cursor_reads if "after" in body else self.final_reads).append(body)
 
         monkeypatch.setattr(
             httpx,
@@ -92,6 +94,20 @@ class _Run:
             id="solve", version=None, prompt="go", agent_name="solver", poll_interval_seconds=0,
             trajectory_output_prefix=self.store.object_url(_PREFIX), **kwargs,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", ["test-events/1", None])
+async def test_every_read_names_the_native_format_a_card_offers_and_the_turn_records_the_label_served(
+        monkeypatch, tmp_path, native):
+    run = _Run(monkeypatch, tmp_path, live=True, wait_for_chunk=False, native=native)
+
+    result = await run.execute(run.step(live_trajectory=True))
+
+    assert run.cursor_reads and {read.get("format") for read in run.cursor_reads} == {native}
+    assert [read.get("format") for read in run.final_reads] == [native]
+    assert result.prompt_responses[-1].target_agent_per_turn_trajectories == [
+        {"native_format": "test-events/1", "atif": None}]
 
 
 @pytest.mark.asyncio

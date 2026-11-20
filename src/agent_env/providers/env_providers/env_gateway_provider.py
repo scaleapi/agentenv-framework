@@ -32,11 +32,14 @@ from agentenv_protocol.website import (
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
+from agent_env.config.errors import ConfigError
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
+from agent_env.env.gateway.console_session import frame_ancestor_problem
 from agent_env.env.gateway.constants import (
     CLOCK_FOLLOWERS_ENV,
     COMPUTERS_ENV,
+    CONSOLE_FRAME_ANCESTORS_ENV,
     CONSOLE_URLS_ENV,
     CONTROL_TOKEN_CHILDREN_ENV,
     DEFAULT_MCP_SERVER_NAME,
@@ -1900,9 +1903,24 @@ def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
 
 
 def consoles_environment(consoles: Mapping[str, str]) -> dict[str, str]:
-    """The env's SQL consoles the gateway serves behind its control token, each at its address on the env's network."""
+    """The env's SQL consoles the gateway serves behind its control token, each at its address on the env's network,
+    and the origins configured to show pgweb in a frame."""
     value = ",".join(f"{name}={url}" for name, url in consoles.items())
-    return {CONSOLE_URLS_ENV: value} if value else {}
+    if not value:
+        return {}
+    ancestors = " ".join(console_frame_ancestors())
+    return {CONSOLE_URLS_ENV: value, **({CONSOLE_FRAME_ANCESTORS_ENV: ancestors} if ancestors else {})}
+
+
+def console_frame_ancestors() -> tuple[str, ...]:
+    """``[gateway] console_frame_ancestors``: the origins besides a gateway's own that may show pgweb in a frame, such as
+    the apps that embed it; none by default."""
+    origins = get_config().section("gateway").get("console_frame_ancestors", [])
+    if not isinstance(origins, list) or not all(isinstance(origin, str) for origin in origins):
+        raise ConfigError("[gateway] console_frame_ancestors is a list of origins, like [\"https://app.example.com\"]")
+    if problems := [problem for origin in origins if (problem := frame_ancestor_problem(origin))]:
+        raise ConfigError(f"[gateway] console_frame_ancestors: {'; '.join(problems)}")
+    return tuple(origins)
 
 
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:
