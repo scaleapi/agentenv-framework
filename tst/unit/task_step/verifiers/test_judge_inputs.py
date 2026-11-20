@@ -2,7 +2,7 @@
 prefix), what an agent judge is given (its prompt and every file staged in its sandbox) and what a scripted verify is
 called with, for runs whose native trajectories are stored as a run stores them. Each is what its golden file holds,
 recorded before prompt steps kept per-turn trajectory records, and stays so byte for byte when the run's prompt
-responses carry those records, read back from the stored form. Re-record after a deliberate change with
+responses carry those records and its atif/1 copies are stored, read back from the stored form. Re-record after a deliberate change with
 ``AGENTENV_TEST_RECORD_GOLDEN=1`` and review the file's diff. Several cases build their runs with other tests' setups
 (the always_on rig, user_sim_judge's fakes, the rubrics golden test's and run_context's helpers), so a change to one of
 those is re-recorded here too."""
@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
+from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,7 +25,9 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.context import AtifRecord, DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.snapshot_utils.agent_state_capture import trajectory_prefix_key
+from agent_env.task_step.snapshot_utils.atif_copies import atif_folder
 from agent_env.task_step.task_steps.verifiers import always_on_agent_verifier
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter
@@ -63,12 +66,25 @@ _RUN_FOLDERS = re.compile(
     r"/[0-9a-f]{12}")
 
 
+#: An atif/1 copy a run that prescribes it stores beside each native one.
+_ATIF = {**json.loads((files("agentenv_protocol.atif") / "fixtures" / "two_turns.json").read_text()),
+         "trajectory_id": "copy-1"}
+
+
 def _recorded_form(context: TaskStepContext) -> TaskStepContext:
-    """``context`` as a run that kept per-turn trajectory records leaves it, read back from its stored form."""
+    """``context`` as a run that prescribes atif/1 and keeps per-turn trajectory records leaves it, its atif/1 copies
+    stored in the run's folder, read back from its stored form."""
+    store = get_config().get_object_store()
     for response in context.prompt_responses:
         turns = response.target_agent_per_turn_trajectory_object_urls or [response.agent_trajectory_object_url]
+        folder = trajectory_prefix_key(store, atif_folder(context, response.agent_name or "solver"))
+        url = store.put(f"{folder}{_ATIF['trajectory_id']}.json", json.dumps(_ATIF).encode(),
+                        content_type="application/json", allow_overwrite=True)
         response.target_agent_per_turn_trajectories = [
-            {"native_format": "claude-code-stream-json", "atif": None} for _ in turns]
+            {"native_format": "claude-code-stream-json",
+             "atif": AtifRecord(url=url, through_step=n + 1, status="valid", rules=[], reason=None,
+                                validator_version="1.0", adapter_version="1.0", aux_url=None, turn_context_url=None)}
+            for n, _ in enumerate(turns)]
     return TaskStepContext.from_dict(context.to_dict())
 
 

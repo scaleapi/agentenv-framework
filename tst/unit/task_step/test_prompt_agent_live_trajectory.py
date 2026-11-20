@@ -127,9 +127,10 @@ async def test_a_prompt_step_prescribes_the_runs_formats_before_its_first_messag
     assert run.prescriptions == [{"formats": formats or []}]
     assert run.sent.index("/ext/trajectory/prescribe") < run.sent.index("message/send")
     assert context.metadata["trajectory_formats"]["solve"]["built"] == ["test-events/1", *(formats or [])]
-    [final] = run.final_reads
+    assert [read["format"] for read in run.final_reads] == ["test-events/1", *(formats or [])]
     async with httpx.AsyncClient() as client:
-        read = await client.post("http://agent.test/ext/trajectory", json={"task_id": final["task_id"], "format": ATIF})
+        read = await client.post("http://agent.test/ext/trajectory",
+                                 json={"task_id": run.final_reads[0]["task_id"], "format": ATIF})
     assert read.status_code == (200 if formats else 409)
 
 

@@ -174,14 +174,18 @@ async def test_each_turn_is_stored_live_under_its_own_prefix_and_joins_to_its_fi
 
 @pytest.mark.asyncio
 async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_another(local_registry):
+    """And the run, which prescribes atif/1, stores the turn's copy in its folder with the image's file beside it."""
     suffix = uuid.uuid4().hex[:8]
     native = "agentenv-echo-agent/v1"
+    image = _png(6, 4)
     agent = put_test_agent(f"trajectory-formats-agent-{suffix}")
     task = Task.put(id=f"trajectory-formats-{suffix}", steps=[
         _deploy(agent, "solver"),
         PromptAgentTaskStep(
-            id="ask", version=None, prompt_id="ask", agent_name="solver", prompt="hello",
-            context_id=f"formats-{suffix}",
+            id="ask", version=None, prompt_id="ask", agent_name="solver", context_id=f"formats-{suffix}",
+            parts=[{"kind": "text", "text": "hello"},
+                   {"kind": "file", "file": {"bytes": base64.b64encode(image).decode(), "mimeType": "image/png",
+                                             "name": "shot.png"}}],
         ),
     ])
 
@@ -204,11 +208,23 @@ async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_an
     document = atif["trajectory"]
     assert (atif["format"], atif["schema_version"], atif["profile_version"]) == (ATIF, SCHEMA_VERSION, PROFILE_VERSION)
     assert errors_in(validate(document)) == []
-    assert [step["message"] for step in document["steps"]] == ["hello", "Echo: hello"]
+    [shot] = media_paths(document)
+    assert document["steps"][0]["message"] == [{"type": "text", "text": "hello"},
+                                               {"type": "image", "source": {"media_type": "image/png", "path": shot}}]
+    assert document["steps"][1]["message"].startswith("Echo: hello")
     assert (document["session_id"], atif["turn_context"]["task_id"]) == (f"formats-{suffix}", page["task_id"])
     assert cursor["events"] == document["steps"] and cursor["header"]["trajectory_id"] == document["trajectory_id"]
     with pytest.raises(httpx.HTTPStatusError, match="HTTP 400: format_not_offered"):
         raise_for_extension_status(refused, operation="trajectory read")
+    [turn] = context.prompt_responses[-1].target_agent_per_turn_trajectories
+    record, store = turn["atif"], get_config().get_object_store()
+    folder = context.metadata["atif_copies"]["agents"]["solver"]["folder"]
+    assert (turn["native_format"], record["status"], record["rules"]) == (native, "valid", [])
+    assert record["url"] == f"{folder}{document['trajectory_id']}.json"
+    assert json.loads(store.get(record["url"])) == document
+    assert json.loads(store.get(record["turn_context_url"])) == atif["turn_context"]
+    assert store.get(f"{folder}{shot}") == image
+    assert errors_in(validate(document, media={shot: store.get(f"{folder}{shot}")})) == []
 
 
 @pytest.mark.asyncio
