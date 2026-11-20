@@ -45,7 +45,7 @@ class ComputerSettings(BaseModel):
     drag_duration_ms: int = Field(default=500, ge=0)
     exec_output_bytes: int = Field(default=1 << 20, gt=0)
     exec_timeout_s: float = Field(default=60.0, gt=0, le=3600)
-    screenshot_settle_ms: int = Field(default=2000, ge=0, le=60_000)
+    screenshot_delay_ms: int = Field(default=500, ge=0, le=10_000)
 
 
 def load_settings(environ: dict | None = None, model: type[ComputerSettings] = ComputerSettings) -> ComputerSettings:

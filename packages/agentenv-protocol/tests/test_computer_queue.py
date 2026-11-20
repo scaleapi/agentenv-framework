@@ -394,8 +394,7 @@ async def test_a_caller_cancelled_while_waiting_never_leaves_the_queue_held():
 
 @pytest.mark.asyncio
 async def test_a_screenshot_that_fails_after_the_input_reports_the_input_as_done():
-    """With no settle, the one capture an input's screenshot takes is the one after the input."""
-    driver = FakeDriver(settings=ComputerSettings(screenshot_settle_ms=0))
+    driver = FakeDriver()
     async with mcp_session(driver) as session:
         await _shot(session)
         driver.fail["capture"] = RuntimeError("mss died")
