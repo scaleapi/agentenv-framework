@@ -3,7 +3,9 @@ prefix), what an agent judge is given (its prompt and every file staged in its s
 called with, for runs whose native trajectories are stored as a run stores them. Each is what its golden file holds,
 recorded before prompt steps kept per-turn trajectory records, and stays so byte for byte when the run's prompt
 responses carry those records, read back from the stored form. Re-record after a deliberate change with
-``AGENTENV_TEST_RECORD_GOLDEN=1`` and review the file's diff."""
+``AGENTENV_TEST_RECORD_GOLDEN=1`` and review the file's diff. Several cases build their runs with other tests' setups
+(the always_on rig, user_sim_judge's fakes, the rubrics golden test's and run_context's helpers), so a change to one of
+those is re-recorded here too."""
 
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.task_step import test_always_on_agent_verifier as A
 from tst.unit.task_step.verifiers import test_rubrics_verifier_golden as G
+from tst.unit.task_step.verifiers import test_run_context as R
 from tst.unit.task_step.verifiers import test_user_sim_judge as T
 from tst.util import verifier_golden
 
@@ -65,12 +68,16 @@ def _recorded_form(context: TaskStepContext) -> TaskStepContext:
     return TaskStepContext.from_dict(context.to_dict())
 
 
+#: The wall-clock day and time a chat run's user sim was shown, which its prompt step reads off this machine's clock.
+_WALL_CLOCK = re.compile(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                         r"\d{1,2}\b|\b\d{1,2}:\d{2} [AP]M\b")
 #: How long a captured string may be in the golden file before it's kept as its sha256 and length.
 _KEPT_CHARS = 500
 
 
-def _normalised(value: Any) -> Any:
-    return json.loads(_RUN_FOLDERS.sub(r"\1/<run>", json.dumps(verifier_golden.normalised(value))))
+def _normalised(value: Any, *, wall_clock: bool = False) -> Any:
+    text = _RUN_FOLDERS.sub(r"\1/<run>", json.dumps(verifier_golden.normalised(value)))
+    return json.loads(_WALL_CLOCK.sub("<clock>", text) if wall_clock else text)
 
 
 def _digested(value: Any) -> Any:
@@ -84,13 +91,15 @@ def _digested(value: Any) -> Any:
     return value
 
 
-async def _pinned(case: str, judged: Callable[[Callable[[TaskStepContext], TaskStepContext]], Awaitable[Any]]) -> None:
+async def _pinned(case: str, judged: Callable[[Callable[[TaskStepContext], TaskStepContext]], Awaitable[Any]], *,
+                  wall_clock: bool = False) -> None:
     """``judged`` builds the case's run, hands its context through the given form and returns what its judge was
-    given: that is the golden file's, as the run is and with the records."""
-    got = _normalised(await judged(lambda context: context))
+    given: that is the golden file's, as the run is and with the records. ``wall_clock``: the run shows this machine's
+    clock, which the golden file holds as ``<clock>``."""
+    got = _normalised(await judged(lambda context: context), wall_clock=wall_clock)
     verifier_golden.check(FILE, case, _digested(got))
     if not verifier_golden.RECORDING:
-        assert _normalised(await judged(_recorded_form)) == got
+        assert _normalised(await judged(_recorded_form), wall_clock=wall_clock) == got
 
 
 def _stored(name: str, text: str) -> str:
@@ -220,6 +229,30 @@ async def test_a_model_judges_screenshots_and_action_log_are_pinned():
         _SCREENSHOTS, run, answer=lambda ids: G._evidence(ids)))
 
 
+@pytest.mark.asyncio
+async def test_a_model_judges_run_context_for_a_prompt_another_follows_is_pinned():
+    """The earlier of two prompts: what it's shown of the run is cut where the next one began, by position."""
+    first_id, first = R._stored_prompt("prompt-1", "Book lunch with Dana.", "Booked for noon.")
+    second_id, second = R._stored_prompt("prompt-2", "Now book dinner.", "Booked for seven.")
+    events = [{"seq": 1, "ts": R._between(first[0]["ts"], first[1]["ts"]), "kind": "fired", "trigger_id": "lunch"},
+              {"seq": 2, "ts": R._between(second[0]["ts"], second[1]["ts"]), "kind": "fired", "trigger_id": "dinner"}]
+    log = _stored(f"env_trigger_state/{second_id}.json",
+                  json.dumps({"env_id": "calendar", "state": {"triggers": [], "events": events}}))
+
+    def run():
+        context = TaskStepContext(metadata={
+            "a2a_conversations": {"prompt-1": first_id, "prompt-2": second_id},
+            "env_trigger_state": {"calendar": {"object_url": log, "capture_step_id": "prompt-2"}}})
+        for prompt_id, step_id, text, reply in (("p1", "prompt-1", "Book lunch with Dana.", "Booked for noon."),
+                                                ("p2", "prompt-2", "Now book dinner.", "Booked for seven.")):
+            context.prompt_responses.append(PromptResponse(prompt_id=prompt_id, response=reply, prompt_text=text,
+                                                           step_id=step_id))
+        return context
+
+    await _pinned("model_run_context_of_an_earlier_prompt", _model_judged(
+        {"run_context_for_judge": ["conversation", "trigger_log"]}, run))
+
+
 AGENT_CASES = {
     "agent_one_turn": ({"use_trajectory": True}, _run),
     "agent_one_turn_compacted": ({"use_trajectory": True, "trajectory_filter": TrajectoryFilter()},
@@ -264,17 +297,35 @@ async def test_a_staged_always_on_judges_prompt_and_files_are_pinned(monkeypatch
     await _pinned("always_on_staged", judged)
 
 
+def _user_sim_calls(fake: T.FakeModel) -> list[dict]:
+    """What each of the user-sim judge's checks was sent, in an order its concurrency can't change."""
+    return sorted(({k: v for k, v in call.items() if k != "alongside"} for call in fake.calls),
+                  key=lambda call: json.dumps(call, sort_keys=True))
+
+
 @pytest.mark.asyncio
-async def test_a_user_sim_judges_input_is_pinned(monkeypatch, tmp_path):
+async def test_a_user_sim_judges_input_on_an_always_on_run_is_pinned(monkeypatch, tmp_path):
     rig, run, prompt = await T._always_on(monkeypatch, tmp_path)
 
     async def judged(form):
         fake = T.FakeModel()
         await T._step(fake, monkeypatch, run_step_id="week").execute(form(copy.deepcopy(run)))
-        return sorted(({k: v for k, v in call.items() if k != "alongside"} for call in fake.calls),
-                      key=lambda call: json.dumps(call, sort_keys=True))
+        return _user_sim_calls(fake)
 
     await _pinned("user_sim", judged)
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_judges_input_on_a_chat_run_is_pinned(monkeypatch):
+    """A prompt step's user sim, judged from each read it stored (``metadata["user_sim_reads"]``)."""
+    run = await T._chat(monkeypatch)
+
+    async def judged(form):
+        fake = T.FakeModel()
+        await T._step(fake, monkeypatch).execute(form(copy.deepcopy(run)))
+        return _user_sim_calls(fake)
+
+    await _pinned("user_sim_chat", judged, wall_clock=True)
 
 
 @pytest.mark.asyncio
