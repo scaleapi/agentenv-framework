@@ -12,10 +12,12 @@ import logging
 import uuid
 from typing import ClassVar, Optional
 
+from agentenv_protocol.computer.annotate import AnnotateOptions, options_problem
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManifest
 from agentenv_protocol.computer.recording import MANIFEST
 from agentenv_protocol.client import find_extension
+from pydantic import ValidationError
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -47,6 +49,13 @@ MAX_SEGMENTS = 10_000
 MAX_RECORDING_BYTES = 64 << 30
 
 
+class AnnotationSettings(AnnotateOptions):
+    """``start_computer_recording``'s ``annotation_settings``: whether the recording draws its inputs, as it does
+    unless ``is_enabled`` is false, and the options its driver's ``annotate`` takes, which the step passes on."""
+
+    is_enabled: bool = True
+
+
 class StartComputerRecordingTaskStep(TaskStep):
     """Start recording a deployed env's display, or its child env ``environment_name``'s, under ``name``, its driver
     drawing each input over the frames unless ``annotation_settings`` says ``is_enabled: false``; a driver that
@@ -64,12 +73,17 @@ class StartComputerRecordingTaskStep(TaskStep):
             raise ValueError("start_computer_recording needs an env_id and a name for the recording")
         self.env_id, self.name, self.fps, self.max_edge, self.cursor = env_id, name, fps, max_edge, cursor
         self.environment_name = environment_name
-        self.annotation_settings = _checked_annotation_settings(annotation_settings)
+        self.annotation_settings = annotation_settings
+        try:
+            self.annotation = AnnotationSettings.model_validate(annotation_settings or {})
+        except ValidationError as e:
+            raise ValueError(f"start_computer_recording's annotation_settings: "
+                             f"{options_problem(e, AnnotationSettings)}") from None
 
     @property
     def annotates(self) -> bool:
         """Whether the recording draws each input, as it does unless its settings turn it off."""
-        return (self.annotation_settings or {}).get("is_enabled", True)
+        return self.annotation.is_enabled
 
     def to_dict(self) -> dict:
         data = {**super().to_dict(), "env_id": self.env_id, "name": self.name, "fps": self.fps,
@@ -110,7 +124,7 @@ class StartComputerRecordingTaskStep(TaskStep):
                 logger.warning("start_computer_recording %s on %s: its driver can't draw inputs, its card listing no "
                                "annotate, as a computer composed before agent-env drew them; recording it plain",
                                self.name, self.env_id)
-            options = {key: value for key, value in (self.annotation_settings or {}).items() if key != "is_enabled"}
+            options = self.annotation.model_dump(exclude={"is_enabled"}, exclude_unset=True)
             started = await deployed.invoke(COMPUTER_RECORDING, "start", {
                 "request_id": request_id, "fps": self.fps, "max_edge": self.max_edge, "cursor": self.cursor,
                 "upload": grant, **({"annotate": options} if annotated else {})},
@@ -244,21 +258,6 @@ def _recording_extension(deployed, environment_name: Optional[str]) -> Optional[
 def _annotates(deployed, environment_name: Optional[str]) -> bool:
     """Whether the env's driver, or its child's, draws inputs over a recording's frames: its card lists annotate."""
     return "annotate" in ((_recording_extension(deployed, environment_name) or {}).get("params") or {})
-
-
-def _checked_annotation_settings(settings: object) -> Optional[dict]:
-    """``annotation_settings``: None, or an object whose ``is_enabled``, true unless given, is a boolean."""
-    if settings is None:
-        return None
-    if not isinstance(settings, dict):
-        raise ValueError(f"start_computer_recording's annotation_settings is an object, such as "
-                         f'{{"is_enabled": false}}; got {settings!r}')
-    if unknown := sorted(set(settings) - {"is_enabled"}):
-        raise ValueError(f"start_computer_recording's annotation_settings takes is_enabled, got {unknown}")
-    if not isinstance(settings.get("is_enabled", True), bool):
-        raise ValueError(f"start_computer_recording's annotation_settings.is_enabled is true or false, got "
-                         f"{settings['is_enabled']!r}")
-    return dict(settings)
 
 
 def _from_namespace(entry: dict) -> RecordingManifest:

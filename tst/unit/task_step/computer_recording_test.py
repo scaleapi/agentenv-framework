@@ -379,7 +379,7 @@ def test_annotation_settings_round_trip_only_when_set_and_take_a_boolean_is_enab
     assert StartComputerRecordingTaskStep.from_dict(off.to_dict()).annotation_settings == {"is_enabled": False}
     assert not off.annotates and _start().annotates and _start(annotation_settings={}).annotates
     assert "annotation_settings" not in _start().to_dict()
-    for settings, problem in (({"is_enabled": "no"}, "is true or false"), ({"marks": []}, "takes is_enabled"),
-                              (True, "is an object")):
+    for settings, problem in (({"is_enabled": "no"}, "is_enabled: input should be a valid boolean"),
+                              ({"marks": []}, "it takes is_enabled, not 'marks'"), (True, "is an object of options")):
         with pytest.raises(ValueError, match=problem):
             _start(annotation_settings=settings)

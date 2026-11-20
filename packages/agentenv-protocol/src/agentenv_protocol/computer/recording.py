@@ -128,7 +128,7 @@ def recording_params(recording: Recording, streams: bool) -> dict:
     return {"formats": [MP4], "scopes": ["display"], "fps": {"default": min(DEFAULT_FPS, most), "max": most},
             "cursor": True, "source": "stream" if streams else "capture", "max_segment_s": recording.max_segment_s,
             "max_concurrent": recording.max_concurrent, "max_duration_s": recording.max_duration_s,
-            "annotate": {"options": list(annotating.OPTIONS)}}
+            "annotate": {"options": list(annotating.AnnotateOptions.model_fields)}}
 
 
 class Recordings:

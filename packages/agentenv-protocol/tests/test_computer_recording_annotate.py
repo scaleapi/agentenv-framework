@@ -14,7 +14,7 @@ pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 av = pytest.importorskip("av")
 
-from computer_fake import FakeDriver, MinimalDriver, http_client, mcp_session  # noqa: E402
+from computer_fake import FakeDriver, MinimalDriver, PageFake, http_client, mcp_session  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
@@ -22,6 +22,8 @@ from agentenv_protocol import EnvironmentTool, ForwardedTool, tool  # noqa: E402
 from agentenv_protocol.computer import (  # noqa: E402
     COMPUTER_RECORDING,
     DeviceUnavailable,
+    FileChooser,
+    PageDialog,
     RecordedSegment,
     Recording,
     record,
@@ -33,11 +35,13 @@ from agentenv_protocol.computer.annotate import (  # noqa: E402
     STYLE,
     UNIT_EDGE,
     Annotations,
+    PointerMove,
     draw,
     input_marks,
     tool_mark,
 )
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
+from agentenv_protocol.computer.tools import COMPUTER_TOOLS  # noqa: E402
 from agentenv_protocol.tool_context import ROLE_META_KEY  # noqa: E402
 
 START, END = "/agentenv/ext/computer-recording/start", "/agentenv/ext/computer-recording/end"
@@ -206,7 +210,7 @@ async def test_start_refuses_an_annotate_that_isnt_an_object_or_names_an_option_
 
     assert option.status_code == scalar.status_code == 400
     assert option.json()["error"]["code"] == scalar.json()["error"]["code"] == "invalid_argument"
-    assert "takes no options yet, got ['events']" in option.json()["error"]["message"]
+    assert "it takes no options yet, not 'events'" in option.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -227,7 +231,7 @@ def test_each_input_is_marked_by_what_it_did_and_who_did_it():
     assert labels("press", (["Control", "s"],), repeat=3) == [("chip", "key Ctrl+S x3")]
     assert labels("key_down", (["Shift"],), hold_ms=500) == [("chip", "hold Shift 500 ms")]
     assert labels("pointer_down", ("left",)) == [("chip", "press left")]
-    assert labels("pointer_down", ("left",), point=(10, 20)) == [("down", "")]
+    assert labels("pointer_down", ("left",), point=(10, 20)) == [("pointer_down", "")]
     assert labels("navigate", ("https://example.com",), role="user") == [("chip", "user: open https://example.com")]
     assert labels("tabs", ("list", None, None)) == []
     [click] = input_marks("click", (500, 250, "right", 1, []), role=None, at=T0, size=(1000, 500))
@@ -388,8 +392,8 @@ def test_the_pointer_follows_the_last_input_before_each_frame_from_the_first_inp
     annotations.add(input_marks("pointer_move", (50, 50), role=None, at=T0 + timedelta(seconds=1), size=(100, 100)))
 
     def pointer(seconds):
-        return [(mark.points[0], mark.points[-1]) for mark, _colour, _age in
-                annotations.showing(T0 + timedelta(seconds=seconds)) if mark.kind == "pointer"]
+        return [(move.was, move.path[-1]) for move, _colour, _age in
+                annotations.showing(T0 + timedelta(seconds=seconds)) if isinstance(move, PointerMove)]
 
     assert pointer(-1) == []
     assert pointer(0.5) == [((0.1, 0.1), (0.1, 0.1))]
@@ -402,8 +406,8 @@ def test_each_role_and_pointer_has_a_pointer_the_last_mover_on_top_each_named_wh
     annotations.add(input_marks("click", (10, 10, "left", 1, []), role=None, at=T0, size=(100, 100)))
 
     def pointers(seconds):
-        return [(mark.role, mark.pointer, mark.points[-1], mark.faded, mark.label) for mark, _colour, _age in
-                annotations.showing(T0 + timedelta(seconds=seconds)) if mark.kind == "pointer"]
+        return [(move.role, move.pointer, move.path[-1], move.faded, move.label) for move, _colour, _age in
+                annotations.showing(T0 + timedelta(seconds=seconds)) if isinstance(move, PointerMove)]
 
     assert pointers(0.5) == [("default", "default", (0.1, 0.1), False, "")]
     annotations.add(input_marks("click", (50, 50, "left", 1, []), role="user", at=T0 + timedelta(seconds=1),
@@ -415,3 +419,56 @@ def test_each_role_and_pointer_has_a_pointer_the_last_mover_on_top_each_named_wh
     assert pointers(2.5) == [("default", "default", (0.1, 0.1), True, "agent"),
                              ("user", "default", (0.5, 0.5), True, "user"),
                              ("default", "p2", (0.8, 0.2), False, "agent p2")]
+
+
+#: Each input tool, a call to it, and the marks it makes, as (kind, label), in the order the calls go.
+EVERY_INPUT = (
+    ("computer_click", {"x": 10, "y": 10}, [("click", "")]),
+    ("computer_drag", {"path": [[10, 10], [60, 40]]}, [("drag", "")]),
+    ("computer_scroll", {"x": 10, "y": 10, "direction": "down"}, [("scroll", "")]),
+    ("computer_type", {"text": "hi"}, [("chip", 'type "hi"')]),
+    ("computer_key", {"keys": ["Control", "s"]}, [("chip", "key Ctrl+S")]),
+    ("computer_pointer_move", {"x": 20, "y": 20}, [("pointer_move", "")]),
+    ("computer_pointer_down", {}, [("pointer_down", "")]),
+    ("computer_pointer_up", {"x": 30, "y": 30}, [("pointer_up", "")]),
+    ("computer_keyboard_down", {"keys": ["Shift"]}, [("chip", "hold Shift")]),
+    ("computer_keyboard_up", {"keys": ["Shift"]}, [("chip", "release Shift")]),
+    ("computer_navigate", {"url": "https://x.test/"}, [("chip", "open https://x.test/")]),
+    ("computer_history", {"direction": "back"}, [("chip", "back")]),
+    ("computer_tabs", {"action": "switch", "tab": "b"}, [("chip", "tab switch b")]),
+    ("computer_dialog", {"accept": True}, [("chip", "dialog OK")]),
+    ("computer_upload", {"paths": ["a.pdf"]}, [("chip", "upload a.pdf")]),
+)
+
+
+@pytest.mark.asyncio
+async def test_every_input_tool_is_marked_by_what_it_did_with_the_arguments_it_hands_its_operation(caplog):
+    """The marks are made from each operation's arguments as the tools build them, so a tool whose arguments change
+    shows here: by a wrong mark, or by the warning a mark that couldn't be made logs. A new input tool fails it until
+    it's listed."""
+    driver = PageFake()
+    noted: list = []
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        served = {tool.name for tool in (await session.list_tools()).tools if tool.name in COMPUTER_TOOLS
+                  and tool.annotations is not None and tool.annotations.readOnlyHint is False}
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        recordings = driver._computer.recordings
+        note = recordings.note
+        recordings.note = lambda marks: (noted.append(list(marks)), note(marks))
+        await session.call_tool("computer_screenshot", {})
+        made = {}
+        with caplog.at_level("WARNING"):
+            for tool, args, _marks in EVERY_INPUT:
+                if tool == "computer_dialog":
+                    driver.open_dialog = PageDialog("confirm", "Leave the page?")
+                if tool == "computer_upload":
+                    driver.chooser = FileChooser()
+                noted.clear()
+                result = await session.call_tool(tool, args)
+                assert not result.isError, (tool, result.content[0].text)
+                made[tool] = [(mark.kind, mark.label) for marks in noted for mark in marks]
+        await http.post(END, json={"recording_id": started["recording_id"]})
+
+    assert served == {tool for tool, _args, _marks in EVERY_INPUT}
+    assert made == {tool: marks for tool, _args, marks in EVERY_INPUT}
+    assert "couldn't mark" not in caplog.text

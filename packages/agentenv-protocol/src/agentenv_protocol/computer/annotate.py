@@ -12,33 +12,33 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import av
 from PIL import Image as PILImage
 from PIL import ImageDraw, ImageFont
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .errors import InvalidArgument
 
-#: The options ``annotate`` takes: none yet, so ``{}`` draws every mark.
-OPTIONS: tuple[str, ...] = ()
 #: The role of a call that names none: the agent.
 DEFAULT_ROLE = "default"
 #: The pointer an input acts through when it names none: the computer's own, the only one the SDK drives yet.
 DEFAULT_POINTER = "default"
 #: Each role's colour: the agent's first, then each other role's in the order it first acts on the recording.
 COLOURS = ((255, 138, 0), (0, 184, 148), (175, 82, 222), (255, 59, 105), (52, 120, 246), (250, 204, 21))
-#: How long a mark shows from its input, in seconds; a drag's, after its moves.
-SHOW_S = {"click": 0.8, "down": 0.8, "up": 0.8, "move": 0.5, "scroll": 0.9, "drag": 0.8, "chip": 1.6}
+#: How long a mark shows from its input, in seconds; a drag's, after its moves. A mark's kind is its operation's name,
+#: or chip for one drawn as a caption.
+SHOW_S = {"click": 0.8, "pointer_down": 0.8, "pointer_up": 0.8, "pointer_move": 0.5, "scroll": 0.9, "drag": 0.8,
+          "chip": 1.6}
 #: The last part of a mark's time, in seconds, over which it fades out.
 FADE_S = 0.3
 #: How long a mark no frame has drawn is kept, in seconds: past it, the recording's frames have stopped coming.
 KEEP_S = 30.0
-#: The marks of inputs that leave the pointer at their last point, a drag's after moving it along its path.
-MOVES_POINTER = ("click", "drag", "scroll", "move", "down", "up")
 #: How long after the pointer jumps a line shows where it came from, in seconds.
 JUMP_S = 0.4
-#: The inputs whose marks are drawn at a point of the display.
+#: The inputs whose marks are drawn at a point of the display, which leave the pointer at their last point, a drag's
+#: after moving it along its path.
 POINTED = ("click", "drag", "scroll", "pointer_move", "pointer_down", "pointer_up")
 #: The most a chip of typed text shows, which grows with its length from the chip's own time.
 MOST_TEXT_S = 4.0
@@ -57,12 +57,44 @@ KEY_NAMES = {"Control": "Ctrl", "Escape": "Esc", "ArrowLeft": "Left", "ArrowRigh
              "ArrowDown": "Down", " ": "Space"}
 
 
+class AnnotateOptions(BaseModel):
+    """What computer-recording/v1 ``start``'s ``annotate`` takes: no options yet, so ``{}`` draws every input. An
+    option is a field here, which the card lists, ``start`` checks, and a task step's annotation settings take too."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+def options_problem(error: ValidationError, model: type[BaseModel] = AnnotateOptions) -> str:
+    """What is wrong with annotation options ``model`` refused, in a sentence."""
+    takes = ", ".join(model.model_fields) or "no options yet"
+    problems = []
+    for e in error.errors():
+        where = ".".join(str(part) for part in e["loc"])
+        if e["type"] == "extra_forbidden":
+            problems.append(f"it takes {takes}, not {where!r}")
+        elif not where:
+            problems.append(f"it is an object of options, got {type(e['input']).__name__}")
+        else:
+            problems.append(f"{where}: {e['msg'].lower()}")
+    return "; ".join(problems)
+
+
+def check_annotate(annotate: object) -> Optional[dict]:
+    """``start``'s ``annotate``: None, or an object of the options this driver takes, as given."""
+    if annotate is None:
+        return None
+    try:
+        return AnnotateOptions.model_validate(annotate).model_dump(exclude_unset=True)
+    except ValidationError as e:
+        raise InvalidArgument(f"annotate: {options_problem(e)}; give {{}} to draw every input") from None
+
+
 @dataclass(frozen=True)
 class Mark:
-    """One input on a recording: ``kind`` is click, down, up, move, scroll, drag or chip, or pointer for where a
-    pointer was and then went; ``points`` are fractions of the display, so they land on any frame size; it shows from
-    ``at`` until ``until``, a drag moving for its first ``moving_s``. ``pointer`` is the pointer it acted through;
-    ``faded``, a pointer drawn fainter, as one that didn't move last."""
+    """One input on a recording: ``kind`` is its operation (click, drag, scroll, pointer_move, pointer_down,
+    pointer_up) for one drawn at a point, or chip for one drawn as a caption; ``points`` are fractions of the display,
+    so they land on any frame size; it shows from ``at`` until ``until``, a drag moving for its first ``moving_s``.
+    ``pointer`` is the pointer it acted through."""
 
     kind: str
     at: datetime
@@ -75,18 +107,26 @@ class Mark:
     label: str = ""
     moving_s: float = 0.0
     pointer: str = DEFAULT_POINTER
+
+
+@dataclass(frozen=True)
+class PointerMove:
+    """Where a role's pointer went at ``at``: from ``was`` along ``path``, a single point for a jump, a drag's path
+    while it moves for ``moving_s``. ``faded`` and ``label`` are how a frame draws it among others: fainter when it
+    didn't move last, named when there are several."""
+
+    at: datetime
+    role: str
+    pointer: str
+    was: tuple[float, float]
+    path: tuple[tuple[float, float], ...]
+    moving_s: float = 0.0
     faded: bool = False
+    label: str = ""
 
 
-def check_annotate(annotate: object) -> Optional[dict]:
-    """``start``'s ``annotate``: None, or an object of the options this driver takes."""
-    if annotate is None:
-        return None
-    if not isinstance(annotate, dict):
-        raise InvalidArgument(f"annotate is an object of options, got {type(annotate).__name__}")
-    if unknown := sorted(set(annotate) - set(OPTIONS)):
-        raise InvalidArgument(f"annotate takes no options yet, got {unknown}; give {{}} to draw every input")
-    return dict(annotate)
+#: What a frame draws: a mark or a pointer, in its colour, at its age in seconds.
+Shown = tuple[Union[Mark, PointerMove], tuple[int, int, int], float]
 
 
 class Annotations:
@@ -101,7 +141,7 @@ class Annotations:
         self.drawn: set[int] = set()
         self.colours: dict[str, tuple[int, int, int]] = {DEFAULT_ROLE: COLOURS[0]}
         self.pointer = pointer
-        self.moves: dict[tuple[str, str], list[Mark]] = {}  # by role and pointer: each move, where it was and went
+        self.moves: dict[tuple[str, str], list[PointerMove]] = {}  # each role's and pointer's, oldest first
 
     def add(self, marks: Sequence[Mark]) -> None:
         for mark in marks:
@@ -109,14 +149,13 @@ class Annotations:
             stale = mark.at - timedelta(seconds=KEEP_S)
             self._keep([kept for kept in self.marks if kept.until > stale])
             self.marks.append(mark)
-            if self.pointer and mark.kind in MOVES_POINTER and mark.points:
+            if self.pointer and mark.kind in POINTED:
                 moves = self.moves.setdefault((mark.role, mark.pointer), [])
                 path = mark.points if mark.kind == "drag" else mark.points[-1:]
-                was = moves[-1].points[-1] if moves else path[0]
-                moves.append(Mark("pointer", mark.at, mark.at, mark.role, (was, *path), moving_s=mark.moving_s,
-                                  pointer=mark.pointer))
+                was = moves[-1].path[-1] if moves else path[0]
+                moves.append(PointerMove(mark.at, mark.role, mark.pointer, was, path, mark.moving_s))
 
-    def _pointers(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
+    def _pointers(self, at: datetime) -> list[Shown]:
         """The pointers a frame captured ``at`` shows, each as its last move before the frame at its age, the one that
         moved last drawn over the others; none for a role or pointer that hadn't acted by then."""
         current = []
@@ -131,7 +170,7 @@ class Annotations:
                                      label=_pointer_label(move) if several else "") for move in current]
         return [(move, self.colours[move.role], (at - move.at).total_seconds()) for move in shown]
 
-    def showing(self, at: datetime) -> list[tuple[Mark, tuple[int, int, int], float]]:
+    def showing(self, at: datetime) -> list[Shown]:
         """The marks a frame captured ``at`` shows, each with its colour and the age, in seconds, it is drawn at: a
         mark over by then that no frame has drawn yet is drawn once, at the age it is last fully shown. A stream's
         frames come in the order they were captured, so a mark that is over and drawn is over for every later one."""
@@ -187,13 +226,12 @@ def input_marks(operation: str, args: tuple, *, role: Optional[str], at: datetim
         x, y, direction, amount = args[:4]
         marks.append(Mark("scroll", at, shown("scroll"), role, (where(x, y),), direction=direction, count=amount))
     elif operation == "pointer_move":
-        marks.append(Mark("move", at, shown("move"), role, (where(*args[:2]),)))
+        marks.append(Mark(operation, at, shown(operation), role, (where(*args[:2]),)))
     elif operation in ("pointer_down", "pointer_up"):
-        kind = "down" if operation == "pointer_down" else "up"
         if point is not None:
-            marks.append(Mark(kind, at, shown(kind), role, (where(*point[:2]),), button=args[0]))
+            marks.append(Mark(operation, at, shown(operation), role, (where(*point[:2]),), button=args[0]))
         else:
-            marks.append(chip(f"{'press' if kind == 'down' else 'release'} {args[0]}"))
+            marks.append(chip(f"{'press' if operation == 'pointer_down' else 'release'} {args[0]}"))
     elif operation == "type_text":
         text = args[0]
         marks.append(chip(f'type "{_shown_text(text)}"', min(MOST_TEXT_S, SHOW_S["chip"] + len(text) / 25)))
@@ -239,21 +277,27 @@ def tool_mark(tool: str, arguments: Mapping[str, Any], *, role: Optional[str], a
                 label=label if role == DEFAULT_ROLE else f"{role}: {label}")
 
 
-def draw(image: Any, marks: Sequence[tuple[Mark, tuple[int, int, int], float]]) -> PILImage.Image:
-    """``image``, a Pillow image or a PyAV frame, with ``marks`` drawn, each in its colour at its age."""
+def draw(image: Any, shown: Sequence[Shown]) -> PILImage.Image:
+    """``image``, a Pillow image or a PyAV frame, with what a frame shows drawn, each in its colour at its age."""
     base = (image.to_image() if isinstance(image, av.VideoFrame) else image).convert("RGBA")
     overlay = PILImage.new("RGBA", base.size, (0, 0, 0, 0))
     pen = ImageDraw.Draw(overlay)
     unit = max(base.size) / UNIT_EDGE
+
+    def pixels(point: tuple[float, float]) -> tuple[float, float]:
+        return (point[0] * base.width, point[1] * base.height)
+
     chips = []
-    for mark, colour, age in marks:
-        span = max((mark.until - mark.at).total_seconds(), 1e-3)
-        if mark.kind == "chip":
-            chips.append((mark, colour))
+    for item, colour, age in shown:
+        if isinstance(item, PointerMove):
+            _draw_pointer(pen, item, pixels(item.was), [pixels(p) for p in item.path], colour, unit, age)
             continue
-        fade = 1.0 if mark.kind == "pointer" else 1.0 - max(0.0, min(1.0, (age - (span - FADE_S)) / FADE_S))
-        points = [(fx * base.width, fy * base.height) for fx, fy in mark.points]
-        _DRAWERS[mark.kind](pen, mark, points, colour, unit, age, fade)
+        if item.kind == "chip":
+            chips.append((item, colour))
+            continue
+        span = max((item.until - item.at).total_seconds(), 1e-3)
+        fade = 1.0 - max(0.0, min(1.0, (age - (span - FADE_S)) / FADE_S))
+        _DRAWERS[item.kind](pen, item, [pixels(p) for p in item.points], colour, unit, age, fade)
     if chips:
         _draw_chips(pen, chips, base.size, unit)
     return PILImage.alpha_composite(base, overlay).convert("RGB")
@@ -331,8 +375,9 @@ def _draw_click(pen, mark, points, colour, unit, age, fade) -> None:
 def _draw_press(pen, mark, points, colour, unit, age, fade) -> None:
     x, y = points[0]
     alpha = round(255 * fade)
-    r = unit * (STYLE.press_down if mark.kind == "down" else STYLE.press_up)
-    fill = (*colour, round(alpha * STYLE.press_fill)) if mark.kind == "down" else None
+    down = mark.kind == "pointer_down"
+    r = unit * (STYLE.press_down if down else STYLE.press_up)
+    fill = (*colour, round(alpha * STYLE.press_fill)) if down else None
     pen.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=(*WHITE, alpha), width=_width(STYLE.halo, unit))
     pen.ellipse((x - r, y - r, x + r, y + r), outline=(*colour, alpha), width=_width(STYLE.stroke, unit))
 
@@ -376,25 +421,25 @@ def _draw_drag(pen, mark, points, colour, unit, age, fade) -> None:
 ARROW = ((0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12))
 
 
-def _draw_pointer(pen, mark, points, colour, unit, age, fade) -> None:
-    """The agent's pointer: along a drag's path while it moves, else where its input left it, after a fading line
-    from where it jumped."""
-    was, path = points[0], points[1:]
-    tip = _along(path, age / mark.moving_s)[-1] if len(path) > 1 and age < mark.moving_s else path[-1]
+def _draw_pointer(pen, move: PointerMove, was, path, colour, unit, age) -> None:
+    """A pointer: along a drag's path while it moves, else where its input left it, after a fading line from where
+    it jumped; fainter when it didn't move last, and named when it is one of several."""
+    tip = _along(path, age / move.moving_s)[-1] if len(path) > 1 and age < move.moving_s else path[-1]
     if age < JUMP_S and math.dist(was, path[0]) > unit * STYLE.cross:
         alpha = round(STYLE.jump_alpha * (1 - age / JUMP_S))
         pen.line((*was, *path[0]), fill=(*colour, alpha), width=_width(STYLE.stroke, unit))
     scale = unit * STYLE.pointer
     arrow = [(tip[0] + dx * scale, tip[1] + dy * scale) for dx, dy in ARROW]
-    alpha = STYLE.pointer_faded_alpha if mark.faded else 255
+    alpha = STYLE.pointer_faded_alpha if move.faded else 255
     pen.polygon(arrow, fill=(*colour, alpha), outline=(*WHITE, alpha), width=_width(STYLE.pointer_outline, unit))
-    if mark.label:
+    if move.label:
         corner = max(dx for dx, _dy in ARROW), max(dy for _dx, dy in ARROW)
-        _label(pen, (tip[0] + corner[0] * scale, tip[1] + corner[1] * scale), mark.label, colour, unit, alpha)
+        _label(pen, (tip[0] + corner[0] * scale, tip[1] + corner[1] * scale), move.label, colour, unit, alpha)
 
 
-_DRAWERS = {"click": _draw_click, "down": _draw_press, "up": _draw_press, "move": _draw_move, "scroll": _draw_scroll,
-            "drag": _draw_drag, "pointer": _draw_pointer}
+#: How each kind of mark drawn at a point is drawn, by its operation.
+_DRAWERS = {"click": _draw_click, "pointer_down": _draw_press, "pointer_up": _draw_press,
+            "pointer_move": _draw_move, "scroll": _draw_scroll, "drag": _draw_drag}
 
 
 def _draw_chips(pen, chips, size, unit) -> None:
@@ -445,7 +490,7 @@ def _along(points: list[tuple[float, float]], fraction: float) -> list[tuple[flo
     return shown
 
 
-def _pointer_label(move: Mark) -> str:
+def _pointer_label(move: PointerMove) -> str:
     """A pointer's name beside it: its role's, the agent's as agent, and its own when it isn't the default."""
     role = "agent" if move.role == DEFAULT_ROLE else move.role
     return role if move.pointer == DEFAULT_POINTER else f"{role} {move.pointer}"
