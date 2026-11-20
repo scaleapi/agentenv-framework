@@ -198,6 +198,7 @@ class _StubAgent:
         self.sandbox_type = None
         self.role = None
         self.model_endpoint_host = None
+        self.on_configured_endpoint = None
         self.control_headers = {}
 
 

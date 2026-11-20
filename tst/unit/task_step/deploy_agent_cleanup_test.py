@@ -25,6 +25,9 @@ class _Agent:
     def model_base_url(self, env_vars, config):
         return None
 
+    def on_configured_endpoint(self, env_vars, config):
+        return False
+
     async def close(self) -> None:
         self.closed += 1
 

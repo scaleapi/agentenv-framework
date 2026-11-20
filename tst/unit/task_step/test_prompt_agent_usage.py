@@ -86,7 +86,7 @@ async def test_each_roles_turns_are_summed_into_one_entry(monkeypatch):
         "role": "solver", "model": None, "endpoint_host": "proxy.example", "attempt": 2, "turns": 2,
         "tool_call_count": 2, "input_tokens": 300, "output_tokens": 30, "total_tokens": 330,
         "cache_read_tokens": 210, "cache_write_tokens": None, "input_includes_cache": True, "cost_usd": 0.03,
-        "partial": False}
+        "cost_status": "reported", "cost_source": "harness", "reported_cost_usd": 0.03, "partial": False}
     assert (user["role"], user["endpoint_host"], user["turns"], user["input_tokens"], user["partial"]) == (
         "user_simulator", "sim-proxy.example:4000", 1, 30, False)
     assert ctx.metadata["step_usage"]["solve"] == [solver, user]
@@ -152,6 +152,9 @@ class _Agent:
 
     def model_base_url(self, env_vars, config):
         return env_vars.get("LITELLM_BASE_URL")
+
+    def on_configured_endpoint(self, env_vars, config):
+        return False
 
 
 @pytest.mark.asyncio

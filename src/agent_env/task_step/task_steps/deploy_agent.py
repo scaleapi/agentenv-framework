@@ -555,6 +555,7 @@ class DeployAgentTaskStep(TaskStep):
                           for env_id, d in env_deployments.items() if d is not None},
             control_token=deployed.control_token,
             model_endpoint_host=endpoint_host(agent.model_base_url(env_vars, get_config())),
+            on_configured_endpoint=agent.on_configured_endpoint(env_vars, get_config()),
         ))
         # An agent deployed while a clock is armed follows it, as sync_env_clock had every agent then.
         from agent_env.a2a_agent.clock import follow_armed_clocks

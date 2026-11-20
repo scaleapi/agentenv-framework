@@ -84,6 +84,13 @@ or one of them only where it is used.
 - `[model.headers]` go with every call to the configured endpoint and nowhere else: `extra_headers` on
   agent-env's own calls, `LITELLM_EXTRA_HEADERS` (JSON, written by core, never read) for agents and the
   unit-test verifier. On `sail_vm` with `inject_model_key`, Sail sets them at egress like the key.
+- `[model.prices]` (`config/prices.py`) prices usage through the configured endpoint, or a native route with none
+  configured, and never on another URL: each model's USD per million tokens (`input`, `output`, optional
+  `cache_read`, `cache_write`), found by its name as called or without its routing prefix. A prompt step prices each
+  role's usage entry as it records it: `cost_usd` with its `cost_status` (`priced`, `reported`, `unpriced`),
+  `cost_source` (`agentenv-prices@<hash of the table>`, `harness` or `provider`), the `unit_prices` it used and any
+  `cost_assumed` that makes it an upper bound, the agent's own figure always in `reported_cost_usd`. The table comes
+  first unless `[model] prefer_reported_cost = true`.
 - A host-mode `install_agent` (no `container_name`) on a `local` sandbox runs the agent's
   `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
   carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes

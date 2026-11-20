@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 from agent_env.config import loader as config_loader
 from agent_env.config import model as model_config
 from agent_env.config.errors import ConfigError, EmptySecretBundleError
+from agent_env.config.prices import PriceTable
 from agent_env.config import snapshot as config_snapshot
 from agent_env.config.paths import state_root
 from agent_env.config.provenance import (
@@ -490,6 +491,15 @@ class Config:
 
     def is_model_endpoint(self, url: str | None) -> bool:
         return self._model_config().is_endpoint(url)
+
+    def get_price_table(self) -> PriceTable:
+        return self._model_config().prices
+
+    def prefers_reported_cost(self) -> bool:
+        return self._model_config().prefer_reported_cost
+
+    def prices_apply(self, url: str | None) -> bool:
+        return self._model_config().prices_apply(url)
 
     def resolve_model_call(
         self,

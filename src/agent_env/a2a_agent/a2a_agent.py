@@ -647,6 +647,12 @@ class A2AAgent:
         except ConfigError:
             return None
 
+    def on_configured_endpoint(self, env_vars: dict[str, str], config) -> bool:
+        """Whether a deploy with ``env_vars`` has this agent call the configured endpoint, or route natively with none
+        configured, so ``[model.prices]`` prices its usage; never for an agent that takes no credentials."""
+        return (bool(self.metadata.get(TAKES_CREDENTIALS, True))
+                and config.prices_apply(self.model_base_url(env_vars, config)))
+
     def _with_model_credentials(self, env_vars: dict[str, str], config) -> dict[str, str]:
         """``env_vars`` with the model endpoint, key and headers each taken from config when neither they nor
         ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them. The
