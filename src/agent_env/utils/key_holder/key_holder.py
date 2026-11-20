@@ -512,7 +512,8 @@ def _string_map(value: Any, what: str) -> dict[str, str]:
 
 
 def _attribution(project_id: str | None, task_id: str | None) -> dict[str, str]:
-    """LiteLLM's spend attribution headers for a run's project and task, as the bridges set them."""
+    """LiteLLM's spend attribution headers for a run's project and task. This, ``_with_attribution`` and ``_join_tags``
+    are claude_bridge's, copied since the key holder can't import it; a unit test keeps the copies equal."""
     if project_id:
         tags = [f"projectId:{project_id}", *([f"taskId:{task_id}"] if task_id else [])]
         return {"x-litellm-customer-id": project_id, "x-litellm-tags": ",".join(tags)}

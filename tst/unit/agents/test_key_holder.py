@@ -22,6 +22,7 @@ import httpx
 import pytest
 
 import agent_env
+from tst.unit.agents.claude_code.agent import claude_bridge
 
 sys.path.insert(0, str(Path(agent_env.__file__).parent / "utils" / "key_holder"))
 key_holder = importlib.import_module("key_holder")
@@ -458,6 +459,31 @@ async def test_the_runs_tags_join_the_configured_ones_after_them(upstream, confi
     await call(holder, "POST", "/v1/messages", headers={"x-litellm-tags": "projectId:forged"}, body=_messages())
 
     assert upstream.last.headers.get_list("x-litellm-tags") == [expected]
+
+
+@pytest.mark.parametrize("project_id, task_id", [("p-1", "t-1"), ("p-1", None), (None, "t-1"), (None, None)])
+def test_the_attribution_is_the_claude_bridges(project_id, task_id):
+    assert key_holder._attribution(project_id, task_id) == claude_bridge._attribution_headers(project_id, task_id)
+
+
+@pytest.mark.parametrize("configured, run", [
+    ("useCase:evals", "projectId:p-1,taskId:t-1"), ("taskId:own, useCase:evals", "projectId:p-1,taskId:t-1"),
+    ("projectId:mine,taskId:mine", "projectId:p-1,taskId:t-1"), (" , useCase:evals,", "taskId:t-1"),
+    ("a:1,b", "b:2,c:3,"), ("", "taskId:t-1"),
+])
+def test_tags_join_as_the_claude_bridge_joins_them(configured, run):
+    assert key_holder._join_tags(configured, run) == claude_bridge._join_tags(configured, run)
+
+
+@pytest.mark.parametrize("headers", [
+    {}, {"X-Bill-To": BILL_TO}, {"X-LiteLLM-Tags": "useCase:evals"}, {"x-litellm-customer-id": "configured"},
+    {"X-LiteLLM-Customer-Id": "configured", "x-litellm-tags": "taskId:own"},
+])
+@pytest.mark.parametrize("project_id, task_id", [("p-1", "t-1"), (None, "t-1"), (None, None)])
+def test_attribution_goes_over_the_headers_as_the_claude_bridge_puts_it(headers, project_id, task_id):
+    attribution = key_holder._attribution(project_id, task_id)
+
+    assert key_holder._with_attribution(headers, attribution) == claude_bridge._with_attribution(headers, attribution)
 
 
 @pytest.mark.asyncio
