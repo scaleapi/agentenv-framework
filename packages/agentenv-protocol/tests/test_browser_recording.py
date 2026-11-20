@@ -99,11 +99,12 @@ def _taken(recordings: BrowserRecordings) -> list[str]:
 
 
 async def _until_taken(taken: list[str], color: str, timeout_s: float = 10) -> None:
-    """Until the video has taken a frame of ``color``, however slowly a loaded machine records."""
+    """Until the video has encoded a frame of ``color``, however slowly a loaded machine records: until it has taken
+    the frame after it, which it takes only once it has encoded the one before."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
-    while color not in taken:
-        assert loop.time() < deadline, f"no {color} frame taken in {timeout_s} s: {taken}"
+    while color not in taken or len(taken) == taken.index(color) + 1:
+        assert loop.time() < deadline, f"no {color} frame encoded in {timeout_s} s: {taken}"
         await asyncio.sleep(0.02)
 
 
