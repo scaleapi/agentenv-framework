@@ -38,8 +38,10 @@ from tst.integration.task_step.test_prompt_agent_live_trajectory_local import (
     local_registry as local_registry,
 )
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
+from tst.util import fake_openai
 from tst.util.capabilities import agent_clock_image, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
+from tst.util.fake_openai import FakeOpenAI
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -75,21 +77,46 @@ async def _claude_turn(context: TaskStepContext, endpoint: FakeAnthropic) -> Non
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
 
+# Each Hermes session the agent's profiles hold, with the time Hermes' own clock gave its start.
+_HERMES_SESSIONS = ("import glob, json, sqlite3; print(json.dumps([row for db in glob.glob('/data/.hermes/profiles/*/"
+                    "state.db') for row in sqlite3.connect(db).execute('select id, started_at from sessions')]))")
+
+
+async def _hermes_turn(context: TaskStepContext, endpoint: FakeOpenAI) -> None:
+    """One turn of the real Hermes: the date its prompt gives the model, a terminal `date` the model runs and its
+    session id's stamp are the env's, while Hermes itself keeps real time, as the start its session store records."""
+    endpoint.respond = fake_openai.tool_then_answer("terminal", {"command": "date -u +%FT%TZ"},
+                                                    prefix="the shell said: ")
+    await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
+                              max_conversation_turns=1).execute(context)
+    bodies = [json.dumps(call.body) for call in endpoint.completions()]
+    started = {m for body in bodies for m in re.findall(r"Conversation started: (\w+, \w+ [0-9]{2}, [0-9]{4})", body)}
+    container = _container_of(context.deployed_agents[-1].sandbox_id)
+    sessions = json.loads(_in_agent(container, "python3", "-c", _HERMES_SESSIONS))
+    print("Hermes' date line:", started, "terminal date:", endpoint.tool_results(), "sessions:", sessions)
+    assert started == {datetime.fromisoformat(VIRTUAL).strftime("%A, %B %d, %Y")}, started
+    assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
+    [[session, started_at]] = sessions
+    assert session.startswith(VIRTUAL[:10].replace("-", "") + "_") and abs(started_at - time.time()) < 3600
+
+
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
-    must return under the preloaded library), and a turn against the stub endpoint, for a CLI that speaks its protocol."""
+    must return under the preloaded library), and a turn against the stub endpoint of the protocol its CLI speaks."""
 
     bridge: str
     version: tuple[str, ...]
     shows: str
-    turn: Callable[[TaskStepContext, FakeAnthropic], Awaitable[None]] | None = None
+    turn: Callable[[TaskStepContext, FakeAnthropic | FakeOpenAI], Awaitable[None]] | None = None
+    endpoint: type[FakeAnthropic] | type[FakeOpenAI] = FakeAnthropic
 
 
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
-    "hermes": Agent(bridge="hermes_bridge", version=("hermes", "--version"), shows="Hermes Agent v"),
+    "hermes": Agent(bridge="hermes_bridge", version=("hermes", "--version"), shows="Hermes Agent v",
+                    turn=_hermes_turn, endpoint=FakeOpenAI),
     "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
 }
 
@@ -121,11 +148,11 @@ async def _followers(deployed) -> dict:
 @pytest.mark.parametrize("name", [pytest.param(name, marks=skip_without_agent_clock_image(name)) for name in AGENTS])
 @pytest.mark.asyncio
 async def test_an_agent_image_follows_the_envs_clock_until_it_is_torn_down(local_registry, name):
-    with FakeAnthropic(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
+    with AGENTS[name].endpoint(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
         await _follows_until_torn_down(name, AGENTS[name], agent_clock_image(name), endpoint)
 
 
-async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: FakeAnthropic) -> None:
+async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: FakeAnthropic | FakeOpenAI) -> None:
     _seed_bootstrap_envs()
     env, deployed, _ = await _deploy_items("agentclock")
     uid = uuid.uuid4().hex[:8]
