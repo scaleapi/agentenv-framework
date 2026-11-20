@@ -77,6 +77,9 @@ CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
 # The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
 # who drives it, the role its browser's requests take.
 COMPUTERS_ENV = "COMPUTERS"
+# The env's SQL consoles (pgweb, db-mcp), each as `key=url` on the env's network, comma-separated. The gateway serves
+# each at /svc/<key>/, every path of it behind its control token, and none of them when it has no token.
+CONSOLE_URLS_ENV = "CONSOLE_URLS"
 # The route a clock follower long-polls, with its read token.
 CLOCK_WATCH_PATH = "/clock/watch"
 CLOCK_FOLLOWERS_PATH = "/clock/followers"
