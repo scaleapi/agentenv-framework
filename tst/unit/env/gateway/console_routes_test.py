@@ -341,11 +341,12 @@ def test_the_log_names_no_link_and_still_formats_its_line(logger, fmt, args, lin
 
 
 @pytest.mark.asyncio
-async def test_a_link_opens_once():
+async def test_a_link_opens_once_however_its_expiry_is_spelled():
     gw, link = _gateway(TOKEN), _mint().link()
     assert (await _send(gw, "GET", f"/svc/pgweb/?pgweb_link={link}", {}))[0] == 303
-    status, headers = await _send(gw, "GET", f"/svc/pgweb/?pgweb_link={link}", {})
-    assert status == 401 and b"set-cookie" not in headers
+    for again in (link, f"0{link}", f"00{link}"):
+        status, headers = await _send(gw, "GET", f"/svc/pgweb/?pgweb_link={again}", {})
+        assert status == 401 and b"set-cookie" not in headers, again
 
 
 @pytest.mark.asyncio

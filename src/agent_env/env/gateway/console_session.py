@@ -59,14 +59,15 @@ class ConsoleSession:
         return f"{expires_at}.{nonce}.{self._mac(f'link:{expires_at}:{nonce}')}"
 
     def opens(self, link: str) -> bool:
-        """Whether ``link`` is live and unused; a link that opens is spent."""
+        """Whether ``link`` is live and its nonce unspent; a link that opens spends its nonce, which its signature binds,
+        so no other spelling of the link opens again."""
         now = int(self._now())
-        self._spent = {spent: expires_at for spent, expires_at in self._spent.items() if expires_at > now}
+        self._spent = {nonce: expires_at for nonce, expires_at in self._spent.items() if expires_at > now}
         match = _LINK.fullmatch(link)
-        if link in self._spent or not match or not self._live(expires_at := int(match[1]), LINK_MAX_SECONDS) \
+        if not match or match[2] in self._spent or not self._live(expires_at := int(match[1]), LINK_MAX_SECONDS) \
                 or not hmac.compare_digest(self._mac(f"link:{expires_at}:{match[2]}"), match[3]):
             return False
-        self._spent[link] = expires_at
+        self._spent[match[2]] = expires_at
         return True
 
     def _cookie_value(self, expires_at: int) -> str:
