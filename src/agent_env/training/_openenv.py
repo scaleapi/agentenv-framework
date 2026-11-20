@@ -161,8 +161,8 @@ class Session:
                              f"{sorted(self._shared.offered)} {self.offered_by}")
         if (exactly := self._shared.exactly) is not None and offered != exactly:
             raise Misgrouped(f"task {played!r} offers the tools {sorted(offered)} at its first turn, not the "
-                             f"{sorted(exactly)} its toolset's first task does: their server configs reveal different "
-                             "tools, so serve them in separate bundles")
+                             f"{sorted(exactly)} its toolset's first task does there, so serve them in separate "
+                             "bundles")
 
     async def _step(self, name: str, arguments: dict[str, Any]) -> str:
         async with self._lock:

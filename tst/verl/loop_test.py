@@ -125,7 +125,7 @@ def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_
     row = _row(write_dataset(server.url, tmp_path))
     row["extra_info"]["first_turn_tools"] = json.dumps(["add_item", "end_turn", "take_item"])
 
-    with pytest.raises(verl_loop.RolloutFailed, match="their server configs reveal different tools"):
+    with pytest.raises(verl_loop.RolloutFailed, match="its toolset's first task does there, so serve them in separate bundles"):
         asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, attempts=1))
     row["extra_info"]["first_turn_tools"] = json.dumps(["add_item", "end_turn"])
     output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, attempts=1))

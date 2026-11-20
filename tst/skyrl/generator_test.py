@@ -245,7 +245,7 @@ def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_
     written[0]["episode"]["first_turn_tools"] = json.dumps(["add_item", "end_turn", "take_item"])
     pq.write_table(pa.Table.from_pylist(written, schema=ROW), rows)
 
-    with pytest.raises(ValueError, match="their server configs reveal different tools, so serve them in separate "
+    with pytest.raises(ValueError, match="its toolset's first task does there, so serve them in separate "
                                          "bundles. Its row lists the tools found by playing its toolset's first task, "
                                          "so its toolset misses what tells its tasks apart"):
         _generate(rows, _Engine(tokenizer, adds_a_crate(tool_format)), tokenizer)

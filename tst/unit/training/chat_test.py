@@ -174,7 +174,7 @@ def test_a_task_revealing_at_its_first_turn_what_its_probed_task_reveals_later_i
 
 @pytest.mark.parametrize("probed, later, refusal", [
     (["take_item"], [], r"\['add_item', 'end_turn'\] at its first turn, not the \['add_item', 'end_turn', "
-                        r"'take_item'\] its toolset's first task does: their server configs reveal different tools"),
+                        r"'take_item'\] its toolset's first task does there, so serve them in separate bundles$"),
     ([], ["take_item"], r"offers the tools \['add_item', 'end_turn', 'take_item'\], not the \['add_item', 'end_turn'\]"),
 ], ids=["fewer", "more"])
 def test_a_task_whose_config_reveals_other_tools_than_its_probed_tasks_is_refused_and_an_older_row_plays(

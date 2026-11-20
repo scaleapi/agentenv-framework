@@ -288,7 +288,8 @@ def test_a_rollout_whose_config_reveals_fewer_tools_than_its_classs_stops_traini
     environment.add_item(item="crate")
     environment.end_turn(response="Added a crate.")
     if stops:
-        with pytest.raises(RuntimeError, match=r"their server configs reveal different tools"):
+        with pytest.raises(RuntimeError, match=r"its toolset's first task does there, so serve them in separate bundles\. "
+                                                r"TRL shows every task"):
             environment.get_reward()
     else:
         assert environment.get_reward() == 1.0
