@@ -6,6 +6,7 @@ other prompt_agent users are unaffected."""
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -24,7 +25,7 @@ from agentenv_protocol.transfers import HttpPutGrant
 from agent_env.a2a_agent.object_transfer import DEFAULT_TRAJECTORY_MAX_BYTES
 from agent_env.config import configure
 from agent_env.store.object_store import LocalFilesystemObjectStore
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture
 from agent_env.task_step.task_steps import prompt_agent as pa
 from agent_env.task_step.task_steps.prompt_agent import (
@@ -138,10 +139,9 @@ def test_fetch_trajectory_object_named_by_target_a2a_task_id(monkeypatch):
     monkeypatch.setattr(pa, "get_config", lambda: config)
     monkeypatch.setattr(agent_state_capture, "get_config", lambda: config)
 
-    # unbound call: the inline branch never touches `self`, so we skip AWS-touching construction.
-    uri = asyncio.run(PromptAgentTaskStep._fetch_trajectory(
-        object(), "http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", "s3://b/traj/",
-        "CLIENT-ID", sandbox_type="local", headers={}))
+    uri = asyncio.run(pa.fetch_native_trajectory(
+        "http://a", {"params": {"endpoint": "/t"}}, "SERVER-ID", "s3://b/traj/",
+        "CLIENT-ID", sandbox_type="local", headers={})).url
     assert uri == "s3://b/traj/trajectory-CLIENT-ID.json"
     assert puts_on_loop == [False]
 
@@ -209,8 +209,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
         }
     }
     uri = asyncio.run(
-        PromptAgentTaskStep._fetch_trajectory(
-            object(),
+        pa.fetch_native_trajectory(
             "https://agent.example.test",
             extension,
             "SERVER-ID",
@@ -218,7 +217,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
             "CLIENT-ID",
             sandbox_type="local", headers={},
         )
-    )
+    ).url
 
     assert uri == "s3://b/traj/trajectory-CLIENT-ID.json"
     assert grants_on_loop == [False]
@@ -230,69 +229,31 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
     assert descriptor["write"]["kind"] == "http-put"
 
 
-@pytest.mark.asyncio
-async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeypatch, tmp_path):
-    store = LocalFilesystemObjectStore(str(tmp_path))
-    configure(object_store=store)
-    for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task",
-               "mark_closed", "get_conversation"):
-        monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
-
-    async def sdk_get(request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest):
-        return {"trajectory": []}
-
-    extensions = build_registry(
-        object(), [enable(TRAJECTORY_V1)], sdk_handlers={(TRAJECTORY_V1.uri, "get"): sdk_get}
-    ).card_extensions()
-    trajectory_requests: list[dict] = []
-
-    def trajectory(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/ext/trajectory"
-        trajectory_requests.append(json.loads(request.content))
-        return httpx.Response(200, json={"trajectory": [{"type": "echo", "output": "Echo: hi"}]})
-
-    FakeA2AAgents({"http://agent.test": [{"kind": "text", "text": "Echo: hi"}]}, other=trajectory).serve(monkeypatch)
-    context = TaskStepContext(instance_id="ti-1")
-    context.deployed_agents.append(DeployedAgent(
-        agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test",
-        a2a_card={"capabilities": {"extensions": extensions}},
-    ))
-    step = PromptAgentTaskStep(
-        id="solve", version=None, prompt="hi", agent_name="solver", poll_interval_seconds=0,
-        trajectory_output_prefix=store.object_url("prompt_agent_trajectories"),
-    )
-
-    result = await step.execute(context)
-
-    uri = result.prompt_responses[-1].agent_trajectory_object_url
-    assert trajectory_requests == [{"task_id": "task-1"}]
-    assert result.prompt_responses[-1].target_agent_per_turn_trajectories == [{"native_format": None, "atif": None}]
-    assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
-    assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
-
-
-@pytest.mark.asyncio
-async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_its_default(monkeypatch, tmp_path):
-    """A card whose default is atif/1, as F10 flips agents to, still gives judges the native copy they read."""
-    store = LocalFilesystemObjectStore(str(tmp_path))
-    configure(object_store=store)
-    for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task",
-               "mark_closed", "get_conversation"):
-        monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
-
+def _trajectory_extension(**enabled) -> dict:
     async def sdk_get(request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest):
         return {"trajectory": []}
 
     [extension] = build_registry(
-        object(), [enable(TRAJECTORY_V1, native="echo/1")], sdk_handlers={(TRAJECTORY_V1.uri, "get"): sdk_get}
+        object(), [enable(TRAJECTORY_V1, **enabled)], sdk_handlers={(TRAJECTORY_V1.uri, "get"): sdk_get}
     ).card_extensions()
-    extension["params"].update(formats=["echo/1", "atif/1"], default="atif/1")
-    trajectory_requests: list[dict] = []
+    return extension
+
+
+async def _one_turn(monkeypatch, tmp_path, extension: dict, answer: Callable[[dict], dict]
+                    ) -> tuple[PromptResponse, list[dict], LocalFilesystemObjectStore]:
+    """One turn of a prompt step against an agent whose card carries ``extension`` and whose trajectory reads
+    ``answer`` gives each body: the step's prompt response, the read bodies it sent and the store it wrote to."""
+    store = LocalFilesystemObjectStore(str(tmp_path))
+    configure(object_store=store)
+    for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task",
+               "mark_closed", "get_conversation"):
+        monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
+    requests: list[dict] = []
 
     def trajectory(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        trajectory_requests.append(body)
-        return httpx.Response(200, json={"trajectory": [{"type": "echo"}], "format": body.get("format", "atif/1")})
+        assert request.url.path == "/ext/trajectory"
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=answer(requests[-1]))
 
     FakeA2AAgents({"http://agent.test": [{"kind": "text", "text": "Echo: hi"}]}, other=trajectory).serve(monkeypatch)
     context = TaskStepContext(instance_id="ti-1")
@@ -304,12 +265,35 @@ async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_i
         id="solve", version=None, prompt="hi", agent_name="solver", poll_interval_seconds=0,
         trajectory_output_prefix=store.object_url("prompt_agent_trajectories"),
     )
+    return (await step.execute(context)).prompt_responses[-1], requests, store
 
-    result = await step.execute(context)
 
-    assert trajectory_requests == [{"task_id": "task-1", "format": "echo/1"}]
-    assert result.prompt_responses[-1].target_agent_per_turn_trajectories == [{"native_format": "echo/1", "atif": None}]
-    assert json.loads(store.get(result.prompt_responses[-1].agent_trajectory_object_url)) == [{"type": "echo"}]
+@pytest.mark.asyncio
+async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeypatch, tmp_path):
+    response, requests, store = await _one_turn(
+        monkeypatch, tmp_path, _trajectory_extension(),
+        lambda body: {"trajectory": [{"type": "echo", "output": "Echo: hi"}]})
+
+    uri = response.agent_trajectory_object_url
+    assert requests == [{"task_id": "task-1"}]
+    assert response.target_agent_per_turn_trajectories == [{"native_format": None, "atif": None}]
+    assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
+    assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_its_default(monkeypatch, tmp_path):
+    """A card whose default is atif/1, as F10 flips agents to, still gives judges the native copy they read."""
+    extension = _trajectory_extension(native="echo/1")
+    extension["params"].update(formats=["echo/1", "atif/1"], default="atif/1")
+
+    response, requests, store = await _one_turn(
+        monkeypatch, tmp_path, extension,
+        lambda body: {"trajectory": [{"type": "echo"}], "format": body.get("format", "atif/1")})
+
+    assert requests == [{"task_id": "task-1", "format": "echo/1"}]
+    assert response.target_agent_per_turn_trajectories == [{"native_format": "echo/1", "atif": None}]
+    assert json.loads(store.get(response.agent_trajectory_object_url)) == [{"type": "echo"}]
 
 
 def test_a_prompt_step_is_a_prompt_agent_or_a_subclass_whether_a_step_or_its_config():

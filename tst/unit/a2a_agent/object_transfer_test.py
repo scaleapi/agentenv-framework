@@ -229,7 +229,7 @@ def test_a_cards_trajectory_formats_are_read_from_its_params_and_an_older_card_h
     assert TrajectoryFormats.of(offered) == TrajectoryFormats(
         ("claude-code-session/1", "atif/1"), "claude-code-session/1", "claude-code-session/1")
     for older in (None, {}, {"params": {"endpoint": "/ext/trajectory"}}, {"params": {"formats": []}}):
-        assert TrajectoryFormats.of(older) is None
+        assert TrajectoryFormats.of(older) == TrajectoryFormats((), None, None)
 
 
 @pytest.mark.asyncio

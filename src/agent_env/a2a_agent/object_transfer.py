@@ -662,20 +662,20 @@ class TrajectoryUpload:
 @dataclass(frozen=True)
 class TrajectoryFormats:
     """The trajectory formats an agent's card offers: every one it serves, its native one and the one its reads
-    serve when they name none."""
+    serve when they name none. A card from before agents named their formats offers none, and its reads refuse a
+    ``format``, so ``native`` is None for it too."""
 
-    formats: tuple[str, ...]
-    native: str | None
-    default: str | None
+    formats: tuple[str, ...] = ()
+    native: str | None = None
+    default: str | None = None
 
     @classmethod
-    def of(cls, extension: Mapping[str, Any] | None) -> TrajectoryFormats | None:
-        """The formats the trajectory extension's card params offer; None for a card from before agents named their
-        formats, whose reads refuse a ``format``."""
+    def of(cls, extension: Mapping[str, Any] | None) -> TrajectoryFormats:
+        """The formats the trajectory extension's card params offer."""
         params = (extension or {}).get("params") or {}
         formats = params.get("formats")
         if not isinstance(formats, list) or not formats:
-            return None
+            return cls()
         return cls(tuple(formats), params.get("native"), params.get("default"))
 
 

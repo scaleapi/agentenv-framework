@@ -118,7 +118,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, fetch_native_trajectory
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
@@ -1287,10 +1287,10 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await asyncio.wait_for(
-                    step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type,
-                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
+                traj = (await asyncio.wait_for(
+                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
+                                            card=card, sandbox_type=self.agent.sandbox_type,
+                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
             except Exception as e:
                 logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1368,10 +1368,10 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await asyncio.wait_for(
-                    step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type,
-                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
+                traj = (await asyncio.wait_for(
+                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
+                                            card=card, sandbox_type=self.agent.sandbox_type,
+                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
             except Exception as e:
                 logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1584,12 +1584,12 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await asyncio.wait_for(
-                    self.step._fetch_trajectory(self.user_url, traj_ext, user_task_id,
-                                                self.step._trajectory_prefix() + "user_sim/", msg_id,
-                                                card=card, sandbox_type=self.user_agent.sandbox_type,
-                                                headers=self.user_agent.control_headers),
-                    max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
+                traj = (await asyncio.wait_for(
+                    fetch_native_trajectory(self.user_url, traj_ext, user_task_id,
+                                            self.step._trajectory_prefix() + "user_sim/", msg_id,
+                                            card=card, sandbox_type=self.user_agent.sandbox_type,
+                                            headers=self.user_agent.control_headers),
+                    max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))).url
             except Exception as e:
                 logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
         return {"text": raw, "structured": structured if isinstance(structured, dict) else None,
