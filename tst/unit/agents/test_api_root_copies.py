@@ -1,5 +1,5 @@
-"""Every agent's copy of core's ``api_root``, which an agent's image can't import, answers as core's does. Each copy is
-read from its file's source, since some agents' modules import packages only their images install."""
+"""Every copy of core's ``api_root``, in an agent or the key holder, whose images can't import core, answers as core's
+does. Each copy is read from its file's source, since some agents' modules import packages only their images install."""
 
 import ast
 from pathlib import Path
@@ -10,7 +10,9 @@ import pytest
 import agent_env
 from agent_env.config.model import api_root
 
-AGENTS = Path(agent_env.__file__).parent / "agents" / "agents"
+SOURCES = Path(agent_env.__file__).parent
+AGENTS = SOURCES / "agents" / "agents"
+KEY_HOLDER = SOURCES / "utils" / "key_holder" / "key_holder.py"
 URLS = [
     "https://proxy.example", "https://proxy.example/", "https://proxy.example/v1", "https://proxy.example/v1/",
     "https://proxy.example/v1/v1", "https://proxy.example/prefix", "https://proxy.example/prefix/v1",
@@ -22,13 +24,13 @@ URLS = [
 def _copies() -> dict[str, object]:
     """Each agent file's ``_api_root``, run from its source with only what it imports from ``urllib.parse``."""
     copies = {}
-    for path in sorted(AGENTS.glob("*/*.py")):
+    for path in [*sorted(AGENTS.glob("*/*.py")), KEY_HOLDER]:
         tree = ast.parse(path.read_text())
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name == "_api_root":
                 namespace = {"urlsplit": urlsplit, "urlunsplit": urlunsplit}
                 exec(compile(ast.Module([node], type_ignores=[]), str(path), "exec"), namespace)
-                copies[str(path.relative_to(AGENTS))] = namespace["_api_root"]
+                copies[str(path.relative_to(SOURCES))] = namespace["_api_root"]
     return copies
 
 
@@ -36,8 +38,9 @@ COPIES = _copies()
 
 
 def test_the_agents_that_append_their_own_path_each_have_a_copy():
-    assert {"browser-use/agent.py", "claude-code/claude_bridge.py", "codex/codex_config.py",
-            "gemini/a2a_server.py"} <= set(COPIES)
+    assert {"agents/agents/browser-use/agent.py", "agents/agents/claude-code/claude_bridge.py",
+            "agents/agents/codex/codex_config.py", "agents/agents/gemini/a2a_server.py",
+            "utils/key_holder/key_holder.py"} <= set(COPIES)
 
 
 @pytest.mark.parametrize("copy", sorted(COPIES))
