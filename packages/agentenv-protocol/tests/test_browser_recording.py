@@ -69,15 +69,42 @@ class Uploads:
         return Uploader()
 
     def colors(self, folder: str) -> list[str]:
-        """The colour of every frame of the video under ``folder``, in order, by its strongest channel."""
-        names = {RED: "red", BLUE: "blue", GREEN: "green", YELLOW: "yellow", (255, 255, 255): "white"}
+        """The colour of every frame of the video under ``folder``, in order."""
         found = []
         for path in sorted(p for p in self.by_path if p.startswith(f"{folder}/video/") and p.endswith(".mp4")):
             with av.open(io.BytesIO(self.by_path[path])) as container:
-                for frame in container.decode(video=0):
-                    pixel = frame.to_image().getpixel((frame.width // 2, frame.height // 2))
-                    found.append(names[min(names, key=lambda c: sum((a - b) ** 2 for a, b in zip(c, pixel)))])
+                found += [_color_name(frame.to_image()) for frame in container.decode(video=0)]
         return found
+
+
+def _color_name(image: Image.Image) -> str:
+    """The named colour nearest the middle of ``image``."""
+    names = {RED: "red", BLUE: "blue", GREEN: "green", YELLOW: "yellow", (255, 255, 255): "white"}
+    pixel = image.convert("RGB").getpixel((image.width // 2, image.height // 2))
+    return names[min(names, key=lambda c: sum((a - b) ** 2 for a, b in zip(c, pixel)))]
+
+
+def _taken(recordings: BrowserRecordings) -> list[str]:
+    """The colour of each frame the one recording's video takes from now on, as it takes it."""
+    [recording] = recordings.every()
+    stream, taken = recording.stream, []
+    latest = stream._latest
+
+    async def noted() -> Image.Image:
+        image = await latest()
+        taken.append(_color_name(image))
+        return image
+    stream._latest = noted
+    return taken
+
+
+async def _until_taken(taken: list[str], color: str, timeout_s: float = 10) -> None:
+    """Until the video has taken a frame of ``color``, however slowly a loaded machine records."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while color not in taken:
+        assert loop.time() < deadline, f"no {color} frame taken in {timeout_s} s: {taken}"
+        await asyncio.sleep(0.02)
 
 
 class Browser:
@@ -213,13 +240,15 @@ async def test_the_video_follows_an_agents_tab_a_popup_it_opens_and_goes_back_wh
     pipe.open("T3", YELLOW)
     pipe.focused = "T0"
     started = await recordings.start("run:a", _grant(), network=False)
-    await asyncio.sleep(0.3)
+    taken = _taken(recordings)
+    await _until_taken(taken, "green")
     _acted(recordings.log, "T3")
-    await asyncio.sleep(0.3)
+    await _until_taken(taken, "yellow")
     pipe.open("T4", RED, opener="T3")
-    await asyncio.sleep(0.3)
+    await _until_taken(taken, "red")
     pipe.close("T4")
-    await asyncio.sleep(0.3)
+    taken.clear()
+    await _until_taken(taken, "yellow")
     manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
 
     assert [seen.tab for seen in manifest.video.followed] == ["T0", "T3", "T4", "T3"]
