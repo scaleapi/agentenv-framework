@@ -1,7 +1,8 @@
 """Claude Code's bridge on the env's clock: it hands the shared egress rule (tst/unit/agents/test_agent_egress.py) the
 model endpoint's URL and every MCP server's, so on an armed clock an env MCP server over TLS goes through the egress
-proxy and loopback and plain-HTTP hosts go direct; unarmed, the CLI goes out as before. What every clocked image shares
-is checked in tst/unit/agents/test_agent_clock_images.py."""
+proxy and loopback and plain-HTTP hosts go direct; unarmed, the CLI goes out as before. Every run keeps its transcripts,
+which the CLI's own cleanup would delete on a clock ahead of the files' real times. What every clocked image shares is
+checked in tst/unit/agents/test_agent_clock_images.py."""
 
 from __future__ import annotations
 
@@ -25,6 +26,15 @@ def test_on_an_armed_clock_the_cli_goes_out_through_the_proxy_and_to_loopback_di
     assert {env[name] for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "https_proxy")} == {PROXY}
     assert env["NO_PROXY"] == env["no_proxy"] == "localhost,127.0.0.1,::1,host.docker.internal"
     assert env["NODE_USE_ENV_PROXY"] == "1"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_every_cli_run_keeps_transcripts_a_clock_years_ahead_would_call_old(resume):
+    command = claude_bridge._command("sess", resume, model=None, allowed_tools=None, mcp_servers=None,
+                                     system_prompt=None, output_format=None, role=None, effort=None, max_turns=None)
+
+    assert command[command.index("--setting-sources") + 1] == "user"
+    assert json.loads(command[command.index("--settings") + 1])["cleanupPeriodDays"] >= 365 * 100
 
 
 def _spawned_env(monkeypatch, tmp_path, armed: bool) -> dict[str, str]:

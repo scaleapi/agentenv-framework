@@ -55,6 +55,9 @@ _MODEL_ALIASES = (
 )
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# Settings every CLI run takes. The CLI deletes a transcript older than cleanupPeriodDays by its own clock, and on an env
+# clock months ahead of the files' real times the transcript of the conversation it resumes looks that old.
+CLI_SETTINGS = {"cleanupPeriodDays": 36500}
 
 
 # The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.
@@ -627,7 +630,7 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
     the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
-           "--setting-sources", "user"]
+           "--setting-sources", "user", "--settings", json.dumps(CLI_SETTINGS)]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
         cmd += ["--model", _with_1m_window(model)]
