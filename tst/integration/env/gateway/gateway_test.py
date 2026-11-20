@@ -5653,13 +5653,18 @@ _SNOWFLAKE_SQL = {"sql": "SELECT region, arr FROM ANALYTICS.FINANCE.REVENUE"}
 
 
 async def _set_async_wait(result, tool_name, min_seconds, max_seconds=None, scale_to_virtual=True) -> dict:
-    """Arm a submit tool's async wait range via the set-async-wait/v1 gateway ext proxy (harness control path)."""
-    base = f"{result.gateway_url}/svc/mcp-snowflake"
-    card = await protocol_v1.get_card(base)
+    """Arm a submit tool's async wait range through apply_server_config, as a task does, so the tools the
+    reply reveals are enabled for every role before the test calls them."""
+    from agent_env.task_step.context import TaskStepContext
+    from agent_env.task_step.task_steps.apply_server_config import ApplyServerConfigStep
+
     params = {"tool_name": tool_name, "min_seconds": min_seconds, "scale_to_virtual": scale_to_virtual}
     if max_seconds is not None:
         params["max_seconds"] = max_seconds
-    return await protocol_v1.invoke_extension(base, card, _ASYNC_WAIT_URI, params=params)
+    step = ApplyServerConfigStep(id="async-wait", version=None, env_id=result.env_id,
+                                 directives=[{"service": "snowflake", "uri": _ASYNC_WAIT_URI, "args": params}])
+    context = await step.execute(TaskStepContext(deployed_envs=[result]))
+    return context.metadata["server_config_changes"][-1]["result"]
 
 
 async def _clock_clear(result) -> None:

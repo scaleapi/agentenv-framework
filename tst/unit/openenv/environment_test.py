@@ -103,6 +103,12 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
     assert ServedTask(defaulted, "defaulted", EpisodeSpec.from_task(defaulted), _score_at("replies")).toolset == {
         "envs": ["items"], "versions": {}, "role": None, "access": [{"env": "items", "action": "disable",
                                                                       "tools": ["add_item"]}], "bash": False}
+    configure = {"id": "cfg", "type": "apply_server_config", "env_id": "items",
+                 "directives": [{"service": "items", "uri": "urn:example:set-mode/v1", "args": {"mode": "slow"}}]}
+    configured = _task(ITEMS, ALICE, configure, TURN, REPLIES)
+    assert ServedTask(configured, "configured", EpisodeSpec.from_task(configured), _score_at("replies")).toolset[
+        "config"] == [{"env": "items", "directives": [{"service": "items", "environment": "items",
+                                                        "uri": "urn:example:set-mode/v1", "args": {"mode": "slow"}}]}]
     assert [task["index"] for task in env.get_task_range("all", 1)] == [1, 2]
     assert [task["id"] for task in env.list_tasks("smoke")] == ["dock-0"]
     with pytest.raises(IndexError, match="split 'all' has 3 tasks, so it has no task 3"):

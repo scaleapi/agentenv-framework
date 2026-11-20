@@ -874,3 +874,79 @@ async def test_a_multi_envs_computer_is_configured_at_its_own_address_with_its_o
         await step.execute(TaskStepContext(deployed_envs=[record]))
 
     assert sent == [("https://desk.example/agentenv/ext/set_errors", computer.control_headers)]
+
+
+class _RevealingGateway:
+    """Replies to the config extension with `reply` and to the gateway's enable-tool endpoint with the role's state."""
+
+    def __init__(self, reply: dict, enable_status: int = 200):
+        self.reply = reply
+        self.enable_status = enable_status
+        self.post_calls: list[tuple[str, dict]] = []
+
+    async def request(self, method, url, *, json=None, timeout=None, headers=None):
+        self.post_calls.append((url, json))
+        if url.endswith("/tools/enable"):
+            return _resp(self.enable_status, url, {"role": "*", "disabled": [], "allowed": json["tools"]})
+        return _resp(200, url, self.reply)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+async def _revealing_context() -> TaskStepContext:
+    return _carded_context(await _composed_card({"mcp-slack": [_ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors")]}))
+
+
+@pytest.mark.asyncio
+async def test_tools_a_reply_reveals_are_enabled_for_every_role_on_the_gateway():
+    gw = _RevealingGateway({"ok": True, "reveal_tools": ["slack_export", "slack_export_status"]})
+    with patch("httpx.AsyncClient", return_value=gw):
+        out = await _step().execute(await _revealing_context())
+
+    assert gw.post_calls[1] == (f"{_CARD}/tools/enable", {"role": "*", "tools": ["slack_export", "slack_export_status"]})
+    [change] = out.metadata["server_config_changes"]
+    assert change["revealed_tools"] == ["slack_export", "slack_export_status"]
+    [access] = out.metadata["tool_access_changes"]
+    assert (access["action"], access["role"], access["tools_requested"]) == (
+        "enable", "*", ["slack_export", "slack_export_status"])
+    assert access["role_state_after"] == {"disabled": [], "allowed": ["slack_export", "slack_export_status"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [{"ok": True}, {"ok": True, "reveal_tools": []}, {"ok": True, "reveal_tools": None},
+                                   ["ok"], True],
+                         ids=["absent", "empty", "null", "list-reply", "scalar-reply"])
+async def test_a_reply_that_reveals_nothing_enables_nothing(reply):
+    gw = _RevealingGateway(reply)
+    with patch("httpx.AsyncClient", return_value=gw):
+        out = await _step().execute(await _revealing_context())
+
+    assert [url for url, _ in gw.post_calls] == [f"{_CARD}/svc/mcp-slack/agentenv/ext/set_errors"]
+    assert "revealed_tools" not in out.metadata["server_config_changes"][0]
+    assert "tool_access_changes" not in out.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", ["slack_export", ["slack_export", 3], [""], ["*"], ["slack_export", "*"]],
+                         ids=["string", "non-string", "empty-name", "wildcard", "wildcard-among-names"])
+async def test_a_malformed_reveal_list_fails_the_step_after_recording_the_applied_directive(tools):
+    gw = _RevealingGateway({"ok": True, "reveal_tools": tools})
+    ctx = await _revealing_context()
+    with patch("httpx.AsyncClient", return_value=gw):
+        with pytest.raises(ApplyServerConfigError, match="'reveal_tools' must be a list of tool names"):
+            await _step().execute(ctx)
+
+    assert len(gw.post_calls) == 1
+    assert ctx.metadata["server_config_changes"][0]["uri"] == _SET_ERRORS_URI
+
+
+@pytest.mark.asyncio
+async def test_a_failing_enable_fails_the_step():
+    gw = _RevealingGateway({"ok": True, "reveal_tools": ["slack_export"]}, enable_status=500)
+    with patch("httpx.AsyncClient", return_value=gw):
+        with pytest.raises(ApplyServerConfigError, match="Enabling the tools \\['slack_export'\\]"):
+            await _step().execute(await _revealing_context())

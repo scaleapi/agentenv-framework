@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import httpx
 from openenv.core.env_server.interfaces import Environment
@@ -52,6 +52,7 @@ class Toolset(TypedDict):
     role: str | None
     access: list[dict[str, Any]]
     bash: bool
+    config: NotRequired[list[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -66,18 +67,24 @@ class ServedTask:
     @property
     def toolset(self) -> Toolset:
         """Where the played agent's tools come from: the envs it works in and the versions the task deploys, its role
-        in them, the changes the task makes to that role's tool access, and whether its turns offer ``bash`` in its
-        sandbox. Tasks that agree on it offer the same tools, so a trainer can group them."""
+        in them, the changes the task makes to that role's tool access, whether its turns offer ``bash`` in its
+        sandbox, and the server config it applies (``config``, only when it applies any), whose replies can reveal
+        tools. Tasks that agree on it offer the same tools, so a trainer can group them."""
         agent = self.spec.trainer_agents[0]
         [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
         role, envs = getattr(deploy, "role", None), list(getattr(deploy, "env_ids", None) or [])
-        return Toolset(envs=envs, role=role,
-                       versions={step.env_id: step.env_version for step in self.task.steps
-                                 if hasattr(step, "env_version") and step.env_id in envs},
-                       access=[{"env": step.env_id, "action": step.action, "tools": step.tools}
-                               for step in self.task.steps
-                               if step.type == "modify_env_tool_access" and step.role == (role or DEFAULT_ROLE)],
-                       bash=works_in_sandbox(self.task.steps, agent))
+        toolset = Toolset(envs=envs, role=role,
+                          versions={step.env_id: step.env_version for step in self.task.steps
+                                    if hasattr(step, "env_version") and step.env_id in envs},
+                          access=[{"env": step.env_id, "action": step.action, "tools": step.tools}
+                                  for step in self.task.steps
+                                  if step.type == "modify_env_tool_access" and step.role == (role or DEFAULT_ROLE)],
+                          bash=works_in_sandbox(self.task.steps, agent))
+        config = [{"env": step.env_id, "directives": [d.to_dict() for d in step.directives]}
+                  for step in self.task.steps if step.type == "apply_server_config" and step.env_id in envs]
+        if config:
+            toolset["config"] = config
+        return toolset
 
 
 @dataclass

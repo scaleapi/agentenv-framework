@@ -70,15 +70,20 @@ class ModifyEnvToolAccessStep(TaskStep):
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         body = await deployed.invoke(_TOOL_ACCESS_URIS[self.action], self.action, {"role": self.role, "tools": self.tools})
         logger.info(f"{self.action} role={self.role!r} tools={self.tools} on env={self.env_id}: {body}")
-        context.metadata.setdefault("tool_access_changes", []).append({
-            "step_id": self.id,
-            "env_id": self.env_id,
-            "action": self.action,
-            "role": self.role,
-            "tools_requested": self.tools,
-            "role_state_after": {"disabled": body.get("disabled", []), "allowed": body.get("allowed", [])},
-        })
+        record_tool_access_change(context, self.id, self.env_id, self.action, self.role, self.tools, body)
         return context
+
+
+def record_tool_access_change(context: TaskStepContext, step_id: str, env_id: str, action: str, role: str,
+                              tools: list[str], body: dict) -> None:
+    context.metadata.setdefault("tool_access_changes", []).append({
+        "step_id": step_id,
+        "env_id": env_id,
+        "action": action,
+        "role": role,
+        "tools_requested": tools,
+        "role_state_after": {"disabled": body.get("disabled", []), "allowed": body.get("allowed", [])},
+    })
 
 
 # The gateway extension each action is advertised under on the env card.

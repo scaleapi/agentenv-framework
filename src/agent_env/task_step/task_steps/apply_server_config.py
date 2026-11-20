@@ -23,14 +23,22 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional
 import httpx
 from agentenv_protocol import client as protocol_v1
 
+from agent_env.env.gateway import TOOL_ENABLE_ACTION, WILDCARD
+from agent_env.env.gateway.constants import EXT_ENABLE_TOOL_URI
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.modify_env_tool_access import record_tool_access_change
 
 if TYPE_CHECKING:
+    from agent_env.env.env import DeployedEnv
     from agent_env.env.legacy_protocol import BackingServer
 
 logger = logging.getLogger(__name__)
+
+# A config extension's reply may name tools the server lists hidden by default that this config makes usable; the
+# step then enables them on the env's gateway for every role, as modify_env_tool_access would.
+REVEAL_TOOLS_KEY = "reveal_tools"
 
 
 class ApplyServerConfigError(RuntimeError):
@@ -279,7 +287,7 @@ class ApplyServerConfigStep(TaskStep):
                 f"apply_server_config: applied {directive.uri} on service={directive.service} "
                 f"env={self.env_id} args={directive.args}: {result}"
             )
-            changes.append({
+            change = {
                 "step_id": self.id,
                 "env_id": self.env_id,
                 "service": directive.service,
@@ -287,6 +295,31 @@ class ApplyServerConfigStep(TaskStep):
                 "uri": directive.uri,
                 "args": directive.args,
                 "result": result,
-            })
+            }
+            changes.append(change)
+            revealed = await self._reveal_tools(deployed, directive, result, context)
+            if revealed:
+                change["revealed_tools"] = revealed
 
         return context
+
+    async def _reveal_tools(self, deployed: DeployedEnv, directive: ConfigDirective, result: Any,
+                            context: TaskStepContext) -> list[str]:
+        tools = result.get(REVEAL_TOOLS_KEY) if isinstance(result, dict) else None
+        if tools is None or tools == []:
+            return []
+        if not isinstance(tools, list) or not all(isinstance(t, str) and t and t != WILDCARD for t in tools):
+            raise ApplyServerConfigError(
+                f"Applying {directive.uri!r} on service {directive.service!r} (env={self.env_id}): its reply's "
+                f"{REVEAL_TOOLS_KEY!r} must be a list of tool names, got {tools!r}"
+            )
+        try:
+            body = await deployed.invoke(EXT_ENABLE_TOOL_URI, TOOL_ENABLE_ACTION, {"role": WILDCARD, "tools": tools})
+        except Exception as e:
+            raise ApplyServerConfigError(
+                f"Enabling the tools {tools} that {directive.uri!r} on service {directive.service!r} revealed "
+                f"(env={self.env_id}) failed: {type(e).__name__}: {e}"
+            ) from e
+        logger.info(f"apply_server_config: enabled {tools} for every role on env={self.env_id} after {directive.uri}")
+        record_tool_access_change(context, self.id, self.env_id, TOOL_ENABLE_ACTION, WILDCARD, tools, body)
+        return tools
