@@ -99,6 +99,7 @@ def test_the_server_start_writes_the_model_endpoint_into_config_toml(codex, monk
             "stream_idle_timeout_ms": 60000,
             "env_http_headers": {"x-litellm-customer-id": "LITELLM_CUSTOMER_ID", "x-litellm-tags": "LITELLM_TAGS"},
             "http_headers": {"X-Gateway": "g"},
+            "capabilities": {"remote_compaction": "v2"},
         }},
     }
 

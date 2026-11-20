@@ -238,6 +238,10 @@ def write_base_config(environ: Mapping[str, str]) -> None:
                    if name.lower() != "x-litellm-tags"}
         if headers:
             provider["http_headers"] = headers
+        # Codex compacts a custom provider's context locally by default, with a request that declares no tools, which
+        # a Responses API may refuse when the history replays encrypted tool-call arguments. Remote compaction sends
+        # the tools.
+        provider["capabilities"] = {"remote_compaction": "v2"}
         cfg.setdefault("model_providers", {})["litellm"] = provider
     _write(cfg)
 
