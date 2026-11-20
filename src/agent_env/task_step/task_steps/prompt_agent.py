@@ -549,7 +549,7 @@ class PromptAgentTaskStep(TaskStep):
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
             # Again each turn, so an agent that restarted since deploy_agent sent it doesn't get its own tools back.
-            "builtin_tools": card.get("builtin_tools"),
+            "builtin_tools": card.get("builtin_tools"), "peer_tools": card.get("peer_tools"),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         model_params = get_config().get_model_params(self.model_params)
@@ -568,8 +568,12 @@ class PromptAgentTaskStep(TaskStep):
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
-            negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
+            user_card = user_sim.a2a_card or {}
+            # Its own tools and peer tools as deploy_agent set them, again, as for the agent above.
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model,
+                                             "builtin_tools": user_card.get("builtin_tools"),
+                                             "peer_tools": user_card.get("peer_tools")}.items() if v is not None}
+            negotiated = A2AAgent.negotiate_agent_config(user_card, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
                                                  headers=user_sim.control_headers)

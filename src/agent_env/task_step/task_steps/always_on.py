@@ -585,7 +585,7 @@ class _Run:
                    "max_thinking_tokens": overrides.get("agent_max_thinking_tokens") or step.max_thinking_tokens,
                    "output_format": step.output_format, "timeout_seconds": step.timeout_seconds,
                    "task_id": ctx.metadata.get("task_id"), "agentenv_tools": step.agentenv_tools,
-                   "builtin_tools": card.get("builtin_tools")}
+                   "builtin_tools": card.get("builtin_tools"), "peer_tools": card.get("peer_tools")}
         desired = {k: v for k, v in desired.items() if v is not None}
         model_params = get_config().get_model_params(step.model_params)
         if model_params:

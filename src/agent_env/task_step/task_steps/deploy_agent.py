@@ -151,10 +151,15 @@ def _skill_fields(skill: dict) -> dict:
 
 
 
+def _config_request(agent_config: dict | None) -> dict:
+    """The ``set`` request description of a card's agent-config extension."""
+    return ((agent_config or {}).get("params") or {}).get("methods", {}).get("set", {}).get("request", {})
+
+
 def _check_builtin_tools(agent_config: dict | None, agent_name: str, selection: dict) -> None:
     """Refuse a selection of the agent's own tools that its card's agent-config extension can't take: it has no
     ``builtin_tools``, or its schema doesn't name a tool the selection does."""
-    request = ((agent_config or {}).get("params") or {}).get("methods", {}).get("set", {}).get("request", {})
+    request = _config_request(agent_config)
     if "builtin_tools" not in request.get("supported", []):
         raise RuntimeError(f"Agent '{agent_name}' cannot have its own tools selected: its card's "
                            f"{AGENT_CONFIG_V1.uri} takes no 'builtin_tools'")
@@ -164,6 +169,14 @@ def _check_builtin_tools(agent_config: dict | None, agent_name: str, selection: 
         error = best_match(Draft202012Validator({**field, "$defs": schema.get("$defs", {})}).iter_errors(selection))
         if error is not None:
             raise RuntimeError(f"Agent '{agent_name}' can't take builtin_tools {selection}: {error.message}")
+
+
+def _check_peer_tools(agent_config: dict | None, agent_name: str) -> None:
+    """Refuse to turn off the peer_agents tools of an agent whose card's agent-config extension can't take
+    ``peer_tools``: it would keep them."""
+    if "peer_tools" not in _config_request(agent_config).get("supported", []):
+        raise RuntimeError(f"Agent '{agent_name}' cannot have its peer_agents tools turned off: its card's "
+                           f"{AGENT_CONFIG_V1.uri} takes no 'peer_tools'")
 
 class DeployAgentTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_agent"
@@ -208,6 +221,7 @@ class DeployAgentTaskStep(TaskStep):
         network_policy: Optional[dict] = None,
         role: Optional[str] = None,
         builtin_tools: Optional[dict] = None,
+        peer_tools: Optional[bool] = None,
         enable_agent_changelog: bool = False,
         agent_changelog_toolcall_position_exclusive: Optional[int] = None,
         sandbox_name: Optional[str] = None,
@@ -241,6 +255,10 @@ class DeployAgentTaskStep(TaskStep):
         self.role = role or None
         self.builtin_tools = (None if builtin_tools is None
                               else BuiltinTools[str].model_validate(builtin_tools).model_dump(exclude_none=True))
+        # False: the agent gets no peer_agents MCP tools, so it can't message the task's other agents.
+        if peer_tools is not None and not isinstance(peer_tools, bool):
+            raise ValueError(f"peer_tools must be true or false, not {peer_tools!r}")
+        self.peer_tools = peer_tools
         self.enable_agent_changelog = enable_agent_changelog
         self.agent_changelog_object_url = agent_changelog_object_url
         self.agent_changelog_toolcall_position_exclusive = agent_changelog_toolcall_position_exclusive
@@ -279,6 +297,7 @@ class DeployAgentTaskStep(TaskStep):
         base["network_policy"] = self.network_policy
         base["role"] = self.role
         base["builtin_tools"] = self.builtin_tools
+        base["peer_tools"] = self.peer_tools
         base["enable_agent_changelog"] = self.enable_agent_changelog
         base["agent_changelog_object_url"] = self.agent_changelog_object_url
         base["agent_changelog_toolcall_position_exclusive"] = self.agent_changelog_toolcall_position_exclusive
@@ -312,6 +331,7 @@ class DeployAgentTaskStep(TaskStep):
             network_policy=data.get("network_policy"),
             role=data.get("role"),
             builtin_tools=data.get("builtin_tools"),
+            peer_tools=data.get("peer_tools"),
             enable_agent_changelog=data.get("enable_agent_changelog", False),
             agent_changelog_object_url=data.get("agent_changelog_object_url"),
             agent_changelog_toolcall_position_exclusive=data.get("agent_changelog_toolcall_position_exclusive"),
@@ -464,6 +484,11 @@ class DeployAgentTaskStep(TaskStep):
             _check_builtin_tools(A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG), self.agent_name,
                                  self.builtin_tools)
             identity_payload["builtin_tools"] = self.builtin_tools
+        if self.peer_tools is not None:
+            if not self.peer_tools:
+                # Before the first request to the agent, as for builtin_tools.
+                _check_peer_tools(A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG), self.agent_name)
+            identity_payload["peer_tools"] = self.peer_tools
         identity = A2AAgent.negotiate_agent_config(card, identity_payload)
         if self.role is not None:
             carried_by = [via for via, carried in (
