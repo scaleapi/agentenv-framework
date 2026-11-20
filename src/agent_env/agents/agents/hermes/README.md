@@ -55,15 +55,18 @@ whatever the uid. It has no `install/v1`.
 The image follows a task env's clock as the agents README describes (`../../README.md`), with one difference: Hermes
 itself stays on real time and the commands it runs follow the env's clock.
 
-- **Off by default.** Without `agent_clock` on `sync_env_clock`, a turn runs exactly as it would without the clock:
-  `hermes agentenv turn` with the same flags and environment, on real time, with no proxy.
+- **Off by default.** Without `agent_clock` on `sync_env_clock`, a turn runs as it would without the clock:
+  `hermes agentenv turn` with the same flags, the server's environment and a profile config with nothing of the
+  clock's, on real time, with no proxy variables. The server's environment is supervisord's, which adds its
+  `SUPERVISOR_*` variables, `USER`, `LOGNAME` and `AGENTENV_EGRESS_PROXY`, and points TLS trust at agent-env's bundles
+  (`root.conf`).
 - **Opted in.** While the agent follows an armed clock, the bridge starts each turn with the command Hermes' launcher
   runs, Hermes' own Python, rather than the launcher, a shell script, so the real-time marker reaches Hermes and not the
   shell, and passes `--env-clock` (`hermes_bridge.cli_command`). Every command Hermes starts, the model's `date`,
   shell and `execute_code` scripts among them, reads the env's time, and goes out through the egress proxy with Hermes,
   as the shared rule (`agent_egress.egress_env`) has it for the model endpoint and every MCP server. `execute_code`
-  hands its scripts only a few variables of its own choosing, so the turn's config names the proxy's and its CA's for
-  it (`terminal.env_passthrough`).
+  hands its scripts only a few variables of its own choosing, so the turn's config names the proxy's, its CA's and the
+  task's zone (`TZ`) for it (`terminal.env_passthrough`).
 - **Why Hermes stays on real time.** Hermes compares its clock with times it didn't make on that clock in many places:
   its scratch folder (`TMPDIR`), pruned at each start of entries idle for 24 hours and the processes running in them;
   its spill files and large tool results, deleted past 7 days and `sessions.retention_days`; its checkpoints, past
@@ -73,10 +76,12 @@ itself stays on real time and the commands it runs follow the env's clock.
   any date, jump or rate the env's clock takes.
 - **The date the model sees.** With `--env-clock`, the plugin has Hermes read the date it shows the model, its
   `Conversation started` line (and `Today's date` after a rebuild) and the date its compaction summary carries, from a
-  `date` it runs, which follows the env's clock; the session id, whose stamp gives the start date, is minted from it
-  too. Hermes writes that line when a session starts and keeps it, as it does on any clock, so a session started before
-  the clock was armed keeps the real date it started on until Hermes rebuilds its prompt. Other times Hermes reports
-  itself, such as the dates `session_search` lists, are real, as files' modification times are.
-- **A clock armed mid-turn.** The command and environment are chosen as a turn starts, so a turn already running when
-  the clock is armed goes on as an unarmed turn, its Hermes following the env's clock without the proxy, until it
-  ends.
+  `date` it runs, which follows the env's clock; the session ids it mints, a compaction's new one included, whose stamp
+  gives the start date, are stamped from it too. Hermes writes that line when a session starts and keeps it, as it does
+  on any clock, so a session started before the clock was armed keeps the real date it started on until Hermes rebuilds
+  its prompt. Other times Hermes reports itself, such as the dates `session_search` lists, are real, as files'
+  modification times are.
+- **A clock armed mid-turn.** The command and environment are chosen as a turn starts. A turn already running when the
+  clock is armed was started as an unarmed turn is, through the launcher with no marker, so its Hermes follows the
+  env's clock from then on, without the proxy, and its turn lease or stall check may stop it (`Session turn lease
+  ...`). The next turn is armed.

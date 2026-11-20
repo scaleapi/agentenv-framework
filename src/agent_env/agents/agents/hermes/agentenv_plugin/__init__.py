@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from datetime import datetime
 
 import hermes_state_ids
@@ -25,7 +26,7 @@ import hermes_time
 _EVENTS_FD = "AGENTENV_EVENTS_FD"
 _write_lock = threading.Lock()
 # The Hermes release whose names --env-clock replaces (hermes_time.datetime, hermes_state_ids.new_session_id and the
-# copy agent.agent_init imports); a test holds it to the Dockerfile's HERMES_COMMIT, so a bump checks them again.
+# copies its modules bind by import); a test holds it to the Dockerfile's HERMES_COMMIT, so a bump checks them again.
 ENV_CLOCK_HERMES_COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
 # The env's time, in whole seconds since the epoch, as a command the model runs reads it.
 ENV_TIME_COMMAND = ("date", "+%s")
@@ -56,18 +57,21 @@ class _EnvDatetime(datetime):
 
 
 def _show_the_envs_date() -> None:
-    """Hermes' date line on the env's clock: the date it shows (``hermes_time.now``) and the start date it reads from
-    the session id's stamp (``new_session_id``, and ``agent.agent_init``'s copy if that module has loaded; it isn't
-    imported here, so Hermes loads its modules in its own order)."""
+    """Hermes' dates on the env's clock: the date it shows (``hermes_time.now``) and the session ids it mints, whose
+    stamp its start date is read from: ``new_session_id`` and every copy a loaded module bound by import, as
+    ``agent.agent_init`` and ``agent.conversation_compression`` (a compaction's new session) do. A module loaded later
+    binds the replacement, and none is imported here, so Hermes loads its modules in its own order."""
     hermes_time.datetime = _EnvDatetime
     minted = hermes_state_ids.new_session_id
 
     def new_session_id(now: datetime | None = None, **kwargs) -> str:
         return minted(_EnvDatetime.now(), **kwargs)
 
-    hermes_state_ids.new_session_id = new_session_id
-    if (agent_init := sys.modules.get("agent.agent_init")) is not None:
-        agent_init.new_session_id = new_session_id
+    for module in list(sys.modules.values()):
+        if isinstance(module, types.ModuleType):
+            for name, value in list(vars(module).items()):
+                if value is minted:
+                    setattr(module, name, new_session_id)
 
 
 def _write(event: dict) -> None:

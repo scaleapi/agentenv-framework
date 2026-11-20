@@ -16,6 +16,9 @@ import pytest
 from tst.unit.agents.hermes.agent import a2a_server, hermes_bridge
 
 FAKE_HERMES = os.path.join(os.path.dirname(__file__), "fake_hermes.py")
+# What the fake launcher's Python runs with -I -c, as Hermes' runs its bootstrap: fake_hermes.py, with the launcher's
+# arguments.
+FAKE_HERMES_BOOTSTRAP = f"import runpy\nrunpy.run_path({FAKE_HERMES!r}, run_name='__main__')\n"
 
 
 class Harness:
@@ -73,7 +76,7 @@ def fake_hermes(monkeypatch, tmp_path):
     returned record file."""
     launcher = tmp_path / "bin" / "hermes"
     launcher.parent.mkdir()
-    launcher.write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, FAKE_HERMES])} \"$@\"\n")
+    launcher.write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, '-I', '-c', FAKE_HERMES_BOOTSTRAP])} \"$@\"\n")
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
     record = tmp_path / "record.json"
     monkeypatch.setattr(hermes_bridge, "HERMES_BIN", str(launcher))

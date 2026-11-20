@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from tst.unit.agents.hermes.agent import AGENT_DIR, agent_egress, hermes_bridge
-from tst.unit.agents.hermes.conftest import FAKE_HERMES
+from tst.unit.agents.hermes.conftest import FAKE_HERMES_BOOTSTRAP
 
 PROXY = "http://127.0.0.1:3128"
 HOME = Path("/data/.hermes/profiles/ctx-0")
@@ -71,9 +71,9 @@ def test_the_turns_plain_http_mcp_servers_are_reached_directly_and_https_ones_th
     assert "gateway.internal" in direct and not {"10.1.2.3", "abc-123.w.modal.host"} & direct
 
 
-def _spawned(monkeypatch, tmp_path, armed: bool) -> dict:
+def _spawned(monkeypatch, tmp_path, armed: bool, environ: dict = ENVIRON) -> dict:
     """What run_hermes starts the turn's process with, and the profile config it writes for it, for a resumed turn
-    with an effort and the env's MCP servers."""
+    with an effort and the env's MCP servers, from a server whose environment is ``environ``."""
     spawned = {}
 
     async def fake_exec(*cmd, env, pass_fds, **_):
@@ -82,7 +82,7 @@ def _spawned(monkeypatch, tmp_path, armed: bool) -> dict:
 
     monkeypatch.setattr(hermes_bridge.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(hermes_bridge, "clock_armed", lambda: armed)
-    monkeypatch.setattr(hermes_bridge.os, "environ", dict(ENVIRON))
+    monkeypatch.setattr(hermes_bridge.os, "environ", dict(environ))
     with pytest.raises(RuntimeError, match="not starting hermes"):
         asyncio.run(hermes_bridge.run_hermes("hi", "ctx-0", session_id="s-1", model="m", effort="high",
                                              mcp_servers=MCP, skills_dir=tmp_path / "skills",
@@ -102,7 +102,20 @@ def test_unarmed_the_bridge_starts_hermes_with_the_command_and_environment_it_al
                               "litellm", "--model", "m", "--usage-file", usage, "--resume", "s-1", "--reasoning", "high"]
     assert spawned["env"] == {**ENVIRON, "HERMES_HOME": str(hermes_bridge.profile_dir("ctx-0")),
                               "AGENTENV_EVENTS_FD": str(spawned["fd"])}
-    assert "terminal" not in spawned["config"]
+    assert spawned["config"] == {
+        "model": {"provider": "litellm", "default": "m"},
+        "providers": {"litellm": {"api": "https://litellm.example.com/v1", "key_env": "LITELLM_API_KEY",
+                                  "transport": "chat_completions"}},
+        "skills": {"external_dirs": [str(tmp_path / "skills")]}, "plugins": {"enabled": ["agentenv"]},
+        "mcp_servers": {name: {"url": info["url"]} for name, info in MCP.items()}}
+
+
+def test_the_clock_adds_only_execute_codes_passthrough_to_the_profile_config(monkeypatch, fake_hermes, tmp_path):
+    unarmed = _spawned(monkeypatch, tmp_path, armed=False)["config"]
+    armed = _spawned(monkeypatch, tmp_path, armed=True)["config"]
+
+    assert {key: value for key, value in armed.items() if key != "terminal"} == unarmed
+    assert list(armed["terminal"]) == ["env_passthrough"]
 
 
 def test_on_an_armed_clock_the_bridge_starts_hermes_own_python_on_real_time_behind_the_proxy(monkeypatch, fake_hermes,
@@ -111,24 +124,27 @@ def test_on_an_armed_clock_the_bridge_starts_hermes_own_python_on_real_time_behi
     spawned = _spawned(monkeypatch, tmp_path, armed=True)
 
     prompt, usage = spawned["files"]
-    assert spawned["cmd"] == [sys.executable, FAKE_HERMES, "agentenv", "turn", "--prompt-file", prompt, "--provider",
-                              "litellm", "--model", "m", "--usage-file", usage, "--resume", "s-1", "--reasoning", "high",
-                              "--env-clock"]
+    assert spawned["cmd"] == [sys.executable, "-I", "-c", FAKE_HERMES_BOOTSTRAP, "agentenv", "turn", "--prompt-file",
+                              prompt, "--provider", "litellm", "--model", "m", "--usage-file", usage, "--resume", "s-1",
+                              "--reasoning", "high", "--env-clock"]
     env = spawned["env"]
     assert env["AGENTENV_REAL_TIME"] == "1" and env["HTTPS_PROXY"] == env["https_proxy"] == PROXY
     assert "abc-123.w.modal.host" not in env["NO_PROXY"].split(",") and "127.0.0.1" in env["NO_PROXY"].split(",")
 
 
-def test_on_an_armed_clock_execute_codes_scripts_get_the_proxy_and_its_ca_as_the_terminals_commands_do(monkeypatch,
-                                                                                                    fake_hermes,
-                                                                                                    tmp_path):
-    """execute_code passes its scripts a fixed few variables and those terminal.env_passthrough names."""
-    spawned = _spawned(monkeypatch, tmp_path, armed=True)
+@pytest.mark.parametrize("zone", [None, "America/Chicago"])
+def test_on_an_armed_clock_execute_codes_scripts_get_the_proxy_its_ca_and_the_zone_as_the_terminals_commands_do(
+        monkeypatch, fake_hermes, tmp_path, zone):
+    """execute_code passes its scripts a fixed few variables and those terminal.env_passthrough names; it sets TZ only
+    from Hermes' own timezone setting, not from the TZ sync_env_clock's ``timezone`` sets in the server's
+    environment."""
+    spawned = _spawned(monkeypatch, tmp_path, armed=True, environ={**ENVIRON, **({"TZ": zone} if zone else {})})
 
     passed = set(spawned["config"]["terminal"]["env_passthrough"])
     egress = {name for name in spawned["env"] if name.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}}
-    assert egress | {"NODE_USE_ENV_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} == passed
-    assert len(egress) == 8
+    named = {"NODE_USE_ENV_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", *(["TZ"] if zone else [])}
+    assert egress | named == passed
+    assert len(egress) == 8 and spawned["env"].get("TZ") == zone
 
 
 @pytest.mark.asyncio
@@ -159,8 +175,15 @@ def test_the_launchers_command_is_read_as_hermes_installer_writes_it(tmp_path):
     assert hermes_bridge.launcher_command(str(link)) == [python, "-I", "-c", script]
 
 
-@pytest.mark.parametrize("body", ["#!/usr/bin/env python3\nfrom hermes_cli.main import main\nmain()\n",
-                                  "#!/bin/sh\nexec python3 -m hermes_cli.main\n"])
+@pytest.mark.parametrize("body", [
+    "#!/usr/bin/env python3\nfrom hermes_cli.main import main\nmain()\n",
+    "#!/bin/sh\nexec python3 -m hermes_cli.main\n",
+    # Hermes' forwarder to its own launcher, and an interpreter behind env: sh or env would take the marker.
+    '#!/bin/sh\nexec /opt/hermes/.hermes/bin/hermes "$@"\n',
+    '#!/bin/sh\nexec env FOO=1 /opt/hermes/python -I -c "import hermes" "$@"\n',
+    '#!/bin/sh\nexec /opt/hermes/python -E -c "import hermes" "$@"\n',
+    '#!/bin/sh\nexec /opt/hermes/python -I -c "import hermes" --flag "$@"\n',
+])
 def test_a_launcher_that_isnt_hermes_installers_is_refused(tmp_path, body):
     launcher = tmp_path / "hermes"
     launcher.write_text(body)
@@ -225,25 +248,27 @@ def _turn(plugin, tmp_path, *flags: str) -> None:
 
 @pytest.mark.parametrize("env_time", ["2031-03-04T05:06:07+00:00", "3026-11-20T12:00:00+00:00",
                                       "1950-01-01T00:00:00+00:00"])
-@pytest.mark.parametrize("agent_init_loaded", [False, True])
+@pytest.mark.parametrize("loaded", [{}, {"agent.agent_init": "new_session_id",
+                                         "agent.conversation_compression": "mint_session_id"}])
 def test_with_env_clock_hermes_dates_its_prompt_and_session_by_the_envs_clock(plugin, monkeypatch, tmp_path, env_time,
-                                                                             agent_init_loaded):
-    """The date line's date and the session id's stamp, which its start date is read from, as a command started from
-    Hermes reads the time: Hermes runs on real time, what it starts on the env's clock."""
+                                                                             loaded):
+    """The date line's date and the session ids' stamp, which its start date is read from, as a command started from
+    Hermes reads the time: Hermes runs on real time, what it starts on the env's clock. Modules that bound
+    new_session_id by import before the turn, as the agent and compaction do, each under its own name for it, mint by
+    the env's clock too; the plugin imports neither."""
     epoch = int(datetime.fromisoformat(env_time).timestamp())
     monkeypatch.setattr(plugin.module, "ENV_TIME_COMMAND", (sys.executable, "-c", f"print({epoch})"))
-    if agent_init_loaded:
-        monkeypatch.setitem(sys.modules, "agent.agent_init",
-                            _module("agent.agent_init", new_session_id=plugin.ids.new_session_id))
+    for module, name in loaded.items():
+        monkeypatch.setitem(sys.modules, module, _module(module, **{name: plugin.ids.new_session_id}))
 
     _turn(plugin, tmp_path, "--env-clock")
 
     stamp = datetime.fromtimestamp(epoch).strftime("%Y%m%d_%H%M%S_")
     assert plugin.hermes_time.now() == datetime.fromisoformat(env_time)
     assert plugin.ids.new_session_id(datetime(2026, 11, 20)).startswith(stamp)
-    assert ("agent.agent_init" in sys.modules) is agent_init_loaded
-    if agent_init_loaded:
-        assert sys.modules["agent.agent_init"].new_session_id().startswith(stamp)
+    for module, name in loaded.items():
+        assert getattr(sys.modules[module], name)().startswith(stamp), module
+    assert {"agent.agent_init", "agent.conversation_compression"} & set(sys.modules) == set(loaded)
     assert plugin.ran == ["hi"]
 
 

@@ -139,13 +139,14 @@ def cli_command(args: list[str], *, clock_armed: bool = False) -> list[str]:
 
 def launcher_command(launcher: str | None = None) -> list[str]:
     """The command Hermes' launcher runs: the launcher is ``#!/bin/sh`` and ``exec <Hermes' Python> -I -c <bootstrap>
-    "$@"``, as Hermes' installer writes it (``shlex.join``)."""
+    "$@"``, as Hermes' installer writes it (``shlex.join``). Any other ``exec``, such as Hermes' forwarder to another
+    launcher or ``env``, would take the marker in Hermes' place."""
     name = launcher or HERMES_BIN
     path = Path(shutil.which(name) or name).resolve()
     words = shlex.split(path.read_text(), comments=True)
-    if words[:1] != ["exec"] or words[-1:] != ["$@"]:
+    if len(words) != 6 or words[0] != "exec" or words[2:4] != ["-I", "-c"] or words[5] != "$@":
         raise ValueError(f"{path} doesn't exec Hermes' interpreter as Hermes' launcher does")
-    return words[1:-1]
+    return words[1:5]
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -226,9 +227,10 @@ def build_config(
         "plugins": {"enabled": [_PLUGIN_NAME]},
     }
     if clock_armed:
-        # Hermes' execute_code hands its scripts a fixed few variables and those this names: the egress proxy's and its
-        # CA's, which the terminal's commands get anyway, so scripts on the env's clock reach TLS hosts through it too.
-        names = {*egress_env(environ, armed=True), *(name for name in _CA_ENV if name in environ)}
+        # Hermes' execute_code hands its scripts a fixed few variables and those this names: the egress proxy's, its
+        # CA's and the task's zone, which the terminal's commands get anyway, so scripts on the env's clock reach TLS
+        # hosts through it and read the time in the zone the terminal does.
+        names = {*egress_env(environ, armed=True), *(name for name in (*_CA_ENV, "TZ") if name in environ)}
         config["terminal"] = {"env_passthrough": sorted(names)}
     if mcp_servers:
         servers: dict[str, dict] = {}
