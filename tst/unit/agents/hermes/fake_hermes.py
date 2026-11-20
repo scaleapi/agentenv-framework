@@ -1,6 +1,7 @@
 """A scripted `hermes agentenv turn` for the bridge tests, run as the real one is: a process of its own. It writes the
 events, usage report and stdout a turn would, as FAKE_HERMES_MODE says: ``ok`` answers, ``fail`` fails the model call,
-``hang`` starts a tool and never finishes. Its arguments, environment and cwd go to FAKE_HERMES_RECORD."""
+``hang`` starts a tool and never finishes. Its arguments, Hermes home, cwd, prompt and the variables the env clock sets
+go to FAKE_HERMES_RECORD."""
 import json
 import os
 import subprocess
@@ -14,7 +15,9 @@ events = int(os.environ["AGENTENV_EVENTS_FD"])
 session = option.get("--resume") or "20260101_000000_abcdef"
 with open(os.environ["FAKE_HERMES_RECORD"], "w") as record:
     json.dump({"args": args, "cwd": os.getcwd(), "home": os.environ.get("HERMES_HOME"),
-               "prompt": open(option["--prompt-file"]).read()}, record)
+               "prompt": open(option["--prompt-file"]).read(),
+               "env": {name: os.environ.get(name) for name in ("AGENTENV_REAL_TIME", "HTTPS_PROXY", "NO_PROXY")}},
+              record)
 
 
 def emit(kind, **fields):

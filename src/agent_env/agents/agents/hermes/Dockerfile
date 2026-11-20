@@ -40,7 +40,9 @@ COPY a2a_server.py hermes_bridge.py hermes_kit.py entrypoint.sh ./
 # Every clocked agent's egress rule, which the bridge imports, and the clock page's format it reads (shared_sources.toml).
 COPY agent_clock/agent_egress.py clock/clockpage.py ./
 COPY agentenv_plugin ./agentenv_plugin
-RUN chmod 0755 entrypoint.sh
+# A turn on an armed clock runs the command Hermes' launcher runs, without its shell (hermes_bridge.cli_command): the
+# build fails, rather than such a turn, when the pinned release's launcher isn't one the bridge reads.
+RUN chmod 0755 entrypoint.sh && python3 -c 'import hermes_bridge; hermes_bridge.launcher_command()'
 # The env's clock: the follower and the egress proxy, each as its own user, under root's supervisord (root.conf), and
 # agent-env's libfaketime and its TLS shim preloaded into every process, faking only the agent's (clock.conf). The
 # follower's config is the agent's user's to write (agentenv_protocol.a2a_agent.clock) and the follower's to read.

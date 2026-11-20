@@ -4,6 +4,7 @@ under the test's own folder."""
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import sys
 import uuid
@@ -68,10 +69,11 @@ def folders(monkeypatch, tmp_path):
 
 @pytest.fixture
 def fake_hermes(monkeypatch, tmp_path):
-    """A `hermes` that runs fake_hermes.py; what it was run with is in the returned record file."""
+    """A `hermes` that runs fake_hermes.py, a launcher as Hermes' installer writes one; what it was run with is in the
+    returned record file."""
     launcher = tmp_path / "bin" / "hermes"
     launcher.parent.mkdir()
-    launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_HERMES} \"$@\"\n")
+    launcher.write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, FAKE_HERMES])} \"$@\"\n")
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
     record = tmp_path / "record.json"
     monkeypatch.setattr(hermes_bridge, "HERMES_BIN", str(launcher))

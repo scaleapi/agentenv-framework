@@ -7,6 +7,8 @@
     enabled. The system prompt is the profile's SOUL.md, Hermes' identity slot.
   - The turn runs in the plugin's process, not in a Hermes gateway, so killing that process stops the turn. The
     plugin writes each hook event as a JSON line to a pipe this module reads as it goes: the turn's trajectory.
+  - On an armed env clock, Hermes itself stays on real time and everything it starts follows the env's clock
+    (``cli_command``, ``cli_env``).
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import tempfile
@@ -48,6 +51,11 @@ _PLUGIN_NAME = "agentenv"
 # Marks a SOUL.md this agent wrote, so a later turn with no system prompt gives Hermes its own back.
 _SOUL_MARKER = ".agentenv-soul"
 _EVENTS_FD_ENV = "AGENTENV_EVENTS_FD"
+# Keeps the process it's given to on real time under the image's libfaketime, which takes it out of that process's
+# environment, so everything the process starts follows the env's clock.
+REAL_TIME_ENV = "AGENTENV_REAL_TIME"
+# Where root.conf points the server's TLS trust: agent-env's bundles, which hold the egress proxy's CA.
+_CA_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
 # How long the event pipe may stay open after the turn's process exits, held by something it left behind.
 _EVENTS_DRAIN_S = 2
 
@@ -108,14 +116,36 @@ def get_last_attribution_snapshot() -> dict[str, str | None]:
 def cli_env(environ: Mapping[str, str], home: Path, *, events_fd: int | None = None,
             mcp_servers: dict[str, dict] | None = None, clock_armed: bool = False) -> dict[str, str]:
     """The turn's process's environment: this process's, with the context's profile as Hermes' home and the event
-    pipe's descriptor for the plugin, and on an armed clock the egress proxy (``egress_env``) for the model endpoint and
-    the turn's MCP servers, which Hermes connects to itself."""
+    pipe's descriptor for the plugin. On an armed clock it adds the real-time marker for Hermes (``cli_command``) and
+    the egress proxy (``egress_env``) for the model endpoint, the turn's MCP servers and what Hermes' commands reach."""
     env = {**environ, "HERMES_HOME": str(home)}
     if events_fd is not None:
         env[_EVENTS_FD_ENV] = str(events_fd)
+    if clock_armed:
+        env[REAL_TIME_ENV] = "1"
     urls = [environ.get("LITELLM_BASE_URL", ""), *(str(info.get("url") or "") for info in (mcp_servers or {}).values())]
     env.update(egress_env(environ, urls, armed=clock_armed))
     return env
+
+
+def cli_command(args: list[str], *, clock_armed: bool = False) -> list[str]:
+    """``hermes`` with ``args``; on an armed clock, the command its launcher runs, without the shell that would take the
+    marker, and ``--env-clock`` for the env's date. Hermes stays on real time: its session records, turn lease, stall
+    check and the age cutoffs of its temp files, spills and checkpoints are set against real file and elapsed times."""
+    if not clock_armed:
+        return [HERMES_BIN, *args]
+    return [*launcher_command(), *args, "--env-clock"]
+
+
+def launcher_command(launcher: str | None = None) -> list[str]:
+    """The command Hermes' launcher runs: the launcher is ``#!/bin/sh`` and ``exec <Hermes' Python> -I -c <bootstrap>
+    "$@"``, as Hermes' installer writes it (``shlex.join``)."""
+    name = launcher or HERMES_BIN
+    path = Path(shutil.which(name) or name).resolve()
+    words = shlex.split(path.read_text(), comments=True)
+    if words[:1] != ["exec"] or words[-1:] != ["$@"]:
+        raise ValueError(f"{path} doesn't exec Hermes' interpreter as Hermes' launcher does")
+    return words[1:-1]
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -181,6 +211,8 @@ def build_config(
     role: str | None,
     skills_dir: Path,
     environ: Mapping[str, str] = os.environ,
+    *,
+    clock_armed: bool = False,
 ) -> dict:
     """The profile's config.yaml for one turn, as JSON (which YAML reads). Everything dynamic is rebuilt each turn, and
     a context's turns run one at a time, so no turn reads another's."""
@@ -193,6 +225,11 @@ def build_config(
         "skills": {"external_dirs": [str(skills_dir)]},
         "plugins": {"enabled": [_PLUGIN_NAME]},
     }
+    if clock_armed:
+        # Hermes' execute_code hands its scripts a fixed few variables and those this names: the egress proxy's and its
+        # CA's, which the terminal's commands get anyway, so scripts on the env's clock reach TLS hosts through it too.
+        names = {*egress_env(environ, armed=True), *(name for name in _CA_ENV if name in environ)}
+        config["terminal"] = {"env_passthrough": sorted(names)}
     if mcp_servers:
         servers: dict[str, dict] = {}
         for name, info in mcp_servers.items():
@@ -326,21 +363,24 @@ async def run_hermes(
             "\n\nReturn only a JSON object matching this schema, with no Markdown or surrounding text: "
             + json.dumps(schema, separators=(",", ":"))
         )
-    config = build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, skills_dir)
+    armed = clock_armed()
+    config = build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, skills_dir, os.environ,
+                          clock_armed=armed)
     # To its end even for a cancelled turn: a snapshot may archive the profile as soon as the turn lets go.
     home = await in_thread_to_its_end(prepare_profile, context_id, config, system_prompt)
 
     with tempfile.TemporaryDirectory(prefix="hermes-turn-") as scratch:
         prompt_file, usage_file = Path(scratch) / "prompt.txt", Path(scratch) / "usage.json"
         prompt_file.write_text(prompt)
-        cmd = [HERMES_BIN, "agentenv", "turn", "--prompt-file", str(prompt_file), "--provider", PROVIDER,
-               "--model", model, "--usage-file", str(usage_file)]
+        args = ["agentenv", "turn", "--prompt-file", str(prompt_file), "--provider", PROVIDER,
+                "--model", model, "--usage-file", str(usage_file)]
         if session_id:
-            cmd += ["--resume", session_id]
+            args += ["--resume", session_id]
         if effort:
-            cmd += ["--reasoning", effort]
+            args += ["--reasoning", effort]
+        cmd = cli_command(args, clock_armed=armed)
         logger.info(f"Running hermes (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, "
-                    f"mcp={list((mcp_servers or {}).keys())})")
+                    f"mcp={list((mcp_servers or {}).keys())}, env_clock={armed})")
         if attribution:
             logger.info(f"hermes attribution headers: {attribution}")
 
@@ -352,7 +392,7 @@ async def run_hermes(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workspace,
-                env=cli_env(os.environ, home, events_fd=write_end, mcp_servers=mcp_servers, clock_armed=clock_armed()),
+                env=cli_env(os.environ, home, events_fd=write_end, mcp_servers=mcp_servers, clock_armed=armed),
                 pass_fds=(write_end,),
                 start_new_session=True,
             ))

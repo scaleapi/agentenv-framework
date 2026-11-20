@@ -1,34 +1,54 @@
-"""Hermes on the env's clock: its bridge hands the shared egress rule (tst/unit/agents/test_agent_egress.py) the model
-endpoint's URL and every MCP server's, which Hermes connects to itself, so on an armed clock the turn's process goes out
-through the image's egress proxy, and to loopback, the hosts NO_PROXY names and plain-HTTP hosts directly; unarmed, it
-goes out as before. What every clocked image shares is checked in tst/unit/agents/test_agent_clock_images.py."""
+"""Hermes on the env's clock. Unarmed, a turn runs exactly as before the clock: ``hermes agentenv turn`` with the same
+flags and environment. On an armed clock Hermes stays on real time, run as the command its launcher runs with the
+real-time marker, so its own records, leases and cleanups keep real times while every command it starts follows the
+env's clock; the bridge hands the shared egress rule (tst/unit/agents/test_agent_egress.py) the model endpoint's URL and
+every MCP server's, which Hermes connects to itself, and names its variables for execute_code's scripts too; and the
+plugin shows the model the env's date. What every clocked image shares is checked in
+tst/unit/agents/test_agent_clock_images.py."""
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import importlib.util
+import json
+import re
+import shlex
 import subprocess
+import sys
+import types
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tst.unit.agents.hermes.agent import AGENT_DIR, agent_egress, hermes_bridge
+from tst.unit.agents.hermes.conftest import FAKE_HERMES
 
 PROXY = "http://127.0.0.1:3128"
-
 HOME = Path("/data/.hermes/profiles/ctx-0")
+# The server's environment as root.conf gives it, and the endpoint agent-env gives the agent.
+ENVIRON = {agent_egress.EGRESS_PROXY_ENV: PROXY, "SSL_CERT_FILE": "/etc/agentenv/ca-bundle.pem",
+           "REQUESTS_CA_BUNDLE": "/etc/agentenv/ca-bundle.pem", "NODE_EXTRA_CA_CERTS": "/etc/agentenv/ca.pem",
+           "LITELLM_BASE_URL": "https://litellm.example.com", "LITELLM_API_KEY": "k"}
+MCP = {"env": {"url": "https://abc-123.w.modal.host/mcp"},
+       "peer_agents": {"url": "http://127.0.0.1:8000/ext/peer-agents/mcp"}}
 
 
-def test_on_an_armed_clock_the_turn_goes_out_through_the_proxy():
+def test_on_an_armed_clock_the_turn_runs_on_real_time_and_goes_out_through_the_proxy():
     env = hermes_bridge.cli_env({agent_egress.EGRESS_PROXY_ENV: PROXY, "NO_PROXY": "registry.internal"}, HOME,
                                 events_fd=7, clock_armed=True)
 
+    assert env["AGENTENV_REAL_TIME"] == "1"
     assert {env[name] for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "https_proxy")} == {PROXY}
     assert {"localhost", "host.docker.internal", "registry.internal"} <= set(env["NO_PROXY"].split(","))
     assert (env["HERMES_HOME"], env["AGENTENV_EVENTS_FD"]) == (str(HOME), "7")
 
 
-@pytest.mark.parametrize("environ, armed", [({}, True), ({agent_egress.EGRESS_PROXY_ENV: PROXY}, False)])
-def test_without_the_proxy_or_an_armed_clock_the_turn_goes_out_directly_as_before(environ, armed):
-    env = hermes_bridge.cli_env(environ, HOME, events_fd=7, clock_armed=armed)
+@pytest.mark.parametrize("environ", [{}, {agent_egress.EGRESS_PROXY_ENV: PROXY}])
+def test_unarmed_the_turns_environment_is_this_processs_with_its_hermes_home_and_event_pipe(environ):
+    env = hermes_bridge.cli_env(environ, HOME, events_fd=7, mcp_servers=MCP, clock_armed=False)
 
     assert env == {**environ, "HERMES_HOME": str(HOME), "AGENTENV_EVENTS_FD": "7"}
 
@@ -49,6 +69,206 @@ def test_the_turns_plain_http_mcp_servers_are_reached_directly_and_https_ones_th
 
     direct = set(env["NO_PROXY"].split(","))
     assert "gateway.internal" in direct and not {"10.1.2.3", "abc-123.w.modal.host"} & direct
+
+
+def _spawned(monkeypatch, tmp_path, armed: bool) -> dict:
+    """What run_hermes starts the turn's process with, and the profile config it writes for it, for a resumed turn
+    with an effort and the env's MCP servers."""
+    spawned = {}
+
+    async def fake_exec(*cmd, env, pass_fds, **_):
+        spawned.update(cmd=list(cmd), env=env, fd=pass_fds[0])
+        raise RuntimeError("not starting hermes")
+
+    monkeypatch.setattr(hermes_bridge.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(hermes_bridge, "clock_armed", lambda: armed)
+    monkeypatch.setattr(hermes_bridge.os, "environ", dict(ENVIRON))
+    with pytest.raises(RuntimeError, match="not starting hermes"):
+        asyncio.run(hermes_bridge.run_hermes("hi", "ctx-0", session_id="s-1", model="m", effort="high",
+                                             mcp_servers=MCP, skills_dir=tmp_path / "skills",
+                                             workspace=str(tmp_path)))
+    cmd = spawned["cmd"]
+    spawned["files"] = (cmd[cmd.index("--prompt-file") + 1], cmd[cmd.index("--usage-file") + 1])
+    spawned["config"] = json.loads((hermes_bridge.profile_dir("ctx-0") / "config.yaml").read_text())
+    return spawned
+
+
+def test_unarmed_the_bridge_starts_hermes_with_the_command_and_environment_it_always_has(monkeypatch, fake_hermes,
+                                                                                         tmp_path):
+    spawned = _spawned(monkeypatch, tmp_path, armed=False)
+
+    prompt, usage = spawned["files"]
+    assert spawned["cmd"] == [hermes_bridge.HERMES_BIN, "agentenv", "turn", "--prompt-file", prompt, "--provider",
+                              "litellm", "--model", "m", "--usage-file", usage, "--resume", "s-1", "--reasoning", "high"]
+    assert spawned["env"] == {**ENVIRON, "HERMES_HOME": str(hermes_bridge.profile_dir("ctx-0")),
+                              "AGENTENV_EVENTS_FD": str(spawned["fd"])}
+    assert "terminal" not in spawned["config"]
+
+
+def test_on_an_armed_clock_the_bridge_starts_hermes_own_python_on_real_time_behind_the_proxy(monkeypatch, fake_hermes,
+                                                                                            tmp_path):
+    """Not the launcher: its shell would take the marker, and the Python it starts would follow the env's clock."""
+    spawned = _spawned(monkeypatch, tmp_path, armed=True)
+
+    prompt, usage = spawned["files"]
+    assert spawned["cmd"] == [sys.executable, FAKE_HERMES, "agentenv", "turn", "--prompt-file", prompt, "--provider",
+                              "litellm", "--model", "m", "--usage-file", usage, "--resume", "s-1", "--reasoning", "high",
+                              "--env-clock"]
+    env = spawned["env"]
+    assert env["AGENTENV_REAL_TIME"] == "1" and env["HTTPS_PROXY"] == env["https_proxy"] == PROXY
+    assert "abc-123.w.modal.host" not in env["NO_PROXY"].split(",") and "127.0.0.1" in env["NO_PROXY"].split(",")
+
+
+def test_on_an_armed_clock_execute_codes_scripts_get_the_proxy_and_its_ca_as_the_terminals_commands_do(monkeypatch,
+                                                                                                    fake_hermes,
+                                                                                                    tmp_path):
+    """execute_code passes its scripts a fixed few variables and those terminal.env_passthrough names."""
+    spawned = _spawned(monkeypatch, tmp_path, armed=True)
+
+    passed = set(spawned["config"]["terminal"]["env_passthrough"])
+    egress = {name for name in spawned["env"] if name.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}}
+    assert egress | {"NODE_USE_ENV_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} == passed
+    assert len(egress) == 8
+
+
+@pytest.mark.asyncio
+async def test_an_armed_turn_runs_to_its_end_as_the_launchers_command(monkeypatch, fake_hermes, folders):
+    monkeypatch.setattr(hermes_bridge, "clock_armed", lambda: True)
+    monkeypatch.setenv(agent_egress.EGRESS_PROXY_ENV, PROXY)
+
+    result = await hermes_bridge.run_hermes(prompt="what is 6*7?", context_id="ctx-a", workspace=str(folders))
+
+    ran = json.loads(fake_hermes.read_text())
+    assert (result.error, result.response) == (None, "42")
+    assert ran["args"][:2] == ["agentenv", "turn"] and ran["args"][-1] == "--env-clock"
+    assert (ran["env"]["AGENTENV_REAL_TIME"], ran["env"]["HTTPS_PROXY"]) == ("1", PROXY)
+
+
+def test_the_launchers_command_is_read_as_hermes_installer_writes_it(tmp_path):
+    """``#!/bin/sh`` and ``exec`` with the Python, -I and a bootstrap of many lines, quoted by ``shlex.join``, then
+    ``"$@"``; /usr/local/bin/hermes links to it."""
+    python = str(tmp_path / "tools" / "python 3.14" / "bin" / "python3")
+    script = "import os, sys\n# the repair's own stdlib: it's bound first\nsys.exit(main())\n"
+    launcher = tmp_path / "hermes"
+    launcher.write_text(f'#!/bin/sh\nexec {shlex.join([python, "-I", "-c", script])} "$@"\n')
+    launcher.chmod(0o755)
+    link = tmp_path / "bin" / "hermes"
+    link.parent.mkdir()
+    link.symlink_to(launcher)
+
+    assert hermes_bridge.launcher_command(str(link)) == [python, "-I", "-c", script]
+
+
+@pytest.mark.parametrize("body", ["#!/usr/bin/env python3\nfrom hermes_cli.main import main\nmain()\n",
+                                  "#!/bin/sh\nexec python3 -m hermes_cli.main\n"])
+def test_a_launcher_that_isnt_hermes_installers_is_refused(tmp_path, body):
+    launcher = tmp_path / "hermes"
+    launcher.write_text(body)
+    launcher.chmod(0o755)
+
+    with pytest.raises(ValueError, match="doesn't exec Hermes' interpreter"):
+        hermes_bridge.launcher_command(str(launcher))
+
+
+# The two Hermes functions --env-clock reaches, as the pinned release has them.
+HERMES_TIME = """
+from datetime import datetime
+
+def get_timezone():
+    return TZ
+
+def now():
+    tz = get_timezone()
+    return datetime.now(tz) if tz is not None else datetime.now().astimezone()
+"""
+HERMES_STATE_IDS = """
+import uuid
+from datetime import datetime
+
+def new_session_id(now=None, *, hex_len=6):
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return f"{stamp}_{uuid.uuid4().hex[:hex_len]}"
+"""
+
+
+def _module(name: str, source: str = "", **values) -> types.ModuleType:
+    module = types.ModuleType(name)
+    module.__dict__.update(values)
+    exec(source, module.__dict__)
+    return module
+
+
+@pytest.fixture
+def plugin(monkeypatch):
+    """The plugin as Hermes loads it, over stand-ins for the Hermes modules it reads and the one-shot runner it ends
+    in, which records each turn's message."""
+    ran: list[str] = []
+    hermes_time = _module("hermes_time", HERMES_TIME, TZ=timezone.utc)
+    ids = _module("hermes_state_ids", HERMES_STATE_IDS)
+    for module in (hermes_time, ids, _module("hermes_cli"),
+                   _module("hermes_cli.main", _run_and_exit_oneshot=lambda message, **_: ran.append(message))):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    spec = importlib.util.spec_from_file_location("hermes_agentenv_plugin", AGENT_DIR / "agentenv_plugin" / "__init__.py")
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return SimpleNamespace(module=loaded, hermes_time=hermes_time, ids=ids, ran=ran)
+
+
+def _turn(plugin, tmp_path, *flags: str) -> None:
+    """``hermes agentenv turn`` as the bridge runs it, through the command the plugin registers."""
+    parser = argparse.ArgumentParser()
+    plugin.module._setup(parser)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("hi")
+    plugin.module._handle(parser.parse_args(["turn", "--prompt-file", str(prompt), *flags]))
+
+
+@pytest.mark.parametrize("env_time", ["2031-03-04T05:06:07+00:00", "3026-11-20T12:00:00+00:00",
+                                      "1950-01-01T00:00:00+00:00"])
+@pytest.mark.parametrize("agent_init_loaded", [False, True])
+def test_with_env_clock_hermes_dates_its_prompt_and_session_by_the_envs_clock(plugin, monkeypatch, tmp_path, env_time,
+                                                                             agent_init_loaded):
+    """The date line's date and the session id's stamp, which its start date is read from, as a command started from
+    Hermes reads the time: Hermes runs on real time, what it starts on the env's clock."""
+    epoch = int(datetime.fromisoformat(env_time).timestamp())
+    monkeypatch.setattr(plugin.module, "ENV_TIME_COMMAND", (sys.executable, "-c", f"print({epoch})"))
+    if agent_init_loaded:
+        monkeypatch.setitem(sys.modules, "agent.agent_init",
+                            _module("agent.agent_init", new_session_id=plugin.ids.new_session_id))
+
+    _turn(plugin, tmp_path, "--env-clock")
+
+    stamp = datetime.fromtimestamp(epoch).strftime("%Y%m%d_%H%M%S_")
+    assert plugin.hermes_time.now() == datetime.fromisoformat(env_time)
+    assert plugin.ids.new_session_id(datetime(2026, 11, 20)).startswith(stamp)
+    assert ("agent.agent_init" in sys.modules) is agent_init_loaded
+    if agent_init_loaded:
+        assert sys.modules["agent.agent_init"].new_session_id().startswith(stamp)
+    assert plugin.ran == ["hi"]
+
+
+def test_without_env_clock_hermes_reads_its_own_clock(plugin, monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin.module, "ENV_TIME_COMMAND", (sys.executable, "-c", "raise SystemExit(1)"))
+    minted = plugin.ids.new_session_id
+
+    _turn(plugin, tmp_path)
+
+    assert plugin.hermes_time.datetime is datetime and plugin.ids.new_session_id is minted
+    assert abs(plugin.hermes_time.now().timestamp() - datetime.now().timestamp()) < 60
+    assert plugin.ran == ["hi"]
+
+
+def test_the_env_time_command_prints_whole_seconds_since_the_epoch(plugin):
+    """Whole seconds: ``%N`` beside a negative ``%s`` reads a second off before 1970."""
+    out = subprocess.run(plugin.module.ENV_TIME_COMMAND, capture_output=True, text=True, check=True).stdout
+
+    assert abs(int(out) - datetime.now().timestamp()) < 60
+
+
+def test_the_names_env_clock_replaces_were_checked_against_the_hermes_the_image_installs(plugin):
+    pinned = re.search(r"^ARG HERMES_COMMIT=(\w+)$", (AGENT_DIR / "Dockerfile").read_text(), re.MULTILINE).group(1)
+
+    assert plugin.module.ENV_CLOCK_HERMES_COMMIT == pinned
 
 
 def test_start_agent_keeps_a_providers_ca_bundle_trusted_by_the_server_and_the_proxy(tmp_path):
