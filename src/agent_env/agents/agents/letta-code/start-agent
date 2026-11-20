@@ -1,5 +1,5 @@
 #!/bin/sh
-# The image's start (FD-5916). As root, it makes what the agent's user must not touch, the clock page and file (the
+# The image's start. As root, it makes what the agent's user must not touch, the clock page and file (the
 # clock user's from their first byte) and the egress proxy's CA (its key the egress user's alone, trusted in the
 # system store, agent-env's trust files and every certifi bundle), then starts root's supervisord (root.conf), which
 # runs the clock follower and the egress proxy, each as its own user on real time, and the A2A server as the agent's

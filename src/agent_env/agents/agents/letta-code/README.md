@@ -32,10 +32,30 @@ direct Letta Code tools through `letta.tools.register`; each tool executes `lett
 | `install/v1` | Template installer brings checksum-verified Node and uv, the pinned CLI, and a private Python into a container or a Linux host with glibc. Installs git if missing. |
 | `staging/v1` | SDK default. |
 
-The image runs as user `agent` in `/app`, with state under `/data`, and includes git and `pdftoppm`. PDF attachments
-are rendered as page images; other attachments are materialized and their paths passed to the CLI. Headless mode
-never loads node-pty, so installation skips dependency scripts and rebuilds only the CLI, sharp and protobufjs.
+The image starts as root (`start-agent`), whose supervisord runs the A2A server as user `agent` in `/app`, with state
+under `/data`; started as another user, it runs the server alone, as before. It includes git and `pdftoppm`. PDF
+attachments are rendered as page images; other attachments are materialized and their paths passed to the CLI. Headless
+mode never loads node-pty, so installation skips dependency scripts and rebuilds only the CLI, sharp and protobufjs.
 The end of CLI stderr is included in failures. Cancellation and shutdown kill the CLI's process tree.
+
+The image follows a task env's clock as the agents README describes, only once a `sync_env_clock` sets `agent_clock`.
+Letta Code's local backend runs inside each `letta` process, so the whole CLI follows the clock, the "Local time" line
+of the environment context it gives the model included, as do the commands the model runs; the A2A server, its model
+relay and its records stay on real time. The CLI reaches the model through that relay on loopback, directly, and the env's
+MCP servers over TLS through the egress proxy, `letta mcp call` included. The workspace changelog's tar runs on real
+time, as file times do. Nothing on the CLI's headless path ages conversations or tool output by file times. What still
+reads the env's clock against other times:
+- A commit to the git-backed memory, the bridge's or the CLI's, carries the env's date. Before 1970 git stores an
+  overflowed time, and after 2099 a broken time zone, which `git fsck` flags; commits, `ls-tree` and `show`, all the
+  CLI reads its memory with, work.
+- A jump back across a compaction makes the CLI's pre-turn compaction check estimate the context's size from its text
+  rather than from the last reported usage.
+- Messages written on 2026-01-01 UTC, the CLI's placeholder date, get timestamps interpolated from the transcript
+  file's times when loaded, which changes neither their content nor their order.
+- A `Retry-After` given as a date (LiteLLM and the providers give seconds) is read against the env's date, and the CLI
+  waits at most 60 s.
+- File locks time out, and those that don't go by their owner's process go stale, on the env's clock, so a rate above
+  1 or a jump forward shortens both. A context's own commands are the only ones to take its locks.
 
 Run `agent-env run agents --task letta-code-smoke` for the shell smoke task and
 `agent-env a2a-agent validate --id letta-code --sandbox local` for the repository's validator.
