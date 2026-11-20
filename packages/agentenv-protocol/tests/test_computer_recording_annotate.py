@@ -28,6 +28,7 @@ from agentenv_protocol.computer import (  # noqa: E402
     Recording,
     record,
 )
+from agentenv_protocol.computer import annotate as annotate_module  # noqa: E402
 from agentenv_protocol.computer.annotate import (  # noqa: E402
     COLOURS,
     FADE_S,
@@ -318,14 +319,19 @@ def test_marks_no_frame_draws_are_kept_only_so_long():
 
 
 @pytest.mark.asyncio
-async def test_an_input_goes_ahead_when_its_mark_cant_be_made():
-    """Reading the display for a mark fails: the scroll is still delivered, unmarked."""
+async def test_an_input_goes_ahead_when_its_mark_cant_be_made(monkeypatch):
+    """Making a scroll's mark fails: the scroll is still delivered, unmarked. The mark fails, not the display read it
+    makes, which the recording's own captures would race for."""
     driver = Recorded()
+
+    def unmarkable(*args, **kwargs):
+        raise DeviceUnavailable("the mark couldn't be made")
+
     async with http_client(driver) as http, mcp_session(driver) as session:
         started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
         recording = driver._computer.recordings.running[started["recording_id"]]
         await session.call_tool("computer_screenshot", {})
-        driver.fail["display"] = DeviceUnavailable("the display went away")
+        monkeypatch.setattr(annotate_module, "input_marks", unmarkable)
         scrolled = await session.call_tool("computer_scroll", {"direction": "down"})
         marks = list(recording.annotations.marks)
         await http.post(END, json={"recording_id": started["recording_id"]})
