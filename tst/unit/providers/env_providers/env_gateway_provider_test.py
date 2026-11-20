@@ -1463,6 +1463,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
     sandbox_provider.create_vm = AsyncMock(return_value=sandbox)
 
     sidecar_art = _loadable("ecr/relay:1.0.4")
+    gateway_port, sidecar_port = 18765, 18768
 
     class _Stop(Exception):
         pass
@@ -1478,7 +1479,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
                 sandbox_provider=sandbox_provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
                 mcp_server_images=[_loadable("mcp-slack")],
-                gateway_port=18765,
+                gateway_port=gateway_port,
                 website_configs=None,
                 website_images=None,
                 gateway_mode=GatewayMode.PERFORMANCE,
@@ -1486,7 +1487,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
                 disk_size_gb=10,
                 sidecars=[SidecarConfig(
                     environment_name="relay", image_artifact=sidecar_art,
-                    container_port=8000, host_port=18768,
+                    container_port=8000, host_port=sidecar_port,
                 )],
             )
 
@@ -1494,7 +1495,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
     loaded = sandbox.load_docker_images.call_args.args[0]
     assert sidecar_art in loaded, "sidecar image_artifact was not side-loaded onto the VM"
     # The VM exposes the gateway and the sidecars, and no port of pgweb's or db-mcp's: the gateway serves both.
-    assert sandbox_provider.create_vm.call_args.kwargs["exposed_ports"] == [18765, 18768]
+    assert sandbox_provider.create_vm.call_args.kwargs["exposed_ports"] == [gateway_port, sidecar_port]
 
 
 # --- name injection: SERVICE_NAME + ENVIRONMENT_NAME --------------------------
