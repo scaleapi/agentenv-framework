@@ -1,6 +1,6 @@
 """The rubrics judge's calls go through the installed litellm, not a stand-in.
 
-``_prompt_llm_judge`` is the only caller of litellm: ``acompletion`` with a strict ``json_schema`` response_format over
+``_prompt_llm_judge`` calls litellm through ``config.model_call``: ``acompletion`` with a strict ``json_schema`` response_format over
 text or text-and-image content, read through ``.choices[0].message.content``, sent again without the response_format
 when an endpoint refuses it with images. Each test hands the real ``litellm.acompletion`` exactly the kwargs the
 judge builds, adding only litellm's ``mock_response`` so nothing leaves the process, so a litellm release that stops
@@ -94,7 +94,8 @@ async def test_a_default_call_sends_one_user_message_and_returns_its_usage_and_c
 
     assert calls[0]["messages"] == [{"role": "user", "content": "grade it"}]
     assert out["usage"]["total_tokens"] > 0
-    assert isinstance(out["cost"], float) and out["cost"] > 0
+    assert (out["model"], out["endpoint_host"], out["cost_status"]) == ("openai/gpt-4o", "judge.invalid", "priced")
+    assert out["cost_source"].startswith("litellm@") and out["cost_usd"] > 0 and out["reported_cost_usd"] is None
 
 
 @pytest.mark.asyncio

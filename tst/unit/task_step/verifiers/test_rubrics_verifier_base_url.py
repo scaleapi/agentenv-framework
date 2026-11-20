@@ -16,7 +16,7 @@ from pytest_socket import enable_socket
 import agent_env.config as cfg_mod
 from agent_env.config.model import ModelConfig
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, _judge_route
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 
 _VERDICT = json.dumps({"results": [{"criterion_id": "c1", "passed": True}]})
 
@@ -113,32 +113,3 @@ async def test_a_judge_whose_params_name_its_provider_keeps_that_providers_url(m
     await judge._prompt_llm_judge("grade it", model="claude-sonnet-4-6", context=TaskStepContext())
 
     assert _Endpoint.calls == [("/v1/chat/completions", "claude-sonnet-4-6")]
-
-
-def _provider(name: str, custom_llm_provider: str | None = None):
-    providers = {"claude-sonnet-4-6": "anthropic", "gpt-4.1-mini": "openai", "gemini-2.5-flash": "vertex_ai",
-                 "deepseek/deepseek-chat": "deepseek"}
-    if custom_llm_provider:
-        return name, custom_llm_provider, None, None
-    if name not in providers:
-        print("Provider List")
-        raise ValueError(name)
-    return name, providers[name], None, None
-
-
-def test_the_route_keeps_a_native_name_and_sends_an_unknown_one_as_openai(capsys):
-    assert _judge_route("claude-sonnet-4-6", "https://gw.example/v1", _provider) == (
-        "claude-sonnet-4-6", "https://gw.example")
-    assert _judge_route("gpt-4.1-mini", "https://gw.example/v1", _provider) == ("gpt-4.1-mini", "https://gw.example/v1")
-    assert _judge_route("qwen3:8b", "https://gw.example", _provider) == ("openai/qwen3:8b", "https://gw.example")
-    assert _judge_route("qwen3:8b", None, _provider) == ("qwen3:8b", None)
-    assert _judge_route("claude-sonnet-4-6", "https://gw.example/v1", _provider, "openai") == (
-        "claude-sonnet-4-6", "https://gw.example/v1")
-    assert _judge_route("qwen3:8b", "https://gw.example", _provider, "hosted_vllm") == ("qwen3:8b", "https://gw.example")
-    assert _judge_route("gemini-2.5-flash", "https://gw.example/v1", _provider) == (
-        "openai/gemini-2.5-flash", "https://gw.example/v1")
-    assert _judge_route("deepseek/deepseek-chat", "https://gw.example/v1", _provider) == (
-        "deepseek/deepseek-chat", "https://gw.example/v1")
-    assert _judge_route("gemini-2.5-flash", "https://gw.example", _provider, "vertex_ai") == (
-        "gemini-2.5-flash", "https://gw.example")
-    assert capsys.readouterr().out == ""

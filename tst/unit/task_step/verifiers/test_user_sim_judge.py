@@ -106,7 +106,7 @@ class FakeModel:
     @staticmethod
     def _reply(text: str) -> dict:
         return {"response": text, "trajectory_object_url": None,
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20}, "cost": 0.001}
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20}, "cost_usd": 0.001}
 
     def asked(self, name: str) -> list[dict]:
         return [c for c in self.calls if name in c["names"]]
@@ -277,6 +277,29 @@ async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns(monkey
     assert entry["format"] == "user_sim_checks" and entry["score"] == 0.0
     assert len(fake.calls) == 7 == entry["calls"] and {c["model"] for c in fake.calls} == {JUDGE}
     assert entry["usage"]["prompt_tokens"] == 700 and entry["cost"] == pytest.approx(0.007)
+
+
+class _PricedFirst(FakeModel):
+    """The fake, its first ``priced`` answers costing $0.001 each and the rest without a figure."""
+
+    def __init__(self, priced: int):
+        super().__init__()
+        self.priced, self.answered = priced, 0
+
+    async def __call__(self, *args, **kwargs):
+        got = await super().__call__(*args, **kwargs)
+        self.answered += 1
+        return {**got, "cost_usd": 0.001 if self.answered <= self.priced else None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("priced, cost, unpriced", [(7, 0.007, None), (3, 0.003, 4), (0, None, 7)])
+async def test_the_runs_cost_sums_the_calls_with_a_figure_and_counts_those_without(monkeypatch, priced, cost,
+                                                                                  unpriced):
+    entry = await _judge(_run(("reply", "ok")), _PricedFirst(priced), monkeypatch)
+
+    assert entry["calls"] == 7 and entry.get("unpriced_calls") == unpriced
+    assert entry["cost"] is None if cost is None else entry["cost"] == pytest.approx(cost)
 
 
 @pytest.mark.asyncio
