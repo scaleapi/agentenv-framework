@@ -258,6 +258,15 @@ async def test_peer_tools_off_on_an_agent_that_cannot_take_it_fails_before_any_r
     assert wiring.agent.close.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_peer_tools_on_for_an_agent_that_cant_take_it_is_dropped_and_the_deploy_goes_on(wiring):
+    # true is the default an agent already has, so it isn't checked against the card: negotiation leaves it out.
+    context = await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role=None, peer_tools=True)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+    assert "peer_tools" not in context.deployed_agents[0].a2a_card
+
+
 def test_peer_tools_is_a_bool_and_round_trips():
     with pytest.raises(ValueError):
         DeployAgentTaskStep(id="ag", version=None, peer_tools="no")
