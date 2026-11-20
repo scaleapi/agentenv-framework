@@ -150,6 +150,8 @@ def test_a_skipped_source_is_left_out_and_every_source_skipped_or_a_gate_skipped
      "weights gives 'rubric' inf; a weight is a finite number of at least 0"),
     ({"sources": ["rubric"], "combine": "weighted_mean", "weights": {"rubric": float("nan")}},
      "weights gives 'rubric' nan; a weight is a finite number of at least 0"),
+    ({"sources": ["rubric"], "combine": "weighted_mean", "weights": {"rubric": 10**400}},
+     "a weight is a finite number of at least 0"),
     ({"sources": [{}], "combine": "weighted_mean", "weights": {"rubric": 1}}, "sources must be a list of step ids"),
     ({"sources": ["rubric", "outcome"], "combine": "weighted_mean", "weights": {"rubric": 0, "outcome": 0}},
      "every weight is 0, so nothing counts"),

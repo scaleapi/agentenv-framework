@@ -143,9 +143,7 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
         if not isinstance(self.weights, dict):
             return [f"weights must map each source's step id to a number, not {self.weights!r}"]
         problems = [f"weights gives {key!r} {weight!r}; a weight is a finite number of at least 0"
-                    for key, weight in self.weights.items()
-                    if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight)
-                    or weight < 0]
+                    for key, weight in self.weights.items() if not _usable_weight(weight)]
         listed = self.sources if isinstance(self.sources, list) else []
         sources = [source for source in listed if isinstance(source, str)]
         if unknown := [key for key in self.weights if key not in sources]:
@@ -237,6 +235,16 @@ def _grade(grades: dict[str, Grade], step: str, role: str) -> Grade:
         raise RuntimeError(f"{role} {step!r} failed, so the aggregate can't combine it: "
                            f"{grade.get('verifier_error_reasoning')}")
     return grade
+
+
+def _usable_weight(weight: Any) -> bool:
+    """A number of at least 0 that a float holds: not a bool, not inf or nan, nor an integer too big for a float."""
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        return False
+    try:
+        return math.isfinite(weight) and weight >= 0
+    except OverflowError:
+        return False
 
 
 def _summary(grade: Grade) -> dict[str, Any]:
