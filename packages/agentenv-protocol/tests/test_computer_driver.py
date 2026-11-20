@@ -119,6 +119,8 @@ def test_unknown_predicates_are_refused():
     ({"keys": ("Return",)}, "keys: 'Return' is not a W3C key value"),
     ({"display_modes": ((10, 10),)}, "display_modes and @set_display come together"),
     ({"screen_kind": "tablet"}, "screen_kind is desktop or page, got 'tablet'"),
+    ({"screenshot_delay_ms": -1}, "screenshot_delay_ms is an integer from 0 to 10000, got -1"),
+    ({"screenshot_delay_ms": 0.5}, "screenshot_delay_ms is an integer from 0 to 10000, got 0.5"),
 ])
 def test_features_are_checked_when_the_class_is_defined(features, error):
     with pytest.raises(TypeError, match=error):
