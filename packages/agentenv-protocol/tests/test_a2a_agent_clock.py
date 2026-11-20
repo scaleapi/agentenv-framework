@@ -22,6 +22,8 @@ from agentenv_protocol.a2a_agent import (
     a2a_agent,
 )
 from agentenv_protocol.a2a_agent import clock as agent_clock
+from agentenv_protocol.a2a_agent import extension
+from agentenv_protocol.a2a_agent.extensions import ClockSyncTimeRequest
 from agentenv_protocol.computer import clock as follower
 
 REQUEST = {"env_get_time_url": "http://gw/clock/time", "watch_url": "http://gw/clock/watch", "name": "agent-solver",
@@ -207,6 +209,22 @@ def test_the_card_serves_use_env_time_beside_sync_time(image):
 
     assert set(methods) == {"sync_time", "use_env_time"}
     assert methods["use_env_time"]["method"] == "POST"
+
+
+def test_an_agent_that_serves_its_own_sync_time_still_starts_without_use_env_time(image):
+
+    @a2a_agent(identity=AgentIdentity(name="own-clock", description="test", version="1"), extensions=(CLOCK_V1,))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("ok")
+
+        @extension(CLOCK_V1.sync_time)
+        async def sync_time(self, request: ClockSyncTimeRequest) -> dict:
+            return {"synced": True, "timezone": "UTC", "follower": {}}
+
+    with TestClient(Agent().create_app()) as client:
+        assert set(_clock(client)["params"]["methods"]) == {"sync_time"}
+        assert client.post("/ext/clock/use-env-time").status_code == 404
 
 
 def test_sync_time_alone_loads_the_clock_libraries_into_nothing(image, opt_in):

@@ -1049,7 +1049,8 @@ def _with_clock(definition: _AgentDefinition) -> _AgentDefinition:
     if not agent_clock.follows() or any(a.definition.uri == CLOCK_V1.uri for a in definition.extensions):
         return definition
     agent_clock.restore()  # a server restarted mid-run takes back the clock libraries and the task's zone
-    return dataclasses.replace(definition, extensions=(*definition.extensions, ExtensionActivation(CLOCK_V1)))
+    return dataclasses.replace(definition, extensions=(*definition.extensions,
+                                                       ExtensionActivation(CLOCK_V1, features=frozenset({"env_time"}))))
 
 
 class DefaultExtensionHandlers:

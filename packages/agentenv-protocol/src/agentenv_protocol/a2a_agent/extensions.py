@@ -1470,13 +1470,20 @@ CLOCK_V1 = ExtensionDefinition(
             request_model=ClockSyncTimeRequest,
             response_required=("synced", "timezone", "follower"),
         ),
-        "use_env_time": _op(
-            "use_env_time",
-            "POST",
-            "/ext/clock/use-env-time",
-            SDK,
-            response_required=("env_time", "preloaded"),
-        ),
+    },
+    # Optional, so an agent that serves its own sync_time needn't serve it; the SDK's clock turns it on.
+    optional_features={
+        "env_time": OperationGroup(
+            {
+                "use_env_time": _op(
+                    "use_env_time",
+                    "POST",
+                    "/ext/clock/use-env-time",
+                    SDK,
+                    response_required=("env_time", "preloaded"),
+                )
+            }
+        )
     },
 )
 
