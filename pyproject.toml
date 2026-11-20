@@ -240,4 +240,15 @@ log_cli_level = "INFO"
 log_cli_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 [tool.ruff.lint]
-select = ["F"]
+select = ["F", "ASYNC", "RUF006"]
+# Left out: a timeout parameter is this codebase's style (ASYNC109); its polling loops wait on processes, files and
+# other threads, which no asyncio.Event can signal (ASYNC110); its async file I/O is small writes and chunked streams
+# (ASYNC230, ASYNC240).
+ignore = ["ASYNC109", "ASYNC110", "ASYNC230", "ASYNC240"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests block the loop on purpose, to stand in for slow work or to drive a subprocess.
+"tst/**" = ["ASYNC2", "RUF006"]
+"packages/agentenv-protocol/tests/**" = ["ASYNC2", "RUF006"]
+# Lume's VM and its port relay are detached processes that outlive the call that starts them.
+"src/agent_env/providers/sandbox_providers/lume/provider.py" = ["ASYNC220"]
