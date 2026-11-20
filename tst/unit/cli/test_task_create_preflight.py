@@ -97,3 +97,28 @@ def test_skip_validation_saves_and_still_prints_the_problems(tmp_path, store):
     assert "Saving anyway" in result.output
     put_step.assert_called_once()
     put_task.assert_called_once()
+
+
+def test_a_field_no_step_reads_is_refused_naming_the_one_it_meant_and_persists_nothing(tmp_path, store):
+    put_step, put_task = store
+    path = tmp_path / "steps.json"
+    path.write_text(json.dumps([{"id": "c1", "type": "run_code", "script_artifact_id": "a", "agent_nme": "x"}]))
+
+    result = CliRunner().invoke(create, [str(path), "--id", "t", "--skip-validation"])
+
+    assert result.exit_code == 1
+    assert "Error: step 'c1': run_code doesn't read 'agent_nme' (did you mean 'agent_name'?)" in result.output
+    put_step.assert_not_called()
+    put_task.assert_not_called()
+
+
+def test_a_lint_error_is_a_preflight_problem_and_a_lint_warning_is_only_printed(tmp_path, store):
+    put_step, put_task = store
+    with patch("agent_env.artifact.Artifact.get", side_effect=NotFoundError("nope")):
+        refused = CliRunner().invoke(create, [str(_object_file(tmp_path, headline_verifiers=["c1"])), "--id", "t"])
+
+    assert refused.exit_code == 1
+    assert "Warning: no step grades this task, so a run has no score" in refused.output
+    assert "  - headline_verifiers names 'c1', a run_code step, which grades nothing" in refused.output
+    put_step.assert_not_called()
+    put_task.assert_not_called()

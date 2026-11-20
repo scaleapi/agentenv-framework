@@ -161,6 +161,8 @@ class VerifierTaskStep(TaskStep):
 
     def config_problems(self) -> list[str]:
         problems = super().config_problems()
+        if not isinstance(self.verifier_id, str):
+            problems.append(f"verifier_id must be a string, not {type(self.verifier_id).__name__}")
         if not 0.0 < self.min_passing_score <= 1.0:
             problems.append(f"min_passing_score must be above 0 and at most 1, not {self.min_passing_score}")
         return problems

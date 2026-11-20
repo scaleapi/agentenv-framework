@@ -657,6 +657,13 @@ class TestFiles:
             f"tasks/b.json: {TASK_SHAPE}",
         )
 
+    def test_a_step_whose_id_or_type_is_an_array_or_object_is_refused(self, tmp_path):
+        root = build(tmp_path / "b", {"tasks/a.json": '[{"id": "box", "type": "x"}, {"id": ["box"], "type": "x"}]',
+                                      "tasks/b.json": '[{"id": "box", "type": {"name": "x"}}]',
+                                      "tasks/c.json": '[{"id": 1, "type": "x"}]'})
+        assert problems(root) == ("tasks/a.json: step #1's id is a JSON array; it must be a string",
+                                  "tasks/b.json: step #0's type is a JSON object; it must be a string")
+
     @pytest.mark.parametrize("rel, content", [
         ("tasks/t.json", "[" * 100_000 + "]" * 100_000),
         ("evals/e.toml", "a = " + "[" * 5000 + "]" * 5000 + "\n"),

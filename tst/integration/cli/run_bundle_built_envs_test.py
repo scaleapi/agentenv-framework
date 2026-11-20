@@ -397,9 +397,10 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
 
 
 # Checks each items server CONFIG names holds exactly the items loaded into it, read from its export-state route behind
-# the multi's gateway. CONFIG goes above it.
+# the multi's gateway, with the control token the run's grant gives. CONFIG goes above it.
 VERIFY_SEEDED = '''
 import httpx
+from agentenv_protocol.client import request_headers
 
 
 async def verify(mcp_url):
@@ -407,7 +408,8 @@ async def verify(mcp_url):
     results = []
     async with httpx.AsyncClient(timeout=30) as client:
         for server, items in CONFIG["servers"].items():
-            response = await client.get(f"{gateway}/svc/mcp-{server}/export-state")
+            url = f"{gateway}/svc/mcp-{server}/export-state"
+            response = await client.get(url, headers=request_headers(url))
             listed = response.json() if response.status_code == 200 else {}
             description = f"{server} holds what it was seeded with, {items}: {response.status_code} {listed}"
             results.append({"id": server, "result": listed.get("items") == items, "description": description})
