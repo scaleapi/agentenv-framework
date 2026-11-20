@@ -16,6 +16,8 @@ STEP_USAGE_KEY = "step_usage"
 _COUNTERS = ("tool_call_count", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
              "cache_write_tokens")
 _TOKEN_COUNTS = _COUNTERS[1:]
+# How many turns' unreadable values an entry keeps; ``unparsed_turns`` counts them all.
+_UNPARSED_TURNS_KEPT = 5
 
 
 @dataclass
@@ -61,7 +63,8 @@ class RoleUsage:
         if unreported:
             entry["unreported_calls"] = sum(unreported)
         if self.unparsed:
-            entry["unparsed"] = list(self.unparsed)
+            entry["unparsed"] = self.unparsed[:_UNPARSED_TURNS_KEPT]
+            entry["unparsed_turns"] = len(self.unparsed)
         return entry
 
 

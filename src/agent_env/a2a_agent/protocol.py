@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import time
@@ -270,14 +271,28 @@ async def cancel_a2a_task(a2a_url: str, task_id: str) -> None:
 
 
 _USAGE_FIELDS = frozenset(f.name for f in fields(Usage)) - {"provider_details"}
+# How much of a value ``read_usage`` couldn't read it keeps, so a broken agent can't bloat a run's stored context.
+_UNPARSED_PREVIEW_CHARS = 200
 # Where agents before Usage had cache fields put their cache counts.
 _LEGACY_CACHE_KEYS = ("cache_read_tokens", "cache_write_tokens")
 
 
+def _preview(value: Any) -> Any:
+    """``value`` as it came when it's short, else the start of its JSON as a string."""
+    text = json.dumps(value, default=str)
+    return value if len(text) <= _UNPARSED_PREVIEW_CHARS else text[:_UNPARSED_PREVIEW_CHARS] + "..."
+
+
 def read_usage(raw: Any) -> tuple[Optional[Usage], Optional[dict]]:
     """An agent's reported usage and what of it couldn't be read, never raising: each field ``Usage`` has, checked on
-    its own, a value it refuses kept under its name in the second; a key it doesn't have kept in ``provider_details``;
-    the cache counts an agent from before the typed fields put in ``provider_details`` read from there."""
+    its own, a value it refuses kept under its name in the second (a long one cut to its start); a key it doesn't have
+    kept in ``provider_details``; the cache counts an agent from before the typed fields put in ``provider_details``
+    read from there."""
+    usage, unparsed = _read_usage(raw)
+    return usage, ({key: _preview(value) for key, value in unparsed.items()} if unparsed else None)
+
+
+def _read_usage(raw: Any) -> tuple[Optional[Usage], Optional[dict]]:
     if raw is None:
         return None, None
     if not isinstance(raw, Mapping):

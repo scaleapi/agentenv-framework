@@ -138,7 +138,7 @@ async def test_malformed_usage_is_kept_aside_and_the_step_runs(monkeypatch):
 
     solver = ctx.prompt_responses[-1].usage[0]
     assert (solver["input_tokens"], solver["output_tokens"], solver["partial"]) == (None, 7, True)
-    assert solver["unparsed"] == [{"input_tokens": -5}, {"usage": "garbage"}]
+    assert (solver["unparsed"], solver["unparsed_turns"]) == ([{"input_tokens": -5}, {"usage": "garbage"}], 2)
 
 
 class _Agent:

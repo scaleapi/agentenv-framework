@@ -208,6 +208,14 @@ def test_an_agents_usage_is_read_as_far_as_it_can_be_and_never_raises(raw, usage
     assert read_usage(raw) == (usage, unparsed)
 
 
+def test_a_long_unreadable_value_is_kept_only_as_its_start():
+    usage, unparsed = read_usage({"input_tokens": 5, "output_tokens": "x" * 5000, "provider_details": ["y"] * 2000})
+
+    assert usage == Usage(input_tokens=5)
+    assert unparsed["output_tokens"].startswith('"xxx') and unparsed["output_tokens"].endswith("...")
+    assert all(len(value) == 203 for value in unparsed.values())
+
+
 def test_the_tool_call_count_is_read_as_it_always_was_whatever_the_rest_of_the_usage():
     message = {"parts": [{"kind": "data", "data": {"usage": {"tool_call_count": "7", "input_tokens": 3}}}]}
 

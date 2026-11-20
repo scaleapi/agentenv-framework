@@ -53,3 +53,13 @@ def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_pa
     entry = role.entry()
 
     assert (entry["total_tokens"], entry["input_tokens"], entry["partial"]) == (100, None, True)
+
+
+def test_an_entry_keeps_the_first_turns_unreadable_values_and_counts_them_all():
+    role = RoleUsage("solver")
+    for n in range(8):
+        role.add(None, {"input_tokens": -n})
+
+    entry = role.entry()
+
+    assert entry["unparsed"] == [{"input_tokens": -n} for n in range(5)] and entry["unparsed_turns"] == 8
