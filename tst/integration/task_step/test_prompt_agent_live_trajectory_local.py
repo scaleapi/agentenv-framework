@@ -149,6 +149,8 @@ async def test_each_turn_is_stored_live_under_its_own_prefix_and_joins_to_its_fi
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     finals = context.prompt_responses[-1].target_agent_per_turn_trajectory_object_urls
     assert len(finals) == 2 and all(finals)
+    assert context.prompt_responses[-1].target_agent_per_turn_trajectories == [
+        {"native_format": "agentenv-echo-agent/v1", "atif": None}] * 2
     turns = [store.get_object_key(url).removeprefix(f"{prefix_key}trajectory-").removesuffix(".json") for url in finals]
     assert len(set(turns)) == 2
     for turn, final_url in zip(turns, finals):

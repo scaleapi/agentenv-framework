@@ -42,17 +42,21 @@ class _Agent:
         self.answers = list(answers)
         self.afters: list[int] = []
         self.tokens: list[str | None] = []
+        self.formats: list[str | None] = []
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self._answer))
 
     def _answer(self, request: httpx.Request) -> httpx.Response:
-        self.afters.append(json.loads(request.content)["after"])
+        body = json.loads(request.content)
+        self.afters.append(body["after"])
+        self.formats.append(body.get("format"))
         self.tokens.append(request.headers.get("agentenv-control-token"))
         return self.answers.pop(0)
 
 
-async def _follow(agent: _Agent, headers: dict[str, str] | None = None) -> list[TrajectoryBatch]:
+async def _follow(agent: _Agent, headers: dict[str, str] | None = None, format: str | None = None
+                  ) -> list[TrajectoryBatch]:
     batches: list[TrajectoryBatch] = []
 
     async def sink(batch: TrajectoryBatch) -> None:
@@ -60,7 +64,8 @@ async def _follow(agent: _Agent, headers: dict[str, str] | None = None) -> list[
 
     async with agent.client() as client:
         await follow_trajectory(
-            _ENDPOINT, "task-1", sink, poll_interval_seconds=0, stop=asyncio.Event(), client=client, headers=headers
+            _ENDPOINT, "task-1", sink, poll_interval_seconds=0, stop=asyncio.Event(), client=client, headers=headers,
+            format=format,
         )
     return batches
 
@@ -114,6 +119,18 @@ async def test_every_read_carries_the_headers_it_was_given():
     await _follow(agent, headers={"AgentEnv-Control-Token": "tok"})
 
     assert agent.tokens == ["tok", "tok"]
+
+
+@pytest.mark.asyncio
+async def test_every_read_names_the_format_it_was_given_and_none_without_one():
+    pages = [_page(0, [{"i": 0}], "running"), _page(1, [], "completed")]
+    named, unnamed = _Agent(*(httpx.Response(200, json=page) for page in pages)), _Agent(
+        *(httpx.Response(200, json=page) for page in pages))
+
+    await _follow(named, format="echo/1")
+    await _follow(unnamed)
+
+    assert named.formats == ["echo/1", "echo/1"] and unnamed.formats == [None, None]
 
 
 @pytest.mark.asyncio

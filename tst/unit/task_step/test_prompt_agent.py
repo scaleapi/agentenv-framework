@@ -266,8 +266,50 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
 
     uri = result.prompt_responses[-1].agent_trajectory_object_url
     assert trajectory_requests == [{"task_id": "task-1"}]
+    assert result.prompt_responses[-1].target_agent_per_turn_trajectories == [{"native_format": None, "atif": None}]
     assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_its_default(monkeypatch, tmp_path):
+    """A card whose default is atif/1, as F10 flips agents to, still gives judges the native copy they read."""
+    store = LocalFilesystemObjectStore(str(tmp_path))
+    configure(object_store=store)
+    for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task",
+               "mark_closed", "get_conversation"):
+        monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
+
+    async def sdk_get(request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest):
+        return {"trajectory": []}
+
+    [extension] = build_registry(
+        object(), [enable(TRAJECTORY_V1, native="echo/1")], sdk_handlers={(TRAJECTORY_V1.uri, "get"): sdk_get}
+    ).card_extensions()
+    extension["params"].update(formats=["echo/1", "atif/1"], default="atif/1")
+    trajectory_requests: list[dict] = []
+
+    def trajectory(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        trajectory_requests.append(body)
+        return httpx.Response(200, json={"trajectory": [{"type": "echo"}], "format": body.get("format", "atif/1")})
+
+    FakeA2AAgents({"http://agent.test": [{"kind": "text", "text": "Echo: hi"}]}, other=trajectory).serve(monkeypatch)
+    context = TaskStepContext(instance_id="ti-1")
+    context.deployed_agents.append(DeployedAgent(
+        agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test",
+        a2a_card={"capabilities": {"extensions": [extension]}},
+    ))
+    step = PromptAgentTaskStep(
+        id="solve", version=None, prompt="hi", agent_name="solver", poll_interval_seconds=0,
+        trajectory_output_prefix=store.object_url("prompt_agent_trajectories"),
+    )
+
+    result = await step.execute(context)
+
+    assert trajectory_requests == [{"task_id": "task-1", "format": "echo/1"}]
+    assert result.prompt_responses[-1].target_agent_per_turn_trajectories == [{"native_format": "echo/1", "atif": None}]
+    assert json.loads(store.get(result.prompt_responses[-1].agent_trajectory_object_url)) == [{"type": "echo"}]
 
 
 def test_a_prompt_step_is_a_prompt_agent_or_a_subclass_whether_a_step_or_its_config():
