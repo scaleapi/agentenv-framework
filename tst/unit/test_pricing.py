@@ -5,21 +5,18 @@ import sys
 
 import pytest
 
-from agent_env.config import prices as prices_module
-from agent_env.config.model import ModelConfig
-from agent_env.config.prices import (
+from agent_env import pricing as prices_module
+from agent_env.pricing import (
     PER_MILLION,
     Assumed,
     CostStatus,
     ModelPrice,
-    PlannedModel,
     PriceTable,
     ReportedBy,
     Tokens,
     Unpriced,
     litellm_prices,
     price,
-    unpriced,
 )
 
 # Entries as LiteLLM's map writes them, in USD per token, beside ones it can't price by the token.
@@ -39,14 +36,14 @@ USAGE = {"input_tokens": 1_000_000, "output_tokens": 100_000, "cache_read_tokens
          "cache_write_tokens": None, "input_includes_cache": None, "cost_usd": None}
 
 
-def _agent(usage, model="gpt-4o-mini", *, table=TABLE, on_endpoint=True, reported_first=False):
+def _agent(usage, model="gpt-4o-mini", *, table=TABLE, on_endpoint=True):
     return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=table, on_endpoint=on_endpoint,
-                 reported_first=reported_first, reported_by=ReportedBy.HARNESS)
+                 reported_by=ReportedBy.HARNESS)
 
 
 def _judge(usage, model="gpt-4o-mini", *, on_endpoint=True):
     return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=TABLE, on_endpoint=on_endpoint,
-                 reported_first=True, reported_by=ReportedBy.PROVIDER)
+                 reported_by=ReportedBy.PROVIDER)
 
 
 def test_the_map_is_read_per_million_tokens_keeping_only_entries_with_an_input_and_an_output_price():
@@ -60,7 +57,7 @@ def test_the_map_is_read_per_million_tokens_keeping_only_entries_with_an_input_a
 
 
 def test_the_installed_litellms_map_is_read_without_importing_litellm():
-    probe = ("import sys; from agent_env.config.prices import litellm_prices; t = litellm_prices(); "
+    probe = ("import sys; from agent_env.pricing import litellm_prices; t = litellm_prices(); "
              "print(t.source, t.lookup('gpt-4.1-mini'), 'litellm' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.strip()
 
@@ -103,23 +100,21 @@ def test_a_model_the_map_lists_as_free_costs_nothing():
 
 
 AGENT_BRANCHES = {
-    # name: (model, on_endpoint, reported, reported_first) -> (status, source, usd)
-    "priced": (("gpt-4o-mini", True, None, False), (CostStatus.PRICED, "litellm@test", 0.15 + 0.06)),
-    "priced-keeps-reported-beside": (("gpt-4o-mini", True, 9.0, False), (CostStatus.PRICED, "litellm@test", 0.21)),
-    "reported-without-a-price": (("gpt-4o", True, 9.0, False), (CostStatus.REPORTED, "harness", 9.0)),
-    "unpriced": (("gpt-4o", True, None, False), (CostStatus.UNPRICED, None, None)),
-    "reported-first": (("gpt-4o-mini", True, 9.0, True), (CostStatus.REPORTED, "harness", 9.0)),
-    "reported-first-without-one-prices": (("gpt-4o-mini", True, None, True), (CostStatus.PRICED, "litellm@test", 0.21)),
-    "other-endpoint-reported": (("gpt-4o-mini", False, 9.0, False), (CostStatus.REPORTED, "harness", 9.0)),
-    "other-endpoint-unpriced": (("gpt-4o-mini", False, None, False), (CostStatus.UNPRICED, None, None)),
-    "no-model": ((None, True, None, False), (CostStatus.UNPRICED, None, None)),
+    # name: (model, on_endpoint, reported) -> (status, source, usd)
+    "priced": (("gpt-4o-mini", True, None), (CostStatus.PRICED, "litellm@test", 0.15 + 0.06)),
+    "priced-keeps-reported-beside": (("gpt-4o-mini", True, 9.0), (CostStatus.PRICED, "litellm@test", 0.21)),
+    "reported-without-a-price": (("gpt-4o", True, 9.0), (CostStatus.REPORTED, "harness", 9.0)),
+    "unpriced": (("gpt-4o", True, None), (CostStatus.UNPRICED, None, None)),
+    "other-endpoint-reported": (("gpt-4o-mini", False, 9.0), (CostStatus.REPORTED, "harness", 9.0)),
+    "other-endpoint-unpriced": (("gpt-4o-mini", False, None), (CostStatus.UNPRICED, None, None)),
+    "no-model": ((None, True, None), (CostStatus.UNPRICED, None, None)),
 }
 
 
 @pytest.mark.parametrize("given, expected", AGENT_BRANCHES.values(), ids=AGENT_BRANCHES.keys())
-def test_a_cost(given, expected):
-    model, on_endpoint, reported, reported_first = given
-    cost = _agent({**USAGE, "cost_usd": reported}, model, on_endpoint=on_endpoint, reported_first=reported_first)
+def test_an_agents_cost(given, expected):
+    model, on_endpoint, reported = given
+    cost = _agent({**USAGE, "cost_usd": reported}, model, on_endpoint=on_endpoint)
     assert (cost.status, cost.source) == expected[:2]
     assert cost.usd == pytest.approx(expected[2]) if expected[2] is not None else cost.usd is None
     assert cost.reported_usd == reported
@@ -187,7 +182,7 @@ def test_records_that_disagree_on_whether_input_counts_the_cache_add_up_to_their
 
     assert counted + apart == Tokens(uncached_input=40, output=2, cache_read=160)
     assert counted + apart + unknown == Tokens(uncached_input=90, output=3, cache_read=190, assumed_uncached=True)
-    cost = price(counted + apart, None, model="gpt-4o-mini", prices=TABLE, on_endpoint=True, reported_first=False,
+    cost = price(counted + apart, None, model="gpt-4o-mini", prices=TABLE, on_endpoint=True,
                  reported_by=ReportedBy.HARNESS)
     assert cost.usd == pytest.approx((40 * 0.15 + 2 * 0.6 + 160 * 0.075) / PER_MILLION) and cost.assumed == ()
     assert cost.fields()["uncached_input_tokens"] == 40
@@ -217,32 +212,3 @@ def test_a_cost_keeps_what_it_was_priced_at_so_a_newer_map_changes_no_old_record
     assert record["cost_usd"] == pytest.approx(again) and record["cost_source"] == "litellm@test"
     assert _agent(usage, table=newer).usd != pytest.approx(record["cost_usd"])
     assert record["reported_cost_usd"] == 0.002 and record["cost_status"] == "priced"
-
-
-def test_unpriced_names_each_role_the_map_cant_price_and_why():
-    plan = [PlannedModel("solver", "openai/gpt-4o-mini"), PlannedModel("judge", "claude-sonnet-4-6"),
-            PlannedModel("user_simulator", "gpt-4o-mini", on_endpoint=False), PlannedModel("reviewer", None)]
-    found = unpriced(plan, TABLE)
-
-    assert [(planned.role, why) for planned, why in found.missing] == [
-        ("judge", Unpriced.NO_PRICE), ("user_simulator", Unpriced.OTHER_ENDPOINT), ("reviewer", Unpriced.NO_MODEL)]
-    assert found.message().splitlines() == [
-        "judge: claude-sonnet-4-6 isn't in LiteLLM's price map (litellm@test)",
-        "user_simulator: gpt-4o-mini is called on a URL other than the configured endpoint, whose prices aren't known",
-        "reviewer: no model is set, so nothing can price it"]
-    assert unpriced([PlannedModel("solver", "gpt-4o-mini")], TABLE).missing == ()
-
-
-@pytest.mark.parametrize("configured, url, applies", [
-    ("http://localhost:4000/v1", "http://localhost:4000", True),
-    ("http://localhost:4000/v1", "HTTP://LOCALHOST:4000/v1/", True),
-    ("http://localhost:4000/v1", "http://127.0.0.1:4000/v1", False),
-    ("http://localhost:4000/v1", None, False),
-    (None, None, True),
-    (None, "http://localhost:4000", False),
-])
-def test_prices_apply_only_to_the_configured_endpoint_or_a_native_route(monkeypatch, configured, url, applies):
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    assert ModelConfig(base_url=configured).prices_apply(url) is applies
-    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
-    assert ModelConfig(base_url=configured).prices_apply("http://127.0.0.1:4000") is True

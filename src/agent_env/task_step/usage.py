@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
-from agent_env.config.prices import PriceTable, ReportedBy, Tokens, litellm_prices, price
+from agent_env.pricing import PriceTable, ReportedBy, Tokens, litellm_prices, price
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
 if TYPE_CHECKING:
@@ -103,8 +103,7 @@ class RoleUsage:
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
         cost = price(tokens, total("cost_usd"), model=self.model,
-                     prices=prices, on_endpoint=self.on_endpoint, reported_first=False,
-                     reported_by=ReportedBy.HARNESS)
+                     prices=prices, on_endpoint=self.on_endpoint, reported_by=ReportedBy.HARNESS)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)

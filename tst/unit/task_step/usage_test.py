@@ -5,7 +5,7 @@ from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config.model import ModelRole
-from agent_env.config.prices import ModelPrice, PriceTable
+from agent_env.pricing import ModelPrice, PriceTable
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 from agent_env.task_step import usage as usage_module
 from agent_env.task_step.usage import RoleUsage, StepUsage

@@ -374,3 +374,18 @@ def test_api_root_drops_a_trailing_slash_and_one_trailing_v1(url, root):
 ], ids=["scheme", "port", "host", "path", "path-case", "two-v1s", "query", "none", "both-none", "both-empty"])
 def test_same_endpoint_tells_two_endpoints_apart(a, b):
     assert not same_endpoint(a, b)
+
+
+@pytest.mark.parametrize("configured, url, applies", [
+    ("http://localhost:4000/v1", "http://localhost:4000", True),
+    ("http://localhost:4000/v1", "HTTP://LOCALHOST:4000/v1/", True),
+    ("http://localhost:4000/v1", "http://127.0.0.1:4000/v1", False),
+    ("http://localhost:4000/v1", None, False),
+    (None, None, True),
+    (None, "http://localhost:4000", False),
+])
+def test_prices_apply_only_to_the_configured_endpoint_or_a_native_route(monkeypatch, configured, url, applies):
+    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
+    assert ModelConfig(base_url=configured).prices_apply(url) is applies
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
+    assert ModelConfig(base_url=configured).prices_apply("http://127.0.0.1:4000") is True

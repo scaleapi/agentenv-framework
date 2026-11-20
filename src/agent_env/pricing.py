@@ -1,6 +1,6 @@
 """Prices for model usage, from the price map the installed LiteLLM bundles, and the one rule that turns usage into a
-cost (``price``), with ``unpriced``, which names the roles of a plan the map can't price. A cost keeps its status, its
-source and the unit prices it used, so a LiteLLM upgrade never changes a cost already recorded."""
+cost (``price``). A cost keeps its status, its source and the unit prices it used, so a LiteLLM upgrade never changes a
+cost already recorded."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,9 @@ class CostStatus(StrEnum):
 
 
 class ReportedBy(StrEnum):
-    """Who reported a ``reported`` cost, as ATIF's ``cost_source`` names them: the agent's harness, or the endpoint that
-    billed the call (a LiteLLM proxy's ``x-litellm-response-cost``)."""
+    """Who reports a cost, as ATIF's ``cost_source`` names them: an agent's harness, whose figure comes after the map's
+    price, or the endpoint that billed the call (a LiteLLM proxy's ``x-litellm-response-cost``, a judge's), whose
+    figure comes before it."""
 
     HARNESS = "harness"
     PROVIDER = "provider"
@@ -186,16 +187,16 @@ def price(
     model: Optional[str],
     prices: PriceTable,
     on_endpoint: bool,
-    reported_first: bool,
     reported_by: ReportedBy,
 ) -> Cost:
     """The cost of ``tokens`` on ``model``, given the ``reported`` figure. ``prices`` price them only for calls
-    through the configured endpoint (``on_endpoint``), and their price comes before the reported figure, which is kept
-    beside it, unless ``reported_first``: a judge's proxy-billed figure comes first. Neither gives ``unpriced``."""
+    through the configured endpoint (``on_endpoint``). Their price comes before a harness's figure, which is kept beside
+    it, and after the figure the endpoint billed. Neither gives ``unpriced``."""
     listed = prices.lookup(model) if model and on_endpoint else None
     as_reported = Cost(reported, CostStatus.REPORTED, reported_by.value, reported) if reported is not None else None
     as_priced = _priced(tokens, listed, prices.source, reported) if listed and tokens else None
-    first, second = (as_reported, as_priced) if reported_first else (as_priced, as_reported)
+    first, second = ((as_reported, as_priced) if reported_by is ReportedBy.PROVIDER
+                     else (as_priced, as_reported))
     chosen = first or second
     if chosen is not None:
         return chosen
@@ -223,45 +224,3 @@ def _priced(tokens: Tokens, rates: ModelPrice, source: str, reported: Optional[f
     unit = {"input": rates.input, "output": rates.output, "cache_read": read_rate, "cache_write": write_rate}
     return Cost(usd, CostStatus.PRICED, source, reported, tokens.uncached_input, unit, tuple(assumed))
 
-
-@dataclass(frozen=True)
-class PlannedModel:
-    """A role's model in a plan, and whether its calls go through the configured endpoint."""
-
-    role: str
-    model: Optional[str]
-    on_endpoint: bool = True
-
-
-@dataclass(frozen=True)
-class UnpricedModels:
-    """The roles of a plan the prices can't price, each with why."""
-
-    missing: tuple[tuple[PlannedModel, Unpriced], ...] = ()
-    source: str = ""
-
-    def message(self) -> str:
-        """Each unpriced role and why, for a person to read."""
-        return "\n".join(f"{planned.role}: {_WHY[why].format(model=planned.model, source=self.source)}"
-                         for planned, why in self.missing)
-
-
-_WHY = {
-    Unpriced.NO_MODEL: "no model is set, so nothing can price it",
-    Unpriced.OTHER_ENDPOINT: "{model} is called on a URL other than the configured endpoint, whose prices aren't known",
-    Unpriced.NO_PRICE: "{model} isn't in LiteLLM's price map ({source})",
-}
-
-
-def unpriced(planned: Iterable[PlannedModel], prices: PriceTable) -> UnpricedModels:
-    """The roles of a plan whose usage ``prices`` can't price: no model, a URL other than the configured endpoint, or
-    a model the map lacks. A cost an agent reports isn't a price, since a budget must hold before the run."""
-    missing = []
-    for role in planned:
-        if not role.model:
-            missing.append((role, Unpriced.NO_MODEL))
-        elif not role.on_endpoint:
-            missing.append((role, Unpriced.OTHER_ENDPOINT))
-        elif prices.lookup(role.model) is None:
-            missing.append((role, Unpriced.NO_PRICE))
-    return UnpricedModels(tuple(missing), prices.source)
