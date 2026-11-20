@@ -441,6 +441,10 @@ def is_entity_collection(collection: str) -> bool:
     return collection in _entity_collections
 
 
+def entity_collections() -> frozenset[str]:
+    return frozenset(_entity_collections)
+
+
 class VersionedEntityStore(Generic[T]):
     """The shared ``(id, version)`` versioning logic on top of a DocumentStore."""
 
