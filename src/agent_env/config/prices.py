@@ -1,28 +1,31 @@
-"""The ``[model.prices]`` table and the one rule that turns usage into a cost (``price``), with ``unpriced``, which
-names the models a plan would leave without a price. A cost keeps its status, its source and the unit prices it used,
-so changing the table never changes a cost already recorded."""
+"""Prices for model usage, from the price map the installed LiteLLM bundles, and the one rule that turns usage into a
+cost (``price``), with ``unpriced``, which names the roles of a plan the map can't price. A cost keeps its status, its
+source and the unit prices it used, so a LiteLLM upgrade never changes a cost already recorded."""
 
 from __future__ import annotations
 
-import hashlib
+import functools
+import importlib.metadata
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-from agent_env.config.errors import ConfigError
+logger = logging.getLogger(__name__)
 
 PER_MILLION = 1_000_000
-PRICES_SOURCE = "agentenv-prices"
-_RATES = ("input", "output", "cache_read", "cache_write")
-_REQUIRED = ("input", "output")
-_VERSION_CHARS = 12
-_EXAMPLE = '"gpt-4o-mini" = { input = 0.15, output = 0.6, cache_read = 0.075 }'
+LITELLM = "litellm"
+# The map a LiteLLM release ships; LiteLLM itself loads a newer one from the network at import unless told not to.
+_MAP_FILE = "litellm/model_prices_and_context_window_backup.json"
+_MAP_KEYS = {"input": "input_cost_per_token", "output": "output_cost_per_token",
+             "cache_read": "cache_read_input_token_cost", "cache_write": "cache_creation_input_token_cost"}
 
 
 class CostStatus(StrEnum):
-    """Where a cost came from: a figure the agent or the endpoint reported, the price table, or neither."""
+    """Where a cost came from: a figure the agent or the endpoint reported, LiteLLM's price map, or neither."""
 
     REPORTED = "reported"
     PRICED = "priced"
@@ -47,7 +50,7 @@ class Assumed(StrEnum):
 
 class Unpriced(StrEnum):
     """Why a cost has no figure: no model, a URL other than the configured endpoint (or one not known to be it), no
-    price in the table for the model, or no input and output token counts to price."""
+    price in the map for the model, or no input and output token counts to price."""
 
     NO_MODEL = "no_model"
     OTHER_ENDPOINT = "other_endpoint"
@@ -57,7 +60,7 @@ class Unpriced(StrEnum):
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """A model's prices in USD per million tokens; a cache rate None when the table gives none."""
+    """A model's prices in USD per million tokens; a cache rate None when the map gives none."""
 
     input: float
     output: float
@@ -67,31 +70,21 @@ class ModelPrice:
 
 @dataclass(frozen=True)
 class PriceTable:
-    """``[model.prices]``: each model's prices, keyed by its name without a routing prefix."""
+    """Each model's prices, keyed by its name, and the ``source`` a cost priced from them names."""
 
     entries: Mapping[str, ModelPrice] = field(default_factory=dict)
+    source: str = ""
 
     @classmethod
-    def from_section(cls, section: object) -> PriceTable:
-        """Parse ``[model.prices]``, refusing an entry without ``input`` and ``output``, a rate that isn't a
-        non-negative number, or a key that isn't a rate, naming the entry."""
-        if not isinstance(section, dict):
-            raise ConfigError(f"[model.prices] maps each model to its prices, such as {_EXAMPLE}")
-        return cls({name: _model_price(name, rates) for name, rates in section.items()})
-
-    @property
-    def version(self) -> str:
-        """A hash of the entries, so any change to a price gives a new version, and writing a price as ``1`` or
-        ``1.0``, or the entries in another order, doesn't."""
-        canonical = {name: {rate: float(value) for rate in _RATES if (value := getattr(price, rate)) is not None}
-                     for name, price in self.entries.items()}
-        digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode())
-        return digest.hexdigest()[:_VERSION_CHARS]
-
-    @property
-    def source(self) -> str:
-        """What a priced cost names as its source: this table at its version."""
-        return f"{PRICES_SOURCE}@{self.version}"
+    def from_cost_map(cls, cost_map: Mapping[str, Any], source: str) -> PriceTable:
+        """LiteLLM's model cost map, in USD per token, as prices per million tokens: each entry with an input and an
+        output price, and its cache prices when it has them."""
+        entries = {}
+        for name, info in cost_map.items():
+            rates = {rate: _rate(info.get(key)) for rate, key in _MAP_KEYS.items()} if isinstance(info, dict) else {}
+            if rates.get("input") is not None and rates.get("output") is not None:
+                entries[name] = ModelPrice(**rates)
+        return cls(entries, source)
 
     def lookup(self, model: str) -> Optional[ModelPrice]:
         """``model``'s prices: the entry named as called, else the one named without its first ``/`` segment, so
@@ -100,6 +93,27 @@ class PriceTable:
             return self.entries[model]
         _, slash, name = model.partition("/")
         return self.entries.get(name) if slash else None
+
+
+@functools.cache
+def litellm_prices() -> PriceTable:
+    """The price map the installed LiteLLM bundles, read without importing LiteLLM, so a cost's source,
+    ``litellm@<version>``, names the one map it came from. A map that can't be read prices nothing, with a warning,
+    rather than failing the step whose usage is being recorded."""
+    try:
+        dist = importlib.metadata.distribution(LITELLM)
+        cost_map = json.loads(Path(dist.locate_file(_MAP_FILE)).read_text())
+    except (importlib.metadata.PackageNotFoundError, OSError, ValueError) as error:
+        logger.warning("Usage stays unpriced, since LiteLLM's price map can't be read: %s", error)
+        return PriceTable()
+    return PriceTable.from_cost_map(cost_map, f"{LITELLM}@{dist.version}")
+
+
+def _rate(per_token: object) -> Optional[float]:
+    """A per-token price as USD per million tokens; None for anything but a finite, non-negative number."""
+    if isinstance(per_token, bool) or not isinstance(per_token, (int, float)):
+        return None
+    return round(per_token * PER_MILLION, 9) if math.isfinite(per_token) and per_token >= 0 else None
 
 
 @dataclass(frozen=True)
@@ -175,10 +189,9 @@ def price(
     reported_first: bool,
     reported_by: ReportedBy,
 ) -> Cost:
-    """The cost of ``tokens`` on ``model``, given the ``reported`` figure. The table prices them only for calls
-    through the configured endpoint (``on_endpoint``). The table's price comes first and the reported figure second,
-    or the other way round with ``reported_first``: an agent's harness figure follows ``[model]
-    prefer_reported_cost``, and a judge's proxy figure always comes first. Neither gives ``unpriced``."""
+    """The cost of ``tokens`` on ``model``, given the ``reported`` figure. ``prices`` price them only for calls
+    through the configured endpoint (``on_endpoint``), and their price comes before the reported figure, which is kept
+    beside it, unless ``reported_first``: a judge's proxy-billed figure comes first. Neither gives ``unpriced``."""
     listed = prices.lookup(model) if model and on_endpoint else None
     as_reported = Cost(reported, CostStatus.REPORTED, reported_by.value, reported) if reported is not None else None
     as_priced = _priced(tokens, listed, prices.source, reported) if listed and tokens else None
@@ -192,7 +205,7 @@ def price(
 
 
 def _priced(tokens: Tokens, rates: ModelPrice, source: str, reported: Optional[float]) -> Cost:
-    """``tokens`` at ``rates``, a cache rate the table lacks taken as the input rate (an upper bound, marked)."""
+    """``tokens`` at ``rates``, a cache rate the map lacks taken as the input rate (an upper bound, marked)."""
     assumed = []
     read_rate, write_rate = rates.cache_read, rates.cache_write
     if read_rate is None:
@@ -222,64 +235,33 @@ class PlannedModel:
 
 @dataclass(frozen=True)
 class UnpricedModels:
-    """The roles of a plan the table can't price, each with why, and the priced models whose entry has no cache rate,
-    whose cache tokens would be priced at the input rate."""
+    """The roles of a plan the prices can't price, each with why."""
 
     missing: tuple[tuple[PlannedModel, Unpriced], ...] = ()
-    no_cache_rates: tuple[str, ...] = ()
-
-    def toml(self) -> str:
-        """``[model.prices]`` lines for every model with no price, to fill in and add under that table."""
-        names = dict.fromkeys(planned.model for planned, why in self.missing if why is Unpriced.NO_PRICE)
-        return "\n".join(f"{json.dumps(name)} = {{ input = 0.0, output = 0.0 }}  # USD per million tokens"
-                         for name in names)
+    source: str = ""
 
     def message(self) -> str:
-        """What a person reads: each unpriced role and why, the lines that would price the models the table lacks,
-        and the cache rates worth adding."""
-        lines = [f"{planned.role}: {_WHY[why].format(model=planned.model)}" for planned, why in self.missing]
-        if toml := self.toml():
-            lines += ["Add their prices under [model.prices] in .agentenv/config.toml:", toml]
-        lines += [f"{model} has no cache_read or cache_write rate, so its cache tokens are priced at its input rate, "
-                  "an upper bound; add them to its [model.prices] entry" for model in self.no_cache_rates]
-        return "\n".join(lines)
+        """Each unpriced role and why, for a person to read."""
+        return "\n".join(f"{planned.role}: {_WHY[why].format(model=planned.model, source=self.source)}"
+                         for planned, why in self.missing)
 
 
 _WHY = {
     Unpriced.NO_MODEL: "no model is set, so nothing can price it",
-    Unpriced.OTHER_ENDPOINT: "{model} is called on a URL other than the configured endpoint, which [model.prices] "
-                             "doesn't price",
-    Unpriced.NO_PRICE: "{model} has no price in [model.prices]",
+    Unpriced.OTHER_ENDPOINT: "{model} is called on a URL other than the configured endpoint, whose prices aren't known",
+    Unpriced.NO_PRICE: "{model} isn't in LiteLLM's price map ({source})",
 }
 
 
 def unpriced(planned: Iterable[PlannedModel], prices: PriceTable) -> UnpricedModels:
-    """The roles of a plan whose usage the table can't price: no model, a URL other than the configured endpoint, or a
-    model the table lacks. A cost an agent reports isn't a price, since a budget must hold before it runs."""
-    missing, no_cache = [], []
+    """The roles of a plan whose usage ``prices`` can't price: no model, a URL other than the configured endpoint, or
+    a model the map lacks. A cost an agent reports isn't a price, since a budget must hold before the run."""
+    missing = []
     for role in planned:
-        listed = prices.lookup(role.model) if role.model and role.on_endpoint else None
-        if listed is None:
-            missing.append((role, Unpriced.NO_MODEL if not role.model
-                            else Unpriced.OTHER_ENDPOINT if not role.on_endpoint else Unpriced.NO_PRICE))
-        elif listed.cache_read is None or listed.cache_write is None:
-            no_cache.append(role.model)
-    return UnpricedModels(tuple(missing), tuple(dict.fromkeys(no_cache)))
-
-
-def _model_price(name: object, rates: object) -> ModelPrice:
-    if not isinstance(name, str) or not name:
-        raise ConfigError(f"[model.prices] keys are model names, such as {_EXAMPLE}")
-    if not isinstance(rates, dict):
-        raise ConfigError(f"[model.prices] {name!r} is a table of USD per million tokens, such as {_EXAMPLE}")
-    unknown = set(rates) - set(_RATES)
-    if unknown:
-        raise ConfigError(f"[model.prices] {name!r} has unknown keys {sorted(unknown)}; allowed: {list(_RATES)}")
-    missing = [rate for rate in _REQUIRED if rate not in rates]
-    if missing:
-        raise ConfigError(f"[model.prices] {name!r} needs {' and '.join(missing)}, in USD per million tokens")
-    for rate, value in rates.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-            raise ConfigError(f"[model.prices] {name!r} {rate} is {value!r}; a price is a number of USD per million "
-                              "tokens, 0 or more")
-    return ModelPrice(**{rate: float(value) for rate, value in rates.items()})
+        if not role.model:
+            missing.append((role, Unpriced.NO_MODEL))
+        elif not role.on_endpoint:
+            missing.append((role, Unpriced.OTHER_ENDPOINT))
+        elif prices.lookup(role.model) is None:
+            missing.append((role, Unpriced.NO_PRICE))
+    return UnpricedModels(tuple(missing), prices.source)

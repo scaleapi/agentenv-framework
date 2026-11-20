@@ -74,16 +74,9 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
 
 
 @pytest.mark.asyncio
-async def test_a_played_agents_usage_is_never_priced_from_the_table_and_keeps_its_trainers_cost(
-        local_backends, monkeypatch, tmp_path):
-    """The proxy takes no model credentials, so its trainer's calls don't go through the configured endpoint: the
-    table doesn't price them though it lists the model, and the stored entry's cost is the figure the trainer
-    reported, as the agent's own."""
-    config = tmp_path / "prices.toml"
-    config.write_text('[model.prices]\n"policy-model" = { input = 1.0, output = 2.0, cache_read = 0.5 }\n')
-    monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
-    reset_config()
-    configure()
+async def test_a_played_agents_usage_keeps_its_trainers_cost_and_is_never_priced_from_list_prices(local_backends):
+    """The proxy takes no model credentials, so its trainer's calls don't go through the configured endpoint: list
+    prices never price them, and the stored entry's cost is the figure the trainer reported, as the agent's own."""
     task = Task.from_dict({"id": "usage", "steps": [
         {"id": "policy", "type": "deploy_agent", "agent_name": "policy", "env_ids": []},
         {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Say hi.",

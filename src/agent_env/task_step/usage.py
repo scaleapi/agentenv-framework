@@ -4,7 +4,6 @@ step that raises keeps its finished turns. An entry's counts have ``Usage``'s ke
 
 from __future__ import annotations
 
-import logging
 import operator
 from dataclasses import dataclass, field
 from functools import reduce
@@ -12,16 +11,12 @@ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 
 from agentenv_protocol.a2a_agent import Usage
 
-from agent_env.config import get_config
-from agent_env.config.errors import ConfigError
 from agent_env.config.model import ModelRole
-from agent_env.config.prices import PriceTable, ReportedBy, Tokens, price
+from agent_env.config.prices import PriceTable, ReportedBy, Tokens, litellm_prices, price
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
 if TYPE_CHECKING:
     from agent_env.a2a_agent.protocol import TerminalResponse
-
-logger = logging.getLogger(__name__)
 
 STEP_USAGE_KEY = "step_usage"
 _COUNTERS = ("tool_call_count", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
@@ -34,7 +29,7 @@ _UNPARSED_TURNS_KEPT = 5
 class UsageEntry(TypedDict):
     """One role's usage in one step, as ``PromptResponse.usage`` and ``metadata["step_usage"]`` hold it. A count or
     a cost is None when nothing reported it, never 0. ``cost_usd`` is the cost ``cost_status`` and ``cost_source``
-    describe: priced from ``[model.prices]``, the ``uncached_input_tokens`` and the cache and output counts each at
+    describe: priced from LiteLLM's price map, the ``uncached_input_tokens`` and the cache and output counts each at
     its ``unit_prices`` rate, the agent's own figure, or None when unpriced, with the agent's figure always in
     ``reported_cost_usd``."""
 
@@ -83,11 +78,11 @@ class RoleUsage:
         if unparsed:
             self.unparsed.append(unparsed)
 
-    def entry(self, prices: PriceTable = PriceTable(), reported_first: bool = False) -> UsageEntry:
+    def entry(self, prices: PriceTable = PriceTable()) -> UsageEntry:
         """The turns summed and priced: each count the sum of the turns that reported it, None when none did, never
-        0, and the sum's cost by ``price`` from ``prices``, the agent's own figure first when ``reported_first``; each
+        0, and the sum's cost by ``price`` from ``prices``, the agent's own figure kept beside it; each
         turn's tokens are read by its own ``input_includes_cache`` before they're summed, so turns that disagree on it
-        are still charged for their cached input once. The table prices the entry only when every turn that reported a
+        are still charged for their cached input once. The map prices the entry only when every turn that reported a
         token count gave input and output; otherwise its sums can't be charged in full, and it isn't priced short.
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
@@ -108,7 +103,7 @@ class RoleUsage:
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
         cost = price(tokens, total("cost_usd"), model=self.model,
-                     prices=prices, on_endpoint=self.on_endpoint, reported_first=reported_first,
+                     prices=prices, on_endpoint=self.on_endpoint, reported_first=False,
                      reported_by=ReportedBy.HARNESS)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
@@ -129,14 +124,14 @@ def _unreported_calls(usage: Usage) -> int:
 
 class StepUsage:
     """A prompt step's usage, role by role: each role ``start``ed with its model and agent, each of its finished turns
-    recorded with ``turn``, and the entries, priced from the configured ``[model.prices]``, written to
+    recorded with ``turn``, and the entries, priced from LiteLLM's price map, written to
     ``metadata["step_usage"][step_id]`` after every turn."""
 
     def __init__(self, context: TaskStepContext, step_id: str) -> None:
         self._context = context
         self._step_id = step_id
         self._roles: dict[ModelRole, RoleUsage] = {}
-        self._prices, self._reported_first = _pricing()
+        self._prices = litellm_prices()
 
     def start(self, role: ModelRole, model: Optional[str], agent: Optional[DeployedAgent]) -> None:
         """Count ``role``'s turns on ``model``, recording the model and the host of the endpoint ``agent`` was given in
@@ -156,19 +151,9 @@ class StepUsage:
     def entries(self) -> Optional[list[UsageEntry]]:
         """The entries of the roles that ran turns, written to ``metadata["step_usage"]``; None, and nothing written,
         when none did."""
-        entries = [usage.entry(self._prices, self._reported_first) for usage in self._roles.values() if usage.turns]
+        entries = [usage.entry(self._prices) for usage in self._roles.values() if usage.turns]
         if not entries:
             return None
         self._context.metadata.setdefault(STEP_USAGE_KEY, {})[self._step_id] = entries
         return entries
 
-
-def _pricing() -> tuple[PriceTable, bool]:
-    """The configured price table and whether an agent's own cost comes first. A ``[model]`` that can't be read leaves
-    the usage unpriced rather than failing the step it records: the step may name every model and URL itself."""
-    config = get_config()
-    try:
-        return config.get_price_table(), config.prefers_reported_cost()
-    except ConfigError as error:
-        logger.warning("This step's usage stays unpriced, since [model] can't be read: %s", error)
-        return PriceTable(), False

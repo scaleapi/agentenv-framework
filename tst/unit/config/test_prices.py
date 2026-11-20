@@ -1,8 +1,11 @@
-import tomllib
+import importlib.metadata
+import logging
+import subprocess
+import sys
 
 import pytest
 
-from agent_env.config.errors import ConfigError
+from agent_env.config import prices as prices_module
 from agent_env.config.model import ModelConfig
 from agent_env.config.prices import (
     PER_MILLION,
@@ -14,28 +17,31 @@ from agent_env.config.prices import (
     ReportedBy,
     Tokens,
     Unpriced,
+    litellm_prices,
     price,
     unpriced,
 )
 
-
-def _table(toml: str) -> PriceTable:
-    return ModelConfig.from_section(tomllib.loads(toml)["model"], secret_resolver=lambda ref: None).prices
-
-
-TABLE = _table("""
-[model.prices]
-"gpt-4o-mini" = { input = 0.15, output = 0.6, cache_read = 0.075, cache_write = 0.3 }
-"my-finetune" = { input = 1.0, output = 4.0, cache_read = 0.1 }
-"meta-llama/Llama-3-70b" = { input = 0.5, output = 0.5 }
-""")
+# Entries as LiteLLM's map writes them, in USD per token, beside ones it can't price by the token.
+COST_MAP = {
+    "sample_spec": {"input_cost_per_token": "the cost per input token", "output_cost_per_token": 0},
+    "gpt-4o-mini": {"input_cost_per_token": 1.5e-07, "output_cost_per_token": 6e-07,
+                    "cache_read_input_token_cost": 7.5e-08, "cache_creation_input_token_cost": 3e-07},
+    "my-finetune": {"input_cost_per_token": 1e-06, "output_cost_per_token": 4e-06, "cache_read_input_token_cost": 1e-07},
+    "meta-llama/Llama-3-70b": {"input_cost_per_token": 5e-07, "output_cost_per_token": 5e-07},
+    "free-local": {"input_cost_per_token": 0, "output_cost_per_token": 0},
+    "dall-e-3": {"output_cost_per_pixel": 1e-07},
+    "broken": {"input_cost_per_token": -1e-06, "output_cost_per_token": 1e-06},
+    "half": {"input_cost_per_token": 1e-06},
+}
+TABLE = PriceTable.from_cost_map(COST_MAP, "litellm@test")
 USAGE = {"input_tokens": 1_000_000, "output_tokens": 100_000, "cache_read_tokens": None,
          "cache_write_tokens": None, "input_includes_cache": None, "cost_usd": None}
 
 
-def _agent(usage, model="gpt-4o-mini", *, table=TABLE, on_endpoint=True, prefer=False):
+def _agent(usage, model="gpt-4o-mini", *, table=TABLE, on_endpoint=True, reported_first=False):
     return price(Tokens.of(usage), usage["cost_usd"], model=model, prices=table, on_endpoint=on_endpoint,
-                 reported_first=prefer, reported_by=ReportedBy.HARNESS)
+                 reported_first=reported_first, reported_by=ReportedBy.HARNESS)
 
 
 def _judge(usage, model="gpt-4o-mini", *, on_endpoint=True):
@@ -43,67 +49,67 @@ def _judge(usage, model="gpt-4o-mini", *, on_endpoint=True):
                  reported_first=True, reported_by=ReportedBy.PROVIDER)
 
 
-def test_an_entry_parses_and_a_routing_prefix_is_stripped_to_find_it():
-    assert TABLE.lookup("my-finetune") == ModelPrice(input=1.0, output=4.0, cache_read=0.1)
+def test_the_map_is_read_per_million_tokens_keeping_only_entries_with_an_input_and_an_output_price():
+    assert TABLE.entries == {
+        "gpt-4o-mini": ModelPrice(input=0.15, output=0.6, cache_read=0.075, cache_write=0.3),
+        "my-finetune": ModelPrice(input=1.0, output=4.0, cache_read=0.1),
+        "meta-llama/Llama-3-70b": ModelPrice(input=0.5, output=0.5),
+        "free-local": ModelPrice(input=0.0, output=0.0),
+    }
+    assert TABLE.source == "litellm@test"
+
+
+def test_the_installed_litellms_map_is_read_without_importing_litellm():
+    probe = ("import sys; from agent_env.config.prices import litellm_prices; t = litellm_prices(); "
+             "print(t.source, t.lookup('gpt-4.1-mini'), 'litellm' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.strip()
+
+    version = importlib.metadata.version("litellm")
+    assert out == (f"litellm@{version} ModelPrice(input=0.4, output=1.6, cache_read=0.1, cache_write=None) False")
+    assert len(litellm_prices().entries) > 1000
+
+
+def test_a_map_that_cant_be_read_prices_nothing_and_says_why(monkeypatch, caplog):
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(prices_module.importlib.metadata, "distribution", missing)
+    litellm_prices.cache_clear()
+    try:
+        with caplog.at_level(logging.WARNING):
+            table = litellm_prices()
+    finally:
+        litellm_prices.cache_clear()
+
+    assert table.entries == {} and _agent(USAGE, table=table).unpriced is Unpriced.NO_PRICE
+    assert "Usage stays unpriced, since LiteLLM's price map can't be read" in caplog.text
+
+
+def test_a_routing_prefix_is_stripped_to_find_a_model():
     assert TABLE.lookup("openai/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini") is not None
     assert TABLE.lookup("meta-llama/Llama-3-70b") is TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b") is not None
 
 
-@pytest.mark.parametrize("model", ["gpt-4o", "openai/gpt-4o", "Llama-3-70b", ""])
-def test_a_model_the_table_lacks_has_no_price_never_a_zero_one(model):
+@pytest.mark.parametrize("model", ["gpt-4o", "openai/gpt-4o", "Llama-3-70b", "dall-e-3", "broken", "half", ""])
+def test_a_model_the_map_cant_price_has_no_price_never_a_zero_one(model):
     assert TABLE.lookup(model) is None
     cost = _agent(USAGE, model or None)
     assert (cost.usd, cost.status) == (None, CostStatus.UNPRICED)
 
 
-@pytest.mark.parametrize("entry, named", [
-    ('"m" = { input = -1, output = 1 }', "'m' input is -1"),
-    ('"m" = { input = "1", output = 1 }', "'m' input is '1'"),
-    ('"m" = { input = true, output = 1 }', "'m' input is True"),
-    ('"m" = { input = inf, output = 1 }', "'m' input is inf"),
-    ('"m" = { input = nan, output = 1 }', "'m' input is nan"),
-    ('"m" = { input = 1 }', "'m' needs output"),
-    ('"m" = { output = 1 }', "'m' needs input"),
-    ('"m" = { input = 1, output = 1, cached = 0.1 }', "'m' has unknown keys ['cached']"),
-    ('"m" = 1.0', "'m' is a table"),
-    ('"" = { input = 1, output = 1 }', "keys are model names"),
-])
-def test_a_bad_entry_is_refused_naming_it(entry, named):
-    with pytest.raises(ConfigError, match="\\[model.prices\\]") as refused:
-        _table(f"[model.prices]\n{entry}\n")
-    assert named in str(refused.value)
-
-
-def test_prefer_reported_cost_is_a_bool_and_prices_take_no_references():
-    config = ModelConfig.from_section({"prefer_reported_cost": True}, secret_resolver=lambda ref: "1")
-    assert config.prefer_reported_cost is True and ModelConfig().prefer_reported_cost is False
-    with pytest.raises(ConfigError, match="prefer_reported_cost is true or false"):
-        ModelConfig.from_section({"prefer_reported_cost": "yes"}, secret_resolver=lambda ref: None)
-    with pytest.raises(ConfigError, match="'m' input is 'env:PRICE'"):
-        ModelConfig.from_section({"prices": {"m": {"input": "env:PRICE", "output": 1}}},
-                                 secret_resolver=lambda ref: "1")
-
-
-def test_the_version_changes_with_any_price_and_not_with_spelling_or_order():
-    one = _table('[model.prices]\n"a" = { input = 1, output = 2 }\n"b" = { input = 3.0, output = 4.0 }\n')
-    same = _table('[model.prices]\n"b" = { output = 4, input = 3 }\n"a" = { input = 1.0, output = 2.0 }\n')
-    assert one.version == same.version and len(one.version) == 12 and one.source == f"agentenv-prices@{one.version}"
-    for changed in ('"a" = { input = 1, output = 2.5 }\n"b" = { input = 3, output = 4 }',
-                    '"a" = { input = 1, output = 2, cache_read = 0.5 }\n"b" = { input = 3, output = 4 }',
-                    '"a" = { input = 1, output = 2 }',
-                    '"a" = { input = 1, output = 2 }\n"b" = { input = 3, output = 4 }\n"c" = { input = 0, output = 0 }'):
-        assert _table(f"[model.prices]\n{changed}\n").version != one.version
-    assert PriceTable().version != one.version
+def test_a_model_the_map_lists_as_free_costs_nothing():
+    cost = _agent(USAGE, "free-local")
+    assert (cost.usd, cost.status) == (0.0, CostStatus.PRICED)
 
 
 AGENT_BRANCHES = {
-    # name: (model, on_endpoint, reported, prefer) -> (status, source, usd)
-    "priced": (("gpt-4o-mini", True, None, False), (CostStatus.PRICED, TABLE.source, 0.15 + 0.06)),
-    "priced-keeps-reported-beside": (("gpt-4o-mini", True, 9.0, False), (CostStatus.PRICED, TABLE.source, 0.21)),
+    # name: (model, on_endpoint, reported, reported_first) -> (status, source, usd)
+    "priced": (("gpt-4o-mini", True, None, False), (CostStatus.PRICED, "litellm@test", 0.15 + 0.06)),
+    "priced-keeps-reported-beside": (("gpt-4o-mini", True, 9.0, False), (CostStatus.PRICED, "litellm@test", 0.21)),
     "reported-without-a-price": (("gpt-4o", True, 9.0, False), (CostStatus.REPORTED, "harness", 9.0)),
     "unpriced": (("gpt-4o", True, None, False), (CostStatus.UNPRICED, None, None)),
-    "prefer-reported-flips": (("gpt-4o-mini", True, 9.0, True), (CostStatus.REPORTED, "harness", 9.0)),
-    "prefer-reported-without-one-prices": (("gpt-4o-mini", True, None, True), (CostStatus.PRICED, TABLE.source, 0.21)),
+    "reported-first": (("gpt-4o-mini", True, 9.0, True), (CostStatus.REPORTED, "harness", 9.0)),
+    "reported-first-without-one-prices": (("gpt-4o-mini", True, None, True), (CostStatus.PRICED, "litellm@test", 0.21)),
     "other-endpoint-reported": (("gpt-4o-mini", False, 9.0, False), (CostStatus.REPORTED, "harness", 9.0)),
     "other-endpoint-unpriced": (("gpt-4o-mini", False, None, False), (CostStatus.UNPRICED, None, None)),
     "no-model": ((None, True, None, False), (CostStatus.UNPRICED, None, None)),
@@ -111,9 +117,9 @@ AGENT_BRANCHES = {
 
 
 @pytest.mark.parametrize("given, expected", AGENT_BRANCHES.values(), ids=AGENT_BRANCHES.keys())
-def test_an_agents_cost(given, expected):
-    model, on_endpoint, reported, prefer = given
-    cost = _agent({**USAGE, "cost_usd": reported}, model, on_endpoint=on_endpoint, prefer=prefer)
+def test_a_cost(given, expected):
+    model, on_endpoint, reported, reported_first = given
+    cost = _agent({**USAGE, "cost_usd": reported}, model, on_endpoint=on_endpoint, reported_first=reported_first)
     assert (cost.status, cost.source) == expected[:2]
     assert cost.usd == pytest.approx(expected[2]) if expected[2] is not None else cost.usd is None
     assert cost.reported_usd == reported
@@ -121,7 +127,7 @@ def test_an_agents_cost(given, expected):
 
 JUDGE_BRANCHES = {
     "proxy-cost-first": (("gpt-4o-mini", 0.5), (CostStatus.REPORTED, "provider", 0.5)),
-    "priced-without-a-proxy-cost": (("gpt-4o-mini", None), (CostStatus.PRICED, TABLE.source, 0.21)),
+    "priced-without-a-proxy-cost": (("gpt-4o-mini", None), (CostStatus.PRICED, "litellm@test", 0.21)),
     "unpriced": (("claude-sonnet-4-6", None), (CostStatus.UNPRICED, None, None)),
 }
 
@@ -197,44 +203,34 @@ def test_cache_tokens_with_no_cache_rate_take_the_input_rate_and_are_marked():
     assert no_cache.assumed == ()
 
 
-def test_a_cost_keeps_what_it_was_priced_at_so_editing_the_table_changes_no_old_record():
+def test_a_cost_keeps_what_it_was_priced_at_so_a_newer_map_changes_no_old_record():
     usage = {**USAGE, "input_tokens": 3000, "output_tokens": 700, "cache_read_tokens": 900,
              "cache_write_tokens": 50, "input_includes_cache": True, "cost_usd": 0.002}
     record = _agent(usage).fields()
-    repriced = _table('[model.prices]\n"gpt-4o-mini" = { input = 5, output = 9, cache_read = 1, cache_write = 2 }\n')
+    newer = PriceTable.from_cost_map({"gpt-4o-mini": {"input_cost_per_token": 5e-06, "output_cost_per_token": 9e-06}},
+                                     "litellm@newer")
 
     rates = record["unit_prices"]
     assert record["uncached_input_tokens"] == 3000 - 950
     again = (record["uncached_input_tokens"] * rates["input"] + 700 * rates["output"] + 900 * rates["cache_read"]
              + 50 * rates["cache_write"]) / PER_MILLION
-    assert record["cost_usd"] == pytest.approx(again)
-    assert record["cost_source"] == TABLE.source != repriced.source
-    assert _agent(usage, table=repriced).usd != pytest.approx(record["cost_usd"])
+    assert record["cost_usd"] == pytest.approx(again) and record["cost_source"] == "litellm@test"
+    assert _agent(usage, table=newer).usd != pytest.approx(record["cost_usd"])
     assert record["reported_cost_usd"] == 0.002 and record["cost_status"] == "priced"
 
 
-def test_unpriced_names_each_role_the_table_cant_price_and_prints_lines_that_price_them():
+def test_unpriced_names_each_role_the_map_cant_price_and_why():
     plan = [PlannedModel("solver", "openai/gpt-4o-mini"), PlannedModel("judge", "claude-sonnet-4-6"),
-            PlannedModel("user_simulator", "gpt-4o-mini", on_endpoint=False),
-            PlannedModel("reviewer", None), PlannedModel("judge", "claude-sonnet-4-6")]
+            PlannedModel("user_simulator", "gpt-4o-mini", on_endpoint=False), PlannedModel("reviewer", None)]
     found = unpriced(plan, TABLE)
 
     assert [(planned.role, why) for planned, why in found.missing] == [
-        ("judge", Unpriced.NO_PRICE), ("user_simulator", Unpriced.OTHER_ENDPOINT), ("reviewer", Unpriced.NO_MODEL),
-        ("judge", Unpriced.NO_PRICE)]
-    assert found.toml() == '"claude-sonnet-4-6" = { input = 0.0, output = 0.0 }  # USD per million tokens'
-    assert "judge: claude-sonnet-4-6 has no price in [model.prices]" in found.message()
-
-    fixed = _table('[model.prices]\n"gpt-4o-mini" = { input = 0.15, output = 0.6, cache_read = 0.075, '
-                   f'cache_write = 0.3 }}\n{found.toml()}\n')
-    assert [why for _, why in unpriced(plan, fixed).missing] == [Unpriced.OTHER_ENDPOINT, Unpriced.NO_MODEL]
-    assert unpriced([PlannedModel("judge", "claude-sonnet-4-6")], fixed).missing == ()
-
-
-def test_unpriced_warns_about_a_priced_model_without_cache_rates():
-    found = unpriced([PlannedModel("solver", "my-finetune"), PlannedModel("judge", "gpt-4o-mini")], TABLE)
-    assert found.missing == () and found.no_cache_rates == ("my-finetune",)
-    assert "my-finetune has no cache_read or cache_write rate" in found.message()
+        ("judge", Unpriced.NO_PRICE), ("user_simulator", Unpriced.OTHER_ENDPOINT), ("reviewer", Unpriced.NO_MODEL)]
+    assert found.message().splitlines() == [
+        "judge: claude-sonnet-4-6 isn't in LiteLLM's price map (litellm@test)",
+        "user_simulator: gpt-4o-mini is called on a URL other than the configured endpoint, whose prices aren't known",
+        "reviewer: no model is set, so nothing can price it"]
+    assert unpriced([PlannedModel("solver", "gpt-4o-mini")], TABLE).missing == ()
 
 
 @pytest.mark.parametrize("configured, url, applies", [

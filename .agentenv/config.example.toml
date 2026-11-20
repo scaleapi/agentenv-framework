@@ -76,13 +76,6 @@ agent_default = "local"   # agents too
 # api_key  = "env:HF_INFERENCE_TOKEN"
 # [model.headers]
 # "X-HF-Bill-To" = "my-org"   # bill an organization instead of the token's account
-#
-# Prices, in USD per million tokens, for usage through this endpoint; a model without one stays unpriced, never $0.
-# A model is found by its name as called, or without its routing prefix (openai/gpt-4o-mini finds gpt-4o-mini).
-# Cache tokens with no cache rate are priced at the input rate and marked as an upper bound. To have an agent's own
-# cost come before these prices, set prefer_reported_cost = true in [model] itself, above its tables.
-# [model.prices]
-# "gpt-4o-mini" = { input = 0.15, output = 0.6, cache_read = 0.075 }
 
 [runner]
 impl = "agent_env.runner.local_runner:LocalRunner"

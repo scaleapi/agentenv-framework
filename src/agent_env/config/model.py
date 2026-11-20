@@ -14,7 +14,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 from agent_env.config.errors import ConfigError
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, SecretResolver, interpolate
-from agent_env.config.prices import PriceTable
 
 logger = logging.getLogger(__name__)
 
@@ -108,16 +107,13 @@ class ModelConfig:
     roles: dict = field(default_factory=dict)
     params: dict = field(default_factory=dict)
     headers: dict = field(default_factory=dict)  # values may hold unresolved env:/secret: references
-    prices: PriceTable = field(default_factory=PriceTable)
-    prefer_reported_cost: bool = False
 
     @classmethod
     def from_section(cls, section: dict, *, secret_resolver: SecretResolver) -> ModelConfig:
         """Build from the raw ``[model]`` section: reject unknown keys and reserved
         ``[model.params]`` keys, then resolve ``env:``/``secret:`` refs — except
         ``api_key`` and ``[model.headers]``, which keep their raw references and resolve
-        lazily per call (an eager secret fetch would make every ``[model]`` read need credentials),
-        and ``[model.prices]`` and ``prefer_reported_cost``, which are plain values."""
+        lazily per call (an eager secret fetch would make every ``[model]`` read need credentials)."""
         allowed = {f.name for f in fields(cls)}
         unknown = set(section) - allowed
         if unknown:
@@ -133,12 +129,8 @@ class ModelConfig:
             raise ConfigError("[model.headers] maps header names to strings (an env:/secret: reference is fine)")
         for name, value in headers.items():
             _check_header(name, None if value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) else value)
-        prefer_reported_cost = section.get("prefer_reported_cost", False)
-        if not isinstance(prefer_reported_cost, bool):
-            raise ConfigError("[model] prefer_reported_cost is true or false: whether an agent's own cost comes "
-                              "before [model.prices]")
         cfg = interpolate(
-            {k: v for k, v in section.items() if k not in ("api_key", "headers", "prices", "prefer_reported_cost")},
+            {k: v for k, v in section.items() if k not in ("api_key", "headers")},
             secret_resolver=secret_resolver,
         )
         _check_roles(cfg.get("roles", {}))
@@ -149,8 +141,6 @@ class ModelConfig:
             roles=cfg.get("roles", {}),
             params=cfg.get("params", {}),
             headers=dict(headers),
-            prices=PriceTable.from_section(section.get("prices", {})),
-            prefer_reported_cost=prefer_reported_cost,
         )
 
     def role_model(self, role: str) -> Optional[str]:
@@ -186,8 +176,9 @@ class ModelConfig:
         return same_endpoint(url, os.getenv(ENV_BASE_URL) or self.base_url)
 
     def prices_apply(self, url: Optional[str]) -> bool:
-        """Whether ``[model.prices]`` prices calls to ``url``: the configured endpoint's, or with none configured, a
-        native route's (no ``url``), but never another URL's, whose prices the table doesn't know."""
+        """Whether a cost may be priced from list prices for calls to ``url``: the configured endpoint's, or with none
+        configured, a native route's (no ``url``), but never another URL's, which may serve anything under a model's
+        name, a fine-tune or a free local model among them."""
         configured = os.getenv(ENV_BASE_URL) or self.base_url
         return same_endpoint(url, configured) if url else not configured
 

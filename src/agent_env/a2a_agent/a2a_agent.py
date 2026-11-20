@@ -649,7 +649,7 @@ class A2AAgent:
 
     def on_configured_endpoint(self, env_vars: dict[str, str], config) -> bool:
         """Whether a deploy with ``env_vars`` has this agent call the configured endpoint, or route natively with none
-        configured, so ``[model.prices]`` prices its usage; never for an agent that takes no credentials."""
+        configured, so its usage is priced from list prices; never for an agent that takes no credentials."""
         return (bool(self.metadata.get(TAKES_CREDENTIALS, True))
                 and config.prices_apply(self.model_base_url(env_vars, config)))
 

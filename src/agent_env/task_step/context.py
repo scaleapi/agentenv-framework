@@ -143,7 +143,7 @@ class DeployedAgent:
     # unknown.
     model_endpoint_host: str | None = None
     # Whether its model calls go through the configured endpoint (or route natively with none configured), by
-    # ``same_endpoint``, so ``[model.prices]`` prices them; None when unknown, which prices nothing.
+    # ``same_endpoint``, so they're priced from list prices; None when unknown, which prices nothing.
     on_configured_endpoint: bool | None = None
 
     @classmethod
