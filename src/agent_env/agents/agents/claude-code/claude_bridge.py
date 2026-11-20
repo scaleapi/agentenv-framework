@@ -55,9 +55,10 @@ _MODEL_ALIASES = (
 )
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
-# Settings every CLI run takes. The CLI deletes a transcript older than cleanupPeriodDays by its own clock, and on an env
-# clock months ahead of the files' real times the transcript of the conversation it resumes looks that old.
-CLI_SETTINGS = {"cleanupPeriodDays": 36500}
+# Settings every CLI run takes. The CLI deletes files older than cleanupPeriodDays by its own clock, so on an env clock
+# ahead of real time it deleted the transcript it resumes. It refuses 0, and --no-session-persistence keeps none, so
+# this is every day a JavaScript date can be from 1970: the cutoff is never after 1970, whatever the clock says.
+CLI_SETTINGS = {"cleanupPeriodDays": 100_000_000}
 
 
 # The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.

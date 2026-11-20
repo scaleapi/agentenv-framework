@@ -17,6 +17,8 @@ from tst.unit.agents.claude_code.agent import AGENT_DIR, agent_egress, claude_br
 from tst.util.build_context import sent
 
 PROXY = "http://127.0.0.1:3128"
+# How many days a JavaScript date can be from 1970 either way (ECMAScript's time value range).
+JS_DATE_RANGE_DAYS = 100_000_000
 ARMED_PAGE = agent_egress.clockpage.encode(2, 1_900_000_000 * 10**9, 10**18, 1.0, 1, 3, 0, 0)
 
 
@@ -29,12 +31,12 @@ def test_on_an_armed_clock_the_cli_goes_out_through_the_proxy_and_to_loopback_di
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_every_cli_run_keeps_transcripts_a_clock_years_ahead_would_call_old(resume):
+def test_every_cli_run_keeps_transcripts_whatever_date_the_clock_shows(resume):
     command = claude_bridge._command("sess", resume, model=None, allowed_tools=None, mcp_servers=None,
                                      system_prompt=None, output_format=None, role=None, effort=None, max_turns=None)
 
     assert command[command.index("--setting-sources") + 1] == "user"
-    assert json.loads(command[command.index("--settings") + 1])["cleanupPeriodDays"] >= 365 * 100
+    assert json.loads(command[command.index("--settings") + 1])["cleanupPeriodDays"] >= JS_DATE_RANGE_DAYS
 
 
 def _spawned_env(monkeypatch, tmp_path, armed: bool) -> dict[str, str]:
