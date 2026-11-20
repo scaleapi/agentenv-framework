@@ -1,6 +1,7 @@
 """An agent's side of clock/v1: in an image that runs the clock follower, every AgentEnvAgent serves sync_time with no
-code of its own; called by sync_env_clock, it writes the follower's config from the request, sets the task's zone for
-what the server starts, and answers once the follower shows the gateway's current version, or says why it doesn't."""
+code of its own; called by sync_env_clock, the opt-in, it writes the follower's config from the request, sets the
+task's zone and loads the image's clock libraries for what the server starts, and answers once the follower shows the
+gateway's current version, or says why it doesn't."""
 from __future__ import annotations
 
 import json
@@ -20,6 +21,7 @@ from agentenv_protocol.a2a_agent import (
     TaskResult,
     a2a_agent,
 )
+from agentenv_protocol.a2a_agent import clock as agent_clock
 from agentenv_protocol.computer import clock as follower
 
 REQUEST = {"env_get_time_url": "http://gw/clock/time", "watch_url": "http://gw/clock/watch", "name": "agent-solver",
@@ -39,6 +41,18 @@ def image(tmp_path, monkeypatch):
     monkeypatch.setenv("TZ", "UTC")
     yield tmp_path
     time.tzset()
+
+
+LIBRARIES = "/usr/local/lib/agentenv-clock/libfaketimeMT.so.1:/usr/local/lib/agentenv-clock/libtls_realtime.so"
+
+
+@pytest.fixture
+def opt_in(monkeypatch):
+    """An image whose clock is opt-in: it names its clock libraries, preloads nothing, and starts the server with the
+    real-time marker, as an image from before did."""
+    monkeypatch.setenv(agent_clock.PRELOAD_ENV, LIBRARIES)
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.setenv(agent_clock.REAL_TIME_ENV, "1")
 
 
 def _status(image, **status) -> None:
@@ -180,6 +194,54 @@ def test_a_server_restarted_mid_run_takes_back_the_tasks_zone(image, monkeypatch
         assert client.get("/.well-known/agent.json").status_code == 200
 
     assert os.environ["TZ"] == "America/Chicago" and time.strftime("%Z") in {"CST", "CDT"}
+
+
+def test_until_sync_time_no_program_the_server_starts_loads_the_clock_libraries(image, opt_in):
+    with _app() as client:
+        assert _clock(client) is not None
+
+    assert "LD_PRELOAD" not in os.environ and os.environ[agent_clock.REAL_TIME_ENV] == "1"
+
+
+def test_sync_time_loads_the_clock_libraries_into_what_the_server_starts_once_it_follows(image, opt_in, monkeypatch):
+    monkeypatch.setenv("LD_PRELOAD", "/opt/other.so")
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+    with _app() as client:
+        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
+        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200  # again: nothing loaded twice
+
+    assert os.environ["LD_PRELOAD"].split() == ["/opt/other.so", *LIBRARIES.split(":")]
+    assert agent_clock.REAL_TIME_ENV not in os.environ
+
+
+def test_a_sync_time_the_follower_doesnt_take_loads_nothing(image, opt_in):
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:2")
+    with _app() as client:
+        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 404
+
+    assert "LD_PRELOAD" not in os.environ
+
+
+def test_an_image_that_preloads_for_every_process_has_nothing_loaded(image, monkeypatch):
+    monkeypatch.delenv(agent_clock.PRELOAD_ENV, raising=False)
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+    with _app() as client:
+        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
+
+    assert "LD_PRELOAD" not in os.environ
+
+
+def test_a_server_restarted_mid_run_loads_the_clock_libraries_again(image, opt_in, monkeypatch):
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+    with _app() as client:
+        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
+    monkeypatch.delenv("LD_PRELOAD")  # the restarted server's environment: the image's
+
+    with _app() as client:
+        assert client.get("/.well-known/agent.json").status_code == 200
+
+    assert os.environ["LD_PRELOAD"].split() == LIBRARIES.split(":")
 
 
 @pytest.mark.parametrize("config", ['{"watch_url": "u", "name": "n", "token": "t"}', '{"timezone": "Mars/Olympus"}',

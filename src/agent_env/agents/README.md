@@ -44,8 +44,11 @@ The A2A server starts with the real-time marker, so it and its records stay on r
 `sync_env_clock` with `agent_clock` (off by default; `require_agent_clock` implies it) has armed the clock, it declares
 the agent at the gateway as a follower with a read token of its own and calls that `sync_time` with the follower's
 config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is armed.
-Without it the agent keeps real time, as its files' modification times do: a CLI that judges a file's age by them, as
-Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the env's date is ahead. From then on the CLI, its own
+That call is also what loads agent-env's libfaketime: an image names its clock libraries (`AGENTENV_CLOCK_PRELOAD`)
+and preloads them into nothing, and `sync_time` puts them in `LD_PRELOAD` for every program the server starts from then
+on (`agentenv_protocol.a2a_agent.clock.preload`), as a server restarted mid-run does again. Without it the agent's CLI
+runs with no libfaketime, on real time, as its files' modification times are: a CLI that judges a file's age by them,
+as Claude Code's transcript cleanup does, would otherwise take a fresh file for one as old as the env's date is ahead. From then on the CLI, its own
 "Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
 followers waits for the agent. While the clock is armed the CLI goes out through the egress proxy, which keeps TLS
 working at any date the clock shows, a live site's, an env MCP server's or the model endpoint's; only loopback hosts

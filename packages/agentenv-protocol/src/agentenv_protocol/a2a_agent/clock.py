@@ -1,6 +1,9 @@
-"""An agent's side of clock/v1. An agent image that follows the env's clock runs the computer base's follower, and
-agent-env's libfaketime is preloaded for the agent's user, so every program the A2A server starts reads universe time
-from the follower's page; the server itself starts with the real-time marker and stays on real time.
+"""An agent's side of clock/v1. An agent image that follows the env's clock runs the computer base's follower and
+carries agent-env's libfaketime, which reads universe time from the follower's page; the server itself stays on real
+time. Following is opt-in: ``sync_time`` is what puts what the server starts on the env's clock. An image that names
+its clock libraries (``PRELOAD_ENV``) loads them into no program until then, so a task that never asks runs its CLI as
+an image without the clock does; once called, every program the server starts loads them (``LD_PRELOAD``). An older
+image preloads them into every process of the agent's user from boot (``/etc/ld.so.preload``) and names none.
 
 The framework serves clock/v1's ``sync_time``, the method every server and computer that follows the clock serves, on
 the card of an agent in such an image (``follows``), so the card is what tells core the agent follows. Unlike a
@@ -21,6 +24,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..computer import clock as follower
 from ..computer.errors import InvalidArgument, TargetUnavailable
+
+#: Set by an image whose clock is opt-in: the libraries, as LD_PRELOAD names them, that put a program on the follower's
+#: page.
+PRELOAD_ENV = "AGENTENV_CLOCK_PRELOAD"
+#: The marker agent-env's libfaketime keeps a program on real time by, and takes out of its environment; one this server
+#: was started with would keep everything it starts on real time.
+REAL_TIME_ENV = "AGENTENV_REAL_TIME"
 
 
 def follows() -> bool:
@@ -68,6 +78,29 @@ def set_zone(timezone: str) -> str:
     return zone
 
 
+def preload() -> bool:
+    """Every program this server starts from now on loads the image's clock libraries (``PRELOAD_ENV``), and so reads
+    the env's time once the follower arms its page; the server itself, already running, stays on real time. Whether
+    the image names any: one that preloads them for every process already has them in every program."""
+    libraries = (os.environ.get(PRELOAD_ENV) or "").replace(":", " ").split()
+    if not libraries:
+        return False
+    loaded = (os.environ.get("LD_PRELOAD") or "").replace(":", " ").split()
+    os.environ["LD_PRELOAD"] = " ".join(dict.fromkeys([*loaded, *libraries]))
+    os.environ.pop(REAL_TIME_ENV, None)
+    return True
+
+
+def restore() -> str | None:
+    """What ``sync_time`` set for what this server starts, set again: called when it starts, so one that restarts
+    mid-run keeps the clock libraries and the task's zone, as the follower keeps the clock. The zone, or None when a
+    config saved none or isn't there, when nothing is restored."""
+    if not Path(follower.CONFIG).exists():
+        return None
+    preload()
+    return restore_zone()
+
+
 def restore_zone() -> str | None:
     """The task's zone ``sync_time`` saved, set again for what this server starts: called when it starts, so one that
     restarts mid-run keeps the zone, as the follower keeps the clock. None when there's none, or it isn't a zone."""
@@ -85,8 +118,9 @@ def restore_zone() -> str | None:
 
 async def sync_time(env_get_time_url: str, timezone: str | None = None, watch_url: str | None = None,
                     name: str | None = None, read_token: str | None = None) -> dict:
-    """``clock/v1``'s ``sync_time`` on an agent: the follower configured to follow the gateway at ``watch_url`` as
-    ``name`` with ``read_token``, the task's ``timezone`` set for what this server starts, and an answer once the
+    """``clock/v1``'s ``sync_time`` on an agent, the call that opts it into the env's clock: the follower configured to
+    follow the gateway at ``watch_url`` as ``name`` with ``read_token``, the task's ``timezone`` set and the clock
+    libraries loaded (``preload``) for what this server starts once it follows, and an answer once the
     follower shows the gateway's version for that config, never what it showed of one before. ``env_get_time_url`` is taken as every server takes it and not used: the
     follower reads the gateway's watch, not its time."""
     if not follows():
@@ -99,4 +133,5 @@ async def sync_time(env_get_time_url: str, timezone: str | None = None, watch_ur
     zone = set_zone(timezone) if timezone is not None else os.environ.get("TZ") or "UTC"
     written = write_config(watch_url, name, read_token, zone)
     shown = await follower.following("this agent's clock follower", follower.CONNECT_WAIT_S, url=watch_url, name=name, since_ns=written)
+    preload()
     return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url, "follower": shown}
