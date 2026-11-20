@@ -195,10 +195,10 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "It spoke as the assistant: a report or summary in the assistant's voice, an offer to do the assistant's "
             "tasks, the person's own questions asked back as if it were the assistant.",
             "It drafted a full message for a third party, for sending.",
-            "It took on part of the task itself where its instructions don't say this person does it. Example: the "
-            "assistant says \"I can't remove Sam. You can do it in Share settings, or I can make a copy without "
-            "him\"; \"ok, i'll remove him myself\" fails, \"yes, make the copy\" doesn't. Choosing the offered "
-            "option that leaves it the work (\"I'll export a file for you to upload\") fails too.",
+            "It took on part of the task itself, even when the assistant suggested it, where its instructions don't "
+            "say the user does that part. Example: the assistant says \"I can't remove Sam. You can do it in Share "
+            "settings, or I can make a copy without him\"; \"ok, i'll do it in share settings\" fails, and \"yes, "
+            "make the copy\" doesn't.",
             "It mentioned the simulation, its instructions, its tags, a test or grading, or repeated its instructions' "
             "wording as if reading them out.",
             "It spoke for someone else, or acted as anyone but this person.",
