@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from agent_env import pricing as prices_module
-from agent_env.pricing import (
+from agent_env.config import model_pricing as prices_module
+from agent_env.config.model_pricing import (
     PER_MILLION,
     Assumed,
     CostStatus,
@@ -57,7 +57,7 @@ def test_the_map_is_read_per_million_tokens_keeping_only_entries_with_an_input_a
 
 
 def test_the_installed_litellms_map_is_read_without_importing_litellm():
-    probe = ("import sys; from agent_env.pricing import litellm_prices; t = litellm_prices(); "
+    probe = ("import sys; from agent_env.config.model_pricing import litellm_prices; t = litellm_prices(); "
              "print(t.source, t.lookup('gpt-4.1-mini'), 'litellm' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.strip()
 

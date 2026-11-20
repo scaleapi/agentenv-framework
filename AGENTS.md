@@ -84,7 +84,7 @@ or one of them only where it is used.
 - `[model.headers]` go with every call to the configured endpoint and nowhere else: `extra_headers` on
   agent-env's own calls, `LITELLM_EXTRA_HEADERS` (JSON, written by core, never read) for agents and the
   unit-test verifier. On `sail_vm` with `inject_model_key`, Sail sets them at egress like the key.
-- Usage is priced from the price map the installed LiteLLM bundles (`pricing.py`), read without importing
+- Usage is priced from the price map the installed LiteLLM bundles (`config/model_pricing.py`), read without importing
   LiteLLM, which would fetch a newer map from the network; there is no price config. Only usage through the configured
   endpoint, or a native route with none configured, is priced, never another URL's. A model is found by its name as
   called or without its routing prefix. A prompt step prices each role's usage entry as it records it: `cost_usd` with

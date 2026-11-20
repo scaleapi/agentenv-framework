@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
-from agent_env.pricing import PriceTable, ReportedBy, Tokens, litellm_prices, price
+from agent_env.config.model_pricing import PriceTable, ReportedBy, Tokens, litellm_prices, price
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
 if TYPE_CHECKING:
