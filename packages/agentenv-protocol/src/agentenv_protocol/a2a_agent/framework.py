@@ -131,6 +131,8 @@ _AgentT = TypeVar("_AgentT", bound="AgentEnvAgent")
 _MAX_CACHED_CONTEXTS = 1_024
 #: How many of a media call's files upload at once.
 MAX_PARALLEL_MEDIA_PUSHES = 8
+#: How much of a spooled media file is read at a time to hash it before its upload.
+_MEDIA_HASH_BLOCK_BYTES = 1 << 20
 
 
 def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
@@ -155,7 +157,7 @@ def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
-        for block in iter(lambda: file.read(1 << 20), b""):
+        for block in iter(lambda: file.read(_MEDIA_HASH_BLOCK_BYTES), b""):
             digest.update(block)
     return digest.hexdigest()
 
