@@ -698,7 +698,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             task_id=cfg.task_id,
                             event_callback=_record_event,
                             max_turns=cfg.max_turns,
-                            mcp_urls=[info["url"] for info in request.mcp_servers.values()],
+                            mcp_servers={name: info["url"] for name, info in request.mcp_servers.items()},
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
                                               *codex_config.builtin_tools_overrides(cfg.builtin_tools),
                                               *catalog],

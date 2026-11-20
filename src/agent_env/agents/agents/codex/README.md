@@ -39,8 +39,27 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 | `triggers/v1` | SDK default |
 
 The image is `python:3.11-slim` with Node, the CLIs, the agent and the Python packages `model-requirements.txt` pins for
-the model's scripts, running as the `agent` user; Codex's state is in
-`/home/agent/.codex` whatever the uid.
+the model's scripts. It starts as root, runs the env clock's follower and egress proxy under supervisord (`start-agent`,
+`root.conf`) and the A2A server as the `agent` user; started as another user, it runs the server alone. Codex's state
+is in `/home/agent/.codex` whatever the uid.
+
+A task's `sync_env_clock` with `agent_clock` has the agent follow the env's clock (`clock/v1` `sync_time`). agent-env's
+libfaketime, preloaded for the `agent` user, then gives the model's commands the env's time. The Codex CLI is a static
+binary the library doesn't reach, so the CLI and what it keeps (rollouts, `state.db`, thread ids) stay on real time,
+and it checks the model endpoint's certificate on real time and reaches it directly. On an armed clock each CLI run
+also gets:
+
+- `-c mcp_servers.<name>.env.AGENTENV_REAL_TIME="1"` for each MCP server, so `mcp-remote` stays on real time: the
+  expiry of its cookies and tokens and the age of its leases are server times or real file times. It checks
+  certificates on real time too, so it reaches the servers directly.
+- `-c shell_environment_policy.set.<name>=...` with the egress proxy's variables (`agent_egress.egress_env`), so the
+  model's commands, which check certificates on the env's date, go out through the proxy, all but loopback, the hosts
+  `NO_PROXY` names and the model endpoint's and MCP servers' hosts served over plain HTTP alone.
+- the env's date and zone before the prompt (`<environment_clock>`), as `date` shows it: Codex puts the host's real
+  date in its `<environment_context>`, and the note says so, and that a clock tool and `Date` in JavaScript the model
+  runs in code mode read real time too.
+
+Unarmed, a CLI run is as before.
 
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;
 config.toml stays as it is. `{"disable": "*"}` turns off every setting below, `{"only": [...]}` every one but those whose

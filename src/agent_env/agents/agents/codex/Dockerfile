@@ -42,8 +42,9 @@ COPY agent_clock/agent_egress.py clock/clockpage.py ./
 RUN useradd --create-home --uid 10001 agent && mkdir -p /app /home/agent/.codex \
     && chown agent:agent /app /home/agent/.codex && chmod 0755 entrypoint.sh
 # The env's clock: the follower and the egress proxy, each as its own user, under root's supervisord (root.conf), and
-# agent-env's libfaketime and its TLS shim preloaded into every process, faking only the agent's (clock.conf). The
-# follower's config is the agent's user's to write (agentenv_protocol.a2a_agent.clock) and the follower's to read.
+# agent-env's libfaketime and its TLS shim preloaded into every dynamically linked process, faking only the agent's
+# (clock.conf): the model's commands, not the Codex CLI, a static binary. The follower's config is the agent's user's
+# to write (agentenv_protocol.a2a_agent.clock) and the follower's to read.
 RUN pip install --no-cache-dir supervisor==4.2.5 \
     && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-clock \
     && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-egress \

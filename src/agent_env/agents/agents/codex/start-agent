@@ -1,11 +1,11 @@
 #!/bin/sh
-# The image's start (FD-5916). As root, it makes what the agent's user must not touch, the clock page and file (the
-# clock user's from their first byte) and the egress proxy's CA (its key the egress user's alone, trusted in the
-# system store, agent-env's trust files and every certifi bundle), then starts root's supervisord (root.conf), which
-# runs the clock follower and the egress proxy, each as its own user on real time, and the A2A server as the agent's
-# user on real time, everything it starts reading the env's time from the page. Until sync_env_clock has the agent
-# follow a clock, the page holds real time and the proxy relays TLS untouched. Started as another user, the image runs
-# the A2A server alone, as before, on real time.
+# The image's start. As root, it makes what the agent's user must not touch, the clock page and file (the clock user's
+# from their first byte) and the egress proxy's CA (its key the egress user's alone, trusted in the system store,
+# agent-env's trust files and every certifi bundle), then starts root's supervisord (root.conf), which runs the clock
+# follower and the egress proxy, each as its own user on real time, and the A2A server as the agent's user on real
+# time, the model's commands it starts reading the env's time from the page. Until sync_env_clock has the agent follow
+# a clock, the page holds real time and the proxy relays TLS untouched. Started as another user, the image runs the A2A
+# server alone, as before, on real time.
 set -eu
 if [ "$(id -u)" != 0 ]; then
     exec /opt/agent/entrypoint.sh

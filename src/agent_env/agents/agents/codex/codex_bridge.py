@@ -27,6 +27,8 @@ from codex_config import MODEL_HEADERS_ENV, model_headers
 
 logger = logging.getLogger(__name__)
 WORKSPACE_DIR = os.environ.get("CODEX_WORKSPACE_DIR", "/app")
+# The one switch agent-env's libfaketime takes from a program's environment: that program stays on real time.
+REAL_TIME_ENV = "AGENTENV_REAL_TIME"
 
 # `todo_list` is excluded: it's a plan update, not a tool invocation.
 _TOOL_ITEM_TYPES = {"command_execution", "mcp_tool_call", "file_change", "web_search"}
@@ -94,12 +96,10 @@ def get_last_attribution_snapshot() -> dict[str, str | None]:
 
 
 def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
-            task_id: str | None = None, mcp_urls: Sequence[str] = (), clock_armed: bool = False) -> dict[str, str]:
+            task_id: str | None = None) -> dict[str, str]:
     """The CLI's environment: this process's, with the endpoint's key also under the name codex's own precheck
     reads, and the run's attribution, which config.toml's env_http_headers sends as headers on each model call. The
-    run's tags join the x-litellm-tags [model.headers] names. On an armed clock (``clock_armed``) the CLI goes out through the
-    egress proxy (``egress_env``) for the model endpoint and the env's MCP servers (``mcp_urls``), which mcp-remote,
-    handed the proxy's variables (codex_config._PROXY_ENV), reaches through it too."""
+    run's tags join the x-litellm-tags [model.headers] names."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("OPENAI_API_KEY"):
         env["OPENAI_API_KEY"] = env["LITELLM_API_KEY"]
@@ -113,8 +113,30 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
                        if name.lower() == _TAGS_HEADER), "")
     if joined := _join_tags(configured, ",".join(tags)):
         env["LITELLM_TAGS"] = joined
-    env.update(egress_env(environ, [env.get("LITELLM_BASE_URL", ""), *mcp_urls], armed=clock_armed))
     return env
+
+
+def clock_overrides(environ: Mapping[str, str], mcp_servers: Mapping[str, str], *, armed: bool) -> list[str]:
+    """The `-c` overrides an armed clock adds to a CLI run. The CLI, a static binary libfaketime can't reach, and
+    mcp-remote, whose cookie and token expiry and leases are server or real file times, stay on real time and go out
+    directly; the model's commands follow the env's clock, so they get the egress proxy (``egress_env``)."""
+    if not armed:
+        return []
+    proxy = egress_env(environ, [environ.get("LITELLM_BASE_URL", ""), *mcp_servers.values()], armed=True)
+    return [*(f'mcp_servers.{name}.env.{REAL_TIME_ENV}="1"' for name in mcp_servers),
+            *(f"shell_environment_policy.set.{name}={json.dumps(value)}" for name, value in proxy.items())]
+
+
+async def clock_note() -> str:
+    """The env's date, put before a turn's prompt on an armed clock: the CLI renders the host's real date into its own
+    context, so the model is told the date `date` shows, which, run by this real-time server, follows the env's clock."""
+    proc = await asyncio.create_subprocess_exec("date", "+%Y-%m-%d (%A)", stdout=asyncio.subprocess.PIPE)
+    shown, _ = await proc.communicate()
+    zone = os.environ.get("TZ") or "UTC"
+    return (f"<environment_clock>\nToday is {shown.decode().strip()} in {zone} on this task's clock, which `date` and "
+            "every command you run read. What the Codex CLI itself reports of the time, such as the current_date in "
+            "<environment_context>, a clock tool or Date in JavaScript you run in code mode, is the host's real time; "
+            "go by this task's clock.\n</environment_clock>\n\n")
 
 
 @dataclass
@@ -730,8 +752,11 @@ async def _run_codex_once(
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
     prior_tool_calls: int = 0,
-    mcp_urls: Sequence[str] = (),
+    mcp_servers: Mapping[str, str] | None = None,
 ) -> CodexResult:
+    armed = clock_armed()
+    if armed:
+        prompt = await clock_note() + prompt
     # JSON Schema: codex's `--output-schema` flag takes a FILE PATH (unlike
     # claude-code's inline-JSON `--json-schema`). Write the inner schema to a
     # per-invocation temp file. Canonical agent-env envelope is
@@ -770,7 +795,7 @@ async def _run_codex_once(
         ]
     if schema_file is not None:
         cmd += ["--output-schema", str(schema_file)]
-    for override in config_overrides:
+    for override in [*config_overrides, *clock_overrides(os.environ, mcp_servers or {}, armed=armed)]:
         cmd += ["-c", override]
 
     inactivity_s = inactivity_timeout_s(effort)
@@ -779,8 +804,7 @@ async def _run_codex_once(
         f"inactivity_watchdog={inactivity_s}s)"
     )
 
-    subprocess_env = cli_env(os.environ, project_id=project_id, task_id=task_id, mcp_urls=mcp_urls,
-                             clock_armed=clock_armed())
+    subprocess_env = cli_env(os.environ, project_id=project_id, task_id=task_id)
     if project_id or task_id:
         _record_attribution(project_id=project_id, task_id=task_id)
         logger.info(
@@ -906,7 +930,7 @@ async def run_codex(
     event_callback: Callable[[dict], None] | None = None,
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
-    mcp_urls: Sequence[str] = (),
+    mcp_servers: Mapping[str, str] | None = None,
 ) -> CodexResult:
     """Run one logical turn with bounded transient recovery.
 
@@ -946,7 +970,7 @@ async def run_codex(
             event_callback=event_callback,
             config_overrides=config_overrides,
             max_turns=max_turns,
-            mcp_urls=mcp_urls,
+            mcp_servers=mcp_servers,
             prior_tool_calls=tool_call_count,
         )
         failure = _resumable_api_failure(result)

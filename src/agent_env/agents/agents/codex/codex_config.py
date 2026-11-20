@@ -30,10 +30,6 @@ _ROLE_VARIABLE = "AGENTENV_ROLE"
 # Codex hands a stdio MCP server only a few of its own variables; these tell mcp-remote, a Node client, which
 # certificates to trust.
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
-# And these, which the bridge sets on an armed clock (agent_egress.egress_env), send it through the image's egress
-# proxy: on the env's date, a certificate mcp-remote checked itself could be before its issue or past its expiry.
-_PROXY_ENV = (*(name for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY") for name in (base, base.lower())),
-              "NODE_USE_ENV_PROXY")
 
 # The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
 TOOLS_CLI_VERSION = "0.162.1"
@@ -254,8 +250,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
     """Build a codex `mcp_servers.<name>` config table.
 
     Wraps the URL in `mcp-remote` (stdio shim), a Node client that trusts the
-    certificates `_TRUST_ENV` names in the agent's environment and goes through the
-    proxy `_PROXY_ENV` names when the bridge sets one. Each header is passed
+    certificates `_TRUST_ENV` names in the agent's environment. Each header is passed
     as a `--header "Name: Value"` arg. The `AgentEnv-Role` header, which the env
     gateway filters tools by, is mcp-remote's `${AGENTENV_ROLE}`: the role the
     registration's own headers name, from the entry's env, unless a CLI run passes
@@ -274,7 +269,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
         "command": "mcp-remote",
         "args": args,
         "env": {_ROLE_VARIABLE: registered},
-        "env_vars": [*_TRUST_ENV, *_PROXY_ENV],
+        "env_vars": list(_TRUST_ENV),
         "startup_timeout_sec": 60,
         # Codex silently drops non-`required` servers that miss its hard-coded
         # 1s startup grace, which mcp-remote always does — but a `required`
