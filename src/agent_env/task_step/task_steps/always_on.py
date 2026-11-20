@@ -283,8 +283,15 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
 
     def read_cap_seconds(self) -> float:
         """The longest one read's answer may take: READ_ASKS user sim turns, each with its grace and trajectory
-        fetch; an ask past it is refused, and an answer past it ends the read as a user sim error."""
-        return READ_ASKS * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS)
+        fetch, and with a user_sim_gate one more turn per rewrite and a judge call per check (every message, the
+        first and each rewrite); an ask past it is refused, and an answer past it ends the read as a user sim error."""
+        asks, judging = READ_ASKS, 0.0
+        gate = self.user_sim_gate
+        if gate is not None:
+            asks += gate.max_rewrites
+            if gate.judge_model:
+                judging = (gate.max_rewrites + 1) * gate.judge_timeout_seconds
+        return asks * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS) + judging
 
     def wake_reserve_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one turn of the loop, or the run's closing, can take, each part hard-capped: a clock jump's
