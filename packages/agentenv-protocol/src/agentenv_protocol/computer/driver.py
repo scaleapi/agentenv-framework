@@ -78,6 +78,10 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     max_duration_ms: ClassVar[int] = 10_000
     max_key_repeat: ClassVar[int] = 100
     max_scroll_amount: ClassVar[int] = 100
+    #: How long after an input ``screenshot: true`` captures, in ms: about the longest this driver's screens take to
+    #: show what an input did, as a smooth scroll or the page a key opens; a deploy's ``screenshot_delay_ms`` setting
+    #: replaces it.
+    screenshot_delay_ms: ClassVar[int] = 500
     #: The (width, height) modes computer-display/v1 set takes; with ``@set_display`` only.
     display_modes: ClassVar[tuple] = ()
     layouts: ClassVar[tuple[str, ...]] = ("us",)

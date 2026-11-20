@@ -44,7 +44,7 @@ async def _scroll(session, screenshot: bool = True):
 @pytest.mark.asyncio
 async def test_the_screenshot_shows_a_change_that_reaches_the_screen_after_the_input():
     driver = LateScreen()
-    assert driver.settings.screenshot_delay_ms == 500
+    assert driver.settings.screenshot_delay_ms is None and driver.screenshot_delay_ms == 500
     async with mcp_session(driver) as session:
         await session.call_tool("computer_screenshot", {})
         started = time.monotonic()
@@ -61,6 +61,28 @@ async def test_with_no_delay_the_screenshot_is_taken_at_once():
         await session.call_tool("computer_screenshot", {})
         scrolled = await _scroll(session)
     assert _colour(scrolled) == BACKGROUND
+
+
+class Instant(LateScreen):
+    """A driver whose screens show an input at once, so it takes the screenshot at once."""
+
+    screenshot_delay_ms = 0
+
+
+@pytest.mark.asyncio
+async def test_the_driver_sets_its_own_delay():
+    async with mcp_session(Instant()) as session:
+        await session.call_tool("computer_screenshot", {})
+        scrolled = await _scroll(session)
+    assert _colour(scrolled) == BACKGROUND
+
+
+@pytest.mark.asyncio
+async def test_a_deploys_setting_replaces_the_drivers_delay():
+    async with mcp_session(Instant(settings=ComputerSettings(screenshot_delay_ms=500))) as session:
+        await session.call_tool("computer_screenshot", {})
+        scrolled = await _scroll(session)
+    assert _colour(scrolled) == RED
 
 
 @pytest.mark.asyncio

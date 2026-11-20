@@ -612,6 +612,7 @@ from agentenv_protocol.computer import (
 class MyDriver(ComputerDriverEnvironment):
     buttons = ("left", "right")       # features, on the card
     max_click_count = 2
+    screenshot_delay_ms = 300         # how long after an input its screenshot is taken
 
     @display
     async def size(self) -> Display: ...                    # width, height, scale
@@ -668,8 +669,10 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
-  after acting, `screenshot_delay_ms` (500 by default; 0 captures at once) after the input, so a smooth scroll or
-  the page a key opens, which renders a couple of hundred milliseconds after the input returns, shows. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
+  taken `screenshot_delay_ms` after the input, so a smooth scroll or the page a key opens, which renders a couple
+  of hundred milliseconds after the input returns, shows: the driver class's `screenshot_delay_ms` (500 unless it
+  sets its own), or the deploy's setting of that name, 0 capturing at once. Click and scroll leave out `x` and `y`
+  to act at the pointer on a computer with
   `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
   group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
   or `reload`s, `computer_tabs` lists, opens, switches and closes tabs by the browser's own ids and
@@ -721,7 +724,8 @@ other exception from an input operation is reported `delivery_failed` with `appl
 **Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
 (`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
 `tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`,
-`exec_timeout_s` and `screenshot_delay_ms`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
+`exec_timeout_s` and `screenshot_delay_ms`, which replaces the driver's own. A driver reads them as `self.settings`,
+for example its tap hold in `@press`.
 
 Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
 names the caller whose latest frame and others' input a call uses.
