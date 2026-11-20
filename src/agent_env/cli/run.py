@@ -26,7 +26,7 @@ from agent_env.task_step.context import TaskStepContext
 
 _COLORS = {Outcome.PASSED: "green", Outcome.BELOW_ONE: "yellow", Outcome.UNSCORED: "yellow", Outcome.FAILED: "red",
            Outcome.CANCELLED: "yellow"}
-_ENV_ENDPOINTS = (("mcp", "mcp_url"), ("gateway", "gateway_url"), ("pgweb", "db_web_url"), ("db-mcp", "db_mcp_url"),
+_ENV_ENDPOINTS = (("mcp", "mcp_url"), ("gateway", "gateway_url"), ("pgweb", "db_web_gateway_url"), ("db-mcp", "db_mcp_gateway_url"),
                   ("vnc", "vnc_url"), ("expires", "expires_at_utc"))
 _DRY_RUN = "Dry run: nothing is written or run."
 

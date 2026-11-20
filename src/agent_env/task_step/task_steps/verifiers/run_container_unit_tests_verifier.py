@@ -39,7 +39,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar, Optional
 
 from agent_env.config import ConfigError, get_config
-from agent_env.config.model import MODEL_HEADERS_ENV, no_key_for
+from agent_env.config.model import MODEL_HEADERS_ENV, api_root, no_key_for
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import require_sandbox
 from agent_env.env.envs.computer.utils import inside
@@ -398,7 +398,7 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
         try:
             litellm_url = config.get_litellm_base_url()
             merged_env["LITELLM_BASE_URL"] = litellm_url
-            merged_env["ANTHROPIC_BASE_URL"] = litellm_url
+            merged_env["ANTHROPIC_BASE_URL"] = api_root(litellm_url)
         except (KeyError, ConfigError):
             logger.warning("LITELLM_BASE_URL unavailable; verifier won't have LLM base URL")
         merged_env.update(all_sandbox_container_env())

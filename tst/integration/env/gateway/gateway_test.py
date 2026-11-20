@@ -18,6 +18,7 @@ import yaml
 from typing import NamedTuple
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 # Each test deploys a real GatewayEnv + MCP servers on sandbox VMs
 # (~5-15 min per test). Mark the entire module as slow.
@@ -41,7 +42,8 @@ from agent_env.env.envs.playwright_mcp import (
 )
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.types import WELL_KNOWN_PATH
-from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
+from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.integration.env.envs.playwright_mcp_local_test import PROCESSES
 from agent_env.env.snapshot_store import compute_env_fingerprint
@@ -643,8 +645,8 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
         assert looked_up.instance_id == result.instance_id
         assert looked_up.gateway_url == result.gateway_url
         assert looked_up.mcp_url == result.mcp_url
-        assert looked_up.db_web_url == result.db_web_url
-        assert looked_up.db_mcp_url == result.db_mcp_url
+        assert looked_up.db_web_gateway_url == result.db_web_gateway_url
+        assert looked_up.db_mcp_gateway_url == result.db_mcp_gateway_url
         assert looked_up.environment_card_url == result.environment_card_url
         assert looked_up.sandbox_id == result.sandbox_id
         assert looked_up.gateway_mode == GatewayMode.PERFORMANCE.value
@@ -1243,7 +1245,9 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             logger.info(f"Changelog count after load: {content_text}")
             assert content_text == "[{'cnt': 0}]", f"Expected empty changelog after load, got {content_text}"
 
-        await _verify_list_tools(mcp_url=result.db_mcp_url, tool_verifier_callback=assert_changelog_empty)
+        assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
+        await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
+                                tool_verifier_callback=assert_changelog_empty)
 
         # Make a modification via MCP tool
         async def send_email_for_changelog(session, tools_result, tool_names):
@@ -1266,7 +1270,9 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             assert "email" in content_text, f"Expected schema_name 'email' in changelog, got {content_text}"
             assert "INSERT" in content_text, f"Expected INSERT operation in changelog, got {content_text}"
 
-        await _verify_list_tools(mcp_url=result.db_mcp_url, tool_verifier_callback=assert_changelog_has_entry)
+        assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
+        await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
+                                tool_verifier_callback=assert_changelog_has_entry)
 
         rehydrated = await MultiEnv.from_deployed_env(result)
         assert rehydrated._env_provider is not None
@@ -1309,7 +1315,9 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             logger.info(f"Post-rehydrate changelog query: {content_text}")
             assert rehydrate_probe_subject in content_text, f"Expected probe subject in changelog (triggers re-installed via rehydrated provider), got {content_text}"
 
-        await _verify_list_tools(mcp_url=result.db_mcp_url, tool_verifier_callback=assert_probe_in_changelog)
+        assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
+        await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
+                                tool_verifier_callback=assert_probe_in_changelog)
     finally:
         await multi_env.close()
 
@@ -1388,7 +1396,7 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
         browser = protocol_v1.find_child(result.environment_card, PLAYWRIGHT_MCP_ENVIRONMENT_NAME)
         assert browser is not None, result.environment_card.get("children_environments")
         sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
-        compose = yaml.safe_load(await sandbox.exec_script(f"cat {DOCKER_COMPOSE_PATH}"))
+        compose = yaml.safe_load(await sandbox.exec_script(f"cat {DEFAULT_STACK_LAYOUT.compose_file}"))
         proxied = dict(item.split("=", 1) for item in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
         assert (f"mcp-{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}=http://{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}:18765"
                 in proxied["REST_PROXY_URLS"].split(",")), proxied["REST_PROXY_URLS"]
@@ -1673,7 +1681,7 @@ async def _verify_step_api(gateway_url: str, tool_verifier_callback: callable):
     logger.info("/step test passed!")
 
 
-async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable):
+async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable, headers: dict[str, str] | None = None):
     """Connect to gateway and verify tools are available.
 
     Args:
@@ -1685,7 +1693,8 @@ async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable):
         logger.info(f"Testing gateway via tunnel (attempt {attempt + 1}/{max_retries})...")
         verified = False
         try:
-            async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
+            async with create_mcp_http_client(headers=headers) as http_client, \
+                    streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     tools_result = await session.list_tools()

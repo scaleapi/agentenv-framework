@@ -147,7 +147,9 @@ must be in it. It needs a protocol floor that has `native`. A context read you b
 `format` in its response. `atif=<adapter class>` there, an `@atif_adapter` class for that native format, has the SDK
 serve `atif/1` too, built from your log as you append it: write the adapter (`agentenv_protocol.atif`, its
 `PROFILE.md`), feed records that aren't in the native log, such as hooks' notes, with
-`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both.
+`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both. Its reads leave out the
+secrets the SDK holds and is handed (the model key, write-only config, MCP and CDP credentials, grants); register any
+other with `self.register_secret(value)`, in `run` or later, and the SDK writes it `[redacted:<length>]` there.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime
@@ -232,7 +234,9 @@ Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/e
    `request.config.timeout_seconds` with `request.mcp_servers` connected, records the trajectory, and returns a
    `TaskResult` with a `session_ref`. Replace `claude_bridge.py` with your runtime's bridge.
 4. **Map the model endpoint**: read `LITELLM_BASE_URL`, `LITELLM_API_KEY` and `LITELLM_EXTRA_HEADERS` and hand them
-   to your runtime, as `claude_bridge.py` `cli_env` does.
+   to your runtime, as `claude_bridge.py` `cli_env` does. `LITELLM_BASE_URL` comes as configured and may end in `/v1`
+   or not: a client that appends its own versioned path (Anthropic's `/v1/messages`) strips one trailing `/v1` first,
+   and one that wants the `/v1` root adds it unless it's there.
 5. **Add extensions** (Extensions): `mcp-config` and `trajectory` first, then every other one your runtime can
    honour. Keep `AGENT_CARD = app.state.agentenv_a2a.card` at the end of `a2a_server.py`.
 6. **Test it offline** with Starlette's `TestClient` and your runtime faked, as `tst/unit/agents/claude_code/` does:
