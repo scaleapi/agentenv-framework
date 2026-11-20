@@ -9,6 +9,7 @@ and httpx, never agent-env or its protocol package."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 
 PORT = 18431
 USER = "agentenv-keyholder"
@@ -51,6 +53,8 @@ READ_TIMEOUT_S = 1800
 IDLE_CONNECTION_TIMEOUT_S = 3600
 #: Shorter sealed values aren't scrubbed from answers: replacing every occurrence of one would hit unrelated text.
 MIN_SCRUB_LENGTH = 8
+#: Larger bodies are read in a worker thread, so parsing one doesn't hold up other contexts' streams.
+THREADED_PARSE_BYTES = 256 * 1024
 REDACTED = b"[agentenv-redacted]"
 
 
@@ -250,7 +254,10 @@ class KeyHolder:
             if not context.models:
                 return call.answer(503, "this run names no model")
             try:
-                body, call.model, call.pinned_to = self._pinned_body(body, kind, context)
+                if len(body) > THREADED_PARSE_BYTES:
+                    body, call.model, call.pinned_to = await asyncio.to_thread(self._pinned_body, body, kind, context)
+                else:
+                    body, call.model, call.pinned_to = self._pinned_body(body, kind, context)
             except ValueError as error:
                 self.stats["refused"] += 1
                 return call.answer(400, str(error))
@@ -277,7 +284,7 @@ class KeyHolder:
         headers = {name: self._scrubbed_text(value) for name, value in response.headers.items()
                    if name.lower() not in _DROP_RESPONSE}
         call.status = response.status_code
-        return StreamingResponse(self._relay(response, call), status_code=response.status_code, headers=headers)
+        return _Relayed(response, call, self._relay(response, call), status_code=response.status_code, headers=headers)
 
     def _context(self, headers: Mapping[str, str]) -> Context | None:
         """The context of the one token the call presents, as a bearer token or the same value as an API key."""
@@ -364,14 +371,27 @@ class KeyHolder:
                 yield tail
         except httpx.HTTPError as error:
             call.error = type(error).__name__
-        finally:
-            await response.aclose()
-            call.log()
 
     def _scrubbed_text(self, text: str) -> str:
         for value in self._sealed_values:
             text = text.replace(value.decode(errors="replace"), REDACTED.decode())
         return text
+
+
+class _Relayed(StreamingResponse):
+    """The endpoint's answer streamed back; its connection closed and the call logged however the stream ends, even
+    when the client is gone before the stream starts."""
+
+    def __init__(self, upstream: httpx.Response, call: _Call, content: AsyncIterator[bytes], **kwargs: Any) -> None:
+        super().__init__(content, **kwargs)
+        self._upstream, self._call = upstream, call
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._upstream.aclose()
+            self._call.log()
 
 
 @dataclass
@@ -389,6 +409,7 @@ class _Call:
     bytes_out: int = 0
     first_byte_ms: float | None = None
     error: str | None = None
+    logged: bool = False
 
     def sent(self, size: int) -> None:
         if self.first_byte_ms is None:
@@ -404,7 +425,11 @@ class _Call:
         return response
 
     def log(self) -> None:
-        fields = {name: value for name, value in self.__dict__.items() if name != "started" and value is not None}
+        if self.logged:
+            return
+        self.logged = True
+        fields = {name: value for name, value in self.__dict__.items()
+                  if name not in ("started", "logged") and value is not None}
         log("call", **fields, ms=round((time.monotonic() - self.started) * 1000, 1))
 
 

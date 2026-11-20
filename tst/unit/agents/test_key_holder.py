@@ -90,7 +90,7 @@ def holder(upstream: Upstream) -> key_holder.KeyHolder:
 
 
 async def call(holder, method: str, target: str, *, headers: dict[str, str] | None = None, body: bytes | dict = b"",
-               token: str | None = TOKEN, on_chunk=None) -> Answer:
+               token: str | None = TOKEN, on_chunk=None, spec_version: str = "2.3") -> Answer:
     """``target`` (a raw path and query) sent to the key holder's ASGI app as uvicorn would, the path decoded;
     each body chunk the app sends is kept apart, and ``on_chunk`` sees each as it is sent."""
     raw, _, query = target.partition("?")
@@ -98,7 +98,8 @@ async def call(holder, method: str, target: str, *, headers: dict[str, str] | No
     sent_headers = {"content-type": "application/json", **({"authorization": f"Bearer {token}"} if token else {}),
                     **(headers or {})}
     scope = {
-        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
+        "type": "http", "asgi": {"version": "3.0", "spec_version": spec_version}, "http_version": "1.1",
+        "method": method, "scheme": "http",
         "path": unquote(raw), "raw_path": raw.encode(), "query_string": query.encode(), "root_path": "",
         "headers": [(name.lower().encode(), value.encode()) for name, value in sent_headers.items()],
         "client": ("127.0.0.1", 40000), "server": ("127.0.0.1", key_holder.PORT),
@@ -508,6 +509,42 @@ async def test_a_stream_passes_chunk_by_chunk(holder, upstream):
     assert seen[0] == first
     assert answer.chunks == [first, b"event: message_stop\ndata: {}\n\n"]
     assert answer.headers["content-type"] == "text/event-stream"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+async def test_a_client_gone_before_the_stream_starts_still_closes_the_endpoints_answer(holder, upstream, capsys,
+                                                                                       spec_version):
+    closed = asyncio.Event()
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"event: message_start\ndata: {}\n\n"
+            await asyncio.sleep(30)
+
+        async def aclose(self):
+            closed.set()
+
+    upstream.reply = lambda request: httpx.Response(200, stream=Stream())
+
+    async def gone(chunk):
+        raise OSError("the client is gone")
+
+    with pytest.raises(Exception):
+        await call(holder, "POST", "/v1/messages", body=_messages(stream=True), on_chunk=gone,
+                   spec_version=spec_version)
+
+    await asyncio.wait_for(closed.wait(), timeout=5)
+    assert [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()] == ["call"]
+
+
+@pytest.mark.asyncio
+async def test_a_large_body_is_read_and_pinned_too(holder, upstream):
+    body = _messages(OTHER, padding="x" * (key_holder.THREADED_PARSE_BYTES + 1))
+
+    assert (await call(holder, "POST", "/v1/messages", body=body)).status == 200
+    assert upstream.body()["model"] == MODEL
+    assert upstream.body()["padding"] == body["padding"]
 
 
 @pytest.mark.asyncio
