@@ -68,6 +68,7 @@ from .extensions import (
     AtifObjectsResponse,
     AtifUploadedObjects,
     TrajectoryEventsResponse,
+    TrajectoryMediaRequest,
     TrajectoryObjectsResponse,
     TrajectoryState,
     TrajectoryUploadedObjects,
@@ -682,6 +683,7 @@ class _SdkServices:
             (PEER_AGENTS_V1.uri, "list"): self.peer_agents_list,
             (SKILL_CONFIG_V1.uri, "list"): self.skill_list,
             (TRAJECTORY_V1.uri, "get"): self.trajectory_get,
+            (TRAJECTORY_V1.uri, "media"): self.trajectory_media,
             (TRIGGERS_V1.uri, "register"): self.triggers_register,
             (TRIGGERS_V1.uri, "decide"): self.triggers_decide,
             (TRIGGERS_V1.uri, "state"): self.triggers_state,
@@ -964,6 +966,11 @@ class _SdkServices:
         )
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
 
+    async def trajectory_media(self, request: TrajectoryMediaRequest) -> dict[str, Any]:
+        """Upload the media files of a context's atif/1 copy the worker asks for, from the spool (``MediaSpool.push``)."""
+        pushed = await self.task_trajectories.media.push(request.context_id, request.objects)
+        return pushed.model_dump(mode="json", exclude_none=True)
+
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
         runs, the agent's own included."""
@@ -1128,7 +1135,8 @@ def _taking_the_control_token(
     inner: Callable[[Starlette], AbstractAsyncContextManager] | None,
 ) -> Callable[[Starlette], AbstractAsyncContextManager]:
     """The application's lifespan, ``inner``'s if it has one: serving starts by taking the agent's control token out of
-    the environment, and the extension routes take it from then on. An application that isn't served stays open."""
+    the environment, and the extension routes take it from then on, and ends by removing the media spool. An
+    application that isn't served stays open."""
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[Any]:
@@ -1136,11 +1144,14 @@ def _taking_the_control_token(
         log_guard(application.control_token)
         if application.services.secrets is not None:
             application.services.secrets.add(application.control_token, source="the control token")
-        if inner is None:
-            yield None
-        else:
-            async with inner(app) as state:
-                yield state
+        try:
+            if inner is None:
+                yield None
+            else:
+                async with inner(app) as state:
+                    yield state
+        finally:
+            application.services.task_trajectories.media.close()
 
     return lifespan
 
@@ -1354,7 +1365,7 @@ class A2AAgentApplication:
                     extension_request = request_model.model_validate(payload)
                     if self.services.secrets is not None:
                         self.services.secrets.add_request(extension_request)
-                if extension_uri == TRAJECTORY_V1.uri:
+                if extension_uri == TRAJECTORY_V1.uri and operation.definition.name == "get":
                     self.services.check_trajectory_format(extension_request.format)
                     if extension_request.format == ATIF_FORMAT:
                         # The SDK serves atif/1 from its own copy, context reads an agent binds included.

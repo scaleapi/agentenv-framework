@@ -1712,6 +1712,20 @@ first, and a read scrubs as it serves, so a secret learned after a step was
 written is left out too. Native reads keep every secret byte for byte, so a
 replay of the served inputs holds what the served copy redacts.
 
+A copy's media files, `media/<sha256>.<ext>` beside the document, wait on the
+agent's disk as the adapter names them, one file per sha256, with a PNG, JPEG,
+GIF or WebP image's width and height read from its header. The worker pulls
+them at each turn's end with the trajectory extension's `media` call, listed on
+the card of an agent that serves `atif/1`: `{context_id, objects: {path: write
+grant}}` uploads each file the context holds under its exact-object grant, up
+to 8 at a time, checking each upload's bytes against its name. It answers what
+it uploaded, the paths it holds no file for (`missing`) and the uploads that
+failed (`failed`). Neither stops the rest. A file uploaded leaves the agent's
+disk, as do a context's files when it is evicted or restored over, and the
+rest when the server stops. A reader takes a part path only as
+`media/<sha256>.<ext>` and checks the bytes it reads against that name
+(`agentenv_protocol.atif.media_file` and `check_media`).
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic

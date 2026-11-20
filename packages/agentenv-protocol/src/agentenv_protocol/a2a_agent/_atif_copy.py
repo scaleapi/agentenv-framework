@@ -68,8 +68,9 @@ class AtifCopy:
     serves goes through ``scrub``, the agent's secrets redacted."""
 
     def __init__(self, adapter: type[Adapter], context_id: str, *,
-                 scrub: Callable[[Any], Any] = lambda served: served) -> None:
-        self._run = AdapterRun(adapter, trajectory_id=uuid.uuid4().hex)
+                 scrub: Callable[[Any], Any] = lambda served: served,
+                 media: Callable[[str, bytes], None] | None = None) -> None:
+        self._run = AdapterRun(adapter, media=media, trajectory_id=uuid.uuid4().hex)
         self._adapter = adapter.__name__
         self._context_id = context_id
         self._scrub = scrub

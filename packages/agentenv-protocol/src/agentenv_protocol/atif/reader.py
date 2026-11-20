@@ -4,7 +4,9 @@ read. Every helper accepts any valid ATIF document, such as a Harbor task's traj
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -91,6 +93,29 @@ def _trajectories(document: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
 
 def _parts(value: Any) -> list[Mapping[str, Any]]:
     return [p for p in value if isinstance(p, Mapping)] if isinstance(value, list) else []
+
+
+#: A media file's name, ``<sha256>.<ext>``: what its bytes are, never a secret.
+MEDIA_NAME = re.compile(r"(?P<sha256>[0-9a-f]{64})\.[A-Za-z0-9]+")
+#: The only path a media file of a document can have: ``media/<sha256>.<ext>``, in the document's own folder.
+MEDIA_PATH = re.compile(rf"^media/{MEDIA_NAME.pattern}$")
+
+
+def media_file(path: str) -> str:
+    """``path``'s sha256, once ``path`` is ``media/<sha256>.<ext>``: a part path resolves only to a file in the
+    document's own media folder, never to another path or a URL. AtifError otherwise."""
+    named = MEDIA_PATH.match(path) if isinstance(path, str) else None
+    if named is None:
+        raise AtifError(f"{path!r} isn't media/<sha256>.<ext> in the document's folder")
+    return named["sha256"]
+
+
+def check_media(path: str, data: bytes) -> None:
+    """Refuse media whose bytes aren't what its name says: a reader checks each file it reads, since a store can hold
+    another file under that name. AtifError naming the difference."""
+    digest = hashlib.sha256(data).hexdigest()
+    if media_file(path) != digest:
+        raise AtifError(f"{path}'s bytes have sha256 {digest}")
 
 
 def media_paths(document: Mapping[str, Any]) -> list[str]:

@@ -10,6 +10,7 @@ from typing import Any, Callable, Sequence
 
 from ..atif import Adapter
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
+from ._media_spool import MediaSpool
 from ._turn_index import TurnIndex
 from .extensions import TrajectoryState
 from .tasks.v1 import TaskError, TrajectoryLog
@@ -98,6 +99,8 @@ class TaskTrajectories:
         self._turns = TurnIndex() if atif is not None else None
         #: What every atif/1 read goes through: the agent's secrets redacted.
         self._scrub = scrub
+        #: The copies' media files, on disk until the worker pulls them.
+        self.media = MediaSpool()
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
         self._copies: dict[str, AtifCopy] = {}
@@ -133,7 +136,8 @@ class TaskTrajectories:
             copy = self._copies.get(record.context_id)
             if copy is None:
                 copy = self._copies[record.context_id] = AtifCopy(
-                    self._atif, record.context_id, **({"scrub": self._scrub} if self._scrub is not None else {})
+                    self._atif, record.context_id, media=self.media.sink(record.context_id),
+                    **({"scrub": self._scrub} if self._scrub is not None else {}),
                 )
             copy.start(task_id, self._turns.next(record.context_id), turn)
             record.log._atif = _CopySink(copy, task_id)
@@ -149,6 +153,7 @@ class TaskTrajectories:
         new document, since the conversation is the snapshot's now; an agent that serves atif/1 only."""
         self._turns.set(context_id, turns)
         self._copies.pop(context_id, None)
+        self.media.drop(context_id)
 
     def request_cancel(self, task_id: str) -> None:
         """Make ``canceled`` the outcome the task is sealed with, whatever ``run`` returns."""
@@ -357,6 +362,7 @@ class TaskTrajectories:
                 continue
             del self._contexts[context_id]
             self._copies.pop(context_id, None)
+            self.media.drop(context_id)
             for task_id in task_ids:
                 del self._tasks[task_id]
 
