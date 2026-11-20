@@ -46,8 +46,12 @@ MCP servers over TLS through the egress proxy, `letta mcp call` included. The wo
 time, as file times do. Nothing on the CLI's headless path ages conversations or tool output by file times. What still
 reads the env's clock against other times:
 - A commit to the git-backed memory, the bridge's or the CLI's, carries the env's date. Before 1970 git stores an
-  overflowed time, and after 2099 a broken time zone, which `git fsck` flags; commits, `ls-tree` and `show`, all the
-  CLI reads its memory with, work.
+  overflowed time, and after 2099 a broken time zone, which `git fsck` flags; `commit`, `ls-tree`, `show`, `log` and
+  `status`, which the bridge and the CLI run on it, work.
+- The memory tool's listing of a folder shows its 10 most recently edited entries, dating committed ones by their
+  commits, on the env's clock, and uncommitted ones by their files' times, which are real. A clock ahead of real time,
+  or before 1970, lists committed entries first and one behind it uncommitted ones, which changes the 10 a larger
+  folder shows.
 - A jump back across a compaction makes the CLI's pre-turn compaction check estimate the context's size from its text
   rather than from the last reported usage.
 - Messages written on 2026-01-01 UTC, the CLI's placeholder date, get timestamps interpolated from the transcript
@@ -55,7 +59,14 @@ reads the env's clock against other times:
 - A `Retry-After` given as a date (LiteLLM and the providers give seconds) is read against the env's date, and the CLI
   waits at most 60 s.
 - File locks time out, and those that don't go by their owner's process go stale, on the env's clock, so a rate above
-  1 or a jump forward shortens both. A context's own commands are the only ones to take its locks.
+  1 or a jump forward shortens both. A context's own commands are the only ones to take its locks. A jump back
+  lengthens both: a lock a killed CLI left, the reflection transcript's say, goes stale only once the env's clock
+  passes the time it was taken plus 90 s, and until then every turn waits 10 s for it at its end and leaves its messages
+  out of that transcript, logging `Failed to append transcript delta` in the context's `.letta/logs/debug`. A jump back
+  while a command waits for a held lock stretches the wait by the jump, and a frozen clock (rate 0) stretches it to the
+  turn's timeout.
+- On a frozen clock, every assistant message from a provider that gives no response id (LiteLLM gives one) takes the
+  same id, made from the time.
 
 Run `agent-env run agents --task letta-code-smoke` for the shell smoke task and
 `agent-env a2a-agent validate --id letta-code --sandbox local` for the repository's validator.

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import tomllib
 
 from tst.unit.agents.letta_code.agent import AGENT_DIR
@@ -71,3 +72,17 @@ def test_the_image_and_an_install_carry_every_module_the_server_imports():
     assert {"agent_clock/agent_egress.py", "clock/clockpage.py", "letta_code_bridge.py"} <= needed
     assert needed <= set(_copied()) and needed <= _installed(), (needed, _installed())
     assert all(_in_context(name) for name in _installed())
+
+
+def test_an_install_puts_every_file_by_its_own_name_in_the_one_folder_run_sh_imports_from():
+    """A file the build context takes from a shared folder, ``agent_clock/agent_egress.py`` say, lands beside the
+    server, as the image copies it, not in a folder of that name off the path."""
+    start = INSTALL_SH.index("for file in $AGENT_FILES; do")
+    loop = INSTALL_SH[start:INSTALL_SH.index("\ndone\n", start) + len("\ndone")]
+    agent_files = re.search(r"^AGENT_FILES=.*$", INSTALL_SH, re.MULTILINE).group(0)
+    script = f'{agent_files}\nhere=/ctx root=/r\nput() {{ printf "%s %s\\n" "$1" "$2"; }}\n{loop}\n'
+
+    placed = subprocess.run(["bash", "-c", script], check=True, capture_output=True, text=True).stdout.splitlines()
+
+    assert sorted(placed) == sorted(f"/ctx/{name} /r/app/{name.rsplit('/', 1)[-1]}" for name in _installed())
+    assert 'PYTHONPATH="$root/app"' in (AGENT_DIR / "run.sh").read_text()

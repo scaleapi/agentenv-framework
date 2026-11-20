@@ -2,7 +2,8 @@
 clock/v1 sync_time; sync_env_clock declares it a follower at the real gateway and hands it its config; from then on
 every program the agent's user runs, its CLI included, reads the env's time while the A2A server stays on real time; a
 clock write that waits for followers waits for it; and once teardown_sandboxes takes it down, writes stop waiting for
-it. An agent whose CLI speaks a protocol the stub endpoint serves also runs one real turn.
+it. An agent whose CLI speaks a protocol a stub endpoint serves, Anthropic's messages or OpenAI's chat completions,
+also runs one real turn.
 
 Runs over images built beforehand, from this branch: AGENTENV_E2E_AGENT_IMAGES names one per agent, as
 ``claude-code=<tag>,codex=<tag>``; an agent it doesn't name is skipped as a missing capability."""
@@ -16,6 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from agentenv_protocol.client import ExtensionCallError
@@ -38,6 +40,7 @@ from tst.integration.task_step.test_prompt_agent_live_trajectory_local import (
     local_registry as local_registry,
 )
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
+from tst.util import fake_openai
 from tst.util.capabilities import agent_clock_image, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
 
@@ -75,21 +78,44 @@ async def _claude_turn(context: TaskStepContext, endpoint: FakeAnthropic) -> Non
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
 
+def _text(content) -> str:
+    return content if isinstance(content, str) else "".join(
+        part.get("text", "") for part in content or [] if isinstance(part, dict))
+
+
+async def _letta_turn(context: TaskStepContext, endpoint: fake_openai.FakeOpenAI) -> None:
+    """One turn of the real Letta Code CLI, its proxy variables set: its model calls reach the bridge's relay on
+    loopback, which the egress proxy would refuse, and the "Local time" line it gives the model and a Bash `date` the
+    model runs are the env's."""
+    endpoint.respond = fake_openai.tool_then_answer("Bash", {"command": "date -u +%FT%TZ", "description": "Show the date"},
+                                                    prefix="the shell said: ")
+    await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
+                              max_conversation_turns=1).execute(context)
+    dated = {line for seen in endpoint.completions() for message in seen.body.get("messages") or []
+             for line in _text(message.get("content")).splitlines() if "**Local time**" in line}
+    print("the CLI's Local time line:", dated, "Bash date:", endpoint.tool_results())
+    assert dated and all("March 4, 2031" in line for line in dated), dated
+    assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
+
+
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
-    must return under the preloaded library), and a turn against the stub endpoint, for a CLI that speaks its protocol."""
+    must return under the preloaded library), and a turn against the stub ``endpoint`` its CLI speaks to, for a CLI
+    that speaks a stub's protocol."""
 
     bridge: str
     version: tuple[str, ...]
     shows: str
-    turn: Callable[[TaskStepContext, FakeAnthropic], Awaitable[None]] | None = None
+    turn: Callable[[TaskStepContext, Any], Awaitable[None]] | None = None
+    endpoint: Callable[..., Any] = FakeAnthropic
 
 
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
-    "letta-code": Agent(bridge="letta_code_bridge", version=("letta", "--version"), shows="(Letta Code)"),
+    "letta-code": Agent(bridge="letta_code_bridge", version=("letta", "--version"), shows="(Letta Code)",
+                        turn=_letta_turn, endpoint=fake_openai.FakeOpenAI),
     "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
 }
 
@@ -121,11 +147,12 @@ async def _followers(deployed) -> dict:
 @pytest.mark.parametrize("name", [pytest.param(name, marks=skip_without_agent_clock_image(name)) for name in AGENTS])
 @pytest.mark.asyncio
 async def test_an_agent_image_follows_the_envs_clock_until_it_is_torn_down(local_registry, name):
-    with FakeAnthropic(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
-        await _follows_until_torn_down(name, AGENTS[name], agent_clock_image(name), endpoint)
+    spec = AGENTS[name]
+    with spec.endpoint(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
+        await _follows_until_torn_down(name, spec, agent_clock_image(name), endpoint)
 
 
-async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: FakeAnthropic) -> None:
+async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: Any) -> None:
     _seed_bootstrap_envs()
     env, deployed, _ = await _deploy_items("agentclock")
     uid = uuid.uuid4().hex[:8]
