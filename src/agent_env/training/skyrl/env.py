@@ -101,8 +101,8 @@ class AgentEnvTextEnv(BaseTextEnv):
         if rollout.failure is not None:
             if rollout.misgrouped:
                 self.close()
-                raise ValueError(f"{self._task()}: {rollout.failure}. Its row was written from its toolset's first "
-                                 "task, so its toolset misses what tells its tasks apart")
+                raise ValueError(f"{self._task()}: {rollout.failure}. Its row lists the tools found by playing its "
+                                 "toolset's first task, so its toolset misses what tells its tasks apart")
             raise _Failed(rollout.failure)
         if not rollout.done:
             return BaseTextEnvStepOutput(observations=answers, reward=0.0, done=False, metadata={})
