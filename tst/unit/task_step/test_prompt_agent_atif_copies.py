@@ -391,3 +391,64 @@ def test_a_run_without_an_instance_id_keeps_one_folder_run_for_all_its_agents(tm
     assert run.startswith("adhoc-") and len(run) == len("adhoc-") + 12
     assert solver.endswith(f"atif/instance_id={run}/solver/") and judge.endswith(f"atif/instance_id={run}/judge/")
     assert atif_copies.atif_folder(context, "solver") == solver
+
+
+@pytest.mark.asyncio
+async def test_a_link_that_fails_is_made_by_a_later_turn_and_its_turn_keeps_its_copy(monkeypatch, tmp_path):
+    run = _Run(monkeypatch, tmp_path)
+    context = run.context()
+    before = await run.execute(context, context_id="talk", max_conversation_turns=1)
+    earlier_url = _atifs(before)[0]["url"]
+    run.wire.restart()
+    real_read, failed = run.store.read, []
+
+    def read_failing_once(key: str) -> bytes:
+        if key.endswith(earlier_url.rsplit("/", 1)[1]) and not failed:
+            failed.append(key)
+            raise OSError("the store blinked")
+        return real_read(key)
+
+    monkeypatch.setattr(run.store, "read", read_failing_once)
+
+    after = await run.execute(context, context_id="talk", max_conversation_turns=2)
+
+    assert failed and [atif["status"] for atif in _atifs(after)] == ["valid", "valid"]
+    later = run.read(_atifs(after)[-1]["url"])
+    assert run.read(earlier_url)["continued_trajectory_ref"] == f"{later['trajectory_id']}.json"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_doesnt_read_as_atif_is_stored_and_recorded_invalid(monkeypatch, tmp_path):
+    run = _Run(monkeypatch, tmp_path)
+
+    def broken(answer: dict) -> dict:
+        answer["trajectory"]["steps"] = [None]
+        return answer
+
+    run.wire.rewrite_atif = broken
+
+    response = await run.execute(run.context(), max_conversation_turns=1)
+
+    [atif] = _atifs(response)
+    assert (atif["status"], atif["rules"], atif["through_step"]) == ("invalid", ["atif"], None)
+    assert run.read(atif["url"])["steps"] == [None] and run.wire.media_requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["bytes", "sha256"])
+async def test_a_profile_that_misdescribes_a_stored_file_makes_the_copy_invalid(monkeypatch, tmp_path, field):
+    run = _Run(monkeypatch, tmp_path)
+
+    def misdescribed(answer: dict) -> dict:
+        for step in answer["trajectory"]["steps"]:
+            for info in (step.get("extra") or {}).get("agentenv", {}).get("media", {}).values():
+                info[field] = info[field] + 1 if field == "bytes" else "0" * 64
+        return answer
+
+    run.wire.rewrite_atif = misdescribed
+
+    response = await run.execute(run.context(), max_conversation_turns=1)
+
+    [atif] = _atifs(response)
+    assert (atif["status"], atif["rules"]) == ("invalid", ["media-bytes"])
+    assert ("bytes" if field == "bytes" else "sha256") in atif["reason"]

@@ -25,7 +25,7 @@ from agentenv_protocol.atif import (
     SCHEMA_VERSION,
     Finding,
     errors_in,
-    media_paths,
+    media_file,
     profile_of,
     validate,
 )
@@ -91,8 +91,9 @@ class AtifCopies:
         self._offered = ATIF in TrajectoryFormats.of(extension).formats
         self._turns: list[asyncio.Task[AtifRecord] | AtifRecord | None] = []
         self._last: asyncio.Task[AtifRecord] | None = None
-        #: The media paths the folder holds, listed once and kept as this step pulls more.
-        self._held: set[str] | None = None
+        #: The media files the folder holds and their sizes (None until read), listed once and kept as this step pulls
+        #: more.
+        self._held: dict[str, int | None] | None = None
 
     def turn(self, task_id: str, name: str) -> None:
         """Copy the ended task ``task_id``'s atif/1 document, its aux log and turn context stored under ``name``."""
@@ -151,13 +152,20 @@ class AtifCopies:
             turn_context_url = await asyncio.to_thread(
                 store.put, f"{folder}turns/{name}/turn_context.json", _json(body["turn_context"]),
                 content_type="application/json", allow_overwrite=True)
-        session_id = document.get("session_id")
-        if isinstance(session_id, str):
-            await self._link(store, folder, session_id, trajectory_id)
-        held = await self._pull_media(document, session_id, store, folder)
         root = profile_of(document)
         newer = _newer(document.get("schema_version"), SCHEMA_VERSION) or _newer(root.get("version"), PROFILE_VERSION)
-        errors = errors_in(await asyncio.to_thread(_findings, document, held, newer))
+        found = await asyncio.to_thread(validate, document, reader=newer)
+        try:
+            infos = _media_infos(document)
+        except (AttributeError, TypeError):  # a shape no ATIF has, which the validator reports; nothing to walk
+            infos = None
+        if infos is not None:
+            session_id = document.get("session_id")
+            if isinstance(session_id, str):
+                await self._link(store, folder, session_id, trajectory_id)
+            held = await self._pull_media(infos, session_id, store, folder)
+            found += _media_findings(infos, held)
+        errors = errors_in(found)
         status = NEWER if newer else INVALID if errors else VALID
         if status == INVALID:
             logger.warning(f"agent '{self._agent.agent_name}': the atif/1 copy of task {task_id} is invalid "
@@ -175,33 +183,48 @@ class AtifCopies:
 
     async def _link(self, store: ObjectStore, folder: str, session_id: str, trajectory_id: str) -> None:
         """Point the session's earlier document, when a restart began this one, to this one: the agent that wrote
-        the earlier one may be gone, so the worker sets its ``continued_trajectory_ref``."""
+        the earlier one may be gone, so the worker sets its ``continued_trajectory_ref``. The session names this one
+        only once that's done, so a link that fails is made by a later turn."""
         sessions = self._context.metadata[ATIF_COPIES_KEY]["agents"][self._agent.agent_name]["sessions"]
         earlier = sessions.get(session_id)
+        if earlier is not None and earlier != trajectory_id:
+            key = f"{folder}{earlier}.json"
+            try:
+                document = json.loads(await asyncio.to_thread(store.read, key))
+                document["continued_trajectory_ref"] = f"{trajectory_id}.json"
+                await asyncio.to_thread(store.put, key, _json(document), content_type="application/json",
+                                        allow_overwrite=True)
+            except Exception as exc:
+                logger.warning(f"agent '{self._agent.agent_name}': linking {earlier} to {trajectory_id} failed, so a "
+                               f"later turn tries again (continuing): {exc}")
+                return
         sessions[session_id] = trajectory_id
-        if earlier is None or earlier == trajectory_id:
-            return
-        key = f"{folder}{earlier}.json"
-        document = json.loads(await asyncio.to_thread(store.read, key))
-        document["continued_trajectory_ref"] = f"{trajectory_id}.json"
-        await asyncio.to_thread(store.put, key, _json(document), content_type="application/json", allow_overwrite=True)
 
-    async def _pull_media(self, document: Mapping[str, Any], context_id: Any, store: ObjectStore,
-                          folder: str) -> set[str]:
-        """The media paths the folder holds once the agent has pushed what ``document`` names and the folder lacks.
-        A file the agent answers missing or failed for may be stored already, by a push whose answer was lost, so the
-        store is asked before it's counted missing."""
+    async def _pull_media(self, infos: Mapping[str, Mapping[str, Any]], context_id: Any, store: ObjectStore,
+                          folder: str) -> dict[str, int | None]:
+        """The media files the folder holds, with their sizes, once the agent has pushed what the document names
+        (``infos``, by path) and the folder lacks. A file the agent answers missing or failed for may be stored already, by a push whose answer
+        was lost, so the store is asked before it's counted missing; a held file's size is read from the store once."""
         if self._held is None:
             listed = await asyncio.to_thread(store.list, f"{folder}media/")
-            self._held = {key[len(folder):] for key in listed}
-        wanted = [path for path in media_paths(document) if MEDIA_PATH.match(path) and path not in self._held]
+            self._held = {key[len(folder):]: None for key in listed}
+        held = await self._pushed(infos, context_id, store, folder, self._held)
+        for path in infos:
+            if path in held and held[path] is None:
+                metadata = await asyncio.to_thread(store.get_object_metadata, f"{folder}{path}")
+                held[path] = None if metadata is None else metadata.size
+        return held
+
+    async def _pushed(self, infos: Mapping[str, Mapping[str, Any]], context_id: Any, store: ObjectStore, folder: str,
+                      held: dict[str, int | None]) -> dict[str, int | None]:
+        """``held``, with what the agent pushed of the files the document names that it lacks."""
+        wanted = [path for path in infos if MEDIA_PATH.match(path) and path not in held]
         method, endpoint = A2AAgent.operation(self._extension, "media")
         card, sandbox_type = self._agent.a2a_card, self._agent.sandbox_type
         if not wanted or method is None or endpoint is None or (
                 transfer_store(store, self._a2a_url, card, sandbox_type=sandbox_type) is store
                 and not issues_grants_to(store, sandbox_type)):
-            return self._held
-        infos = _media_infos(document)
+            return held
         cap = store.max_single_upload_bytes
         wanted = [path for path in wanted if cap is None or (infos.get(path, {}).get("bytes") or 0) <= cap]
         unconfirmed: list[str] = []
@@ -224,26 +247,37 @@ class AtifCopies:
                                f"(continuing): {exc}")
                 unconfirmed += batch
                 continue
-            self._held.update(pushed.objects)
+            held.update({path: uploaded.size_bytes for path, uploaded in pushed.objects.items()})
             unconfirmed += [*pushed.missing, *pushed.failed]
         for path in unconfirmed:
-            if await asyncio.to_thread(store.exists, f"{folder}{path}"):
-                self._held.add(path)
-        return self._held
+            metadata = await asyncio.to_thread(store.get_object_metadata, f"{folder}{path}")
+            if metadata is not None:
+                held[path] = metadata.size
+        return held
 
 
-def _findings(document: Mapping[str, Any], held: set[str], newer: bool) -> list[Finding]:
-    """The validator's findings, a reader's for a document newer than this worker's, with each media file the folder
-    doesn't hold as ``media-bytes``: the agent checked each file it pushed against its name, so held files aren't read
-    back."""
-    found = validate(document, reader=newer)
-    found += [Finding("media-bytes", ERROR, "", f"{path} isn't stored beside the document")
-              for path in media_paths(document) if MEDIA_PATH.match(path) and path not in held]
+def _media_findings(infos: Mapping[str, Mapping[str, Any]], held: Mapping[str, int | None]) -> list[Finding]:
+    """``media-bytes`` for each media file the folder doesn't hold as the profile describes it: missing, a profile
+    sha256 other than its name's, or a profile size other than the stored file's. The agent checked each file it pushed
+    against its name, before and after the upload, so held files aren't read back."""
+    found: list[Finding] = []
+    for path, info in infos.items():
+        if not MEDIA_PATH.match(path):
+            continue
+        if path not in held:
+            found.append(Finding("media-bytes", ERROR, "", f"{path} isn't stored beside the document"))
+            continue
+        if info.get("sha256") is not None and info["sha256"] != media_file(path):
+            found.append(Finding("media-bytes", ERROR, "", f"{path}'s profile gives sha256 {info['sha256']}"))
+        if info.get("bytes") is not None and held[path] is not None and info["bytes"] != held[path]:
+            found.append(Finding("media-bytes", ERROR, "",
+                                 f"{path}'s profile gives {info['bytes']} bytes, and the stored file has {held[path]}"))
     return found
 
 
 def _media_infos(document: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    """Each media path's profile entry, with the media type of the part that names it when the entry has none."""
+    """Each media file the document names (``media_paths``), by path, with its profile entry and the media type of
+    the part that names it when the entry has none."""
     infos: dict[str, dict[str, Any]] = {}
     for trajectory in _trajectories(document):
         for step in trajectory.get("steps") or []:
