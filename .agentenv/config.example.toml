@@ -83,6 +83,11 @@ impl = "agent_env.runner.local_runner:LocalRunner"
 [runner.config]
 workers = 2
 
+# [gateway]
+# The origins besides a gateway's own that may show its pgweb console in a frame, such as an app that embeds it. A
+# browser opens pgweb with a link from DeployedGatewayEnv.pgweb_link(); with no origin here, only a tab of its own can.
+# console_frame_ancestors = ["https://app.example.com"]
+
 [explorer]
 # The explorer is an unauthenticated local control plane, so `agent-env up` always binds
 # loopback (127.0.0.1) — there is no `host` knob. To reach it from another machine, use an
