@@ -66,7 +66,7 @@ from agent_env.task_step.task_steps.always_on import (
     TURN_GRACE_SECONDS,
     AlwaysOnTaskStep,
 )
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, is_prompt_step
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, fetch_native_trajectory, is_prompt_step
 
 logger = logging.getLogger(__name__)
 
@@ -268,11 +268,11 @@ class RateUserSatisfactionTaskStep(TaskStep):
         if not ext or not session.trajectory_prefix:
             return None
         try:
-            # prompt_agent's fetch uses nothing of its step, so the run's own code stores it.
-            return await asyncio.wait_for(PromptAgentTaskStep._fetch_trajectory(
-                None, agent.a2a_url or agent.api_url, ext, task_id, session.trajectory_prefix, message_id,
+            stored = await asyncio.wait_for(fetch_native_trajectory(
+                agent.a2a_url or agent.api_url, ext, task_id, session.trajectory_prefix, message_id,
                 card=card, sandbox_type=agent.sandbox_type, headers=agent.control_headers),
                 max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
+            return stored.url
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
             return None

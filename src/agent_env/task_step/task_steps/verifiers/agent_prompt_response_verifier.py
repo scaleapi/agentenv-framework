@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStepDependency
@@ -64,6 +64,14 @@ class AgentPromptResponseVerifierTaskStep(VerifierTaskStep):
         base["score_aggregator"] = self.score_aggregator.value
         base["verifier_id"] = self.verifier_id
         return base
+
+    def config_problems(self) -> list[str]:
+        """The criteria a run would refuse when it grades: an unknown type, an empty ``needles`` or ``pattern``, a
+        pattern that doesn't compile, or a flag ``re`` doesn't have."""
+        problems = super().config_problems()
+        for idx, criterion in enumerate(self.criteria):
+            problems.extend(f"criterion #{idx}: {problem}" for problem in _criterion_problems(criterion))
+        return problems
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentPromptResponseVerifierTaskStep":
@@ -143,3 +151,32 @@ class AgentPromptResponseVerifierTaskStep(VerifierTaskStep):
                 "justification": "pattern matched" if passed else f"no match for pattern {pattern!r}",
             }
         raise RuntimeError(f"unhandled criterion type {rtype}")
+
+
+def _criterion_problems(criterion: Any) -> list[str]:
+    if not isinstance(criterion, dict):
+        return [f"must be an object, not {type(criterion).__name__}"]
+    rtype = criterion.get("type")
+    if not isinstance(rtype, str) or rtype not in _HANDLED_TYPES:
+        return [f"unknown type {rtype!r}; handled types: {sorted(_HANDLED_TYPES)}"]
+    if rtype == "response_contains":
+        needles = criterion.get("needles")
+        if isinstance(needles, list) and needles and all(isinstance(needle, str) for needle in needles):
+            return []
+        return [f"response_contains needs non-empty needles, a list of strings, not {needles!r}"]
+    pattern = criterion.get("pattern")
+    if not (isinstance(pattern, str) and pattern):
+        return [f"response_regex_present needs a non-empty pattern, a string, not {pattern!r}"]
+    names = criterion.get("flags")
+    if names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)):
+        return [f"flags must be a list of re flag names, not {names!r}"]
+    if unknown := [name for name in names or () if not isinstance(getattr(re, name, None), re.RegexFlag)]:
+        return [f"flags {unknown!r} aren't re flags"]
+    flags = re.DOTALL if names is None else 0
+    for name in names or ():
+        flags |= getattr(re, name)
+    try:
+        re.compile(pattern, flags)
+    except re.error as e:
+        return [f"pattern {pattern!r} doesn't compile: {e}"]
+    return []

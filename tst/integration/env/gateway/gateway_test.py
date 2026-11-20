@@ -1273,6 +1273,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
         assert result.db_mcp_gateway_url, "the deploy recorded no db-mcp at the gateway"
         await _verify_list_tools(mcp_url=result.db_mcp_gateway_url, headers=result.control_headers_for(result.db_mcp_gateway_url),
                                 tool_verifier_callback=assert_changelog_has_entry)
+        await _verify_pgweb_link(result)
 
         rehydrated = await MultiEnv.from_deployed_env(result)
         assert rehydrated._env_provider is not None
@@ -1320,6 +1321,29 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
                                 tool_verifier_callback=assert_probe_in_changelog)
     finally:
         await multi_env.close()
+
+
+async def _verify_pgweb_link(deployed) -> None:
+    """A browser's way into pgweb without the token: the record's link trades once for a cookie that opens pgweb's page
+    and API, and nothing else at the gateway."""
+    link = deployed.pgweb_link()
+    assert link, "the deploy recorded no pgweb at the gateway"
+    navigate = {"sec-fetch-site": "none", "sec-fetch-mode": "navigate"}
+    same_origin = {"sec-fetch-site": "same-origin", "sec-fetch-mode": "cors"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        opened = await client.get(link)
+        cookie = opened.headers.get("set-cookie", "").split(";")[0]
+        page = await client.get(deployed.db_web_gateway_url, headers={**navigate, "cookie": cookie})
+        query = await client.get(f"{deployed.db_web_gateway_url}api/query", params={"query": "SELECT 41 + 1 AS answer"},
+                                 headers={**same_origin, "cookie": cookie})
+        db_mcp = await client.post(deployed.db_mcp_gateway_url, json={}, headers={**same_origin, "cookie": cookie})
+        again = await client.get(link)
+    assert opened.status_code == 303 and opened.headers["location"] == "./", (opened.status_code, opened.text)
+    assert opened.headers["content-security-policy"].startswith("frame-ancestors 'self'")
+    assert page.status_code == 200 and "pgweb" in page.text.lower(), page.status_code
+    assert query.status_code == 200 and query.json()["rows"] == [[42]], (query.status_code, query.text)
+    assert db_mcp.status_code == 401, db_mcp.status_code
+    assert again.status_code == 401, again.status_code
 
 
 @pytest.mark.asyncio

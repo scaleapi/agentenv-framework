@@ -222,7 +222,17 @@ async def start_runs(task_id: EntityId, body: StartRunsRequest | None = None) ->
 
 @router.post("/{task_id}/cancel-run")
 async def cancel_run(task_id: EntityId, workflow_id: str = Query(...)) -> dict:
-    canceled = await get_runner().cancel(workflow_id)
+    """Cancel a run of the configured runner. A run another process records, such as an episode a trainer plays, is
+    refused with 409: only the process running it can stop it, so asking this runner would silently do nothing."""
+    from agent_env.runner import store as run_store
+
+    runner = get_runner()
+    record = run_store.get_run(workflow_id)
+    if record is not None and record.runner != runner.type:
+        raise HTTPException(status_code=409, detail=(
+            f"run {workflow_id} is run by {record.runner!r}, not by this explorer's {runner.type!r} runner: stop it "
+            "where it runs (an episode, from the trainer that plays it)"))
+    canceled = await runner.cancel(workflow_id)
     return {"workflow_id": workflow_id, "canceled": canceled}
 
 
