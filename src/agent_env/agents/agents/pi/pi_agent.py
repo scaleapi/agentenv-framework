@@ -63,7 +63,7 @@ from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.routing import Route
 
-from agent_egress import clock_armed, egress_env
+from agent_egress import EGRESS_PROXY_ENV, clock_armed, egress_env
 from changelog import ChangelogCapture, apply as apply_increment
 from peers import Peers
 
@@ -90,6 +90,9 @@ MAX_ATTACHMENT_BYTES = 256 * 1024 * 1024
 # The peer MCP server's header naming the run, whose value pi reads from its environment, never from disk.
 PEER_RUN_HEADER = "X-Pi-A2A-Run"
 PEER_RUN_ENV = "AGENTENV_MCP_PEER_RUN"
+# agent-env's libfaketime keeps a process started with this marker on real time and takes it out of the process's
+# environment, so every process that one starts reads the env's clock.
+REAL_TIME_ENV = "AGENTENV_REAL_TIME"
 # Deltas are reconstructible from the message_end records, so they are left out of the trajectory.
 _UNRECORDED_EVENTS = frozenset({"message_update", "tool_execution_update"})
 # A context id passes through as its session id only when it has none of pi's ``.`` and ``_``; every derived id
@@ -201,11 +204,16 @@ def _mcp_json(
 
 
 def cli_env(environ: Mapping[str, str], base_url: str, mcp_servers: Mapping[str, Any] | None = None, *,
-            clock_armed: bool = False) -> dict[str, str]:
-    """The pi CLI's environment, before its run's own variables: this process's, and on an armed clock the egress
-    proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI calls itself (mcp.json)."""
+            armed: bool = False) -> dict[str, str]:
+    """The pi CLI's environment, before its run's own variables: this process's; where the image runs the env's clock,
+    the real-time marker, so pi stays on real time while every command it runs follows the clock; and on an ``armed``
+    clock the egress proxy (``egress_env``) for the model endpoint, the env's MCP servers and those commands.
+
+    pi itself can't follow the clock: before 1970 its compaction throws (UUIDv7), and its file locks compare its clock
+    with their modification times. It shows the model no date of its own, so the model reads the env's time alone."""
     urls = [base_url, *(str(entry.get("url") or "") for entry in (mcp_servers or {}).values())]
-    return {**environ, **egress_env(environ, urls, armed=clock_armed)}
+    real_time = {REAL_TIME_ENV: "1"} if EGRESS_PROXY_ENV in environ else {}
+    return {**environ, **real_time, **egress_env(environ, urls, armed=armed)}
 
 
 def _prompt_text(parts: Sequence[Any], unattached: Sequence[tuple[Path, str]]) -> str:
@@ -532,7 +540,7 @@ class PiAgent(AgentEnvAgent):
         argv += [f"@{path}" for path in attached]
 
         env = {
-            **cli_env(os.environ, base_url, request.mcp_servers, clock_armed=clock_armed()),
+            **cli_env(os.environ, base_url, request.mcp_servers, armed=clock_armed()),
             **mcp_env,
             "PI_CODING_AGENT_DIR": str(agent_dir),
             "PI_OFFLINE": "1",

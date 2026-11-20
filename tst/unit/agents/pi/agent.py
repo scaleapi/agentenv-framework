@@ -3,7 +3,6 @@ its build context takes as agent_clock/ and clock/, whose modules the image copi
 
 import importlib
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from tst.util.build_context import sent
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "pi"
 IMPORTED = [str(AGENT_DIR), str(sent(AGENT_DIR, "agent_clock/agent_egress.py").parent),
             str(sent(AGENT_DIR, "clock/clockpage.py").parent)]
-PYTHONPATH = os.pathsep.join(IMPORTED)
 sys.path[:0] = IMPORTED
 changelog = importlib.import_module("changelog")
 peers = importlib.import_module("peers")

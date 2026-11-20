@@ -1,6 +1,7 @@
 """Stands in for ``pi --mode json``: records its invocation and replays a scripted event stream.
 
-``FAKE_PI_RECORD`` names the file the argv, cwd, stdin and pi config dir contents are written to;
+``FAKE_PI_RECORD`` names the file the argv, cwd, stdin, pi config dir contents and the environment's agent-env, pi
+and proxy variables are written to;
 ``FAKE_PI_SCENARIO`` selects the stream (``ok``, ``error``, ``crash``, ``hang``). Like pi, it keeps the
 conversation in ``<session-dir>/<stamp>_<id>.jsonl``, found by its header's id and cwd, and its tool call
 writes ``FAKE_PI_WRITE`` (``name=text``) into the working directory when set.
@@ -11,6 +12,8 @@ import os
 import sys
 import time
 from pathlib import Path
+
+ROUTING = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"})
 
 
 def emit(event):
@@ -51,7 +54,8 @@ Path(os.environ["FAKE_PI_RECORD"]).write_text(json.dumps({
     "stdin": prompt,
     "models": json.loads((agent_dir / "models.json").read_text()),
     "mcp": json.loads((agent_dir / "mcp.json").read_text()),
-    "env": {key: value for key, value in os.environ.items() if key.startswith(("AGENTENV_MCP_", "PI_"))},
+    "env": {key: value for key, value in os.environ.items()
+            if key.startswith(("AGENTENV_", "PI_")) or key.upper() in ROUTING},
     "attachments": {arg: Path(arg[1:]).read_bytes().decode() for arg in argv if arg.startswith("@")},
     "history": existing.read_text().splitlines()[1:] if existing else None,
 }))
