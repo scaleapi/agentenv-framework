@@ -6,8 +6,9 @@ skill and ``browser/v1`` on its card. It runs alone on a computer with no displa
 is its page, headful on an X server that computer gives it alone, else headless; which site proxy it goes through comes
 from a variable agentenv sets, never from its settings."""
 from .control import (ACTIVE_CHECK_TIMEOUT_S, AGENT, AGENTENV, CAPTURE_TIMEOUT_S, DOWNLOADS, EXIT, FAILED,
-                      HASH_CHUNK_BYTES, LIVE_START_TAB_TIMEOUT_S, LOADED, PAGE_INPUT, PAGES, PIN_TIMEOUT_S, STOP,
+                      LIVE_START_TAB_TIMEOUT_S, LOADED, PAGE_INPUT, PAGES, PIN_TIMEOUT_S, STOP,
                       TIMED_OUT, UNKNOWN, UNNAVIGATED_CAPTURE_TIMEOUT_S, UPLOADS, BrowserControl)
+from ..transfers import HASH_CHUNK_BYTES
 from .devtools import MAX_MESSAGE_BYTES, PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
 from .environment import (ALONE_BYPASS, BLOCK, BROWSER, COMPUTER_BYPASS, OWNED_FLAGS, POLICIES, READY_POLL_S,
                           SHM_MIN_BYTES, SITE_PROXY_ENV, SITES, SKILL, BrowserSettings, WebsiteBrowserEnvironment,

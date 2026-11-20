@@ -26,12 +26,11 @@ from .profile import (
     StepError,
     profile_of,
 )
-from .reader import is_prefix, tasks
+from .reader import MEDIA_PATH, is_prefix, tasks
 
 ERROR = "error"
 WARNING = "warning"
 
-MEDIA_PATH = re.compile(r"^media/(?P<sha256>[0-9a-f]{64})\.[A-Za-z0-9]+$")
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$")
 _COUNTS = (("prompt_tokens", "total_prompt_tokens"), ("completion_tokens", "total_completion_tokens"),
            ("cached_tokens", "total_cached_tokens"))

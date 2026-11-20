@@ -12,10 +12,12 @@ import logging
 import uuid
 from typing import ClassVar, Optional
 
+from agentenv_protocol.computer.annotate import AnnotateOptions, options_problem
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManifest
 from agentenv_protocol.computer.recording import MANIFEST
 from agentenv_protocol.client import find_extension
+from pydantic import ValidationError
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -47,27 +49,50 @@ MAX_SEGMENTS = 10_000
 MAX_RECORDING_BYTES = 64 << 30
 
 
+class AnnotationSettings(AnnotateOptions):
+    """``start_computer_recording``'s ``annotation_settings``: whether the recording draws its inputs, as it does
+    unless ``is_enabled`` is false, and the options its driver's ``annotate`` takes, which the step passes on."""
+
+    is_enabled: bool = True
+
+
 class StartComputerRecordingTaskStep(TaskStep):
-    """Start recording a deployed env's display, or its child env ``environment_name``'s, under ``name``. Best effort
-    by default."""
+    """Start recording a deployed env's display, or its child env ``environment_name``'s, under ``name``, its driver
+    drawing each input over the frames unless ``annotation_settings`` says ``is_enabled: false``; a driver that
+    can't, as one composed before agent-env drew inputs, records it plain. Best effort by default."""
 
     type: ClassVar[str] = "start_computer_recording"
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(self, id: str, version: Optional[int], env_id: str, name: str, fps: Optional[int] = None,
                  max_edge: Optional[int] = None, cursor: bool = True, environment_name: Optional[str] = None,
-                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = False):
+                 annotation_settings: Optional[dict] = None, depends_on: Optional[list[TaskStepDependency]] = None,
+                 fail_task_on_error: bool = False):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not env_id or not name:
             raise ValueError("start_computer_recording needs an env_id and a name for the recording")
         self.env_id, self.name, self.fps, self.max_edge, self.cursor = env_id, name, fps, max_edge, cursor
         self.environment_name = environment_name
+        self.annotation_settings = annotation_settings
+        try:
+            self.annotation = AnnotationSettings.model_validate({} if annotation_settings is None else
+                                                                annotation_settings)
+        except ValidationError as e:
+            raise ValueError(f"start_computer_recording's annotation_settings: "
+                             f"{options_problem(e, AnnotationSettings)}") from None
+
+    @property
+    def annotates(self) -> bool:
+        """Whether the recording draws each input, as it does unless its settings turn it off."""
+        return self.annotation.is_enabled
 
     def to_dict(self) -> dict:
         data = {**super().to_dict(), "env_id": self.env_id, "name": self.name, "fps": self.fps,
                 "max_edge": self.max_edge, "cursor": self.cursor}
         if self.environment_name is not None:  # left out otherwise, so a step without one serializes as before
             data["environment_name"] = self.environment_name
+        if self.annotation_settings is not None:  # left out otherwise, so a step without them serializes as before
+            data["annotation_settings"] = self.annotation_settings
         return data
 
     @classmethod
@@ -76,7 +101,8 @@ class StartComputerRecordingTaskStep(TaskStep):
         base["fail_task_on_error"] = data.get("fail_task_on_error", False)
         return cls(**base, env_id=data["env_id"], name=data["name"], fps=data.get("fps"),
                    max_edge=data.get("max_edge"), cursor=data.get("cursor", True),
-                   environment_name=data.get("environment_name"))
+                   environment_name=data.get("environment_name"),
+                   annotation_settings=data.get("annotation_settings"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         recordings = context.metadata.setdefault(RECORDINGS_KEY, {})
@@ -94,9 +120,16 @@ class StartComputerRecordingTaskStep(TaskStep):
             refuse_no_network(deployed)
             namespace = recording_namespace(request_id, _KEY_PREFIX)
             grant = _grant(deployed, namespace, self.environment_name)
+            annotated = self.annotates and _annotates(deployed, self.environment_name)
+            if self.annotates and not annotated:
+                logger.warning("start_computer_recording %s on %s: its driver can't draw inputs, its card listing no "
+                               "annotate, as a computer composed before agent-env drew them; recording it plain",
+                               self.name, self.env_id)
+            options = self.annotation.model_dump(exclude={"is_enabled"}, exclude_unset=True)
             started = await deployed.invoke(COMPUTER_RECORDING, "start", {
                 "request_id": request_id, "fps": self.fps, "max_edge": self.max_edge, "cursor": self.cursor,
-                "upload": grant}, environment_name=self.environment_name)
+                "upload": grant, **({"annotate": options} if annotated else {})},
+                environment_name=self.environment_name)
         except Exception as e:
             recordings[self.name] = {"env_id": self.env_id, "state": "failed", "error": why(e)}
             logger.warning("start_computer_recording %s on %s: %s", self.name, self.env_id, e)
@@ -105,7 +138,7 @@ class StartComputerRecordingTaskStep(TaskStep):
             return context
         recordings[self.name] = {
             "env_id": self.env_id, "recording_id": started["recording_id"], "started_at": started["started_at"],
-            "namespace": namespace, "state": "open"}
+            "namespace": namespace, "state": "open", "annotated": annotated}
         if self.environment_name is not None:
             recordings[self.name]["environment_name"] = self.environment_name
         logger.info("start_computer_recording %s on %s: %s", self.name, self.env_id, started["recording_id"])
@@ -197,6 +230,8 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Reco
     uploaded = [s for s in manifest.segments if s.uploaded]
     entry.update(state="ended", ended_by=manifest.ended_by, segments=len(uploaded),
                  missing_segments=len(manifest.segments) - len(uploaded))
+    if manifest.source is not None:  # the driver's own says whether it drew; one rebuilt from segments can't
+        entry["annotated"] = manifest.annotate is not None
     logger.info("recording %s: %d segments, ended by %s", name, len(uploaded), manifest.ended_by)
 
 
@@ -210,13 +245,22 @@ def _deployed(context: TaskStepContext, env_id: str):
 def _grant(deployed, namespace: str, environment_name: Optional[str] = None, method: str = "start") -> dict:
     """A grant for a computer recording's segments and manifest. EnvCapabilityUnsupported when the env's card, or its
     child's, declares no recording."""
-    card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
-    extension = find_extension(card or {}, COMPUTER_RECORDING)
+    extension = _recording_extension(deployed, environment_name)
     if extension is None:
         raise EnvCapabilityUnsupported(COMPUTER_RECORDING, method, deployed.env_id,
                                        getattr(deployed, "instance_id", None), environment_name)
     return recording_grant(deployed, extension.get("params") or {}, namespace, MAX_SEGMENTS + 1, _MAX_SEGMENT_BYTES,
                            MAX_RECORDING_BYTES)
+
+
+def _recording_extension(deployed, environment_name: Optional[str]) -> Optional[dict]:
+    card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
+    return find_extension(card or {}, COMPUTER_RECORDING)
+
+
+def _annotates(deployed, environment_name: Optional[str]) -> bool:
+    """Whether the env's driver, or its child's, draws inputs over a recording's frames: its card lists annotate."""
+    return "annotate" in ((_recording_extension(deployed, environment_name) or {}).get("params") or {})
 
 
 def _from_namespace(entry: dict) -> RecordingManifest:

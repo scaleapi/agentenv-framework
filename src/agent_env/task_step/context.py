@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional, TypedDict
 
 from agentenv_protocol import client as protocol_v1
 
@@ -235,6 +235,15 @@ _PROMPT_RESPONSE_LEGACY_KEYS = (
 )
 
 
+class TurnTrajectory(TypedDict):
+    """What a turn's trajectory reads left, beside its native copy's url in the per-turn list: the native copy's
+    format, as the agent's answer named it (None from an agent that names none), and its atif/1 copy, None when the
+    agent offers none."""
+
+    native_format: Optional[str]
+    atif: Optional[dict[str, Any]]
+
+
 @dataclass
 class PromptResponse:
     prompt_id: str
@@ -259,6 +268,8 @@ class PromptResponse:
     target_agent_per_turn_trajectory_object_urls: list[str | None] | None = None
     # The step's usage, one entry per role that ran turns in it (``task_step.usage``); None before it was recorded.
     usage: list[dict] | None = None
+    # Each turn's ``TurnTrajectory``, beside ``target_agent_per_turn_trajectory_object_urls``.
+    target_agent_per_turn_trajectories: list[TurnTrajectory] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The stored form: every field, plus the legacy key of each renamed one."""
@@ -294,6 +305,7 @@ class PromptResponse:
             step_id=data.get("step_id"),
             structured_output=data.get("structured_output"),
             usage=data.get("usage"),
+            target_agent_per_turn_trajectories=data.get("target_agent_per_turn_trajectories"),
         )
 
 
