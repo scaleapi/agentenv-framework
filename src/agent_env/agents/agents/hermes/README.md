@@ -44,6 +44,39 @@ the model no one is there to answer.
 | `attribution-probe/v1` | the `project_id` and `task_id` the last turn sent |
 
 A turn's usage is Hermes' own report for its main model calls: tokens, `api_calls`, and its estimated cost where the
-endpoint's model list prices the model. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent, running
-as the `agent` user. Hermes' runtime (its own Python, Node and ripgrep) and the profiles are under `/data/.hermes`,
+endpoint's model list prices the model. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent. It
+starts as root, which runs the env clock's follower and egress proxy under supervisord (`start-agent`, `root.conf`),
+and the A2A server and Hermes run as the `agent` user, on Modal too; started as another user, it runs the A2A server
+alone as that user. Hermes' runtime (its own Python, Node and ripgrep) and the profiles are under `/data/.hermes`,
 whatever the uid. It has no `install/v1`.
+
+## The env's clock
+
+The image follows a task env's clock as the agents README describes (`../../README.md`), with one difference: Hermes
+itself stays on real time and the commands it runs follow the env's clock.
+
+- **Off by default.** Without `agent_clock` on `sync_env_clock`, a turn runs exactly as it would without the clock:
+  `hermes agentenv turn` with the same flags and environment, on real time, with no proxy.
+- **Opted in.** While the agent follows an armed clock, the bridge starts each turn with the command Hermes' launcher
+  runs, Hermes' own Python, rather than the launcher, a shell script, so the real-time marker reaches Hermes and not the
+  shell, and passes `--env-clock` (`hermes_bridge.cli_command`). Every command Hermes starts, the model's `date`,
+  shell and `execute_code` scripts among them, reads the env's time, and goes out through the egress proxy with Hermes,
+  as the shared rule (`agent_egress.egress_env`) has it for the model endpoint and every MCP server. `execute_code`
+  hands its scripts only a few variables of its own choosing, so the turn's config names the proxy's and its CA's for
+  it (`terminal.env_passthrough`).
+- **Why Hermes stays on real time.** Hermes compares its clock with times it didn't make on that clock in many places:
+  its scratch folder (`TMPDIR`), pruned at each start of entries idle for 24 hours and the processes running in them;
+  its spill files and large tool results, deleted past 7 days and `sessions.retention_days`; its checkpoints, past
+  their retention; the turn's lease, which stops the turn when the clock jumps past the lease's deadline or runs a few
+  times fast; and the stream stall check, which drops a model stream the clock jumps past. Each runs in Hermes' own
+  process against real file times or real elapsed time, so on real time a conversation keeps its history and files at
+  any date, jump or rate the env's clock takes.
+- **The date the model sees.** With `--env-clock`, the plugin has Hermes read the date it shows the model, its
+  `Conversation started` line (and `Today's date` after a rebuild) and the date its compaction summary carries, from a
+  `date` it runs, which follows the env's clock; the session id, whose stamp gives the start date, is minted from it
+  too. Hermes writes that line when a session starts and keeps it, as it does on any clock, so a session started before
+  the clock was armed keeps the real date it started on until Hermes rebuilds its prompt. Other times Hermes reports
+  itself, such as the dates `session_search` lists, are real, as files' modification times are.
+- **A clock armed mid-turn.** The command and environment are chosen as a turn starts, so a turn already running when
+  the clock is armed goes on as an unarmed turn, its Hermes following the env's clock without the proxy, until it
+  ends.
