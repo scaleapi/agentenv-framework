@@ -54,7 +54,8 @@ class Rig:
     user sim got in ``reads``. A ``plugin`` replaces the scripted one; what it sends the user sim agent with ``ask`` is
     in ``user_calls``, answered in turn by ``user_texts`` (then no_reply). ``during`` has, for each of the agent's
     turns, the gateway's settings and the agent's tools as the agent saw them. With ``takes_config`` the agent's card
-    takes its config (``CONFIG_CARD``), whose posts land in ``configs``."""
+    takes its config (``CONFIG_CARD``), whose posts land in ``configs``. ``solver_usage`` and ``user_usage``, when set,
+    are the usage each of the agent's and the user sim agent's replies reports."""
 
     def __init__(self, monkeypatch, tmp_path, *, agent: Optional[Turn] = None, answers: tuple = (), rate: float = 0,
                  t0: str = T0, plugin: Any = None, user_texts: tuple = (), takes_config: bool = False):
@@ -80,6 +81,8 @@ class Rig:
         self.solver_contexts: list[Optional[str]] = []
         self.takes_config = takes_config
         self.configs: list[tuple[str, dict]] = []
+        self.solver_usage: Optional[dict] = None
+        self.user_usage: Optional[dict] = None
         self._contacts: dict[str, dict] = {}
         self._monkeypatch = monkeypatch
         monkeypatch.setattr(ao, "POLL_SECONDS", 0)
@@ -249,7 +252,7 @@ class Rig:
             self.user_calls.append({"parts": list(parts), "context_id": kw.get("context_id")})
             text = self.user_texts.pop(0) if self.user_texts else '{"outcome": "no_reply", "message": ""}'
             return f"user-{len(self.user_calls)}", {"status": {"state": "completed", "message": {
-                "parts": [{"kind": "text", "text": text}]}}}
+                "parts": [{"kind": "text", "text": text}, *self._usage_part(self.user_usage)]}}}
         assert url == SOLVER, url
         self.solver_contexts.append(kw.get("context_id"))
         if before_send:
@@ -269,7 +272,12 @@ class Rig:
             return f"task-{len(self.sent)}", {"status": {"state": closing.state, "message": {"parts": [
                 {"kind": "text", "text": closing.message}, {"kind": "data", "data": data}]}}}
         reply = [{"kind": "text", "text": closing}] if closing else []
+        reply += self._usage_part(self.solver_usage)
         return f"task-{len(self.sent)}", {"status": {"state": "completed", "message": {"parts": reply}}}
+
+    @staticmethod
+    def _usage_part(usage: Optional[dict]) -> list[dict]:
+        return [{"kind": "data", "data": {"usage": usage}}] if usage is not None else []
 
     async def _load_plugin(self, spec):
         if self.plugin is not None:

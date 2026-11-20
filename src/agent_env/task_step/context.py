@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import re
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +18,9 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
 HEARTBEAT_KEY = "_heartbeat_fn"
+# The attempt epoch the step running in this task was dispatched under, which ``Task.run`` sets for it; None for a
+# step run outside it.
+ATTEMPT_EPOCH: ContextVar[int | None] = ContextVar("agentenv_attempt_epoch", default=None)
 # context.metadata[ENTITY_IDS_KEY]: the run's task's Task.entity_ids, set by Task.run.
 ENTITY_IDS_KEY = "entity_ids"
 # The context.metadata keys whose entries name a deployed env by its id, each with the index of the path segment that
@@ -134,6 +138,10 @@ class DeployedAgent:
     env_bindings: dict[str, str | None] = field(default_factory=dict)
     # The token its extension routes take, from the deploy that started it; None for an agent agent-env didn't start.
     control_token: str | None = None
+    # The host (and port) of the model endpoint it was given, as configured, before a sandbox's rewrite to reach it
+    # (localhost to host.docker.internal), so one endpoint has one name; never a key or a URL's userinfo. None when
+    # unknown.
+    model_endpoint_host: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> DeployedAgent:
@@ -152,6 +160,7 @@ class DeployedAgent:
             env_ids=list(data.get("env_ids") or []),
             env_bindings=dict(data.get("env_bindings") or {}),
             control_token=data.get("control_token"),
+            model_endpoint_host=data.get("model_endpoint_host"),
         )
 
     @property
@@ -248,6 +257,8 @@ class PromptResponse:
     agent_trajectory_object_url: str | None = None
     agent_trajectory_object_prefix: str | None = None
     target_agent_per_turn_trajectory_object_urls: list[str | None] | None = None
+    # The step's usage, one entry per role that ran turns in it (``task_step.usage``); None before it was recorded.
+    usage: list[dict] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The stored form: every field, plus the legacy key of each renamed one."""
@@ -282,6 +293,7 @@ class PromptResponse:
             agent_name=data.get("agent_name"),
             step_id=data.get("step_id"),
             structured_output=data.get("structured_output"),
+            usage=data.get("usage"),
         )
 
 
@@ -315,6 +327,12 @@ class TaskStepContext:
     def record_model(self, role: str, step_id: str, model: str | None) -> None:
         """Record the model ``step_id`` ran ``role`` on, None when the agent chose its own, for the run's summary."""
         self.metadata.setdefault("models", {}).setdefault(role, {})[step_id] = model
+
+    def record_model_endpoint(self, role: str, step_id: str, model: str | None, endpoint_host: str | None) -> None:
+        """Record the model ``step_id`` ran ``role`` on and the host of the endpoint it called (``endpoint_host``,
+        never a key or a URL's userinfo), beside ``models`` under the role's own name."""
+        self.metadata.setdefault("model_endpoints", {}).setdefault(role, {})[step_id] = {
+            "model": model, "endpoint_host": endpoint_host}
 
     def to_safe_dict(self) -> dict[str, Any]:
         """Return a dict representation with sensitive keys recursively removed."""

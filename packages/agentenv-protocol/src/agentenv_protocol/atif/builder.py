@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, get_args
 
 from pydantic import ValidationError
 
+from ._image_size import image_size
 from .adapter import AdapterSpec
 from .models.content import AudioMediaType, ContentPart, ImageSource
 from .profile import (
@@ -418,6 +419,8 @@ class Document:
         for key in ("width", "height", "duration_ms", "pages"):
             _int(info.get(key), key)
         _str(info.get("name"), "a media file's name")
+        if info.get("width") is None and info.get("height") is None and (size := image_size(bytes(data), media_type)):
+            info = {**info, "width": size[0], "height": size[1]}
         digest = hashlib.sha256(data).hexdigest()
         extension = _EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type, strict=False) or ".bin"
         path = f"media/{digest}{extension}"

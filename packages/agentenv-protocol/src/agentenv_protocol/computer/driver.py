@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -16,10 +17,10 @@ from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
                                      AgentEnvError, _error_response, _marked_members, add_websocket_route,
-                                     control_check, environment_card)
+                                     control_check, environment_card, read_only_tools)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import _linux, apps, card, svc
+from . import _linux, annotate, apps, card, svc
 from .checks import check_features, check_names
 from .dataplane import DataPlane
 from .errors import TargetUnavailable
@@ -32,6 +33,7 @@ from .prefix import ToolPrefix
 from .settings import TOOL_PREFIX_ENV, ComputerSettings, load_settings, tool_prefix_problem
 from .tools import COMPUTER_TOOLS, Tools
 
+_log = logging.getLogger(__name__)
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
 
@@ -127,10 +129,27 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return AgentEnvFastMCPApplication(card, driver).environment_card
 
     def on_tool_call(self, context: ToolContext) -> Any:
-        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has: a
-        subclass that has its own calls this one too."""
+        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has, and
+        draw a call to one of the driver's own or forwarded tools that may act on the recordings that draw inputs,
+        since it acts without ``act``, which marks the SDK's: a subclass that has its own calls this one too."""
         apps.note_agent_acted(self._computer.apps)
+        if self._computer.recordings.annotating():
+            try:
+                name = self._computer_prefix.own(context.tool)
+                if name not in COMPUTER_TOOLS and self._computer_tool_acts(name):
+                    self._computer.recordings.note([annotate.tool_mark(name, context.arguments, role=context.role,
+                                                                       at=datetime.now(timezone.utc))])
+            except Exception as e:  # a mark is best effort: the call goes ahead without one
+                _log.warning("couldn't mark %s on an annotated recording: %s: %s", context.tool, type(e).__name__, e)
         return None
+
+    def _computer_tool_acts(self, name: str) -> bool:
+        """Whether the driver's own or forwarded tool ``name``, by the name it is mounted under, may act: its
+        annotations don't say it only reads."""
+        reading = self.__dict__.get("_computer_reading")
+        if reading is None:
+            reading = self._computer_reading = read_only_tools(self, self.mounted_card().name)
+        return name not in reading
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""

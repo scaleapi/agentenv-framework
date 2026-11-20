@@ -314,6 +314,10 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
             names.append(DB_MCP_SERVICE_NAME)
         return names
 
+    def console_urls(self) -> dict[str, str]:
+        ports = {PGWEB_SERVICE_NAME: DB_WEB_PORT, DB_MCP_SERVICE_NAME: DB_MCP_CONTAINER_PORT}
+        return {name: f"http://{name}:{ports[name]}" for name in self.rendered_sidecar_service_names()}
+
     @staticmethod
     def _in_image_store(image: str | None) -> bool:
         """Whether the image store serving ``image`` owns it: the container path pulls with that
@@ -369,7 +373,9 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
             specs.append(ContainerSpec(
                 name=DB_MCP_SERVICE_NAME, image=cfg.db_mcp_image, port=DB_MCP_CONTAINER_PORT,
                 env={"DATABASE_URI": db_mcp_uri},
-                command=["--transport=streamable-http", "--streamable-http-host=0.0.0.0", "--access-mode=unrestricted"],
+                # An empty host binds every address family. The gateway reaches it over Modal's private network, which
+                # is IPv6 only, and 0.0.0.0 would serve IPv4 alone.
+                command=["--transport=streamable-http", "--streamable-http-host=", "--access-mode=unrestricted"],
             ))
         elif cfg.db_mcp_image:
             logger.warning(f"db-mcp image {cfg.db_mcp_image} is not in the image store; skipping db-mcp provisioning")
