@@ -210,10 +210,11 @@ class Turn:
 
     async def read_trajectory(self, number: int) -> Optional[str]:
         """Turn ``number``'s trajectory (1 is the first turn) as the agent stored it, as text; None when that turn
-        has none. Raises IndexError for a turn that hasn't happened."""
-        if not 1 <= number <= len(self.trajectory_urls):
-            raise IndexError(f"turn {number}: the conversation has {len(self.trajectory_urls)} turn trajectories")
-        url = self.trajectory_urls[number - 1]
+        has none, including every turn of an agent whose card offers no trajectories. Raises IndexError for a turn
+        that hasn't happened."""
+        if not 1 <= number <= self.number:
+            raise IndexError(f"turn {number}: the conversation is at turn {self.number}")
+        url = self.trajectory_urls[number - 1] if number <= len(self.trajectory_urls) else None
         if url is None:
             return None
         from agent_env.config import get_config

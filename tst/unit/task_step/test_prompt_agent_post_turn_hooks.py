@@ -619,10 +619,17 @@ async def test_an_agent_that_offers_no_trajectories_hands_a_hook_none(monkeypatc
     ctx = _context()
     hook = _hook("none", """
         async def post_turn(turn, params):
-            turn.record({"urls": list(turn.trajectory_urls)})
+            try:
+                await turn.read_trajectory(turn.number + 1)
+                ahead = "read"
+            except IndexError:
+                ahead = "refused"
+            turn.record({"urls": list(turn.trajectory_urls), "this_turn": await turn.read_trajectory(turn.number),
+                         "ahead": ahead})
             return None
     """)
 
     await _step(hook, turns=1).execute(ctx)
 
-    assert [e["urls"] for e in _recorded(ctx)] == [[]]
+    # A turn that happened has no trajectory (None), not an error; one that hasn't is still refused.
+    assert [(e["urls"], e["this_turn"], e["ahead"]) for e in _recorded(ctx)] == [([], None, "refused")]
