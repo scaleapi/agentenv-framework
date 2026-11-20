@@ -310,12 +310,34 @@ def _ends_in_result(trajectory: list[dict]) -> bool:
 
 
 def _without_terminal_result(trajectory: list[dict]) -> list[dict]:
-    """The attempt's events less its last `result`: a resumed turn is one turn, and readers take the first `result`
-    as its answer."""
+    """The attempt's events less its last `result`, the error that cut it short: a resumed turn is one turn, whose
+    reply (`_reply`) has no place for it."""
     for index in range(len(trajectory) - 1, -1, -1):
         if trajectory[index].get("type") == "result":
             return trajectory[:index] + trajectory[index + 1:]
     return list(trajectory)
+
+
+def _reply(trajectory: list[dict]) -> str | None:
+    """The turn's reply: each successful `result`'s text in order, a blank line apart. The CLI wakes the model again
+    when a background task it started finishes, so a turn can end in a holding note then the answer, or the answer
+    then a remark on the task. Error results and a text repeating the one before are left out; a turn with no other
+    text replies with its last `result`'s, as when the CLI failed."""
+    texts: list[str] = []
+    last: str | None = None
+    for event in trajectory:
+        text = event.get("result")
+        if event.get("type") != "result" or event.get("subtype") != "success" or not isinstance(text, str):
+            continue
+        last = text
+        if not event.get("is_error") and text.strip() and (not texts or text != texts[-1]):
+            texts.append(text)
+    return "\n\n".join(texts) if texts else last
+
+
+def _response(trajectory: list[dict], structured_output: dict | None) -> str:
+    """A requested JSON Schema's output, as JSON text the caller loads, else the turn's reply."""
+    return json.dumps(structured_output) if structured_output is not None else (_reply(trajectory) or "")
 
 
 # Bounded so the whole message fits the agent's 1000-character error message.
@@ -484,7 +506,9 @@ async def run_claude(
                                f"(retries_left={retries_left}, budget_left={int(budget_left)}s)")
             # The first attempt's `result` was dropped from the trajectory, so the error says how the turn began.
             error = result.error and _failure_message(result.error, result.error_detail, attempts, first_failure)
-            return replace(result, response=_redact(result.response) if error else result.response,
+            # Over every attempt: an answer given before a background task's wake failed is still the turn's.
+            response = _response(trajectory, result.structured_output)
+            return replace(result, response=_redact(response) if error else response,
                            tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error)
 
         trajectory.extend(_without_terminal_result(result.trajectory))
@@ -706,13 +730,12 @@ async def _spawn_claude(
     trajectory: list[dict] = []
     tool_count = 0
     cli_session_id: str | None = None
-    final_response: str | None = None
     structured_output: dict | None = None
     # A trailing `result` is run_claude's to report, since it knows whether the attempt is resumed.
     held_result: dict | None = None
 
     def on_line(line: str) -> None:
-        nonlocal tool_count, cli_session_id, final_response, structured_output, held_result
+        nonlocal tool_count, cli_session_id, structured_output, held_result
         if not line.strip():
             return
         try:
@@ -737,8 +760,6 @@ async def _spawn_claude(
                     tool_count += 1
         elif etype == "result":
             cli_session_id = event.get("session_id", cli_session_id)
-            if event.get("subtype") == "success" and isinstance(event.get("result"), str):
-                final_response = event["result"]
             if isinstance(event.get("structured_output"), dict):
                 structured_output = event["structured_output"]
         if event_callback is None:
@@ -781,11 +802,7 @@ async def _spawn_claude(
             detail = f"{detail}; {hint}" if detail else hint
         logger.error(f"claude CLI failed: {_failure_message(err, detail)}")
 
-    # A requested JSON Schema's output is the answer, as JSON text the caller loads.
-    if structured_output is not None:
-        final_response = json.dumps(structured_output)
-
-    return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
+    return ClaudeResult(response=_response(trajectory, structured_output), tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
                         error_detail=detail, structured_output=structured_output)
 

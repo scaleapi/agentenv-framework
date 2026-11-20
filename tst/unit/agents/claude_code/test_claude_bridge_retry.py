@@ -92,7 +92,7 @@ def test_stalled_turn_resumes_the_session_and_recovers(scripted):
 
 
 def test_abandoned_attempt_leaves_its_work_but_not_its_error(scripted):
-    """Downstream readers take the FIRST result event as the turn's answer."""
+    """A resumed turn is one turn: its trajectory keeps no `result` for the attempt that was cut short."""
     _write_session(scripted)
     scripted["queue"].append((_api_error_stdout("API Error: The operation timed out.", tool_uses=3), 1))
     scripted["queue"].append((_ok_stdout("finished after resume"), 0))
