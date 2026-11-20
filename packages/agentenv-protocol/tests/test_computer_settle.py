@@ -30,6 +30,7 @@ class LateScreen(FakeDriver):
         super().__init__(settings=settings)
         self.steps = steps
         self.captures = 0
+        self.since_scroll: int | None = None
 
     def fill(self, colour: tuple) -> None:
         self.screen.image = PILImage.new("RGB", self.screen.image.size, colour)
@@ -37,6 +38,7 @@ class LateScreen(FakeDriver):
     @scroll
     async def scroll_at(self, x, y, direction, amount, modifiers):
         await super().scroll_at(x, y, direction, amount, modifiers)
+        self.since_scroll = 0
         loop = asyncio.get_running_loop()
         for delay, colour in self.steps:
             loop.call_later(delay, self.fill, colour)
@@ -44,6 +46,8 @@ class LateScreen(FakeDriver):
     @capture
     async def grab(self):
         self.captures += 1
+        if self.since_scroll is not None:
+            self.since_scroll += 1
         return await super().grab()
 
 
@@ -139,3 +143,28 @@ async def test_a_capture_that_fails_while_the_screen_settles_reports_the_input_a
     assert "frame" not in scrolled.structuredContent
     assert "the screenshot after it failed (internal: @capture failed: RuntimeError: the screen grabber died)" in (
         scrolled.content[0].text)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_capture_doesnt_count_as_time_the_screen_held_still():
+    driver = LateScreen(steps=[(0.05, RED), (0.42, BLUE)])
+    driver.slow["capture"] = 0.15
+    scrolled, _ = await _scroll(driver)
+    assert _colour(scrolled) == BLUE
+
+
+class SlowLater(LateScreen):
+    """A fake whose captures take a second from the second after its scroll on."""
+
+    @capture
+    async def grab(self):
+        if self.since_scroll:
+            await asyncio.sleep(1.0)
+        return await super().grab()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_capture_doesnt_outlast_the_settle_limit():
+    scrolled, took = await _scroll(SlowLater(settings=ComputerSettings(screenshot_settle_ms=400)))
+    assert not scrolled.isError and scrolled.structuredContent["frame"]["frame_id"] == "f2"
+    assert took < 0.8

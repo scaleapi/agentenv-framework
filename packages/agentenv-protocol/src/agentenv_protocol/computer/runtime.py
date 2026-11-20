@@ -104,27 +104,33 @@ class ComputerRuntime:
         return self.frames.add(image, display, inputs, identity=identity, page=page)
 
     async def _settled(self, before: bytes, display: Display) -> tuple[Any, Any]:
-        """The screen once it has settled after an input, as (capture, image): captured every ``SETTLE_POLL_S``, it has
-        settled when it has stayed the same for ``SETTLE_STEADY_S`` after differing from ``before`` (the pixels just
-        before the input), or for ``SETTLE_QUIET_S`` from the input on; else it's the last capture when
-        ``screenshot_settle_ms`` runs out. A capture taken at once can show the screen before the input."""
+        """The screen once it has settled after an input, as (capture, image), captured every ``SETTLE_POLL_S``: it
+        has settled when a capture shows the pixels one finished at least ``SETTLE_STEADY_S`` earlier showed, once they
+        differ from ``before`` (the pixels just before the input), or ``SETTLE_QUIET_S`` earlier when they never did.
+        When ``screenshot_settle_ms`` runs out, waiting or capturing, it's the last capture. A capture taken at once
+        can show the screen before the input."""
         loop = asyncio.get_running_loop()
-        limit = self.driver.settings.screenshot_settle_ms / 1000
-        start = loop.time()
+        deadline = loop.time() + self.driver.settings.screenshot_settle_ms / 1000
         captured = await self.call("capture")
         image = to_pil(captured, display)
         pixels = image.tobytes()
-        changed, since = pixels != before, start
-        while loop.time() - start < limit:
-            await asyncio.sleep(SETTLE_POLL_S)
-            again = await self.call("capture")
+        changed, since = pixels != before, loop.time()
+        while (left := deadline - loop.time()) > 0:
+            await asyncio.sleep(min(SETTLE_POLL_S, left))
+            if (left := deadline - loop.time()) <= 0:
+                break
+            asked = loop.time()
+            try:
+                again = await asyncio.wait_for(self.call("capture"), left)
+            except TimeoutError:
+                break
             now = to_pil(again, display)
             fresh = now.tobytes()
             if fresh != pixels:
                 since = loop.time()
             pixels, captured, image = fresh, again, now
             changed = changed or pixels != before
-            steady = loop.time() - since
+            steady = asked - since
             if steady >= SETTLE_STEADY_S and (changed or steady >= SETTLE_QUIET_S):
                 break
         return captured, image
