@@ -161,9 +161,14 @@ class BrowserUseAgent(AgentEnvAgent):
                 input_tokens=usage["input"],
                 output_tokens=usage["output"],
                 total_tokens=usage["input"] + usage["output"],
+                # browser-use counts the cache in its input on both of its routes: Anthropic's Messages, whose cache
+                # it adds in, and OpenAI's Chat Completions, whose prompt already holds it.
+                cache_read_tokens=usage["cache_read"],
+                cache_write_tokens=usage["cache_write"],
+                input_includes_cache=True,
+                cost_usd=result.get("cost_usd"),
                 provider_details={"steps": result["steps"], "model": result["model"], "requests": usage["requests"],
-                                  "cache_read_tokens": usage["cache_read"], "cache_write_tokens": usage["cache_write"],
-                                  "cost_usd": result.get("cost_usd"), "success": result.get("success")},
+                                  "success": result.get("success")},
             ))
             .build()
         )

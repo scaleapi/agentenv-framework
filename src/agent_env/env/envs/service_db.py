@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.env.env import Env
+from agent_env.env.gateway.constants import PGWEB_CONSOLE
 
 SERVICE_DB_PORT = 5432
 DB_USER = "agentenv"
@@ -15,11 +16,13 @@ DB_NAME = "agentenv"
 
 # The service db's containers: compose service names and ports.
 DATABASE_SERVICE_NAME = "servicedb"
-PGWEB_SERVICE_NAME = "pgweb"
+PGWEB_SERVICE_NAME = PGWEB_CONSOLE
 DB_WEB_PORT = 8081  # pgweb: same port host-side and in-container (8081:8081)
 DB_MCP_SERVICE_NAME = "db-mcp"
 DB_MCP_PORT = 18767  # db-mcp host/tunnel port
 DB_MCP_CONTAINER_PORT = 8000  # db-mcp's in-container listen port (tunneled as DB_MCP_PORT:DB_MCP_CONTAINER_PORT)
+# The env's SQL consoles, each served by the gateway at /svc/<name>/, so no child env may take one's name.
+CONSOLE_SERVICE_NAMES = frozenset({PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME})
 
 
 @dataclass

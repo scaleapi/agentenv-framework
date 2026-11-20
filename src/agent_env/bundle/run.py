@@ -32,6 +32,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.interrupts import Interrupts
+from agent_env.task.lint import said
 from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import TeardownReport, attempt_epoch, record_teardown, teardown_run
@@ -225,6 +226,7 @@ def run_bundle(
     emulate: bool = True,
     source: HubSource | None = None,
     variant: Variant | None = None,
+    skip_lint: bool = False,
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
@@ -237,7 +239,8 @@ def run_bundle(
     (``InstalledBundle.id_root``) or one downloaded from the Hub (``HubBundle.id_root``); a folder's ids otherwise come
     from its path. ``source`` says where a Hub bundle came from (``HubBundle.source``), which each run's context
     records under ``metadata["bundle_source"]``. ``variant`` sets env keys for this run (``with_variant``), writing
-    what it changes under ids of their own and leaving the bundle as written.
+    what it changes under ids of their own and leaving the bundle as written. ``skip_lint`` runs tasks task lint's own
+    rules refuse, saying why (``plan_bundle``).
 
     Each run's sandboxes are torn down as it ends, so the contexts returned record sandboxes that are gone.
     ``keep`` leaves them up instead, for the caller to use and then remove with ``BundleRun.teardown()``.
@@ -264,7 +267,7 @@ def run_bundle(
     with namespace_routing():
         prepared = _prepare(root, tasks, evals, sandbox, id_root, agent, False, say,
                             declaring_for(Path(root), installed=id_root is not None, dry_run=False), composing,
-                            variant=variant)
+                            variant=variant, skip_lint=skip_lint)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
@@ -296,6 +299,7 @@ def prepare_bundle(
     played: bool = False,
     agent: str | None = None,
     solver_endpoint: bool = False,
+    skip_lint: bool = False,
     emulate: bool = True,
 ) -> PreparedBundle:
     """Do what ``run_bundle`` with these arguments does before its first task runs, and stop there. ``played``
@@ -309,7 +313,7 @@ def prepare_bundle(
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
     composing = _composing(sandbox, emulate)
     return _prepare(root, tasks, evals, sandbox, id_root, agent, played, _progress(on_progress), _hint(id_root),
-                    composing, solver_endpoint=solver_endpoint)
+                    composing, solver_endpoint=solver_endpoint, skip_lint=skip_lint)
 
 
 def _write_bundle(
@@ -354,6 +358,7 @@ def dry_run_bundle(
     id_root: str | None = None,
     emulate: bool = True,
     variant: Variant | None = None,
+    skip_lint: bool = False,
 ) -> DryRun:
     """Check what ``run_bundle`` with these arguments checks before its first task runs, and say what it would
     write and run, writing and running nothing: no entity, ledger row, lock or instance. Each write's version is
@@ -367,7 +372,7 @@ def dry_run_bundle(
     composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
-        plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, variant=variant)
+        plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, variant=variant, skip_lint=skip_lint)
         _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
                                       composing=composing, sandbox=sandbox,
@@ -410,9 +415,9 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
              agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring,
              composing: Composing = Composing(), *, solver_endpoint: bool = False,
-             variant: Variant | None = None) -> PreparedBundle:
+             variant: Variant | None = None, skip_lint: bool = False) -> PreparedBundle:
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played,
-                               solver_endpoint=solver_endpoint, variant=variant)
+                               solver_endpoint=solver_endpoint, variant=variant, skip_lint=skip_lint)
     _say_plan(plan, say, declaring)
     materialization = _written_with_infra(plan, preflight, say, composing, sandbox)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
@@ -421,14 +426,15 @@ def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandb
 
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
              sandbox: str | None, agent: str | None = None, *, played: bool = False,
-             solver_endpoint: bool = False, variant: Variant | None = None) -> tuple[Plan, Preflight]:
+             solver_endpoint: bool = False, variant: Variant | None = None,
+             skip_lint: bool = False) -> tuple[Plan, Preflight]:
     bundle = parse_bundle(Path(root), id_root=id_root)
     varied = with_variant(bundle, variant) if variant is not None else None
     if varied is not None:
         tasks, evals = varied.selected(tasks, BundleKind.TASK), varied.selected(evals, BundleKind.EVAL)
     resolved = resolve_bundle(varied.bundle if varied is not None else bundle)
     plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals,
-                       installed=installed_bundles, agent=agent)
+                       installed=installed_bundles, agent=agent, skip_lint=skip_lint)
     refuse_store_tasks(plan)
     if varied is not None:
         plan = replace(plan, variant=varied)
@@ -449,10 +455,11 @@ def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
 
 def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
                   agent: str | None = None) -> tuple[ResolvedEntry, ...]:
-    """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything.
-    Namespace routing must be on, as for ``plan_bundle``."""
+    """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything,
+    task lint included: a caller that keeps some checks those as it prepares them. Namespace routing must be on, as
+    for ``plan_bundle``."""
     plan = plan_bundle(resolve_bundle(parse_bundle(Path(root))), tasks=tasks, evals=evals, installed=installed_bundles,
-                       agent=agent)
+                       agent=agent, lint=False)
     selected = set(_to_run(plan))
     return tuple(write.source for write in plan.writes if write.kind is BundleKind.TASK and write.source.entry in selected)
 
@@ -486,8 +493,8 @@ def refuse_store_tasks(plan: Plan) -> None:
 
 def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring) -> None:
     """Say what each agent, env and artifact alias names, what the solver deploys in place of the tasks' agents, the
-    ids what --set changes is written under, and what plugin packages the bundle uses that its bundle.toml doesn't
-    require, as ``declaring`` says (``declare``)."""
+    ids what --set changes is written under, what plugin packages the bundle uses that its bundle.toml doesn't
+    require, as ``declaring`` says (``declare``), and its tasks' lint findings, each kind once."""
     for use in (use for uses in plan.alias_uses.values() for use in uses.values()):
         say(_aliased(use))
     if plan.agent is not None:
@@ -499,6 +506,8 @@ def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring) -> N
         variant = plan.variant.variant
         say(f"{variant.typed}: {_changed(plan)} written under ids ending in ({variant.label})")
     for line in declare(plan.bundle, declaring):
+        say(line)
+    for line in said(plan.lint_findings):
         say(line)
 
 

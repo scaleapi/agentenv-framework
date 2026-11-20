@@ -3,8 +3,9 @@
 runs reads the env's time. ``follow`` declares it at the gateway as a follower with a read token of its own, then calls
 its ``sync_time`` with the follower's config: the gateway's watch URL as the agent's sandbox reaches it, the name the
 gateway knows it by and that token. From then on a clock write that waits for followers (``wait_followers_s``) waits
-for the agent too. ``sync_env_clock`` has every agent registered with the env follow once it has armed the clock, and
-``deploy_agent`` an agent it deploys while the clock is armed. An agent has one follower, so it follows one env's
+for the agent too. Only a task that opts in (``sync_env_clock``'s ``agent_clock``, off by default) has agents follow:
+``sync_env_clock`` has every agent registered with the env follow once it has armed the clock, and ``deploy_agent`` an
+agent it deploys while that clock is armed. An agent has one follower, so it follows one env's
 clock: the first env it's registered with (``clock_env``), whatever order steps arm clocks in, even at once; another
 env's is reported and skipped (``follows_another_env``). When ``teardown_sandboxes`` takes the agent's sandbox down,
 ``retire_followers`` has the gateway it follows stop waiting for it. Which
@@ -136,6 +137,22 @@ def torn_down(context: TaskStepContext, agent: DeployedAgent) -> bool:
     return bool(agent.sandbox_id) and agent.sandbox_id in (context.metadata.get(TORN_DOWN_KEY) or ())
 
 
+def _deploy_step_of(env: DeployedEnv) -> Optional[str]:
+    return (env.metadata or {}).get("deploy_step_id")
+
+
+def on_deployment(agent: DeployedAgent, env: DeployedEnv) -> bool:
+    """Whether ``env`` is the deployment of its env that ``deploy_agent`` bound ``agent`` to, so a later deployment of
+    the same env never takes it over; any deployment is when it recorded none, as for an agent agent-env didn't deploy."""
+    if env.env_id not in agent.env_bindings:
+        return True
+    return agent.env_bindings[env.env_id] == _deploy_step_of(env)
+
+
+def _agent_deployment(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> Optional[DeployedEnv]:
+    return next((d for d in context.deployed_envs if d.env_id == env_id and on_deployment(agent, d)), None)
+
+
 def clock_env(agent: DeployedAgent) -> Optional[str]:
     """The one env whose clock ``agent`` follows: the first it's registered with. Fixed by the agent alone, so two
     steps arming two of its envs' clocks at once never both take its one follower."""
@@ -148,10 +165,13 @@ async def follow_in(context: TaskStepContext, agent: DeployedAgent, env: Deploye
     its follower while that gateway still waits for it, is reported and skipped (``follows_another_env``)."""
     if env.env_id != clock_env(agent):
         return {"synced": False, "reason": "follows_another_env", "follows": clock_env(agent)}
+    if not on_deployment(agent, env):
+        return {"synced": False, "reason": "bound_to_another_deployment", "bound_to": agent.env_bindings[env.env_id]}
     outcome = await follow(agent, env, env_get_time_url=env_get_time_url, timezone=timezone, timeout=timeout)
     if outcome["synced"]:
         context.metadata.setdefault(FOLLOWING_KEY, {})[_slot(agent.agent_name)] = {
-            "agent": agent.agent_name, "env_id": env.env_id, "follower": outcome["follower"]}
+            "agent": agent.agent_name, "env_id": env.env_id, "deploy_step_id": _deploy_step_of(env),
+            "follower": outcome["follower"]}
     return outcome
 
 
@@ -160,31 +180,44 @@ def summary(outcome: dict) -> dict:
     return {key: outcome[key] for key in ("synced", "reason", "follower", "follows") if key in outcome}
 
 
-def _armed(context: TaskStepContext, env_id: str) -> Optional[dict]:
-    """The configuration of the last ``sync_env_clock`` that armed ``env_id``'s clock in this run, if any."""
+def _armed(context: TaskStepContext, env: DeployedEnv) -> Optional[dict]:
+    """The configuration of the last ``sync_env_clock`` that armed this deployment's clock in this run, if any."""
     return next((c for c in reversed(context.metadata.get("clock_configurations") or [])
-                 if c.get("env_id") == env_id and "env_get_time_url" in c), None)
+                 if c.get("env_id") == env.env_id and "env_get_time_url" in c
+                 and c.get("deploy_step_id", _deploy_step_of(env)) == _deploy_step_of(env)), None)
+
+
+async def follow_agents(context: TaskStepContext, env: DeployedEnv, agents, *, env_get_time_url: Optional[str],
+                        timezone: Optional[str], required: bool, timeout: float) -> list[dict]:
+    """Have each of ``agents`` follow ``env``'s clock (``follow_in``), for ``sync_env_clock`` and a late
+    ``deploy_agent`` alike: one that can't is reported and skipped, or fails the step when ``required``."""
+    outcomes = []
+    for agent in agents:
+        outcome = await follow_in(context, agent, env, env_get_time_url=env_get_time_url, timezone=timezone,
+                                  timeout=timeout)
+        if not outcome["synced"] and required:
+            raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env '{env.env_id}': "
+                                   f"{outcome['reason']}")
+        logger.info(f"agent '{agent.agent_name}' on env {env.env_id}'s clock: {summary(outcome)}")
+        outcomes.append({"agent": agent.agent_name, **outcome})
+    return outcomes
 
 
 async def follow_armed_clocks(context: TaskStepContext, agent: DeployedAgent, *,
                               timeout: float = LATE_FOLLOW_TIMEOUT_S) -> list[dict]:
     """Have an agent ``deploy_agent`` just deployed follow the clock of each env registered with it that this run has
-    armed, as ``sync_env_clock`` has every agent then: one that can't is reported and skipped, or fails the step under
-    that step's ``require_agent_clock``."""
+    armed with ``agent_clock``, as ``sync_env_clock`` has every agent then (``follow_agents``). A clock armed without
+    it, or by a run from before it, is one agents don't follow."""
     outcomes = []
     for env_id in agent.env_ids:
-        if (armed := _armed(context, env_id)) is None:
+        env = _agent_deployment(context, agent, env_id)
+        armed = _armed(context, env) if env is not None and gateway_url_of(env) is not None else None
+        if armed is None or not armed.get("agent_clock", False):
             continue
-        env = next((d for d in context.deployed_envs if d.env_id == env_id), None)
-        if env is None or gateway_url_of(env) is None:
-            continue
-        outcome = await follow_in(context, agent, env, env_get_time_url=armed.get("env_get_time_url"),
-                                  timezone=armed.get("timezone"), timeout=timeout)
-        if not outcome["synced"] and armed.get("require_agent_clock", False):
-            raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env '{env_id}': "
-                                   f"{outcome['reason']}")
-        logger.info(f"agent '{agent.agent_name}' on env {env_id}'s clock: {summary(outcome)}")
-        outcomes.append({"env_id": env_id, "agent": agent.agent_name, **outcome})
+        followed = await follow_agents(context, env, [agent], env_get_time_url=armed.get("env_get_time_url"),
+                                       timezone=armed.get("timezone"), required=armed.get("require_agent_clock", False),
+                                       timeout=timeout)
+        outcomes.extend({"env_id": env_id, **outcome} for outcome in followed)
     return outcomes
 
 
@@ -197,7 +230,8 @@ async def retire_followers(context: TaskStepContext, agent_names, *, timeout: fl
     for name in dict.fromkeys(agent_names):
         if (record := following.get(_slot(name))) is None:
             continue
-        env = next((d for d in context.deployed_envs if d.env_id == record["env_id"]), None)
+        env = next((d for d in context.deployed_envs if d.env_id == record["env_id"]
+                    and record.get("deploy_step_id", _deploy_step_of(d)) == _deploy_step_of(d)), None)
         if env is None:
             continue
         if not await _retire(env, record["follower"], timeout=timeout):

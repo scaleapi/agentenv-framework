@@ -39,7 +39,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar, Optional
 
 from agent_env.config import ConfigError, get_config
-from agent_env.config.model import MODEL_HEADERS_ENV, no_key_for
+from agent_env.config.model import MODEL_HEADERS_ENV, api_root, no_key_for
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import require_sandbox
 from agent_env.env.envs.computer.utils import inside
@@ -144,6 +144,28 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
         if env_id is not None and (absolute := [path for path in self.result_paths if posixpath.isabs(path)]):
             raise ValueError(f"run_container_unit_tests_verifier '{id}': result paths in env '{env_id}' are relative "
                              f"to its session user's home, not {absolute}")
+
+    def config_problems(self) -> list[str]:
+        """A ``command`` or ``timeout_sec`` a run can't use, and a negative ``timeout_sec``, which ``timeout``
+        refuses, so the tests never run."""
+        problems = super().config_problems()
+        if not isinstance(self.command, str):
+            problems.append(f"command must be a string, not {type(self.command).__name__}")
+        if not isinstance(self.timeout_sec, (int, float)) or isinstance(self.timeout_sec, bool):
+            problems.append(f"timeout_sec must be a number of seconds, not {self.timeout_sec!r}")
+        elif self.timeout_sec < 0:
+            problems.append(f"timeout_sec {self.timeout_sec} is negative; give the tests at least 1 s")
+        return problems
+
+    def config_warnings(self) -> list[str]:
+        """What runs without testing anything: an empty ``command``, which exits 0 and so passes without a
+        ``reward_path``, and a ``timeout_sec`` of 0, which ``timeout`` reads as no limit."""
+        warnings = super().config_warnings()
+        if isinstance(self.command, str) and not self.command.strip() and self.reward_path is None:
+            warnings.append("command is empty, so it exits 0 and the tests pass without running anything")
+        if self.timeout_sec == 0:
+            warnings.append("timeout_sec 0 means no time limit, so a hung test runs until the sandbox's own TTL")
+        return warnings
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -376,7 +398,7 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
         try:
             litellm_url = config.get_litellm_base_url()
             merged_env["LITELLM_BASE_URL"] = litellm_url
-            merged_env["ANTHROPIC_BASE_URL"] = litellm_url
+            merged_env["ANTHROPIC_BASE_URL"] = api_root(litellm_url)
         except (KeyError, ConfigError):
             logger.warning("LITELLM_BASE_URL unavailable; verifier won't have LLM base URL")
         merged_env.update(all_sandbox_container_env())

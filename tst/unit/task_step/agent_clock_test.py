@@ -1,8 +1,9 @@
-"""Agents on the env's clock: once sync_env_clock has armed it, every agent registered with the env whose card serves
+"""Agents on the env's clock: once sync_env_clock has armed it with agent_clock, every agent registered with the env whose card serves
 clock/v1 sync_time is declared at the gateway as a follower with a token of its own and handed the follower's config;
 one that doesn't is reported and skipped, even when the env's servers must follow (tolerate_missing_sync_time false),
 or fails the step under require_agent_clock; and an agent
-deploy_agent deploys while the clock is armed follows the same way."""
+deploy_agent deploys while the clock is armed follows the same way. Without agent_clock, the default, no agent follows."""
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -14,7 +15,7 @@ from agent_env.task_step.context import DeployedAgent, StepContextError, TaskSte
 from agent_env.a2a_agent import clock as agent_clock
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
 from tst.unit.task_step.sync_env_clock_test import (CLOCK_URL, T0, _CARD, _CLOCK_EXT, _ZONE_EXT, _carded, _composed_card, _mock_http,
-                                                    _step)
+                                                    _step as _sync_step)
 
 AGENT_URL = "http://solver:8000"
 AGENT_CONTROL_TOKEN = "the-agents-control-token"
@@ -22,9 +23,15 @@ SYNC_TIME = {"method": "POST", "endpoint": "/ext/clock/sync-time",
              "request": {"required": ["env_get_time_url"], "optional": ["timezone", "watch_url", "name", "read_token"]}}
 
 
-def _agent(name="solver", sync_time=SYNC_TIME, env_ids=("e1",)) -> DeployedAgent:
+def _step(**kw) -> SyncEnvClockTaskStep:
+    """A sync_env_clock step that has agents follow (agent_clock), unless ``kw`` says otherwise."""
+    return _sync_step(**{"agent_clock": True, **kw})
+
+
+def _agent(name="solver", sync_time=SYNC_TIME, env_ids=("e1",), env_step_id=None) -> DeployedAgent:
     extensions = [{"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock", "methods": {"sync_time": sync_time}}}]
     return DeployedAgent(agent_name=name, api_url=AGENT_URL, a2a_url=AGENT_URL, env_ids=list(env_ids),
+                         env_bindings={env_id: env_step_id for env_id in env_ids} if env_step_id else {},
                          a2a_card={"capabilities": {"extensions": extensions if sync_time else []}},
                          control_token=AGENT_CONTROL_TOKEN)
 
@@ -47,7 +54,7 @@ async def test_an_agent_is_declared_a_follower_then_handed_its_config_with_the_s
     context.deployed_envs = [_carded(await _composed_card({"mcp-email": [_ZONE_EXT]}))]
 
     await SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", virtual_time="2026-01-01T06:00:00",
-                               timezone="America/Chicago").execute(context)
+                               timezone="America/Chicago", agent_clock=True).execute(context)
 
     declared, synced = sent[3], sent[4]
     assert (declared.method, str(declared.url)) == ("PUT", f"{_CARD}/clock/followers")
@@ -146,7 +153,7 @@ async def test_an_agent_deployed_while_the_clock_is_armed_follows_it(monkeypatch
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
     context = await _context()
     context.metadata["clock_configurations"] = [
-        {"step_id": "sync", "env_id": "e1", "virtual_time": T0, "env_get_time_url": CLOCK_URL, "timezone": "Asia/Tokyo",
+        {"step_id": "sync", "env_id": "e1", "virtual_time": T0, "env_get_time_url": CLOCK_URL, "agent_clock": True, "timezone": "Asia/Tokyo",
          "require_agent_clock": False},
         {"step_id": "rate", "env_id": "e1", "virtual_seconds_per_real_second": 60, "virtual_time": T0},
     ]
@@ -171,12 +178,45 @@ async def test_an_agent_deployed_before_any_clock_is_armed_is_left_alone(monkeyp
 async def test_a_late_agent_that_cant_follow_fails_a_deploy_only_under_require_agent_clock(monkeypatch):
     _mock_http(monkeypatch)
     context = await _context()
-    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL, "agent_clock": True}]
     [skipped] = await agent_clock.follow_armed_clocks(context, _agent("late", sync_time=None), timeout=5)
     assert (skipped["synced"], skipped["reason"]) == (False, "not_advertised")
     context.metadata["clock_configurations"][0]["require_agent_clock"] = True
     with pytest.raises(StepContextError, match="agent 'late' can't follow the clock of env 'e1': not_advertised"):
         await agent_clock.follow_armed_clocks(context, _agent("late", sync_time=None), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_without_agent_clock_no_agent_follows_and_one_deployed_later_doesnt_either(monkeypatch):
+    """Off by default: an agent on the env's clock judges its files' age by real modification times (FD-6368)."""
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_agent())
+
+    await _sync_step().execute(context)
+
+    assert [r.url.path for r in sent][3:] == []
+    [configuration] = context.metadata["clock_configurations"]
+    assert (configuration["agents"], configuration["agent_clock"]) == ([], False)
+    assert await agent_clock.follow_armed_clocks(context, _agent("late"), timeout=5) == []
+    assert [r.url.path for r in sent][3:] == []
+
+
+@pytest.mark.asyncio
+async def test_a_clock_armed_by_a_run_from_before_agent_clock_has_no_late_agent_follow(monkeypatch):
+    sent = _mock_http(monkeypatch)
+    context = await _context()
+    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+
+    assert await agent_clock.follow_armed_clocks(context, _agent("late"), timeout=5) == []
+    assert sent == []
+
+
+def test_agent_clock_round_trips_is_left_out_when_off_and_require_agent_clock_implies_it():
+    assert "agent_clock" not in _sync_step().to_dict() and _sync_step().agent_clock is False
+    on = _sync_step(agent_clock=True).to_dict()
+    assert on["agent_clock"] is True and SyncEnvClockTaskStep.from_dict(on).agent_clock is True
+    assert _sync_step(require_agent_clock=True).agent_clock is True
 
 
 def test_require_agent_clock_round_trips_and_is_left_out_when_off():
@@ -190,7 +230,7 @@ def test_require_agent_clock_round_trips_and_is_left_out_when_off():
 async def test_an_agent_follows_the_first_envs_clock_and_another_envs_is_reported_and_skipped(monkeypatch):
     sent = _mock_http(monkeypatch)
     context = await _context()  # e1 alone is deployed and armed: whether e0 has been armed yet doesn't matter
-    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL, "agent_clock": True}]
 
     [outcome] = await agent_clock.follow_armed_clocks(context, _agent("late", env_ids=("e0", "e1")), timeout=5)
 
@@ -219,7 +259,7 @@ async def test_a_teardown_retires_the_agents_follower_at_each_gateway_it_followe
     assert [(r.method, str(r.url), json.loads(r.content)) for r in sent] == [
         ("DELETE", f"{_CARD}/clock/followers", {"name": "agent-solver"})]
     assert context.metadata[agent_clock.FOLLOWING_KEY] == {
-        "bystander": {"agent": "bystander", "env_id": "e1", "follower": "agent-bystander"}}
+        "bystander": {"agent": "bystander", "env_id": "e1", "deploy_step_id": None, "follower": "agent-bystander"}}
     assert agent_clock.followed_env(context, _agent()) is None
 
 
@@ -250,7 +290,7 @@ async def test_late_agents_deployed_at_once_each_save_only_their_own_record(monk
 
     _mock_http(monkeypatch)
     pre = await _context()
-    pre.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    pre.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL, "agent_clock": True}]
     saved = {}
     for name in ("first", "second"):  # each from the same context, as two deploy_agent steps at once
         post = copy.deepcopy(pre)
@@ -323,3 +363,123 @@ async def test_a_later_sync_leaves_an_agent_teardown_took_down_alone(monkeypatch
 
     assert [a["agent"] for a in context.metadata["clock_configurations"][0]["agents"]] == ["kept"]
     assert not any("agent-gone" in (r.content or b"").decode() for r in sent)
+
+
+async def _two_deployments(*agents) -> TaskStepContext:
+    """Two deployments of e1, by deploy_env steps deploy-a and deploy-b, each at a card URL of its own."""
+    from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+
+    card = await _composed_card({"mcp-email": [_CLOCK_EXT]})
+    envs = [dataclasses.replace(_carded(card), sandbox_id=f"sb-{lane}",
+                                metadata={"deploy_step_id": f"deploy-{lane}"},
+                                environment_card_url=f"https://sandbox.example/sb-{lane}{WELL_KNOWN_PATH}")
+            for lane in ("a", "b")]
+    return TaskStepContext(deployed_envs=envs, deployed_agents=list(agents))
+
+
+@pytest.mark.asyncio
+async def test_syncing_one_deployment_has_only_its_own_agents_follow(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _two_deployments(_agent("solver-a", env_step_id="deploy-a"),
+                                     _agent("solver-b", env_step_id="deploy-b"))
+
+    await _step(env_step_id="deploy-b").execute(context)
+
+    gateway = [r for r in sent if r.url.host == "sandbox.example"]
+    assert gateway and all(r.url.path.startswith("/sb-b/") for r in gateway)
+    assert [json.loads(r.content)["name"] for r in sent if r.url.path.endswith("/clock/followers")] == ["agent-solver-b"]
+    [configuration] = context.metadata["clock_configurations"]
+    assert configuration["deploy_step_id"] == "deploy-b"
+    assert [a["agent"] for a in configuration["agents"]] == ["solver-b"]
+    assert context.metadata[agent_clock.FOLLOWING_KEY] == {
+        "solver-b": {"agent": "solver-b", "env_id": "e1", "deploy_step_id": "deploy-b", "follower": "agent-solver-b"}}
+
+
+@pytest.mark.asyncio
+async def test_a_late_agent_follows_only_its_own_deployments_armed_clock(monkeypatch):
+    sent = _mock_http(monkeypatch)
+    context = await _two_deployments()
+    context.metadata["clock_configurations"] = [
+        {"env_id": "e1", "deploy_step_id": "deploy-b", "env_get_time_url": CLOCK_URL, "agent_clock": True}]
+    late = _agent("late", env_step_id="deploy-a")
+
+    assert await agent_clock.follow_armed_clocks(context, late, timeout=5) == []
+    assert sent == []
+
+    context.metadata["clock_configurations"].append({"env_id": "e1", "deploy_step_id": "deploy-a",
+                                                     "env_get_time_url": CLOCK_URL, "agent_clock": True})
+    [outcome] = await agent_clock.follow_armed_clocks(context, late, timeout=5)
+    assert outcome["synced"] is True
+    assert str(sent[0].url) == "https://sandbox.example/sb-a/clock/followers"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_bound_to_another_deployment_is_reported_and_skipped(monkeypatch):
+    sent = _mock_http(monkeypatch)
+    context = await _two_deployments()
+    other = context.deployed_envs[1]
+
+    outcome = await agent_clock.follow_in(context, _agent("solver-a", env_step_id="deploy-a"), other,
+                                          env_get_time_url=CLOCK_URL, timezone=None, timeout=5)
+
+    assert outcome == {"synced": False, "reason": "bound_to_another_deployment", "bound_to": "deploy-a"}
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_retires_the_follower_at_the_deployment_it_followed(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _two_deployments(_agent("solver-b", env_step_id="deploy-b"))
+    await _step(env_step_id="deploy-b").execute(context)
+    del sent[:]
+
+    assert await agent_clock.retire_followers(context, ["solver-b"]) == ["agent-solver-b"]
+    assert [(r.method, str(r.url)) for r in sent] == [("DELETE", "https://sandbox.example/sb-b/clock/followers")]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_deployed_unbound_stays_on_the_deployment_it_got_when_another_comes(monkeypatch):
+    """deploy_agent without env_step_id binds to the one deployment there is; a second deployment of the env, and
+    arming its clock, leave the agent on the first."""
+    import agent_env.a2a_agent as a2a_agent_package
+    from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+
+    card = _agent().a2a_card
+
+    class _Agent:
+        metadata: dict = {}
+
+        async def deploy(self, **_):
+            return SimpleNamespace(a2a_url=AGENT_URL, agent_card=card, sandbox_id="sb-agent", sandbox_type="fake",
+                                   instance_id="i-1", network_policy=None, control_token=None, control_headers={})
+
+        def model_base_url(self, env_vars, config):
+            return None
+
+    monkeypatch.setattr(a2a_agent_package.A2AAgent, "get", classmethod(lambda cls, *a, **k: _Agent()))
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _two_deployments()
+    first, second = context.deployed_envs
+    context.deployed_envs = [first]
+
+    await DeployAgentTaskStep(id="deploy", version=None, a2a_agent_id="a", agent_name="solver",
+                              env_ids=["e1"]).execute(context)
+    [agent] = context.deployed_agents
+    assert agent.env_bindings == {"e1": "deploy-a"}
+    assert DeployedAgent.from_dict(dataclasses.asdict(agent)).env_bindings == {"e1": "deploy-a"}
+    context.deployed_envs.append(second)
+    del sent[:]
+
+    await _step(env_step_id="deploy-b").execute(context)
+
+    assert not any(r.url.path.endswith("/clock/followers") or r.url.host == "solver" for r in sent)
+    assert context.metadata["clock_configurations"][-1]["agents"] == []
+    assert agent_clock.FOLLOWING_KEY not in context.metadata
+
+
+def test_an_agent_record_from_before_bindings_loads_bound_to_any_deployment():
+    agent = DeployedAgent.from_dict({"agent_name": "solver", "api_url": AGENT_URL, "env_ids": ["e1"]})
+    assert agent.env_bindings == {}

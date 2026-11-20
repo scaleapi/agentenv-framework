@@ -418,13 +418,25 @@ class RootChannel:
         if isinstance(self.sandbox, VmSandbox):
             return await self.sandbox.exec_script(f"docker exec -u 0 {shlex.quote(self.sandbox.container_name)} "
                                                   f"{shlex.join(argv)}")
+        await self._check_root()
+        return await self._exec(argv)
+
+    async def exec(self, argv: list[str]) -> tuple[int, str, str]:
+        """``argv`` run as root: its exit code, stdout and stderr, whatever the code."""
+        if isinstance(self.sandbox, VmSandbox):
+            return await self.sandbox.exec_with_output(
+                "sudo", "bash", "-c", f"docker exec -u 0 {shlex.quote(self.sandbox.container_name)} {shlex.join(argv)}")
+        await self._check_root()
+        return await self.sandbox.exec_with_output(*argv)
+
+    async def _check_root(self) -> None:
         if not self.checked:
             uid = (await self._exec(["id", "-u"])).strip()
             if uid != "0":
-                raise RuntimeError(f"site routing installs as root, and the {getattr(self.sandbox, 'type', 'given')} "
-                                   f"sandbox runs the computer's commands as uid {uid}; deploy it on a VM sandbox")
+                raise RuntimeError(f"root in the computer runs through its sandbox, and the "
+                                   f"{getattr(self.sandbox, 'type', 'given')} sandbox runs the computer's commands as "
+                                   f"uid {uid}; deploy it on a VM sandbox")
             self.checked = True
-        return await self._exec(argv)
 
     async def _exec(self, argv: list[str]) -> str:
         code, stdout, stderr = await self.sandbox.exec_with_output(*argv)

@@ -301,6 +301,9 @@ impls = ["pkg.artifacts:CustomArtifact"]
 [task_steps]
 impls = ["pkg.steps:CustomStep"]
 
+[gateway]
+console_frame_ancestors = ["https://app.example.com"]
+
 [explorer]
 port = 9999
 
@@ -316,7 +319,7 @@ timeout = 30
 
 _ALIASED = ("document", "object", "image", "secret", "runner")
 _EVERY_TABLE = ("document", "object", "image", "secret", "runner", "model", "conversations",
-                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "explorer")
+                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "gateway", "explorer")
 
 
 @pytest.mark.parametrize("toml", [None, MONGO_TOML, FULL_SURFACE_TOML])

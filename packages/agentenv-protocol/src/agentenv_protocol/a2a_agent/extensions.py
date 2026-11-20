@@ -24,6 +24,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..atif import FORMAT as ATIF_FORMAT
+from ..atif import Adapter, AdapterSpec, media_file
 from ._triggers import MAX_SOLVER_MESSAGE_LENGTH
 from .tasks.v1 import AgentConfig
 from ..transfers import (
@@ -166,12 +168,19 @@ class ContextTrajectoryRequest(ExtensionRequest):
 
 
 class TrajectoryWriteObjects(ExtensionRequest):
+    """Where the agent uploads what it serves. An atif/1 task read may also grant ``aux``, the task's aux log, and
+    ``turn_context``, its TurnContext and how it ended, so the turn can be replayed offline."""
+
     trajectory: WriteObject
+    aux: WriteObject | None = None
+    turn_context: WriteObject | None = None
 
     @model_validator(mode="after")
     def _json_trajectory(self) -> TrajectoryWriteObjects:
-        if self.trajectory.media_type != "application/json":
-            raise ValueError("trajectory object media_type must be application/json")
+        for name in ("trajectory", "aux", "turn_context"):
+            granted = getattr(self, name)
+            if granted is not None and granted.media_type != "application/json":
+                raise ValueError(f"{name} object media_type must be application/json")
         return self
 
 
@@ -194,6 +203,50 @@ class TrajectoryUploadedObjects(ExtensionResponse):
 class TrajectoryObjectsResponse(ExtensionResponse):
     objects: TrajectoryUploadedObjects
     format: str | None = None
+
+
+#: The most media files one media call may name: a turn of a computer-use run holds a few hundred screenshots.
+MAX_MEDIA_OBJECTS = 10_000
+
+
+class TrajectoryMediaRequest(ExtensionRequest):
+    """The media files of a context's atif/1 copy the caller wants, by their paths in it (``media/<sha256>.<ext>``),
+    each under its own exact-object write grant."""
+
+    context_id: str = Field(min_length=1)
+    objects: dict[str, WriteObject] = Field(min_length=1, max_length=MAX_MEDIA_OBJECTS)
+
+    @field_validator("objects")
+    @classmethod
+    def _media_paths(cls, objects: dict[str, WriteObject]) -> dict[str, WriteObject]:
+        for path in objects:
+            media_file(path)
+        return objects
+
+
+class TrajectoryMediaResponse(ExtensionResponse):
+    """What a media call uploaded, by path; the paths the context holds no file for; and the uploads that failed, with
+    why. Neither of the last two stops the rest."""
+
+    objects: dict[str, Uploaded]
+    missing: list[str] = Field(default_factory=list)
+    failed: dict[str, str] = Field(default_factory=dict)
+
+
+class AtifUploadedObjects(ExtensionResponse):
+    trajectory: Uploaded
+    aux: Uploaded | None = None
+    turn_context: Uploaded | None = None
+
+
+class AtifObjectsResponse(ExtensionResponse):
+    """An atif/1 read's answer in objects form: what it uploaded, the format, and the ATIF and profile versions of the
+    document it uploaded."""
+
+    objects: AtifUploadedObjects
+    format: Literal["atif/1"] = ATIF_FORMAT
+    schema_version: str
+    profile_version: str
 
 
 class TrajectoryState(str, Enum):
@@ -237,6 +290,27 @@ class TrajectoryEventsResponse(ExtensionResponse):
     has_more: bool
 
 
+class AtifEventsResponse(ExtensionResponse):
+    """An atif/1 cursor page: the document's closed steps after step ``after``, ``next`` the last one's ``step_id``.
+    ``header`` is the document's root without its steps and sub-agents (``final_metrics`` once no task is open), and
+    ``subagents`` the embedded sub-agent trajectories of the
+    tasks these steps belong to, as far as each is served, so the page stands alone. A sub-agent can gain steps while
+    its task runs; a reader keeps each sub-agent's latest copy, and the page that serves a task's last step carries
+    them whole. The last page's header with every page's steps and the latest sub-agents is the document."""
+
+    context_id: str
+    task_id: str
+    state: TrajectoryState
+    format: Literal["atif/1"] = ATIF_FORMAT
+    schema_version: str
+    profile_version: str
+    header: dict[str, Any] | None = None
+    subagents: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[Any]
+    next: int
+    has_more: bool
+
+
 def _opaque_snapshot_objects(
     objects: SnapshotWriteObjects | SnapshotReadObjects,
 ) -> SnapshotWriteObjects | SnapshotReadObjects:
@@ -244,12 +318,18 @@ def _opaque_snapshot_objects(
         descriptor = getattr(objects, name)
         if descriptor is not None and descriptor.media_type != "application/octet-stream":
             raise ValueError(f"snapshot {name} media_type must be application/octet-stream")
+    if objects.state is not None and objects.state.media_type != "application/json":
+        raise ValueError("snapshot state media_type must be application/json")
     return objects
 
 
 class SnapshotWriteObjects(ExtensionRequest):
+    """Where a snapshot is saved: the agent's ``trajectory`` and ``workspace``, and ``state``, the SDK's own (an agent
+    that serves atif/1 keeps its turn count there), which the SDK writes after the agent's handler."""
+
     trajectory: WriteObject
     workspace: WriteObject | None = None
+    state: WriteObject | None = None
 
     _opaque_media_types = model_validator(mode="after")(_opaque_snapshot_objects)
 
@@ -260,8 +340,11 @@ class ObjectSnapshotSaveRequest(ExtensionRequest):
 
 
 class SnapshotReadObjects(ExtensionRequest):
+    """What a snapshot is loaded from; ``state`` is the SDK's, read before the agent's handler runs."""
+
     trajectory: ReadObject
     workspace: ReadObject | None = None
+    state: ReadObject | None = None
 
     _opaque_media_types = model_validator(mode="after")(_opaque_snapshot_objects)
 
@@ -274,6 +357,7 @@ class ObjectSnapshotLoadRequest(ExtensionRequest):
 class SnapshotUploadedObjects(ExtensionResponse):
     trajectory: Uploaded
     workspace: Uploaded | None = None
+    state: Uploaded | None = None
 
 
 class ObjectSnapshotSaveResponse(ExtensionResponse):
@@ -760,6 +844,9 @@ class OperationDefinition:
     implementation: ImplementationOwner
     request: RequestDefinition | type[BaseModel] | None = None
     response: FieldSchema | type[BaseModel] | None = None
+    #: Served by the SDK alone, from state only it holds: no agent overrides it, and an agent that overrides the
+    #: extension's other SDK operations needn't override it with them.
+    sdk_only: bool = False
     response_model: type[BaseModel] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -1048,6 +1135,7 @@ def _op(
     response_required: Iterable[str] = (),
     response_optional: Iterable[str] = (),
     variants: Iterable[RequestVariant] = (),
+    sdk_only: bool = False,
 ) -> OperationDefinition:
     response_required = _tuple(response_required)
     response_optional = _tuple(response_optional)
@@ -1067,6 +1155,7 @@ def _op(
         implementation=owner,
         request=request,
         response=response,
+        sdk_only=sdk_only,
     )
 
 
@@ -1111,20 +1200,35 @@ def _configure_install(**declaration: Any) -> ExtensionConfiguration:
     return ExtensionConfiguration(wire_params=declaration)
 
 
-def _configure_trajectory(*, live: bool = False, native: str | None = None) -> ExtensionConfiguration:
+def _configure_trajectory(
+    *, live: bool = False, native: str | None = None, atif: type[Adapter] | None = None
+) -> ExtensionConfiguration:
     """``live=True`` advertises the cursor reads, which serve the framework's log while a
     task runs, and the context reads the framework answers when the agent binds none.
     ``native`` names the native log's format: the card offers it as ``formats``, ``native`` and
-    ``default``, and the log, a returned native trajectory and every read hold to it."""
+    ``default``, and the log, a returned native trajectory and every read hold to it. ``atif``
+    names the ``@atif_adapter`` class for that format: the card then offers atif/1 too, and the
+    SDK serves it from one document per context, built as the agent writes its log."""
     if not isinstance(live, bool):
         raise TypeError("live must be a boolean")
     if native is not None and not isinstance(native, str):
         raise TypeError("native must be a format id string")
     if native is not None and (not native.strip() or len(native) > MAX_TRAJECTORY_FORMAT_LENGTH):
         raise ValueError(f"native must be a format id of 1 to {MAX_TRAJECTORY_FORMAT_LENGTH} characters")
+    if atif is not None:
+        spec = vars(atif).get("spec") if isinstance(atif, type) and issubclass(atif, Adapter) else None
+        if not isinstance(spec, AdapterSpec):
+            raise TypeError("atif must be an Adapter subclass declared with @atif_adapter")
+        if native is None:
+            raise ValueError("atif needs native, the format the adapter reads")
+        if spec.native_format != native:
+            raise ValueError(f"{atif.__name__} reads {spec.native_format!r}, not {native!r}, the native format")
+    formats = [native, ATIF_FORMAT] if atif is not None else [native]
     return ExtensionConfiguration(
-        wire_params={"formats": [native], "native": native, "default": native} if native else {},
-        options={"native": native} if native else {},
+        wire_params={"formats": formats, "native": native, "default": native} if native else {},
+        options={"native": native, **({"atif": atif} if atif is not None else {})} if native else {},
+        # An agent that serves atif/1 hands over its copies' media files, which the worker pulls at each turn's end.
+        features={"media"} if atif is not None else frozenset(),
         variants=(
             {"get": {"task_events", "context_events", "context", "context_objects"}} if live else {}
         ),
@@ -1270,6 +1374,21 @@ TRAJECTORY_V1 = ExtensionDefinition(
                     ),
                 ),
             ),
+        )
+    },
+    optional_features={
+        "media": OperationGroup(
+            operations={
+                "media": _op(
+                    "media",
+                    "POST",
+                    "/ext/trajectory/media",
+                    SDK,
+                    request_model=TrajectoryMediaRequest,
+                    response_model=TrajectoryMediaResponse,
+                    sdk_only=True,
+                ),
+            }
         )
     },
     configuration_validator=_configure_trajectory,

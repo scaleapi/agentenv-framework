@@ -1,7 +1,8 @@
-"""Golden files for the built-in verifiers' legacy ``verifications`` entries, under ``tst/data/verifier_golden``: first
-recorded on main before the verifiers moved onto ``VerifierTaskStep``, and the contract since. A run must leave what the
-file holds, number types and key order included. After a deliberate change, re-record with
-``AGENTENV_TEST_RECORD_GOLDEN=1`` and review the files' diff: each check then writes what the run left instead."""
+"""Golden files under ``tst/data/verifier_golden``: the built-in verifiers' legacy ``verifications`` entries, first
+recorded on main before the verifiers moved onto ``VerifierTaskStep``, and the requests the direct judge hands LiteLLM
+(``judge_requests.json``), first recorded on main before its call moved onto ``config.model_call``; each the contract
+since. A run must leave what the file holds, number types and key order included. After a deliberate change, re-record
+with ``AGENTENV_TEST_RECORD_GOLDEN=1`` and review the files' diff: each check then writes what the run left instead."""
 
 from __future__ import annotations
 

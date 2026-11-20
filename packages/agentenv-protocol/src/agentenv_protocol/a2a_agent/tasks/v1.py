@@ -19,6 +19,8 @@ from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
 from a2a.types import TaskStatusUpdateEvent
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ...atif import AdapterSpec
+
 logger = logging.getLogger(__name__)
 
 _LARGE_LIVE_TRAJECTORY_BYTES = 100 * 1024 * 1024
@@ -156,11 +158,14 @@ class TrajectoryLog:
     Each event is serialized as it is appended, so an event once read never changes; append
     from one thread at a time. Unless the result carries a ``native_trajectory``, the log is
     the task's final trajectory. An agent whose card declares a ``native`` format starts with
-    that format, and setting or returning another fails the turn."""
+    that format, and setting or returning another fails the turn. With an ATIF adapter
+    (``adapter``, its spec), every event and aux record also feeds the context's atif/1 copy."""
 
-    __slots__ = ("_events", "_size_bytes", "_format", "_native", "_sealed", "_task_id", "_warned")
+    __slots__ = (
+        "_events", "_size_bytes", "_format", "_native", "_sealed", "_task_id", "_warned", "_adapter", "_atif",
+    )
 
-    def __init__(self, *, native: str | None = None) -> None:
+    def __init__(self, *, native: str | None = None, adapter: AdapterSpec | None = None) -> None:
         self._events: list[bytes] = []
         self._size_bytes = 0
         self._format: str | None = native
@@ -168,6 +173,8 @@ class TrajectoryLog:
         self._sealed = False
         self._task_id: str | None = None
         self._warned = False
+        self._adapter = adapter
+        self._atif: Any = None
 
     @property
     def format(self) -> str | None:
@@ -195,6 +202,8 @@ class TrajectoryLog:
         encoded = json.dumps(dict(event), separators=(",", ":"), allow_nan=False).encode()
         self._events.append(encoded)
         self._size_bytes += len(encoded)
+        if self._atif is not None:
+            self._atif.native(json.loads(encoded))
         if not self._warned and self._size_bytes > _LARGE_LIVE_TRAJECTORY_BYTES:
             self._warned = True
             logger.warning(
@@ -203,8 +212,33 @@ class TrajectoryLog:
                 _LARGE_LIVE_TRAJECTORY_BYTES,
             )
 
+    def aux(self, name: str, record: Any) -> None:
+        """Feed a record of aux file ``name``, one the agent's ATIF adapter declares, such as a
+        hook's note, where it happened among the native events. It reaches the adapter and the
+        turn's atif/1 final read; the native log doesn't change."""
+        if self._adapter is None:
+            raise RuntimeError("aux records feed an ATIF adapter: enable(TRAJECTORY_V1, native=..., atif=...)")
+        if name not in self._adapter.aux:
+            raise ValueError(f"the ATIF adapter declares no aux file {name!r}")
+        self._ensure_open()
+        encoded = json.dumps(record, separators=(",", ":"), allow_nan=False)
+        if self._atif is not None:
+            self._atif.aux(name, json.loads(encoded))
+
     def __len__(self) -> int:
         return len(self._events)
+
+    def _hold_returned(self, format: str) -> None:
+        """Fail the turn when a returned native trajectory breaks the card: its format isn't the
+        native one, or the task also appended events while an ATIF adapter builds the atif/1 copy
+        from them, so the copy and the native record would come from different sources."""
+        self._hold_to_native(format)
+        if self._adapter is not None and self._events:
+            raise _TaskFailed(
+                "framework.trajectory_appended_and_returned",
+                "the task appended trajectory events and returned a native trajectory; with an ATIF adapter, "
+                "append the events or return the trajectory, not both",
+            )
 
     def _hold_to_native(self, format: str) -> None:
         """Fail the turn as the agent's error when ``format``, set or returned, isn't the native

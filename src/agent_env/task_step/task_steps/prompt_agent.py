@@ -11,7 +11,7 @@ import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from collections.abc import Mapping
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, NamedTuple, Optional
 import httpx
 from a2a.types import TaskState
 from agentenv_protocol.a2a_agent import card_request_accepts
@@ -19,6 +19,7 @@ from agentenv_protocol.a2a_agent import card_request_accepts
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
+    TrajectoryFormats,
     TrajectoryUpload,
     fetch_trajectory,
     send_and_wait,
@@ -36,7 +37,14 @@ from agent_env.env.gateway.constants import (
 )
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
-from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.context import (
+    DeployedAgent,
+    PromptResponse,
+    StepContextError,
+    TaskStepContext,
+    TurnTrajectory,
+)
+from agent_env.task_step.usage import StepUsage
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
@@ -560,11 +568,15 @@ class PromptAgentTaskStep(TaskStep):
             await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
                                              headers=agent.control_headers)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
-        context.record_model(ModelRole.SOLVER.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
+        solver_model = negotiated.fields.get("model") if negotiated else None
+        context.record_model(ModelRole.SOLVER.record_key, self.id, solver_model)
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, solver_model, agent)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
             context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
+            usage.start(ModelRole.USER_SIMULATOR, built_in[0].get("model"), user_sim)
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
@@ -574,7 +586,9 @@ class PromptAgentTaskStep(TaskStep):
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
                                                  headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
-            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
+            user_model = negotiated.fields.get("model") if negotiated else None
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, user_model)
+            usage.start(ModelRole.USER_SIMULATOR, user_model, user_sim)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
@@ -626,11 +640,14 @@ class PromptAgentTaskStep(TaskStep):
         conversation_tool_call_count: Optional[int] = None
         final_task_id = ""
         per_turn_trajectory_urls: list[str | None] = []
+        per_turn_trajectories: list[TurnTrajectory] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        formats = TrajectoryFormats.of(traj_ext_cached)
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
-            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers)
+            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers,
+                      format=formats.native)
             if live is not None else None
         )
         final_state: str = TaskState.completed.value
@@ -643,7 +660,7 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
-            built_in=sim,
+            built_in=sim, usage=usage,
         )
         # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
         end_after: Optional[str] = None
@@ -692,6 +709,7 @@ class PromptAgentTaskStep(TaskStep):
                 final_terminal = protocol.TerminalResponse.from_message(status_msg)
                 if final_terminal.tool_call_count is not None:
                     conversation_tool_call_count = (conversation_tool_call_count or 0) + final_terminal.tool_call_count
+                usage.turn(ModelRole.SOLVER, final_terminal)
                 agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
 
                 conversation_store.complete_a2a_task(
@@ -702,16 +720,17 @@ class PromptAgentTaskStep(TaskStep):
                 )
 
                 if traj_ext_cached:
-                    turn_traj_uri: str | None = None
+                    stored = StoredTrajectory()
                     try:
-                        turn_traj_uri = await self._fetch_trajectory(
+                        stored = await fetch_native_trajectory(
                             target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
                             target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
                             headers=agent.control_headers,
                         )
                     except Exception as e:
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
-                    per_turn_trajectory_urls.append(turn_traj_uri)
+                    per_turn_trajectory_urls.append(stored.url)
+                    per_turn_trajectories.append(TurnTrajectory(native_format=stored.format, atif=None))
 
                 final_task_id = sent_task_id
                 final_state = target_state
@@ -833,6 +852,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_trajectory_object_url=trajectory_url,
             agent_trajectory_object_prefix=trajectory_output_prefix,
             target_agent_per_turn_trajectory_object_urls=per_turn_trajectory_urls or None,
+            target_agent_per_turn_trajectories=per_turn_trajectories or None,
             source_agent_per_turn_prompt_parts=source_agent_per_turn_prompt_parts or None,
             tool_call_count=conversation_tool_call_count,
             model=model,
@@ -844,6 +864,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_name=self.agent_name,
             step_id=self.id,
             structured_output=structured_output,
+            usage=usage.entries(),
         ))
 
         if final_state == TaskState.failed:
@@ -891,30 +912,6 @@ class PromptAgentTaskStep(TaskStep):
             logger.warning(f"{self.id}: not following the live trajectory: {e}")
             return None
         return endpoint, store, prefix_key
-
-    async def _fetch_trajectory(
-        self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
-        target_a2a_task_id: str, *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
-    ) -> str | None:
-        get_method, get_path = A2AAgent.operation(traj_ext, "get")
-        store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
-        mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
-        if mode is None:
-            raise RuntimeError(
-                "Agent advertises no trajectory get form this object store can serve"
-            )
-        # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
-        # target_a2a_task_id, the client message id persisted on the conversation as
-        # a2a_task_id, so the FE can resolve it.
-        upload = None
-        if mode == "objects":
-            upload = await asyncio.to_thread(
-                TrajectoryUpload.to,
-                store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
-            )
-        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
-                                         headers=headers)
-        return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
 
     async def _env_clock(self, envs: list) -> dict:
         """``{"env_clock": [...]}``, each armed env clock for a conversation message, or {} when no clock is armed."""
@@ -1115,9 +1112,10 @@ class _UserSide:
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
                  decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
-                 built_in: Optional[_BuiltInUserSim] = None) -> None:
+                 built_in: Optional[_BuiltInUserSim] = None, usage: Optional[StepUsage] = None) -> None:
         self._step = step
         self._built_in = built_in
+        self._usage = usage
         self._context = context
         self._url = url
         self._user_sim = user_sim
@@ -1166,10 +1164,10 @@ class _UserSide:
         except TimeoutError as e:
             return {"text": None, "error": f"timeout: {e}"}
         status = result.get("status") or {}
+        msg = status.get("message") or {}
+        term = self._record_usage(msg)
         if status.get("state") != TaskState.completed:
             return {"text": None, "error": f"state {status.get('state')}"}
-        msg = status.get("message") or {}
-        term = protocol.TerminalResponse.from_message(msg)
         raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         return {"text": raw, "structured": term.structured_output if isinstance(term.structured_output, dict) else None,
                 "trajectory_url": await self._user_sim_trajectory(task_id, message_id)}
@@ -1180,13 +1178,13 @@ class _UserSide:
         ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if not ext:
             return None
-        step = self._step
         try:
-            return await asyncio.wait_for(
-                step._fetch_trajectory(self._url, ext, task_id, step._trajectory_prefix() + "user_sim/", message_id,
-                                       card=card, sandbox_type=self._user_sim.sandbox_type,
-                                       headers=self._user_sim.control_headers),
+            stored = await asyncio.wait_for(
+                fetch_native_trajectory(self._url, ext, task_id, self._step._trajectory_prefix() + "user_sim/",
+                                        message_id, card=card, sandbox_type=self._user_sim.sandbox_type,
+                                        headers=self._user_sim.control_headers),
                 _USER_SIM_TRAJECTORY_FETCH_SECONDS)
+            return stored.url
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
             return None
@@ -1229,6 +1227,7 @@ class _UserSide:
             return {"end": "user_timeout"}
 
         user_state = (user_result.get("status") or {}).get("state")
+        self._record_usage((user_result.get("status") or {}).get("message") or {})
         if user_state != TaskState.completed:
             logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
             return {"end": "user_not_completed"}
@@ -1259,6 +1258,13 @@ class _UserSide:
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+    def _record_usage(self, message: dict) -> protocol.TerminalResponse:
+        """The user side's reply, a user sim's turn recorded as it ends; a human peer's has none to record."""
+        term = protocol.TerminalResponse.from_message(message)
+        if self._usage is not None:
+            self._usage.turn(ModelRole.USER_SIMULATOR, term)
+        return term
 
 
 class _BuiltInUserSim:
@@ -1352,6 +1358,43 @@ class _BuiltInUserSim:
 
 # How long one user sim trajectory fetch may take, as in always_on.
 _USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
+
+
+class StoredTrajectory(NamedTuple):
+    """Where a turn's native trajectory was stored, None when the agent returned none, and the format its answer
+    named, None when it named none."""
+
+    url: str | None = None
+    format: str | None = None
+
+
+async def fetch_native_trajectory(
+    a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str, target_a2a_task_id: str,
+    *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
+) -> StoredTrajectory:
+    """A turn's native trajectory, read by ``a2a_server_task_id`` and stored under ``target_a2a_task_id``. A card that
+    offers formats is asked for its native one by name, so the copy judges read stays native whatever the card's
+    default; one that offers none gets the read it always has."""
+    get_method, get_path = A2AAgent.operation(traj_ext, "get")
+    store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
+    mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
+    if mode is None:
+        raise RuntimeError(
+            "Agent advertises no trajectory get form this object store can serve"
+        )
+    # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
+    # target_a2a_task_id, the client message id persisted on the conversation as
+    # a2a_task_id, so the FE can resolve it.
+    upload = None
+    if mode == "objects":
+        upload = await asyncio.to_thread(
+            TrajectoryUpload.to,
+            store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
+        )
+    fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                                     headers=headers, format=TrajectoryFormats.of(traj_ext).native)
+    url = await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
+    return StoredTrajectory(url, fetched.format)
 
 
 def _agent_text(solver_message: str, agent_parts: Optional[list[dict]]) -> str:

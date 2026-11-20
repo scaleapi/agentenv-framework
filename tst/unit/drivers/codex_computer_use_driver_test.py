@@ -98,9 +98,9 @@ FAKE = textwrap.dedent('''\
 
     anyio.run(main)
 ''')
-#: How long a REPL may sit unused before the driver closes it, in the idle test: well over two calls in a row on a busy
-#: runner, so the second still finds the first's REPL.
-IDLE_S = 1.0
+#: How long the idle test's REPL may sit unused: through its two calls, however slow a busy runner makes them, then for
+#: a moment once they're done, so the sweep closes it.
+IDLE_THROUGH_CALLS_S, IDLE_AFTER_CALLS_S = 60, 0.2
 MACOS = Platform(os="macos", version="26.5", arch="arm64", display="aqua")
 WINDOWS = Platform(os="windows", version="11", arch="amd64", display="dwm")
 
@@ -360,10 +360,11 @@ async def test_past_the_most_repls_kept_the_least_recently_used_is_closed_and_th
 @pytest.mark.asyncio
 async def test_a_repl_left_idle_is_closed_without_another_call_and_its_session_starts_afresh(module, monkeypatch):
     monkeypatch.setattr(module, "SWEEP_S", 0.05)
-    monkeypatch.setattr(module, "IDLE_S", IDLE_S)
+    monkeypatch.setattr(module, "IDLE_S", IDLE_THROUGH_CALLS_S)
     async with mcp_session(_driver(module, monkeypatch)) as session:
         await session.call_tool("js", {"code": "set 1"}, meta={SESSION_META_KEY: "a"})
         before = _text(await session.call_tool("js", {"code": "get"}, meta={SESSION_META_KEY: "a"}))
+        monkeypatch.setattr(module, "IDLE_S", IDLE_AFTER_CALLS_S)
         closed = await _gone(int(before.rpartition(" in ")[2]))
         after = _text(await session.call_tool("js", {"code": "get"}, meta={SESSION_META_KEY: "a"}))
 
