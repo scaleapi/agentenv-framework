@@ -333,7 +333,8 @@ def test_enable_installs_the_capture_as_an_after_tool_hook_run_by_the_agents_pyt
 
     (entry,) = settings(home)["hooks"]["AfterTool"]
     assert entry == {"matcher": ".*", "hooks": [{
-        "type": "command", "command": f"{sys.executable} {changelog_dir / 'capture.py'}", "timeout": 600000}]}
+        "type": "command", "command": f"AGENTENV_REAL_TIME=1 {sys.executable} {changelog_dir / 'capture.py'}",
+        "timeout": 600000}]}
 
 
 def test_enable_refuses_while_a_turn_runs(home, changelog_dir, agent, client):

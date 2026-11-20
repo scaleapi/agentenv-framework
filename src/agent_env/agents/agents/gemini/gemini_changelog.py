@@ -47,16 +47,23 @@ META_DIR_SUFFIX = ".changelog-meta"
 _META_MEMBER = re.compile(rf"(?:^|/)[^/]+{re.escape(META_DIR_SUFFIX)}/{re.escape(META_NAME)}\Z")
 _TAR_STDERR_TAIL_CHARS = 2000
 _TAR_VERSION_TIMEOUT_S = 30
+# The marker agent-env's libfaketime keeps a program started with on real time, and takes out of what its children
+# inherit: the capture compares its grant's expiry, and its tar file times, with its own clock, and both are real.
+_REAL_TIME_ENV = "AGENTENV_REAL_TIME"
 _FAILED_INCREMENTS_LOGGED = 5
 
 # The post-tool hook, run by the agent's own Python, as a child of the CLI after every tool call, so an increment
-# includes that tool's writes. It exits 0 on a capture error, so the error never reaches the model.
+# includes that tool's writes. It exits 0 on a capture error, so the error never reaches the model. It runs on real
+# time, as its grant's expiry is.
 CAPTURE_SCRIPT = r'''import asyncio, fcntl, json, os, shutil, signal, subprocess, sys, time
 from pathlib import Path
 
 from agentenv_protocol.transfers import NamespaceUploader, WriteNamespaceGrant
 
 CFG = "/tmp/changelog/config.json"
+# tar runs on real time, as the file times it compares with its last run's are: on an env clock ahead of them, it
+# would record that clock's time as its baseline and miss what changed since.
+REAL_TIME = {"AGENTENV_REAL_TIME": "1"}
 STDERR_TAIL_CHARS = 500
 TURN_POLL_S = 0.05
 TOOL_NAME_CHARS = 40
@@ -221,6 +228,7 @@ def main():
                     ["tar", "--ignore-failed-read", "--listed-incremental=" + work, "--exclude=" + changelog_dir,
                      "-czf", local, *members],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, pass_fds=(lock.fileno(),),
+                    env=dict(os.environ, **REAL_TIME),
                 )
                 archived = True
                 try:
@@ -413,7 +421,7 @@ class Changelog:
         self.snar = f"{directory}/state.snar"
         self.config_path = f"{directory}/config.json"
         self.capture_path = f"{directory}/capture.py"
-        self.hook_command = f"{shlex.quote(sys.executable)} {shlex.quote(self.capture_path)}"
+        self.hook_command = f"{_REAL_TIME_ENV}=1 {shlex.quote(sys.executable)} {shlex.quote(self.capture_path)}"
 
     def capture_script(self) -> str:
         """``CAPTURE_SCRIPT`` reading this changelog's config."""
@@ -462,6 +470,7 @@ class Changelog:
                 ["tar", "--ignore-failed-read", f"--listed-incremental={self.snar}", f"--exclude={self.directory}",
                  "-cf", "/dev/null", *present],
                 check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={**os.environ, _REAL_TIME_ENV: "1"},
             )
 
     async def apply(self, request: ObjectChangelogApplyRequest) -> ObjectChangelogApplyResponse:
