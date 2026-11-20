@@ -235,13 +235,30 @@ _PROMPT_RESPONSE_LEGACY_KEYS = (
 )
 
 
+class AtifRecord(TypedDict):
+    """A turn's atif/1 copy: the stored document and the step it reached at that turn (each turn's copy is a prefix
+    of the next), how it checked (``valid``, ``invalid`` with the rules it broke, ``newer`` than this worker reads as a
+    producer's, or ``unavailable`` with why in ``reason``), the versions that made and checked it, and the turn's aux
+    log and turn context."""
+
+    url: Optional[str]
+    through_step: Optional[int]
+    status: str
+    rules: list[str]
+    reason: Optional[str]
+    validator_version: Optional[str]
+    adapter_version: Optional[str]
+    aux_url: Optional[str]
+    turn_context_url: Optional[str]
+
+
 class TurnTrajectory(TypedDict):
     """What a turn's trajectory reads left, beside its native copy's url in the per-turn list: the native copy's
     format, as the agent's answer named it (None from an agent that names none), and its atif/1 copy, None when the
-    agent offers none."""
+    run doesn't prescribe atif/1."""
 
     native_format: Optional[str]
-    atif: Optional[dict[str, Any]]
+    atif: Optional[AtifRecord]
 
 
 @dataclass

@@ -15,6 +15,7 @@ from typing import Any, ClassVar, NamedTuple, Optional
 import httpx
 from a2a.types import TaskState
 from agentenv_protocol.a2a_agent import card_request_accepts
+from agentenv_protocol.atif import FORMAT as ATIF_FORMAT
 
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent import protocol
@@ -62,6 +63,7 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
     trajectory_object_url,
     trajectory_prefix_key,
 )
+from agent_env.task_step.snapshot_utils.atif_copies import AtifCopies
 from agent_env.task_step.snapshot_utils.live_trajectory import LiveTurns
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig, SnapshotSeries
 
@@ -645,6 +647,8 @@ class PromptAgentTaskStep(TaskStep):
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         formats = TrajectoryFormats.of(traj_ext_cached)
+        atif_copies = AtifCopies(context, agent, target_url, traj_ext_cached,
+                                 prescribed=ATIF_FORMAT in prescribed_formats(context))
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
             LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers,
@@ -732,6 +736,7 @@ class PromptAgentTaskStep(TaskStep):
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
                     per_turn_trajectory_urls.append(stored.url)
                     per_turn_trajectories.append(TurnTrajectory(native_format=stored.format, atif=None))
+                    atif_copies.turn(sent_task_id, target_a2a_task_id)
 
                 final_task_id = sent_task_id
                 final_state = target_state
@@ -786,10 +791,15 @@ class PromptAgentTaskStep(TaskStep):
                     logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")
                     conversation_store.mark_closed(conversation_id)
                     break
+        except BaseException:
+            atif_copies.cancel()
+            raise
         finally:
             # On failure too, so a reader of the last turn knows no other follows.
             if live_turns is not None:
                 await live_turns.end()
+        for turn_record, atif in zip(per_turn_trajectories, await atif_copies.records()):
+            turn_record["atif"] = atif
 
         await self._persist_env_trigger_state(context)
 

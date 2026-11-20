@@ -122,7 +122,12 @@ or one of them only where it is used.
   agent whose trajectory it reads (prompt_agent and always_on call the trajectory extension's `prescribe` on the agent
   they prompt before its conversation starts); a run's `user_overrides.trajectory_formats` beats it. None by default,
   so an agent builds native only, and an `atif/1` read of a conversation not prescribed it is refused
-  (`format_not_prescribed`).
+  (`format_not_prescribed`). A prompt step of a run that prescribes `atif/1` reads each turn's copy inline once the
+  turn ends, off the turn's path, and stores it as `<trajectory_id>.json` under `{prefix}atif/instance_id=<id>/<agent>/`
+  (`metadata["atif_copies"]`, `task_step/snapshot_utils/atif_copies.py`), overwritten each turn, with the turn's aux
+  log and turn context under `turns/` and the media it names pulled into `media/`; after a restart the session's
+  earlier document names the next in `continued_trajectory_ref`. Each turn's record says how its copy checked
+  (`AtifRecord`: `valid`, `invalid`, `newer`, `unavailable`), and a copy never fails the run; judges read native.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
