@@ -25,7 +25,7 @@ from agent_env.store.document_store import (
     VersionedEntityStoreCache,
 )
 from agent_env.store.query import QueryBuilder, to_document_query
-from agent_env.store.routing import namespace_routing_enabled
+from agent_env.store.routing import shared_store
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv, Env
@@ -102,10 +102,9 @@ class EnvStore:
         )
         if existing and existing.get("type") != env.type:
             raise ValueError(f"Env id '{env.id}' already exists as type '{existing.get('type')}'; cannot put as type '{env.type}'.")
-        # Where aliases resolve, with namespace routing on, a deployment recorded under an alias reloads its env, so no
-        # env of the store's own starts on its id there. A service resolves none, so it may hold one, as the hub holds
-        # `chromium`.
-        if (not existing and namespace_routing_enabled()
+        # This machine's runs record a deployment under an alias, which reloads the alias's env, so no env of its own
+        # store starts on the alias's id. A shared store, such as the hub's, may hold one: a task there names it.
+        if (not existing and not shared_store(store)
                 and (named := installed_aliases(table=ENV_ALIASES).target(env.id)) is not None):
             raise ValueError(f"env id {env.id!r} is an alias of {named.target_id}, which comes with "
                              f"{named.declared_by}, and a task naming it deploys that env; give this env another id")

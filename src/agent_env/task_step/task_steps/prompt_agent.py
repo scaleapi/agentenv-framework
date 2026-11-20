@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any, ClassVar, Optional
 import httpx
 from a2a.types import TaskState
@@ -25,7 +26,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
 from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
-from agent_env.config.model import MODEL_PARAMS_RESERVED
+from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
     EXT_CLOCK_URI,
@@ -36,9 +37,10 @@ from agent_env.env.gateway.constants import (
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
-from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
@@ -155,6 +157,7 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
+    step_role = StepRole.AGENT
     DEFAULT_USER_AGENT_NAME: ClassVar[str] = "human_agent"
     entity_refs = (
         EntityRef.env("snapshot_config.env_id"),
@@ -391,16 +394,17 @@ class PromptAgentTaskStep(TaskStep):
         """Model and effort for this run: this step's ``step_overrides`` win over the run-wide ``agent_model`` / ``agent_effort`` and the stored values."""
         step_overrides = self.step_param_overrides(context)
         overrides = context.metadata.get("user_overrides", {})
-        model = step_overrides.get("model") or context.agent_model or self.model or context.default_agent_model
+        model = resolve_model(ModelRole.SOLVER, step_params=step_overrides.get("model"), run=context.agent_model,
+                              step=self.model, agent=context.default_agent_model).model
         effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
         return model, effort
 
     def _resolve_user_model(self, context: TaskStepContext) -> Optional[str]:
         """The user simulator's model for this run: this step's ``step_overrides``, then the run's ``user_model``, the
         stored value, and the config's ``user`` role when it names one."""
-        return (self.step_param_overrides(context).get("user_model")
-                or context.metadata.get("user_overrides", {}).get("user_model") or self.user_model
-                or get_config().get_model_for_role("user", or_default=False))
+        return get_config().resolve_model(
+            ModelRole.USER_SIMULATOR, step_params=self.step_param_overrides(context).get("user_model"),
+            run=context.metadata.get("user_overrides", {}).get("user_model"), step=self.user_model).model
 
     def _built_in_user_sim(self, context: TaskStepContext) -> Optional[tuple[dict, str]]:
         """The user deploy_user_sim_agent deployed, when it is this step's user, and their time zone; None for any other
@@ -554,22 +558,30 @@ class PromptAgentTaskStep(TaskStep):
             desired_config["model_params"] = model_params
         negotiated = A2AAgent.negotiate_agent_config(card, desired_config)
         if negotiated:
-            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
+                                             headers=agent.control_headers)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
-        context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
+        solver_model = negotiated.fields.get("model") if negotiated else None
+        context.record_model(ModelRole.SOLVER.record_key, self.id, solver_model)
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, solver_model, agent)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
-            context.record_model("user simulator", self.id, built_in[0].get("model"))
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
+            usage.start(ModelRole.USER_SIMULATOR, built_in[0].get("model"), user_sim)
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
             user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
-                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
+                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
+                                                 headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
-            context.record_model("user simulator", self.id, negotiated.fields.get("model") if negotiated else None)
+            user_model = negotiated.fields.get("model") if negotiated else None
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, user_model)
+            usage.start(ModelRole.USER_SIMULATOR, user_model, user_sim)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
@@ -625,7 +637,8 @@ class PromptAgentTaskStep(TaskStep):
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
-            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds) if live is not None else None
+            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers)
+            if live is not None else None
         )
         final_state: str = TaskState.completed.value
         trajectory_url: Optional[str] = None
@@ -637,7 +650,7 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
-            built_in=sim,
+            built_in=sim, usage=usage,
         )
         # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
         end_after: Optional[str] = None
@@ -686,6 +699,7 @@ class PromptAgentTaskStep(TaskStep):
                 final_terminal = protocol.TerminalResponse.from_message(status_msg)
                 if final_terminal.tool_call_count is not None:
                     conversation_tool_call_count = (conversation_tool_call_count or 0) + final_terminal.tool_call_count
+                usage.turn(ModelRole.SOLVER, final_terminal)
                 agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
 
                 conversation_store.complete_a2a_task(
@@ -701,6 +715,7 @@ class PromptAgentTaskStep(TaskStep):
                         turn_traj_uri = await self._fetch_trajectory(
                             target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
                             target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                            headers=agent.control_headers,
                         )
                     except Exception as e:
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
@@ -773,7 +788,7 @@ class PromptAgentTaskStep(TaskStep):
         if trig_ext and triggers_registered:  # best-effort firing-log readback (provenance only; never fails the run)
             try:
                 async with httpx.AsyncClient() as client:
-                    r = await client.get(state_url, timeout=15)
+                    r = await client.get(state_url, headers=user_sim.control_headers, timeout=15)
                     r.raise_for_status()
                     context.metadata.setdefault("agent_trigger_state", {})[self.id] = r.json().get("firing_log", [])
             except Exception as e:
@@ -837,6 +852,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_name=self.agent_name,
             step_id=self.id,
             structured_output=structured_output,
+            usage=usage.entries(),
         ))
 
         if final_state == TaskState.failed:
@@ -887,7 +903,7 @@ class PromptAgentTaskStep(TaskStep):
 
     async def _fetch_trajectory(
         self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
-        target_a2a_task_id: str, *, sandbox_type: str | None, card: dict | None = None,
+        target_a2a_task_id: str, *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
     ) -> str | None:
         get_method, get_path = A2AAgent.operation(traj_ext, "get")
         store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
@@ -905,7 +921,8 @@ class PromptAgentTaskStep(TaskStep):
                 TrajectoryUpload.to,
                 store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
             )
-        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store)
+        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                                         headers=headers)
         return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
 
     async def _env_clock(self, envs: list) -> dict:
@@ -940,12 +957,12 @@ class PromptAgentTaskStep(TaskStep):
         return env_triggers
 
     async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict,
-                      **quiet: bool) -> dict:
+                      *, headers: Mapping[str, str], **quiet: bool) -> dict:
         """Call the usersim's /decide for the triggers that should fire this turn."""
         payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id,
                    "env_triggers": env_triggers, **quiet}
         async with httpx.AsyncClient() as client:
-            resp = await client.post(decide_url, json=payload, timeout=self.user_agent_timeout_seconds)
+            resp = await client.post(decide_url, json=payload, headers=headers, timeout=self.user_agent_timeout_seconds)
             if resp.status_code >= 400:
                 raise RuntimeError(f"agent-trigger /decide failed (HTTP {resp.status_code}): {resp.text}")
             return resp.json()
@@ -1107,9 +1124,10 @@ class _UserSide:
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
                  decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
-                 built_in: Optional[_BuiltInUserSim] = None) -> None:
+                 built_in: Optional[_BuiltInUserSim] = None, usage: Optional[StepUsage] = None) -> None:
         self._step = step
         self._built_in = built_in
+        self._usage = usage
         self._context = context
         self._url = url
         self._user_sim = user_sim
@@ -1130,7 +1148,7 @@ class _UserSide:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id,
-                                            env_triggers)
+                                            env_triggers, headers=self._user_sim.control_headers)
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
             logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
             answer = _trigger_answer(resp)
@@ -1158,10 +1176,10 @@ class _UserSide:
         except TimeoutError as e:
             return {"text": None, "error": f"timeout: {e}"}
         status = result.get("status") or {}
+        msg = status.get("message") or {}
+        term = self._record_usage(msg)
         if status.get("state") != TaskState.completed:
             return {"text": None, "error": f"state {status.get('state')}"}
-        msg = status.get("message") or {}
-        term = protocol.TerminalResponse.from_message(msg)
         raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         return {"text": raw, "structured": term.structured_output if isinstance(term.structured_output, dict) else None,
                 "trajectory_url": await self._user_sim_trajectory(task_id, message_id)}
@@ -1176,7 +1194,8 @@ class _UserSide:
         try:
             return await asyncio.wait_for(
                 step._fetch_trajectory(self._url, ext, task_id, step._trajectory_prefix() + "user_sim/", message_id,
-                                       card=card, sandbox_type=self._user_sim.sandbox_type),
+                                       card=card, sandbox_type=self._user_sim.sandbox_type,
+                                       headers=self._user_sim.control_headers),
                 _USER_SIM_TRAJECTORY_FETCH_SECONDS)
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
@@ -1192,7 +1211,7 @@ class _UserSide:
                                "agentenv-framework-protocol whose triggers/v1 decide takes record_unfired")
         env_triggers = await self._step._read_env_triggers(self._context)
         resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id, env_triggers,
-                                        record_unfired=False)
+                                        headers=self._user_sim.control_headers, record_unfired=False)
         logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
         answer = _trigger_answer(resp)
         if answer is not None:
@@ -1220,6 +1239,7 @@ class _UserSide:
             return {"end": "user_timeout"}
 
         user_state = (user_result.get("status") or {}).get("state")
+        self._record_usage((user_result.get("status") or {}).get("message") or {})
         if user_state != TaskState.completed:
             logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
             return {"end": "user_not_completed"}
@@ -1250,6 +1270,13 @@ class _UserSide:
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+    def _record_usage(self, message: dict) -> protocol.TerminalResponse:
+        """The user side's reply, a user sim's turn recorded as it ends; a human peer's has none to record."""
+        term = protocol.TerminalResponse.from_message(message)
+        if self._usage is not None:
+            self._usage.turn(ModelRole.USER_SIMULATOR, term)
+        return term
 
 
 class _BuiltInUserSim:

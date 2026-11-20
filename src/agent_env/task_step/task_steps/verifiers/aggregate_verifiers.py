@@ -16,32 +16,33 @@ import uuid
 from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierTaskStep
 
 logger = logging.getLogger(__name__)
 
 
-class AggregateVerifiersTaskStep(TaskStep):
+class AggregateVerifiersTaskStep(VerifierTaskStep):
     type: ClassVar[str] = "aggregate_verifiers"
     entity_refs = ()
+    DEFAULT_SCORE_AGGREGATOR: ClassVar[ScoreAggregator] = ScoreAggregator.WEIGHTED_AVERAGE
 
     def __init__(
         self,
         id: str,
         version: Optional[int],
         verifier_ids: Optional[list[str]] = None,
-        score_aggregator: Optional[ScoreAggregator] = None,
+        score_aggregator: Optional[ScoreAggregator | str] = None,
         verifier_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        min_passing_score: Optional[float] = None,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id or uuid.uuid4().hex, score_aggregator=score_aggregator,
+                         min_passing_score=min_passing_score)
         self.verifier_ids = list(verifier_ids or [])
-        if isinstance(score_aggregator, str):
-            score_aggregator = ScoreAggregator(score_aggregator)
-        self.score_aggregator = score_aggregator or ScoreAggregator.WEIGHTED_AVERAGE
-        self.verifier_id = verifier_id or uuid.uuid4().hex
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -52,15 +53,9 @@ class AggregateVerifiersTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> "AggregateVerifiersTaskStep":
-        raw_agg = data.get("score_aggregator")
-        return cls(
-            **cls._base_from_dict(data),
-            verifier_ids=data.get("verifier_ids"),
-            score_aggregator=ScoreAggregator(raw_agg) if raw_agg else None,
-            verifier_id=data.get("verifier_id"),
-        )
+        return cls(**cls._base_from_dict(data), verifier_ids=data.get("verifier_ids"))
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def verify(self, context: TaskStepContext) -> Verification:
         all_verifications = context.metadata.get("verifications", {})
         missing = [vid for vid in self.verifier_ids if vid not in all_verifications]
         if missing:
@@ -76,15 +71,8 @@ class AggregateVerifiersTaskStep(TaskStep):
 
         non_skipped = [r for r in merged_results if not r.get("skipped")]
         score = aggregate_score(non_skipped, self.score_aggregator)
-
-        if "verifications" not in context.metadata:
-            context.metadata["verifications"] = {}
-        context.metadata["verifications"][self.verifier_id] = {
-            "score": score,
-            "source_verifier_ids": list(self.verifier_ids),
-        }
         logger.info(
             f"AggregateVerifiers '{self.verifier_id}': merged {len(self.verifier_ids)} verifier(s), "
             f"{len(non_skipped)}/{len(merged_results)} criteria evaluated, score={score}"
         )
-        return context
+        return Verification(score=score, output={"source_verifier_ids": list(self.verifier_ids)})

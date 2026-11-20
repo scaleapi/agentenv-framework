@@ -584,6 +584,12 @@ def configured_store(store: Any) -> Any:
     return store.configured if isinstance(store, (RoutingDocumentStore, LocalRunObjectStore, LocalRunImageStore)) else store
 
 
+def shared_store(store: DocumentStore) -> bool:
+    """Whether the configured store behind ``store`` is other than this machine's own, so others read what's written
+    to it."""
+    return not isinstance(configured_store(store), LocalSqliteDocumentStore)
+
+
 def image_store_holding(ref: str, configured: ImageStore, local: ImageStore) -> ImageStore:
     host = registry_host_from_ref(ref)
     if isinstance(local, OciRegistryImageStore) and host == normalize_registry_host(local.registry_host):

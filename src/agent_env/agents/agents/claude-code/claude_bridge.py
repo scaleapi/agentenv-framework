@@ -12,14 +12,16 @@ import re
 import signal
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,10 @@ _MODEL_ALIASES = (
 )
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# Settings every CLI run takes. The CLI deletes files older than cleanupPeriodDays by its own clock, so on an env clock
+# ahead of real time it deleted the transcript it resumes. It refuses 0, and --no-session-persistence keeps none, so
+# this is every day a JavaScript date can be from 1970: the cutoff is never after 1970, whatever the clock says.
+CLI_SETTINGS = {"cleanupPeriodDays": 100_000_000}
 
 
 # The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.
@@ -173,8 +179,17 @@ def _model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the CLI appends its own ``/v1/messages``. Core's ``api_root``, copied since this image can't import core; a unit
+    test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
+
+
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
-            task_id: str | None = None, max_thinking_tokens: int | None = None) -> dict[str, str]:
+            task_id: str | None = None, max_thinking_tokens: int | None = None,
+            clock_armed: bool = False, mcp_urls: Iterable[str] = ()) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
     token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
     aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
@@ -183,7 +198,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if not env.get("ANTHROPIC_AUTH_TOKEN") and env.get("LITELLM_API_KEY"):
         env["ANTHROPIC_AUTH_TOKEN"] = env["LITELLM_API_KEY"]
     if not env.get("ANTHROPIC_BASE_URL") and env.get("LITELLM_BASE_URL"):
-        env["ANTHROPIC_BASE_URL"] = env["LITELLM_BASE_URL"]
+        env["ANTHROPIC_BASE_URL"] = _api_root(env["LITELLM_BASE_URL"])
     if env.get("ANTHROPIC_AUTH_TOKEN"):
         env["ANTHROPIC_API_KEY"] = ""
     if model and env.get("ANTHROPIC_BASE_URL"):
@@ -203,6 +218,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     # Older CLIs prepend a changing attribution block to the system prompt on custom base URLs, which defeats the
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+    env.update(egress_env(environ, [env.get("ANTHROPIC_BASE_URL", ""), *mcp_urls], armed=clock_armed))
     return env
 
 
@@ -615,7 +631,7 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
     the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
-           "--setting-sources", "user"]
+           "--setting-sources", "user", "--settings", json.dumps(CLI_SETTINGS)]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
         cmd += ["--model", _with_1m_window(model)]
@@ -682,7 +698,8 @@ async def _spawn_claude(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
-                    max_thinking_tokens=max_thinking_tokens),
+                    max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed(),
+                    mcp_urls=[info["url"] for info in (mcp_servers or {}).values()]),
         cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))

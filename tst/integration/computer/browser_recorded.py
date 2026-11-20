@@ -8,6 +8,7 @@ loads, the default's frames are taken, and buyer's recording ends with its lease
 
 import asyncio
 import io
+import itertools
 import json
 import subprocess
 import uuid
@@ -95,6 +96,11 @@ def _colors(files: dict[str, bytes], prefix: str) -> list[str]:
     return found
 
 
+def _runs(frames: list[str], color: str) -> list[int]:
+    """How many frames long each run of ``color`` in ``frames`` is."""
+    return [len(list(run)) for shown, run in itertools.groupby(frames) if shown == color]
+
+
 def _registered(entry: dict) -> dict[str, bytes]:
     universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
     objects = get_config().get_object_store()
@@ -158,10 +164,12 @@ async def check_recorded_contexts(deployed, env_id: str, op_url: Callable[[str],
     # A tab switch is blank until the new tab's first frame arrives: a few white frames, never another context's colour.
     assert set(colors["buyer"]) - {"white"} == {"red", "orange"} and colors["buyer"][-1] == "red", colors["buyer"]
     assert set(colors["seller"]) - {"white"} == {"blue"} and set(colors["default"]) - {"white"} == {"green"}, colors
-    assert all(colors[name].count("white") <= 3 for name in colors), colors
     tabs = [seen["tab"] for seen in manifests["buyer"]["video"]["followed"]]
     followed = [tab for n, tab in enumerate(tabs) if n == 0 or tab != tabs[n - 1]]
     assert len(followed) == 3 and followed[0] == followed[2] != followed[1], manifests["buyer"]["video"]["followed"]
+    blanks = _runs(colors["buyer"], "white")
+    assert len(blanks) <= len(followed) - 1 and all(blank <= 3 for blank in blanks), colors["buyer"]
+    assert all(colors[name].count("white") <= 3 for name in ("seller", "default")), colors
     assert [c["made_by"] for c in child] == ["bob"] and child[0]["missing"] is None, child
     assert set(_colors(files["seller"], child_prefix)) <= {"yellow", "white"}, child_prefix
     assert "yellow" in _colors(files["seller"], child_prefix)

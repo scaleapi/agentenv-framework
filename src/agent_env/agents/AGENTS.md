@@ -52,6 +52,13 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   Its parts become the task's status message, with `usage` as a data part; a failure adds
   `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
   text part, so add one.
+- **Usage:** when the runtime counts prompt-cache tokens, put them in `Usage`'s `cache_read_tokens` and
+  `cache_write_tokens`, not `provider_details`, and set `input_includes_cache` to whether `input_tokens` counts them
+  (`None` when it can't tell). Set it per call: through a gateway it depends on the model behind it. Where the runtime
+  hands back a model response's own usage, `Usage.from_model_response` reads it. A call that came back with no usage,
+  as a streamed answer through some gateways does, leaves the counts unset rather than zero and is counted in
+  `provider_details.unreported_calls`. Code that sets these fields needs a
+  `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
   never sent.
@@ -134,6 +141,15 @@ every exception.
 agent-env reads what the agent did, and verifiers grade it. Call `request.trajectory.set_format(...)`, then append
 each native event as it happens; with `enable(TRAJECTORY_V1, live=True)` it can be read while the turn runs. The SDK
 serves the reads; bind `get.context` and `get.context_objects` to serve a whole conversation from your own record.
+`native="<format id>"` in that `enable` declares the format: the card lists it as `formats`, `native` and `default`,
+a read naming any other format is refused before your handlers run, and the log and a returned `native_trajectory`
+must be in it. It needs a protocol floor that has `native`. A context read you bind names the format it serves as
+`format` in its response. `atif=<adapter class>` there, an `@atif_adapter` class for that native format, has the SDK
+serve `atif/1` too, built from your log as you append it: write the adapter (`agentenv_protocol.atif`, its
+`PROFILE.md`), feed records that aren't in the native log, such as hooks' notes, with
+`request.trajectory.aux(name, record)`, and append or return a native trajectory, not both. Its reads leave out the
+secrets the SDK holds and is handed (the model key, write-only config, MCP and CDP credentials, grants); register any
+other with `self.register_secret(value)`, in `run` or later, and the SDK writes it `[redacted:<length>]` there.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime
@@ -218,7 +234,9 @@ Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/e
    `request.config.timeout_seconds` with `request.mcp_servers` connected, records the trajectory, and returns a
    `TaskResult` with a `session_ref`. Replace `claude_bridge.py` with your runtime's bridge.
 4. **Map the model endpoint**: read `LITELLM_BASE_URL`, `LITELLM_API_KEY` and `LITELLM_EXTRA_HEADERS` and hand them
-   to your runtime, as `claude_bridge.py` `cli_env` does.
+   to your runtime, as `claude_bridge.py` `cli_env` does. `LITELLM_BASE_URL` comes as configured and may end in `/v1`
+   or not: a client that appends its own versioned path (Anthropic's `/v1/messages`) strips one trailing `/v1` first,
+   and one that wants the `/v1` root adds it unless it's there.
 5. **Add extensions** (Extensions): `mcp-config` and `trajectory` first, then every other one your runtime can
    honour. Keep `AGENT_CARD = app.state.agentenv_a2a.card` at the end of `a2a_server.py`.
 6. **Test it offline** with Starlette's `TestClient` and your runtime faked, as `tst/unit/agents/claude_code/` does:

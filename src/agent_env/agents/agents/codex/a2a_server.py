@@ -592,6 +592,7 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
         enable(
             TRAJECTORY_V1,
             live=True,
+            native=TRAJECTORY_FORMAT,
             description="Retrieve a task's Codex --json trajectory, also while it runs.",
         ),
         enable(
@@ -613,8 +614,10 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
             # Port the agent's A2A server listens on inside the container.
             a2a_port=8000,
             # Every placeholder referenced in install_commands must be in this list.
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",
@@ -804,6 +807,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             )
         return {
             "trajectory": trajectory,
+            "format": TRAJECTORY_FORMAT,
             "is_live": is_live,
             "session_id": self.session_ref_for_context(context_id),
             "harness": HARNESS,
@@ -819,7 +823,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
     async def upload_context_trajectory(self, request: ContextObjectTrajectoryRequest) -> dict[str, Any]:
         trajectory = (await self._context_trajectory(request.context_id))["trajectory"]
         body = json.dumps(trajectory, separators=(",", ":"), default=str).encode()
-        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))}}
+        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))},
+                "format": TRAJECTORY_FORMAT}
 
     @extension(SNAPSHOT_V1.save)
     async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> dict[str, Any]:

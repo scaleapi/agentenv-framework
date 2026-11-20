@@ -33,8 +33,10 @@ import os
 import platform
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from collections.abc import Callable
@@ -42,6 +44,8 @@ from pathlib import Path
 
 REGISTRY = "ghcr.io/scaleapi"
 REPO = Path(__file__).resolve().parents[2]
+# What an image's shared_sources.toml names is under here, as agent_env.utils.paths.SOURCES is.
+SOURCES = REPO / "src" / "agent_env"
 # Each image agent-env ships, by name, and the Dockerfile it's built from, with its folder as the context.
 IMAGES = {
     "agentenv-gateway": "src/agent_env/env/gateway/Dockerfile",
@@ -226,12 +230,31 @@ def _build(entry: str, arch: str) -> int:
         for arg, value in {"ROOTFS": rootfs, "TOOLS": args["TOOLS"], "SIZE_GB": args["SIZE_GB"],
                            "ROOTFS_CONFIG": _config(rootfs)}.items():
             build_args += ["--build-arg", f"{arg}={value}"]
-    command = ["docker", "build", "--platform", target, "--provenance=false", "-f", image["dockerfile"],
-               "-t", f"{_ref(image)}-{arch}", *build_args,
-               "--label", f"org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
-               "--label", f"org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
-               "--label", f"io.agentenv.source-tag={image['tag']}", image["context"]]
-    return _tried_again(lambda: _streamed(command)).returncode
+    with tempfile.TemporaryDirectory(prefix="agentenv-context-") as staged:
+        context, dockerfile = image["context"], image["dockerfile"]
+        if (Path(context) / "shared_sources.toml").is_file():
+            context = _staged(image["context"], staged)
+            dockerfile = os.path.join(context, os.path.relpath(image["dockerfile"], image["context"]))
+        command = ["docker", "build", "--platform", target, "--provenance=false", "-f", dockerfile,
+                   "-t", f"{_ref(image)}-{arch}", *build_args,
+                   "--label", f"org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
+                   "--label", f"org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
+                   "--label", f"io.agentenv.source-tag={image['tag']}", context]
+        return _tried_again(lambda: _streamed(command)).returncode
+
+
+def _staged(context: str, staged: str) -> str:
+    """``context`` copied into ``staged`` with what its ``shared_sources.toml`` takes from agent-env's sources, each at
+    the name it gives, as agent-env's build contexts send it (``agent_env.utils.docker.context``)."""
+    shutil.copytree(context, staged, dirs_exist_ok=True)
+    declared = Path(context) / "shared_sources.toml"
+    for name, source in (tomllib.loads(declared.read_text()) if declared.is_file() else {}).items():
+        path = SOURCES / source
+        if path.is_dir():
+            shutil.copytree(path, Path(staged) / name)
+        else:
+            shutil.copy2(path, Path(staged) / name)
+    return staged
 
 
 def _publish(missing: str) -> int:
@@ -245,11 +268,9 @@ def _publish(missing: str) -> int:
             continue
         if code != 1:
             return 1
+        # No --annotation: buildx refuses annotations on a Docker list; each platform build carries the same --labels.
         created = _tried_again(lambda: _streamed([
-            "docker", "buildx", "imagetools", "create", "-t", ref,
-            "--annotation", f"index:org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
-            "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
-            f"{ref}-amd64", f"{ref}-arm64"]))
+            "docker", "buildx", "imagetools", "create", "-t", ref, f"{ref}-amd64", f"{ref}-arm64"]))
         if created.returncode:
             return created.returncode
     return 0
@@ -293,11 +314,9 @@ def _publish_computers(folder: Path) -> int:
         if served is None and ": not found" not in error:
             print(f"::warning::{index} is taken as unpublished, since the registry won't say: {error}")
         if served is None:
-            source = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+            # No --annotation: a compose pushes Docker media types, and buildx refuses annotations on a Docker list.
             created = _tried_again(lambda: _streamed([
                 "docker", "buildx", "imagetools", "create", "-t", index,
-                "--annotation", f"index:org.opencontainers.image.source={source}",
-                "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
                 *(f"localhost:5000/agentenv-computers@{digests[arch]}" for arch in COMPUTER_ARCHES)]))
             if created.returncode:
                 return created.returncode

@@ -10,7 +10,7 @@ import sys
 
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 
-from tst.unit.agents.claude_code.agent import AGENT_DIR
+from tst.unit.agents.claude_code.agent import AGENT_DIR, PYTHONPATH
 from tst.unit.agents.claude_code.support import card
 
 _CLAUDE_SKILL = {
@@ -77,6 +77,7 @@ def test_the_config_takes_every_field_prompt_agent_sends_that_the_cli_has(app):
 def test_request_and_response_contracts(app):
     methods = {uri: ext["params"].get("methods", {}) for uri, ext in _extensions(app).items()}
     assert methods["urn:agentenv:trajectory/v1"]["get"]["request"] == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
@@ -136,7 +137,7 @@ def test_install_agent_reads_the_card_and_its_install_commands_from_the_image():
               "from a2a_server import AGENT_CARD; "
               "print(json.dumps(AGENT_CARD.model_dump()))")
     env = {**{k: v for k, v in os.environ.items() if not k.startswith(("LITELLM_", "ANTHROPIC_"))},
-           "PYTHONPATH": str(AGENT_DIR)}
+           "PYTHONPATH": PYTHONPATH}
     out = subprocess.run([sys.executable, "-c", script], cwd=AGENT_DIR, env=env, capture_output=True, text=True,
                          check=True)
     (install,) = [ext for ext in json.loads(out.stdout)["capabilities"]["extensions"]

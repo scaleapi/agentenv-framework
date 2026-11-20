@@ -20,27 +20,32 @@ def create(filepath: Path, task_id: str, skip_validation: bool):
     """Create a task from a JSON file containing step definitions.
 
     \b
-    The JSON file should contain a list of step dicts, e.g.:
+    The JSON file holds a list of step dicts, as a bundle's task file does, e.g.:
     [
         {"id": "step-1", "type": "deploy_env", "env_id": "my-env"},
         {"id": "step-2", "type": "prompt_agent", "prompt": "Hello"}
     ]
+    or an object with them as "steps" and the step ids of its reward as "headline_verifiers".
     """
+    from agent_env.bundle.parse import task_file_parts
     from agent_env.task import Task
 
     click.echo(f"Reading steps from {filepath}...")
     with open(filepath) as f:
-        steps = json.load(f)
-
-    if not isinstance(steps, list):
-        click.echo("Error: JSON file must contain a list of step dicts", err=True)
+        data = json.load(f)
+    try:
+        steps, headlines = task_file_parts(data)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
     built = _build_steps(steps)
-    _report_preflight(
-        Task(id=task_id, version=None, steps=[s for _, s in built]),
-        skip_validation,
-    )
+    try:
+        checked = Task(id=task_id, version=None, steps=[s for _, s in built], headline_verifiers=headlines)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    _report_preflight(checked, skip_validation)
 
     task_steps = []
     for i, (kwargs, step) in enumerate(built):
@@ -49,7 +54,7 @@ def create(filepath: Path, task_id: str, skip_validation: bool):
         task_steps.append(saved)
 
     click.echo(f"Creating task '{task_id}' with {len(task_steps)} steps...")
-    task = Task.put(id=task_id, steps=task_steps)
+    task = Task.put(id=task_id, steps=task_steps, headline_verifiers=headlines)
     click.echo(f"Created task: id={task.id} version={task.version} steps={len(task.steps)}")
 
 
@@ -74,14 +79,13 @@ def _build_steps(steps: list[dict]) -> list[tuple[dict, object]]:
             raise SystemExit(1)
         kwargs = {k: v for k, v in step_dict.items() if k != "type"}
         kwargs.setdefault("version", None)
-        # retry_config lives on the TaskStep base but most step __init__s don't
-        # accept it; construct without it and hydrate (as Task.from_dict does),
-        # so retry_config on any step type doesn't crash create. put() below
-        # handles the kwargs form the same way.
-        from agent_env.task_step.task_step import attach_retry_config
+        # retry_config and step_role live on the TaskStep base but most step
+        # __init__s don't accept them; construct without them and hydrate (as
+        # Task.from_dict does). put() below handles the kwargs form the same way.
+        from agent_env.task_step.task_step import attach_base_fields
 
-        ctor_kwargs = {k: v for k, v in kwargs.items() if k != "retry_config"}
-        step = attach_retry_config(step_cls(**ctor_kwargs), step_dict)
+        ctor_kwargs = {k: v for k, v in kwargs.items() if k not in ("retry_config", "step_role")}
+        step = attach_base_fields(step_cls(**ctor_kwargs), step_dict)
         built.append((kwargs, step))
     return built
 
