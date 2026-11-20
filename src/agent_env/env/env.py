@@ -18,6 +18,7 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode
+from .gateway.console_session import LINK_DEFAULT_SECONDS, LINK_PARAM, ConsoleSession
 from .gateway.constants import WELL_KNOWN_PATH
 from .store import get_env_store
 
@@ -263,6 +264,13 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "child_envs": data.get("child_envs") or {},
             "stack_layout": data.get("stack_layout"),
         }
+
+    def pgweb_link(self, seconds: int = LINK_DEFAULT_SECONDS) -> Optional[str]:
+        """A link that opens pgweb in a browser once, within ``seconds``, without the control token ever reaching the
+        browser; None when the gateway serves no pgweb or the record holds no token."""
+        if not self.db_web_gateway_url or not self.control_token:
+            return None
+        return f"{self.db_web_gateway_url}?{LINK_PARAM}={ConsoleSession(self.control_token).link(seconds)}"
 
 
 @dataclass

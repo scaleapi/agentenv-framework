@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import io
 import json
 import logging
 import re
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
@@ -22,7 +20,8 @@ from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ModelParam, ModelRole, api_root, no_key_for
+from agent_env.config import model_call
+from agent_env.config.model import ModelRole, no_key_for
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -281,39 +280,6 @@ def _looks_like_response_format_error(exc: Exception) -> bool:
 def _caches_prompts(model: str) -> bool:
     """Whether a judge call to ``model`` marks its shared prefix for the prompt cache: Claude models, by any route."""
     return "claude" in model.lower()
-
-
-def _judge_route(model: str, api_base: Optional[str], provider_of: Callable[..., Any],
-                 custom_provider: Optional[str] = None) -> tuple[str, Optional[str]]:
-    """The model name and base a direct judge call hands litellm; what it records stays ``model``. Through an
-    endpoint, a bare name goes by what litellm makes of it: an Anthropic one keeps that route, with the base's
-    trailing ``/v1`` dropped since its client appends ``/v1/messages``; an OpenAI one goes as configured; any other,
-    which litellm would send to that provider's own API (``gemini-*`` to Vertex), or one it can't place, goes
-    through the endpoint as ``openai/<name>``. A provider prefix in the name, or a ``custom_llm_provider`` among the
-    call's params, keeps the route it names. ``provider_of`` is litellm's ``get_llm_provider``, which prints a banner
-    before refusing a name it can't place."""
-    if api_base is None:
-        return model, None
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            provider = provider_of(model, custom_llm_provider=custom_provider)[1]
-    except Exception:
-        return f"openai/{model}", api_base
-    if provider == "anthropic":
-        return model, api_root(api_base)
-    if provider == "openai" or custom_provider or "/" in model:
-        return model, api_base
-    return f"openai/{model}", api_base
-
-
-def _usage_and_cost(response: Any) -> dict:
-    """A LiteLLM response's token counts and LiteLLM's price of it in USD, each None when it has none."""
-    usage = getattr(response, "usage", None)
-    usage = usage.model_dump() if hasattr(usage, "model_dump") else usage
-    hidden = getattr(response, "_hidden_params", None)
-    cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
-    return {"usage": usage if isinstance(usage, dict) else None,
-            "cost": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None}
 
 
 def _image_url_block(frame: ImageFrame) -> dict:
@@ -1393,9 +1359,10 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         system: Optional[str] = None,
         cached_prefix: Optional[str] = None,
     ) -> dict:
-        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_object_url, usage, cost}:
-        ``usage`` the call's token counts and ``cost`` LiteLLM's price of it in USD, each None when the response
-        has none, for a caller that records them (this step records neither).
+        """Direct judge — no agent boot, no tools — through core's one model call (``config.model_call``). Returns
+        ``response`` and ``trajectory_object_url`` (None), and the call's record for a caller that keeps it (this step
+        doesn't): its ``usage`` as the response carried it, the ``model`` called, the ``endpoint_host`` it reached, and
+        its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's price map's figure.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1403,20 +1370,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         marked for Anthropic's prompt cache, so the calls after the first read it from the cache; a prompt that
         doesn't start with it is sent whole. The step's own calls pass neither, so their request is unchanged; a
         subclass opts in by overriding this and calling it with them."""
-        import litellm
-
-        from agent_env.config import get_config
-
         overrides = context.metadata.get("user_overrides", {})
-        config = get_config()
-        api_key = config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
-        base = overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url") or self.default_model_api_base
-        if base and not api_key and not config.is_model_endpoint(base):
-            raise ConfigError(f"{self.type} '{self.id}': {no_key_for(base, _JUDGE_KEY_HOW)}")
-        call_config = config.resolve_model_call(model, default_api_key=api_key, base_override=base)
-        route_model, route_base = _judge_route(model, call_config.api_base, litellm.get_llm_provider,
-                                               call_config.params.get("custom_llm_provider"))
-        call_config = replace(call_config, api_base=route_base)
+        route = model_call.resolve_route(
+            model, api_key=overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"),
+            api_base=overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url")
+            or self.default_model_api_base, who=f"{self.type} '{self.id}'", key_how=_JUDGE_KEY_HOW)
         text_blocks: list[dict] = [{"type": "text", "text": eval_prompt}]
         cached = bool(cached_prefix) and eval_prompt.startswith(cached_prefix or "") and _caches_prompts(model)
         if cached:
@@ -1441,17 +1399,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         last_exc: Exception | None = None
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
-                request_kwargs: dict = dict(
-                    model=route_model,
-                    messages=messages,
-                    timeout=self.judge_timeout_seconds,
-                    **call_config.client_kwargs(),
-                )
-                if use_response_format:
-                    request_kwargs[ModelParam.RESPONSE_FORMAT] = response_format
-                response = await litellm.acompletion(**request_kwargs)
-                content = response.choices[0].message.content or ""
-                return {"response": content, "trajectory_object_url": None, **_usage_and_cost(response)}
+                reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,
+                                                  response_format=response_format if use_response_format else None)
+                return {"response": reply.content, "trajectory_object_url": None, **reply.fields()}
             except Exception as exc:
                 last_exc = exc
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):

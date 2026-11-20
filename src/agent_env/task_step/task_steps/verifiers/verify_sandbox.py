@@ -26,7 +26,7 @@ import logging
 import re
 import shlex
 import uuid
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -49,8 +49,34 @@ _HANDLED_TYPES = {
     "probe_file_contains",
     "bash_cmd_succeeds",
 }
+_PROBES = ("probe_file_exists", "probe_dir_exists", "probe_file_contains")
 _DEFAULT_BASE_DIR = "/app"
 _DEFAULT_SHELL_TIMEOUT_S = 120
+
+
+def _criterion_problems(criterion: Any) -> list[str]:
+    if not isinstance(criterion, dict):
+        return [f"must be an object, not {type(criterion).__name__}"]
+    rtype = criterion.get("type")
+    if not isinstance(rtype, str):
+        return [f"type must be a string, not {rtype!r}"]
+    problems = []
+    paths = criterion.get("paths")
+    if rtype in _PROBES and not (isinstance(paths, list) and paths and all(isinstance(path, str) for path in paths)):
+        problems.append(f"{rtype} needs paths, a non-empty list of strings, not {paths!r}")
+    if rtype == "probe_file_contains":
+        pattern = criterion.get("expected") or criterion.get("value") or ""
+        if not isinstance(pattern, str):
+            problems.append(f"expected must be a string, not {pattern!r}")
+        else:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                problems.append(f"expected {pattern!r} doesn't compile as a regex: {e}")
+    command = criterion.get("bash_cmd")
+    if rtype == "bash_cmd_succeeds" and not (isinstance(command, str) and command.strip()):
+        problems.append(f"bash_cmd_succeeds needs a bash_cmd, a non-empty string, not {command!r}")
+    return problems
 
 
 def _outcome(passed: bool, justification: str) -> dict:
@@ -102,6 +128,30 @@ class VerifySandboxTaskStep(VerifierTaskStep):
         base["score_aggregator"] = self.score_aggregator.value
         base["verifier_id"] = self.verifier_id
         return base
+
+    def config_problems(self) -> list[str]:
+        """The criteria a run can't read, or that fail their row whatever the sandbox holds: one that isn't an object or
+        whose type isn't a string, a probe without a list of paths, a ``probe_file_contains`` pattern that doesn't
+        compile, a ``bash_cmd_succeeds`` with no command."""
+        problems = super().config_problems()
+        for idx, criterion in enumerate(self.criteria):
+            problems.extend(f"criterion #{idx}: {problem}" for problem in _criterion_problems(criterion))
+        return problems
+
+    def config_warnings(self) -> list[str]:
+        """The criteria a run grades as nothing: a type this step doesn't handle, which it skips, and a
+        ``probe_file_contains`` with no expected text, which any file passes."""
+        warnings = super().config_warnings()
+        for idx, criterion in enumerate(self.criteria):
+            if not (isinstance(criterion, dict) and isinstance(criterion.get("type"), str)):
+                continue  # config_problems refuses it
+            rtype = criterion["type"]
+            if rtype not in _HANDLED_TYPES:
+                warnings.append(f"criterion #{idx}: type {rtype!r} isn't one verify_sandbox checks, so a run skips "
+                                f"it; it checks {sorted(_HANDLED_TYPES)}")
+            elif rtype == "probe_file_contains" and not (criterion.get("expected") or criterion.get("value")):
+                warnings.append(f"criterion #{idx}: probe_file_contains has no expected text, so any file passes")
+        return warnings
 
     @classmethod
     def from_dict(cls, data: dict) -> "VerifySandboxTaskStep":
