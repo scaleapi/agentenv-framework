@@ -93,8 +93,8 @@ class AtCapacity(RuntimeError):
 
 
 class Misgrouped(Failed):
-    """An episode offering a tool the model isn't shown: a toolset that misses what tells tasks apart, which no rollout
-    fixes."""
+    """An episode offering a tool the model isn't shown, or with server config offering other first-turn tools than its
+    toolset's probed task: a toolset that misses what tells tasks apart, which no rollout fixes."""
 
 
 @dataclass
@@ -415,13 +415,11 @@ def tasks_and_tools(url: str, *, local: str, timeout: float, token: str | None =
 
 
 def applies_config(each: str) -> bool:
-    """Whether the tasks of the toolset keyed ``each`` apply server config, whose replies can reveal tools."""
     toolset: Toolset = json.loads(each)
     return toolset.get("config", False)
 
 
 def exactly(names: list[str] | str | None) -> frozenset[str] | None:
-    """A row's ``FIRST_TURN_TOOLS``, a list or its JSON, as ``Shared.exactly``; ``None`` for a row without it."""
     if isinstance(names, str):
         names = json.loads(names)
     return None if names is None else frozenset(names)

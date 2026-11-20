@@ -237,7 +237,7 @@ def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tool_f
     assert (output["env_metrics"][0]["failed"], output["env_metrics"][0]["attempts"]) == (1, 1)
 
 
-def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_tools_raises(
+def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_tools_raises_and_a_match_plays(
         serve, tmp_path, tool_format, tokenizer):
     server = serve({"a": PLAYED})
     rows = _rows(server.url, tmp_path, tool_format)
@@ -247,7 +247,12 @@ def test_a_rollout_whose_first_turn_offers_other_tools_than_its_rows_first_turn_
 
     with pytest.raises(ValueError, match="their server configs reveal different tools"):
         _generate(rows, _Engine(tokenizer, adds_a_crate(tool_format)), tokenizer)
+    written[0]["episode"]["first_turn_tools"] = json.dumps(["add_item", "end_turn"])
+    pq.write_table(pa.Table.from_pylist(written, schema=ROW), rows)
+    output = _generate(rows, _Engine(tokenizer, adds_a_crate(tool_format)), tokenizer)
     server.stop()
+
+    assert sum(output["rewards"][0]) == 1.0
 
 
 def test_an_episode_that_ends_without_failing_or_a_reward_raises(serve, tmp_path, tool_format, tokenizer):

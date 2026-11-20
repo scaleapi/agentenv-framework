@@ -145,11 +145,31 @@ def test_a_config_between_turns_is_compared_on_the_first_turns_tools_not_on_ever
     model = session(_call('{"item": "crate"}'), _says("Added a crate."))
 
     played = _played(model, row)
+    stored = {**row, "metadata": {**row["metadata"], "first_turn_tools": json.dumps(row["metadata"]["first_turn_tools"])}}
+    played_from_its_json = _played(model, stored)
     server.stop()
 
     assert [tool["function"]["name"] for tool in row["metadata"]["tools"]] == ["add_item", "end_turn", "take_item"]
     assert row["metadata"]["first_turn_tools"] == ["add_item", "end_turn"]
     assert "agentenv_failure" not in played
+    assert "agentenv_failure" not in played_from_its_json
+
+
+def test_a_task_revealing_at_its_first_turn_what_its_probed_task_reveals_later_is_refused(serve, session, tmp_path,
+                                                                                          reveals):
+    server = serve({"a": [ITEMS, ALICE, TURN, {**reveals("take_item"), "depends_on": ["turn"]},
+                          {**AGAIN, "depends_on": ["cfg"]}, REPLIES],
+                    "b": [ITEMS, ALICE, reveals("take_item"), {**TURN, "depends_on": ["cfg"]}, AGAIN, REPLIES]})
+    rows = _rows(server, tmp_path)
+    model = session(_call('{"item": "crate"}'), _says("Added a crate."))
+
+    refused = _played(model, rows["b"])
+    server.stop()
+
+    assert [tool["function"]["name"] for tool in rows["b"]["metadata"]["tools"]] == [
+        "add_item", "end_turn", "take_item"]
+    assert re.search(r"\['add_item', 'end_turn', 'take_item'\] at its first turn, not the \['add_item', 'end_turn'\]",
+                     refused["agentenv_failure"])
 
 
 @pytest.mark.parametrize("probed, later, refusal", [
