@@ -428,6 +428,8 @@ async def test_a_hook_note_is_in_the_users_read_after_the_reply_and_never_reache
 
     stored = _full(_reads(ctx)[0])
     assert stored["read"]["user_note"] == "The sheet has no total."
+    # recorded where the peer path records it, so there's one place to look for what the user sim was told
+    assert [n["note"] for n in ctx.metadata["user_side_notes"]["talk"]] == ["The sheet has no total."]
     rendered = stored["input"]
     assert rendered.index("Sheet's in the folder.") < rendered.index(
         "WHAT YOU FOUND WHEN YOU CHECKED ITS WORK YOURSELF (the assistant doesn't see this):\n  The sheet has no total.")

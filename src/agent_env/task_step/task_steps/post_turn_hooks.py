@@ -169,11 +169,19 @@ class _Answer:
         self._ask_user = ask_user
         self._user_triggers = user_triggers
         self._asking = asyncio.Lock()
+        self._asked_user = False  # the user sim (or human) was asked this turn, not an agent trigger
+        self._note: Optional[str] = None
 
     async def ask_user(self, note: Optional[str] = None) -> Answer:
         async with self._asking:
             if self.value is None:
                 self.value = await (self._ask_user(note=note) if note is not None else self._ask_user())
+                self._asked_user, self._note = True, note
+            elif self._asked_user and note is not None and note != self._note:
+                # The user side answered already; a note now would never reach it, so say so rather than drop it.
+                raise RuntimeError("the user side was already asked this turn" +
+                                   (" with another note" if self._note is not None else " without a note") +
+                                   "; a note passed now would never reach it")
             return self.value
 
     async def user_triggers(self) -> Optional[Answer]:
@@ -208,7 +216,11 @@ class Turn:
         """Today's user side: agent triggers, then a human or the LLM user sim, which sees only replies sent here.
 
         ``note`` is shown to an LLM user sim with the agent's reply, as something only it sees (what the person would
-        find by checking the work themselves); the agent never sees it. A human peer gets no note."""
+        find by checking the work themselves); the agent never sees it. A human peer gets no note.
+
+        The user side is asked once a turn and every later call gets that answer: a note passed after it was already
+        asked, by this hook or another, without that note raises RuntimeError rather than being dropped. A note has
+        no one to reach when an agent trigger answers the turn instead (``user_triggers`` fired first)."""
         if note is not None and (not isinstance(note, str) or not note.strip()):
             raise ValueError("a note for the user side is non-empty text")
         return await self._answer.ask_user(note)

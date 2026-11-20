@@ -616,3 +616,45 @@ async def test_with_no_armed_env_clock_stored_messages_carry_none(monkeypatch):
                               poll_interval_seconds=0).execute(ctx)
 
     assert all("env_clock" not in m for m in _stored(ctx, peers)["messages"])
+
+
+
+@pytest.mark.asyncio
+async def test_a_note_passed_after_the_user_side_was_asked_raises_instead_of_being_dropped():
+    from agent_env.task_step.task_steps.post_turn_hooks import _Answer
+
+    asked = []
+
+    async def ask_user(note=None):
+        asked.append(note)
+        return {"message": text("ok")}
+
+    async def no_trigger():
+        return None
+
+    answer = _Answer(ask_user, no_trigger)
+    assert await answer.ask_user() == {"message": text("ok")}
+    with pytest.raises(RuntimeError, match="already asked this turn without a note"):
+        await answer.ask_user(note="the sheet has no total")
+    assert await answer.ask_user() == {"message": text("ok")} and asked == [None]   # asked once
+
+    noted = _Answer(ask_user, no_trigger)
+    await noted.ask_user(note="first")
+    assert await noted.ask_user(note="first") == {"message": text("ok")}             # the same note is fine
+    with pytest.raises(RuntimeError, match="with another note"):
+        await noted.ask_user(note="second")
+
+
+@pytest.mark.asyncio
+async def test_a_note_after_an_agent_trigger_answered_the_turn_has_no_one_to_reach_and_isnt_an_error():
+    from agent_env.task_step.task_steps.post_turn_hooks import _Answer
+
+    async def ask_user(note=None):
+        raise AssertionError("the user side isn't asked once a trigger answered")
+
+    async def fired():
+        return {"message": text("nudge from a trigger")}
+
+    answer = _Answer(ask_user, fired)
+    assert await answer.user_triggers() == {"message": text("nudge from a trigger")}
+    assert await answer.ask_user(note="the sheet has no total") == {"message": text("nudge from a trigger")}

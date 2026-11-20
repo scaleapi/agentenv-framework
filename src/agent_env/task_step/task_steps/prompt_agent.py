@@ -1136,7 +1136,9 @@ class _UserSide:
         """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record. A
         user deployed by deploy_user_sim_agent may add ``end_after``: the agent answers the message, then the
         conversation ends for that reason, and every later ask gets that end without asking anyone. ``note`` (from a
-        post-turn hook) is shown to an LLM user sim with the reply, as something only it sees; a human peer gets none."""
+        post-turn hook) is shown to an LLM user sim with the reply, as something only it sees, and recorded in
+        ``metadata["user_side_notes"]``; a human peer gets none. Nobody sees it either when an agent trigger answers
+        the turn, or once ``end_after`` has ended the conversation."""
         if self._end_after is not None:
             return {"end": self._end_after}
         if self._decide_url is not None:
@@ -1151,6 +1153,8 @@ class _UserSide:
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
+            if note is not None:  # where the peer path records it too: one place for what the user sim was told
+                self._record("user_side_notes", {"turn": number, "note": note})
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
                                               note=note)
             self._end_after = answer.get("end_after")
