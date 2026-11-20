@@ -83,6 +83,21 @@ def delegate_then_answer(cue: str, peer: str, prompt: str, reply: str) -> Respon
     return respond
 
 
+def background_then_answer(command: str, first: str, then: str) -> Responder:
+    """Run ``command`` with Bash in the background, answer ``first`` once its tool result is back, and ``then`` once
+    the CLI wakes the model with the command's completion notification; answer ``first`` to a request that offers no
+    Bash."""
+
+    def respond(body: dict) -> Text | ToolUse:
+        if "<task-notification>" in json.dumps(body.get("messages") or []):
+            return Text(then)
+        if _tool_result_text(body) is not None or not any(t.get("name") == "Bash" for t in body.get("tools") or []):
+            return Text(first)
+        return ToolUse("Bash", {"command": command, "description": "slow command", "run_in_background": True})
+
+    return respond
+
+
 def _tool_result_text(body: dict) -> str | None:
     """The text of a tool result in the latest user turn, or None. The CLI may follow it with system messages."""
     user = next((m for m in reversed(body.get("messages") or []) if m.get("role") == "user"), None)
