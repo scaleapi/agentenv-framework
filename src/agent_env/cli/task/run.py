@@ -373,7 +373,7 @@ def _stored(task, context: TaskStepContext) -> str:
 @click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret); a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier (overrides the step's trajectory_filter setting)")
 @click.option("--a2a-agent-id", default=None, type=str,
-              help="Override A2A agent id for deploy_agent steps, at its latest version when it is not the step's own agent; a user sim's agent keeps its own")
+              help="Override A2A agent id for deploy_agent and install_agent steps; an agent other than the step's own runs at the run's a2a_agent_version, else its latest, never the step's pinned version; a user sim's agent keeps its own")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--env-sandbox", default=None,

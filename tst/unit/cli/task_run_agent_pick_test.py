@@ -1,4 +1,4 @@
-"""``task run --a2a-agent-id`` is a run-wide pick: the CLI leaves it run-wide, at the deploy steps' stored versions, for
+"""``task run --a2a-agent-id`` is a run-wide pick: the CLI leaves it run-wide, with no version of its own, for
 each step to apply (tst/unit/task_step/run_wide_agent_pick_test.py); a step that plays the user keeps its own agent by
 its class, as it does for a hub run's pick."""
 
