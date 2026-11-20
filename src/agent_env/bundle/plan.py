@@ -57,6 +57,7 @@ from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.routing import namespace_routing_enabled
+from agent_env.task.lint import Finding, lint, refuses
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
@@ -198,6 +199,9 @@ class Plan:
     alias_uses: Mapping[EntityKind, Mapping[str, AliasUse]] = field(default_factory=dict)
     agent: AgentOverride | None = None  # the agent --agent names for the solver
     variant: Varied | None = None  # what --set changes, written under its variant's ids
+    # Each selected task's task lint findings that didn't refuse it, with its path: its warnings, and its errors too
+    # when the plan skipped lint.
+    lint_findings: tuple[tuple[str, Finding], ...] = ()
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
@@ -210,14 +214,18 @@ class Plan:
 
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                installed: Installed | None = None, agent: str | None = None, default_agents: bool = True) -> Plan:
+                installed: Installed | None = None, agent: str | None = None, default_agents: bool = True,
+                skip_lint: bool = False, lint: bool = True) -> Plan:
     """Plan a run of ``tasks`` and ``evals``, each a name or id in this bundle. With neither, the
     run is every eval or, in a bundle without evals, every task. ``installed`` lists the installed bundles whose
     entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. ``agent`` names
     the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Without
     ``default_agents``, a step that leaves its agent unset pulls in no configured default, as for a task written to
-    run wherever another's default applies. Raises BundleError listing every problem found."""
-    return _Planner(resolved, installed, default_agents).plan(tasks, evals, agent)
+    run wherever another's default applies. With ``skip_lint``, the errors of task lint's own rules are findings it
+    keeps (``Plan.lint_findings``), not problems; a step's config problems stay problems. Without ``lint``, task lint
+    doesn't run, for a caller that only selects tasks and checks those it keeps. Raises BundleError listing every
+    problem found."""
+    return _Planner(resolved, installed, default_agents, skip_lint, lint).plan(tasks, evals, agent)
 
 
 def plan_entities(resolved: ResolvedBundle, ids: Sequence[str], *, installed: Installed | None = None) -> Plan:
@@ -244,10 +252,14 @@ class _Pullable:
 
 
 class _Planner:
-    def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None, default_agents: bool = True):
+    def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None, default_agents: bool = True,
+                 skip_lint: bool = False, lint: bool = True):
         self.resolved = resolved
         self.default_agents = default_agents
+        self.skip_lint, self.lint = skip_lint, lint
         self.problems: list[str] = []
+        self.lint_findings: list[tuple[str, Finding]] = []
+        self.lint_refused = 0
         self.nodes: dict[_Key, ResolvedEntry | BundleImage] = {}
         self.rank: dict[_Key, int] = {}
         self.edges: dict[_Key, list[_Key]] = {}
@@ -575,7 +587,7 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
             override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
-        self._build_tasks(closure)
+        self._build_tasks(closure, linted=self.lint)
         self._check_files(closure)
         self._check_cli_loads(closure)
         self._check_env_types(closure)
@@ -583,11 +595,15 @@ class _Planner:
         self._check_environment_names(closure, store_latest)
         self._check_loaded_environments(closure, store_latest)
         if self.problems:
-            raise NotInStore(self.problems, self.missing) if self.missing else BundleError(self.problems)
+            refused = NotInStore(self.problems, self.missing) if self.missing else BundleError(self.problems)
+            if self.lint_refused:
+                refused.add_note(f"task lint found {self.lint_refused} of these; --skip-lint runs the tasks anyway")
+            raise refused
         writes = self._ordered(closure)
         return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
                     dict(self.origins), self._published(writes),
-                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override)
+                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override,
+                    lint_findings=tuple(self.lint_findings))
 
     def check(self) -> None:
         """The checks a run makes before it reads a store. A bundle with nothing to run passes only when its
@@ -1122,8 +1138,12 @@ class _Planner:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
 
-    def _build_tasks(self, closure: set[_Key]) -> None:
-        """Build each task's steps the way a write will, so a bad step fails before anything is written."""
+    def _build_tasks(self, closure: set[_Key], *, linted: bool = False) -> None:
+        """Build each task's steps the way a write will, so a bad step fails before anything is written. ``linted``,
+        for a run or registration, adds task lint: its errors are problems, unless the plan skips lint, and the rest
+        ``lint_findings``. The
+        store-free check leaves it out, since a folder ``bundle init`` writes leaves user-scoped fields for its runner
+        to fill in."""
         registry = get_task_step_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
@@ -1140,10 +1160,17 @@ class _Planner:
             self.steps[key] = steps
             if not failed:
                 try:
-                    Task(id=source.entry.id, version=None, steps=steps,
-                         headline_verifiers=source.entry.headline_verifiers)
+                    task = Task(id=source.entry.id, version=None, steps=steps,
+                                headline_verifiers=source.entry.headline_verifiers)
                 except ValueError as e:
                     self.problems.append(f"{self._path(source.entry)}: {e}")
+                    continue
+                for finding in lint(task, source.config, unpinned=False) if linted else ():
+                    if refuses(finding, skip_lint=self.skip_lint):
+                        self.problems.append(f"{self._path(source.entry)}: {finding.text}")
+                        self.lint_refused += not refuses(finding, skip_lint=True)
+                    else:
+                        self.lint_findings.append((self._path(source.entry), finding))
 
     # Order
 

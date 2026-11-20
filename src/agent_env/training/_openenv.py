@@ -24,6 +24,7 @@ from openenv.core.generic_client import GenericEnvClient
 from agent_env.openenv.environment import END_TURN as END_TURN_TOOL
 from agent_env.openenv.environment import TIMEOUT_METADATA, Toolset
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS
+from agent_env.training._episodes import next_prompt
 
 FAILED = "The environment failed to answer, so this episode won't be scored."
 ENDED = "The episode has ended."
@@ -215,11 +216,9 @@ class Session:
             return ENDED
         answer = observation.get("result") or {}
         if name == END_TURN:
-            prompt, system = answer.get("prompt") or "", answer.get("system_prompt") or None
-            if system is None or system == rollout.system:
-                return prompt
-            rollout.system = system
-            return f"{system}\n\n{prompt}"
+            prompt, rollout.system = next_prompt(answer.get("prompt") or "", answer.get("system_prompt"),
+                                                 rollout.system)
+            return prompt
         return answer["data"] if isinstance(answer.get("data"), str) else json.dumps(answer)
 
     async def _fail(self, rollout: Rollout, why: str) -> None:

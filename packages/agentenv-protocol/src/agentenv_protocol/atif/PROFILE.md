@@ -108,7 +108,10 @@ One vocabulary, in three places:
   `[video: media/<sha256>.mp4, 4.4 MB, 31 s]`. That covers video, documents, images other than JPEG, PNG, GIF and WebP
   (such as HEIC or SVG), audio outside ATIF's eight types, and other files.
 - Each file's details go in the `media` map of the profile of the object that holds the part (Step for a message,
-  ObservationResult for a result), keyed by its path.
+  ObservationResult for a result), keyed by its path. A PNG, JPEG, GIF or WebP image's `width` and `height` are read
+  from its header when the producer gives none.
+- A reader takes a part path only as `media/<sha256>.<ext>` in the document's own folder, never another path or a URL,
+  and checks each file's bytes against its name (`media_file`, `check_media`).
 
 ## Fields
 

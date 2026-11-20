@@ -27,9 +27,10 @@ from typing import Callable, ClassVar, NamedTuple, Optional
 import httpx
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.a2a_agent.a2a_agent import TAKES_CREDENTIALS
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.config import get_config
-from agent_env.config.model import ModelRole
+from agent_env.config import ConfigError, get_config
+from agent_env.config.model import ModelRole, endpoint_host
 from agent_env.entity.scopes import FieldScope
 from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.sandbox_providers.local_docker.provider import (
@@ -149,6 +150,17 @@ def _build_param_resolvers(
         # need; empty elsewhere. Asking for it puts the CA's files where the lines point.
         "trust_env":         lambda: trust_lines,
     }
+
+
+def _installed_model_host(agent: A2AAgent) -> Optional[str]:
+    """The host of the model endpoint an installed agent calls: the configured one, which its install commands take,
+    and none for an agent that takes no credentials."""
+    if not agent.metadata.get(TAKES_CREDENTIALS, True):
+        return None
+    try:
+        return endpoint_host(get_config().get_litellm_base_url())
+    except ConfigError:
+        return None
 
 
 class InstallAgentTaskStep(TaskStep):
@@ -390,6 +402,7 @@ class InstallAgentTaskStep(TaskStep):
             on_host=host_mode,
             installed_container=container,
             control_token=deployed.control_token,
+            model_endpoint_host=_installed_model_host(agent),
         ))
 
         default_model = get_config().resolve_model(ModelRole.SOLVER, agent=agent.metadata.get("default_model")).model

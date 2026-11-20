@@ -54,6 +54,22 @@ def test_the_stored_form_round_trips():
     assert PromptResponse.from_dict(response.to_dict()) == response
 
 
+def test_every_field_round_trips_through_the_stored_form():
+    """``from_dict`` names each field by hand, so one it leaves out would be dropped from every stored run."""
+    values = {"prompt_text": "do it", "agent_trajectory_file_path": "/t.json",
+              "source_agent_per_turn_prompt_parts": [None, [{"kind": "text", "text": "more"}]], "tool_call_count": 3,
+              "model": "m", "error_type": "agent_error", "error_code": "c", "error_message": "e",
+              "agent_session_id": "s", "a2a_context_id": "ctx", "agent_name": "solver", "step_id": "solve",
+              "structured_output": {"a": 1}, "usage": [{"role": "solver", "turns": 2}],
+              "target_agent_per_turn_trajectories": [{"native_format": "echo/1", "atif": None},
+                                                     {"native_format": None, "atif": None}]}
+    response = dataclasses.replace(_neutral(), **values)
+    unset = [f.name for f in dataclasses.fields(PromptResponse)
+             if getattr(response, f.name) == (f.default if f.default is not dataclasses.MISSING else None)]
+    assert unset == []
+    assert PromptResponse.from_dict(response.to_dict()) == response
+
+
 def test_the_legacy_key_wins_when_the_two_disagree():
     """Only a raw-doc writer outside the model can make them differ, and today's know only the legacy key."""
     response = PromptResponse.from_dict({"prompt_id": "p1", "response": "done", "agent_trajectory_s3_uri": _URL,

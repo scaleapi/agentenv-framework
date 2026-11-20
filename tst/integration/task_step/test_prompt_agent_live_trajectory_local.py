@@ -5,30 +5,37 @@ in more than one chunk, and its chunks join to that turn's final trajectory; eac
 the last none. The echo agent declares its native format and an ATIF adapter, so its card offers both; its native reads
 name their format, its atif/1 reads are valid ATIF, and a read naming another format is refused with a code agent-env
 reads. A snapshot of it carries its atif/1 copy's turn count to the fresh agent it is restored into, and its atif/1
-reads leave out the model key a command it runs prints, which its native read keeps. Needs Docker and a throwaway local
-registry."""
+reads leave out the model key a command it runs prints, which its native read keeps. An image sent to it is spooled
+as its copy's media file, and pushed under an exact-object grant from the local store's grant server. Needs Docker and a
+throwaway local registry."""
 
+import base64
+import hashlib
 import json
 import re
+import struct
 import shutil
 import socket
 import subprocess
 import time
 import uuid
+import zlib
 
 import httpx
 import pytest
 
-from agentenv_protocol.atif import FORMAT as ATIF, PROFILE_VERSION, SCHEMA_VERSION, errors_in, validate
+from agentenv_protocol.atif import FORMAT as ATIF, PROFILE_VERSION, SCHEMA_VERSION, errors_in, media_paths, validate
 
 from agent_env.a2a_agent import A2AAgent
-from agent_env.a2a_agent.protocol import raise_for_extension_status
+from agent_env.a2a_agent.object_transfer import write_object
+from agent_env.a2a_agent.protocol import poll_a2a_task, raise_for_extension_status, send_a2a_message
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, reset_config, set_image_store
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import Task
+from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
@@ -94,6 +101,11 @@ def local_registry(monkeypatch, tmp_path):
         reset_config()
 
 
+def _prescribing_atif() -> TaskStepContext:
+    """A run that prescribes atif/1, so its prompt steps have the agents they prompt build it."""
+    return TaskStepContext(metadata={"user_overrides": {"trajectory_formats": [ATIF]}})
+
+
 def _deploy(agent, name: str, **snapshot) -> DeployAgentTaskStep:
     return DeployAgentTaskStep(
         id=f"deploy-{name}", version=None, env_ids=[], a2a_agent_id=agent.id, a2a_agent_version=agent.version,
@@ -143,6 +155,8 @@ async def test_each_turn_is_stored_live_under_its_own_prefix_and_joins_to_its_fi
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     finals = context.prompt_responses[-1].target_agent_per_turn_trajectory_object_urls
     assert len(finals) == 2 and all(finals)
+    assert context.prompt_responses[-1].target_agent_per_turn_trajectories == [
+        {"native_format": "agentenv-echo-agent/v1", "atif": None}] * 2
     turns = [store.get_object_key(url).removeprefix(f"{prefix_key}trajectory-").removesuffix(".json") for url in finals]
     assert len(set(turns)) == 2
     for turn, final_url in zip(turns, finals):
@@ -171,7 +185,7 @@ async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_an
         ),
     ])
 
-    context = await task.run()
+    context = await task.run(context=_prescribing_atif())
 
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     [deployed] = context.deployed_agents
@@ -213,7 +227,7 @@ async def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restor
         _prompt("three", "restored", restored),
     ])
 
-    context = await task.run()
+    context = await task.run(context=_prescribing_atif())
 
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     store = get_config().get_object_store()
@@ -240,7 +254,7 @@ async def test_a_model_key_a_command_prints_is_redacted_in_atif_and_kept_in_the_
                             prompt="run printenv LITELLM_API_KEY", context_id=context_id),
     ])
 
-    context = await task.run()
+    context = await task.run(context=_prescribing_atif())
 
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     [deployed] = context.deployed_agents
@@ -256,3 +270,56 @@ async def test_a_model_key_a_command_prints_is_redacted_in_atif_and_kept_in_the_
     served = json.dumps(atif)
     assert key not in served and f"[redacted:{len(key)}]" in served
     assert errors_in(validate(atif["trajectory"])) == []
+
+
+def _png(width: int, height: int) -> bytes:
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    pixels = zlib.compress(b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height)))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", pixels) + chunk(b"IEND", b""))
+
+
+@pytest.mark.asyncio
+async def test_a_deployed_agent_pushes_its_copys_media_under_exact_object_grants(local_registry):
+    suffix = uuid.uuid4().hex[:8]
+    context_id = f"media-{suffix}"
+    agent = put_test_agent(f"media-agent-{suffix}")
+    context = await Task.put(id=f"media-{suffix}", steps=[_deploy(agent, "solver")]).run()
+    assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
+    [deployed] = context.deployed_agents
+    image = _png(6, 4)
+    parts = [{"kind": "text", "text": "look"},
+             {"kind": "file", "file": {"bytes": base64.b64encode(image).decode(), "mimeType": "image/png",
+                                       "name": "shot.png"}}]
+    trajectory = A2AAgent.find_extension(deployed.a2a_card, A2AAgent.EXT_TRAJECTORY)
+    _, media_endpoint = A2AAgent.operation(trajectory, "media")
+    _, prescribe_endpoint = A2AAgent.operation(trajectory, "prescribe")
+    read_url = deployed.a2a_url + trajectory["params"]["endpoint"]
+    unprescribed, _ = await send_a2a_message(deployed.a2a_url, parts, f"m0-{suffix}", f"unprescribed-{suffix}", 60)
+    await poll_a2a_task(deployed.a2a_url, unprescribed, 120, 1)
+    async with httpx.AsyncClient(timeout=60, headers=deployed.control_headers) as client:
+        refused = await client.post(read_url, json={"task_id": unprescribed, "format": ATIF})
+        prescribed = (await client.post(deployed.a2a_url + prescribe_endpoint, json={"formats": [ATIF]})).json()
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 409: format_not_prescribed"):
+        raise_for_extension_status(refused, operation="trajectory read")
+    assert prescribed == {"formats": ["agentenv-echo-agent/v1", ATIF]}
+    task_id, _ = await send_a2a_message(deployed.a2a_url, parts, f"m-{suffix}", context_id, 60)
+    await poll_a2a_task(deployed.a2a_url, task_id, 120, 1)
+    store = get_config().get_object_store()
+    async with httpx.AsyncClient(timeout=60, headers=deployed.control_headers) as client:
+        atif = (await client.post(read_url, json={"task_id": task_id, "format": ATIF})).json()
+        [path] = media_paths(atif["trajectory"])
+        url = store.object_url(f"atif-media-{suffix}/{path}")
+        grant = write_object(store, url, media_type="image/png", max_bytes=len(image))
+        pushed = await client.post(deployed.a2a_url + media_endpoint, json={
+            "context_id": context_id, "objects": {path: grant.model_dump(mode="json", exclude_none=True)}})
+    raise_for_extension_status(pushed, operation="media push")
+    digest = hashlib.sha256(image).hexdigest()
+    assert path == f"media/{digest}.png"
+    assert pushed.json() == {"objects": {path: {"size_bytes": len(image), "sha256": digest}}, "missing": [], "failed": {}}
+    assert store.get(url) == image
+    [user] = [step for step in atif["trajectory"]["steps"] if step["source"] == "user"]
+    assert user["extra"]["agentenv"]["media"][path] == {"sha256": digest, "bytes": len(image), "width": 6, "height": 4,
+                                                       "name": "shot.png"}
