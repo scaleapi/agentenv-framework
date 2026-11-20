@@ -44,6 +44,8 @@ class RecordingManifest(BaseModel):
     ended_by: EndedBy
     segments: list[ManifestSegment]
     error: Optional[str] = None
+    #: The ``annotate`` the recording drew its inputs with; none for a plain recording.
+    annotate: Optional[dict] = None
 
     def wire(self) -> dict:
         """As JSON goes on the wire, without the fields it doesn't know."""
