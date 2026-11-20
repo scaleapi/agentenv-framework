@@ -27,8 +27,8 @@ from tst.unit.agents.gemini.support import namespace_grant, send, settings as us
 
 PROXY = "http://127.0.0.1:3128"
 ATTRIBUTION_PROXY = "http://127.0.0.1:8000/litellm-gemini/token"
-PROXY_VARS = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
-              "NODE_USE_ENV_PROXY"}
+PROXY_VARS = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY",
+              "no_proxy", "NODE_USE_ENV_PROXY"}
 MCP_URLS = ["http://gateway:8080/mcp", "https://abc-123.w.modal.host/mcp"]
 ENV_TODAY = "Tuesday, March 3, 2031"
 CHANGELOG_PATH = a2a_server.SNAPSHOT_V1.endpoint + "/changelog"

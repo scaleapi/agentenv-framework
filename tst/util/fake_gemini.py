@@ -94,7 +94,7 @@ _SCHEMA_VALUES = {"STRING": "user", "INTEGER": 1, "NUMBER": 1, "BOOLEAN": False,
 
 
 def _schema_answer(schema: dict) -> dict:
-    """An object with each of ``schema``'s properties, of its type: the CLI's router and next-speaker check ask for one."""
+    """An object of ``schema``'s properties, each of its type: the CLI's router and next-speaker check ask for one."""
     return {name: _SCHEMA_VALUES.get(str(prop.get("type")).upper(), "user")
             for name, prop in (schema.get("properties") or {}).items()}
 
@@ -105,7 +105,8 @@ def _reply(fake: FakeGemini, body: dict) -> dict:
     else:
         schema = (body.get("generationConfig") or {}).get("responseJsonSchema")
         reply = Text(json.dumps(_schema_answer(schema)) if isinstance(schema, dict) else "fake")
-    part = {"text": reply.text} if isinstance(reply, Text) else {"functionCall": {"name": reply.name, "args": reply.args}}
+    part = ({"text": reply.text} if isinstance(reply, Text)
+            else {"functionCall": {"name": reply.name, "args": reply.args}})
     return {"candidates": [{"content": {"role": "model", "parts": [part]}, "finishReason": "STOP", "index": 0}],
             "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}}
 

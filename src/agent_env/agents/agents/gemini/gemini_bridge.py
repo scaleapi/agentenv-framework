@@ -288,14 +288,11 @@ def cli_env(environ: Mapping[str, str], *, system_settings: Path, base_url: str 
             mcp_urls: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment for one run: this process's, with the endpoint's key under the name the CLI reads, its
     model calls sent to ``base_url`` (the attribution proxy, for this run) unless the environment names its own
-    endpoint, and the run's own system settings.
-
-    On an armed clock (``clock_armed``) the CLI itself stays on real time, with no relaunch of its own, whose child
-    would inherit no marker: it compares its locks', sessions' and logs' real file times, and its MCP servers'
-    certificates, with real time, and goes out directly, as it must, since it would send every request through a proxy
-    it's handed, loopback ones included. Only the commands the model runs follow the clock, and they go out through the
-    egress proxy by ``egress_env`` (given the model endpoint's URL and the env's MCP servers', ``mcp_urls``), from a file
-    beside the run's settings that every bash the CLI starts reads first (BASH_ENV)."""
+    endpoint, and the run's own system settings. On an armed clock the CLI stays on real time, relaunching nothing (its
+    child would lose the marker), so it judges its locks, cleanups and certificates by real time and goes out directly,
+    as it must: it sends every request through a proxy it's handed, loopback ones included. Only the model's commands
+    follow the clock, and they get ``egress_env``'s proxy for the model endpoint and ``mcp_urls`` from a file beside
+    the settings that every bash the CLI starts reads first (BASH_ENV)."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("GEMINI_API_KEY"):
         env["GEMINI_API_KEY"] = env["LITELLM_API_KEY"]
