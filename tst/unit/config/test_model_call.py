@@ -13,12 +13,10 @@ import litellm
 import pytest
 from pytest_socket import enable_socket
 
-import agent_env.config as cfg_mod
 from agent_env.config import model_call
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ModelConfig
 from agent_env.config.model_pricing import litellm_prices
-from agent_env.store import LocalSecretStore
+from tst.util.config import install_model_config
 
 _HOW = "judge_litellm_api_key in the run's overrides"
 _USER = [{"role": "user", "content": "grade it"}]
@@ -72,12 +70,7 @@ def endpoint():
 
 
 def _configure(monkeypatch, base_url: str | None) -> None:
-    config = cfg_mod.Config()
-    config.set_secret_store(LocalSecretStore(values={"own": "own-key"}, use_env=False))
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url=base_url, api_key="configured-key"))
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, secrets={"own": "own-key"}, base_url=base_url, api_key="configured-key")
 
 
 async def _call(monkeypatch, endpoint: str, model: str, *, billed: str | None, usage: dict) -> model_call.ModelReply:

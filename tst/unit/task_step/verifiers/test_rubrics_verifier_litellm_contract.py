@@ -13,10 +13,9 @@ import json
 import litellm
 import pytest
 
-from agent_env.config.model import ModelConfig
-from agent_env.store import LocalSecretStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 _VERDICT = {"results": [{"criterion_id": "c1", "passed": True}]}
 _IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
@@ -24,14 +23,7 @@ _IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR
 
 @pytest.fixture
 def judge(monkeypatch):
-    import agent_env.config as cfg_mod
-
-    config = cfg_mod.Config()
-    config.set_secret_store(LocalSecretStore(values={"litellm_api_key": "k"}, use_env=False))
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url="https://judge.invalid/v1"))
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, secrets={"litellm_api_key": "k"}, base_url="https://judge.invalid/v1")
     return RubricsVerifierTaskStep(
         id="v", version=1, criteria=[], prompt_id="p", use_agent_judge=False,
         default_model_api_base="https://judge.invalid/v1", verifier_id="vt",

@@ -15,7 +15,6 @@ import pytest
 
 from agent_env.config.model import ModelConfig, resolve_model
 from agent_env.openenv.reward import reward_of
-from agent_env.store import LocalSecretStore
 from agent_env.task import Task
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.registry import _builtin_registry
@@ -44,6 +43,7 @@ from tst.unit.task_step.test_prompt_agent_built_in_user_sim import _context as _
 from tst.unit.task_step.test_prompt_agent_built_in_user_sim import _step as _chat_step
 from tst.unit.task_step.test_prompt_agent_built_in_user_sim import said
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, USER, Peers, text
+from tst.util.config import install_model_config
 
 JUDGE = "fake/judge"
 OTHER_PERSONA = "0" * 64  # a persona fingerprint no run here has
@@ -719,14 +719,7 @@ def test_the_run_is_the_one_run_step_id_names():
 # ---- the judge's calls, through litellm -----------------------------------------------------------------------------
 @pytest.fixture
 def litellm_config(monkeypatch):
-    import agent_env.config as cfg_mod
-
-    config = cfg_mod.Config()
-    config.set_secret_store(LocalSecretStore(values={"litellm_api_key": "k"}, use_env=False))
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig())
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, secrets={"litellm_api_key": "k"})
 
 
 def _litellm_answers(monkeypatch, answer):

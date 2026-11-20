@@ -12,10 +12,10 @@ from typing import Any, Callable, Optional
 
 from agentenv_protocol.a2a_agent import Usage
 
-from agent_env import config as agent_config
 from agent_env.config.errors import ConfigError
 from agent_env.config.model import ModelCallConfig, ModelParam, api_root, endpoint_host, no_key_for
 from agent_env.config.model_pricing import Cost, ReportedBy, Tokens, litellm_prices, price
+from agent_env.config.runtime import get_config
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ def resolve_route(model: str, *, api_key: Optional[str], api_base: Optional[str]
     configured one isn't sent there: without one this refuses, as ``who``, saying ``key_how`` to give one."""
     import litellm
 
-    config = agent_config.get_config()
+    config = get_config()
     key = config.resolve_reference(api_key)
     if api_base and not key and not config.is_model_endpoint(api_base):
         raise ConfigError(f"{who}: {no_key_for(api_base, key_how)}")

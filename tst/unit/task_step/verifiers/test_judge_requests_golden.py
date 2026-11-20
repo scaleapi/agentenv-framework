@@ -9,13 +9,11 @@ from types import SimpleNamespace
 import litellm
 import pytest
 
-import agent_env.config as cfg_mod
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ModelConfig
-from agent_env.store import LocalSecretStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.util import verifier_golden
+from tst.util.config import install_model_config
 
 FILE = "judge_requests.json"
 ENDPOINT = "https://gw.test/v1"
@@ -51,14 +49,8 @@ CASES = {
 @pytest.mark.parametrize("case", CASES)
 async def test_the_direct_judge_sends_the_requests_it_always_has(monkeypatch, case):
     spec = CASES[case]
-    config = cfg_mod.Config()
-    config.set_secret_store(LocalSecretStore(values={"judge-key": "judge-secret"}, use_env=False))
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig(
-        base_url=spec.get("base_url", ENDPOINT), api_key="configured-key", params=spec.get("params", {}),
-        headers=spec.get("headers", {})))
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, secrets={"judge-key": "judge-secret"}, base_url=spec.get("base_url", ENDPOINT),
+                         api_key="configured-key", params=spec.get("params", {}), headers=spec.get("headers", {}))
     requests: list[dict] = []
 
     async def acompletion(**kwargs):

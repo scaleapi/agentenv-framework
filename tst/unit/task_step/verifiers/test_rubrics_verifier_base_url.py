@@ -13,10 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from pytest_socket import enable_socket
 
-import agent_env.config as cfg_mod
-from agent_env.config.model import ModelConfig
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 _VERDICT = json.dumps({"results": [{"criterion_id": "c1", "passed": True}]})
 
@@ -67,11 +66,7 @@ def endpoint():
 
 
 def _judge(monkeypatch, base_url: str, params: dict | None = None) -> RubricsVerifierTaskStep:
-    config = cfg_mod.Config()
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url=base_url, api_key="k", params=params or {}))
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, base_url=base_url, api_key="k", params=params or {})
     return RubricsVerifierTaskStep(id="v", version=1, criteria=[], prompt_id="p", use_agent_judge=False,
                                    verifier_id="vt")
 

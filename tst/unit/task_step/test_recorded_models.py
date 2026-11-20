@@ -9,15 +9,14 @@ import litellm
 import pytest
 from a2a.types import TaskState
 
-import agent_env.config as cfg_mod
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent import protocol
-from agent_env.config.model import ModelConfig, resolve_model
+from agent_env.config.model import resolve_model
 from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
-from agent_env.task_step.task_steps.verifiers import rubrics_verifier as rv_mod
 from agent_env.task_step.task_steps import prompt_agent as pa_mod
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 
 def _card(*supported: str) -> dict:
@@ -110,12 +109,7 @@ async def test_an_agent_judge_records_the_model_it_took(monkeypatch, card, recor
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("asked", "sent"), [("gpt-4.1-mini", "gpt-4.1-mini"), ("qwen3:8b", "openai/qwen3:8b")])
 async def test_a_direct_judge_records_the_model_it_called(monkeypatch, asked, sent):
-    config = cfg_mod.Config()
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig(base_url="https://gw.test/v1", api_key="k"))
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.setattr(rv_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="k")
     called = []
 
     async def acompletion(**kwargs):
