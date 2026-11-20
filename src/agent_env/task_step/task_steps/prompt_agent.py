@@ -10,7 +10,7 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, ClassVar, Optional
 import httpx
 from a2a.types import TaskState
@@ -37,7 +37,7 @@ from agent_env.env.gateway.constants import (
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
-from agent_env.task_step.usage import RoleUsage, record_step_usage
+from agent_env.task_step.usage import StepUsage
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
@@ -399,13 +399,6 @@ class PromptAgentTaskStep(TaskStep):
         effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
         return model, effort
 
-    def _user_usage(self, context: TaskStepContext, model: Optional[str],
-                    user_sim: Optional[DeployedAgent]) -> RoleUsage:
-        """The user simulator's usage in this step, its model and endpoint host recorded beside the solver's."""
-        host = user_sim.model_endpoint_host if user_sim else None
-        context.record_model_endpoint(ModelRole.USER_SIMULATOR.value, self.id, model, host)
-        return RoleUsage(ModelRole.USER_SIMULATOR.value, model, host)
-
     def _resolve_user_model(self, context: TaskStepContext) -> Optional[str]:
         """The user simulator's model for this run: this step's ``step_overrides``, then the run's ``user_model``, the
         stored value, and the config's ``user`` role when it names one."""
@@ -570,14 +563,13 @@ class PromptAgentTaskStep(TaskStep):
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
         solver_model = negotiated.fields.get("model") if negotiated else None
         context.record_model(ModelRole.SOLVER.record_key, self.id, solver_model)
-        context.record_model_endpoint(ModelRole.SOLVER.value, self.id, solver_model, agent.model_endpoint_host)
-        solver_usage = RoleUsage(ModelRole.SOLVER.value, solver_model, agent.model_endpoint_host)
-        user_usage: Optional[RoleUsage] = None
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, solver_model, agent)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
             context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
-            user_usage = self._user_usage(context, built_in[0].get("model"), user_sim)
+            usage.start(ModelRole.USER_SIMULATOR, built_in[0].get("model"), user_sim)
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
@@ -587,8 +579,9 @@ class PromptAgentTaskStep(TaskStep):
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
                                                  headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
-            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, negotiated.fields.get("model") if negotiated else None)
-            user_usage = self._user_usage(context, negotiated.fields.get("model") if negotiated else None, user_sim)
+            user_model = negotiated.fields.get("model") if negotiated else None
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, user_model)
+            usage.start(ModelRole.USER_SIMULATOR, user_model, user_sim)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
@@ -657,8 +650,7 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
-            built_in=sim, usage=user_usage,
-            on_usage=lambda: record_step_usage(context, self.id, (solver_usage, user_usage)),
+            built_in=sim, usage=usage,
         )
         # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
         end_after: Optional[str] = None
@@ -707,9 +699,7 @@ class PromptAgentTaskStep(TaskStep):
                 final_terminal = protocol.TerminalResponse.from_message(status_msg)
                 if final_terminal.tool_call_count is not None:
                     conversation_tool_call_count = (conversation_tool_call_count or 0) + final_terminal.tool_call_count
-                # As each turn ends, so a step that raises later keeps it.
-                solver_usage.add(final_terminal.usage, final_terminal.usage_unparsed)
-                record_step_usage(context, self.id, (solver_usage, user_usage))
+                usage.turn(ModelRole.SOLVER, final_terminal)
                 agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
 
                 conversation_store.complete_a2a_task(
@@ -862,7 +852,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_name=self.agent_name,
             step_id=self.id,
             structured_output=structured_output,
-            usage=record_step_usage(context, self.id, (solver_usage, user_usage)),
+            usage=usage.entries(),
         ))
 
         if final_state == TaskState.failed:
@@ -1134,12 +1124,10 @@ class _UserSide:
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
                  decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
-                 built_in: Optional[_BuiltInUserSim] = None, usage: Optional[RoleUsage] = None,
-                 on_usage: Callable[[], Any] = lambda: None) -> None:
+                 built_in: Optional[_BuiltInUserSim] = None, usage: Optional[StepUsage] = None) -> None:
         self._step = step
         self._built_in = built_in
         self._usage = usage
-        self._on_usage = on_usage
         self._context = context
         self._url = url
         self._user_sim = user_sim
@@ -1251,8 +1239,7 @@ class _UserSide:
             return {"end": "user_timeout"}
 
         user_state = (user_result.get("status") or {}).get("state")
-        if self._is_user_sim:
-            self._record_usage((user_result.get("status") or {}).get("message") or {})
+        self._record_usage((user_result.get("status") or {}).get("message") or {})
         if user_state != TaskState.completed:
             logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
             return {"end": "user_not_completed"}
@@ -1285,11 +1272,10 @@ class _UserSide:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
 
     def _record_usage(self, message: dict) -> protocol.TerminalResponse:
-        """The user sim's reply, its turn's usage recorded as the turn ends."""
+        """The user side's reply, a user sim's turn recorded as it ends; a human peer's has none to record."""
         term = protocol.TerminalResponse.from_message(message)
         if self._usage is not None:
-            self._usage.add(term.usage, term.usage_unparsed)
-            self._on_usage()
+            self._usage.turn(ModelRole.USER_SIMULATOR, term)
         return term
 
 

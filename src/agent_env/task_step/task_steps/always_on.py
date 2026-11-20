@@ -113,7 +113,7 @@ from agent_env.env.gateway.constants import (
 from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
-from agent_env.task_step.usage import RoleUsage, record_step_usage
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
@@ -381,8 +381,7 @@ class _Run:
         self.per_turn_parts: list[Optional[list[dict]]] = []
         self.tool_calls: Optional[int] = None
         # Each role's turns' usage, recorded as each turn ends.
-        self.solver_usage: Optional[RoleUsage] = None
-        self.user_usage: Optional[RoleUsage] = None
+        self.usage = StepUsage(context, step.id)
         self.all_messages: list[dict] = []
         self.final_task_id = ""
         self.error: Optional[str] = None
@@ -600,8 +599,7 @@ class _Run:
                                              headers=self.agent.control_headers)
         solver_model = negotiated.fields.get("model") if negotiated else None
         ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
-        ctx.record_model_endpoint(ModelRole.SOLVER.value, step.id, solver_model, self.agent.model_endpoint_host)
-        self.solver_usage = RoleUsage(ModelRole.SOLVER.value, solver_model, self.agent.model_endpoint_host)
+        self.usage.start(ModelRole.SOLVER, solver_model, self.agent)
         self.rules_in_system_prompt = bool(desired.get("system_prompt") and negotiated
                                            and "system_prompt" in negotiated.fields)
         if desired.get("system_prompt") and not self.rules_in_system_prompt:
@@ -611,7 +609,7 @@ class _Run:
         if self.us.get("prompt_set"):  # deploy_user_sim_agent set the user sim's prompt and model at deploy
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
             self.user_setup = dict(self.us["setup"])
-            self._start_user_usage(self.user_model)
+            self.usage.start(ModelRole.USER_SIMULATOR, self.user_model, self.user_agent)
             return
         setup = self.plugin.setup(self.version, self.person)
         self.user_model, self.user_model_from = self._user_model()
@@ -623,8 +621,9 @@ class _Run:
             await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.user_agent.control_headers)
         accepted = sorted(negotiated.fields) if negotiated else []
-        ctx.record_model(ModelRole.USER_SIMULATOR.record_key, step.id, negotiated.fields.get("model") if negotiated else None)
-        self._start_user_usage(negotiated.fields.get("model") if negotiated else None)
+        user_model = negotiated.fields.get("model") if negotiated else None
+        ctx.record_model(ModelRole.USER_SIMULATOR.record_key, step.id, user_model)
+        self.usage.start(ModelRole.USER_SIMULATOR, user_model, self.user_agent)
         self.user_setup = {"model": self.user_model, "model_from": self.user_model_from,
                            "user_sim_step_model": self.us.get("model"),
                            "model_set": "model" in accepted,  # else the agent ran its own
@@ -1280,7 +1279,7 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self._record_usage(self.solver_usage, term)
+        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
         traj = None
@@ -1361,7 +1360,7 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self._record_usage(self.solver_usage, term)
+        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
         traj = None
@@ -1570,7 +1569,7 @@ class _Run:
         status = (result.get("status") or {})
         msg = status.get("message") or {}
         term = protocol.TerminalResponse.from_message(msg)
-        self._record_usage(self.user_usage, term)
+        self.usage.turn(ModelRole.USER_SIMULATOR, term)
         if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
             return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
         raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
@@ -1749,19 +1748,7 @@ class _Run:
             model=self.model, error_type=self.error_type, error_code=self.error_code, error_message=self.error,
             agent_session_id=self.final_task_id,
             a2a_context_id=self.solver_context_id, agent_name=step.agent_name, step_id=step.id,
-            usage=record_step_usage(ctx, step.id, (self.solver_usage, self.user_usage))))
-
-    def _start_user_usage(self, model: Optional[str]) -> None:
-        """The user sim's usage in this step, its model and endpoint host recorded beside the solver's."""
-        host = self.user_agent.model_endpoint_host
-        self.ctx.record_model_endpoint(ModelRole.USER_SIMULATOR.value, self.step.id, model, host)
-        self.user_usage = RoleUsage(ModelRole.USER_SIMULATOR.value, model, host)
-
-    def _record_usage(self, role: Optional[RoleUsage], term: protocol.TerminalResponse) -> None:
-        """One finished turn's usage, recorded as it ends, so a step that raises later keeps it."""
-        if role is not None:
-            role.add(term.usage, term.usage_unparsed)
-            record_step_usage(self.ctx, self.step.id, (self.solver_usage, self.user_usage))
+            usage=self.usage.entries()))
 
 
 # ==================================================================================================================

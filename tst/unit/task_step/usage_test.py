@@ -2,8 +2,10 @@
 
 from agentenv_protocol.a2a_agent import Usage
 
-from agent_env.task_step.context import ATTEMPT_EPOCH, TaskStepContext
-from agent_env.task_step.usage import RoleUsage, record_step_usage
+from agent_env.a2a_agent.protocol import TerminalResponse
+from agent_env.config.model import ModelRole
+from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
+from agent_env.task_step.usage import RoleUsage, StepUsage
 
 
 def test_turns_that_disagree_on_whether_input_counts_the_cache_leave_the_flag_unknown():
@@ -40,9 +42,24 @@ def test_the_entry_carries_the_attempt_its_step_ran_under():
 
 def test_a_step_whose_roles_ran_no_turns_records_nothing():
     context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "m", None)
 
-    assert record_step_usage(context, "solve", (RoleUsage("solver"), None)) is None
+    assert usage.entries() is None
     assert "step_usage" not in context.metadata
+
+
+def test_a_step_records_each_started_role_as_each_turn_ends_and_skips_one_never_started():
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "m", DeployedAgent(agent_name="a", api_url="u", model_endpoint_host="gw:443"))
+
+    usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(input_tokens=3, output_tokens=1)))
+    usage.turn(ModelRole.USER_SIMULATOR, TerminalResponse(response_text="", usage=Usage(input_tokens=99)))
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["role"], entry["model"], entry["endpoint_host"], entry["input_tokens"]) == ("solver", "m", "gw:443", 3)
+    assert context.metadata["model_endpoints"] == {"solver": {"solve": {"model": "m", "endpoint_host": "gw:443"}}}
 
 
 def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_partial():
