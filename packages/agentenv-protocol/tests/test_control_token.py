@@ -124,6 +124,11 @@ def test_a_call_sends_its_own_headers_or_else_the_ones_its_grant_gives_an_addres
     assert client.control_headers(None) == {} and client.control_headers("") == {}
 
 
+def test_an_agents_token_travels_in_its_own_header_not_authorization():
+    assert client.control_token_headers("s3cret") == {"AgentEnv-Control-Token": "s3cret"}
+    assert client.control_token_headers(None) == {} and client.control_token_headers("") == {}
+
+
 @pytest.mark.asyncio
 async def test_invoke_extension_and_the_data_plane_send_the_token(monkeypatch):
     seen = []

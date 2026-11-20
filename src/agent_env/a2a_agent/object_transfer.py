@@ -91,12 +91,17 @@ CHANGELOG_LIMITS = ObjectLimits(
 
 SNAPSHOT_TRAJECTORY_OBJECT_NAME = "trajectory"
 SNAPSHOT_WORKSPACE_OBJECT_NAME = "workspace"
+#: The SDK's own object of a snapshot, its turn counts as JSON, granted only to an agent whose card says its SDK keeps
+#: one (``A2AAgent.keeps_snapshot_state``).
+SNAPSHOT_STATE_OBJECT_NAME = "state"
+SNAPSHOT_STATE_MAX_BYTES = 64 * 1024
 # A portable snapshot's objects, each opaque bytes, and the most each may hold.
 _SNAPSHOT_OBJECTS = {
     SNAPSHOT_TRAJECTORY_OBJECT_NAME: DEFAULT_SNAPSHOT_TRAJECTORY_MAX_BYTES,
     SNAPSHOT_WORKSPACE_OBJECT_NAME: DEFAULT_SNAPSHOT_WORKSPACE_MAX_BYTES,
 }
 _OPAQUE = "application/octet-stream"
+_JSON = "application/json"
 
 def _fields(model: type[BaseModel]) -> tuple[str, ...]:
     return request_fields(model).required
@@ -175,6 +180,7 @@ async def invoke_transfer(
     timeout: float,
     response_model: type[_Response] | None = None,
     store: ObjectStore | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> Any:
     """Send ``call`` and return the agent's answer, validated against ``response_model`` when
     the call carried grants. An error never quotes the answer to such a call, which may echo a
@@ -186,7 +192,7 @@ async def invoke_transfer(
             await staged.push()
         async with httpx.AsyncClient() as client:
             send = client.post if verb == "POST" else client.put
-            resp = await send(url, json=call.payload, timeout=timeout)
+            resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
         try:
             raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
         except httpx.HTTPStatusError as exc:
@@ -444,8 +450,10 @@ def snapshot_save_call(
     context_id: str,
     capture_prefix: str,
     sandbox_type: str | None,
+    state: bool = False,
 ) -> TransferCall:
-    """The snapshot ``save`` call that writes one capture below ``capture_prefix``."""
+    """The snapshot ``save`` call that writes one capture below ``capture_prefix``, granting the
+    SDK's ``state`` object too when the agent's SDK keeps one (``A2AAgent.keeps_snapshot_state``)."""
     _require_object_form(
         method,
         ObjectSnapshotSaveRequest,
@@ -457,10 +465,16 @@ def snapshot_save_call(
         name: write_object(store, url, media_type=_OPAQUE, max_bytes=max_bytes)
         for name, url, max_bytes in _snapshot_objects(store, capture_prefix)
     }
+    if state:
+        objects[SNAPSHOT_STATE_OBJECT_NAME] = write_object(
+            store, _snapshot_url(store, capture_prefix, SNAPSHOT_STATE_OBJECT_NAME),
+            media_type=_JSON, max_bytes=SNAPSHOT_STATE_MAX_BYTES,
+        )
     request = ObjectSnapshotSaveRequest(
         context_id=context_id, objects=SnapshotWriteObjects(**objects)
     )
-    return TransferCall("objects", request.model_dump(mode="json"))
+    # Only the grants given: a pinned agent's request model forbids the optional ones newer SDKs take.
+    return TransferCall("objects", request.model_dump(mode="json", exclude_none=True))
 
 
 def snapshot_load_call(
@@ -472,8 +486,10 @@ def snapshot_load_call(
     file_names: Collection[str],
     target_context_id: str | None,
     sandbox_type: str | None,
+    state: bool = False,
 ) -> TransferCall:
-    """The snapshot ``load`` call that restores the capture at ``bundle_url``. Only a portable
+    """The snapshot ``load`` call that restores the capture at ``bundle_url``, granting the SDK's
+    ``state`` object too when the capture has one and the agent keeps one. Only a portable
     capture can be restored; an older one holds the runtime's own files."""
     operation = f"snapshot load on agent '{agent_name}'"
     if not is_portable_snapshot(file_names):
@@ -488,6 +504,11 @@ def snapshot_load_call(
         for name, url, max_bytes in _snapshot_objects(store, bundle_url)
         if name in file_names
     }
+    if state and SNAPSHOT_STATE_OBJECT_NAME in file_names:
+        objects[SNAPSHOT_STATE_OBJECT_NAME] = read_object(
+            store, _snapshot_url(store, bundle_url, SNAPSHOT_STATE_OBJECT_NAME),
+            media_type=_JSON, max_bytes=SNAPSHOT_STATE_MAX_BYTES,
+        )
     request = ObjectSnapshotLoadRequest(
         objects=SnapshotReadObjects(**objects), target_context_id=target_context_id
     )
@@ -495,11 +516,14 @@ def snapshot_load_call(
 
 
 def _snapshot_objects(store: ObjectStore, prefix_url: str) -> list[tuple[str, str, int]]:
-    prefix_key = store.get_object_key(prefix_url).rstrip("/") + "/"
     return [
-        (name, store.object_url(prefix_key + name), max_bytes)
+        (name, _snapshot_url(store, prefix_url, name), max_bytes)
         for name, max_bytes in _SNAPSHOT_OBJECTS.items()
     ]
+
+
+def _snapshot_url(store: ObjectStore, prefix_url: str, name: str) -> str:
+    return store.object_url(store.get_object_key(prefix_url).rstrip("/") + "/" + name)
 
 
 def changelog_enable_call(
@@ -651,13 +675,15 @@ async def fetch_trajectory(
     upload: TrajectoryUpload | None = None,
     timeout: float | None = None,
     store: ObjectStore | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> FetchedTrajectory:
     """POST one trajectory ``get``. With ``upload`` the agent uploads the trajectory through its
     grant, issued by ``store``, and the answer is checked. The default wait covers that upload."""
     payload: dict[str, Any] = dict(selector)
     if upload is not None:
         objects = TrajectoryWriteObjects(trajectory=upload.write)
-        payload["objects"] = objects.model_dump(mode="json")
+        # Only the grants given: a pinned agent's request model forbids the optional ones newer SDKs take.
+        payload["objects"] = objects.model_dump(mode="json", exclude_none=True)
     call = TransferCall("objects" if upload is not None else "legacy", payload)
     if timeout is None:
         timeout = TRANSFER_TIMEOUT_SECONDS if upload is not None else REPLY_TIMEOUT_SECONDS
@@ -669,6 +695,7 @@ async def fetch_trajectory(
         timeout=timeout,
         response_model=TrajectoryObjectsResponse,
         store=store,
+        headers=headers,
     )
     if upload is not None:
         return FetchedTrajectory(object_url=upload.object_url)

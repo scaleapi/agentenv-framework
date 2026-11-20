@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from a2a.types import AgentSkill
@@ -137,9 +138,49 @@ _SNAPSHOT_LOCK_TIMEOUT_S = 0.05
 # the CLI prints each model call's events once that call returns, so the live
 # trajectory advances per call.
 _LITELLM_PROXY_PATH = "/litellm-gemini"
+_UPSTREAM_ERROR_BODY_LOG_LIMIT = 500
 _LITELLM_PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
 _PROXY_DROP_REQ_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "accept-encoding"}
 _PROXY_DROP_RESP_HEADERS = {"content-length", "transfer-encoding", "content-encoding", "connection", "keep-alive"}
+_LITELLM_ROUTE_HEADERS = ("x-litellm-model-id", "x-litellm-model-api-base", "x-litellm-model-group")
+
+
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the proxy appends LiteLLM's ``/gemini/...`` and ``/v1/chat/completions`` routes to it. Core's ``api_root``,
+    copied since this image can't import core; a unit test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
+
+
+def _describe_transport_error(exc: Exception) -> str:
+    """Name the exception class: many httpx errors (ReadTimeout, RemoteProtocolError) stringify to ''."""
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else repr(exc)
+
+
+def _litellm_route_headers(headers: httpx.Headers) -> dict[str, str]:
+    """The headers by which LiteLLM names the deployment that served (or failed) a call, when it sent them."""
+    return {name: headers[name] for name in _LITELLM_ROUTE_HEADERS if name in headers}
+
+
+def _log_upstream_error(proxy: str, upstream: httpx.Response) -> None:
+    route = _litellm_route_headers(upstream.headers)
+    route_text = "".join(f" {name}={value}" for name, value in route.items())
+    logger.warning(
+        "%s upstream %s: %s event=litellm_upstream_error_response%s",
+        proxy, upstream.status_code, upstream.text[:_UPSTREAM_ERROR_BODY_LOG_LIMIT], route_text,
+        extra={"event": "litellm_upstream_error_response", "proxy": proxy,
+               "upstream_status": upstream.status_code, **route},
+    )
+
+
+def _log_transport_error(proxy: str, exc: Exception) -> str:
+    detail = _describe_transport_error(exc)
+    logger.warning("%s upstream request failed: %s event=litellm_upstream_transport_error", proxy, detail,
+                   extra={"event": "litellm_upstream_transport_error", "proxy": proxy,
+                          "error_type": type(exc).__name__})
+    return detail
 
 
 class GeminiConfig(AgentConfig):
@@ -347,9 +388,9 @@ async def _vertex_openai_bridge(
                 headers=headers, content=json.dumps(oai_req).encode(),
             )
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"vertex bridge upstream failed: {e}")
+        raise HTTPException(status_code=502, detail=f"vertex bridge upstream failed: {_log_transport_error('vertex bridge', e)}")
     if upstream.status_code >= 400:
-        logger.warning("vertex bridge upstream %s: %s", upstream.status_code, upstream.text[:500])
+        _log_upstream_error("vertex bridge", upstream)
         return Response(
             content=upstream.content, status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "application/json"),
@@ -401,9 +442,11 @@ async def _vertex_openai_bridge(
                 "or directly onto a task VM (host mode)."
             ),
             install_commands=_INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             a2a_port=8000,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",
@@ -418,6 +461,7 @@ async def _vertex_openai_bridge(
         enable(
             TRAJECTORY_V1,
             live=True,
+            native=TRAJECTORY_FORMAT,
             description="Retrieve a task's Gemini stream-json trajectory, also while it runs.",
         ),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Gemini CLI should connect to."),
@@ -712,7 +756,7 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         if route is None:
             raise HTTPException(status_code=404, detail="no running turn has this proxy route")
         rest = request.path_params["rest"]
-        base = (os.environ.get("LITELLM_BASE_URL") or "").rstrip("/")
+        base = _api_root(os.environ.get("LITELLM_BASE_URL") or "")
         if not base:
             raise HTTPException(status_code=503, detail="LITELLM_BASE_URL not set; cannot forward gemini model calls")
         # Provider-prefixed route models (vertex_ai/...) can't traverse the /gemini
@@ -734,7 +778,9 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                     params=request.query_params, headers=fwd_headers, content=body,
                 )
         except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"gemini upstream request failed: {e}")
+            raise HTTPException(status_code=502, detail=f"gemini upstream request failed: {_log_transport_error('gemini', e)}")
+        if upstream.status_code >= 400:
+            _log_upstream_error("gemini", upstream)
         resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _PROXY_DROP_RESP_HEADERS}
         return Response(content=upstream.content, status_code=upstream.status_code, headers=resp_headers)
 

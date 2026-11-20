@@ -1,20 +1,35 @@
-"""The agent's folder is its build context: the Dockerfile copies only its own files, keeps TLS checks on, and
-installs the protocol at or above its floor, which a release doesn't pin."""
+"""The agent's folder is its build context: the Dockerfile copies only its own files and the folders its
+shared_sources.toml takes from agent-env's sources, keeps TLS checks on, and installs the protocol at or above its
+floor, which a release doesn't pin."""
 
 from __future__ import annotations
 
 import re
+import tomllib
 
 from tst.unit.agents.claude_code.agent import AGENT_DIR
 
 DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text()
+SOURCES = AGENT_DIR.parents[2]
+SHARED = tomllib.loads((AGENT_DIR / "shared_sources.toml").read_text())
+
+# Harbor bundles pin the same versions (agentenvhub-sdk's _DOC_TOOL_PACKAGES), so a task's documents read alike in both.
+DOC_LIBS = ["openpyxl==3.1.5", "pypdf==6.21.3", "python-docx==1.2.0", "python-pptx==1.0.2"]
+
+
+def _in_context(name: str) -> bool:
+    """Whether the build context has ``name``: from the folder, or under a folder shared_sources.toml takes from
+    agent-env's own sources at that name."""
+    first, _, rest = name.partition("/")
+    path = SOURCES / SHARED[first] / rest if first in SHARED else AGENT_DIR / name
+    return path.is_dir() if name.endswith("/") else path.is_file()
 
 
 def test_every_file_the_image_copies_is_in_the_folder():
     copied = [name for line in re.findall(r"^COPY (?!--from=)(.+) \S+$", DOCKERFILE, re.MULTILINE)
               for name in line.split()]
 
-    assert copied and all((AGENT_DIR / name).is_file() for name in copied), copied
+    assert copied and all(_in_context(name) for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
     assert {"a2a_server.py", "claude_bridge.py", "kit.py", "tar_changelog.py", "entrypoint.sh", "install.sh", "run.sh"} <= set(copied)
 
@@ -23,7 +38,7 @@ def test_the_image_installs_the_protocol_alone_from_its_requirements():
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.351"]
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.588"]
 
 
 def test_the_image_gives_the_model_node_alone_from_a_pinned_image():
@@ -39,6 +54,7 @@ def test_the_packages_the_image_gives_the_models_python_are_pinned():
 
     assert packages and all(re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][0-9A-Za-z.]*", line) for line in packages), packages
     assert any(line.startswith("boto3==") for line in packages)
+    assert set(DOC_LIBS) <= set(packages), packages
     assert "-r requirements.txt -r model-requirements.txt" in DOCKERFILE
 
 
@@ -50,5 +66,5 @@ def test_the_image_pins_its_cli_checks_its_checksum_and_keeps_tls_on():
 
 
 def test_the_image_starts_through_cmd_which_modal_passes_its_env_to():
-    assert 'CMD ["/opt/agent/entrypoint.sh"]' in DOCKERFILE
+    assert 'CMD ["/usr/local/bin/start-agent"]' in DOCKERFILE
     assert not re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE)

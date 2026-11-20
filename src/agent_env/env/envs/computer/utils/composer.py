@@ -317,7 +317,7 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         protocol = _stage_protocol(context)
         layer = _stage_driver(context, driver, base, {})
         apps = [(app, _stage_app(context, app, base, {})) for app in env.composed_apps()]
-        parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
+        parts = [_part(layer, _services(f"driver-{gate.driver_folder(driver)}", layer.install),
                        {"MCP_PORT": driver.port}, protocol, False)]
         parts += [_part(staged, dict(zip(gate.programs(app, platform_of(base.os)), [
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
@@ -378,7 +378,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         driver_prefix = windows_disk.DRIVERS / name
         parts = [_windows_part(layer, driver_prefix, {
             program: windows_disk.argv(command, driver_prefix)
@@ -525,7 +525,7 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         prefix = omarchy_disk.DRIVERS / name
         parts = [_omarchy_part(layer, prefix, {
             program: omarchy_disk.argv(command, prefix)
@@ -689,10 +689,11 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
                 progress: _Progress) -> dict:
     """The status of the disk form of ``arch`` once built from ``container``, its container's result, and pushed, or
     reused, or the stage that failed and why. Its key is of the container's key, the base disk and the disk recipe;
-    the base disk is the base's own, the one published for it, or else one made on the builder from the base's
-    container and the boot recipe. Its build runs no program of ``arch``'s but that recipe's. Two composes of one disk
-    on this machine take turns, so the second reuses the first's: built again, its tag would move off the image the
-    first pinned, which a boot mounts by that name and Docker doesn't pull for a mount."""
+    the base disk is the base's own or the one published for it, whose EFI system partition and size the disk keeps,
+    or else the base's container and size, the disk then taking the recipe's own partition at that size, all a base
+    disk made from them would give it. Its build runs no program of ``arch``'s but that recipe's. Two composes of one
+    disk on this machine take turns, so the second reuses the first's: built again, its tag would move off the image
+    the first pinned, which a boot mounts by that name and Docker doesn't pull for a mount."""
     pair, platform = f"disk/{arch}", f"linux/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened):
@@ -718,33 +719,18 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
                 tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
                 on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
                          context=f"{builder.CONTEXT}/tools")
-            dockerfile = (context / "Dockerfile").read_text()
-            if base_disk is None:
-                progress.at(pair, "making the base's disk")
-                base_disk = _made_base_disk(on, base, arch, f"{base_identity} {recipe}", tools, dockerfile)
             progress.at(pair, "making the disk")
             local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
-            on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
+            on.build((context / "Dockerfile").read_text(), local, platform, {KEY_LABEL: key}, build_args={
                 "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
-                "ESP": base_disk, "TOOLS": tools})
+                "TOOLS": tools, **({"ESP": base_disk} if base_disk is not None
+                                   else {"SIZE_GB": str(base.forms.disk.min_disk_gb)})})
             attempt.stage = "push"
             progress.at(pair, "pushing the disk")
             on.push(local, ref, store)
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
                     "builder": on.name, "built_at": now()}
     return attempt.result
-
-
-def _made_base_disk(on: builder.Builder, base: ComputerArtifact, arch: str, made_from: str, tools: str,
-                    dockerfile: str) -> str:
-    """The base's disk for ``arch``, made on ``on`` from the base's container with the boot recipe's ``dockerfile`` at
-    the base's size, under a tag of ``made_from``, what it's made from."""
-    source, _ = _base(base, arch)
-    tag = f"agentenv-computer:{hashlib.sha256(made_from.encode()).hexdigest()[:16]}-base-disk-{arch}"
-    on.build(dockerfile, tag, f"linux/{arch}", {}, build_args={
-        "ROOTFS": source, "ROOTFS_CONFIG": _encoded(_config(on, source, arch)), "TOOLS": tools,
-        "SIZE_GB": str(base.forms.disk.min_disk_gb)})
-    return tag
 
 
 @dataclass
@@ -916,9 +902,9 @@ class _Layer:
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
-    its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
+    its port, its folder under ``DRIVERS`` named for the name its class declares (``gate.driver_folder``), its programs and their file under ``driver-``
     as an app's are under ``app-``, so neither ever takes the other's."""
-    install, name = for_os(driver.install, base.os), gate.folder_name(driver.id, "driver")
+    install, name = for_os(driver.install, base.os), gate.driver_folder(driver)
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
            {"MCP_PORT": driver.port}, from_store)

@@ -65,6 +65,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
     from agent_env.task_step.task_steps.always_on import AlwaysOnTaskStep
     from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import DeployUserSimAgentTaskStep
+    from agent_env.task_step.task_steps.agent.rate_user_satisfaction import RateUserSatisfactionTaskStep
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
     from agent_env.task_step.task_steps.register_agent_triggers import RegisterAgentTriggersStep
     from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
@@ -72,6 +73,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
     from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+    from agent_env.task_step.task_steps.verifiers.user_sim_judge import UserSimJudge
     from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
     from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
     from agent_env.task_step.task_steps.run_docker_container import RunDockerContainerTaskStep
@@ -94,6 +96,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_snapshot import VerifyA2ASnapshotStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_trajectory import VerifyA2ATrajectoryStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_builtin_tools import VerifyA2ABuiltinToolsStep
+    from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_control_token import VerifyA2AControlTokenStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_role import VerifyA2ARoleStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_system_prompt import VerifyA2ASystemPromptStep
     from agent_env.task_step.task_steps.add_skills import AddSkillsTaskStep
@@ -102,6 +105,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
     from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
     from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
+    from agent_env.task_step.task_steps.computer.computer_exec import ComputerExecTaskStep
     from agent_env.task_step.task_steps.peer_agents import PeerAgentsTaskStep
     from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
     from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
@@ -139,6 +143,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(PromptAgentTaskStep): PromptAgentTaskStep,
         _get_type(AlwaysOnTaskStep): AlwaysOnTaskStep,
         _get_type(DeployUserSimAgentTaskStep): DeployUserSimAgentTaskStep,
+        _get_type(RateUserSatisfactionTaskStep): RateUserSatisfactionTaskStep,
         _get_type(RegisterEnvTriggersStep): RegisterEnvTriggersStep,
         _get_type(RegisterAgentTriggersStep): RegisterAgentTriggersStep,
         _get_type(SyncEnvClockTaskStep): SyncEnvClockTaskStep,
@@ -146,6 +151,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(ConfigureScheduledChecksTaskStep): ConfigureScheduledChecksTaskStep,
         _get_type(InstallAgentTaskStep): InstallAgentTaskStep,
         _get_type(RubricsVerifierTaskStep): RubricsVerifierTaskStep,
+        _get_type(UserSimJudge): UserSimJudge,
         _get_type(AlwaysOnAgentVerifier): AlwaysOnAgentVerifier,
         _get_type(RunContainerUnitTestsVerifierTaskStep): RunContainerUnitTestsVerifierTaskStep,
         _get_type(RunDockerContainerTaskStep): RunDockerContainerTaskStep,
@@ -170,6 +176,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(SnapshotAgentStateTaskStep): SnapshotAgentStateTaskStep,
         _get_type(SnapshotEnvTaskStep): SnapshotEnvTaskStep,
         _get_type(SnapshotComputerEnvTaskStep): SnapshotComputerEnvTaskStep,
+        _get_type(ComputerExecTaskStep): ComputerExecTaskStep,
         _get_type(RunCodeTaskStep): RunCodeTaskStep,
         _get_type(PeerAgentsTaskStep): PeerAgentsTaskStep,
         _get_type(VerifyA2ASnapshotStep): VerifyA2ASnapshotStep,
@@ -179,6 +186,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(AggregateVerifiersTaskStep): AggregateVerifiersTaskStep,
         _get_type(VerifyA2ABuiltinToolsStep): VerifyA2ABuiltinToolsStep,
         _get_type(VerifyA2ARoleStep): VerifyA2ARoleStep,
+        _get_type(VerifyA2AControlTokenStep): VerifyA2AControlTokenStep,
         _get_type(VerifyA2ASystemPromptStep): VerifyA2ASystemPromptStep,
     }
 

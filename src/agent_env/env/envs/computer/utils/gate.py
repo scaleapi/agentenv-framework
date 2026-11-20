@@ -112,6 +112,13 @@ def app_folder(app: ComputerAppEnv) -> str:
     return folder_name(app.environment_name, "app")
 
 
+def driver_folder(driver: ComputerDriverEnv) -> str:
+    """The name of the folder ``driver`` is installed in, under its computer's drivers folder, and of its programs: the
+    name its class declares (``@computer_driver(name=...)``), not its id, so the same driver stored under another id (a
+    bundle registered with a prefix) composes the same image, of the same key."""
+    return folder_name(driver.declaration.name, "driver")
+
+
 def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv],
           environment_name: str) -> list[str]:
     """Every way ``apps`` don't fit together on ``base`` and ``driver`` in a computer env named ``environment_name``:

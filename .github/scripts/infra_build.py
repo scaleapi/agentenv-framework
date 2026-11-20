@@ -33,8 +33,10 @@ import os
 import platform
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from collections.abc import Callable
@@ -42,6 +44,8 @@ from pathlib import Path
 
 REGISTRY = "ghcr.io/scaleapi"
 REPO = Path(__file__).resolve().parents[2]
+# What an image's shared_sources.toml names is under here, as agent_env.utils.paths.SOURCES is.
+SOURCES = REPO / "src" / "agent_env"
 # Each image agent-env ships, by name, and the Dockerfile it's built from, with its folder as the context.
 IMAGES = {
     "agentenv-gateway": "src/agent_env/env/gateway/Dockerfile",
@@ -97,6 +101,8 @@ _NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-frame
 # What GHCR answers a push to a new package while another platform's push creates it, until it links the package to
 # this repository.
 _NOT_YET_LINKED = re.compile(r"denied: permission_denied: write_package")
+# The commands that push: an image, and an index joined in the registry, which pushes its platforms' manifests at once.
+_PUSHES = (["docker", "push"], ["docker", "buildx", "imagetools", "create"])
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
@@ -139,7 +145,7 @@ _SMOKES = {
                               " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
     "agentenv-ubuntu-24.04-browser": [
         "docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
-        "start-computer & for _ in $(seq 60); do sleep 1;"
+        "start-computer init & for _ in $(seq 60); do sleep 1;"
         " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
         " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
         " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
@@ -224,12 +230,31 @@ def _build(entry: str, arch: str) -> int:
         for arg, value in {"ROOTFS": rootfs, "TOOLS": args["TOOLS"], "SIZE_GB": args["SIZE_GB"],
                            "ROOTFS_CONFIG": _config(rootfs)}.items():
             build_args += ["--build-arg", f"{arg}={value}"]
-    command = ["docker", "build", "--platform", target, "--provenance=false", "-f", image["dockerfile"],
-               "-t", f"{_ref(image)}-{arch}", *build_args,
-               "--label", f"org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
-               "--label", f"org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
-               "--label", f"io.agentenv.source-tag={image['tag']}", image["context"]]
-    return _tried_again(lambda: _streamed(command)).returncode
+    with tempfile.TemporaryDirectory(prefix="agentenv-context-") as staged:
+        context, dockerfile = image["context"], image["dockerfile"]
+        if (Path(context) / "shared_sources.toml").is_file():
+            context = _staged(image["context"], staged)
+            dockerfile = os.path.join(context, os.path.relpath(image["dockerfile"], image["context"]))
+        command = ["docker", "build", "--platform", target, "--provenance=false", "-f", dockerfile,
+                   "-t", f"{_ref(image)}-{arch}", *build_args,
+                   "--label", f"org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
+                   "--label", f"org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
+                   "--label", f"io.agentenv.source-tag={image['tag']}", context]
+        return _tried_again(lambda: _streamed(command)).returncode
+
+
+def _staged(context: str, staged: str) -> str:
+    """``context`` copied into ``staged`` with what its ``shared_sources.toml`` takes from agent-env's sources, each at
+    the name it gives, as agent-env's build contexts send it (``agent_env.utils.docker.context``)."""
+    shutil.copytree(context, staged, dirs_exist_ok=True)
+    declared = Path(context) / "shared_sources.toml"
+    for name, source in (tomllib.loads(declared.read_text()) if declared.is_file() else {}).items():
+        path = SOURCES / source
+        if path.is_dir():
+            shutil.copytree(path, Path(staged) / name)
+        else:
+            shutil.copy2(path, Path(staged) / name)
+    return staged
 
 
 def _publish(missing: str) -> int:
@@ -243,11 +268,9 @@ def _publish(missing: str) -> int:
             continue
         if code != 1:
             return 1
+        # No --annotation: buildx refuses annotations on a Docker list; each platform build carries the same --labels.
         created = _tried_again(lambda: _streamed([
-            "docker", "buildx", "imagetools", "create", "-t", ref,
-            "--annotation", f"index:org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
-            "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
-            f"{ref}-amd64", f"{ref}-arm64"]))
+            "docker", "buildx", "imagetools", "create", "-t", ref, f"{ref}-amd64", f"{ref}-arm64"]))
         if created.returncode:
             return created.returncode
     return 0
@@ -286,14 +309,14 @@ def _publish_computers(folder: Path) -> int:
         images = {arch: f"{repository}@{digest}" for arch, digest in digests.items()}
         index = f"{repository}:index-" + hashlib.sha256(
             ",".join(images[arch] for arch in COMPUTER_ARCHES).encode()).hexdigest()
-        if (code := _exists(index)) == 2:
-            return 1
-        if code == 1:
-            source = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+        served, error = _served(index)
+        # GHCR may refuse a token a package before its first push, which a release's first of an app is.
+        if served is None and ": not found" not in error:
+            print(f"::warning::{index} is taken as unpublished, since the registry won't say: {error}")
+        if served is None:
+            # No --annotation: a compose pushes Docker media types, and buildx refuses annotations on a Docker list.
             created = _tried_again(lambda: _streamed([
                 "docker", "buildx", "imagetools", "create", "-t", index,
-                "--annotation", f"index:org.opencontainers.image.source={source}",
-                "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
                 *(f"localhost:5000/agentenv-computers@{digests[arch]}" for arch in COMPUTER_ARCHES)]))
             if created.returncode:
                 return created.returncode
@@ -434,13 +457,14 @@ def _why_again(result: subprocess.CompletedProcess) -> str | None:
     """Why a failed run can work later, or None: a registry rate-limited it, as public.ecr.aws does past one anonymous
     pull a second, which builds starting together pass; a build's pip can't find the agentenv-framework-protocol its
     release has just published, which PyPI's index lists a little after the upload; or GHCR refuses a push to a package
-    another platform's push is creating, as an image's first release pushes both at once."""
+    another platform's push is creating, as an image's first release pushes both at once, and as a computer app's first
+    index pushes both its images."""
     printed, command = f"{result.stdout}{result.stderr}", f"`{' '.join(result.args)[:_PRINTED_CHARS]}`"
     if _RATE_LIMITED.search(printed):
         return f"a registry rate-limited {command}"
     if _NOT_YET_SERVED.search(printed):
         return f"PyPI doesn't list yet the agentenv-framework-protocol {command} installs"
-    if list(result.args[:2]) == ["docker", "push"] and _NOT_YET_LINKED.search(printed):
+    if any(list(result.args[:len(push)]) == push for push in _PUSHES) and _NOT_YET_LINKED.search(printed):
         return f"GHCR doesn't let this repository write yet the package {command} pushes to"
     return None
 

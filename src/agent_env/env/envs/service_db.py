@@ -20,6 +20,8 @@ DB_WEB_PORT = 8081  # pgweb: same port host-side and in-container (8081:8081)
 DB_MCP_SERVICE_NAME = "db-mcp"
 DB_MCP_PORT = 18767  # db-mcp host/tunnel port
 DB_MCP_CONTAINER_PORT = 8000  # db-mcp's in-container listen port (tunneled as DB_MCP_PORT:DB_MCP_CONTAINER_PORT)
+# The env's SQL consoles, each served by the gateway at /svc/<name>/, so no child env may take one's name.
+CONSOLE_SERVICE_NAMES = frozenset({PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME})
 
 
 @dataclass

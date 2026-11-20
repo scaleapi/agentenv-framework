@@ -45,7 +45,7 @@ from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
     data_plane_headers, file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
-    reset_server_data,
+    reset_server_data, stack_layout_of,
     staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
@@ -340,14 +340,14 @@ class WebsiteEnv(Env):
         return await super().load_file_artifact_universe(file_artifact_universe, destination_path)
 
     async def _copy_artifact_into_container(self, file_artifact, path: str) -> str:
-        from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX, DOCKER_COMPOSE_PATH
+        from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX
         validate_file_path(path)
         backend_service = f"{self.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
         # Random suffix so concurrent loads on a shared sandbox (parallel /load-universe,
         # MCP+website sharing a service_name, repeated loads) don't race on a shared path.
         vm_path = f"/tmp/_artifact_{self.environment_name}-{uuid.uuid4().hex[:8]}-{posixpath.basename(path)}"
         container_path = f"/tmp/data/{path}"
-        compose = f"docker compose -f {shlex.quote(DOCKER_COMPOSE_PATH)}"
+        compose = stack_layout_of(self._env_provider).compose_command
 
         await self._sandbox.load_object_file(file_artifact.object_url, vm_path)
         await self._sandbox.exec_script(
@@ -358,11 +358,12 @@ class WebsiteEnv(Env):
 
     async def _remove_from_container(self, path: str) -> None:
         """Remove what a load staged at ``/tmp/data/<path>``, best-effort: a load that finished stands either way."""
-        from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX, DOCKER_COMPOSE_PATH
+        from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX
         backend_service = f"{self.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
         container_path = f"/tmp/data/{path}"
+        compose = stack_layout_of(self._env_provider).compose_command
         try:
-            await self._sandbox.exec_script(f"docker compose -f {shlex.quote(DOCKER_COMPOSE_PATH)} exec -T "
+            await self._sandbox.exec_script(f"{compose} exec -T "
                                             f"{shlex.quote(backend_service)} rm -rf {shlex.quote(container_path)}")
         except Exception as e:  # noqa: BLE001 -- cleanup, not the load
             logger.warning(f"[{self.environment_name}] could not remove {container_path} after a load (ignored): {e}")

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import (CLOCK_FOLLOWERS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
+from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
                         GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
                         WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
@@ -165,8 +165,9 @@ async def _site_card(client: httpx.AsyncClient, base: str, deadline: float) -> d
         await asyncio.sleep(_INTERNAL_SERVER_POLL_S)
 
 
-def parse_name_url_map(env_str: str) -> dict[str, str]:
-    # Expected format: 'slack=http://slack-website-backend:8000,email=http://email-website-backend:8000'
+def parse_name_url_map(variable: str) -> dict[str, str]:
+    """The environment variable ``variable`` as a name-to-URL map, from 'slack=http://slack-website-backend:8000,...'."""
+    env_str = os.environ.get(variable, "")
     urls: dict[str, str] = {}
     if not env_str.strip():
         return urls
@@ -175,16 +176,16 @@ def parse_name_url_map(env_str: str) -> dict[str, str]:
         if not entry:
             continue
         if "=" not in entry:
-            raise ValueError(f"Invalid REST_PROXY_URLS entry: '{entry}' (expected 'name=url')")
+            raise ValueError(f"Invalid {variable} entry: '{entry}' (expected 'name=url')")
         name, url = entry.split("=", 1)
         name = name.strip()
         url = url.strip()
         if not name:
-            raise ValueError(f"Empty service name in REST_PROXY_URLS entry: '{entry}'")
+            raise ValueError(f"Empty service name in {variable} entry: '{entry}'")
         if not url.startswith(("http://", "https://")):
-            raise ValueError(f"Invalid URL in REST_PROXY_URLS: '{url}' (must start with http:// or https://)")
+            raise ValueError(f"Invalid URL in {variable}: '{url}' (must start with http:// or https://)")
         if name in urls:
-            raise ValueError(f"Duplicate service name in REST_PROXY_URLS: '{name}'")
+            raise ValueError(f"Duplicate service name in {variable}: '{name}'")
         urls[name] = url
     return urls
 
@@ -223,8 +224,8 @@ if __name__ == "__main__":
         spec=os.environ.get("INTERNAL_MCP_SERVERS", ""),
         port=int(os.environ.get("INTERNAL_MCP_PORT", str(AGENT_ENV_GATEWAY_MCP_PORT))),
     )
-    website_urls = parse_name_url_map(os.environ.get("WEBSITE_URLS", ""))
-    rest_proxy_urls = parse_name_url_map(os.environ.get("REST_PROXY_URLS", ""))
+    website_urls = parse_name_url_map("WEBSITE_URLS")
+    rest_proxy_urls = parse_name_url_map("REST_PROXY_URLS")
     internal_mcp_servers += asyncio.run(website_mcp_servers(
         {name: rest_proxy_urls.get(name, url) for name, url in website_urls.items()},
         taken=frozenset(server.name for server in internal_mcp_servers)))
@@ -239,11 +240,13 @@ if __name__ == "__main__":
         internal_mcp_servers=internal_mcp_servers,
         website_urls=website_urls,
         rest_proxy_urls=rest_proxy_urls,
+        console_urls=parse_name_url_map(CONSOLE_URLS_ENV),
         gateway_mode=gateway_mode,
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         control_token_children=[name.strip() for name in os.environ.get(CONTROL_TOKEN_CHILDREN_ENV, "").split(",")
                                 if name.strip()],
+        computers=[name.strip() for name in os.environ.get(COMPUTERS_ENV, "").split(",") if name.strip()],
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
         clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
         site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),

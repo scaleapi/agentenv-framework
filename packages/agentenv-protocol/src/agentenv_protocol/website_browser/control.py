@@ -1172,21 +1172,24 @@ class BrowserControl:
 
     async def _let_run(self, session: str) -> None:
         """A page it attached to, enabled and, alone, held to its window's size, then told to run: a page attached as
-        it opens, a popup say, or any new page alone, waits for that before it runs."""
+        it opens, a popup say, or any new page alone, waits for that before it runs. The calls go together, in order,
+        which the browser handles them in: a popup a click opened answers Page.enable only once it runs."""
         target = self._sessions.get(session)
+        calls: list[tuple[str, Optional[dict]]] = [("Page.enable", None)]
+        if self.viewport is not None:
+            width, height = self.viewport
+            calls += [("Emulation.setDeviceMetricsOverride",
+                       {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}),
+                      ("Page.setInterceptFileChooserDialog", {"enabled": True})]
+        calls.append(("Runtime.runIfWaitingForDebugger", None))
         try:
-            await self.devtools.call("Page.enable", session_id=session)
-            if self.viewport is not None:
-                width, height = self.viewport
-                await self.devtools.call("Emulation.setDeviceMetricsOverride", {
-                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session_id=session)
-                await self.devtools.call("Page.setInterceptFileChooserDialog", {"enabled": True}, session_id=session)
+            answers = await asyncio.gather(*(self.devtools.call(method, params, session_id=session)
+                                             for method, params in calls), return_exceptions=True)
         finally:
-            try:
-                await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
-            finally:
-                if target is not None:
-                    self._pinned.setdefault(target, asyncio.Event()).set()
+            if target is not None:
+                self._pinned.setdefault(target, asyncio.Event()).set()
+        if failed := next((answer for answer in answers if isinstance(answer, BaseException)), None):
+            raise failed
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         self._screencasts.pop(params["sessionId"], None)

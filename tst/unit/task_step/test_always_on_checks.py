@@ -67,7 +67,7 @@ async def test_a_check_the_agent_schedules_moves_the_clock_and_wakes_it(monkeypa
 
     wake = rig.events(ctx, "wake")[1]
     assert wake["virtual_time"] == "2026-11-12T14:00:00Z" and wake["woke_by"] == ["notification:your scheduled check"]
-    assert "[Thu Nov 12, 2:00 PM UTC · your scheduled check] book La Ola, it opens at 9" in rig.sent[1]
+    assert "[Thu Nov 12, 9:00 AM EST · your scheduled check] book La Ola, it opens at 9" in rig.sent[1]
 
 
 @pytest.mark.parametrize("end_time,setting,on", [(None, None, False), ("PT6H", None, False), ("P5D", False, False),

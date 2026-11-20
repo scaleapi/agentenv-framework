@@ -32,6 +32,8 @@ from typing import Literal
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
+
 logger = logging.getLogger(__name__)
 
 # The model a run uses when neither the task nor the agent-config names one; the
@@ -75,7 +77,7 @@ class OpenCodeTools(BaseModel):
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 
@@ -96,6 +98,15 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
+def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
+    armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
+    connects to itself."""
+    urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed)}
+
+
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +124,7 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
     """`opencode export <session_id>` for the given context: the transcript JSON bytes."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "export", session_id, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode export failed: {err.decode(errors='replace')[:300]}")
@@ -123,7 +134,7 @@ async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI
 async def import_session(context_id: str, json_path: str, timeout_s: int = _CLI_TIMEOUT_S) -> str | None:
     """`opencode import <json_path>` into the given context's data dir: the imported session id, from
     'Imported session: <id>'."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "import", json_path, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode import failed: {err.decode(errors='replace')[:300]}")
@@ -430,10 +441,15 @@ async def run_opencode(
     builtin_tools: OpenCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
+    max_turns: int | None = None,
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
-    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection."""
+    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
+
+    ``max_turns`` bounds the turn's steps, OpenCode's model requests, as ``--max-turns`` bounds Claude Code's: once
+    the last step it allows asks for another, the CLI is killed and the turn fails. OpenCode v1's own ``steps`` limit
+    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921)."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -472,9 +488,8 @@ async def run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **os.environ,
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-        **_context_xdg(context_id),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")
@@ -491,8 +506,13 @@ async def run_opencode(
     ))
     _RUNNING.add(proc)
     parser = _EventParser(event_callback)
+
+    def at_turn_limit() -> bool:
+        return max_turns is not None and parser.needs_step_past(max_turns)
+
     try:
-        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line), timeout=timeout_s)
+        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line, at_turn_limit),
+                                        timeout=timeout_s)
     except asyncio.CancelledError:
         _kill_cli(proc)
         await _reap(proc)
@@ -514,6 +534,10 @@ async def run_opencode(
         _RUNNING.discard(proc)
 
     result = parser.result(stderr, proc.returncode)
+    if at_turn_limit():
+        # Claude Code's words, which callers already read as the turn limit.
+        result.error = f"Reached maximum number of turns ({max_turns})"
+        result.error_code = None
     if output_format is not None and result.error is None:
         try:
             structured_output = json.loads(result.response)
@@ -530,12 +554,14 @@ async def run_opencode(
 _STDOUT_READ_BYTES = 64 * 1024
 
 
-async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -> bytes:
+async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None],
+                      stop: Callable[[], bool] = lambda: False) -> bytes:
     """``proc.communicate(stdin_data)``, handing ``on_line`` each stdout line as it arrives.
 
     Lines are split as ``stdout.decode(errors="replace").splitlines()`` splits
     the whole output, so they are the same lines; a line has no length limit,
-    as with ``communicate``. Returns stderr once the CLI has exited."""
+    as with ``communicate``. Returns stderr once the CLI has exited, or, once
+    ``stop`` holds after a read, kills the CLI and returns no stderr."""
 
     async def feed_stdin() -> None:
         try:
@@ -562,6 +588,10 @@ async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -
                     on_line(line)
                 pieces = []
             pieces.append(rest)
+            if stop():
+                _kill_cli(proc)
+                await _reap(proc)
+                return b""
         for line in b"".join(pieces).decode(errors="replace").splitlines():
             on_line(line)
         await stdin_task
@@ -587,12 +617,17 @@ def _parse_events(stdout: bytes, stderr: bytes, returncode: int | None) -> Openc
     return parser.result(stderr, returncode)
 
 
+# The step-finish reasons after which OpenCode's loop makes another model request; any other reason ends the turn.
+_CONTINUING_STEP_REASONS = frozenset({"tool-calls", "unknown"})
+
+
 class _EventParser:
     """Parse the `--format json` JSONL event stream one line at a time.
 
     Events carry a `type` and (for content) a `part`. We accumulate assistant
-    `text` parts as the response, count `tool` parts as tool calls, and note
-    the session id wherever it appears. The whole event list is the trajectory,
+    `text` parts as the response, count `tool` parts as tool calls and
+    `step-finish` parts as steps, and note the session id wherever it
+    appears. The whole event list is the trajectory,
     and each event is handed to ``event_callback`` as it is parsed.
     """
 
@@ -601,6 +636,8 @@ class _EventParser:
         self.trajectory: list[dict] = []
         self.text_chunks: list[str] = []
         self.tool_calls: set[str] = set()
+        self.steps: set[str] = set()
+        self.last_step_continues = False
         self.session_id: str | None = None
         self.completed = False
         self.event_errors: list[str] = []
@@ -683,11 +720,20 @@ class _EventParser:
             call_id = (part or event).get("callID") or (part or event).get("id") or f"tool-{len(self.tool_calls)}"
             self.tool_calls.add(str(call_id))
         elif etype == "step_finish" or ptype == "step-finish":
-            if (part or event).get("reason") == "stop":
+            reason = (part or event).get("reason")
+            self.steps.add(str((part or event).get("id") or f"step-{len(self.steps)}"))
+            self.last_step_continues = reason in _CONTINUING_STEP_REASONS
+            if reason == "stop":
                 self.completed = True
 
         if self._event_callback is not None:
             self._event_callback(event)
+
+    def needs_step_past(self, max_steps: int) -> bool:
+        """Whether the turn has needed a model request past ``max_steps``: more steps finished, or the last step it
+        allows asked for another. Decided at a step's end, so how the CLI's output is split into reads can't change
+        it."""
+        return len(self.steps) > max_steps or (len(self.steps) == max_steps and self.last_step_continues)
 
     def result(self, stderr: bytes, returncode: int | None) -> OpencodeResult:
         # A turn is successful once OpenCode emits a terminal step_finish{reason:stop}.

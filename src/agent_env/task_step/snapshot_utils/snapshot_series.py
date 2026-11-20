@@ -428,6 +428,7 @@ class SnapshotSeries:
             artifact_id=self.workspace_artifact_id,
             timeout_seconds=remaining(),
             sandbox_type=agent.sandbox_type,
+            headers=agent.control_headers,
         )
         row["id"] = workspace.universe_id
         row["version"] = workspace.universe_version
@@ -445,6 +446,7 @@ class SnapshotSeries:
             timeout_seconds=remaining(),
             trajectory_output_prefix=self.trajectory_output_prefix,
             sandbox_type=agent.sandbox_type,
+            headers=agent.control_headers,
         )
         if traj.reason and is_final:
             recorded = self._recorded_trajectory_uri(context)

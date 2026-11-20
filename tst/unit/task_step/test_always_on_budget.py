@@ -49,7 +49,7 @@ async def test_once_another_wake_might_end_past_the_budget_the_agent_gets_its_cl
     assert reached["real_seconds"] == 10800
     assert record["end_reason"] == "time_budget" and record["error_type"] is None
     assert rig.events(ctx, "user_sim_read")[-1]["last_read"] is True
-    assert rig.chat(ctx)[-1]["texts"][-1].startswith("[End of run · Wed Nov 11, 2:00 PM UTC] The run was cut off by "
+    assert rig.chat(ctx)[-1]["texts"][-1].startswith("[End of run · Wed Nov 11, 9:00 AM EST] The run was cut off by "
                                                      "its real-time budget.")
 
 

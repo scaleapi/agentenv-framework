@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 from agent_env.config.errors import ConfigError
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, SecretResolver, interpolate
@@ -40,6 +40,45 @@ class ModelParam(StrEnum):
 
 
 MODEL_PARAMS_RESERVED = frozenset(p.value for p in ModelParam)
+
+
+class ModelRole(StrEnum):
+    """A role a model plays in a run. ``[model.roles]`` also takes the names it had first: ``agent`` for the solver
+    and ``user`` for the user simulator."""
+
+    SOLVER = "solver"
+    USER_SIMULATOR = "user_simulator"
+    JUDGE = "judge"
+
+    @property
+    def record_key(self) -> str:
+        """The role's key in ``metadata.models``, which its readers have always seen."""
+        return "user simulator" if self is ModelRole.USER_SIMULATOR else self.value
+
+
+ROLE_SYNONYMS: dict[str, ModelRole] = {"agent": ModelRole.SOLVER, "user": ModelRole.USER_SIMULATOR}
+JUDGE_FALLBACK_MODEL = "claude-sonnet-4-6"
+
+
+class ModelSource(StrEnum):
+    """The layer a role's model came from: the first of them, in this order, that names one."""
+
+    STEP_PARAMS = "step_params"
+    RUN = "run"
+    STEP = "step"
+    AGENT = "agent"
+    CONFIG_ROLE = "config_role"
+    CONFIG_DEFAULT = "config_default"
+    FALLBACK = "fallback"
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    """A role's model for one step and the layer it came from; both None when no layer names one."""
+
+    role: ModelRole
+    model: Optional[str]
+    source: Optional[ModelSource]
 
 
 @dataclass(frozen=True)
@@ -94,6 +133,7 @@ class ModelConfig:
             {k: v for k, v in section.items() if k not in ("api_key", "headers")},
             secret_resolver=secret_resolver,
         )
+        _check_roles(cfg.get("roles", {}))
         return cls(
             base_url=cfg.get("base_url"),
             api_key=section.get("api_key"),
@@ -103,9 +143,16 @@ class ModelConfig:
             headers=dict(headers),
         )
 
+    def role_model(self, role: str) -> Optional[str]:
+        """``[model.roles]``'s model for ``role``, under its name or the synonym it had first; the map is open, so a
+        plugin's own role is looked up by its name."""
+        canonical = ROLE_SYNONYMS.get(role, role)
+        names = (canonical, *(synonym for synonym, named in ROLE_SYNONYMS.items() if named == canonical))
+        return next((self.roles[name] for name in names if self.roles.get(name)), None)
+
     def model_for_role(self, role: str, *, or_default: bool = True) -> Optional[str]:
-        """The ``[model.roles].<role>`` model, else ``default`` unless ``or_default`` is False (open map)."""
-        return self.roles.get(role) or (self.default if or_default else None)
+        """The ``[model.roles].<role>`` model, else ``default`` unless ``or_default`` is False."""
+        return self.role_model(role) or (self.default if or_default else None)
 
     def resolve_api_key(self, *, secret_resolver: SecretResolver) -> str:
         """Key: env ``LITELLM_API_KEY`` > ``api_key`` (resolving a reference lazily);
@@ -123,15 +170,19 @@ class ModelConfig:
             return None
         return interpolate(self.api_key, secret_resolver=secret_resolver)
 
+    def is_endpoint(self, url: Optional[str]) -> bool:
+        """Whether ``url`` names the configured endpoint (``LITELLM_BASE_URL``, else ``base_url``), by
+        ``same_endpoint``: the only URL the configured key and headers go to."""
+        return same_endpoint(url, os.getenv(ENV_BASE_URL) or self.base_url)
+
     def headers_for(self, base_url: Optional[str], *, secret_resolver: SecretResolver) -> dict[str, str]:
         """``[model.headers]``, resolved, for a call or an agent pointed at ``base_url``: none unless
         that is the configured endpoint, since a header may carry a credential."""
         if not self.headers or not base_url:
             return {}
-        configured_base = os.getenv(ENV_BASE_URL) or self.base_url
-        if not configured_base or base_url.rstrip("/") != configured_base.rstrip("/"):
+        if not self.is_endpoint(base_url):
             logger.info("Not sending [model.headers] to %s, which is not the configured model endpoint",
-                        urlparse(base_url).hostname or base_url)
+                        _netloc(base_url))
             return {}
         headers = interpolate(dict(self.headers), secret_resolver=secret_resolver)
         for name, value in headers.items():
@@ -144,27 +195,14 @@ class ModelConfig:
         *,
         default_api_key: Optional[str] = None,
         base_override: Optional[str] = None,
-        model_overrides: Optional[dict[str, dict[str, str]]] = None,
         secret_resolver: SecretResolver,
     ) -> ModelCallConfig:
         """A provider-prefixed model routes natively when no endpoint is configured; a bare
-        model name needs one (override/env/config) and fails actionably without it."""
-        if model_overrides:
-            override = model_overrides.get(model)
-            if override:
-                key = secret_resolver(override["secret_key"])
-                if key is None:
-                    raise ConfigError(
-                        f"Model override for {model!r} names secret {override['secret_key']!r}, "
-                        "which the configured secret store has no value for"
-                    )
-                return ModelCallConfig(
-                    api_key=key,
-                    api_base=base_override or override["base_url"],
-                    params={},
-                )
-
-        key = default_api_key or os.getenv(ENV_API_KEY)
+        model name needs one (override/env/config) and fails actionably without it. The configured key, from
+        ``LITELLM_API_KEY`` or ``api_key``, goes only to the configured endpoint or a native route; a ``base_override``
+        elsewhere needs ``default_api_key``, since without one ``litellm`` would fall back to provider keys in the
+        environment."""
+        key = default_api_key
         configured_base = os.getenv(ENV_BASE_URL) or self.base_url
         if base_override:
             api_base = base_override
@@ -178,11 +216,10 @@ class ModelConfig:
                 f".agentenv/config.toml or {ENV_BASE_URL}, or use a provider-prefixed "
                 "model name (e.g. 'openai/gpt-4o') for native routing."
             )
-        # The configured key is scoped to the configured endpoint (and native routing):
-        # a base_override pointing elsewhere must not inherit it, or a caller-supplied
-        # URL would receive the configured proxy's credential.
-        if key is None and (api_base is None or api_base.rstrip("/") == (configured_base or "").rstrip("/")):
-            key = self._resolved_api_key(secret_resolver)
+        if key is None:
+            if api_base is not None and not same_endpoint(api_base, configured_base):
+                raise ConfigError(no_key_for(api_base, "default_api_key"))
+            key = os.getenv(ENV_API_KEY) or self._resolved_api_key(secret_resolver)
         params = dict(self.params)
         headers = self.headers_for(api_base, secret_resolver=secret_resolver)
         if headers:
@@ -190,6 +227,118 @@ class ModelConfig:
             overridden = {name.lower() for name in explicit}
             params["extra_headers"] = {**{k: v for k, v in headers.items() if k.lower() not in overridden}, **explicit}
         return ModelCallConfig(api_key=key, api_base=api_base, params=params)
+
+
+def resolve_model(
+    role: ModelRole,
+    *,
+    step_params: Optional[str] = None,
+    run: Optional[str] = None,
+    step: Optional[str] = None,
+    agent: Optional[str] = None,
+    config: Optional[ModelConfig] = None,
+) -> ResolvedModel:
+    """``role``'s model for one step: the first of the layers its call site has that names one, else ``config``'s
+    (``named_model``, then ``config_model``). It reads no environment, key or secret, so a plan can resolve every role
+    before its run starts."""
+    return (named_model(role, step_params=step_params, run=run, step=step, agent=agent)
+            or config_model(role, config))
+
+
+def named_model(
+    role: ModelRole,
+    *,
+    step_params: Optional[str] = None,
+    run: Optional[str] = None,
+    step: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> Optional[ResolvedModel]:
+    """The first of these layers that names a model: this step's ``step_params``, the run's override, the step's own
+    field, the deployed agent's default; None when none does."""
+    for source, model in ((ModelSource.STEP_PARAMS, step_params), (ModelSource.RUN, run),
+                          (ModelSource.STEP, step), (ModelSource.AGENT, agent)):
+        if model:
+            return ResolvedModel(role, model, source)
+    return None
+
+
+def config_model(role: ModelRole, config: Optional[ModelConfig]) -> ResolvedModel:
+    """``role``'s model when no layer names one: ``[model.roles]``, then for the solver and the judge ``[model]
+    default``; a judge always has one, claude-sonnet-4-6 last."""
+    if config is not None:
+        if model := config.role_model(role):
+            return ResolvedModel(role, model, ModelSource.CONFIG_ROLE)
+        if role is not ModelRole.USER_SIMULATOR and config.default:
+            return ResolvedModel(role, config.default, ModelSource.CONFIG_DEFAULT)
+    if role is ModelRole.JUDGE:
+        return ResolvedModel(role, JUDGE_FALLBACK_MODEL, ModelSource.FALLBACK)
+    return ResolvedModel(role, None, None)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def same_endpoint(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two URLs name one model endpoint: scheme and host in any case, a default port, a trailing ``/`` and one
+    trailing ``/v1`` don't tell them apart, so a client that wants ``/v1`` and one that doesn't reach the same one."""
+    return bool(a and b) and _endpoint(a) == _endpoint(b)
+
+
+def api_root(url: str) -> str:
+    """``url`` without a trailing ``/`` and one trailing ``/v1``, for a client that appends its own versioned path
+    (Anthropic's ``/v1/messages``): the endpoint may be configured either way, and ``same_endpoint`` compares by the
+    same root."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=_root_path(parts.path)))
+
+
+def _root_path(path: str) -> str:
+    return path.rstrip("/").removesuffix("/v1").rstrip("/")
+
+
+def _endpoint(url: str) -> tuple:
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return (url,)
+    path = _root_path(parts.path)
+    return scheme, (parts.hostname or "").lower(), None if port == _DEFAULT_PORTS.get(scheme) else port, path, parts.query
+
+
+def _netloc(url: str) -> str:
+    """``url``'s host and port, without any user or password it carries."""
+    return urlsplit(url).netloc.rpartition("@")[2] or url
+
+
+def endpoint_host(url: object) -> Optional[str]:
+    """The host, and port when it names one, a model call to ``url`` reaches, for a record: never the user or
+    password a URL may carry. None for anything but a URL with a host, never raising, so a record can't fail what it
+    records."""
+    if not isinstance(url, str):
+        return None
+    try:
+        return urlsplit(url.strip()).netloc.rpartition("@")[2] or None
+    except ValueError:
+        return None
+
+
+def no_key_for(url: str, how: str) -> str:
+    """Why a model call or an agent pointed at ``url`` with no key of its own is refused, and ``how`` to give it one."""
+    return (f"{_netloc(url)} isn't the configured model endpoint, so the configured key isn't sent there, and no key "
+            f"was given with it. Pass one with it: {how}. Any non-empty value works for a server that needs no key.")
+
+
+def _check_roles(roles: object) -> None:
+    """Refuse a ``[model.roles]`` that maps a role to anything but a model name, or names one role twice, under its
+    name and its synonym."""
+    if not isinstance(roles, dict) or not all(isinstance(model, str) for model in roles.values()):
+        raise ConfigError("[model.roles] maps each role to a model name, such as judge = \"claude-sonnet-4-6\"")
+    for synonym, role in ROLE_SYNONYMS.items():
+        if synonym in roles and role.value in roles:
+            raise ConfigError(f"[model.roles] sets both {role.value!r} and {synonym!r}, which name the same role; "
+                              f"keep {role.value!r}")
 
 
 def _check_header(name: str, value: Optional[str]) -> None:

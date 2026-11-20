@@ -88,7 +88,7 @@ async def test_a_task_s_final_line_is_hers_and_comes_with_the_notice(monkeypatch
     await rig.run(rig.step(end_time="P2D", final="send me the rundown"))
 
     texts = rig.sent[-1]
-    assert "[Wed Nov 11, 2:00 PM UTC] Linda: send me the rundown" in texts and DEFAULT_FINAL not in texts
+    assert "[Wed Nov 11, 9:00 AM EST] Linda: send me the rundown" in texts and DEFAULT_FINAL not in texts
     assert texts[-1] == NOTICE and ao.WAKE_REMINDER_TEXT not in texts
     assert [s["text"] for s in rig.reads[-1]["you_sent"]] == ["sort the cdmx weekend", "send me the rundown"]
 
@@ -321,7 +321,7 @@ async def test_messages_a_turn_sent_before_it_timed_out_are_in_the_graded_respon
     ctx = await rig.run(rig.step())
 
     [response] = ctx.prompt_responses
-    assert response.response == "[Mon Nov 9, 2:00 PM UTC] found it: the blue house, $855"
+    assert response.response == "[Mon Nov 9, 9:00 AM EST] found it: the blue house, $855"
     assert response.error_type == "agent_turn_timeout"
     [sent] = rig.events(ctx, "message_to_user")
     assert sent["leftover"] is True

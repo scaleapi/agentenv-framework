@@ -384,7 +384,6 @@ jobs:
       contents: read
     env:
       ARCH: ${{ matrix.arch }}
-      XDG_STATE_HOME: ${{ runner.temp }}/state
       AGENT_ENV_DOCUMENT_STORE: local
       AGENT_ENV_OBJECT_STORE: local
     steps:
@@ -409,15 +408,23 @@ jobs:
           python3 .github/scripts/infra_build.py retry "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet \
             --index-url https://pypi.org/simple dist/agentenv_framework-*.whl \
             "agentenv-framework-protocol[app]==${protocol}"
+      # The folders first, as Docker makes a missing one it mounts root's, which the compose then can't write in.
       - name: Start the local registry, its storage in a folder handed on
         run: |
+          mkdir -p "$RUNNER_TEMP/computers/registry" "$RUNNER_TEMP/computers/composed"
           docker run --detach --name registry --publish 5000:5000 \
             --volume "$RUNNER_TEMP/computers/registry:/var/lib/registry" mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
+      # The runner context is a step's, not a job's. Its resolve can ask PyPI for the protocol moments after the
+      # protocol job published it, before PyPI's index lists it, so it's tried again, each time in fresh stores.
       - name: Compose and probe
+        env:
+          XDG_STATE_HOME: ${{ runner.temp }}/state
         run: |
-          "$RUNNER_TEMP/venv/bin/python" .github/scripts/release_computers.py compose "$ARCH" \
-            "$RUNNER_TEMP/computers/composed"
+          # shellcheck disable=SC2016 # each try's sh expands them
+          python3 .github/scripts/infra_build.py retry sh -c 'rm -rf "$XDG_STATE_HOME" &&
+            "$RUNNER_TEMP/venv/bin/python" .github/scripts/release_computers.py compose "$ARCH" \
+            "$RUNNER_TEMP/computers/composed"'
       - name: Stop the local registry
         run: docker stop registry
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

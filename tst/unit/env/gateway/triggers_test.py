@@ -1492,8 +1492,9 @@ def _fake_waits(engine, monkeypatch, armed_at=None) -> _Waits:
 
 
 class _SteppedClock:
-    """The engine's clock on a fake source that asyncio.sleep advances, so the real virtual-time waits run at once;
-    `.at[n]` runs after the n-th sleep."""
+    """The engine's clock on a fake source that the engine's own naps advance, so the real virtual-time waits run at
+    once; `.at[n]` runs after the n-th nap. Only this engine's naps count: the tests share one event loop, where
+    waits other tests left running still sleep."""
 
     def __init__(self, engine, monkeypatch):
         self.t = 0.0
@@ -1501,10 +1502,10 @@ class _SteppedClock:
         self.at: dict = {}
         self.clock = engine._test_gw._clock = Clock(now_fn=lambda: self.t)
 
-        async def fake_sleep(seconds):
+        async def fake_nap(seconds):
             self.slept.append(seconds)
             assert len(self.slept) < 100, "the wait never ended"
             self.t += seconds
             self.at.pop(len(self.slept), lambda: None)()
 
-        monkeypatch.setattr(triggers_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(engine, "_nap", fake_nap)

@@ -109,8 +109,8 @@ raises.
 Raise `AgentEnvError(code, message, *, retryable=False, applied="no", hint=None, status=400)` to
 answer a caller with a code rather than a crash. From an `@extension` method it answers with
 `status` and the body `{"ok": false, "error": {code, message, retryable, applied, hint?}}`; from a
-`@tool` it answers `isError` with `"<code>: <message>"` as the text and the same fields as the
-structured content. `applied` says whether the call's effect happened (`yes`, `no`, or `unknown`
+`@tool` it answers `isError` with `"<code>: <message> (<hint>)"` as the text, the hint left out when
+there is none, and the same fields as the structured content. `applied` says whether the call's effect happened (`yes`, `no`, or `unknown`
 when it may have been delivered before something failed), and callers retry on their own only when
 `retryable` is true and `applied` is `no`. Any other exception in an extension still answers
 `extension_failed` with status 500, now with `applied: "unknown"`. On the client side,
@@ -759,7 +759,8 @@ class MyDriver(ComputerDriverEnvironment):
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
   and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
   grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
-  computer down. A repeated `request_id`, or a repeated `end`, answers the same. A start past
+  computer down; `list` (a GET) returns `{recordings}`, each still recording as `{recording_id,
+  started_at}`. A repeated `request_id`, or a repeated `end`, answers the same. A start past
   `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
   failing for 60 s end a recording by itself.
 - **Segments.** A segment closes at `max_segment_s`, when the frame size changes or after a gap in the
@@ -797,7 +798,7 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held, counting the recordings a driver that `list`s them has open already; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
 At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), and its layout
 (`conformance/desk.py`) into `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
@@ -1204,7 +1205,8 @@ are the profile's template. The base class adds:
   - **a video** of the tab its context's agent is on, at `fps` (10 by default, 15 at most), encoded as
     `computer-recording/v1`'s is and uploaded a segment at a time under `<recording_id>/video/`. It follows the tab an
     agent last acted on in that context (CDP commands and MCP calls, not agentenv's own), a tab that one opens as
-    soon as it opens, and once it closes the tab followed before it, else the context's newest; it's blank while the
+    soon as it opens, which an action begun on the opener before then, as the click that opened it, doesn't take it
+    back from, and once it closes the tab followed before it, else the context's newest; it's blank while the
     context has no tab. The browser's own connection screencasts that tab, and captures it instead while it sends no
     frame, as a tab behind another in its window does; `video.followed` says which tab showed when, and how.
   - **its log**: at the end, the lines of its context since its start, actions and tab events on its tabs and a
@@ -1251,6 +1253,46 @@ are the profile's template. The base class adds:
   Puppeteer connects by `ws_url`: its `browserURL` drops the address's path.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
+
+## Agent trajectories: ATIF
+
+`agentenv_protocol.atif` is the record every agent serves beside its native log, as format `atif/1`:
+[ATIF v1.8](https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md), Harbor's Agent
+Trajectory Interchange Format, plus agentenv's optional `extra.agentenv` profile. A document without the profile is
+still correct ATIF that means the same, so Harbor's tools read every document as is. `PROFILE.md` beside the module is
+the profile's spec, and `fixtures/` holds its canonical examples. The package needs only the base dependencies.
+
+- **The models** are Harbor 0.26.0's own, vendored in `atif.models` and changed only in import paths (Harbor is
+  Apache-2.0; its license is beside them). `python scripts/vendor_atif.py <version>` refreshes them.
+- **An adapter** turns an agent's native records into ATIF steps. It's a class declared with `@atif_adapter`, whose
+  `@native`, `@aux` and `@finish` methods write through the typed step builder they're handed:
+
+  ```python
+  from agentenv_protocol.atif import Adapter, atif_adapter, native
+
+  @atif_adapter(native_format="my-cli-events/1", version="0.1.0", input_includes_cache=False)
+  class MyCliAtif(Adapter):
+      @native(type="assistant")
+      def assistant(self, record, turn):
+          turn.message(step=record["id"], text=record["text"])
+          turn.step(key=record["id"], model_name=record["model"], input_tokens=record["in"],
+                    cache_read_tokens=record["cache_read"], output_tokens=record["out"])
+
+      @native(type="tool_result")
+      def result(self, record, turn):
+          turn.tool_result(source_call_id=record["call_id"], text=record["output"])
+  ```
+
+  The builder closes a step when the next one starts, puts every result in its call's step, writes `prompt_tokens`
+  with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
+  record no method takes is counted in the root profile.
+- **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
+  time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
+  terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
+  reader's earlier page is always a prefix of a later one. A step is rendered once a page serves it and kept, so a
+  read costs one parse of the document, not a render of every step.
+- **Readers** (`load`, `tasks`, `media_paths`, `strip_profile`, `is_prefix`) take any valid ATIF document, with or
+  without the profile, such as a Harbor task's trajectory.json.
 
 ## A2A agent framework
 
@@ -1346,6 +1388,39 @@ Extensions come from explicit definitions, configured activations, and
 decorated handlers in one validated registry, so routes and card advertisement
 cannot drift.
 
+`Usage` reports what a task used: `tool_call_count`, `input_tokens`,
+`output_tokens`, `total_tokens`, `cost_usd`, the prompt-cache counts
+`cache_read_tokens` and `cache_write_tokens`, and `input_includes_cache`, which
+says whether `input_tokens` counts both cache counts (`True`), neither
+(`False`), or is unknown (`None`, the default). Set the flag whenever you set
+the cache counts: a price can't read them without it. Runtime-specific counts go
+in `provider_details`, but cache counts go in their own fields. `Usage.from_dict`
+reads what `to_dict` wrote under any protocol version, a field it leaves out
+being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
+usage=...)` carries usage on a failure as `success` does.
+
+Whoever makes a model call knows what its counts hold, so an agent builds its own
+`Usage`. `Usage.from_model_response(usage)` is the default reader for a model
+response's own usage, with `input_tokens` counting the cache
+(`input_includes_cache` true), for OpenAI's Chat Completions (`prompt_tokens`)
+and Responses (`input_tokens`) shapes and Anthropic's:
+
+- An OpenAI count, or a LiteLLM client's, counts the cache its
+  `prompt_tokens_details` or `input_tokens_details` names: `cached_tokens`, and
+  `cache_write_tokens` beside it.
+- Anthropic's `input_tokens` counts neither `cache_read_input_tokens` nor
+  `cache_creation_input_tokens`, and neither does the `prompt_tokens` a LiteLLM
+  proxy sends with those two beside it, so they're added, to `total_tokens` too.
+- A provider's split of its cache writes by how long they're kept, priced apart
+  (Anthropic's `cache_creation`, OpenAI's `cache_write_tokens_details`), is kept
+  in `provider_details`, and so are the keys of a usage in none of these shapes,
+  as `unrecognized`. A value that isn't a count is left out.
+
+Through a gateway, whether a response's input counts the cache depends on the
+model behind it: a LiteLLM proxy's Claude answers through Chat Completions leave
+it out, its GPT answers don't. Set `input_includes_cache` per call, never once
+per agent.
+
 `run(request)` is the required execution contract. It is an ordinary method
 and needs no decorator.
 
@@ -1395,6 +1470,31 @@ task canceled and cancels `run()`, which gets `asyncio.CancelledError` at its
 next `await`. A process `run()` started keeps running unless `run()` stops it,
 so kill it before re-raising. Trajectory events it appended, including any it
 appends while cleaning up, are kept, and its log ends `canceled`.
+
+#### The control token
+
+agent-env deploys each agent with a token of its own in `AGENTENV_CONTROL_TOKEN`
+(`CONTROL_TOKEN_ENV`), and sends it on every call to the agent's extension routes
+in the `AgentEnv-Control-Token` header (`CONTROL_TOKEN_HEADER`;
+`client.control_token_headers(token)`), never in `Authorization`, which a front
+door may claim. When the application starts serving, under `serve()` or any ASGI
+server that runs its lifespan, it takes the token out of the environment, so the
+CLIs and tools the agent runs never inherit it, and from then on every extension
+operation refuses a call without it with a 401, before its body is read, and logs
+the refusal. `/a2a`, the card, `/health`, staging and the peer-agents MCP endpoint
+stay open. An agent deployed without a token, or an application that isn't served,
+answers anyone, as before.
+
+An agent that serves its `/ext/*` routes by hand adds `ControlTokenMiddleware`
+(`Middleware(ControlTokenMiddleware)`), which takes the token the same way and
+guards every `/ext/` path but staging and the peer-agents MCP endpoint.
+
+An agent installed into a running container (`install/v1`) gets its token when its
+declaration lists it in `optional_params` (`optional_params_host` for a host
+install): the installer exports it to every install command as
+`AGENTENV_CONTROL_TOKEN`, and the agent's install writes it where the agent's
+server reads its environment. An optional param is never a `{placeholder}`, so an
+installer that doesn't know it still installs the agent, without a token.
 
 #### Live trajectories
 
@@ -1465,6 +1565,137 @@ are dropped, least recently used first; a context with a task still pending or
 running is never dropped, nor is the one whose task has just ended. A running
 task's log is logged as a warning once it passes 100 MiB.
 
+#### Trajectory formats
+
+`native` declares the format of the agent's native trajectory:
+
+```python
+enable(TRAJECTORY_V1, live=True, native="my-cli-events/1")
+```
+
+The card then lists three fields in the trajectory extension's `params`, beside
+`methods`:
+
+- `formats`: the formats a read may name.
+- `native`: the native trajectory's format, which never changes.
+- `default`: the format a read that names none gets; for now it is `native`.
+
+A card without `formats` predates them, so send its reads no `format`. With
+`native` declared, the log starts in that format and `set_format` is optional.
+A `set_format` or a returned `native_trajectory` in another format fails the
+turn as an `agent_error` with code `framework.trajectory_format_mismatch`, whose
+message names both formats.
+
+Every trajectory read takes an optional `format`. A read naming none gets the
+default. A read naming a format the card doesn't list is HTTP 400 with the error
+code `format_not_offered`, and its message lists the formats the card offers.
+That check comes before any handler runs, the agent's own included.
+
+Every read the framework answers names the format it served: `{trajectory, format}`,
+`{objects, format}`, and the cursor reads' `format`. A task whose result carries a
+`native_trajectory` is served in that trajectory's `format`. A context read names
+the most recent format its tasks set. Readers trust a response's `format` over
+the card. An agent that binds its own context reads should name, in their
+responses, the format it serves.
+
+#### Serving ATIF (`atif/1`)
+
+`atif` names the agent's ATIF adapter, an `@atif_adapter` class from
+`agentenv_protocol.atif` that reads the `native` format:
+
+```python
+enable(TRAJECTORY_V1, live=True, native="my-cli-events/1", atif=MyCliAtif)
+```
+
+The card then lists `atif/1` in `formats` too; `default` stays `native`. The
+SDK keeps one ATIF document per A2A context, run through one adapter instance,
+and feeds it every event the agent appends, as it appends it. A native
+trajectory returned at task end runs through the adapter then. The agent's own
+code feeds the adapter's aux files, records that aren't in the native log such
+as a hook's notes, with `request.trajectory.aux(name, record)`, where they
+happened among the events. An agent with an adapter that both appends events and
+returns a native trajectory fails the turn with code
+`framework.trajectory_appended_and_returned`, since its ATIF copy would come
+from one of them and its native record from the other.
+
+The SDK writes each task's user step from the inbound message and its final
+response from the result, both as [PROFILE.md](src/agentenv_protocol/atif/PROFILE.md)
+says, stamped on the clock the agent's programs read: the universe's when the
+agent follows the env's clock, though the server itself stays on real time. `session_id` is the A2A context id, and `trajectory_id` names the document.
+Reads naming `atif/1` are served by the SDK, context reads an agent binds
+included:
+
+- A task read returns the context's document as it stood when the task ended,
+  with `aux`, the task's aux log (each record with `after`, the number of events
+  before it), and `turn_context`, its TurnContext and how it ended: an
+  `AuxEntry` each and a `ServedTurn`, both in `agentenv_protocol.atif`. With
+  those and the native events, `RecordedTask.from_served` and `replay` rebuild
+  the document offline. In the objects form, `aux` and `turn_context` are optional
+  grants beside `trajectory`, uploaded only when given; other reads refuse them.
+- A context read returns the live page: every step that has closed and whose
+  calls are all answered, up to the first that isn't.
+- A cursor read pages those closed steps by `step_id`: `after` is the last
+  `step_id` read, and `next` is the last one served. Each page carries `header`,
+  the document's root without its steps (with `final_metrics` once no task is
+  open), and `subagents`, the embedded
+  sub-agent trajectories of the tasks its steps belong to, as far as each is
+  served. A sub-agent can gain steps while its task runs, so keep each one's
+  latest copy; the page that serves a task's last step, which closes only as the
+  task ends, carries them whole.
+
+Every `atif/1` answer names `schema_version` and `profile_version` beside
+`format`. An adapter that raises stops its context's copy, never the turn: the
+copy's reads then answer HTTP 409 with code `atif_unavailable`, and native reads
+are unaffected.
+
+Each task's user step carries its turn index, the number of tasks its context
+started before it. The SDK keeps each context's count on disk, under
+`agentenv/turns/` in the user's state folder (`$XDG_STATE_HOME`, else
+`~/.local/state`), so a restarted server, or a context it dropped
+from memory, goes on counting in a new document of the same session; a home it
+can't write keeps the counts in memory, with one warning. A snapshot carries the
+count in its `state` object, a JSON object that is the SDK's own: on save the
+SDK uploads it after the agent's handler returns and adds it to the answer, and
+on load it reads it before the agent's handler runs and seeds the context the
+handler restored into, whose next task goes on from the snapshot's count in a
+new document. While such a save or load is in flight, a task of its context
+waits to start until the agent's handler returns, so the count is the
+conversation's the agent captured; a task already running goes on, as a capture
+mid-task expects. The agent's handlers leave `state` alone. The card's snapshot
+extension names the state the SDK keeps (`"state": ["turns"]` in its params,
+`SNAPSHOT_STATE_PARAM`), and agent-env grants the object only to an agent whose
+card has it, since an SDK from before it refuses the object.
+
+Every `atif/1` read leaves out the secrets the SDK knows, each written
+`[redacted:<length>]` wherever it occurs: in the document, the aux log and the
+turn context, inline, uploaded and in cursor pages, whose byte budget counts
+what they serve. The SDK knows:
+
+- its control token, and the model credentials in its environment:
+  `LITELLM_API_KEY` and the values of `LITELLM_EXTRA_HEADERS`;
+- write-only agent-config values: a string whole, and in a mapping what a
+  credential-like key names (`Authorization`, `api_key`, `token`, `password`,
+  ...), so a mapping of sampling parameters keeps its ordinary words;
+- an MCP registration's header values and credential-like query values, and a
+  CDP endpoint's header values and the token in its URLs;
+- every transfer grant an extension call hands the agent: the parts of its URL
+  that carry the credential (a presigned URL's credential-like query values,
+  `X-Amz-Signature` but not `X-Amz-Algorithm`, decoded and as the URL writes
+  them; else a token-like path segment; a password), its headers other than `Content-Type` and the
+  like, and a signed upload form's signing fields. Every copy of the URL holds
+  those parts, so a URL an agent prints keeps its host and path and loses its
+  signature;
+- a clock follower's read token;
+- whatever the agent registers with `self.register_secret(value)`, once its app
+  exists (in `run`, say).
+
+They're taken from each extension call before any handler runs, the agent's own
+included. A value under 8 characters isn't scrubbed, with a warning naming where
+it came from. Each is matched raw, JSON-escaped and percent-encoded, the longest
+first, and a read scrubs as it serves, so a secret learned after a step was
+written is left out too. Native reads keep every secret byte for byte, so a
+replay of the served inputs holds what the served copy redacts.
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic
@@ -1485,8 +1716,11 @@ configuration keywords, and third-party definitions use the same public API as
 the built-ins.
 
 Extension request parsing and schema validation failures return HTTP 400.
-Unhandled exceptions raised by an implementation handler return HTTP 500;
-handlers use `HTTPException` when they intentionally need another status.
+An `AgentEnvError` raised by a handler answers with its `status` and the body
+`{"ok": false, "error": {code, message, retryable, applied, hint?}}`, as it does
+from an env (see [Errors](#errors)). Other unhandled exceptions raised by an
+implementation handler return HTTP 500 with a correlation ID; handlers use
+`HTTPException` when they intentionally need another status.
 
 Passing `config=MyAgentConfig` automatically enables `AGENT_CONFIG_V1`; direct
 `enable(AGENT_CONFIG_V1, ...)` declarations are rejected. The model's fields become the Agent Card's
@@ -1597,7 +1831,9 @@ counterpart. Without them, or `enable(TRAJECTORY_V1, live=True)`, the
 generated card advertises only the framework-owned completed-task variants:
 `{task_id}`, answered inline, and `{task_id, objects}`, answered by upload.
 Snapshot `save` and `load` are an atomic core contract, while its optional
-changelog handlers are enabled as an atomic feature group.
+changelog handlers are enabled as an atomic feature group. A snapshot's optional
+`state` object is the SDK's own, which its handlers leave alone (see
+[Serving ATIF](#serving-atif-atif1)).
 Each operation has at most one response model. The framework validates a
 handler's return value against it before serializing, so a response with a
 missing or unknown field is an HTTP 500.
@@ -1763,7 +1999,18 @@ operations:
   records a call, each action must be one the last recorded call made, by name and
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
-  Calls to tools the turn doesn't offer aren't checked.
+  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's: a `Usage` the
+  driver reports under `REPORTED_USAGE_KEY` (`{"agentenv_usage": usage.to_dict()}`), taken as
+  given, or else the model response's own, read by `Usage.from_model_response`. It rides in
+  `usage` rather than a field of its own, so a proxy on an earlier protocol still takes the
+  record. A reported `Usage` that isn't one gets 400 and leaves the turn as it was. The call's
+  input is made to count the cache, its `chat` span shows that reading, and its turn sums it.
+  The turn's `Usage`, on its reply or its error, sums each count over the calls that gave it,
+  `cost_usd` included. Its `provider_details` give `model_calls`, how many were recorded;
+  `unreported`, how many left out each count only some gave, so such a sum reads as a lower
+  bound; `cache_unsettled`, how many had cache counts with no word on whether their input held
+  them, which leaves the turn's flag unknown; `unrecognized`, how many usages were in no shape
+  the reader knows; and each provider's cache-write split, summed.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 
@@ -1815,9 +2062,9 @@ optional field, `|` an alternative request):
 | Operation | Request | Response |
 | --- | --- | --- |
 | skill `add` | `{name, description, skill_md}` \| `{name, description, skill_bundle: {max_total_bytes, files: [{path, object: ReadObject}]}}` | `{name}` |
-| trajectory `get` | `{task_id}` \| `{context_id}` | `{trajectory}` |
-| | `{task_id \| context_id, objects: {trajectory: WriteObject}}` | `{objects: {trajectory: Uploaded}}` |
-| | `{task_id \| context_id, after, limit?}` | `{context_id, task_id, state, format, events, next, has_more}` |
+| trajectory `get` | `{task_id, format?}` \| `{context_id, format?}` | `{trajectory, format}` |
+| | `{task_id \| context_id, objects: {trajectory: WriteObject}, format?}` | `{objects: {trajectory: Uploaded}, format}` |
+| | `{task_id \| context_id, after, limit?, format?}` | `{context_id, task_id, state, format, events, next, has_more}` |
 | snapshot `save` | `{context_id, objects: {trajectory: WriteObject, workspace?: WriteObject}}` | `{context_id, objects: {trajectory: Uploaded, workspace?: Uploaded}}` |
 | snapshot `load` | `{objects: {trajectory: ReadObject, workspace?: ReadObject}, target_context_id?}` | `{context_id}` |
 | `enable-changelog` | `{write_namespace: WriteNamespaceGrant, roots?}` | `{roots}` |

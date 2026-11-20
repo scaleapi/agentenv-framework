@@ -10,7 +10,6 @@ never reaches a configured store. Reading it never creates the store.
 from __future__ import annotations
 
 import hashlib
-import json
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
@@ -31,6 +30,8 @@ from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentSto
 from agent_env.store.ids import local_namespace
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
+from agent_env.utils.canonical import canonical_json
+from agent_env.utils.docker.context import shared_files
 
 from .authoring import build_context_files
 from .parse import BundleKind
@@ -146,10 +147,15 @@ class Ledger:
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
+            if built:
+                for key, path in shared_files(write.source.entry.path).items():
+                    inputs["files"][key] = _file_sha256(path) + _mode(path)
         if (published := self._plan.published.get(write.id)) is not None:
             inputs["published"] = published.pinned
         if write.requires:
             inputs["requires"] = list(write.requires)
+        if write.kind is BundleKind.TASK and write.source.entry.headline_verifiers:
+            inputs["headline_verifiers"] = list(write.source.entry.headline_verifiers)
         if self.pins_references or write.kind not in (BundleKind.TASK, BundleKind.EVAL):
             # A document records the versions of what it references (an env its images, a universe its
             # environments), so one written anew means it must be written again. A task or eval a run writes names
@@ -248,10 +254,11 @@ def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for an env type with a ``from_toml`` of
     its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
     every file in its folder (``folder_files``) and what it references; an agent or env from its
-    toml and what it references. A built image is made from its build context, ``build_context_files``, and the
-    image published for it when there is one (``Plan.published``); what the build fetches (its base image, packages)
-    isn't an input. A referenced image is made from its ref's text, so a tag
-    that moves in its registry isn't a change. An image folder's image is also made from its description."""
+    toml and what it references. A built image is made from its build context, ``build_context_files`` and what
+    its ``shared_sources.toml`` takes from agent-env's sources (``shared_files``), and the image published for it when
+    there is one (``Plan.published``); what the build fetches (its base image, packages) isn't an input. A referenced
+    image is made from its ref's text, so a tag that moves in its registry isn't a change. An image folder's image is
+    also made from its description."""
     if isinstance(write.source, BundleImage):
         return True
     if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
@@ -296,6 +303,9 @@ def _changes(row: Mapping[str, Any], digest: Digest) -> list[str]:
         reasons.append("config changed")
     if before.get("requires") != after.get("requires"):
         reasons.append(f"requires {', '.join(after['requires'])}" if after.get("requires") else "requires nothing")
+    if before.get("headline_verifiers") != after.get("headline_verifiers"):
+        reasons.append(f"headline_verifiers {', '.join(after['headline_verifiers'])}" if after.get("headline_verifiers")
+                       else "no headline_verifiers")
     if before.get("published") != after.get("published"):
         reasons.append(f"published as {after['published'].partition('@')[0]}" if after.get("published")
                        else "not found published")
@@ -321,7 +331,7 @@ def _diff(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[list[str
 
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_scalar).encode()
+    return canonical_json(value, default=_scalar)
 
 
 def _scalar(value: Any) -> str:
