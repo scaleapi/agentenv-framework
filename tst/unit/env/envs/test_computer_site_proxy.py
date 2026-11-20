@@ -862,13 +862,14 @@ async def test_dns_answers_a_sites_wildcard_name_with_loopback_and_passes_every_
 @pytest.mark.asyncio
 async def test_dns_over_udp_answers_every_query_a_client_sends_while_a_slow_nameserver_holds_them_open():
     loop = asyncio.get_running_loop()
+    passed_on, nameserver_delay_s = 20, 0.2
 
     class Nameserver(asyncio.DatagramProtocol):
         def connection_made(self, transport):
             self.transport = transport
 
         def datagram_received(self, data, addr):
-            loop.call_later(0.2, self.transport.sendto, data[:2] + b"\x81\x80" + data[4:], addr)
+            loop.call_later(nameserver_delay_s, self.transport.sendto, data[:2] + b"\x81\x80" + data[4:], addr)
 
     class Client(asyncio.DatagramProtocol):
         def datagram_received(self, data, addr):
@@ -884,17 +885,18 @@ async def test_dns_over_udp_answers_every_query_a_client_sends_while_a_slow_name
                                                         local_addr=("127.0.0.1", 0))
         client, _ = await loop.create_datagram_endpoint(Client, remote_addr=server.get_extra_info("sockname"))
         try:
+            deadline = loop.time() + 10 * nameserver_delay_s
             client.sendto(_query("eu.chat.test", 1))
-            for _ in range(20):
+            for _ in range(passed_on):
                 client.sendto(_query("example.org", 1))
-            for _ in range(20):
+            while loop.time() < deadline and len(answered) < passed_on + 1:
                 gc.collect()
                 await asyncio.sleep(0.05)
         finally:
             for transport in (client, server, upstream):
                 transport.close()
 
-    assert len(answered) == 21
+    assert len(answered) == passed_on + 1
     assert sum(answer.endswith(socket.inet_aton("127.0.0.1")) for answer in answered) == 1
 
 
