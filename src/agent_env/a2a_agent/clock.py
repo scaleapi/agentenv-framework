@@ -3,8 +3,9 @@
 runs reads the env's time. ``follow`` declares it at the gateway as a follower with a read token of its own, then calls
 its ``sync_time`` with the follower's config: the gateway's watch URL as the agent's sandbox reaches it, the name the
 gateway knows it by and that token. From then on a clock write that waits for followers (``wait_followers_s``) waits
-for the agent too. ``sync_env_clock`` has every agent registered with the env follow once it has armed the clock, and
-``deploy_agent`` an agent it deploys while the clock is armed. An agent has one follower, so it follows one env's
+for the agent too. Only a task that opts in (``sync_env_clock``'s ``agent_clock``, off by default) has agents follow:
+``sync_env_clock`` has every agent registered with the env follow once it has armed the clock, and ``deploy_agent`` an
+agent it deploys while that clock is armed. An agent has one follower, so it follows one env's
 clock: the first env it's registered with (``clock_env``), whatever order steps arm clocks in, even at once; another
 env's is reported and skipped (``follows_another_env``). When ``teardown_sandboxes`` takes the agent's sandbox down,
 ``retire_followers`` has the gateway it follows stop waiting for it. Which
@@ -186,23 +187,37 @@ def _armed(context: TaskStepContext, env: DeployedEnv) -> Optional[dict]:
                  and c.get("deploy_step_id", _deploy_step_of(env)) == _deploy_step_of(env)), None)
 
 
+async def follow_agents(context: TaskStepContext, env: DeployedEnv, agents, *, env_get_time_url: Optional[str],
+                        timezone: Optional[str], required: bool, timeout: float) -> list[dict]:
+    """Have each of ``agents`` follow ``env``'s clock (``follow_in``), for ``sync_env_clock`` and a late
+    ``deploy_agent`` alike: one that can't is reported and skipped, or fails the step when ``required``."""
+    outcomes = []
+    for agent in agents:
+        outcome = await follow_in(context, agent, env, env_get_time_url=env_get_time_url, timezone=timezone,
+                                  timeout=timeout)
+        if not outcome["synced"] and required:
+            raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env '{env.env_id}': "
+                                   f"{outcome['reason']}")
+        logger.info(f"agent '{agent.agent_name}' on env {env.env_id}'s clock: {summary(outcome)}")
+        outcomes.append({"agent": agent.agent_name, **outcome})
+    return outcomes
+
+
 async def follow_armed_clocks(context: TaskStepContext, agent: DeployedAgent, *,
                               timeout: float = LATE_FOLLOW_TIMEOUT_S) -> list[dict]:
     """Have an agent ``deploy_agent`` just deployed follow the clock of each env registered with it that this run has
-    armed, as ``sync_env_clock`` has every agent then: one that can't is reported and skipped, or fails the step under
-    that step's ``require_agent_clock``."""
+    armed with ``agent_clock``, as ``sync_env_clock`` has every agent then (``follow_agents``). A clock armed without
+    it, or by a run from before it, is one agents don't follow."""
     outcomes = []
     for env_id in agent.env_ids:
         env = _agent_deployment(context, agent, env_id)
-        if env is None or gateway_url_of(env) is None or (armed := _armed(context, env)) is None:
+        armed = _armed(context, env) if env is not None and gateway_url_of(env) is not None else None
+        if armed is None or not armed.get("agent_clock", False):
             continue
-        outcome = await follow_in(context, agent, env, env_get_time_url=armed.get("env_get_time_url"),
-                                  timezone=armed.get("timezone"), timeout=timeout)
-        if not outcome["synced"] and armed.get("require_agent_clock", False):
-            raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env '{env_id}': "
-                                   f"{outcome['reason']}")
-        logger.info(f"agent '{agent.agent_name}' on env {env_id}'s clock: {summary(outcome)}")
-        outcomes.append({"env_id": env_id, "agent": agent.agent_name, **outcome})
+        followed = await follow_agents(context, env, [agent], env_get_time_url=armed.get("env_get_time_url"),
+                                       timezone=armed.get("timezone"), required=armed.get("require_agent_clock", False),
+                                       timeout=timeout)
+        outcomes.extend({"env_id": env_id, **outcome} for outcome in followed)
     return outcomes
 
 
