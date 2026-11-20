@@ -129,7 +129,8 @@ class CodexResult:
     token_usage: dict | None = None
     model_requests: int | None = None
     # A model request the bridge's own stop cut short: the CLI counts a response only once it completes, so the one in
-    # flight when the bridge stopped it at its tool-call limit, timeout or stall is in neither count.
+    # flight when the bridge stopped it at its tool-call limit, timeout or stall is in neither count. A stop during a
+    # tool call cut none: the response that asked for the tool was counted.
     unreported_calls: int = 0
 
 
@@ -859,6 +860,7 @@ async def _run_codex_once(
         turn_completed = False
         usage: dict = {}
         captured_thread_id: str | None = thread_id
+        running_tools: set = set()
 
         for event in trajectory:
             etype = event.get("type")
@@ -868,9 +870,12 @@ async def _run_codex_once(
                 turn_completed = True
                 if isinstance(event.get("usage"), dict):
                     usage = dict(event["usage"])
+            elif etype == "item.started" and (event.get("item") or {}).get("type") in _TOOL_ITEM_TYPES:
+                running_tools.add(event["item"].get("id"))
             elif etype == "item.completed":
                 item = event.get("item") or {}
                 item_type = item.get("type")
+                running_tools.discard(item.get("id"))
                 if item_type == "agent_message":
                     # Last message wins.
                     final_message = item.get("text", "")
@@ -932,7 +937,7 @@ async def _run_codex_once(
             error_detail=detail,
             warnings=warnings,
             usage=usage,
-            unreported_calls=1 if stopped else 0,
+            unreported_calls=1 if stopped and not running_tools else 0,
         )
     finally:
         _RUNNING.discard(proc)
