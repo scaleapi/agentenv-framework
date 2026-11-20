@@ -84,17 +84,19 @@ def test_the_image_copies_every_module_the_server_imports_beside_it():
 
 
 def test_an_install_imports_every_module_the_server_imports_from_the_build_context_it_unpacks(tmp_path):
-    """install/v1 unpacks the build context, which keeps the shared modules in the folders it takes them as, and
-    start.sh puts those folders on the server's path before it runs the server from the context's top."""
-    archive = tmp_path / "ctx.tar.gz"
+    """install/v1 unpacks the build context, which keeps the shared modules in the folders it takes them as; install.sh
+    copies them beside the bridge, and start.sh runs the server from there, with no PYTHONPATH the model's commands
+    would inherit."""
+    archive, here = tmp_path / "ctx.tar.gz", tmp_path / "pi-a2a"
     BuildContext.of(AGENT_DIR, AGENT_DIR / "Dockerfile").write(archive)
     with tarfile.open(archive) as tar:
-        tar.extractall(tmp_path / "pi-a2a", filter="data")
-    [path] = [line for line in (AGENT_DIR / "start.sh").read_text().splitlines() if line.startswith("export PYTHONPATH=")]
+        tar.extractall(here, filter="data")
+    beside = INSTALL_SH[INSTALL_SH.index('if [ -d "$here/agent_clock" ]'):]
     imports = ", ".join(sorted(set(_server_modules()) - {"a2a_server"}))
-    script = f'here={tmp_path / "pi-a2a"}; {path}; cd "$here" && exec "$0" -c "import {imports}"'
 
-    subprocess.run(["sh", "-c", script, sys.executable], check=True, env={"PATH": "/usr/bin:/bin"})
+    subprocess.run(["sh", "-c", f'here={here}; {beside}'], check=True, env={"PATH": "/usr/bin:/bin"})
+    subprocess.run([sys.executable, "-c", f"import {imports}"], cwd=here, check=True, env={"PATH": "/usr/bin:/bin"})
+    assert "PYTHONPATH" not in (AGENT_DIR / "start.sh").read_text()
 
 
 def test_install_sh_pins_node_by_its_checksum_and_pi_by_the_version_the_bridge_names():

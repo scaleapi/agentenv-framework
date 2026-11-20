@@ -30,3 +30,8 @@ PATH="/opt/node/bin:$PATH" npm install --global --prefix /opt/pi --ignore-script
 
 python3 -m venv /opt/pi-a2a-venv
 /opt/pi-a2a-venv/bin/pip install --no-cache-dir -r "$here/requirements.txt"
+# install/v1 unpacks the build context, which keeps the shared egress rule and the clock page's format in the folders
+# shared_sources.toml takes them as; the bridge imports them from beside it, where the image's build copies them.
+if [ -d "$here/agent_clock" ]; then
+  cp "$here/agent_clock/agent_egress.py" "$here/clock/clockpage.py" "$here/"
+fi
