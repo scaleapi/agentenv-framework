@@ -43,6 +43,9 @@ _NAME_WORD = re.compile(r"[a-z0-9]+")
 #: token is: longer than an ordinary path's words, unlike ``MIN_SECRET_LENGTH``, which bounds what is scrubbed at all.
 MIN_TOKEN_SEGMENT_LENGTH = 16
 _TOKEN_SEGMENT = re.compile(rf"[A-Za-z0-9_.=~+-]{{{MIN_TOKEN_SEGMENT_LENGTH},}}")
+#: A media file's name, ``<sha256>.<ext>``: a grant's path may name the file it writes, which names its bytes, not a
+#: credential, and which every atif/1 copy that holds the file must keep.
+_MEDIA_NAME = re.compile(r"[0-9a-f]{64}\.[A-Za-z0-9]+")
 
 T = TypeVar("T")
 
@@ -245,7 +248,8 @@ def _url_secrets(url: str) -> list[str]:
     parts = urlsplit(url)
     carried = _query_values(url)
     if not carried:
-        carried = [segment for segment in parts.path.split("/") if _TOKEN_SEGMENT.fullmatch(segment)]
+        carried = [segment for segment in parts.path.split("/")
+                   if _TOKEN_SEGMENT.fullmatch(segment) and not _MEDIA_NAME.fullmatch(segment)]
     return [*carried, *([parts.password] if parts.password else [])]
 
 

@@ -68,6 +68,8 @@ from .extensions import (
     AtifObjectsResponse,
     AtifUploadedObjects,
     TrajectoryEventsResponse,
+    TrajectoryMediaRequest,
+    TrajectoryMediaResponse,
     TrajectoryObjectsResponse,
     TrajectoryState,
     TrajectoryUploadedObjects,
@@ -75,6 +77,7 @@ from .extensions import (
     TriggerRegisterRequest,
     enable,
 )
+from ..atif import media_file
 from ..computer.errors import ComputerError
 from ..errors import AgentEnvError
 from ..types import error_body
@@ -101,7 +104,7 @@ from .tasks.v1 import (
 from .tasks.v1 import (
     TextPart as TaskTextPart,
 )
-from ..transfers import TransferError, serving_on, upload
+from ..transfers import TransferError, Uploaded, serving_on, upload
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +128,8 @@ class _ServingOnItsPort:
 _AGENT_DEFINITION = "_agentenv_a2a_definition"
 _AgentT = TypeVar("_AgentT", bound="AgentEnvAgent")
 _MAX_CACHED_CONTEXTS = 1_024
+#: How many of a media call's files upload at once.
+MAX_PARALLEL_MEDIA_PUSHES = 8
 
 
 def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
@@ -682,6 +687,7 @@ class _SdkServices:
             (PEER_AGENTS_V1.uri, "list"): self.peer_agents_list,
             (SKILL_CONFIG_V1.uri, "list"): self.skill_list,
             (TRAJECTORY_V1.uri, "get"): self.trajectory_get,
+            (TRAJECTORY_V1.uri, "media"): self.trajectory_media,
             (TRIGGERS_V1.uri, "register"): self.triggers_register,
             (TRIGGERS_V1.uri, "decide"): self.triggers_decide,
             (TRIGGERS_V1.uri, "state"): self.triggers_state,
@@ -964,6 +970,39 @@ class _SdkServices:
         )
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
 
+    async def trajectory_media(self, request: TrajectoryMediaRequest) -> dict[str, Any]:
+        """Upload the media files of a context's atif/1 copy the worker asks for, each under its grant and from the
+        spool, ``MAX_PARALLEL_MEDIA_PUSHES`` at a time, checking each upload's bytes against its name. A path the
+        context holds no file for is ``missing``, an upload that fails is ``failed``, and neither stops the rest; a
+        file uploaded leaves the spool."""
+        media = self.task_trajectories.media
+        uploaded: dict[str, Uploaded] = {}
+        missing: list[str] = []
+        failed: dict[str, str] = {}
+        gate = asyncio.Semaphore(MAX_PARALLEL_MEDIA_PUSHES)
+
+        async def push(path: str, target: Any) -> None:
+            file = media.held(request.context_id, path)
+            if file is None:
+                missing.append(path)
+                return
+            async with gate:
+                try:
+                    done = await upload(target, file)
+                except TransferError as exc:
+                    failed[path] = f"{exc.code}: {exc}"
+                    return
+            if done.sha256 is not None and done.sha256 != media_file(path):
+                failed[path] = f"the upload's sha256 is {done.sha256}"
+                return
+            uploaded[path] = done
+            media.release(request.context_id, path)
+
+        await asyncio.gather(*(push(path, target) for path, target in request.objects.items()))
+        return TrajectoryMediaResponse(objects=uploaded, missing=sorted(missing), failed=failed).model_dump(
+            mode="json", exclude_none=True
+        )
+
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
         runs, the agent's own included."""
@@ -1128,7 +1167,8 @@ def _taking_the_control_token(
     inner: Callable[[Starlette], AbstractAsyncContextManager] | None,
 ) -> Callable[[Starlette], AbstractAsyncContextManager]:
     """The application's lifespan, ``inner``'s if it has one: serving starts by taking the agent's control token out of
-    the environment, and the extension routes take it from then on. An application that isn't served stays open."""
+    the environment, and the extension routes take it from then on, and ends by removing the media spool. An
+    application that isn't served stays open."""
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[Any]:
@@ -1136,11 +1176,15 @@ def _taking_the_control_token(
         log_guard(application.control_token)
         if application.services.secrets is not None:
             application.services.secrets.add(application.control_token, source="the control token")
-        if inner is None:
-            yield None
-        else:
-            async with inner(app) as state:
-                yield state
+        try:
+            if inner is None:
+                yield None
+            else:
+                async with inner(app) as state:
+                    yield state
+        finally:
+            # The media the worker didn't pull go with the server.
+            application.services.task_trajectories.media.close()
 
     return lifespan
 
@@ -1354,7 +1398,7 @@ class A2AAgentApplication:
                     extension_request = request_model.model_validate(payload)
                     if self.services.secrets is not None:
                         self.services.secrets.add_request(extension_request)
-                if extension_uri == TRAJECTORY_V1.uri:
+                if extension_uri == TRAJECTORY_V1.uri and operation.definition.name == "get":
                     self.services.check_trajectory_format(extension_request.format)
                     if extension_request.format == ATIF_FORMAT:
                         # The SDK serves atif/1 from its own copy, context reads an agent binds included.
