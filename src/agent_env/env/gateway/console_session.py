@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import logging
 import re
+import secrets
 import time
 from collections.abc import Callable, Iterable
 
@@ -22,9 +23,11 @@ LINK_MAX_SECONDS = 300
 SESSION_SECONDS = 900
 EXPIRY_MAX_DIGITS = 12
 SIGNATURE_CHARS = 43  # an unpadded base64url SHA-256 digest
+NONCE_BYTES, NONCE_CHARS = 8, 11  # a link's nonce, and its unpadded base64url
 COOKIE_NAME_HEX_CHARS = 8
 _KEY_LABEL = b"pgweb-console-v1"
-_SIGNED = re.compile(rf"([0-9]{{1,{EXPIRY_MAX_DIGITS}}})\.([A-Za-z0-9_-]{{{SIGNATURE_CHARS}}})")
+_COOKIE = re.compile(rf"([0-9]{{1,{EXPIRY_MAX_DIGITS}}})\.([A-Za-z0-9_-]{{{SIGNATURE_CHARS}}})")
+_LINK = re.compile(rf"([0-9]{{1,{EXPIRY_MAX_DIGITS}}})\.([A-Za-z0-9_-]{{{NONCE_CHARS}}})\.([A-Za-z0-9_-]{{{SIGNATURE_CHARS}}})")
 _LINK_IN_LOG = re.compile(rf"({LINK_PARAM}=)[^&\s\"']+")
 _FRAME_ANCESTOR = re.compile(r"https?://(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:[0-9]{1,5})?")
 
@@ -39,41 +42,48 @@ class ConsoleSession:
         name = hmac.new(self._key, b"cookie-name", hashlib.sha256).hexdigest()[:COOKIE_NAME_HEX_CHARS]
         self.cookie_name = COOKIE_PREFIX + name
 
-    def _sign(self, purpose: str, expires_at: int) -> str:
-        digest = hmac.new(self._key, f"{purpose}:{expires_at}".encode(), hashlib.sha256).digest()
-        return f"{expires_at}.{base64.urlsafe_b64encode(digest).rstrip(b'=').decode()}"
+    def _mac(self, text: str) -> str:
+        digest = hmac.new(self._key, text.encode(), hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
-    def _expiry(self, purpose: str, value: str, longest: int) -> int | None:
-        match = _SIGNED.fullmatch(value)
-        if not match:
-            return None
-        expires_at, now = int(match[1]), int(self._now())
-        if now < expires_at <= now + longest and hmac.compare_digest(self._sign(purpose, expires_at), value):
-            return expires_at
-        return None
+    def _live(self, expires_at: int, longest: int) -> bool:
+        now = int(self._now())
+        return now < expires_at <= now + longest
 
     def link(self, seconds: int = LINK_DEFAULT_SECONDS) -> str:
+        """A link that opens the console once within ``seconds``: ``<expiry>.<nonce>.<signature>``, so two links minted
+        in the same second still differ."""
         if not 0 < seconds <= LINK_MAX_SECONDS:
             raise ValueError(f"a pgweb link lasts 1 to {LINK_MAX_SECONDS} seconds, not {seconds}")
-        return self._sign("link", int(self._now()) + seconds)
+        expires_at, nonce = int(self._now()) + seconds, secrets.token_urlsafe(NONCE_BYTES)
+        return f"{expires_at}.{nonce}.{self._mac(f'link:{expires_at}:{nonce}')}"
 
     def opens(self, link: str) -> bool:
         """Whether ``link`` is live and unused; a link that opens is spent."""
         now = int(self._now())
         self._spent = {spent: expires_at for spent, expires_at in self._spent.items() if expires_at > now}
-        if link in self._spent or (expires_at := self._expiry("link", link, LINK_MAX_SECONDS)) is None:
+        match = _LINK.fullmatch(link)
+        if link in self._spent or not match or not self._live(expires_at := int(match[1]), LINK_MAX_SECONDS) \
+                or not hmac.compare_digest(self._mac(f"link:{expires_at}:{match[2]}"), match[3]):
             return False
         self._spent[link] = expires_at
         return True
 
+    def _cookie_value(self, expires_at: int) -> str:
+        return f"{expires_at}.{self._mac(f'cookie:{expires_at}')}"
+
     def set_cookie(self) -> str:
-        value = self._sign("cookie", int(self._now()) + SESSION_SECONDS)
+        value = self._cookie_value(int(self._now()) + SESSION_SECONDS)
         return (f"{self.cookie_name}={value}; Max-Age={SESSION_SECONDS}; Path=/; Secure; HttpOnly; SameSite=None; "
                 "Partitioned")
 
     def _session_expiry(self, scope: dict) -> int | None:
-        expiries = [expires_at for value in cookie_values(scope.get("headers", ()), self.cookie_name)
-                    if (expires_at := self._expiry("cookie", value, SESSION_SECONDS)) is not None]
+        expiries = []
+        for value in cookie_values(scope.get("headers", ()), self.cookie_name):
+            match = _COOKIE.fullmatch(value)
+            if match and self._live(expires_at := int(match[1]), SESSION_SECONDS) \
+                    and hmac.compare_digest(self._cookie_value(expires_at), value):
+                expiries.append(expires_at)
         return max(expiries, default=None)
 
     def admits(self, scope: dict) -> bool:

@@ -442,3 +442,14 @@ def test_a_link_lasts_one_to_three_hundred_seconds(seconds):
     with pytest.raises(ValueError, match="1 to 300 seconds"):
         _mint().link(seconds)
     assert _mint().opens(_mint().link(300))
+
+
+@pytest.mark.asyncio
+async def test_two_links_minted_in_one_second_differ_and_each_opens_once():
+    session = ConsoleSession(TOKEN, now=lambda: 1_800_000_000)
+    first, second = session.link(), session.link()
+    assert first != second
+    gateway = _gateway(TOKEN)
+    gateway._console_session._now = lambda: 1_800_000_000
+    codes = [(await _send(gateway, "GET", f"/svc/pgweb/?pgweb_link={link}", {}))[0] for link in (first, second, first)]
+    assert codes == [303, 303, 401]
