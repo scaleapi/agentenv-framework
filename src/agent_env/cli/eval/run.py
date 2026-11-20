@@ -46,7 +46,7 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     from agent_env.eval import Eval
     from agent_env.task import Task
-    from agent_env.task.lint import lint, refuses, said
+    from agent_env.task.lint import UNPINNED, lint, refuses, said, unpinned_summary
 
     click.echo(f"Fetching eval: id={eval_id} version={eval_version or 'latest'}...")
     eval_obj = Eval.get(eval_id, version=eval_version)
@@ -66,8 +66,9 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         for task, finding in refused:
             click.echo(f"  - {task}: {finding.text}", err=True)
         raise SystemExit(1)
-    for line in said(findings):
-        click.echo(f"  {line}")
+    for line in [*said((task, f) for task, f in findings if f.rule != UNPINNED), unpinned_summary(findings)]:
+        if line is not None:
+            click.echo(f"  {line}")
 
     print_banner()
 

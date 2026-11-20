@@ -3,6 +3,7 @@ correctly, and refuses the run; everything else is a warning, which blocks nothi
 
 from __future__ import annotations
 
+import collections
 import copy
 import difflib
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ class Finding:
     rule: str
     message: str
     step_id: str | None = None
+    about: str | None = None  # what the finding names, for a summary to count by: an unpinned reference's entity kind
 
     @property
     def text(self) -> str:
@@ -62,6 +64,7 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
 
 #: How many of the tasks a finding is in a run names, before how many more.
 SHOWN_TASKS = 3
+UNPINNED = "unpinned-reference"
 
 
 def said(findings: Iterable[tuple[str, Finding]]) -> list[str]:
@@ -79,6 +82,24 @@ def said(findings: Iterable[tuple[str, Finding]]) -> list[str]:
             shown = ", ".join(tasks[:SHOWN_TASKS]) + (f" and {more} more" if more > 0 else "")
             lines.append(f"{severity.value}: {text} ({len(tasks)} tasks: {shown}; agent-env task lint lists each)")
     return lines
+
+
+def unpinned_summary(findings: Iterable[tuple[str, Finding]]) -> str | None:
+    """``findings``' unpinned references as one line, by how many tasks name how many of each kind: an eval of
+    thousands of tasks naming the latest of their agents and artifacts, as the hub's do, would otherwise say one line
+    for each, since each names its own step. None when there are none."""
+    tasks, kinds = set(), collections.Counter()
+    for task, finding in findings:
+        if finding.rule == UNPINNED:
+            tasks.add(task)
+            kinds[finding.about] += 1
+    if not tasks:
+        return None
+    total = sum(kinds.values())
+    counts = ", ".join(f"{kind} {n:,}" for kind, n in kinds.most_common())
+    return (f"warning: {len(tasks):,} task{'s' * (len(tasks) != 1)} name{'s' * (len(tasks) == 1)} {total:,} store "
+            f"entit{'ies' if total != 1 else 'y'} with no version, so each run takes the latest ({counts}); "
+            "agent-env task lint --id TASK lists a task's")
 
 
 def refuses(finding: Finding, *, skip_lint: bool = False) -> bool:
@@ -234,9 +255,9 @@ def _unpinned(steps: Sequence[TaskStep]) -> Iterator[Finding]:
         for site in ref_sites(type(step).entity_refs or (), step.to_dict()):
             if (site.ref.role is RefRole.INPUT and site.version_key is not None and site.version is None
                     and isinstance(site.value, str) and site.value and not is_local_id(site.value)):
-                yield Finding(Severity.WARNING, "unpinned-reference",
+                yield Finding(Severity.WARNING, UNPINNED,
                               f"{site.path} names {site.ref.kind.value} {site.value!r} with no version, so each run "
-                              f"takes its latest; set {site.version_key} to pin it", step.id)
+                              f"takes its latest; set {site.version_key} to pin it", step.id, site.ref.kind.value)
 
 
 def _coverage(task: Task) -> Iterator[Finding]:

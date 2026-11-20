@@ -19,7 +19,7 @@ from agent_env.eval.eval import EvalTask
 from agent_env.openenv import app
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
-from agent_env.task.lint import Finding, Severity, lint, said
+from agent_env.task.lint import UNPINNED, Finding, Severity, lint, said, unpinned_summary
 from agent_env.task_step.task_step import TaskStep
 from agent_env.training import trl
 from agent_env.training.nemo_gym import __main__ as nemo_cli, prepare
@@ -493,6 +493,40 @@ def test_bundle_register_with_skip_lint_registers_a_task_lint_refuses_saying_why
     assert skipped.exit_code == 0, skipped.output
     assert skipped.output.count(f"tasks/t.json: error: {_HEADLESS}") == 1
     assert Task.get("triage-t").headline_verifiers == ["box"]
+
+
+def test_unpinned_references_are_said_as_one_line_counting_tasks_and_kinds():
+    def unpinned(kind):
+        return Finding(Severity.WARNING, UNPINNED, f"names {kind} 'x' with no version", "s", kind)
+
+    many = [(f"t{n} v1", unpinned("agent")) for n in range(3)] + [("t0 v1", unpinned("artifact")),
+                                                                  ("t1 v1", unpinned("artifact"))]
+
+    assert unpinned_summary(many) == (
+        "warning: 3 tasks name 5 store entities with no version, so each run takes the latest (agent 3, artifact 2); "
+        "agent-env task lint --id TASK lists a task's")
+    assert unpinned_summary(many[:1]).startswith("warning: 1 task names 1 store entity with no version")
+    assert unpinned_summary([("t v1", Finding(Severity.WARNING, "no-verifier", "grades nothing"))]) is None
+
+
+def test_eval_run_says_its_tasks_unpinned_references_in_one_line_and_its_other_warnings_by_kind(local_stores,
+                                                                                               monkeypatch):
+    tasks = {f"t{n}": Task.from_dict({"id": f"t{n}", "version": 1, "steps": [BOX, {**NOTES, "id": f"notes{n}"}]})
+             for n in range(4)}
+    listed = Eval(id="e", version=1, tasks=[EvalTask(task_id=name, task_version=1) for name in tasks])
+    monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: listed))
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, id, version=None: tasks[id]))
+    monkeypatch.setattr(importlib.import_module("agent_env.cli.eval.run"), "print_banner",
+                        lambda: (_ for _ in ()).throw(SystemExit(7)))
+
+    result = CliRunner().invoke(cli, ["eval", "run", "--id", "e"])
+
+    assert result.exit_code == 7, result.output
+    assert ("  warning: 4 tasks name 4 store entities with no version, so each run takes the latest (artifact 4); "
+            "agent-env task lint --id TASK lists a task's") in result.output
+    assert "names artifact 'shared-notes'" not in result.output
+    assert ("  warning: no step grades this task, so a run has no score (4 tasks: t0 v1, t1 v1, t2 v1 and 1 more; "
+            "agent-env task lint lists each)") in result.output
 
 
 def test_a_run_says_each_kind_of_finding_once_with_how_many_tasks_have_it_errors_first():
