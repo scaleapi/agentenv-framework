@@ -38,13 +38,15 @@ def main() -> None:
                    "reward is then their sum.")
 @click.option("--max-concurrent-envs", type=int, default=8, show_default=True,
               help="The episodes the server runs at once, which should cover a step's rollouts: the rest wait their turn.")
+@click.option("--skip-lint", is_flag=True,
+              help="Serve tasks agent-env task lint refuses for its own rules, as agent-env run --skip-lint.")
 def write(source: str, root: str, name: str | None, sandbox: str | None, reward: str | None, reward_components: bool,
-          max_concurrent_envs: int) -> None:
+          max_concurrent_envs: int, skip_lint: bool) -> None:
     """Writes the resources server for SOURCE, a bundle or the URL of an OpenEnv server serving one, into the Gym root
     ROOT, with its config and a JSONL file of rows per split. Playing one task of each toolset to find its tools
     deploys its envs."""
     server = write_server(source, root, name=name, sandbox=sandbox, reward=reward, reward_components=reward_components,
-                          max_concurrent_envs=max_concurrent_envs)
+                          max_concurrent_envs=max_concurrent_envs, skip_lint=skip_lint)
     click.echo(f"wrote {server}")
 
 

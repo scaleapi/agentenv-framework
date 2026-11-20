@@ -15,13 +15,22 @@ from agentenv_protocol.computer import (
     ComputerSettings,
     Display,
     Effect,
+    FileChooser,
+    Image,
+    PageDialog,
+    PageState,
     Platform,
+    Tab,
     capture,
     click,
+    dialog,
     display,
     drag,
+    history,
     key_down,
     key_up,
+    navigate,
+    page_state,
     pointer_down,
     pointer_move,
     pointer_position,
@@ -29,7 +38,9 @@ from agentenv_protocol.computer import (
     press,
     scroll,
     set_display,
+    tabs,
     type_text,
+    upload,
 )
 
 LINUX = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="x11")
@@ -160,6 +171,54 @@ class FakeDriver(ComputerDriverEnvironment):
         await self._step("key_up")
         self.screen.log.append(("key_up", tuple(keys)))
         self.screen.held = [k for k in self.screen.held if k not in keys]
+
+
+class PageFake(FakeDriver):
+    """A fake whose screen is a browser's page, with two tabs, the first active, and a log of the page calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tabs = [Tab("a", "https://mail.test/", "Inbox", True), Tab("b", "https://docs.test/", "Docs")]
+        self.open_dialog: PageDialog | None = None
+        self.chooser: FileChooser | None = None
+        self.calls: list = []
+        self.captured: PageState | None = None
+
+    @capture
+    async def grab(self):
+        image = await super().grab()
+        if self.captured is None:
+            return image
+        return Image(image.width, image.height, image.tobytes(), "RGB", self.captured)
+
+    @navigate
+    async def go_to(self, url):
+        self.calls.append(("navigate", url))
+
+    @history
+    async def step(self, direction):
+        self.calls.append(("history", direction))
+
+    @tabs
+    async def tab_action(self, action, tab, url):
+        self.calls.append(("tabs", action, tab, url))
+        if action == "switch":
+            self.tabs = [Tab(t.id, t.url, t.title, t.id == tab) for t in self.tabs]
+        return self.tabs
+
+    @dialog
+    async def answer(self, accept, text):
+        self.calls.append(("dialog", accept, text))
+        self.open_dialog = None
+
+    @upload
+    async def choose(self, paths):
+        self.calls.append(("upload", paths))
+
+    @page_state
+    async def page_now(self):
+        active = next(t for t in self.tabs if t.active)
+        return PageState(active.id, active.url, active.title, self.open_dialog, self.chooser)
 
 
 class MinimalDriver(ComputerDriverEnvironment):

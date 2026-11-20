@@ -660,12 +660,34 @@ class TrajectoryUpload:
 
 
 @dataclass(frozen=True)
+class TrajectoryFormats:
+    """The trajectory formats an agent's card offers: every one it serves, its native one and the one its reads
+    serve when they name none. A card from before agents named their formats offers none, and its reads refuse a
+    ``format``, so ``native`` is None for it too."""
+
+    formats: tuple[str, ...] = ()
+    native: str | None = None
+    default: str | None = None
+
+    @classmethod
+    def of(cls, extension: Mapping[str, Any] | None) -> TrajectoryFormats:
+        """The formats the trajectory extension's card params offer."""
+        params = (extension or {}).get("params") or {}
+        formats = params.get("formats")
+        if not isinstance(formats, list) or not formats:
+            return cls()
+        return cls(tuple(formats), params.get("native"), params.get("default"))
+
+
+@dataclass(frozen=True)
 class FetchedTrajectory:
     """Where a trajectory ``get`` left the trajectory: uploaded by the agent through the grant
-    (``object_url``) or in the answer (``inline``). Both None: the agent returned none."""
+    (``object_url``) or in the answer (``inline``). Both None: the agent returned none. ``format``
+    is the one the answer says it served, None when it says none."""
 
     object_url: str | None = None
     inline: Any = None
+    format: str | None = None
 
 
 async def fetch_trajectory(
@@ -676,10 +698,14 @@ async def fetch_trajectory(
     timeout: float | None = None,
     store: ObjectStore | None = None,
     headers: Mapping[str, str] | None = None,
+    format: str | None = None,
 ) -> FetchedTrajectory:
-    """POST one trajectory ``get``. With ``upload`` the agent uploads the trajectory through its
-    grant, issued by ``store``, and the answer is checked. The default wait covers that upload."""
+    """POST one trajectory ``get``, naming ``format`` when given: only to a card that offers formats
+    (``TrajectoryFormats.of``). With ``upload`` the agent uploads the trajectory through its grant,
+    issued by ``store``, and the answer is checked. The default wait covers that upload."""
     payload: dict[str, Any] = dict(selector)
+    if format is not None:
+        payload["format"] = format
     if upload is not None:
         objects = TrajectoryWriteObjects(trajectory=upload.write)
         # Only the grants given: a pinned agent's request model forbids the optional ones newer SDKs take.
@@ -698,7 +724,8 @@ async def fetch_trajectory(
         headers=headers,
     )
     if upload is not None:
-        return FetchedTrajectory(object_url=upload.object_url)
+        return FetchedTrajectory(object_url=upload.object_url, format=body.format)
     if not isinstance(body, Mapping):
         return FetchedTrajectory()
-    return FetchedTrajectory(inline=body.get("trajectory"))
+    served = body.get("format")
+    return FetchedTrajectory(inline=body.get("trajectory"), format=served if isinstance(served, str) else None)

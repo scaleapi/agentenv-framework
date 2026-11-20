@@ -103,10 +103,11 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
     # A record without a gateway has none of the gateway's URLs.
     if isinstance(deployed_env, DeployedGatewayEnv):
         click.echo("Env Gateway Url: " + click.style(deployed_env.gateway_url, fg="yellow"))
-        if deployed_env.db_web_url:
-            click.echo("Env DB Web Url: " + click.style(deployed_env.db_web_url, fg="yellow"))
-        if deployed_env.db_mcp_url:
-            click.echo("Env DB MCP Url: " + click.style(deployed_env.db_mcp_url, fg="yellow"))
+        # The SQL consoles take the env's control token, as an Authorization: Bearer header.
+        if deployed_env.db_web_gateway_url:
+            click.echo("Env DB Web Url: " + click.style(deployed_env.db_web_gateway_url, fg="yellow"))
+        if deployed_env.db_mcp_gateway_url:
+            click.echo("Env DB MCP Url: " + click.style(deployed_env.db_mcp_gateway_url, fg="yellow"))
         if deployed_env.vnc_url:
             click.echo("VNC Url: " + click.style(deployed_env.vnc_url, fg="yellow"))
         for svc_name, url in (deployed_env.website_frontend_urls or {}).items():

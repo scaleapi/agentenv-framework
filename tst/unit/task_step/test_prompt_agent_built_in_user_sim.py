@@ -13,7 +13,8 @@ from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps import prompt_agent as pa
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, StoredTrajectory
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, text
@@ -236,11 +237,11 @@ async def test_each_user_sim_turn_records_its_trajectory_as_always_on_does(monke
                                                      {"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
     fetched = []
 
-    async def fetch(self, url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
+    async def fetch(url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
         fetched.append((url, task_id, prefix, sandbox_type))
-        return f"{prefix}{name}.json"
+        return StoredTrajectory(f"{prefix}{name}.json")
 
-    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", fetch)
+    monkeypatch.setattr(pa, "fetch_native_trajectory", fetch)
     step = _step()
 
     await step.execute(ctx)

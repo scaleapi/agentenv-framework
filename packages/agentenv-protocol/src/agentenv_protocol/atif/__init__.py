@@ -46,16 +46,16 @@ from .profile import (
     read_profile,
 )
 from .kit import KIT_RULES, KitResult, check_adapter
-from .reader import Task, check, is_prefix, load, media_paths, strip_profile, tasks
+from .reader import MEDIA_PATH, Task, check, check_media, is_prefix, load, media_file, media_paths, strip_profile, tasks
 from .runner import AdapterRun, Fed, RecordedTask, replay
 from .served import AuxEntry, ContentItem, MediaItem, ServedData, ServedError, ServedMedia, ServedTurn
 from .validator import RULES, Finding, Rule, errors_in, validate, validate_live
 
 __all__ = [
     "Adapter", "AdapterRef", "AdapterRun", "AdapterSpec", "Agent", "AgentProfile", "Arrival", "atif_adapter",
-    "AtifError", "AtifTurn", "AudioSource", "aux", "AuxEntry", "check", "check_adapter", "ContentItem", "ContentPart",
+    "AtifError", "AtifTurn", "AudioSource", "aux", "AuxEntry", "check", "check_adapter", "check_media", "ContentItem", "ContentPart",
     "Document", "dump_profile", "errors_in", "Fed", "FinalMetrics", "FinalMetricsProfile", "Finding", "finish",
-    "FORMAT", "ImageSource", "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "media_paths", "MediaInfo",
+    "FORMAT", "ImageSource", "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "MEDIA_PATH", "media_file", "media_paths", "MediaInfo",
     "MediaItem", "Metrics", "MetricsProfile", "Native", "native", "Observation", "ObservationResult",
     "ObservationResultProfile", "PROFILE_KEY", "profile_of", "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS",
     "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",

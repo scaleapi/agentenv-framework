@@ -22,11 +22,15 @@ def _copied() -> list[str]:
             for name in line.split()]
 
 
-def _in_context(name: str) -> bool:
-    """Whether the build context has ``name``: from the folder, or under a folder shared_sources.toml takes from
-    agent-env's own sources at that name."""
+def _source(name: str):
+    """Where the build context's ``name`` comes from: the folder, or a folder shared_sources.toml takes from agent-env's
+    own sources at that name."""
     first, _, rest = name.partition("/")
-    path = SOURCES / SHARED[first] / rest if first in SHARED else AGENT_DIR / name
+    return SOURCES / SHARED[first] / rest if first in SHARED else AGENT_DIR / name
+
+
+def _in_context(name: str) -> bool:
+    path = _source(name)
     return path.is_dir() if name.endswith("/") else path.is_file()
 
 
@@ -50,10 +54,19 @@ def _imported(path) -> set[str]:
 
 
 def test_the_image_and_an_install_carry_every_module_the_server_imports():
-    modules = {path.stem: path for path in AGENT_DIR.glob("*.py")}
-    needed = {"a2a_server.py"} | {f"{name}.py" for path in modules.values() for name in _imported(path) & set(modules)}
+    """The folder's own modules and those the build context takes from agent-env's sources, the egress rule and the
+    clock page's format among them, each by its name in the context."""
+    shared = {path.stem: f"{name}/{path.name}" for name, source in SHARED.items()
+              for path in (SOURCES / source).glob("*.py")}
+    modules = {**shared, **{path.stem: path.name for path in AGENT_DIR.glob("*.py")}}
+    needed, pending = set(), ["a2a_server"]
+    while pending:
+        if (name := modules[pending.pop()]) not in needed:
+            needed.add(name)
+            pending += _imported(_source(name)) & set(modules)
     installed = set(re.search(r'^AGENT_FILES="([^"]+)"$', INSTALL_SH, re.MULTILINE).group(1).split())
 
+    assert {"agent_clock/agent_egress.py", "clock/clockpage.py"} <= needed
     assert needed <= set(_copied()) and needed <= installed, (needed, installed)
 
 

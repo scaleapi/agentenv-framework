@@ -22,18 +22,17 @@ import logging
 import os
 import re
 import signal
-import struct
 import threading
-import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
+
+from agent_egress import clock_armed, egress_env
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +77,7 @@ class OpenCodeTools(BaseModel):
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 
@@ -99,80 +98,13 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
-#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
-#: while the agent follows an armed clock.
-EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
-#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
-#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
-CLOCK_PAGE = "/dev/shm/agentenv-clock"
-_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
-_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
-#: The constant every page's check is salted with (clockpage.check).
-_PAGE_CHECK_SALT = 0x9E3779B97F4A7C15
-#: How often, and how far apart, a read retries a page a write is under way on: 50 ms in all, far longer than a write.
-_PAGE_READ_TRIES, _PAGE_RETRY_S = 50, 0.001
-_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
-
-
-def clock_armed(page_path: str | None = None) -> bool:
-    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
-    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
-    try:
-        with open(page_path or CLOCK_PAGE, "rb") as page:
-            for _ in range(_PAGE_READ_TRIES):
-                page.seek(0)
-                raw = page.read(_PAGE.size)
-                if len(raw) < _PAGE.size:
-                    return False
-                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
-                    _PAGE.unpack(raw)
-                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
-                    return False
-                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
-                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
-                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ _PAGE_CHECK_SALT) & _MASK
-                if seq % 2 == 0 and checked == expected:
-                    return bool(armed)
-                time.sleep(_PAGE_RETRY_S)
-    except OSError:
-        return False
-    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
-
-
-def model_direct_hosts(base_url: str | None) -> list[str]:
-    """The model endpoint's host when the CLI reaches it directly on an armed clock: over plain HTTP, which has no
-    certificate to check at the env's date. Over TLS it goes through the egress proxy, which checks the certificate on
-    real time and, in an agent's image, reaches a private network's address too (``AGENTENV_EGRESS_PRIVATE``)."""
-    endpoint = urlsplit(base_url or "")
-    return [endpoint.hostname] if endpoint.hostname and endpoint.scheme == "http" else []
-
-
-def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
-    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
-    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
-    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
-    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
-    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
-    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
-    ``no_proxy``) stay direct."""
-    proxy = environ.get(EGRESS_PROXY_ENV)
-    if not proxy or not armed:
-        return {}
-    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
-    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
-    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
-            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
-
-
 def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
             clock_armed: bool = False) -> dict[str, str]:
-    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs. On an
-    armed clock (``clock_armed``) the CLI goes out through the egress proxy (``egress_env``), reaching the env's MCP
-    servers (``mcp_servers``), which it connects to itself, and a plain-HTTP model endpoint directly."""
-    model_host = model_direct_hosts(environ.get("LITELLM_BASE_URL")) if clock_armed else []
-    mcp_hosts = [url.hostname for url in (urlsplit(str(info.get("url") or "")) for info in (mcp_servers or {}).values()) if url.hostname and url.scheme == "http"]
-    return {**environ, **_context_xdg(context_id),
-            **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
+    armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
+    connects to itself."""
+    urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed)}
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:

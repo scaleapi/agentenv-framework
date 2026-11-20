@@ -331,6 +331,18 @@ def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, mon
     assert client.post(f"{base}/cancel-run", params={"workflow_id": single["workflow_id"]}).status_code == 200
 
 
+def test_a_run_another_runner_records_is_refused_cancelling_with_where_to_stop_it(client):
+    task_id = "@local/~/dock/crate"
+    run_store.insert_run(RunRecord(run_id="episode-abc", runner="episode", task_id=task_id, task_version=1,
+                                   instance_id="abc", status=RunStatus.RUNNING))
+
+    refused = client.post(f"/api/v1/tasks/{quote(task_id, safe='')}/cancel-run", params={"workflow_id": "episode-abc"})
+
+    assert refused.status_code == 409
+    assert "run by 'episode'" in refused.json()["detail"] and "trainer that plays it" in refused.json()["detail"]
+    assert run_store.get_run("episode-abc").status == "RUNNING"
+
+
 def test_a_bundle_runs_namespaced_instance_id_is_one_encoded_segment(client):
     task_id, instance_id = "@local/~/triage/runs", "@local/~/triage/runs-7f3a9c2e"
     store = get_config().get_document_store()
