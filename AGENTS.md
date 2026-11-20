@@ -182,14 +182,14 @@ Per trainer:
   - `python -m agent_env.training.nemo_gym SOURCE ROOT` writes a bundle's NeMo Gym resources server into a Gym root,
     `NEMO_GYM_EXTRA_ROOTS`'s or a Gym checkout's: `app.py`; a `pyproject.toml`, since uv applies the nearest one's
     `[tool.uv]` and a checkout's `exclude-dependencies` would drop `cryptography`; a config with `simple_agent` and the
-    `legacy_agent` environment server; and `data/<split>.jsonl` rows with each task's tools (and `first_turn_tools`).
+    `legacy_agent` environment server; and `data/<split>.jsonl` rows with each task's tools (and `first_turn_tools` when it applies server config).
   - `server.AgentEnvResourcesServer` is that server, run in the venv Gym builds: a row's seed starts its episode, a
     catch-all route calls its tools, and `verify` ends the turns left open with the model's last reply and returns the
     reward, masking a rollout the environment failed. With `reward_components` it also returns each score by step id,
     their sum the reward, for NeMo RL's GDPO.
 - `verl/` (`verl` extra, installed into verl's own environment):
   - `python -m agent_env.training.verl URL OUT` writes a server's tasks as verl's `<split>.parquet` rows (the task's
-    prompt, `agent_name: agentenv`, the row's tools and `first_turn_tools` in `extra_info`) and `agent_loop.yaml`. It reads a server that asks
+    prompt, `agent_name: agentenv`, the row's tools and `first_turn_tools`, null without server config, in `extra_info`) and `agent_loop.yaml`. It reads a server that asks
     for a token with the one `--token-var` names, and with `--tokenizer` counts each prompt with its tools as verl
     renders it (`--chat-template-kwargs`), refusing rows over `--max-prompt-length` before writing.
   - `loop.AgentEnvAgentLoop` is verl's `ToolAgentLoop` with the row's tools: each call a call on the row's episode, the
@@ -203,8 +203,8 @@ Per trainer:
     `max_tool_response_length`.
 - `skyrl/` (`skyrl` extra, installed into SkyRL's own environment):
   - `python -m agent_env.training.skyrl URL OUT --tokenizer MODEL` writes a server's tasks as SkyRL's `<split>.parquet`
-    rows (`env_class: agentenv`, the episode's split, index, task id, tools and `first_turn_tools`, the server's
-    settings). Each row has its
+    rows (`env_class: agentenv`, the episode's split, index, task id, tools and `first_turn_tools` (null without
+    server config), the server's settings). Each row has its
     tools rendered into its system prompt by the model's chat template, checked to render as `tools=` would, since
     SkyRL's generator passes the template no tools; rows over `--max-prompt-length`, counted as SkyRL's filter and
     generator count them, are refused.

@@ -206,8 +206,9 @@ class _Environment(Session):
         except Exception as e:
             rollout.failure = rollout.failure or why(e)
         if rollout.misgrouped:
-            raise RuntimeError(f"{rollout.failure}. TRL shows the model its class's tools, so a task's episode must "
-                               "offer them: their toolset misses what tells them apart")
+            raise RuntimeError(f"{rollout.failure}. TRL shows the model its class's tools, so an episode must offer no "
+                               "tool beyond them, and with server config exactly them at its first turn: their toolset "
+                               "misses what tells them apart")
         if rollout.failure is not None:
             logger.warning("rollout left unscored: %s", rollout.failure)
             return None

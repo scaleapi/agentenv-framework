@@ -102,7 +102,8 @@ class AgentEnvTextEnv(BaseTextEnv):
             if rollout.misgrouped:
                 self.close()
                 raise ValueError(f"{self._task()}: {rollout.failure}. Its row lists the tools of its toolset's first "
-                                 "task, which its episode must offer")
+                                 "task: an episode must offer no tool beyond them, and with server config exactly "
+                                 "them at its first turn")
             raise _Failed(rollout.failure)
         if not rollout.done:
             return BaseTextEnvStepOutput(observations=answers, reward=0.0, done=False, metadata={})
