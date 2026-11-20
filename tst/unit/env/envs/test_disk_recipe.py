@@ -6,6 +6,7 @@ settings and size, and exporting one, compressed, once."""
 
 import asyncio
 import base64
+import csv
 import hashlib
 import importlib.util
 import json
@@ -772,6 +773,17 @@ async def test_a_timed_out_create_keeps_ownership_until_a_late_container_is_remo
     assert uncertain_disk.removals == [f"docker rm -f {rebuilt.container_name} >/dev/null"]
     assert not (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
     assert local_sandbox.remove_local_work_dir(uncertain_disk.sandbox_id) == uncertain_disk.folder
+
+
+@pytest.mark.parametrize("folder", ["plain", "with,comma", 'with"quote'])
+def test_a_bind_mount_names_its_folder_as_docker_reads_it(folder):
+    """Docker reads --mount as one CSV row: a folder whose name holds a comma or a quote still names that folder."""
+    src = Path("/sandboxes") / folder
+    fields = next(csv.reader([local_sandbox._bind(src, "/var/lib/agentenv-vm", "readonly")]))
+
+    assert fields == ["type=bind", f"src={src}", "dst=/var/lib/agentenv-vm", "readonly"]
+    if folder == "plain":
+        assert local_sandbox._bind(src, "/in") == f"type=bind,src={src},dst=/in"
 
 
 @pytest.mark.asyncio

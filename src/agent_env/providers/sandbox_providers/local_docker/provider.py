@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import csv
 import errno
 import functools
 import glob
+import io
 import json
 import logging
 import os
@@ -865,7 +867,7 @@ class LocalSandboxProvider(SandboxProvider):
         state = sandbox.work_dir / "vm-state"
         state.mkdir(mode=0o700)
         # The launcher owns its files as this user, so teardown needs no privileged recursive cleanup.
-        state_args = ("--mount", f"type=bind,src={state},dst=/var/lib/agentenv-vm",
+        state_args = ("--mount", _bind(state, "/var/lib/agentenv-vm"),
                       "--user", f"{os.getuid()}:{os.getgid()}", "--group-add", str(os.stat(KVM).st_gid))
         (sandbox.work_dir / _CONTAINER_MODE_MARKER).write_text(sandbox.container_name)
         pending = sandbox.work_dir / _CONTAINER_START_MARKER
@@ -1123,8 +1125,16 @@ def _grant_args(port: int, trust: Path) -> list[str]:
     finds ``host.docker.internal`` at QEMU's address for the launcher, where the launcher forwards the grant server's
     ``port`` to this machine, and trusts the local transfer CA, whose ``trust`` files the launcher puts in its seed."""
     return [*(arg for entry in _EXTRA_HOSTS for arg in ("--add-host", entry)),
-            "--mount", f"type=bind,src={trust},dst={_LAUNCHER_TRUST},readonly",
+            "--mount", _bind(trust, _LAUNCHER_TRUST, "readonly"),
             "-e", f"VM_HOST_PORTS={port}", "-e", f"VM_TRUST={_LAUNCHER_TRUST}"]
+
+
+def _bind(src: Path, dst: str, *options: str) -> str:
+    """``--mount``'s value binding ``src`` at ``dst``: Docker reads it as one CSV row, so a field holding a comma, as a
+    folder's name may, is quoted."""
+    row = io.StringIO()
+    csv.writer(row, lineterminator="").writerow(["type=bind", f"src={src}", f"dst={dst}", *options])
+    return row.getvalue()
 
 
 def _found(sandbox_id: str) -> LocalSandbox:
