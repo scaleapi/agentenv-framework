@@ -72,12 +72,14 @@ neither, Alpine's for one, gets bash from its own package manager. The agent wor
 or in `/app` on the host.
 
 `agents/pi/` runs the [pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) behind
-the protocol's A2A agent framework: each turn is one `pi --mode json` run, the task env's MCP servers go to its
-`mcp.json`, and its JSON events are the turn's trajectory. Name it as `pi`, its alias, or by its id,
-`@local/agentenv-framework/agents/pi`. It calls
+the protocol's A2A agent framework: each turn is one `pi --mode json` run, started as `node /opt/pi/bin/pi`, the task
+env's MCP servers go to its `mcp.json`, and its JSON events are the turn's trajectory. Name it as `pi`, its alias, or by
+its id, `@local/agentenv-framework/agents/pi`. It calls
 the `[model]` endpoint as an OpenAI-compatible one and takes its model from the prompt, so its smoke task needs
-`[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets.
-Its folder's `README.md` covers the extensions it implements.
+`[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets. Its image can
+follow a task env's clock as Claude Code's does, opted in the same way, except that pi itself stays on real time and
+only the commands it runs for the model follow the clock. Its folder's `README.md` says why, and covers the extensions
+it implements.
 
 `agents/codex/` runs OpenAI's [Codex CLI](https://github.com/openai/codex) behind the protocol's A2A agent framework:
 each turn is one `codex exec --json` run, resumed in the context's Codex thread, the task env's MCP servers go to its

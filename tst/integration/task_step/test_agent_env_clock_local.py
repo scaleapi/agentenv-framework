@@ -1,8 +1,9 @@
 """An agent image on a task env's clock (FD-5916), end to end on local Docker: the agent deployed with the env serves
 clock/v1 sync_time; sync_env_clock declares it a follower at the real gateway and hands it its config; from then on
-every program the agent's user runs, its CLI included, reads the env's time while the A2A server stays on real time; a
-clock write that waits for followers waits for it; and once teardown_sandboxes takes it down, writes stop waiting for
-it. An agent whose CLI speaks a protocol the stub endpoint serves also runs one real turn.
+every program the agent's user runs reads the env's time, its CLI included unless its bridge starts the CLI on real
+time, as pi's does, while the A2A server stays on real time; a clock write that waits for followers waits for it; and
+once teardown_sandboxes takes it down, writes stop waiting for it. An agent whose CLI speaks a protocol the stub
+endpoint serves also runs one real turn.
 
 Runs over images built beforehand, from this branch: AGENTENV_E2E_AGENT_IMAGES names one per agent, as
 ``claude-code=<tag>,codex=<tag>``; an agent it doesn't name is skipped as a missing capability."""
@@ -78,19 +79,27 @@ async def _claude_turn(context: TaskStepContext, endpoint: FakeAnthropic) -> Non
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
-    must return under the preloaded library), and a turn against the stub endpoint, for a CLI that speaks its protocol."""
+    must return under the preloaded library), a turn against the stub endpoint, for a CLI that speaks its protocol, and,
+    for a CLI its bridge starts on real time, a program its bridge starts the same way, with the marker, that prints its
+    own time, then a command's it runs, then the marker as it sees it."""
 
     bridge: str
     version: tuple[str, ...]
     shows: str
     turn: Callable[[TaskStepContext, FakeAnthropic], Awaitable[None]] | None = None
+    on_real_time: tuple[str, ...] | None = None
 
+
+# pi's bridge starts node itself (pi_agent.PI_COMMAND), not through pi's ``#!/usr/bin/env node``.
+NODE_ON_REAL_TIME = ("node", "-e", "console.log(new Date().toISOString());"
+                     "console.log(require('child_process').execSync('date -u +%FT%TZ').toString().trim());"
+                     "console.log(process.env.AGENTENV_REAL_TIME ?? 'scrubbed')")
 
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
     "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
-    "pi": Agent(bridge="pi_agent", version=("pi", "--version"), shows="1.1.0"),
+    "pi": Agent(bridge="pi_agent", version=("pi", "--version"), shows="1.1.0", on_real_time=NODE_ON_REAL_TIME),
 }
 
 
@@ -165,6 +174,11 @@ async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: F
         assert shown["real"].startswith(str(datetime.now(timezone.utc).year))
         assert _routes_through_proxy(container, spec.bridge)  # armed: live sites' TLS goes through the proxy
         assert spec.shows in _in_agent(container, "timeout", "30", *spec.version)  # the CLI starts on the env's clock
+        if spec.on_real_time is not None:
+            # libfaketime keeps the program started with the marker on real time and takes the marker from what it runs.
+            own, command, marker = _in_agent(container, *spec.on_real_time, real_time=True).splitlines()
+            print("started as the bridge starts the CLI:", {"own": own, "command": command, "marker": marker})
+            assert own.startswith(str(datetime.now(timezone.utc).year)) and command == VIRTUAL and marker == "scrubbed"
         if spec.turn is not None:
             await spec.turn(context, endpoint)
 

@@ -8,10 +8,11 @@ every clocked agent shares (`agent_clock/`). The protocol package comes from PyP
 `install.sh` installs Node, pinned by version and checksum, pi and the agent's environment, both for the image and for
 `install/v1`.
 
-Each task runs `pi --mode json` once in its workspace: `PI_A2A_WORKSPACE`, default `/workspace`, and the task
-container's working directory when it's installed there. The prompt goes in on stdin. Images and text
-files are attached as `@path`; any other file is saved to disk and its path is added to the prompt,
-for pi's tools to use. A file fetched from a URL may be at most 256 MiB. The pi config dir is built fresh for each task:
+Each task runs `pi --mode json` once, as `node /opt/pi/bin/pi --mode json`, in its workspace: `PI_A2A_WORKSPACE`,
+default `/workspace`, and the task container's working directory when it's installed there. The prompt goes in on
+stdin. Images and text files are attached as `@path`; any other file is saved to disk and its path is added to the
+prompt, for pi's tools to use. A file fetched from a URL may be at most 256 MiB. The pi config dir is built fresh for
+each task:
 
 - `models.json` points provider `agentenv` at `LITELLM_BASE_URL`. The key stays a `${LITELLM_API_KEY}`
   reference, so it is never written to disk.
@@ -65,7 +66,8 @@ and the A2A server as `agent` with the real-time marker, and agent-env's libfake
   the env's time: `date`, `datetime.now()` and the timestamps its programs write. Files keep real modification times,
   as libfaketime is built without faking `stat`.
 - **pi itself stays on real time.** The bridge starts pi with the real-time marker, which libfaketime takes out of
-  pi's environment, so what pi starts follows the clock (`cli_env`). It hands pi's script to `node` itself
+  pi's environment, so what pi starts follows the clock (`cli_env`); pi's `/proc/<pid>/environ`, its environment as
+  it started, shows the marker rewritten in place as `AGENTENV_REAL_TIME=0`. It hands pi's script to `node` itself
   (`PI_COMMAND`): run through its `#!/usr/bin/env node`, `env` would take the marker and start node without it. pi
   can't follow the clock: before 1970 its compaction throws, as it makes a UUIDv7 from its clock, and its file locks
   compare its clock with their modification times.
@@ -77,7 +79,7 @@ and the A2A server as `agent` with the real-time marker, and agent-env's libfake
   `HTTPS_PROXY` and `NO_PROXY` itself, its model and MCP calls alike; Node programs the model runs do through
   `NODE_USE_ENV_PROXY`, which Node honours from 22.21.
 - **The changelog needs no change.** Capture compares each file's modification time, size and mode with the previous
-  scan's, in the server on real time, and never with a clock.
+  scan's, never with a clock, and writes each increment's tar itself, in the server on real time; it runs no `tar`.
 
 Started as a user other than root, the image runs the A2A server alone, on real time, as before.
 

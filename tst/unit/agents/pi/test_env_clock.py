@@ -2,12 +2,14 @@
 agent-env's libfaketime takes out of pi's environment, so pi stays on real time while every command it runs follows the
 clock; and it hands the shared egress rule (tst/unit/agents/test_agent_egress.py) the model endpoint's URL and every MCP
 server's, so on an armed clock pi and its commands go out through the image's egress proxy, and to loopback, the hosts
-NO_PROXY names and plain-HTTP hosts directly. With the clock off, pi runs with the flags and environment it had before.
-What every clocked image shares is checked in tst/unit/agents/test_agent_clock_images.py."""
+NO_PROXY names and plain-HTTP hosts directly. With the clock off, the bridge starts pi with the flags it had before and
+the server's environment, adding only the marker; what the image adds to the server's environment, clock on or off, is
+pinned here too. What every clocked image shares is checked in tst/unit/agents/test_agent_clock_images.py."""
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -159,6 +161,17 @@ def test_an_installed_agent_whose_target_runs_no_clock_starts_pi_with_the_runs_o
 
     assert set(spawned.env) - set(spawned.environ) == RUN_OWN
     assert {name: spawned.env[name] for name in spawned.environ} == spawned.environ
+
+
+def test_the_image_starts_the_server_and_so_pi_and_its_commands_with_these_variables_clock_on_or_off():
+    """supervisord adds SUPERVISOR_ENABLED, SUPERVISOR_SERVER_URL, SUPERVISOR_PROCESS_NAME and SUPERVISOR_GROUP_NAME
+    beside them, and libfaketime takes the marker out of the server's own environment."""
+    conf = (AGENT_DIR / "root.conf").read_text()
+    environment = re.search(r"^environment=(.+)$", conf[conf.index("[program:agent]"):], re.MULTILINE).group(1)
+
+    assert {pair.split("=", 1)[0] for pair in environment.split(",")} == {
+        "HOME", "USER", "LOGNAME", pi_agent.REAL_TIME_ENV, agent_egress.EGRESS_PROXY_ENV, "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"}
 
 
 def test_start_agent_keeps_a_providers_ca_bundle_trusted_by_the_server_and_the_proxy(tmp_path):
