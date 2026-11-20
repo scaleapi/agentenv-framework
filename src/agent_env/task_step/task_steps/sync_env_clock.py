@@ -26,7 +26,8 @@ import httpx
 import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.env.env import EnvCapabilityUnsupported
+from agent_env.a2a_agent.clock import follow_agents, on_deployment, torn_down
+from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -147,12 +148,10 @@ class SyncEnvClockTaskStep(TaskStep):
         """The env's backing MCP servers and websites, as its card lists them (``legacy_protocol.backing_servers``):
         a website sharing its name with an MCP server is a server of its own, at its own route."""
         from agent_env.env import legacy_protocol
-        from agent_env.env.env import Env, gateway_url_of
         return await legacy_protocol.backing_servers(deployed, gateway_url_of(deployed), Env.get(deployed.env_id, deployed.env_version),
                                                      timeout=self.timeout_seconds)
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agent_env.env.env import gateway_url_of
 
         deployed = bound_deployment(context, self.env_id, env_step_id=self.env_step_id, step_id=self.id)
         if deployed is None:
@@ -187,7 +186,12 @@ class SyncEnvClockTaskStep(TaskStep):
             entry = {"service": service, "environment": service, **({} if server.mcp else {"website": True}), **outcome}
             (synced if outcome.get("synced") else skipped).append(entry)
 
-        agents = await self._follow_agents(context, deployed, env_get_time_url) if self.agent_clock else []
+        agents = await follow_agents(
+            context, deployed, [agent for agent in context.deployed_agents
+                                if self.env_id in (agent.env_ids or []) and on_deployment(agent, deployed)
+                                and not torn_down(context, agent)],
+            env_get_time_url=env_get_time_url, timezone=self.timezone, required=self.require_agent_clock,
+            timeout=self.timeout_seconds) if self.agent_clock else []
         configuration = {
             "step_id": self.id, "env_id": self.env_id,
             "deploy_step_id": (deployed.metadata or {}).get("deploy_step_id"),
@@ -206,27 +210,6 @@ class SyncEnvClockTaskStep(TaskStep):
             logger.warning(f"sync_env_clock env={self.env_id}: clock armed but NO server synced "
                            f"({[(s['service'], s.get('reason')) for s in skipped]}) — every tool still answers wall time")
         return context
-
-    async def _follow_agents(self, context: TaskStepContext, deployed, env_get_time_url: Optional[str]) -> list[dict]:
-        """Have every agent registered with the env follow its clock (``a2a_agent.clock.follow``): one that can't is
-        reported and skipped, or fails the step under ``require_agent_clock``."""
-        from agent_env.a2a_agent.clock import follow_in, on_deployment, torn_down
-
-        outcomes = []
-        for agent in context.deployed_agents:
-            mine = self.env_id in (agent.env_ids or []) and on_deployment(agent, deployed)
-            if not mine or torn_down(context, agent):
-                continue  # not this deployment's, or taken down by teardown_sandboxes: nothing to follow
-            outcome = await follow_in(context, agent, deployed, env_get_time_url=env_get_time_url,
-                                      timezone=self.timezone, timeout=self.timeout_seconds)
-            if not outcome["synced"]:
-                if self.require_agent_clock:
-                    raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env "
-                                           f"'{self.env_id}': {outcome['reason']}")
-                logger.info(f"sync_env_clock: agent '{agent.agent_name}' doesn't follow the clock "
-                            f"({outcome['reason']}); skipping")
-            outcomes.append({"agent": agent.agent_name, **outcome})
-        return outcomes
 
     async def _sync_one(self, deployed, gateway_url: str, service: str, env_get_time_url: Optional[str], mcp: bool = True,
                         tolerate: Optional[bool] = None, server: Optional[BackingServer] = None) -> dict:
