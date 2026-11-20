@@ -764,6 +764,7 @@ class PromptAgentTaskStep(TaskStep):
                         agent_parts=agent_response_parts,
                         ask_user=functools.partial(user_side.ask, turn + 1, reply, agent_response_parts),
                         user_triggers=functools.partial(user_side.triggers, turn + 1, reply),
+                        trajectory_urls=per_turn_trajectory_urls,
                     )
                 if answer is None and not last:
                     answer = await user_side.ask(turn + 1, final_terminal.response_text, agent_response_parts)

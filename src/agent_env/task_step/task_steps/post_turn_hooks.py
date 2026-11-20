@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Optional
@@ -187,8 +187,12 @@ class Turn:
     """What a hook is handed after an agent turn; ``last`` after the final one, when a returned message is ignored."""
 
     def __init__(self, *, context: TaskStepContext, step_id: str, hook: PostTurnHook, answer: _Answer, number: int,
-                 last: bool, agent_reply: str, agent_parts: list[dict]) -> None:
+                 last: bool, agent_reply: str, agent_parts: list[dict],
+                 trajectory_urls: Sequence[Optional[str]] = ()) -> None:
         self.number = number
+        # The agent's native trajectory of each turn so far, oldest first: None for a turn whose trajectory the
+        # agent returned none of or couldn't be fetched; empty when the agent's card offers no trajectories.
+        self.trajectory_urls: tuple[Optional[str], ...] = tuple(trajectory_urls)
         self.last = last
         self.agent_reply = agent_reply
         self.agent_parts = copy.deepcopy(agent_parts)
@@ -203,6 +207,18 @@ class Turn:
     def metadata(self) -> Mapping[str, Any]:
         """A read-only copy of the run's metadata, its secret keys stripped."""
         return MappingProxyType(_strip_redacted_keys(self._context.metadata))
+
+    async def read_trajectory(self, number: int) -> Optional[str]:
+        """Turn ``number``'s trajectory (1 is the first turn) as the agent stored it, as text; None when that turn
+        has none. Raises IndexError for a turn that hasn't happened."""
+        if not 1 <= number <= len(self.trajectory_urls):
+            raise IndexError(f"turn {number}: the conversation has {len(self.trajectory_urls)} turn trajectories")
+        url = self.trajectory_urls[number - 1]
+        if url is None:
+            return None
+        from agent_env.config import get_config
+        data = await asyncio.to_thread(lambda: get_config().get_object_store_at(url).get(url))
+        return data.decode("utf-8", errors="replace")
 
     async def ask_user(self) -> Answer:
         """Today's user side: agent triggers, then a human or the LLM user sim, which sees only replies sent here."""
@@ -264,12 +280,13 @@ def _parts(message: Any, hook: PostTurnHook) -> list[dict]:
 async def run_post_turn_hooks(hooks: PostTurnHooks, *, context: TaskStepContext, step_id: str, number: int, last: bool,
                               agent_reply: str, agent_parts: list[dict],
                               ask_user: Callable[[], Awaitable[Answer]],
-                              user_triggers: Callable[[], Awaitable[Optional[Answer]]]) -> Optional[Answer]:
+                              user_triggers: Callable[[], Awaitable[Optional[Answer]]],
+                              trajectory_urls: Sequence[Optional[str]] = ()) -> Optional[Answer]:
     """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that."""
     answer = _Answer(ask_user, user_triggers)
     for hook in hooks.hooks:
         turn = Turn(context=context, step_id=step_id, hook=hook, answer=answer, number=number, last=last,
-                    agent_reply=agent_reply, agent_parts=agent_parts)
+                    agent_reply=agent_reply, agent_parts=agent_parts, trajectory_urls=trajectory_urls)
         returned = await hook.post_turn(turn, copy.deepcopy(hook.params))
         if answer.value is not None:
             if returned != answer.value:

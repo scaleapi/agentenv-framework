@@ -571,3 +571,58 @@ async def test_with_no_armed_env_clock_stored_messages_carry_none(monkeypatch):
                               poll_interval_seconds=0).execute(ctx)
 
     assert all("env_clock" not in m for m in _stored(ctx, peers)["messages"])
+
+
+@pytest.mark.asyncio
+async def test_a_hook_sees_each_turns_trajectory_so_far_and_can_read_it(monkeypatch):
+    from agent_env.a2a_agent import A2AAgent
+    from agent_env.config import get_config
+    from agent_env.task_step.task_steps import prompt_agent as pa
+
+    EnvPeers(monkeypatch, {AGENT: [text("one"), text("two"), text("three")]})
+    ctx = _context()
+    ctx.deployed_agents[0].a2a_card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
+    stored = {"task-1": b'[{"turn": 1}]', "task-3": b'[{"turn": 3}]'}  # turn 2's agent returned none
+
+    async def fetch(url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
+        if task_id not in stored:
+            return pa.StoredTrajectory()
+        return pa.StoredTrajectory(get_config().get_object_store().put(f"traj/{task_id}.json", stored[task_id]))
+
+    monkeypatch.setattr(pa, "fetch_native_trajectory", fetch)
+    hook = _hook("reads", """
+        async def post_turn(turn, params):
+            urls = turn.trajectory_urls
+            texts = [await turn.read_trajectory(n) for n in range(1, len(urls) + 1)]
+            try:
+                await turn.read_trajectory(len(urls) + 1)
+                ahead = "read"
+            except IndexError:
+                ahead = "refused"
+            turn.record({"count": len(urls), "missing": [n for n, u in enumerate(urls, 1) if u is None],
+                         "texts": texts, "ahead": ahead})
+            return {"message": f"wake {turn.number}"}
+    """)
+
+    await _step(hook, turns=3).execute(ctx)
+
+    assert [(e["count"], e["missing"], e["texts"], e["ahead"]) for e in _recorded(ctx)] == [
+        (1, [], ['[{"turn": 1}]'], "refused"),
+        (2, [2], ['[{"turn": 1}]', None], "refused"),
+        (3, [2], ['[{"turn": 1}]', None, '[{"turn": 3}]'], "refused"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_offers_no_trajectories_hands_a_hook_none(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("none", """
+        async def post_turn(turn, params):
+            turn.record({"urls": list(turn.trajectory_urls)})
+            return None
+    """)
+
+    await _step(hook, turns=1).execute(ctx)
+
+    assert [e["urls"] for e in _recorded(ctx)] == [[]]
