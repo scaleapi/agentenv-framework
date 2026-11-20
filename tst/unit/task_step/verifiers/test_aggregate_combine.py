@@ -177,6 +177,7 @@ def test_its_source_steps_are_the_steps_it_names_or_those_whose_verifier_ids_it_
     assert _aggregate(sources=["rubric"], gates=["tests", "rubric"]).source_steps(steps) == ["rubric", "tests"]
     assert _aggregate(verifier_ids=["tests-vid", "rubric-vid-trajectory-mistakes", "rubric-vid", "gone"]).source_steps(
         steps) == ["tests", "rubric"]
+    assert _aggregate(sources=7, gates=[None, "tests"]).source_steps(steps) == ["tests"]
 
 
 def test_a_stored_aggregate_of_one_rubric_as_the_hubs_are_loads_and_resolves_its_source():

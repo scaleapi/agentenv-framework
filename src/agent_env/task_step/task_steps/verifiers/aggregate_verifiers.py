@@ -70,9 +70,11 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
     def source_steps(self, steps: Sequence[TaskStep]) -> list[str]:
         """The ids of the steps in ``steps`` whose results this aggregate reads, sources then gates: for the older
         form, the steps whose ``verifier_id`` each of its ``verifier_ids`` names, a rubric's trajectory-mistakes entry
-        resolving to its rubric. An id no step writes is left out."""
+        resolving to its rubric. An id no step writes is left out, as are sources or gates not given as a list of step
+        ids, which are its config problems."""
         if self.names_steps:
-            return list(dict.fromkeys([*(self.sources or ()), *(self.gates or ())]))
+            named = [name for field in (self.sources, self.gates) if isinstance(field, list) for name in field]
+            return list(dict.fromkeys(name for name in named if isinstance(name, str)))
         by_verifier_id = {}
         for step in steps:
             verifier_id = getattr(step, "verifier_id", None)
