@@ -119,7 +119,8 @@ def test_the_a2a_servers_exit_stops_supervisord_and_the_followers_or_the_proxys_
     [section] = [name for name in _conf(agent).sections() if name.startswith("eventlistener:")]
     listener = _conf(agent)[section]
     assert set(listener["events"].split(",")) == {"PROCESS_STATE_EXITED", "PROCESS_STATE_FATAL"}
-    assert "%" not in listener["command"]
+    # As root, which may stop supervisord.
+    assert "user" not in listener and "%" not in listener["command"]
     events = [("PROCESS_STATE_EXITED", "processname:clock groupname:clock from_state:RUNNING expected:0 pid:7"),
               ("PROCESS_STATE_FATAL", "processname:egress groupname:egress from_state:BACKOFF"),
               ("PROCESS_STATE_EXITED", "processname:agent-exit groupname:agent-exit from_state:RUNNING expected:1 pid:8"),
