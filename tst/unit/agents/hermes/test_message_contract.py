@@ -5,6 +5,7 @@ snapshot of a context's conversation and workspace restored into another context
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import stat
@@ -251,8 +252,85 @@ def test_a_turns_usage_adds_the_cache_back_to_the_input():
 
     assert a2a_server._usage(result(usage=report, tool_call_count=1)).to_dict() == {
         "tool_call_count": 1, "input_tokens": 21246, "output_tokens": 48, "total_tokens": 21294,
-        "cache_read_tokens": 10496, "cache_write_tokens": 0, "input_includes_cache": True, "cost_usd": 0.0,
+        "cache_read_tokens": 10496, "cache_write_tokens": 0, "input_includes_cache": True,
         "provider_details": {"api_calls": 2, "reasoning_tokens": 0, "cost_status": "unknown"}}
+
+
+def test_hermes_cost_is_kept_only_when_it_priced_the_calls():
+    """Hermes reports 0.0 with ``cost_status`` unknown when it couldn't price a call; that isn't a price."""
+    report = {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "cache_read_tokens": 0,
+              "cache_write_tokens": 0, "api_calls": 1}
+
+    unknown = a2a_server._usage(result(usage={**report, "estimated_cost_usd": 0.0, "cost_status": "unknown"}))
+    estimated = a2a_server._usage(result(usage={**report, "estimated_cost_usd": 0.0123, "cost_status": "estimated"}))
+
+    assert unknown.cost_usd is None and estimated.cost_usd == 0.0123
+
+
+def test_a_turns_usage_counts_its_auxiliary_calls():
+    """hermes-baseline-gpt, recorded on 2026-11-20 through Scale's LiteLLM proxy: two main calls and a title-generation
+    call, which Hermes reports only in its usage file's auxiliary block; the proxy saw 21,523 in and 64 out."""
+    report = {"input_tokens": 10739, "output_tokens": 54, "total_tokens": 21289, "cache_read_tokens": 10496,
+              "cache_write_tokens": 0, "api_calls": 2, "estimated_cost_usd": 0.0, "cost_status": "unknown",
+              "auxiliary": {"api_calls": 1, "input_tokens": 288, "output_tokens": 10, "cache_read_tokens": 0,
+                            "cache_write_tokens": 0, "reasoning_tokens": 0, "estimated_cost_usd": 0.0,
+                            "total_tokens": 298, "by_task": {"title_generation": {"api_calls": 1}}},
+              "total_including_auxiliary": {"estimated_cost_usd": 0.0, "total_tokens": 21587, "api_calls": 3}}
+
+    usage = a2a_server._usage(result(usage=report))
+
+    assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) == (21523, 64, 10496)
+    assert usage.provider_details["api_calls"] == 3 and usage.cost_usd is None
+
+
+def _events(*events):
+    parser = hermes_bridge._EventParser()
+    for event in events:
+        parser.on_line(json.dumps(event))
+    return parser
+
+
+def _call(turn, session, prompt, output):
+    return {"type": "post_api_request", "turn_id": turn, "session_id": session,
+            "usage": {"input_tokens": prompt, "prompt_tokens": prompt, "output_tokens": output,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}}
+
+
+def test_a_delegate_task_childs_calls_are_counted_and_the_session_stays_the_turns():
+    """hermes-subagent-claude, recorded on 2026-11-20: the turn's two calls (26,616 in, 86 out, as its usage file
+    counts them) and its title call (456, 17) beside a child's two (9,161 and 9,251 in), which the usage file leaves
+    out; the proxy saw 45,484 in and 172 out."""
+    parser = _events({"type": "on_session_start", "session_id": "parent"}, _call("A", "parent", 13081, 82),
+                     {"type": "on_session_start", "session_id": "child"}, _call("B", "child", 9161, 60),
+                     _call("B", "child", 9251, 9), _call("A", "parent", 13535, 4))
+    report = {"input_tokens": 26616, "output_tokens": 86, "total_tokens": 26702, "cache_read_tokens": 0,
+              "cache_write_tokens": 0, "api_calls": 2, "cost_status": "unknown",
+              "auxiliary": {"api_calls": 1, "input_tokens": 456, "output_tokens": 17, "cache_read_tokens": 0,
+                            "cache_write_tokens": 0, "total_tokens": 473},
+              "total_including_auxiliary": {"api_calls": 3}}
+
+    turn = parser.result(b"", b"", 0, report)
+    usage = a2a_server._usage(turn)
+
+    assert turn.session_id == "parent" and parser.session_id == "parent"
+    assert (usage.input_tokens, usage.output_tokens, usage.provider_details["api_calls"]) == (45484, 172, 5)
+
+
+def test_a_killed_turn_keeps_the_calls_it_made_as_a_lower_bound():
+    """hermes-timeout-claude, recorded on 2026-11-20: two calls (13,073 and 13,156 in, 53 and 81 out) before the turn
+    ran out of time, killed before it wrote its usage file."""
+    parser = _events(_call("A", "s", 13073, 53), _call("A", "s", 13156, 81))
+
+    usage = a2a_server._usage(result(usage={}, killed_calls=parser.all_calls))
+
+    assert (usage.input_tokens, usage.output_tokens, usage.input_includes_cache) == (26229, 134, True)
+    assert usage.provider_details == {"api_calls": 2, "unreported_calls": 1}
+
+
+def test_the_profile_turns_hermes_review_fork_off():
+    config = hermes_bridge.build_config("m", None, {}, None, Path("/skills"), environ={"LITELLM_BASE_URL": "http://x"})
+
+    assert config["auxiliary"] == {"background_review": {"enabled": False}}
 
 
 def test_a_turn_whose_calls_reported_no_usage_has_unknown_counts():
