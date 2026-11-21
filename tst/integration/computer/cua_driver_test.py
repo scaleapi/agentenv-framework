@@ -68,9 +68,10 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
                     row = re.search(r'\[(\d+)\] push button "Open Parent"', tree).group(1)
                     clicked = await session.call_tool("click", {"element_token": f"{snapshot}:{row}"})
                     parent = await _window(session, "home - Thunar")
-                    bounds = parent["bounds"]
-                    pixel = await session.call_tool("click", {"pid": parent["pid"], "window_id": parent["window_id"],
-                                                              "x": 20, "y": bounds["height"] - 15})
+                    target = {"pid": parent["pid"], "window_id": parent["window_id"]}
+                    await session.call_tool("get_window_state", {**target, "include_screenshot": True})
+                    bounds = (await _window(session, "home - Thunar"))["bounds"]
+                    pixel = await session.call_tool("click", {**target, "x": 20, "y": bounds["height"] - 15})
             async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
                 async with ClientSession(read, write) as other:
                     await other.initialize()
@@ -81,8 +82,9 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
             report = await teardown_run(context)
 
     assert not launched.isError and not clicked.isError and parent["window_id"] == window["window_id"]
+    assert not pixel.isError, pixel.content
     landed = re.search(r"screen_point=\((-?[\d.]+), (-?[\d.]+)\)", pixel.structuredContent["summary"])
-    assert not pixel.isError and landed, pixel.structuredContent
+    assert landed, pixel.structuredContent
     assert (float(landed[1]), float(landed[2])) == (bounds["x"] + 20, bounds["y"] + bounds["height"] - 15)
     assert not started.isError and "agent" in _named(mine) and "agent" not in _named(others)
     assert connected.instructions == json.loads(MANIFEST.read_text())["instructions"] and "AT-SPI" in linux.contents[0].text
