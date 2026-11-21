@@ -63,6 +63,14 @@ class StackLayout:
         """A slot names its compose project; only the default stack leaves it to compose."""
         return self.compose_project is not None
 
+    @property
+    def slot_index(self) -> int | None:
+        """The index ``for_slot`` made this layout for; None for the default stack, or a slot layout built by hand."""
+        index = (self.compose_project or "")[1:]
+        if not (self.is_slot and self.compose_project.startswith("s") and index.isascii() and index.isdigit()):
+            return None
+        return int(index) if self == StackLayout.for_slot(int(index)) else None
+
     @classmethod
     def for_slot(cls, index: int) -> StackLayout:
         """Slot ``index`` of a shared VM: compose project ``s{index}`` names its dir and scratch files, its host ports are the index's block.
@@ -143,9 +151,7 @@ class StackLayout:
         not made by ``for_slot``: a hand-built project such as ``s1-x`` would have its files caught by ``s1``'s glob."""
         if not self.is_slot:
             raise ValueError("only a slot's stack is torn down on its own; the default stack ends with its VM")
-        index = self.compose_project[1:]
-        if not (self.compose_project.startswith("s") and index.isascii() and index.isdigit()
-                and self == StackLayout.for_slot(int(index))):
+        if self.slot_index is None:
             raise ValueError(f"only a layout made by StackLayout.for_slot is torn down, so its dir and scratch glob "
                              f"can't reach another stack's files; got {self}")
         label = shlex.quote(f"label=com.docker.compose.project={self.compose_project}")

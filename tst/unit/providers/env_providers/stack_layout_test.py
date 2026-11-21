@@ -6,10 +6,12 @@ import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from agent_env.env import snapshot_store
 from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT, ServiceDBConfig
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
+from agent_env.env.gateway.constants import SLOT_TOKEN_HEADER
 from agent_env.providers.env_providers.env_gateway_provider import (
     TEARDOWN_RETRIES,
     EnvironmentGatewayProvider,
@@ -17,6 +19,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
     SidecarConfig,
     tear_down_slot,
 )
+from agent_env.providers.env_providers.slot_compose import DOOR_SERVICE_NAME
 from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 
 SIDECAR_HOST_PORT = 9100
@@ -57,6 +60,8 @@ class _RecordingVm:
         self.calls.append(("exec", args))
         if args[0] == "curl":
             return 0, "200", ""
+        if args == ("cat", "/etc/resolv.conf"):
+            return 0, "nameserver 172.21.0.1\nnameserver fd00::1\n", ""
         if args == ("sudo", "docker", "ps"):
             return 0, "\n".join(f"{p or 'app'}-gateway-1" for p in self.running), ""
         if "--status" in args:
@@ -148,6 +153,19 @@ async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
     assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT}"
     assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT}/"
     assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT}/mcp"
+    assert result.door_token is None
+    assert not any("-H" in c[1] for c in vm.calls if c[0] == "exec" and c[1][0] == "curl")
+    assert ("cat", "/etc/resolv.conf") not in execs
+
+
+@pytest.mark.asyncio
+async def test_every_slot_deploy_draws_a_new_door_token():
+    tokens = []
+    for _ in range(2):
+        _, result, _ = await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=_walled_vm({None, "s1"}))
+        tokens.append(result.door_token)
+    assert all(len(token) >= 43 for token in tokens)
+    assert tokens[0] != tokens[1]
 
 
 SLOT_1_PORTS = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT)]
@@ -165,14 +183,21 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
 
     scripts = _scripts(vm)
     assert scripts[0] == "mkdir -p /app/s1"
-    assert _written(scripts[1])[0] == "/app/s1/init-schemas.sql"
-    path, compose = _written(scripts[2])
+    assert _written(scripts[1]) == ("/app/s1/resolv.conf", "nameserver 172.21.0.1")
+    assert _written(scripts[2])[0] == "/app/s1/init-schemas.sql"
+    path, compose = _written(scripts[3])
     assert path == "/app/s1/docker-compose.yml"
-    assert f'"{AGENT_ENV_GATEWAY_MCP_PORT + 2000}:{AGENT_ENV_GATEWAY_MCP_PORT}"' in compose
-    assert f'"{DB_WEB_PORT + 2000}:{DB_WEB_PORT}"' in compose
-    assert f'"{SIDECAR_HOST_PORT + 2000}:80"' in compose
+    services = yaml.safe_load(compose)["services"]
+    assert [name for name, service in services.items() if "ports" in service] == [DOOR_SERVICE_NAME]
+    shifted = [p + 2000 for p in (DB_WEB_PORT, DB_MCP_PORT, AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT)]
+    assert services[DOOR_SERVICE_NAME]["ports"] == [f"{p}:{p}" for p in shifted]
     assert f"MCP_PORT={AGENT_ENV_GATEWAY_MCP_PORT}" in compose
-    assert scripts[3:] == ["cd /app/s1 && docker compose -p s1 up -d"]
+    assert scripts[4:] == ["cd /app/s1 && docker compose -p s1 up -d"]
+    door = {SLOT_TOKEN_HEADER: result.door_token}
+    curl = next(c[1] for c in vm.calls if c[0] == "exec" and c[1][0] == "curl")
+    assert curl[curl.index("-H") + 1] == f"{SLOT_TOKEN_HEADER}: {result.door_token}"
+    assert gp._wait_for_tunnel.await_args.kwargs["headers"] == door
+    assert gp._refuse_tool_name_clashes.await_args.kwargs["headers"] == door
     compose_ps = ("sudo", "docker", "compose", "-f", "/app/s1/docker-compose.yml", "-p", "s1", "ps")
     assert (*compose_ps, "--status", "running", "-q", "gateway") in _execs(vm)
     assert (*compose_ps, "-a", "-q", "gateway") in _execs(vm)

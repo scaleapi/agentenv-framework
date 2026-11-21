@@ -25,6 +25,7 @@ from agentenv_protocol.transfers import WriteNamespaceGrant
 from agentenv_protocol.types import FileWithBytes
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
+from agent_env.env.door_headers import granted_door_headers
 from agent_env.env.gateway.constants import CHANGES_PAGE_MAX, EXT_CHANGES_URI, EXT_TRAJECTORY_URI
 from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
@@ -582,7 +583,7 @@ class SnapshotEnvTaskStep(TaskStep):
                         raise ValueError(
                             f"FilePart for '{environment_name}' names {uri!r}, which is not on its service's address {base_url}"
                         )
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(headers=granted_door_headers(uri)) as client:
                         async with client.stream(
                             "GET",
                             uri,

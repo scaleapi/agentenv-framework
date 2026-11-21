@@ -331,3 +331,10 @@ GATEWAY_EXTENSIONS = [
         "required": False,
     },
 ]
+
+# A slot's door (``gateway.door``): the one container of a slot of a shared VM that publishes host ports. It takes a
+# request only with the slot's token in this header, which it removes before forwarding, and refuses every other.
+SLOT_TOKEN_HEADER = "X-Agentenv-Slot-Token"
+# The door's token, and its routes: comma-separated ``<listen port>=<host>:<port>``, one per port the slot publishes.
+DOOR_TOKEN_ENV = "AGENTENV_SLOT_TOKEN"
+DOOR_ROUTES_ENV = "AGENTENV_DOOR_ROUTES"

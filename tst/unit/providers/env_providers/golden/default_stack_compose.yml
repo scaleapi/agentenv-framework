@@ -1,0 +1,240 @@
+services:
+  servicedb:
+    image: public.ecr.aws/docker/library/postgres:16-alpine
+    environment:
+      - POSTGRES_USER=agentenv
+      - POSTGRES_PASSWORD=agentenv
+      - POSTGRES_DB=agentenv
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentenv']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql
+    networks:
+      - env-network
+
+  pgweb:
+    image: agent-env-db-web
+    restart: unless-stopped
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - PGWEB_DATABASE_URL=postgres://agentenv:agentenv@servicedb:5432/agentenv?sslmode=disable
+      - PGWEB_LOCK_SESSION=true
+    ports:
+      - "10.0.0.5:9081:8081"
+    networks:
+      - env-network
+
+  db-mcp:
+    image: agent-env-db-mcp
+    restart: unless-stopped
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - DATABASE_URI=postgresql://agentenv:agentenv@servicedb:5432/agentenv
+    command: --transport=streamable-http --streamable-http-host=0.0.0.0 --access-mode=unrestricted
+    ports:
+      - "10.0.0.5:19767:8000"
+    networks:
+      - env-network
+
+  slack:
+    image: mcp-slack
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=18765
+      - SERVICE_NAME=slack
+      - ENVIRONMENT_NAME=slack
+      - DATABASE_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv?options=-c%20search_path%3D%22slack%22,public
+      - SLACK_MODE=mock
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('localhost',18765),2); s.close()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - env-network
+
+  calc:
+    image: mcp-calc
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=18765
+      - SERVICE_NAME=calc
+      - ENVIRONMENT_NAME=calc
+      - DATABASE_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv?options=-c%20search_path%3D%22calc%22,public
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('localhost',18765),2); s.close()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - env-network
+
+  browser:
+    image: playwright-mcp
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=18765
+      - SERVICE_NAME=browser
+      - ENVIRONMENT_NAME=browser
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('localhost',18765),2); s.close()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - website-network
+
+  gateway:
+    image: agent-gateway
+    depends_on:
+      servicedb:
+        condition: service_healthy
+      slack:
+        condition: service_healthy
+      calc:
+        condition: service_healthy
+      browser:
+        condition: service_healthy
+      shop-website-backend:
+        condition: service_healthy
+      blog-website-backend:
+        condition: service_healthy
+      feed-website-backend:
+        condition: service_healthy
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=18765
+      - MCP_SERVER_NAME=crm1234
+      - INTERNAL_MCP_SERVERS=slack,calc,browser,desk=https://desk.example.com/mcp
+      - INTERNAL_MCP_PORT=18765
+      - GATEWAY_TRAJECTORY_FILE=/var/log/agentenv/trajectory.jsonl
+      - WEBSITE_URLS=shop=http://shop-website-frontend:80,blog=http://blog-website-backend:8000
+      - WEBSITE_NAMES=shop=shop.example.com
+      - WEBSITE_LISTED_BY_NAME=shop
+      - REST_PROXY_URLS=mcp-slack=http://slack:18765,mcp-calc=http://calc:18765,mcp-browser=http://browser:18765,shop=http://shop-website-backend:8000,blog=http://blog-website-backend:8000,feed=http://feed-website-backend:8000,desk=https://desk.example.com
+      - GATEWAY_MODE=performance
+      - SERVICE_DB_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv
+      - AGENTENV_CONTROL_TOKEN=ctl-token
+      - CONTROL_TOKEN_CHILDREN=desk
+      - COMPUTERS=desk
+    ports:
+      - "10.0.0.5:19765:18765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('localhost',18765),2); s.close()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - env-network
+      - website-network
+
+  shop-website-backend:
+    image: shop-be
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv?options=-c%20search_path%3D%22shop%22,public
+      - SERVICE_NAME=shop
+      - ENVIRONMENT_NAME=shop
+      - PORT=8000
+      - WEBSITE_SESSION_SECRET=0000000000000000000000000000000000000000000000000000000000000000
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v curl >/dev/null 2>&1; then get() { curl -sf --max-time 2 -o /dev/null \"$$1\"; }; elif command -v wget >/dev/null 2>&1; then get() { wget -q -T 2 -O /dev/null \"$$1\"; }; elif command -v python3 >/dev/null 2>&1; then get() { python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' \"$$1\"; }; elif command -v node >/dev/null 2>&1; then get() { node -e 'fetch(process.argv[1], {signal: AbortSignal.timeout(2000)}).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$1\"; }; else exit 1; fi; for u in http://localhost:8000/.well-known/agent-env.json http://localhost:8000/api/health; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - env-network
+
+  shop-website-frontend:
+    image: shop-fe
+    depends_on:
+      shop-website-backend:
+        condition: service_healthy
+    networks:
+      - env-network
+      - website-network
+
+  blog-website-backend:
+    image: blog-be
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv?options=-c%20search_path%3D%22blog%22,public
+      - SERVICE_NAME=blog
+      - ENVIRONMENT_NAME=blog
+      - PORT=8000
+      - WEBSITE_SESSION_SECRET=0000000000000000000000000000000000000000000000000000000000000000
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v curl >/dev/null 2>&1; then get() { curl -sf --max-time 2 -o /dev/null \"$$1\"; }; elif command -v wget >/dev/null 2>&1; then get() { wget -q -T 2 -O /dev/null \"$$1\"; }; elif command -v python3 >/dev/null 2>&1; then get() { python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' \"$$1\"; }; elif command -v node >/dev/null 2>&1; then get() { node -e 'fetch(process.argv[1], {signal: AbortSignal.timeout(2000)}).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$1\"; }; else exit 1; fi; for u in http://localhost:8000/.well-known/agent-env.json http://localhost:8000/api/health; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    shm_size: 256m
+    networks:
+      - env-network
+      - website-network
+
+  feed-website-backend:
+    image: feed-be
+    depends_on:
+      servicedb:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv?options=-c%20search_path%3D%22feed%22,public
+      - SERVICE_NAME=feed
+      - ENVIRONMENT_NAME=feed
+      - PORT=8000
+      - WEBSITE_SESSION_SECRET=0000000000000000000000000000000000000000000000000000000000000000
+      - PYTHONUNBUFFERED=1
+      - "AGENTENV_WEBSITE_SETTINGS={\"mode\": \"live\"}"
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v curl >/dev/null 2>&1; then get() { curl -sf --max-time 2 -o /dev/null \"$$1\"; }; elif command -v wget >/dev/null 2>&1; then get() { wget -q -T 2 -O /dev/null \"$$1\"; }; elif command -v python3 >/dev/null 2>&1; then get() { python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' \"$$1\"; }; elif command -v node >/dev/null 2>&1; then get() { node -e 'fetch(process.argv[1], {signal: AbortSignal.timeout(2000)}).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$1\"; }; else exit 1; fi; for u in http://localhost:8000/.well-known/agent-env.json http://localhost:8000/api/health; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - env-network
+
+  relay:
+    image: ecr/relay:1.0.4
+    environment:
+      - RELAY_MODE=remote
+    ports:
+      - "10.0.0.5:19768:8000"
+    restart: unless-stopped
+    networks:
+      - env-network
+
+networks:
+  env-network:
+    driver: bridge
+  website-network:
+    driver: bridge

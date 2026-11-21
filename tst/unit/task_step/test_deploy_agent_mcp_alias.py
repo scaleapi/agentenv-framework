@@ -9,6 +9,7 @@ import pytest
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
+from agent_env.env.gateway.constants import SLOT_TOKEN_HEADER
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, _mcp_add_body
 
@@ -56,6 +57,15 @@ async def test_a_record_without_a_stored_card_relays_no_name_and_warns(monkeypat
     assert [(r.method, r.url.path) for r in requests] == [("POST", "/ext/mcp-config")]
     assert json.loads(requests[0].content) == {"url": _MCP_URL}
     assert "Env crm has no env card name; the agent will pick its own MCP alias" in caplog.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("door_token", "headers"), [(None, None), ("door-tok", {SLOT_TOKEN_HEADER: "door-tok"})])
+async def test_a_slots_mcp_registration_carries_its_door_header_and_the_default_stacks_none(monkeypatch, door_token, headers):
+    deployed = _deployed_env({"name": "env5647"})
+    deployed.door_token = door_token
+    [request] = await _deploy_agent_against(monkeypatch, deployed)
+    assert json.loads(request.content).get("headers") == headers
 
 
 _MCP_URL = "https://gw.example/mcp"

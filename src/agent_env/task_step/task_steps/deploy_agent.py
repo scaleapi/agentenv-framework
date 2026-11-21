@@ -451,7 +451,8 @@ class DeployAgentTaskStep(TaskStep):
                 url = host_url_for(live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
             if mcp_ext:
-                body = _mcp_add_body(mcp_ext, url, sandbox_request_headers_for_url(url), card_name, self.role)
+                door = deployed_env.door_headers_for(deployed_env.mcp_url or "") if deployed_env is not None else {}
+                body = _mcp_add_body(mcp_ext, url, {**sandbox_request_headers_for_url(url), **door}, card_name, self.role)
                 registrations.append((env_id, body))
 
         identity_payload: dict[str, str] = {"name": self.agent_name}

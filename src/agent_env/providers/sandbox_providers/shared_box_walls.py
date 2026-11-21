@@ -17,6 +17,9 @@ from agent_env.providers.sandbox_providers.sandbox import Sandbox
 
 SLOT_COUNT = 46
 SLOT_RANGE = IPv4Network("10.250.0.0/16")
+# Every slot network's Linux bridge is named with this prefix, so the firewall can match slot traffic by the interface
+# it arrived on, which a container can't spoof as it can a source address.
+SLOT_BRIDGE_PREFIX = "aes"
 _PRIVATE_RANGES = tuple(IPv4Network(n) for n in
                         ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"))
 FORWARD_CHAIN, INPUT_CHAIN = "AGENTENV-WALLS-FWD", "AGENTENV-WALLS-IN"
@@ -36,6 +39,17 @@ def slot_networks(index: int) -> SlotNetworks:
     env = IPv4Network(f"10.250.{2 * index}.0/24")
     website = IPv4Network(f"10.250.{2 * index + 1}.0/24")
     return SlotNetworks(env.supernet(), env, website)
+
+
+class SlotBridges(NamedTuple):
+    env: str
+    website: str
+
+
+def slot_bridges(index: int) -> SlotBridges:
+    """The Linux bridge names of slot ``index``'s env and website networks, at most 9 characters (Linux allows 15)."""
+    slot_networks(index)
+    return SlotBridges(f"{SLOT_BRIDGE_PREFIX}{index}env", f"{SLOT_BRIDGE_PREFIX}{index}web")
 
 
 def upstream_resolvers(resolv_conf: str) -> tuple[IPv4Address, ...]:

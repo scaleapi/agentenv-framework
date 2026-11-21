@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 _COMMAND_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 # The file installing a CLI writes the gateway URL to, beside its entrypoint.
 GATEWAY_ENV_FILE = ".env"
+# The door token of a gateway in a slot of a shared VM, which an installed CLI sends as the door's header on every call;
+# unset for the default stack.
+SLOT_TOKEN_ENV_VAR = "AGENT_ENV_SLOT_TOKEN"
 
 
 class CliArtifact(Artifact):

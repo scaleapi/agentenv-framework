@@ -7,6 +7,7 @@ import shlex
 from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
+from urllib.parse import urlsplit
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.website import READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness, env_readiness
@@ -18,6 +19,7 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode
+from .door_headers import door_headers, slot_token_headers
 from .gateway.constants import WELL_KNOWN_PATH
 from .store import get_env_store
 
@@ -118,10 +120,20 @@ class DeployedEnv:
         """What a call to the env's framework-only routes sends: its control token, when it has one."""
         return protocol_v1.control_headers(self.control_token)
 
+    @property
+    def grants(self) -> dict[str, dict[str, str]]:
+        """What a call under each of the env's addresses sends, by address: ``control_headers`` under its own, as a
+        step's grant (``protocol_v1.authorized``) gives them."""
+        return {self.environment_url: self.control_headers} if self.environment_url and self.control_headers else {}
+
     def control_headers_for(self, url: str) -> dict[str, str]:
-        """What a call to ``url`` sends of the env's control token: ``control_headers`` when ``url`` is the env's
-        address or under it, as a step's grant gives them, and none anywhere else, an override's address say."""
-        return protocol_v1.granted_headers(url, {self.environment_url: self.control_headers})
+        """What a call to ``url`` sends: what ``grants`` gives the address it is or is under, and none anywhere else,
+        an override's address say."""
+        return protocol_v1.granted_headers(url, self.grants)
+
+    def door_headers_for(self, url: str) -> dict[str, str]:
+        """The slot door's header of what a call to ``url`` sends (``door_headers``); none for an env not in a slot."""
+        return door_headers(self.control_headers_for(url))
 
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
@@ -181,7 +193,8 @@ class DeployedEnv:
             raise EnvCapabilityUnsupported(WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, self.env_id, self.instance_id)
         card = self.environment_card
         if card is None:
-            card = await protocol_v1.get_card(self.environment_url, timeout=timeout)
+            card = await protocol_v1.get_card(self.environment_url, timeout=timeout,
+                                              headers=self.door_headers_for(self.environment_url))
         return await env_readiness(self.environment_url, card, timeout=timeout, headers=self.control_headers)
 
     @classmethod
@@ -241,6 +254,30 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     # Where the gateway's stack lives when it is one slot of a VM other runs share (StackLayout.to_record); None for
     # the default stack, which has the VM to itself.
     stack_layout: Optional[dict] = None
+    # The token the door of a slot's stack takes on every request to its addresses; None for the default stack.
+    door_token: Optional[str] = None
+
+    @property
+    def control_headers(self) -> dict[str, str]:
+        """What a call to the env's framework-only routes sends: in a slot, the door's header too."""
+        return {**self._door_header, **super().control_headers}
+
+    @property
+    def grants(self) -> dict[str, dict[str, str]]:
+        """In a slot, every address the door publishes takes its header: the gateway's with the control token, and
+        pgweb's and db-mcp's with the door's alone."""
+        grants = super().grants
+        if self._door_header:
+            if self.gateway_url:
+                grants.setdefault(self.gateway_url.rstrip("/"), self.control_headers)
+            for url in (self.db_web_url, self.db_mcp_url):
+                if url:
+                    grants.setdefault(_origin(url), self._door_header)
+        return grants
+
+    @property
+    def _door_header(self) -> dict[str, str]:
+        return slot_token_headers(self.door_token)
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -256,6 +293,7 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "env_state_instance_ids": data.get("env_state_instance_ids") or [],
             "child_envs": data.get("child_envs") or {},
             "stack_layout": data.get("stack_layout"),
+            "door_token": data.get("door_token"),
         }
 
 
@@ -572,6 +610,12 @@ def _mcp_url(url: str, card: dict) -> str:
     return f"{url.rstrip('/')}/{protocol_v1.mcp_path(card).lstrip('/')}"
 
 
+def _origin(url: str) -> str:
+    """``scheme://host[:port]`` of ``url``: all a door guards, since it holds the whole port."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def _record_class(data: dict) -> type[DeployedEnv]:
     """A stored record's class: its provider type's, else its shape's, so a record from before the type (or of one unknown here) keeps every field."""
     from agent_env.providers.env_providers.env_provider import record_class_for  # providers import this module
@@ -588,4 +632,4 @@ def _record_class(data: dict) -> type[DeployedEnv]:
 
 # A record carrying any of these is a gateway's. Not gateway_mode: an older kernel writes its default into any record it round-trips.
 _GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids",
-                        "child_envs", "stack_layout")
+                        "child_envs", "stack_layout", "door_token")

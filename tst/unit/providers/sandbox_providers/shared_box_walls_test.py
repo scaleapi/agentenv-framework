@@ -12,9 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_env.providers.sandbox_providers.shared_box_walls import (
+    SLOT_BRIDGE_PREFIX,
     SLOT_COUNT,
     SLOT_RANGE,
     apply_walls_firewall,
+    slot_bridges,
     slot_networks,
     upstream_resolvers,
     walls_firewall_script,
@@ -265,3 +267,12 @@ async def test_applying_the_walls_raises_and_runs_nothing_when_resolv_conf_cant_
         await apply_walls_firewall(box)
 
     box.exec_script.assert_not_called()
+
+
+def test_every_slot_network_has_its_own_bridge_name_that_linux_accepts():
+    names = [name for index in range(SLOT_COUNT) for name in slot_bridges(index)]
+    assert len(set(names)) == len(names) == 2 * SLOT_COUNT
+    assert all(name.startswith(SLOT_BRIDGE_PREFIX) and len(name) <= 15 for name in names)
+    assert slot_bridges(7) == ("aes7env", "aes7web")
+    with pytest.raises(ValueError):
+        slot_bridges(SLOT_COUNT)

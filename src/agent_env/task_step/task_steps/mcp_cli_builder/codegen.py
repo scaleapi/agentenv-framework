@@ -14,7 +14,9 @@ from typing import Any
 
 from agentenv_protocol import MANIFEST_VERSION, manifest_compatible
 
+from agent_env.artifact.artifacts.cli import SLOT_TOKEN_ENV_VAR
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
+from agent_env.env.gateway.constants import SLOT_TOKEN_HEADER
 
 GATEWAY_URL_ENV_VAR = "AGENT_ENV_GATEWAY_URL"
 ROLE_ENV_VAR = "AGENT_ENV_ROLE"
@@ -166,6 +168,8 @@ def generate_cli_script(
         role_env_var=ROLE_ENV_VAR,
         default_role=DEFAULT_CLI_ROLE,
         role_header=AGENT_ENV_ROLE_HEADER,
+        slot_token_env_var=SLOT_TOKEN_ENV_VAR,
+        slot_token_header=SLOT_TOKEN_HEADER,
     )
 
 
@@ -186,6 +190,8 @@ GATEWAY_URL_ENV = "{gateway_env_var}"
 ROLE_ENV = "{role_env_var}"
 DEFAULT_ROLE = "{default_role}"
 ROLE_HEADER = "{role_header}"
+SLOT_TOKEN_ENV = "{slot_token_env_var}"
+SLOT_TOKEN_HEADER = "{slot_token_header}"
 SERVICE_NAME = {environment_name}
 INTERFACE_MANIFEST = {interface_manifest_literal}
 _CONFIG_FILE_NAME = ".env"
@@ -226,11 +232,16 @@ def _role():
     return os.environ.get(ROLE_ENV, DEFAULT_ROLE)
 
 
+def _headers():
+    token = os.environ.get(SLOT_TOKEN_ENV)
+    return {{ROLE_HEADER: _role(), **({{SLOT_TOKEN_HEADER: token}} if token else {{}})}}
+
+
 def _post_step(payload):
     response = httpx.post(
         f"{{_gateway_url()}}/step",
         json=payload,
-        headers={{ROLE_HEADER: _role()}},
+        headers=_headers(),
         timeout=120,
     )
     response.raise_for_status()
@@ -248,7 +259,7 @@ def _list_tools():
     allowed_names = {{t.get("name") for t in (role_filtered.get("tools") or []) if t.get("name")}}
     state_resp = httpx.get(
         f"{{_gateway_url()}}/state",
-        headers={{ROLE_HEADER: _role()}},
+        headers=_headers(),
         timeout=120,
     )
     state_resp.raise_for_status()

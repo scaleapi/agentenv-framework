@@ -1894,10 +1894,10 @@ async def test_probe_compares_the_gateway_tools_with_the_stored_card(monkeypatch
     assert record.levelno == (logging.INFO if status == "ok" else logging.WARNING)
     assert f"env_id=crm-suite status={status} tools={len(tools)} " in record.getMessage()
     assert record.getMessage().endswith(f" children=a,b missing={missing}")
-    env_gateway_provider._tool_names.assert_awaited_once_with("https://gw.example/mcp")
+    env_gateway_provider._tool_names.assert_awaited_once_with("https://gw.example/mcp", headers=None)
 
 
-async def _never_answers(_mcp_url: str) -> set[str]:
+async def _never_answers(_mcp_url: str, **_) -> set[str]:
     await asyncio.sleep(60)
     return set()
 
@@ -2092,7 +2092,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
         record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
                                    ttl_seconds=60, env_state_type="remote")
 
-    clashes_checked.assert_awaited_once_with("https://vm.example")
+    clashes_checked.assert_awaited_once_with("https://vm.example", headers={})
 
     acquire.assert_awaited_once_with(env_state_type="remote", ttl_seconds=60, name_hint="crm-env", env_state_instance_id=None)
     [server] = compose.call_args.kwargs["mcp_servers"]
@@ -3149,3 +3149,45 @@ def test_a_gateway_record_keeps_its_slot_layout_through_storage_and_an_older_rec
     assert DeployedEnv.from_dict(dataclasses.asdict(record)).stack_layout == StackLayout.for_slot(4).to_record()
     older = {k: v for k, v in dataclasses.asdict(_multi_record([])).items() if k != "stack_layout"}
     assert DeployedEnv.from_dict(older).stack_layout is None
+
+
+class _ComposeRendered(Exception):
+    pass
+
+
+async def _door_token_of_a_deploy(layout: StackLayout) -> str | None:
+    """The door token a VM deploy in ``layout`` hands its compose file, the deploy stopped right there."""
+    from agent_env.env.gateway import GatewayMode
+
+    gp = EnvironmentGatewayProvider()
+    gp._stack_layout = layout
+    tokens = []
+
+    def compose(**kwargs):
+        tokens.append(kwargs["door_token"])
+        raise _ComposeRendered
+
+    box = MagicMock(sandbox_id="box", ON_THIS_MACHINE=False, load_docker_images=AsyncMock())
+    with patch("agent_env.env.env.Env.get", MagicMock(return_value=MagicMock(docker_image_artifact=_loadable("gw")))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", side_effect=compose), pytest.raises(_ComposeRendered):
+        await gp._deploy_via_vm(_vm_provider(), [], [], 18765, None, None, GatewayMode.PERFORMANCE, 60, 10,
+                                existing_sandbox=box)
+    [token] = tokens
+    return token
+
+
+@pytest.mark.asyncio
+async def test_every_slot_deploy_draws_a_door_token_no_deploy_had_and_the_default_stack_none():
+    tokens = [await _door_token_of_a_deploy(StackLayout.for_slot(2)) for _ in range(3)]
+    assert len(set(tokens)) == 3 and all(len(token) >= 43 for token in tokens)
+    assert await _door_token_of_a_deploy(DEFAULT_STACK_LAYOUT) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("headers", "sent"), [(None, []), ({"X-Agentenv-Slot-Token": "tok"}, ["-H", "X-Agentenv-Slot-Token: tok"])])
+async def test_the_gateway_wait_sends_a_slots_door_header_and_nothing_new_for_the_default_stack(headers, sent):
+    sandbox = MagicMock(exec_with_output=AsyncMock(return_value=(0, "200", "")))
+    assert await EnvironmentGatewayProvider()._wait_for_gateway(sandbox, 19765, headers=headers)
+    argv = sandbox.exec_with_output.await_args.args
+    assert [a for i, a in enumerate(argv) if a == "-H" or argv[i - 1] == "-H"] == sent

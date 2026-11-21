@@ -102,7 +102,7 @@ async def test_capture_universe_state_publishes_unsigned_object_urls(monkeypatch
 
     monkeypatch.setattr(config_mod, "get_config", lambda: _Cfg())
 
-    async def _supports_v1(_base):
+    async def _supports_v1(_base, **_):
         return False
 
     monkeypatch.setattr(protocol_v1, "supports_v1", _supports_v1)
@@ -136,7 +136,7 @@ async def test_each_service_state_uploads_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
     monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
-    async def _no_v1(_base):
+    async def _no_v1(_base, **_):
         return False
 
     async def _export_state(_gw, name):
@@ -162,7 +162,7 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
     monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
-    async def _no_probe(_base):
+    async def _no_probe(_base, **_):
         raise AssertionError("a stored card means no live probe")
 
     got, legacy = [], []

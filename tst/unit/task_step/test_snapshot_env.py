@@ -742,13 +742,13 @@ async def test_export_service_to_file_materializes_filepart_zip(monkeypatch, tmp
         }
     )
 
-    async def fake_supports_v1(base_url):
+    async def fake_supports_v1(base_url, **_):
         return True
 
     async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
-    async def fake_get_card(base_url, timeout=10):
+    async def fake_get_card(base_url, timeout=10, **_):
         return {}  # no s3-credentials extension -> _push_s3_credentials no-ops
 
     from agentenv_protocol import client as protocol_v1
@@ -788,13 +788,13 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
         file={"uri": uri, "name": "gdrive.zip", "mimeType": "application/zip"}
     )
 
-    async def fake_supports_v1(base_url):
+    async def fake_supports_v1(base_url, **_):
         return True
 
     async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
-    async def fake_get_card(base_url, timeout=10):
+    async def fake_get_card(base_url, timeout=10, **_):
         return {}  # no s3-credentials extension -> _push_s3_credentials no-ops
 
     monkeypatch.setattr(protocol_v1, "supports_v1", fake_supports_v1)
@@ -846,13 +846,13 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
 def _serve_filepart_uri(monkeypatch, uri):
     part = FilePart(file={"uri": uri, "name": "gdrive.zip", "mimeType": "application/zip"})
 
-    async def fake_supports_v1(base_url):
+    async def fake_supports_v1(base_url, **_):
         return True
 
     async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
-    async def fake_get_card(base_url, timeout=10):
+    async def fake_get_card(base_url, timeout=10, **_):
         return {}
 
     def no_http(*a, **k):
@@ -981,13 +981,13 @@ async def test_export_service_to_file_filepart_without_bytes_or_uri_raises_value
     part = FilePart(file={"uri": "http://x", "name": "slack.zip", "mimeType": "application/zip"})
     part.file.uri = None
 
-    async def fake_supports_v1(base_url):
+    async def fake_supports_v1(base_url, **_):
         return True
 
     async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
-    async def fake_get_card(base_url, timeout=10):
+    async def fake_get_card(base_url, timeout=10, **_):
         return {}  # no s3-credentials extension -> _push_s3_credentials no-ops
 
     monkeypatch.setattr(protocol_v1, "supports_v1", fake_supports_v1)

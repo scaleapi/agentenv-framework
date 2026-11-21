@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from agent_env.env.env import DeployedGatewayEnv
-from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+from agent_env.env.gateway.constants import SLOT_TOKEN_HEADER, WELL_KNOWN_PATH
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.mcp_env_validator.verify_spec_conformance import (
     VerifySpecConformanceTaskStep,
@@ -613,17 +613,27 @@ class TestSpecAddress:
         sent, _ = self._run("https://gw", None)
         assert sent == [("GET", f"https://gw/svc/mcp-items{WELL_KNOWN_PATH}"), ("GET", "https://gw/svc/mcp-items/openapi.yaml")]
 
+    @pytest.mark.parametrize(("door_token", "door"), [(None, None), ("door-tok", "door-tok")])
+    def test_a_slots_spec_fetch_carries_its_door_header_and_the_default_stacks_none(self, door_token, door):
+        card = {"name": "gw", "url": "/agentenv", "children_environments": [{"name": "items", "url": "/svc/mcp-items/agentenv"}]}
+        headers = []
+        self._run("https://gw", card, door_token=door_token, headers=headers)
+        assert [(h.get(SLOT_TOKEN_HEADER), h.get("authorization")) for h in headers] == [(door, None)]
+
     @staticmethod
-    def _run(gateway_url, card):
+    def _run(gateway_url, card, *, door_token=None, headers=None):
         """Execute against a spec endpoint that 404s, so the step records a skip before any MCP call."""
         sent, real = [], httpx.AsyncClient
 
         def handle(request):
             sent.append((request.method, str(request.url)))
+            if headers is not None:
+                headers.append(request.headers)
             return httpx.Response(200, json={"name": "items"}) if request.url.path.endswith(WELL_KNOWN_PATH) else httpx.Response(404)
 
         record = DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url=gateway_url, mcp_url="", db_web_url=None, sandbox_id="sb",
-                             environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}", environment_card=card)
+                             environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}", environment_card=card,
+                             control_token="ctl", door_token=door_token)
         env = MagicMock(environment_name="items")
         with patch.object(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle))), \
              patch("agent_env.env.env.Env.get", return_value=env):

@@ -26,7 +26,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     port_bindings,
 )
-from agent_env.artifact.artifacts.cli import GATEWAY_ENV_FILE
+from agent_env.artifact.artifacts.cli import GATEWAY_ENV_FILE, SLOT_TOKEN_ENV_VAR
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -297,11 +297,12 @@ class A2AAgent:
     @staticmethod
     async def install_cli(
         deployed: "DeployedA2AAgent", cli_artifact: "CliArtifact", gateway_url: str, container: str | None = None,
-        on_host: bool = False,
+        on_host: bool = False, slot_token: str | None = None,
     ) -> str:
         """Install a CliArtifact bundle into the agent's filesystem at /opt/cli/<command>/, in ``container`` when
         install_agent put the agent in one, or on the VM host, ``on_host``, when it put it there. Writes a sidecar
-        bin/.env with the gateway URL and chmod +x's the entrypoint. Idempotent. Returns the path to the entrypoint."""
+        bin/.env with the gateway URL, and the door token of a gateway in a slot (``slot_token``), and chmod +x's
+        the entrypoint. Idempotent. Returns the path to the entrypoint."""
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox, into_container, stage_files_into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
         provider = build_sandbox_provider(deployed.sandbox_type) if deployed.sandbox_type else get_agent_sandbox_provider()
@@ -309,9 +310,10 @@ class A2AAgent:
         target_root = f"/opt/cli/{cli_artifact.command_name}"
         entrypoint_path = f"{target_root}/{cli_artifact.entrypoint}"
         env_dir = posixpath.dirname(entrypoint_path)
+        env_file = f"AGENT_ENV_GATEWAY_URL={gateway_url}\n" + (f"{SLOT_TOKEN_ENV_VAR}={slot_token}\n" if slot_token else "")
 
         if on_host:
-            await sandbox.write_host_file(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n".encode(), f"{env_dir}/{GATEWAY_ENV_FILE}")
+            await sandbox.write_host_file(env_file.encode(), f"{env_dir}/{GATEWAY_ENV_FILE}")
             await stage_files_into_container(
                 sandbox, cli_artifact.get_cli_files().get_file_artifacts(), target_root, on_host=True)
             await sandbox.exec_script(f"chmod +x {shlex.quote(entrypoint_path)}")
@@ -319,7 +321,7 @@ class A2AAgent:
             return entrypoint_path
 
         # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
-        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}",
+        await sandbox.write_file_from_text(env_file, f"{env_dir}/{GATEWAY_ENV_FILE}",
                                            **into_container(container))
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():

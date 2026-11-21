@@ -625,7 +625,8 @@ class LoadArtifactTaskStep(TaskStep):
                 if not (agent.on_host and agent.sandbox_type == LocalSandbox.type):
                     gateway_url = reachable_url(gateway_url, from_sandbox_type=deployed.sandbox_type,
                                                 to_sandbox_type=agent.sandbox_type)
-                install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url, **_agent_files(agent))
+                install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url, **_agent_files(agent),
+                                                          slot_token=getattr(deployed, "door_token", None))
                 agent_clis = context.metadata.setdefault("installed_clis", {}).setdefault(self.agent_name, {})
                 agent_clis[artifact.id] = {
                     "install_path": install_path,
