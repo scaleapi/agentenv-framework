@@ -290,33 +290,6 @@ def kill_running_clis() -> int:
     return len(running)
 
 
-def kill_orphaned_clis(proc_root: Path = Path("/proc")) -> int:
-    """Kill the CLIs an earlier server left running, each with its process group; how many. In the image, supervisord
-    restarts a crashed server in place, and the CLIs it was running, each in a session of its own, outlive it and go on
-    writing to the workspace and their threads' rollouts beside the new server's turns. A `codex exec` of this user
-    leading its own session is one. Where the server isn't the image's (install/v1), a crash ends the agent; nothing is
-    looked for."""
-    if not os.environ.get(EGRESS_PROXY_ENV):
-        return 0
-    killed = 0
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-            continue
-        try:
-            if entry.stat().st_uid != os.getuid():
-                continue
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
-            _, _, group, session = (entry / "stat").read_text().rsplit(")", 1)[1].split()[:4]
-        except (OSError, ValueError):
-            continue
-        cli = b"exec" in argv[1:3] and any(os.path.basename(arg) == b"codex" for arg in argv[:2])
-        if cli and int(group) == int(session) == int(entry.name):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(int(entry.name), signal.SIGKILL)
-                killed += 1
-    return killed
-
-
 def _kill_process_group(proc) -> None:
     pid = getattr(proc, "pid", None)
     if pid is not None:

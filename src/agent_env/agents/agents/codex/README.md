@@ -40,8 +40,9 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 
 The image is `python:3.11-slim` with Node, the CLIs, the agent and the Python packages `model-requirements.txt` pins for
 the model's scripts. It starts as root, runs the env clock's follower and egress proxy under supervisord (`start-agent`,
-`root.conf`) and the A2A server as the `agent` user; started as another user, it runs the server alone. Codex's state
-is in `/home/agent/.codex` whatever the uid.
+`root.conf`) and the A2A server as the `agent` user; started as another user, it runs the server alone. Either way the
+server's exit ends the container: supervisord never starts it again, and its `agent-exit` listener shuts supervisord
+down, while the follower and the proxy restart in place. Codex's state is in `/home/agent/.codex` whatever the uid.
 
 A task's `sync_env_clock` with `agent_clock` has the agent follow the env's clock (`clock/v1` `sync_time`). agent-env's
 libfaketime, preloaded for the `agent` user, then gives the model's commands the env's time. The Codex CLI is a static
