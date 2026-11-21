@@ -99,7 +99,7 @@ print("mcp-remote on real time:", marked)
 async def _codex_turn(context: TaskStepContext, endpoint: FakeResponses) -> None:
     """One turn of the real Codex CLI, which stays on real time: the date the agent tells the model before the prompt
     and a shell `date` the model runs are the env's, while the CLI's own <environment_context> date is the host's, and
-    the env's MCP server's mcp-remote is on real time. The model is one the CLI's catalog doesn't know, so it gets the
+    every mcp-remote it starts is on real time. The model is one the CLI's catalog doesn't know, so it gets the
     shell tool directly rather than in code mode."""
     endpoint.respond = shell_then_answer(f"date -u +%FT%TZ; python3 -c {shlex.quote(_MCP_REMOTE_MARKED)}",
                                          prefix="the shell said: ")
@@ -113,7 +113,9 @@ async def _codex_turn(context: TaskStepContext, endpoint: FakeResponses) -> None
     assert hosts and VIRTUAL[:10] not in hosts, hosts
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
     marked = [re.search(r"mcp-remote on real time: (\[.*\])", result) for result in endpoint.tool_results()]
-    assert [m.group(1) for m in marked if m] == ["[True]"], endpoint.tool_results()
+    # One mcp-remote per server the CLI is given: the env's and the agent's own peer_agents server.
+    [found] = [m.group(1) for m in marked if m]
+    assert "True" in found and "False" not in found, endpoint.tool_results()
 
 
 @dataclass(frozen=True)
