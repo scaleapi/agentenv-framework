@@ -38,7 +38,7 @@ from agent_env.providers.env_providers.slot_compose import (
 )
 from agent_env.providers.env_providers.stack_layout import StackLayout
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
-from agent_env.providers.sandbox_providers.shared_box_walls import upstream_resolvers, walls_check_script
+from agent_env.providers.sandbox_providers.shared_box_walls import PRIVATE_RANGES, upstream_resolvers, walls_check_script
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +328,14 @@ print("reached " + ", ".join(reached) if reached else "blocked")
 """
 
 
+def _private_range_targets(plan: ProbePlan) -> list[str]:
+    """Private addresses a slot must not reach, including a private resolver on a port other than DNS. A public
+    resolver such as 1.1.1.1 is internet, which a slot may reach, so it isn't one."""
+    private_resolvers = [r for r in upstream_resolvers(plan.facts.resolv_conf) if any(r in n for n in PRIVATE_RANGES)]
+    return ["10.0.0.1:80", "169.254.169.254:80", "192.168.0.1:80", "100.64.0.1:80",
+            *(f"{r}:80" for r in private_resolvers)]
+
+
 def _blocked_from_inside(name: str, targets: Callable[[ProbePlan], list[str]]) -> Probe:
     """A probe that slot 0's prober reaches none of ``targets``: a connection that opens or is refused got there."""
     async def run(box: VmSandbox, plan: ProbePlan) -> str:
@@ -406,9 +414,7 @@ PROBES: tuple[Probe, ...] = (
         f"{plan.other.peer_address}:{_PEER_PORT}", f"{plan.other.door_address}:{plan.other.door_port}"]),
     _blocked_from_inside("a_to_b_door_via_box_ip", lambda plan: [f"{plan.facts.address}:{plan.other.door_port}"]),
     _blocked_from_inside("a_to_box_ip", lambda plan: [f"{plan.facts.address}:{port}" for port in (22, 80, 2375)]),
-    _blocked_from_inside("a_to_private_ranges", lambda plan: [
-        "10.0.0.1:80", "169.254.169.254:80", "192.168.0.1:80", "100.64.0.1:80",
-        *(f"{r}:80" for r in upstream_resolvers(plan.facts.resolv_conf))]),
+    _blocked_from_inside("a_to_private_ranges", _private_range_targets),
     _blocked_from_inside("a_ipv6", lambda plan: list(_PUBLIC_IPV6)),
     Probe("dns", frozenset({"answers"}), 30, _dns_answers_through_the_mounted_resolv_conf, needs_open_egress=True),
     Probe("internet", frozenset({"204"}), 45, _internet_is_reachable, needs_open_egress=True),

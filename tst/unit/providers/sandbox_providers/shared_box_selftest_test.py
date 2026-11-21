@@ -35,7 +35,7 @@ TEARDOWN = "probe_slots_torn_down"
 TEARDOWNS = {StackLayout.for_slot(i).teardown_script for i in (0, 1)}
 PASSING = {
     "box_facts": json.dumps({"address": "10.0.0.5", "kernel": "6.1.0-modal",
-                             "resolv_conf": "nameserver 172.21.0.1\n"}),
+                             "resolv_conf": "nameserver 172.21.0.1\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n"}),
     "docker_info": "ok",
     "firewall": "ok",
     "probe_slots_up": "up",
@@ -252,3 +252,16 @@ def test_every_probe_container_runs_the_base_the_gateway_image_is_built_on():
     dockerfile = Path(gateway_package.__file__).parent / "Dockerfile"
 
     assert dockerfile.read_text().splitlines()[0] == f"FROM {shared_box_selftest.PROBE_IMAGE}"
+
+
+def test_a_slot_must_not_reach_a_private_resolver_off_dns_but_may_reach_a_public_one():
+    facts = shared_box_selftest.BoxFacts(address="10.0.0.5", kernel="6.1.0-modal",
+                                         resolv_conf="nameserver 172.21.0.1\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+    targets = shared_box_selftest._private_range_targets(dataclasses.replace(_plan_stub(), facts=facts))
+    assert "172.21.0.1:80" in targets
+    assert not {"1.1.1.1:80", "8.8.8.8:80"} & set(targets)
+
+
+def _plan_stub() -> shared_box_selftest.ProbePlan:
+    return shared_box_selftest.ProbePlan(facts=shared_box_selftest.BoxFacts("", "", ""), slots=(None, None),
+                                         no_new_privileges=False, open_egress=True)

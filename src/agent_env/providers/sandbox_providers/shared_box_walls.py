@@ -24,7 +24,7 @@ SLOT_RANGE = IPv4Network("10.250.0.0/16")
 # Every slot network's Linux bridge is named with this prefix, so the firewall can match slot traffic by the interface
 # it arrived on, which a container can't spoof as it can a source address.
 SLOT_BRIDGE_PREFIX = "aes"
-_PRIVATE_RANGES = tuple(IPv4Network(n) for n in
+PRIVATE_RANGES = tuple(IPv4Network(n) for n in
                         ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"))
 FORWARD_CHAIN, INPUT_CHAIN = "AGENTENV-WALLS-FWD", "AGENTENV-WALLS-IN"
 _ESTABLISHED = "-m conntrack --ctstate ESTABLISHED,RELATED"
@@ -111,7 +111,7 @@ def walls_rules(resolvers: Sequence[IPv4Address]) -> dict[str, dict[str, list[st
         forward += [f"-i {a} -o {b} -j RETURN" for a in bridges for b in bridges]
     forward += [f"{from_slot} -o {SLOT_BRIDGE_PREFIX}+ -j DROP", f"{_ESTABLISHED} -j RETURN"]
     forward += [f"{from_slot} -d {r}/32 -p {proto} --dport 53 -j RETURN" for r in resolvers for proto in ("udp", "tcp")]
-    forward += [f"{from_slot} -d {n} -j DROP" for n in _PRIVATE_RANGES]
+    forward += [f"{from_slot} -d {n} -j DROP" for n in PRIVATE_RANGES]
     return {
         "iptables": {FORWARD_CHAIN: forward, INPUT_CHAIN: [f"{_ESTABLISHED} -j RETURN", f"{from_slot} -j DROP"]},
         "ip6tables": {FORWARD_CHAIN: [f"{from_slot} -j DROP"], INPUT_CHAIN: [f"{from_slot} -j DROP"]},
