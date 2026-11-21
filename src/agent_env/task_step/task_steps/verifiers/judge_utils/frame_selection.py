@@ -52,6 +52,7 @@ class TrajectoryAction:
     args: dict
     screenshot: str | None      # raw base64 of the post-action screenshot, if the span had one
     result: object = None       # the tool result minus its `screenshot`; None if nothing is left
+    screenshot_media_type: str | None = None  # the screenshot's type when its reader knew it; else read from its bytes
 
 
 @dataclass(frozen=True)
@@ -351,7 +352,8 @@ def _labeled_frames(actions: list[TrajectoryAction], picked: set[int], wants: li
         parts.extend(pins.get(j, ()))
         parts.append(f"action {j}")
         frames.append(LabeledFrame(" ".join(part for part in parts if part),
-                                   ImageFrame(media_type=media_type_for_b64(a.screenshot), data=a.screenshot)))
+                                   ImageFrame(media_type=a.screenshot_media_type or media_type_for_b64(a.screenshot),
+                                              data=a.screenshot)))
     return frames
 
 

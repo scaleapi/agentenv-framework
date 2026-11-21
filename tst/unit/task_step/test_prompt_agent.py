@@ -239,10 +239,11 @@ def _trajectory_extension(**enabled) -> dict:
     return extension
 
 
-async def _one_turn(monkeypatch, tmp_path, extension: dict, answer: Callable[[dict], dict]
-                    ) -> tuple[PromptResponse, list[dict], LocalFilesystemObjectStore]:
+async def _one_turn(monkeypatch, tmp_path, extension: dict, answer: Callable[[dict], dict], *,
+                    formats: list[str] | None = None) -> tuple[PromptResponse, list[dict], LocalFilesystemObjectStore]:
     """One turn of a prompt step against an agent whose card carries ``extension`` and whose trajectory reads
-    ``answer`` gives each body: the step's prompt response, the read bodies it sent and the store it wrote to."""
+    ``answer`` gives each body, in a run that prescribes ``formats``: the step's prompt response, the read bodies it
+    sent and the store it wrote to."""
     store = LocalFilesystemObjectStore(str(tmp_path))
     configure(object_store=store)
     for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task",
@@ -257,6 +258,8 @@ async def _one_turn(monkeypatch, tmp_path, extension: dict, answer: Callable[[di
 
     FakeA2AAgents({"http://agent.test": [{"kind": "text", "text": "Echo: hi"}]}, other=trajectory).serve(monkeypatch)
     context = TaskStepContext(instance_id="ti-1")
+    if formats is not None:
+        context.metadata["user_overrides"] = {"trajectory_formats": formats}
     context.deployed_agents.append(DeployedAgent(
         agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test",
         a2a_card={"capabilities": {"extensions": [extension]}},
@@ -282,8 +285,23 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_card_from_before_formats_in_a_run_that_prescribes_atif_reads_native_as_ever(monkeypatch, tmp_path):
+    """A pinned image's card names no formats, so it can't build atif/1: its turn stays native, read as it always was,
+    and its record says why (Y4-7, Y4-10)."""
+    response, requests, store = await _one_turn(
+        monkeypatch, tmp_path, _trajectory_extension(),
+        lambda body: {"trajectory": [{"type": "echo", "output": "Echo: hi"}]}, formats=["atif/1"])
+
+    assert requests == [{"task_id": "task-1"}]
+    [turn] = response.target_agent_per_turn_trajectories
+    assert turn["format"] is None and (turn["atif"]["status"], turn["atif"]["reason"]) == (
+        "unavailable", "format_not_offered")
+    assert json.loads(store.get(response.agent_trajectory_object_url)) == [{"type": "echo", "output": "Echo: hi"}]
+
+
+@pytest.mark.asyncio
 async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_its_default(monkeypatch, tmp_path):
-    """A card whose default is atif/1, as F10 flips agents to, still gives judges the native copy they read."""
+    """A card whose default is atif/1 is still read as native by name in a run that doesn't prescribe atif/1."""
     extension = _trajectory_extension(native="echo/1")
     extension["params"].update(formats=["echo/1", "atif/1"], default="atif/1")
 

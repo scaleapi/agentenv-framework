@@ -71,6 +71,8 @@ UNAVAILABLE: AtifStatus = "unavailable"
 #: A trajectory id the worker stores a document under: the agent mints it, so it must be a plain file name.
 _DOCUMENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+#: How many hex digits name a run with no instance id, as the other run-scoped folders name it (``adhoc-<uuid12>``).
+_ADHOC_ID_CHARS = 12
 #: How much of an invalid copy's first finding its record keeps as the reason; ``rules`` names every rule broken.
 _REASON_CHARS = 300
 _VALIDATOR_VERSION = importlib.metadata.version("agentenv-framework-protocol")
@@ -84,7 +86,7 @@ def atif_folder(context: TaskStepContext, agent_name: str) -> str:
 
 def _copies_of(context: TaskStepContext, agent_name: str) -> AtifAgentCopies:
     copies: AtifCopiesMetadata = context.metadata.setdefault(ATIF_COPIES_KEY, AtifCopiesMetadata(
-        run=context.instance_id or f"adhoc-{uuid.uuid4().hex[:12]}", agents={}))
+        run=context.instance_id or f"adhoc-{uuid.uuid4().hex[:_ADHOC_ID_CHARS]}", agents={}))
     if agent_name not in copies["agents"]:
         config = get_config()
         folder = config.get_object_store().object_url(
