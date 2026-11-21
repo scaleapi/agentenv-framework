@@ -23,7 +23,8 @@ _HOOKS = {
     "post_tool_call": ("session_id", "turn_id", "tool_call_id", "tool_name", "result", "status", "duration_ms",
                        "error_type", "error_message"),
     # ``response`` is Hermes' sanitized record of the model's answer: its assistant message, tool calls and usage.
-    "post_api_request": ("session_id", "turn_id", "api_call_count", "model", "finish_reason", "response"),
+    # ``usage`` is the call's token counts, normalized (``prompt_tokens`` counts the cache), never truncated.
+    "post_api_request": ("session_id", "turn_id", "api_call_count", "model", "finish_reason", "response", "usage"),
     "api_request_error": ("session_id", "turn_id", "api_call_count", "model", "status_code", "reason", "retryable",
                           "error"),
     "post_llm_call": ("session_id", "turn_id", "assistant_response"),
