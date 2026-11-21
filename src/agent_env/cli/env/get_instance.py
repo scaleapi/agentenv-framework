@@ -10,6 +10,7 @@ def get_instance(instance_id: str):
     from agent_env.store.base import NotFoundError
 
     from agent_env.env.env import DeployedGatewayEnv, DeployedSandboxEnv
+    from agent_env.env.gateway.console_session import LINK_MAX_SECONDS
     from agent_env.env.store import get_env_instance_store
 
     try:
@@ -28,6 +29,8 @@ def get_instance(instance_id: str):
     click.echo(f"Env MCP Url: {deployed_env.mcp_url}")
     if gateway and gateway.db_web_gateway_url:
         click.echo(f"Env DB Web Url: {gateway.db_web_gateway_url}")
+    if gateway and (link := gateway.pgweb_link(LINK_MAX_SECONDS)):
+        click.echo(f"Env DB Web Link (opens once, within {LINK_MAX_SECONDS // 60} min): {link}")
     if gateway and gateway.db_mcp_gateway_url:
         click.echo(f"Env DB MCP Url: {gateway.db_mcp_gateway_url}")
     for svc_name, url in ((gateway.website_frontend_urls if gateway else None) or {}).items():

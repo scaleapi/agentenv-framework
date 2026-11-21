@@ -4,6 +4,7 @@ import click
 
 from agent_env.env import DeployedGatewayEnv, Env
 from agent_env.env.gateway import GatewayMode
+from agent_env.env.gateway.console_session import LINK_MAX_SECONDS
 from agent_env.store.routing import run_scope
 
 MIN_TTL_SECONDS = 60  # 1 minute
@@ -103,9 +104,12 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
     # A record without a gateway has none of the gateway's URLs.
     if isinstance(deployed_env, DeployedGatewayEnv):
         click.echo("Env Gateway Url: " + click.style(deployed_env.gateway_url, fg="yellow"))
-        # The SQL consoles take the env's control token, as an Authorization: Bearer header.
+        # The SQL consoles take the env's control token, as an Authorization: Bearer header; a browser opens pgweb
+        # through a link that carries no token.
         if deployed_env.db_web_gateway_url:
             click.echo("Env DB Web Url: " + click.style(deployed_env.db_web_gateway_url, fg="yellow"))
+        if link := deployed_env.pgweb_link(LINK_MAX_SECONDS):
+            click.echo(f"Env DB Web Link (opens once, within {LINK_MAX_SECONDS // 60} min): " + click.style(link, fg="yellow"))
         if deployed_env.db_mcp_gateway_url:
             click.echo("Env DB MCP Url: " + click.style(deployed_env.db_mcp_gateway_url, fg="yellow"))
         if deployed_env.vnc_url:
