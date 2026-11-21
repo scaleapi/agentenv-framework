@@ -187,6 +187,33 @@ def test_the_wall_check_refuses_a_named_volume_with_any_settings(slot, mount, co
     assert any(found.startswith("volume logs sets") for found in slot_compose_problems(broken, SLOT))
 
 
+@pytest.mark.parametrize(("change", "problem"), [
+    pytest.param(lambda n: n["env-network"]["ipam"]["config"][0].update(subnet=str(slot_networks(4).env)),
+                 "network env-network isn't one of the slot's own", id="another slot's subnet"),
+    pytest.param(lambda n: n["website-network"]["driver_opts"].update({"com.docker.network.bridge.name": "br-x"}),
+                 "network website-network isn't one of the slot's own", id="a bridge outside the walls"),
+    pytest.param(lambda n: n["env-network"]["driver_opts"].update({"com.docker.network.bridge.name": slot_bridges(4).env}),
+                 "network env-network isn't one of the slot's own", id="another slot's bridge"),
+    pytest.param(lambda n: n["env-network"].update(enable_ipv6=True), "network env-network isn't", id="ipv6"),
+    pytest.param(lambda n: n["env-network"].update(external=True), "network env-network isn't", id="external"),
+    pytest.param(lambda n: n["env-network"].pop("driver_opts"), "network env-network isn't", id="no bridge name"),
+    pytest.param(lambda n: n.update(other={"driver": "bridge"}), "network other isn't one of the slot's own",
+                 id="a network of its own"),
+])
+def test_the_wall_check_refuses_any_network_but_the_slots_own(slot, change, problem):
+    broken = copy.deepcopy(slot)
+    change(broken["networks"])
+    assert problem in "; ".join(slot_compose_problems(broken, SLOT))
+
+
+@pytest.mark.parametrize("networks", [None, [], ["default"], ["env-network", "other"]],
+                         ids=["unset", "empty", "default", "one more"])
+def test_the_wall_check_refuses_a_service_on_any_network_but_the_slots_own(slot, networks):
+    broken = copy.deepcopy(slot)
+    broken["services"]["gateway"]["networks"] = networks
+    assert any(found.startswith("gateway is on") for found in slot_compose_problems(broken, SLOT))
+
+
 def test_named_and_anonymous_volumes_and_binds_inside_the_slots_dir_pass(slot):
     fine = copy.deepcopy(slot)
     fine["services"]["gateway"]["volumes"] += ["logs:/var/log", "./data:/data", f"{SLOT.app_dir}/x:/x",

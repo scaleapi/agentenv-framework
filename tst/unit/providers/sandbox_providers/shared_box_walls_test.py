@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,7 +16,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox
 from agent_env.providers.sandbox_providers.shared_box_walls import (
+    RP_FILTER_KNOBS,
     SLOT_BRIDGE_PREFIX,
     SLOT_COUNT,
     SLOT_RANGE,
@@ -36,13 +39,15 @@ class IptablesFailed(Exception):
 
 
 class FakeIptables:
-    """The filter tables of iptables and ip6tables as the script leaves them, the script run line by line as
-    ``bash -e`` would, each restore all or nothing. ``fail_on`` makes the one command or restore line holding that text
-    fail, and ``missing`` names tools the box lacks. ``calls`` is every command run, in order."""
+    """The filter tables of iptables and ip6tables, with each one's raw PREROUTING as ``raw:PREROUTING``, and the
+    kernel settings the script writes, as the script leaves them, run line by line as ``bash -e`` would, each restore
+    all or nothing. ``fail_on`` makes the one command or restore line holding that text fail, and ``missing`` names
+    tools the box lacks. ``calls`` is every command run, in order."""
 
     def __init__(self, *, docker_user: bool = True, fail_on: str | None = None, missing: tuple[str, ...] = ()):
         self.tables: dict[int, dict[str, list[tuple[str, ...]]]] = {
-            family: {"INPUT": [], "FORWARD": []} for family in TOOLS.values()}
+            family: {"INPUT": [], "FORWARD": [], "raw:PREROUTING": []} for family in TOOLS.values()}
+        self.settings: dict[str, str] = {}
         if docker_user:
             self.tables[4]["DOCKER-USER"] = [("-j", "RETURN")]
             self.tables[4]["FORWARD"].append(("-j", "DOCKER-USER"))
@@ -61,6 +66,8 @@ class FakeIptables:
             if "<<'WALLS'" in line:
                 body = list(itertools.takewhile(lambda body_line: body_line != "WALLS", lines))
                 ok = self._restore(line.split("<<")[0].strip(), body)
+            elif line.startswith("printf "):
+                ok = self._write(line)
             else:
                 ok = any(self._command(part.replace("2>/dev/null", "")) for part in line.split(" || "))
             if not ok:
@@ -101,11 +108,21 @@ class FakeIptables:
         table.update(staged)
         return True
 
+    def _write(self, line: str) -> bool:
+        self.calls.append(line)
+        value, path = re.fullmatch(r"printf (\S+) > (\S+)", line).groups()
+        if self.fail_on and self.fail_on in line:
+            return False
+        self.settings[path] = value
+        return True
+
     def _command(self, command: str) -> bool:
         found = self._tool(command)
         if found is None:
             return False
-        (op, chain, *rest), table = found
+        (dash_t, table_name, op, chain, *rest), table = found
+        assert dash_t == "-t"
+        chain = chain if table_name == "filter" else f"{table_name}:{chain}"
         if chain not in table:
             return False
         rules, rest = table[chain], tuple(rest)
@@ -118,9 +135,10 @@ class FakeIptables:
         return True
 
     def verdict(self, packet: Packet, chain: str) -> str:
-        """``ACCEPT`` or ``DROP`` for ``packet`` entering ``chain``, whose policy, like every built-in chain's on the
-        box, accepts."""
-        return "DROP" if self._walk(packet, chain) == "DROP" else "ACCEPT"
+        """``ACCEPT`` or ``DROP`` for ``packet`` arriving, through raw PREROUTING, at ``chain``, whose policy, like every
+        built-in chain's on the box, accepts."""
+        dropped = "DROP" in (self._walk(packet, "raw:PREROUTING"), self._walk(packet, chain))
+        return "DROP" if dropped else "ACCEPT"
 
     def _walk(self, packet: Packet, chain: str) -> str:
         for rule in self.tables[packet.dst.version][chain]:
@@ -128,10 +146,10 @@ class FakeIptables:
             if not _matches(packet, rule, options):
                 continue
             target = options["-j"]
-            if target in ("DROP", "RETURN"):
+            if target in ("ACCEPT", "DROP", "RETURN"):
                 return target
-            if self._walk(packet, target) == "DROP":
-                return "DROP"
+            if (verdict := self._walk(packet, target)) != "RETURN":
+                return verdict
         return "RETURN"
 
 
@@ -260,7 +278,19 @@ def test_a_slot_reaches_no_private_link_local_or_carrier_address(walled, dst):
 def test_a_slot_reaches_the_internet_and_replies_to_what_reached_it(walled):
     assert walled.verdict(from_slot(45, "8.8.4.4", half="website"), "FORWARD") == "ACCEPT"
     assert walled.verdict(from_slot(45, "172.20.0.9", half="website", established=True), "FORWARD") == "ACCEPT"
-    assert walled.verdict(from_slot(45, half="website", established=True, **to_slot(2)), "FORWARD") == "ACCEPT"
+    assert walled.verdict(from_slot(45, half="website", established=True, **to_slot(45)), "FORWARD") == "ACCEPT"
+
+
+def test_a_slot_that_forges_a_reply_into_another_slots_flow_is_dropped(walled):
+    for half, other_half in itertools.product(("env", "website"), repeat=2):
+        assert walled.verdict(from_slot(3, half=half, established=True, **to_slot(5, other_half)), "FORWARD") == "DROP"
+    assert walled.verdict(from_slot(3, established=True, src=host(slot_networks(5).env), **to_slot(5)),
+                          "FORWARD") == "DROP"
+
+
+def test_the_script_turns_on_strict_reverse_path_filtering_for_every_interface_and_every_new_one(walled):
+    assert RP_FILTER_KNOBS == ("/proc/sys/net/ipv4/conf/all/rp_filter", "/proc/sys/net/ipv4/conf/default/rp_filter")
+    assert walled.settings == {knob: "1" for knob in RP_FILTER_KNOBS}
 
 
 def test_a_slot_reaches_nothing_on_the_box_but_replies_to_the_box(walled):
@@ -275,6 +305,17 @@ def test_no_ipv6_from_a_slot_is_forwarded_or_reaches_the_box_even_as_a_reply(wal
             assert walled.verdict(packet("fd00::9", dst, "aes3env", out_iface, established=established),
                                   "FORWARD") == "DROP"
         assert walled.verdict(packet("fd00::9", "fe80::1", "aes3env", established=established), "INPUT") == "DROP"
+
+
+@pytest.mark.parametrize("chain", ["FORWARD", "INPUT"])
+def test_no_ipv6_from_a_slot_gets_through_when_docker_puts_its_own_rules_above_the_walls(walled, chain):
+    walled.tables[6][chain].insert(0, ("-j", "ACCEPT"))
+
+    out_iface = "eth0" if chain == "FORWARD" else None
+    for established in (False, True):
+        assert walled.verdict(packet("fd00::9", "2001:4860:4860::8888", "aes3env", out_iface, established=established),
+                              chain) == "DROP"
+    assert walled.verdict(packet("2001:db8::2", "2001:db8::1", "eth0"), chain) == "ACCEPT"
 
 
 def test_traffic_not_from_a_slot_is_left_to_docker(walled):
@@ -308,6 +349,7 @@ def test_running_the_script_again_leaves_the_same_rules(walled):
     assert walled.chains["INPUT"] == [("-j", "AGENTENV-WALLS-IN")]
     assert walled.tables[6]["FORWARD"] == [("-j", "AGENTENV-WALLS-FWD")]
     assert walled.tables[6]["INPUT"] == [("-j", "AGENTENV-WALLS-IN")]
+    assert walled.tables[6]["raw:PREROUTING"] == [("-i", "aes+", "-j", "DROP")]
 
 
 def test_a_run_over_older_walls_replaces_their_rules():
@@ -364,15 +406,18 @@ case "$call" in FAIL) exit 1 ;; *" -C "*) exit 1 ;; esac
 
 
 def _run_under_bash(tmp_path, tools: tuple[str, ...], fail: str = "__never__") -> tuple[int, list[str]]:
-    """Run the script under bash with only ``tools``, as stubs, on its PATH: its exit code and the stubs' log."""
+    """Run the script under bash with only ``tools``, as stubs, on its PATH, and its kernel settings written under
+    ``tmp_path``: its exit code and the stubs' log."""
     bash, log = shutil.which("bash"), tmp_path / "log"
     (tmp_path / "bin").mkdir()
     for tool in tools:
         stub = tmp_path / "bin" / tool
         stub.write_text(_STUB.replace("BASH", bash).replace("LOG", str(log)).replace("FAIL", fail))
         stub.chmod(0o755)
-    done = subprocess.run([bash, "-c", walls_firewall_script(RESOLVERS)], env={"PATH": str(tmp_path / "bin")},
-                          capture_output=True, text=True)
+    for knob in RP_FILTER_KNOBS:
+        (tmp_path / knob.lstrip("/")).parent.mkdir(parents=True)
+    script = walls_firewall_script(RESOLVERS).replace(" /proc/sys/", f" {tmp_path}/proc/sys/")
+    done = subprocess.run([bash, "-c", script], env={"PATH": str(tmp_path / "bin")}, capture_output=True, text=True)
     return done.returncode, log.read_text().splitlines() if log.exists() else []
 
 
@@ -383,12 +428,17 @@ def test_under_bash_each_restore_reads_its_whole_input_then_each_wall_is_hooked_
     code, log = _run_under_bash(tmp_path, _ALL_TOOLS)
 
     script = walls_firewall_script(RESOLVERS).splitlines()
+    restore = script.index("iptables-restore -w --noflush <<'WALLS'")
     assert code == 0
+    assert all((tmp_path / knob.lstrip("/")).read_text() == "1" for knob in RP_FILTER_KNOBS)
     assert log[:log.index("ip6tables-restore -w --noflush")] == \
-        ["iptables-restore -w --noflush", *script[2:script.index("WALLS")]]
+        ["iptables-restore -w --noflush", *script[restore + 1:script.index("WALLS")]]
     assert [line for line in log if " -I " in line] == [
-        "iptables -w -I DOCKER-USER 1 -j AGENTENV-WALLS-FWD", "iptables -w -I INPUT 1 -j AGENTENV-WALLS-IN",
-        "ip6tables -w -I FORWARD 1 -j AGENTENV-WALLS-FWD", "ip6tables -w -I INPUT 1 -j AGENTENV-WALLS-IN"]
+        "iptables -w -t filter -I DOCKER-USER 1 -j AGENTENV-WALLS-FWD",
+        "iptables -w -t filter -I INPUT 1 -j AGENTENV-WALLS-IN",
+        "ip6tables -w -t raw -I PREROUTING 1 -i aes+ -j DROP",
+        "ip6tables -w -t filter -I FORWARD 1 -j AGENTENV-WALLS-FWD",
+        "ip6tables -w -t filter -I INPUT 1 -j AGENTENV-WALLS-IN"]
 
 
 @pytest.mark.parametrize("tools, fail", [
@@ -420,20 +470,51 @@ async def test_applying_the_walls_reads_the_boxs_resolvers_and_runs_the_script_f
     assert box.exec_script.await_args.args == (walls_firewall_script(RESOLVERS),)
 
 
+def _modal_vm_running(table: FakeIptables) -> MagicMock:
+    """A Modal VM sandbox whose exec reads the box's resolv.conf or runs a ``bash -c`` script against ``table``,
+    exiting 1, as bash would, when a line of it fails."""
+    def process(code: int, stdout: str = "", stderr: str = "") -> MagicMock:
+        done = MagicMock()
+        done.wait.aio = AsyncMock(return_value=code)
+        done.stdout.read.aio = AsyncMock(return_value=stdout.encode())
+        done.stderr.read.aio = AsyncMock(return_value=stderr.encode())
+        return done
+
+    def run(*command: str, text: bool) -> MagicMock:
+        if command == ("cat", "/etc/resolv.conf"):
+            return process(0, MODAL_RESOLV_CONF)
+        assert command[:2] == ("bash", "-c")
+        try:
+            table.run(command[2])
+        except IptablesFailed as failed:
+            return process(1, stderr=f"failed: {failed}")
+        return process(0)
+
+    sb = MagicMock(object_id="sb-1")
+    sb.exec.aio = AsyncMock(side_effect=run)
+    return sb
+
+
 @pytest.mark.asyncio
-async def test_applying_the_walls_raises_when_a_restore_fails_and_keeps_the_walls_as_they_were():
+async def test_applying_the_walls_on_a_modal_vm_raises_when_a_restore_fails_and_keeps_the_walls_as_they_were():
     table = FakeIptables()
     table.run(walls_firewall_script(RESOLVERS))
     before = copy.deepcopy(table.tables)
     table.fail_on = "ip6tables-restore"
-    box = MagicMock(sandbox_id="sb-1")
-    box.exec_with_output = AsyncMock(return_value=(0, MODAL_RESOLV_CONF, ""))
-    box.exec_script = AsyncMock(side_effect=lambda script, **_: table.run(script))
 
-    with pytest.raises(IptablesFailed):
-        await apply_walls_firewall(box)
+    with pytest.raises(RuntimeError, match=r"exit 1(.|\n)*ip6tables-restore"):
+        await apply_walls_firewall(ModalVmSandbox(_modal_vm_running(table), {}, shared_box_id="box-1"))
 
     assert table.tables == before
+
+
+@pytest.mark.asyncio
+async def test_applying_the_walls_on_a_modal_vm_sets_them():
+    table = FakeIptables()
+
+    await apply_walls_firewall(ModalVmSandbox(_modal_vm_running(table), {}, shared_box_id="box-1"))
+
+    assert table.verdict(from_slot(0, **to_slot(1)), "FORWARD") == "DROP"
 
 
 @pytest.mark.asyncio

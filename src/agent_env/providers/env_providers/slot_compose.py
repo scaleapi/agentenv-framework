@@ -73,12 +73,7 @@ def slot_compose(compose: str, layout: StackLayout, *, door_image: str, door_tok
         service["extra_hosts"] = [*(service.get("extra_hosts") or []), *(f"{peer}:{ip}" for peer, ip in peers.items())]
         service["volumes"] = [*(service.get("volumes") or []), resolv_conf_mount]
     used = {network for service_addresses in addresses.values() for network in service_addresses}
-    doc["networks"] = {network: {
-        "driver": "bridge",
-        "enable_ipv6": False,
-        "driver_opts": {_BRIDGE_NAME_OPTION: bridge},
-        "ipam": {"config": [{"subnet": str(subnet)}]},
-    } for network, (subnet, bridge) in networks.items() if network in used}
+    doc["networks"] = {network: config for network, config in _slot_networks(index).items() if network in used}
     if problems := slot_compose_problems(doc, layout):
         raise ValueError(f"slot {index}'s compose file breaks its walls: {'; '.join(problems)}")
     return yaml.safe_dump(doc, sort_keys=False, width=float("inf"))
@@ -86,13 +81,20 @@ def slot_compose(compose: str, layout: StackLayout, *, door_image: str, door_tok
 
 def slot_compose_problems(doc: Mapping, layout: StackLayout) -> list[str]:
     """Why a slot's parsed compose file would let a container past its walls: a key outside the allowed ones, a named
-    volume with any settings (a driver's options can bind any host path), a runtime other than gVisor, a published
-    port on any service but the door, the docker socket, a bind mount from outside ``layout.app_dir``, or a ``$`` in a
-    mount's source. Empty when there is none."""
+    volume with any settings (a driver's options can bind any host path), a network other than the slot's own as
+    ``slot_compose`` writes it, as one on another bridge is outside the walls, a service on none of them, which Compose
+    would put on such a network, a runtime other than gVisor, a published port on any service but the door, the docker
+    socket, a bind mount from outside ``layout.app_dir``, or a ``$`` in a mount's source. Empty when there is none."""
     problems = [f"the file sets {key}" for key in doc if key not in _ALLOWED_TOP_LEVEL_KEYS]
     problems += [f"volume {name} sets {sorted(config)}" for name, config in (doc.get("volumes") or {}).items() if config]
+    own = _slot_networks(layout.slot_index) if layout.slot_index is not None else {}
+    networks = doc.get("networks") or {}
+    problems += [f"network {name} isn't one of the slot's own" for name, config in networks.items()
+                 if own.get(name) != config]
     for name, service in (doc.get("services") or {}).items():
         problems += [f"{name} sets {key}" for key in service if key not in _ALLOWED_SERVICE_KEYS]
+        if not (on := _service_networks(service)) or not networks.keys() >= set(on):
+            problems.append(f"{name} is on {on or 'no network'}, not only the slot's own")
         if service.get("runtime") != SLOT_RUNTIME:
             problems.append(f"{name} runs under {service.get('runtime')!r}, not {SLOT_RUNTIME}")
         if service.get("ports") and name != DOOR_SERVICE_NAME:
@@ -107,6 +109,17 @@ def _slot_network_plan(index: int) -> dict[str, tuple[IPv4Network, str]]:
     """Each network a stack may use, with slot ``index``'s subnet and bridge name for it."""
     subnets, bridges = slot_networks(index), slot_bridges(index)
     return {ENV_NETWORK: (subnets.env, bridges.env), SITES_NETWORK: (subnets.website, bridges.website)}
+
+
+def _slot_networks(index: int) -> dict[str, dict]:
+    """The top-level ``networks`` entry of each network slot ``index`` may use: a bridge with its fixed name and
+    subnet, and no IPv6."""
+    return {network: {
+        "driver": "bridge",
+        "enable_ipv6": False,
+        "driver_opts": {_BRIDGE_NAME_OPTION: bridge},
+        "ipam": {"config": [{"subnet": str(subnet)}]},
+    } for network, (subnet, bridge) in _slot_network_plan(index).items()}
 
 
 def _service_networks(service: Mapping) -> list[str]:

@@ -6,7 +6,8 @@ box, every slot at once, applied once dockerd is up and its ``DOCKER-USER`` chai
 the bridge it came in on, which a container can't spoof as it can a source address. It only drops: what it lets
 through still meets Docker's own rules, so it never opens a path Docker would close. Forwarded traffic from a slot may
 reach its own two bridges, the box's upstream resolvers on port 53, and anything outside the private ranges; traffic
-from a slot to the box itself, and any IPv6 from a slot, is dropped.
+from a slot to another slot, even posing as a reply, to the box itself, and any IPv6 from a slot, is dropped. Strict
+reverse-path filtering drops a packet whose source address its bridge doesn't route to.
 """
 
 from __future__ import annotations
@@ -26,10 +27,17 @@ _PRIVATE_RANGES = tuple(IPv4Network(n) for n in
                         ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"))
 FORWARD_CHAIN, INPUT_CHAIN = "AGENTENV-WALLS-FWD", "AGENTENV-WALLS-IN"
 _ESTABLISHED = "-m conntrack --ctstate ESTABLISHED,RELATED"
-# Where each walls chain is jumped to. The box's dockerd isn't set up for IPv6, so it may make no ip6tables
-# DOCKER-USER; the IPv6 walls hook into FORWARD itself.
-_HOOKS = (("iptables", "DOCKER-USER", FORWARD_CHAIN), ("iptables", "INPUT", INPUT_CHAIN),
-          ("ip6tables", "FORWARD", FORWARD_CHAIN), ("ip6tables", "INPUT", INPUT_CHAIN))
+# The rules hooked into the box's own chains, each table, chain and rule. The box's dockerd isn't set up for IPv6, so it
+# may make no ip6tables DOCKER-USER, and Docker may later put its own FORWARD jumps above ours: IPv6 from a slot is also
+# dropped in raw PREROUTING, which every packet meets before any filter chain and where Docker adds no ACCEPT.
+_HOOKS = (("iptables", "filter", "DOCKER-USER", f"-j {FORWARD_CHAIN}"),
+          ("iptables", "filter", "INPUT", f"-j {INPUT_CHAIN}"),
+          ("ip6tables", "raw", "PREROUTING", f"-i {SLOT_BRIDGE_PREFIX}+ -j DROP"),
+          ("ip6tables", "filter", "FORWARD", f"-j {FORWARD_CHAIN}"),
+          ("ip6tables", "filter", "INPUT", f"-j {INPUT_CHAIN}"))
+# Strict reverse-path filtering. Slot bridges come up after the walls, so they take it from ``default``; ``all`` makes
+# it the floor for every interface, as the kernel applies the larger of ``all`` and an interface's own value.
+RP_FILTER_KNOBS = ("/proc/sys/net/ipv4/conf/all/rp_filter", "/proc/sys/net/ipv4/conf/default/rp_filter")
 
 
 class SlotNetworks(NamedTuple):
@@ -91,26 +99,30 @@ def _restore_input(chains: dict[str, list[str]]) -> str:
 
 def walls_firewall_script(resolvers: Sequence[IPv4Address]) -> str:
     """A root shell script that sets the box's firewall to the walls for every slot, the same rules however often it
-    runs. Each of iptables and ip6tables refills the walls' chains in one transaction, so a run that fails leaves the
-    walls as they were, then each chain is hooked in once. A box without ip6tables fails the script."""
+    runs. It turns on strict reverse-path filtering, then each of iptables and ip6tables refills the walls' chains in
+    one transaction, so a run that fails leaves the walls as they were, then each hook is added once. A box without
+    ip6tables fails the script.
+
+    Slot-to-slot traffic is decided before conntrack is asked whether a packet is a reply: no real flow crosses
+    slots, so a slot that forges a reply into another slot's flow is dropped like any other packet between them."""
     if not resolvers:
         raise ValueError("the walls need at least one upstream resolver")
     from_slot = f"-i {SLOT_BRIDGE_PREFIX}+"
-    forward = [f"{_ESTABLISHED} -j RETURN"]
+    forward = []
     for bridges in map(slot_bridges, range(SLOT_COUNT)):
         forward += [f"-i {a} -o {b} -j RETURN" for a in bridges for b in bridges]
-    forward.append(f"{from_slot} -o {SLOT_BRIDGE_PREFIX}+ -j DROP")
+    forward += [f"{from_slot} -o {SLOT_BRIDGE_PREFIX}+ -j DROP", f"{_ESTABLISHED} -j RETURN"]
     forward += [f"{from_slot} -d {r}/32 -p {proto} --dport 53 -j RETURN" for r in resolvers for proto in ("udp", "tcp")]
     forward += [f"{from_slot} -d {n} -j DROP" for n in _PRIVATE_RANGES]
     tables = {
         "iptables": {FORWARD_CHAIN: forward, INPUT_CHAIN: [f"{_ESTABLISHED} -j RETURN", f"{from_slot} -j DROP"]},
         "ip6tables": {FORWARD_CHAIN: [f"{from_slot} -j DROP"], INPUT_CHAIN: [f"{from_slot} -j DROP"]},
     }
-    lines = ["set -eu"]
+    lines = ["set -eu", *(f"printf 1 > {knob}" for knob in RP_FILTER_KNOBS)]
     for tool, chains in tables.items():
         lines += [f"{tool}-restore -w --noflush <<'WALLS'", _restore_input(chains) + "WALLS"]
-    for tool, parent, chain in _HOOKS:
-        lines.append(f"{tool} -w -C {parent} -j {chain} 2>/dev/null || {tool} -w -I {parent} 1 -j {chain}")
+    for tool, table, parent, rule in _HOOKS:
+        lines.append(f"{tool} -w -t {table} -C {parent} {rule} 2>/dev/null || {tool} -w -t {table} -I {parent} 1 {rule}")
     return "\n".join(lines) + "\n"
 
 
