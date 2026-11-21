@@ -42,7 +42,10 @@ CLI by its last segment, and the proxy translates its generate calls to `/v1/cha
 The image is `python:3.11-slim` with Node, the CLI, the agent and the Python packages `model-requirements.txt` pins for
 the model's scripts. It starts as root, whose supervisord (`start-agent`, `root.conf`) runs the clock follower and the
 egress proxy, each as its own user, and the A2A server as the `agent` user, on real time; the CLI's state is in
-`/home/agent/.gemini` (`GEMINI_CLI_HOME`) whatever the uid. Started as another user, it runs the A2A server alone.
+`/home/agent/.gemini` (`GEMINI_CLI_HOME`) whatever the uid. When the A2A server exits, supervisord stops and the
+container exits with it, as when the server was the container's process, so a run fails at once rather than going on
+with a new server that has none of its registrations; the follower and the proxy restart in place. Started as another
+user, it runs the A2A server alone.
 
 ## The env's clock
 
