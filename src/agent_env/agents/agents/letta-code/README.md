@@ -10,12 +10,18 @@ Each turn runs `letta --backend local -p --output-format stream-json --yolo`. Th
 `--conversation <id>`. Each context has a separate home under `$HOME/sessions/`. Different contexts
 run concurrently; turns in one context and snapshot operations are synchronized.
 
-The bridge connects the local backend with `letta connect openai-compatible`. A per-turn loopback relay forwards
-requests to `$LITELLM_BASE_URL/v1`, with `LITELLM_API_KEY`, `[model.headers]` (`LITELLM_EXTRA_HEADERS`), and
-`project_id` / `task_id` as `x-litellm-customer-id` and `x-litellm-tags`. The model defaults to
-`openai/gpt-4.1-mini`. Endpoint credentials stay at the relay, which answers the CLI's model list with the turn's model
-alone: the CLI's merge of a listed model scans every model listed, which costs about 45 s of CPU per command over an
-endpoint that lists thousands. Registered MCP servers retain their names and headers;
+The bridge connects the local backend with `letta connect openai-compatible`, to a per-turn loopback model relay
+(`model_relay.py`, shared with other agents) that forwards requests to `$LITELLM_BASE_URL/v1`, with `LITELLM_API_KEY`,
+`[model.headers]` (`LITELLM_EXTRA_HEADERS`), and `project_id` / `task_id` as `x-litellm-customer-id` and
+`x-litellm-tags`. The model defaults to `openai/gpt-4.1-mini`. The CLI is connected with a placeholder key; the relay
+answers its model list with the turn's model alone: the CLI's merge of a listed model scans every model listed, which
+costs about 45 s of CPU per command over an endpoint that lists thousands. The relay counts each model call from its
+answer's usage, so a task's `Usage` covers every call the CLI made, its subagents', summaries' and retries' too; a call
+answered without usage is counted in `unreported_calls`, and a refused one counts nothing. When a task ends, the Letta
+Code processes it left running (a background Workflow's server, a subagent stuck in a tool), found by a marker its
+commands carry, are stopped, since their later calls would go to the next task's relay; the model's own background
+jobs keep running. The CLI's environment, and so the model's shell, still has `LITELLM_*`: a call a tool makes to the
+endpoint itself isn't counted. Registered MCP servers retain their names and headers;
 a task role replaces `AgentEnv-Role`. Before each turn, `letta mcp tools --full` discovers the exact schemas. A context-local mod registers them as
 direct Letta Code tools through `letta.tools.register`; each tool executes `letta mcp call` with its full
 `mcp__<server>__<tool>` name. Peer tools use the same path.
