@@ -260,13 +260,13 @@ def test_a_turns_usage_counts_the_cache_in_its_input_and_is_unknown_where_no_usa
 
     assert {outcome["state"] for outcome in outcomes.values()} == {"completed"}, outcomes
     usage = {name: Usage.from_dict(outcome["data"]["usage"]) for name, outcome in outcomes.items()}
-    # GPT's prompt is as large as its cache, so whether it counts it is left unknown.
+    # GPT's prompt is at least as large as its cache, which OpenAI's rule takes it to count, as it does.
     assert usage == {
         "claude": Usage(tool_call_count=1, input_tokens=20948, output_tokens=172, total_tokens=21120,
                         cache_read_tokens=10363, cache_write_tokens=10562, input_includes_cache=True,
                         provider_details={"reasoning_tokens": 0}),
         "gpt": Usage(tool_call_count=0, input_tokens=2303, output_tokens=2, total_tokens=2305, cache_read_tokens=2048,
-                     cache_write_tokens=0, input_includes_cache=None, provider_details={"reasoning_tokens": 0}),
+                     cache_write_tokens=0, input_includes_cache=True, provider_details={"reasoning_tokens": 0}),
         "none": Usage(tool_call_count=0, provider_details={"reasoning_tokens": 0, "unreported_calls": 1}),
     }, outcomes
 
