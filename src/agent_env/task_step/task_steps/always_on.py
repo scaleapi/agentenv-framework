@@ -601,7 +601,7 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.agent.control_headers)
-        await prescribe_formats(ctx, step.id, self.agent, self.target_url)
+        await prescribe_formats(ctx, step.id, self.agent, self.target_url, formats=())  # native until it reads atif/1
         solver_model = negotiated.fields.get("model") if negotiated else None
         ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
         self.usage.start(ModelRole.SOLVER, solver_model, self.agent)

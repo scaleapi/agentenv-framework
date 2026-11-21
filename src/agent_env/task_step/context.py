@@ -239,12 +239,13 @@ AtifStatus = Literal["valid", "invalid", "newer", "unavailable"]
 
 
 class AtifRecord(TypedDict):
-    """A turn's atif/1 copy: the stored document and the step it reached at that turn (each turn's copy is a prefix
-    of the next), how it checked (``valid``, ``invalid`` with the rules it broke, ``newer`` than this worker reads as a
-    producer's, or ``unavailable`` with why in ``reason``), the versions that made and checked it, and the turn's aux
-    log and turn context."""
+    """A turn's atif/1 copy: the stored document, the turn's A2A task in it and the step it reached at that turn (each
+    turn's copy is a prefix of the next), how it checked (``valid``, ``invalid`` with the rules it broke, ``newer`` than
+    this worker reads as a producer's, or ``unavailable`` with why in ``reason``), the versions that made and checked
+    it, and the turn's aux log and turn context."""
 
     url: Optional[str]
+    task_id: Optional[str]
     through_step: Optional[int]
     status: AtifStatus
     rules: list[str]
@@ -272,12 +273,21 @@ class AtifCopiesMetadata(TypedDict):
 
 
 class TurnTrajectory(TypedDict):
-    """What a turn's trajectory reads left, beside its native copy's url in the per-turn list: the native copy's
-    format, as the agent's answer named it (None from an agent that names none), and its atif/1 copy, None when the
-    run doesn't prescribe atif/1."""
+    """What a turn's trajectory reads left, beside its url in the per-turn list: the format of the trajectory stored at
+    that url, as its answer named it (None from an agent that names none), and its atif/1 copy, None when the run
+    doesn't prescribe atif/1. In a run that prescribes atif/1 to an agent that offers it, the url is the copy's
+    document and the format ``atif/1``; a turn whose copy couldn't be had has its native trajectory there instead."""
 
-    native_format: Optional[str]
+    format: Optional[str]
     atif: Optional[AtifRecord]
+
+
+def turn_trajectories(records: Optional[list[dict[str, Any]]]) -> Optional[list[TurnTrajectory]]:
+    """Stored per-turn records as TurnTrajectory, an older record's ``native_format`` read as its format."""
+    if records is None:
+        return None
+    return [TurnTrajectory(format=record.get("format", record.get("native_format")), atif=record.get("atif"))
+            for record in records]
 
 
 @dataclass
@@ -341,7 +351,7 @@ class PromptResponse:
             step_id=data.get("step_id"),
             structured_output=data.get("structured_output"),
             usage=data.get("usage"),
-            target_agent_per_turn_trajectories=data.get("target_agent_per_turn_trajectories"),
+            target_agent_per_turn_trajectories=turn_trajectories(data.get("target_agent_per_turn_trajectories")),
         )
 
 

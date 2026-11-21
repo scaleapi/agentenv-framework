@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from pydantic import ValidationError
 
@@ -83,6 +83,50 @@ def tasks(document: Mapping[str, Any]) -> list[Task]:
                             message_id=profile.get("message_id")))
         out[-1].steps.append(step)
     return out
+
+
+def task_document(document: Mapping[str, Any], task_ids: Iterable[str]) -> dict[str, Any]:
+    """The A2A tasks ``task_ids`` names, cut out of ``document`` as a document of their own that ATIF's models load: their
+    steps in order, renumbered from 1 with each result's arrival step to match, the embedded sub-agents those steps reach
+    (through one another too) kept whole, and the root's ``final_metrics`` and ``continued_trajectory_ref`` dropped, since
+    they describe the whole document. A reader that shows one turn shows this. KeyError naming a task it doesn't hold."""
+    wanted = list(task_ids)
+    picked = [task for task in tasks(document) if task.task_id in wanted]
+    missing = [task_id for task_id in wanted if task_id not in {task.task_id for task in picked}]
+    if missing:
+        raise KeyError(f"the document holds no task {', '.join(map(repr, missing))}")
+    steps = [copy.deepcopy(step) for task in picked for step in task.steps]
+    numbers = {step.get("step_id"): n for n, step in enumerate(steps, 1)}
+    for n, step in enumerate(steps, 1):
+        step["step_id"] = n
+        for result in (step.get("observation") or {}).get("results") or []:
+            arrived = ((result.get("extra") or {}).get(PROFILE_KEY) or {}).get("arrived")
+            if isinstance(arrived, dict) and "step_id" in arrived:
+                if arrived["step_id"] in numbers:
+                    arrived["step_id"] = numbers[arrived["step_id"]]
+                else:
+                    del arrived["step_id"]
+    subs = {sub.get("trajectory_id"): sub for sub in document.get("subagent_trajectories") or []}
+    reached: set[Any] = set()
+    frontier = _references(steps)
+    while frontier:
+        trajectory_id = frontier.pop()
+        if trajectory_id in subs and trajectory_id not in reached:
+            reached.add(trajectory_id)
+            frontier += _references(subs[trajectory_id].get("steps") or [])
+    cut = {key: copy.deepcopy(value) for key, value in document.items()
+           if key not in ("steps", "subagent_trajectories", "final_metrics", "continued_trajectory_ref")}
+    cut["steps"] = steps
+    kept = [copy.deepcopy(sub) for sub in document.get("subagent_trajectories") or []
+            if sub.get("trajectory_id") in reached]
+    if kept:
+        cut["subagent_trajectories"] = kept
+    return cut
+
+
+def _references(steps: Iterable[Mapping[str, Any]]) -> list[Any]:
+    return [ref.get("trajectory_id") for step in steps for result in (step.get("observation") or {}).get("results") or []
+            for ref in result.get("subagent_trajectory_ref") or []]
 
 
 def _trajectories(document: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, Mapping[str, Any]]]:
