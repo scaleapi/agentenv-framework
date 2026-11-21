@@ -1663,7 +1663,7 @@ class Gateway:
             })
             return result
 
-        arg_model = self._create_arg_model_from_schema(tool_name, input_schema)
+        arg_model = self._create_arg_model_from_schema(tool_name, input_schema, forward_extras=True)
         return FastMCPTool(
             fn=proxy,
             name=tool_name,
@@ -1674,7 +1674,10 @@ class Gateway:
         )
 
     @staticmethod
-    def _create_arg_model_from_schema(tool_name: str, schema: dict[str, Any]):
+    def _create_arg_model_from_schema(tool_name: str, schema: dict[str, Any], forward_extras: bool = False):
+        """A child proxy forwards keys its schema doesn't declare, for the child's own validation to judge; a tool the
+        gateway serves itself drops them, so a stray argument still gets an answer."""
+        base = _ForwardingArgModelBase if forward_extras else _ProxyArgModelBase
         fields = {}
         properties = schema.get("properties", {})
         required = set(schema.get("required", []))
@@ -1684,8 +1687,8 @@ class Gateway:
             else:
                 fields[name] = (Any, None)
         if not fields:
-            return create_model(f"{tool_name}Args", __base__=_ProxyArgModelBase)
-        return create_model(f"{tool_name}Args", __base__=_ProxyArgModelBase, **fields)
+            return create_model(f"{tool_name}Args", __base__=base)
+        return create_model(f"{tool_name}Args", __base__=base, **fields)
 
     def _close_trajectory_file(self) -> None:
         if self._trajectory_file and not self._trajectory_file.closed:
@@ -1820,11 +1823,13 @@ class Gateway:
 
 
 class _ProxyArgModelBase(ArgModelBase):
-    """Forwards exactly the arguments the caller sent, as /step does: unset optional fields stay unset (an explicit
-    null is still sent) and keys the schema doesn't declare reach the child, whose own validation rejects or accepts
-    them, instead of being dropped here."""
+    """ArgModelBase subclass that excludes unset fields from model_dump_one_level().
 
-    model_config = ConfigDict(extra="allow")
+    This prevents the gateway proxy from forwarding null values for optional
+    parameters that the caller didn't provide. Pydantic's model_fields_set
+    tracks which fields were actually present in the input, so explicitly
+    provided null values are still forwarded correctly.
+    """
 
     def model_dump_one_level(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -1834,8 +1839,16 @@ class _ProxyArgModelBase(ArgModelBase):
             value = getattr(self, field_name)
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
-        kwargs.update(self.model_extra or {})
         return kwargs
+
+
+class _ForwardingArgModelBase(_ProxyArgModelBase):
+    """Keeps undeclared keys too, so a child proxy forwards exactly what the caller sent, as /step does."""
+
+    model_config = ConfigDict(extra="allow")
+
+    def model_dump_one_level(self) -> dict[str, Any]:
+        return {**super().model_dump_one_level(), **(self.model_extra or {})}
 
 
 def _step_source(body: dict) -> dict | None:
