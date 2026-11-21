@@ -129,7 +129,7 @@ def _execs(vm: _RecordingVm) -> list[tuple]:
 async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
     vm, result, _ = await _deploy()
 
-    assert vm.exposed_ports == [AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT]
+    assert vm.exposed_ports == [AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT]
     scripts = _scripts(vm)
     assert scripts[0] == "mkdir -p /app"
     assert _written(scripts[1])[0] == "/app/init-schemas.sql"
@@ -144,8 +144,8 @@ async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
         assert ("sudo", "docker", "compose", "-f", "/app/docker-compose.yml", "ps", "-a", "-q", service) in execs
     assert not any("-p" in e or "--status" in e for e in execs)
     assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT}"
-    assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT}/"
-    assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT}/mcp"
+    assert result.db_web_url is None
+    assert result.db_mcp_url is None
 
 
 SLOT_1_PORTS = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT)]
@@ -167,7 +167,7 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
     path, compose = _written(scripts[2])
     assert path == "/app/s1/docker-compose.yml"
     assert f'"{AGENT_ENV_GATEWAY_MCP_PORT + 2000}:{AGENT_ENV_GATEWAY_MCP_PORT}"' in compose
-    assert f'"{DB_WEB_PORT + 2000}:{DB_WEB_PORT}"' in compose
+    assert f'"127.0.0.1:{DB_WEB_PORT + 2000}:{DB_WEB_PORT}"' in compose
     assert f'"{SIDECAR_HOST_PORT + 2000}:80"' in compose
     assert f"MCP_PORT={AGENT_ENV_GATEWAY_MCP_PORT}" in compose
     assert scripts[3:] == ["cd /app/s1 && docker compose -p s1 up -d"]
@@ -176,8 +176,8 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
     assert (*compose_ps, "-a", "-q", "gateway") in _execs(vm)
     assert ("sudo", "docker", "ps") not in _execs(vm)
     assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT + 2000}"
-    assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT + 2000}/"
-    assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT + 2000}/mcp"
+    assert result.db_web_url is None
+    assert result.db_mcp_url is None
     assert gp.stack_layout == slot
 
 
