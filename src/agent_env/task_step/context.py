@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Optional, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 from agentenv_protocol import client as protocol_v1
 
@@ -235,6 +235,9 @@ _PROMPT_RESPONSE_LEGACY_KEYS = (
 )
 
 
+AtifStatus = Literal["valid", "invalid", "newer", "unavailable"]
+
+
 class AtifRecord(TypedDict):
     """A turn's atif/1 copy: the stored document and the step it reached at that turn (each turn's copy is a prefix
     of the next), how it checked (``valid``, ``invalid`` with the rules it broke, ``newer`` than this worker reads as a
@@ -243,13 +246,29 @@ class AtifRecord(TypedDict):
 
     url: Optional[str]
     through_step: Optional[int]
-    status: str
+    status: AtifStatus
     rules: list[str]
     reason: Optional[str]
     validator_version: Optional[str]
     adapter_version: Optional[str]
     aux_url: Optional[str]
     turn_context_url: Optional[str]
+
+
+class AtifAgentCopies(TypedDict):
+    """One agent's atif/1 copies in a run: the folder they're stored in, and the trajectory id of each session's (A2A
+    context's) latest document, which a restart's next document is linked from."""
+
+    folder: str
+    sessions: dict[str, str]
+
+
+class AtifCopiesMetadata(TypedDict):
+    """``metadata["atif_copies"]``: the id a run's atif/1 folders are named by (its instance id, else one made for
+    it), and each agent's copies."""
+
+    run: str
+    agents: dict[str, AtifAgentCopies]
 
 
 class TurnTrajectory(TypedDict):

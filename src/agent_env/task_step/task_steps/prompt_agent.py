@@ -735,8 +735,9 @@ class PromptAgentTaskStep(TaskStep):
                     except Exception as e:
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
                     per_turn_trajectory_urls.append(stored.url)
-                    per_turn_trajectories.append(TurnTrajectory(native_format=stored.format, atif=None))
-                    atif_copies.turn(sent_task_id, target_a2a_task_id)
+                    turn_record = TurnTrajectory(native_format=stored.format, atif=None)
+                    per_turn_trajectories.append(turn_record)
+                    atif_copies.turn(sent_task_id, target_a2a_task_id, turn_record)
 
                 final_task_id = sent_task_id
                 final_state = target_state
@@ -798,8 +799,7 @@ class PromptAgentTaskStep(TaskStep):
             # On failure too, so a reader of the last turn knows no other follows.
             if live_turns is not None:
                 await live_turns.end()
-        for turn_record, atif in zip(per_turn_trajectories, await atif_copies.records()):
-            turn_record["atif"] = atif
+        await atif_copies.join()
 
         await self._persist_env_trigger_state(context)
 

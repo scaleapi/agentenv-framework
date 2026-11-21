@@ -13,13 +13,11 @@ import base64
 import hashlib
 import json
 import re
-import struct
 import shutil
 import socket
 import subprocess
 import time
 import uuid
-import zlib
 
 import httpx
 import pytest
@@ -41,6 +39,7 @@ from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
 from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.a2a_test_agent import put_test_agent
+from tst.util.images import png
 
 pytestmark = pytest.mark.integration
 
@@ -177,7 +176,7 @@ async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_an
     """And the run, which prescribes atif/1, stores the turn's copy in its folder with the image's file beside it."""
     suffix = uuid.uuid4().hex[:8]
     native = "agentenv-echo-agent/v1"
-    image = _png(6, 4)
+    image = png(6, 4)
     agent = put_test_agent(f"trajectory-formats-agent-{suffix}")
     task = Task.put(id=f"trajectory-formats-{suffix}", steps=[
         _deploy(agent, "solver"),
@@ -288,15 +287,6 @@ async def test_a_model_key_a_command_prints_is_redacted_in_atif_and_kept_in_the_
     assert errors_in(validate(atif["trajectory"])) == []
 
 
-def _png(width: int, height: int) -> bytes:
-    def chunk(kind: bytes, body: bytes) -> bytes:
-        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-
-    pixels = zlib.compress(b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height)))
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", pixels) + chunk(b"IEND", b""))
-
-
 @pytest.mark.asyncio
 async def test_a_deployed_agent_pushes_its_copys_media_under_exact_object_grants(local_registry):
     suffix = uuid.uuid4().hex[:8]
@@ -305,7 +295,7 @@ async def test_a_deployed_agent_pushes_its_copys_media_under_exact_object_grants
     context = await Task.put(id=f"media-{suffix}", steps=[_deploy(agent, "solver")]).run()
     assert not context.metadata.get("failed_steps"), context.metadata.get("failed_steps")
     [deployed] = context.deployed_agents
-    image = _png(6, 4)
+    image = png(6, 4)
     parts = [{"kind": "text", "text": "look"},
              {"kind": "file", "file": {"bytes": base64.b64encode(image).decode(), "mimeType": "image/png",
                                        "name": "shot.png"}}]

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agentenv_protocol.atif import AtifError, check, is_prefix, load, media_paths, strip_profile, tasks
+from agentenv_protocol.atif import AtifError, check, is_prefix, load, media_paths, media_refs, strip_profile, tasks
 from atif_cases import FIXTURES
 
 
@@ -50,6 +50,19 @@ def test_media_paths_lists_every_file_once_including_the_ones_atif_has_no_part_f
     assert media_paths(fixture("coding")) == []
     for name in ("computer_use", "odd_parts"):
         assert all((FIXTURES / path).exists() for path in media_paths(fixture(name)))
+
+
+def test_media_refs_name_each_place_a_file_is_named_with_its_details_and_media_type():
+    refs = media_refs(fixture("computer_use"))
+    assert list(dict.fromkeys(ref.path for ref in refs)) == media_paths(fixture("computer_use"))
+    part = next(ref for ref in refs if ref.where.endswith(".source.path"))
+    assert part.media_type and part.media_type.startswith("image/") and part.info.get("sha256") == part.path[6:70]
+    odd = media_refs(fixture("odd_parts"))
+    noted = [ref for ref in odd if ".extra.agentenv.media[" in ref.where]
+    assert noted and all(ref.media_type == ref.info.get("media_type") for ref in noted)
+    nested = {**fixture("coding"), "subagent_trajectories": [fixture("computer_use")]}
+    assert all(ref.where.startswith("subagent_trajectories[0].steps[") for ref in media_refs(nested))
+    assert len(media_refs(nested)) == len(refs)
 
 
 def test_a_page_is_a_prefix_only_when_its_steps_lead_every_trajectory():

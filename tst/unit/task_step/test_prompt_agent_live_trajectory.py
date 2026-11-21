@@ -20,10 +20,11 @@ from agentenv_protocol.atif import FORMAT as ATIF, Adapter, atif_adapter, native
 
 from agent_env.config import configure
 from agent_env.store.object_store import LocalFilesystemObjectStore
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.snapshot_utils import live_trajectory
 from agent_env.task_step.task_steps import prompt_agent as pa
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.unit.task_step.prompt_agent_rig import card_of, deployed, quiet_conversations, route_clients
 
 _PREFIX = "prompt_agent_trajectories/prompt_id=solve/"
 _EVENTS = [{"type": "system", "subtype": "init"}, {"type": "assistant", "step": 0}]
@@ -73,18 +74,14 @@ class _Run:
                  native: str | None = None, atif: bool = False) -> None:
         self.store = LocalFilesystemObjectStore(str(tmp_path))
         configure(object_store=self.store)
-        for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task", "mark_closed", "get_conversation"):
-            monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
+        quiet_conversations(monkeypatch)
         app = _agent(self.store, live=live, wait_for_chunk=wait_for_chunk, native=native, atif=atif).create_app()
-        self.card = app.state.agentenv_a2a.card.model_dump(mode="json", exclude_none=True)
+        self.card = card_of(app)
         self.cursor_reads: list[dict] = []
         self.final_reads: list[dict] = []
         #: Every request the step sent, in order: its path and, for a JSON-RPC call, its method.
         self.sent: list[str] = []
         self.prescriptions: list[dict] = []
-        transport = httpx.ASGITransport(app=app)
-        real_client = httpx.AsyncClient
-
         async def record(request: httpx.Request) -> None:
             body = json.loads(await request.aread()) if request.method == "POST" else {}
             self.sent.append(body.get("method", request.url.path) if isinstance(body, dict) else request.url.path)
@@ -93,17 +90,11 @@ class _Run:
             elif request.url.path == "/ext/trajectory/prescribe":
                 self.prescriptions.append(body)
 
-        monkeypatch.setattr(
-            httpx,
-            "AsyncClient",
-            lambda *a, **kw: real_client(*a, transport=transport, event_hooks={"request": [record]}, **kw),
-        )
+        route_clients(monkeypatch, httpx.ASGITransport(app=app), event_hooks={"request": [record]})
 
     async def execute(self, step: PromptAgentTaskStep, context: TaskStepContext | None = None) -> TaskStepContext:
         context = context or TaskStepContext(instance_id="ti-1")
-        context.deployed_agents.append(
-            DeployedAgent(agent_name="solver", api_url="http://agent.test", a2a_url="http://agent.test", a2a_card=self.card)
-        )
+        context.deployed_agents.append(deployed(self.card))
         return await step.execute(context)
 
     def step(self, **kwargs) -> PromptAgentTaskStep:

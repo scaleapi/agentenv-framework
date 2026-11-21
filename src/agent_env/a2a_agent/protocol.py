@@ -45,6 +45,18 @@ _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _REFUSED = " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
 
 
+def extension_error_code(response: httpx.Response) -> str | None:
+    """The SDK error code an extension's error answer names, such as ``format_not_prescribed``, when it names one in
+    the SDK's form: the agent writes the body, so anything else is no code."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, Mapping) else None
+    code = error.get("code") if isinstance(error, Mapping) else None
+    return code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else None
+
+
 def raise_for_extension_status(
     response: httpx.Response, *, operation: str, include_body: bool = False
 ) -> None:
@@ -53,16 +65,7 @@ def raise_for_extension_status(
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        if include_body:
-            detail = response.text[:500]
-        else:
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
-            error = body.get("error") if isinstance(body, Mapping) else None
-            code = error.get("code") if isinstance(error, Mapping) else None
-            detail = code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else ""
+        detail = response.text[:500] if include_body else extension_error_code(response) or ""
         status = f"{operation} failed with HTTP {response.status_code}"
         refused = _REFUSED if response.status_code == 401 else ""
         if refused:

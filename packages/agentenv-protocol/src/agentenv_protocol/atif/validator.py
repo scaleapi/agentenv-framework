@@ -26,7 +26,7 @@ from .profile import (
     StepError,
     profile_of,
 )
-from .reader import MEDIA_PATH, is_prefix, tasks
+from .reader import MEDIA_PATH, _trajectories, is_prefix, media_refs, tasks
 
 ERROR = "error"
 WARNING = "warning"
@@ -131,17 +131,26 @@ def parse(source: str | bytes | Path) -> tuple[Any, list[Finding]]:
         return None, [Finding("json", ERROR, "", str(exc))]
 
 
+@dataclass(frozen=True)
+class StoredMedia:
+    """Media files stored beside a document by one who checked each file's bytes against its name, as the worker does
+    each file an agent pushes: their sizes by path, None where the store can't tell. Given these, ``validate`` holds
+    the profile's sha256 to each name and its size to the stored file's without reading the bytes."""
+
+    sizes: Mapping[str, int | None]
+
+
 def validate(document: Any, *, reader: bool = False,
-             media: Path | Mapping[str, bytes] | None = None) -> list[Finding]:
+             media: Path | Mapping[str, bytes] | StoredMedia | None = None) -> list[Finding]:
     """Every finding for ``document``. ``reader`` checks someone else's document for reading rather than a producer's
-    output. ``media`` is the folder the document's media paths are relative to, or the files by path; without it, only
-    the paths' form is checked."""
+    output. ``media`` is the folder the document's media paths are relative to, the files by path, or the files stored
+    beside it (``StoredMedia``); without it, only the paths' form is checked."""
     found = _Findings(reader)
     _check(document, found, media)
     return found.items
 
 
-def _check(document: Any, found: _Findings, media: Path | Mapping[str, bytes] | None) -> None:
+def _check(document: Any, found: _Findings, media: Path | Mapping[str, bytes] | StoredMedia | None) -> None:
     if not isinstance(document, Mapping):
         found.add("json", "", "a document is a JSON object")
         return
@@ -209,13 +218,6 @@ def validate_live(pages: Sequence[Mapping[str, Any] | None], final: Mapping[str,
 
 
 # What the document holds
-
-def _trajectories(document: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, Mapping[str, Any]]]:
-    """The document and every sub-agent embedded in it, at any depth, with the path prefix of each."""
-    yield prefix, document
-    for index, sub in enumerate(document.get("subagent_trajectories") or []):
-        yield from _trajectories(sub, f"{prefix}subagent_trajectories[{index}].")
-
 
 def _count(value: Any) -> int | None:
     """A token count as ATIF's models read it, a numeric string included, or None when there is none."""
@@ -397,8 +399,10 @@ def _usage(document: Mapping[str, Any], found: _Findings) -> None:
                       f"cache reads and writes ({cache}) exceed prompt_tokens ({prompt}), which include them")
 
 
-def _media(document: Mapping[str, Any], found: _Findings, media: Path | Mapping[str, bytes] | None) -> None:
-    for where, path, info in _media_paths(document):
+def _media(document: Mapping[str, Any], found: _Findings,
+           media: Path | Mapping[str, bytes] | StoredMedia | None) -> None:
+    for ref in media_refs(document):
+        where, path, info = ref.where, ref.path, ref.info
         if "://" in path:
             found.add("media-path", where, f"{path!r} is a URL; the profile's media are files beside the document")
             continue
@@ -406,6 +410,9 @@ def _media(document: Mapping[str, Any], found: _Findings, media: Path | Mapping[
         if not named:
             found.add("media-path", where, f"{path!r} isn't media/<sha256>.<ext>")
         if media is None:
+            continue
+        if isinstance(media, StoredMedia):
+            _stored(found, where, path, named, info, media)
             continue
         data = _media_bytes(media, path)
         if data is None:
@@ -420,24 +427,16 @@ def _media(document: Mapping[str, Any], found: _Findings, media: Path | Mapping[
             found.add("media-bytes", where, f"the profile gives {info['bytes']} bytes, but the file has {len(data)}")
 
 
-def _media_paths(document: Mapping[str, Any]) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
-    """Each media path the document names, where, and the profile's details for it."""
-    for where, step in _steps(document):
-        holders = [(f"{where}.message", step, step.get("message"))] + [
-            (f"{where}.observation.results[{n}].content", result, result.get("content"))
-            for n, result in enumerate(_results(step))]
-        for at, holder, parts in holders:
-            details = profile_of(holder).get("media") or {}
-            details = details if isinstance(details, Mapping) else {}
-            paths = [(f"{at}[{n}].source.path", part["source"]["path"])
-                     for n, part in enumerate(parts if isinstance(parts, list) else [])
-                     if isinstance(part, Mapping) and isinstance((part.get("source") or {}).get("path"), str)]
-            listed = {path for _, path in paths}
-            owner = at.rsplit(".", 1)[0]
-            paths += [(f"{owner}.extra.{PROFILE_KEY}.media[{path}]", path) for path in details if path not in listed]
-            for path_where, path in paths:
-                info = details.get(path)
-                yield path_where, path, info if isinstance(info, Mapping) else {}
+def _stored(found: _Findings, where: str, path: str, named: re.Match[str] | None, info: Mapping[str, Any],
+            media: StoredMedia) -> None:
+    if path not in media.sizes:
+        found.add("media-bytes", where, f"{path} isn't in the media given")
+        return
+    if named and info.get("sha256") is not None and info["sha256"] != named["sha256"]:
+        found.add("media-bytes", where, f"the profile gives sha256 {info['sha256']}, but the name has {named['sha256']}")
+    size = media.sizes[path]
+    if info.get("bytes") is not None and size is not None and info["bytes"] != size:
+        found.add("media-bytes", where, f"the profile gives {info['bytes']} bytes, but the file has {size}")
 
 
 def _media_bytes(media: Path | Mapping[str, bytes], path: str) -> bytes | None:
