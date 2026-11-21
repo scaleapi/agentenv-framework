@@ -33,7 +33,8 @@ direct Letta Code tools through `letta.tools.register`; each tool executes `lett
 | `staging/v1` | SDK default. |
 
 The image starts as root (`start-agent`), whose supervisord runs the A2A server as user `agent` in `/app`, with state
-under `/data`; started as another user, it runs the server alone, as before. It includes git and `pdftoppm`. PDF
+under `/data`; started as another user, it runs the server alone, as before. Either way the container ends when the
+server exits, as before: supervisord never restarts it, and stops once it exits. It includes git and `pdftoppm`. PDF
 attachments are rendered as page images; other attachments are materialized and their paths passed to the CLI. Headless
 mode never loads node-pty, so installation skips dependency scripts and rebuilds only the CLI, sharp and protobufjs.
 The end of CLI stderr is included in failures. Cancellation and shutdown kill the CLI's process tree.
