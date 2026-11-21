@@ -2,14 +2,20 @@
 clock takes the computer bases' clock library and egress proxy from agent-env's one copy, whose libfaketime patch has
 the init guard; runs the follower and the proxy, each as its own user, and the A2A server as the agent's user on real
 time, under root's supervisord; preloads agent-env's libfaketime for the agent's user alone; starts as another user as
-it did before; and its bridge takes ``clock_armed`` and ``egress_env`` from the one shared ``agent_egress``, in a folder
-only agent images take, which its image copies beside it."""
+it did before; stops when the A2A server exits, as the image did when the server was its main process, while the
+follower and the proxy restart in place; and its bridge takes ``clock_armed`` and ``egress_env`` from the one shared
+``agent_egress``, in a folder only agent images take, which its image copies beside it."""
 
 from __future__ import annotations
 
 import ast
+import configparser
+import json
 import posixpath
 import re
+import shlex
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -57,10 +63,15 @@ def test_the_libfaketime_every_clocked_image_builds_has_the_init_guard():
     assert "pthread_once(&initialized_once_control, ftpl_really_init_guarded);" in patch
 
 
+def _conf(agent: str) -> configparser.RawConfigParser:
+    """The image's root.conf as supervisord reads it, with its inline comments."""
+    conf = configparser.RawConfigParser(inline_comment_prefixes=(";", "#"))
+    conf.read_string((AGENTS_DIR / agent / "root.conf").read_text())
+    return conf
+
+
 def _program(agent: str, name: str) -> dict[str, str]:
-    conf = (AGENTS_DIR / agent / "root.conf").read_text()
-    section = re.search(rf"^\[program:{name}\]\n(.*?)(?=^\[|\Z)", conf, re.MULTILINE | re.DOTALL).group(1)
-    return dict(line.split("=", 1) for line in section.splitlines() if "=" in line and not line.startswith(";"))
+    return dict(_conf(agent)[f"program:{name}"])
 
 
 @pytest.mark.parametrize("agent", CLOCKED)
@@ -72,6 +83,56 @@ def test_the_follower_and_the_proxy_run_as_their_own_users_and_the_a2a_server_as
     assert server["command"].split()[0].rsplit("/", 1)[-1].startswith("python")
     assert 'AGENTENV_REAL_TIME="1"' in server["environment"]
     assert f'AGENTENV_EGRESS_PROXY="{PROXY}"' in server["environment"]
+
+
+@pytest.mark.parametrize("agent", CLOCKED)
+def test_the_a2a_server_is_never_restarted_and_the_follower_and_the_proxy_are(agent):
+    """A server restarted in place would have lost the env's MCP servers, its config, its peers and its running tasks."""
+    assert (_program(agent, "agent")["autorestart"], _program(agent, "agent")["startretries"]) == ("false", "0")
+    assert _program(agent, "clock")["autorestart"] == _program(agent, "egress")["autorestart"] == "true"
+
+
+# What supervisord sends a listener: each event's header line, then its payload of len bytes.
+LISTENER_HOST = r"""
+import json, signal, subprocess, sys
+argv, events = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+terminated = []
+signal.signal(signal.SIGTERM, lambda *_: terminated.append(1))
+listener = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+after = []
+for serial, (name, payload) in enumerate(events):
+    assert listener.stdout.readline() == b"READY\n"
+    body = payload.encode()
+    listener.stdin.write(f"ver:3.0 server:supervisor serial:{serial} pool:p poolserial:{serial} eventname:{name} "
+                         f"len:{len(body)}\n".encode() + body)
+    listener.stdin.flush()
+    assert listener.stdout.readline() == b"RESULT 2\n" and listener.stdout.read(2) == b"OK"
+    after.append(len(terminated))
+listener.stdin.close()
+print(json.dumps({"terminated_after": after, "stderr": listener.stderr.read().decode(), "exit": listener.wait()}))
+"""
+
+
+@pytest.mark.parametrize("agent", CLOCKED)
+def test_the_a2a_servers_exit_stops_supervisord_and_the_followers_or_the_proxys_doesnt(agent):
+    """The listener, run as supervisord runs it, under a stand-in for supervisord that counts the SIGTERMs it gets."""
+    [section] = [name for name in _conf(agent).sections() if name.startswith("eventlistener:")]
+    listener = _conf(agent)[section]
+    assert set(listener["events"].split(",")) == {"PROCESS_STATE_EXITED", "PROCESS_STATE_FATAL"}
+    # As root, which may stop supervisord.
+    assert "user" not in listener and "%" not in listener["command"]
+    events = [("PROCESS_STATE_EXITED", "processname:clock groupname:clock from_state:RUNNING expected:0 pid:7"),
+              ("PROCESS_STATE_FATAL", "processname:egress groupname:egress from_state:BACKOFF"),
+              ("PROCESS_STATE_EXITED", "processname:agent-exit groupname:agent-exit from_state:RUNNING expected:1 pid:8"),
+              ("PROCESS_STATE_EXITED", "processname:agent groupname:agent from_state:RUNNING expected:0 pid:9"),
+              ("PROCESS_STATE_FATAL", "processname:agent groupname:agent from_state:BACKOFF")]
+
+    host = subprocess.run([sys.executable, "-I", "-c", LISTENER_HOST, json.dumps(shlex.split(listener["command"])),
+                           json.dumps(events)], capture_output=True, text=True, timeout=30, check=True)
+
+    result = json.loads(host.stdout)
+    assert result["terminated_after"] == [0, 0, 0, 1, 2]
+    assert result["stderr"].count("the A2A server exited") == 2 and result["exit"] == 0
 
 
 @pytest.mark.parametrize("agent", CLOCKED)
