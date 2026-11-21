@@ -45,6 +45,8 @@ class Endpoint:
         self.requests: list[dict] = []
         self.hold: asyncio.Event | None = None
         self.hold_headers: asyncio.Event | None = None
+        # Each answer written this many bytes at a time, when set, rather than an event at a time.
+        self.write_bytes: int | None = None
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         self.requests.append({"method": request.method, "path": request.path_qs, "body": await request.read(),
@@ -54,6 +56,13 @@ class Endpoint:
             await self.hold_headers.wait()
         response = web.StreamResponse(status=status, headers={"content-type": kind})
         await response.prepare(request)
+        if self.write_bytes is not None:
+            encoded = body.encode()
+            for start in range(0, len(encoded), self.write_bytes):
+                await response.write(encoded[start:start + self.write_bytes])
+                await asyncio.sleep(0)
+            await response.write_eof()
+            return response
         chunks = body.split("\n\n")
         for index, chunk in enumerate(chunks):
             await response.write((chunk + ("\n\n" if index < len(chunks) - 1 else "")).encode())
@@ -176,7 +185,7 @@ def test_a_call_whose_cli_hung_up_before_the_answer_began_is_still_counted():
 def test_a_long_streams_usage_is_read_however_long_it_ran():
     """The usage comes last, so it's read as the stream passes, not from a kept prefix of it."""
     chunk = 'data: {"choices": [{"delta": {"content": "%s"}}]}\n\n' % ("x" * 4000)
-    reader = model_relay.AnswerReader()
+    reader = model_relay.AnswerReader(stream=True)
     for _ in range(20_000):
         reader.feed(chunk.encode())
     reader.feed(CLAUDE_STREAM.encode())
@@ -185,12 +194,26 @@ def test_a_long_streams_usage_is_read_however_long_it_ran():
 
 
 def test_a_streams_usage_split_across_reads_is_read_whole():
-    reader = model_relay.AnswerReader()
+    """Read 7 bytes at a time, the first read ``data: {``, and 1 byte at a time, ``d`` first."""
     encoded = CLAUDE_STREAM.encode()
-    for start in range(0, len(encoded), 7):
-        reader.feed(encoded[start:start + 7])
+    for size in (7, 1):
+        reader = model_relay.AnswerReader(stream=True)
+        for start in range(0, len(encoded), size):
+            reader.feed(encoded[start:start + size])
 
-    assert (reader.usage().input_tokens, reader.usage().cache_write_tokens) == (20948, 199)
+        assert (reader.usage().input_tokens, reader.usage().cache_write_tokens) == (20948, 199)
+
+
+def test_a_relayed_stream_written_a_byte_at_a_time_is_counted():
+    """The relay judges an answer by its content type, so a stream whose first read is ``d`` is still a stream."""
+    async def exercise(client, root, endpoint):
+        endpoint.write_bytes = 1
+        return (await _chat(client, root)).text
+
+    text, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
+
+    assert text == CLAUDE_STREAM
+    assert [usage.input_tokens for usage in calls.answered] == [20948]
 
 
 def test_another_turns_path_reaches_nothing_and_other_routes_are_not_calls():

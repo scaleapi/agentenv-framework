@@ -70,19 +70,16 @@ class Calls:
 class AnswerReader:
     """Reads an answer's usage as its bytes pass: a stream's events one line at a time, keeping only the usage they
     carry (its last chunk with one in Chat Completions, its ``response.completed`` in Responses, its
-    ``message_start`` and ``message_delta`` in Anthropic's Messages), or a JSON body's ``usage``."""
+    ``message_start`` and ``message_delta`` in Anthropic's Messages), or a JSON body's ``usage``. ``stream`` says which
+    the answer is, as its content type does; when None, the whole answer is kept and judged by how it begins."""
 
-    def __init__(self) -> None:
-        self._stream: bool | None = None
+    def __init__(self, stream: bool | None = None) -> None:
+        self._stream = stream
         self._line = bytearray()
         self._body = bytearray()
         self._usage: dict[str, Any] | None = None
 
     def feed(self, chunk: bytes) -> None:
-        if self._stream is None:
-            if not chunk.strip():
-                return
-            self._stream = chunk.lstrip().startswith((b"data:", b"event:", b":"))
         if not self._stream:
             if len(self._body) < _KEPT_BODY_BYTES:
                 self._body.extend(chunk)
@@ -114,6 +111,9 @@ class AnswerReader:
     def usage(self) -> Usage | None:
         """The answer's usage, None when it carried none, or only zeros, as a gateway sends for a call it didn't
         count."""
+        if self._stream is None and self._body.lstrip().startswith((b"data:", b"event:", b":")):
+            self._stream, body, self._body = True, bytes(self._body), bytearray()
+            self.feed(body)
         if self._stream:
             self._event(bytes(self._line))
             usage = self._usage
@@ -164,6 +164,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                 async with client.request(request.method, f"{upstream}/{path}", params=request.query,
                                           data=await request.read(), headers=outgoing) as answer:
                     status = answer.status
+                    reader = AnswerReader(stream=answer.content_type == "text/event-stream")
                     response = web.StreamResponse(status=answer.status, headers={
                         name: value for name, value in answer.headers.items()
                         if name.lower() not in _ANSWER_DROP_HEADERS})
