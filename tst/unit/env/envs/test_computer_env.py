@@ -543,12 +543,78 @@ def test_a_probe_ended_by_a_dropped_connection_runs_again_on_a_fresh_boot_and_on
     ({"status": "building"}, {"status": "failed", "stage": "build"}, True),
     ({"status": "building"}, {"status": "ready", "composer": "sha256:another"}, True),
     ({"status": "failed", "stage": "build"}, {"status": "ready", "composer": None}, True),
+    ({"status": "failed", "stage": "resolve"}, {"status": "ready", "composer": "sha256:another", "published": True},
+     False),
+    ({"status": "building"}, {"status": "unverified", "composer": "sha256:another", "published": True}, False),
 ], ids=["unprobed-over-ready", "build-failure-over-built", "building-over-built", "probe-failure-over-unprobed",
         "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure",
-        "building-over-another-composers-ready", "build-failure-over-a-ready-no-composer-named"])
+        "building-over-another-composers-ready", "build-failure-over-a-ready-no-composer-named",
+        "resolve-failure-over-another-composers-published-ready", "building-over-another-composers-published-unprobed"])
 def test_a_result_takes_a_pairs_place_only_when_it_got_at_least_as_far(result, stored, replaces):
     mine = {"composer": composed.composition()}
     assert (composed._rank({**mine, **result}) >= composed._rank({**mine, **stored})) is replaces
+
+
+def _recorded_by_another_composer(env, **changes):
+    """``env``, its arm64 container's record as another agent-env's composer left it, with ``changes``."""
+    record = env.metadata["composed"]
+    record["container"]["arm64"] = {**record["container"]["arm64"], "composer": "sha256:another", **changes}
+    env.metadata = {**env.metadata, "composed": record}
+    return env
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["a-release-published-it", "composed-by-a-user"])
+def test_a_ready_build_another_composer_recorded_is_composed_again_unless_a_release_published_it(base, driver, docker,
+                                                                                                 published):
+    env = _recorded_by_another_composer(Env.get(_put(base, driver).id), **({"published": True} if published else {}))
+
+    assert (("container", "arm64") in composer.pending(env)) is not published
+    assert (("container", "arm64") in [(form, arch) for form, arch, _ in env.deployable_builds()]) is published
+    assert env.build_statuses()["container/arm64"] == ("ready" if published else "ready, by another composer")
+
+
+def test_an_unprobed_image_a_release_published_is_probed_as_it_is_under_another_composer(base, driver, docker):
+    env = _recorded_by_another_composer(Env.get(_put(base, driver).id), status="unverified", published=True)
+    image = env.metadata["composed"]["container"]["arm64"]["image"]
+    builds, resolves = len(docker.builds), len(docker.resolved)
+
+    composer.compose(env, [("container", "arm64")])
+
+    probed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    assert (probed["status"], probed["image"], probed["published"]) == ("ready", image, True)
+    assert (len(docker.builds), len(docker.resolved)) == (builds, resolves)
+
+
+@pytest.mark.parametrize("requirements, pinned", [
+    ("agentenv-framework-protocol[app]==0.1.597\n", True),
+    ("# shipped by a release\nAgentenv_Framework.Protocol[app] === 0.1.597  # its own\nav>=17\n", True),
+    ("agentenv-framework-protocol[app]>=0.1.547\nav>=17\n", False),
+    ("agentenv-framework-protocol[app]==0.1.*\n", False),
+    ("-r more.txt\nav>=17\n", False),
+], ids=["pinned", "pinned-by-another-spelling", "a-floor", "a-wildcard", "not-named"])
+def test_an_apps_venv_adds_this_releases_protocol_unless_its_requirements_pin_the_protocol_exactly(
+        base, driver, docker, tmp_path, requirements, pinned):
+    mail = _app(base, driver, tmp_path / "mail", compose=False,
+                extra={"requirements.txt": requirements, "more.txt": "av>=17\n"})
+
+    _put(base, driver, apps=[mail])
+
+    release = f"agentenv-framework-protocol[app]=={importlib.metadata.version('agentenv-framework-protocol')}"
+    assert {tuple(layer["add"]) for _, request in docker.resolved for layer in request["python"]
+            if layer["name"] != "driver"} == {() if pinned else (release,)}
+
+
+def test_a_checkout_adds_its_own_protocol_only_to_the_venvs_that_dont_pin_one(base, driver, docker, tmp_path,
+                                                                             monkeypatch):
+    monkeypatch.setattr(composer, "_protocol_source", lambda: _protocol_checkout(tmp_path))
+    mail = _app(base, driver, tmp_path / "mail", compose=False,
+                extra={"requirements.txt": "agentenv-framework-protocol[app]==0.1.597\n"})
+
+    _put(base, driver, apps=[mail])
+
+    assert {layer["name"]: tuple(layer["add"]) for _, request in docker.resolved for layer in request["python"]} == {
+        "driver": ("/ctx/protocol",), **{name: () for name in {
+            layer["name"] for _, request in docker.resolved for layer in request["python"]} - {"driver"}}}
 
 
 def test_the_composers_digest_changes_with_a_files_bytes_and_with_its_executable_bit_alone(tmp_path, monkeypatch):

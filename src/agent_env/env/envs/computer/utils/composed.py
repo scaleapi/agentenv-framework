@@ -100,8 +100,9 @@ def now() -> str:
 
 def stale(result: dict | None) -> bool:
     """Whether ``result`` was recorded by an agent-env whose composing code differs from this one's, or by one from
-    before results named it: what it holds may not be what this agent-env composes."""
-    return result is not None and result.get("composer") != composition()
+    before results named it: what it holds may not be what this agent-env composes. Never an image a release published
+    (``published``): its digest fixes it, and what it's made from pins that release, so no other composer makes it."""
+    return result is not None and not result.get("published") and result.get("composer") != composition()
 
 
 @functools.cache

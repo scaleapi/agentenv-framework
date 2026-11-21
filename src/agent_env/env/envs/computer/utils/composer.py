@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from agentenv_protocol.computer.apps import apps_folder
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 from agentenv_protocol.computer.platform import PLATFORM_ENV, applies, entry_for
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX, ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -253,11 +255,18 @@ def _with_containers(env: ComputerEnv, pairs: list[tuple[str, str]]) -> list[tup
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
               builds: builder.Builds, progress: _Progress) -> dict:
-    """``form`` and ``arch`` built or reused, then probed when it built (gate 3)."""
-    result = _built(env, base, driver, form, arch, builds, progress)
+    """``form`` and ``arch`` built or reused, then probed when it built (gate 3). An image a release published that the
+    record holds unprobed is probed as it is, never built again: no other release's composer makes it."""
+    result = _unprobed_published(env, form, arch) or _built(env, base, driver, form, arch, builds, progress)
     if result["status"] != "unverified":
         return result
     return _probed(env, driver, form, arch, result, builds.provider, progress)
+
+
+def _unprobed_published(env: ComputerEnv, form: str, arch: str) -> dict | None:
+    """The pair's record, when it's an image a release published that's built but not probed yet."""
+    record = env.metadata.get("composed", {}).get(form, {}).get(arch) or {}
+    return dict(record) if record.get("published") and record.get("status") == "unverified" else None
 
 
 def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
@@ -622,7 +631,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         layer = _stage_driver(context, driver, base, from_store)
         apps = [_stage_app(context, app, base, from_store) for app in env.composed_apps()]
         layers = [layer, *apps]
-        wants = _wants(layers, _stage_protocol(context))
+        wants = _wants(layers, _stage_protocol(context), context)
         platform, held = f"linux/{arch}", []
 
         def on() -> builder.Builder:
@@ -1095,16 +1104,37 @@ def _venv(layer: _Layer) -> bool:
     return layer.install.python is not None or layer.app
 
 
-def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
+def _wants(layers: list[_Layer], protocol: bool, context: Path) -> list[packages.Want]:
     """What each layer asks a lock for; a venv adds the protocol, for an app with its ``app`` extra: from this checkout's
-    source when ``protocol``, else an app's pinned to this release, which a driver's requirements name themselves."""
+    source when ``protocol``, else an app's pinned to this release, which a driver's requirements name themselves. A
+    layer whose requirements in ``context`` pin the protocol exactly, as each env a release ships does, adds none: its
+    pin stands, so an env one release shipped composes under another."""
     wants = []
     for layer in layers:
         extra = "[app]" if layer.app else ""
-        adds = ((f"/ctx/protocol{extra}",) if protocol else
+        adds = (() if _pins_protocol(context / layer.folder, layer.install) else
+                (f"/ctx/protocol{extra}",) if protocol else
                 (f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}",) if layer.app else ())
         wants.append(packages.Want(layer.folder, layer.install, _venv(layer), adds if _venv(layer) else ()))
     return wants
+
+
+def _pins_protocol(folder: Path, install: Install) -> bool:
+    """Whether the requirements ``install`` names in ``folder`` pin the protocol to one version (``==`` or ``===``)."""
+    if install.python is None or not (requirements := folder / install.python).is_file():
+        return False
+    for line in requirements.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement:
+            continue
+        if canonicalize_name(requirement.name) == _PROTOCOL and any(
+                spec.operator in ("==", "===") and "*" not in spec.version for spec in requirement.specifier):
+            return True
+    return False
 
 
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str],
