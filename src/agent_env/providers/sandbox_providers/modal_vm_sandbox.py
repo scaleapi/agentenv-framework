@@ -66,6 +66,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 from agent_env.providers.sandbox_providers.shared_box_walls import apply_walls_firewall
 
 if TYPE_CHECKING:
+    from agent_env.providers.sandbox_providers.shared_box_selftest import ProbeResult
     from agent_env.store.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
@@ -463,15 +464,27 @@ class ModalVmSandboxProvider(SandboxProvider):
         network_policy: Optional[NetworkPolicy] = None,
     ) -> ModalVmSandbox:
         """A VM running Docker with every container under gVisor, tagged as shared box ``box_id`` at create, since a
-        later ``set_tags`` would replace its attribution tags; set up for a gateway, it has the walls between its slots
-        too, though not yet verified. Its handle's terminate, and ``terminate_sandbox``, refuse to end it: only
-        ``terminate_shared_box`` does."""
+        later ``set_tags`` would replace its attribution tags. Set up for a gateway, it has the walls between its slots
+        too, and returns only once ``verify_walls`` has verified them; a box whose walls fail it is ended through
+        ``terminate_shared_box`` and its error raised. Its handle's terminate, and ``terminate_sandbox``, refuse to end
+        it: only ``terminate_shared_box`` does."""
         if not _MODAL_TAG_KEY.fullmatch(box_id):
             raise ValueError(f"shared box id {box_id!r} can't be a Modal tag: use 1-63 of a-z A-Z 0-9 . _ -")
-        return await self._created(_KEEPALIVE_CMD, _SHARED_BOX_IMAGE, cpu=cpu, memory=memory, timeout=timeout,
-                                   ports=list(exposed_ports or []), attribution=attribution,
-                                   network_policy=network_policy, setup_for_gateway=setup_for_gateway,
-                                   idle_timeout=self._idle_timeout, runtime="vm", shared_box_id=box_id)
+        box = await self._created(_KEEPALIVE_CMD, _SHARED_BOX_IMAGE, cpu=cpu, memory=memory, timeout=timeout,
+                                  ports=list(exposed_ports or []), attribution=attribution,
+                                  network_policy=network_policy, setup_for_gateway=setup_for_gateway,
+                                  idle_timeout=self._idle_timeout, runtime="vm", shared_box_id=box_id)
+        if setup_for_gateway:
+            try:
+                await verify_walls(box)
+            except BaseException:
+                try:
+                    await self.terminate_shared_box(box.sandbox_id, box_id)
+                except Exception as e:
+                    logger.warning(f"Failed to end shared box {box_id} ({box.sandbox_id}) after its walls weren't "
+                                   f"verified: {type(e).__name__}: {e}")
+                raise
+        return box
 
     async def terminate_shared_box(self, sandbox_id: str, box_id: str) -> None:
         """End shared box ``box_id``, the sandbox ``sandbox_id``, and every slot on it. A sandbox tagged as another box,
@@ -595,6 +608,18 @@ class ModalVmSandboxProvider(SandboxProvider):
 
 async def _tunnel_urls(sb: modal.Sandbox) -> dict[int, str]:
     return {p: _tunnel_url(t) for p, t in (await sb.tunnels.aio()).items()}
+
+
+async def verify_walls(box: ModalVmSandbox) -> list[ProbeResult]:
+    """Run every probe of shared box ``box``'s walls, a new box whose dockerd is up and whose walls are applied, and
+    once all have passed and their probe slots are gone, tag the box as verified: the only way the tag is written.
+    Returns each probe's result; raises WallsNotVerified, tagging nothing, at the first probe that fails."""
+    # Imported here: the probes tear their slots down with the gateway provider, which imports this module.
+    from agent_env.providers.sandbox_providers.shared_box_selftest import run_walls_probes
+
+    results = await run_walls_probes(box, dockerd_config=_SHARED_BOX_DOCKERD_CONFIG)
+    await _mark_walls_verified(box)
+    return results
 
 
 async def _mark_walls_verified(box: ModalVmSandbox) -> None:

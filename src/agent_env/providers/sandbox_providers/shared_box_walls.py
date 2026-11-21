@@ -13,6 +13,7 @@ reverse-path filtering drops a packet whose source address its bridge doesn't ro
 from __future__ import annotations
 
 import ipaddress
+import shlex
 from ipaddress import IPv4Address, IPv4Network
 from typing import NamedTuple, Sequence
 
@@ -97,11 +98,8 @@ def _restore_input(chains: dict[str, list[str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def walls_firewall_script(resolvers: Sequence[IPv4Address]) -> str:
-    """A root shell script that sets the box's firewall to the walls for every slot, the same rules however often it
-    runs. It turns on strict reverse-path filtering, then each of iptables and ip6tables refills the walls' chains in
-    one transaction, so a run that fails leaves the walls as they were, then each hook is added once. A box without
-    ip6tables fails the script.
+def walls_rules(resolvers: Sequence[IPv4Address]) -> dict[str, dict[str, list[str]]]:
+    """The rules of each walls chain, in order, for each of iptables and ip6tables.
 
     Slot-to-slot traffic is decided before conntrack is asked whether a packet is a reply: no real flow crosses
     slots, so a slot that forges a reply into another slot's flow is dropped like any other packet between them."""
@@ -114,15 +112,46 @@ def walls_firewall_script(resolvers: Sequence[IPv4Address]) -> str:
     forward += [f"{from_slot} -o {SLOT_BRIDGE_PREFIX}+ -j DROP", f"{_ESTABLISHED} -j RETURN"]
     forward += [f"{from_slot} -d {r}/32 -p {proto} --dport 53 -j RETURN" for r in resolvers for proto in ("udp", "tcp")]
     forward += [f"{from_slot} -d {n} -j DROP" for n in _PRIVATE_RANGES]
-    tables = {
+    return {
         "iptables": {FORWARD_CHAIN: forward, INPUT_CHAIN: [f"{_ESTABLISHED} -j RETURN", f"{from_slot} -j DROP"]},
         "ip6tables": {FORWARD_CHAIN: [f"{from_slot} -j DROP"], INPUT_CHAIN: [f"{from_slot} -j DROP"]},
     }
+
+
+def walls_firewall_script(resolvers: Sequence[IPv4Address]) -> str:
+    """A root shell script that sets the box's firewall to the walls for every slot, the same rules however often it
+    runs. It turns on strict reverse-path filtering, then each of iptables and ip6tables refills the walls' chains in
+    one transaction, so a run that fails leaves the walls as they were, then each hook is added once. A box without
+    ip6tables fails the script."""
     lines = ["set -eu", *(f"printf 1 > {knob}" for knob in RP_FILTER_KNOBS)]
-    for tool, chains in tables.items():
+    for tool, chains in walls_rules(resolvers).items():
         lines += [f"{tool}-restore -w --noflush <<'WALLS'", _restore_input(chains) + "WALLS"]
     for tool, table, parent, rule in _HOOKS:
         lines.append(f"{tool} -w -t {table} -C {parent} {rule} 2>/dev/null || {tool} -w -t {table} -I {parent} 1 {rule}")
+    return "\n".join(lines) + "\n"
+
+
+def walls_check_script(resolvers: Sequence[IPv4Address]) -> str:
+    """A root shell script that prints ``ok`` when the box's firewall is the walls ``walls_firewall_script`` sets: each
+    walls chain holds its rules and no others, each hook is in place and reverse-path filtering is strict. Otherwise
+    its last line counts the problems and names the first. It changes nothing.
+
+    Each rule is checked with ``-C``, which compares rules as iptables parsed them rather than as text, so the check
+    doesn't depend on how ``-S`` would print them. It doesn't check the rules' order."""
+    lines = ['problems=0 first=""', 'problem() { problems=$((problems + 1)); [ -n "$first" ] || first="$1"; }']
+    for tool, chains in walls_rules(resolvers).items():
+        for chain, rules in chains.items():
+            for rule in rules:
+                what = shlex.quote(f"{tool} {chain} lacks {rule}")
+                lines.append(f"{tool} -w -C {chain} {rule} 2>/dev/null || problem {what}")
+            size = shlex.quote(f"{tool} {chain} doesn't hold exactly its {len(rules)} rules")
+            lines.append(f'[ "$({tool} -w -S {chain} 2>/dev/null | wc -l)" -eq {len(rules) + 1} ] || problem {size}')
+    for tool, table, parent, rule in _HOOKS:
+        what = shlex.quote(f"{tool} {table} {parent} lacks {rule}")
+        lines.append(f"{tool} -w -t {table} -C {parent} {rule} 2>/dev/null || problem {what}")
+    for knob in RP_FILTER_KNOBS:
+        lines.append(f'[ "$(cat {knob} 2>/dev/null)" = 1 ] || problem {shlex.quote(f"{knob} is not 1")}')
+    lines.append('if [ "$problems" = 0 ]; then echo ok; else echo "walls problems: $problems; the first: $first"; fi')
     return "\n".join(lines) + "\n"
 
 

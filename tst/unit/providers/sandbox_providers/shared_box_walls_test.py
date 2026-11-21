@@ -26,6 +26,7 @@ from agent_env.providers.sandbox_providers.shared_box_walls import (
     slot_bridges,
     slot_networks,
     upstream_resolvers,
+    walls_check_script,
     walls_firewall_script,
 )
 
@@ -536,3 +537,89 @@ def test_every_slot_network_has_its_own_bridge_name_that_linux_accepts():
     assert slot_bridges(7) == ("aes7env", "aes7web")
     with pytest.raises(ValueError):
         slot_bridges(SLOT_COUNT)
+
+
+# A stand-in for iptables or ip6tables that answers ``-C`` and ``-S`` from a model's tables: STATE/<tool>.chains lists
+# its chains, raw ones as ``raw:<chain>``, and STATE/<tool>.rules holds each rule as ``<chain>\t<rule>``.
+_CHECK_STUB = """#!BASH
+args=()
+for arg in "$@"; do [ "$arg" = -w ] || args+=("$arg"); done
+table=filter
+if [ "${args[0]}" = -t ]; then table=${args[1]}; args=("${args[@]:2}"); fi
+op=${args[0]} chain=${args[1]} rule="${args[*]:2}"
+key=$chain; [ "$table" = filter ] || key="$table:$chain"
+state=STATE/${0##*/}
+found=1
+while IFS= read -r line; do [ "$line" = "$key" ] && found=0; done < "$state.chains"
+[ "$found" = 0 ] || exit 1
+[ "$op" = -C ] || echo "-N $chain"
+while IFS= read -r line; do
+  if [ "$op" = -C ]; then [ "$line" = "$key	$rule" ] && exit 0
+  elif [ "${line%%	*}" = "$key" ]; then echo "-A $chain ${line#*	}"; fi
+done < "$state.rules"
+[ "$op" != -C ]
+"""
+
+
+def _check_under_bash(tmp_path, table: FakeIptables) -> str:
+    """The last line the check script prints, run under bash against ``table``'s rules and kernel settings."""
+    bash = shutil.which("bash")
+    (tmp_path / "bin").mkdir()
+    for tool, family in TOOLS.items():
+        chains = table.tables[family]
+        (tmp_path / f"{tool}.chains").write_text("".join(f"{chain}\n" for chain in chains))
+        (tmp_path / f"{tool}.rules").write_text(
+            "".join(f"{chain}\t{' '.join(rule)}\n" for chain, rules in chains.items() for rule in rules))
+        stub = tmp_path / "bin" / tool
+        stub.write_text(_CHECK_STUB.replace("BASH", bash).replace("STATE", str(tmp_path)))
+        stub.chmod(0o755)
+    for knob in RP_FILTER_KNOBS:
+        path = tmp_path / knob.lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if knob in table.settings:
+            path.write_text(table.settings[knob])
+    script = walls_check_script(RESOLVERS).replace(" /proc/sys/", f" {tmp_path}/proc/sys/")
+    done = subprocess.run([bash, "-c", script], capture_output=True, text=True,
+                          env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"})
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip().splitlines()[-1]
+
+
+def test_the_check_passes_a_box_whose_firewall_is_the_walls(tmp_path, walled):
+    assert _check_under_bash(tmp_path, walled) == "ok"
+
+
+def _drop_resolver_rule(table: FakeIptables) -> str:
+    rule = next(r for r in table.chains["AGENTENV-WALLS-FWD"] if "--dport" in r)
+    table.chains["AGENTENV-WALLS-FWD"].remove(rule)
+    return f"iptables AGENTENV-WALLS-FWD lacks {' '.join(rule)}"
+
+
+def _add_rule(table: FakeIptables) -> str:
+    table.chains["AGENTENV-WALLS-IN"].append(("-j", "RETURN"))
+    return "iptables AGENTENV-WALLS-IN doesn't hold exactly its 2 rules"
+
+
+def _unhook_ipv6_raw(table: FakeIptables) -> str:
+    table.tables[6]["raw:PREROUTING"].clear()
+    return f"ip6tables raw PREROUTING lacks -i {SLOT_BRIDGE_PREFIX}+ -j DROP"
+
+
+def _loosen_rp_filter(table: FakeIptables) -> str:
+    table.settings[RP_FILTER_KNOBS[1]] = "0"
+    return f"{RP_FILTER_KNOBS[1]} is not 1"
+
+
+def _drop_ipv6_walls(table: FakeIptables) -> str:
+    del table.tables[6]["AGENTENV-WALLS-FWD"]
+    return f"ip6tables AGENTENV-WALLS-FWD lacks -i {SLOT_BRIDGE_PREFIX}+ -j DROP"
+
+
+def test_the_check_counts_every_way_the_firewall_differs_from_the_walls_and_names_the_first(tmp_path, walled):
+    problems = [_drop_resolver_rule(walled), _add_rule(walled), _unhook_ipv6_raw(walled), _loosen_rp_filter(walled),
+                _drop_ipv6_walls(walled)]
+
+    answer = _check_under_bash(tmp_path, walled)
+
+    # Dropping a rule, or a whole chain, also leaves its chain short of its rules.
+    assert answer == f"walls problems: 7; the first: {problems[0]}"

@@ -464,14 +464,16 @@ async def test_marking_the_walls_verified_writes_nothing_unless_the_sandbox_is_t
 _MODAL_SANDBOX, _MODAL_VM_SANDBOX = modal_sandbox.__name__, modal_vm_sandbox.__name__
 #: The places, each a module and a qualified name in it, with a part in the walls tag: its one writer; the functions
 #: that may name WALLS_TAG without writing it, its refusal in attribution and the reattach, which alone passes a
-#: handle the ``walls`` it read from the tags; and the handle's ``__init__``, which alone stores that ``walls``.
+#: handle the ``walls`` it read from the tags; the handle's ``__init__``, which alone stores that ``walls``; and the
+#: self-test, which alone calls the writer.
 _WALLS_WRITER = (_MODAL_VM_SANDBOX, "_mark_walls_verified")
+_WALLS_SELF_TEST = (_MODAL_VM_SANDBOX, "verify_walls")
 _WALLS_REATTACH = (_MODAL_VM_SANDBOX, "ModalVmSandboxProvider.get_shared_box")
 _WALLS_READERS = {(_MODAL_SANDBOX, "_attribution_tags"), _WALLS_REATTACH}
 _HANDLE_INIT = (_MODAL_VM_SANDBOX, "ModalVmSandbox.__init__")
 _TAG_DEFINITION = (_MODAL_SANDBOX, "")
 #: The strings that would reach the walls tag, or the tags and the handle's record around getattr and setattr.
-_WALLS_NAMES = {"WALLS_TAG", "set_tags", "_walls", WALLS_TAG}
+_WALLS_NAMES = {"WALLS_TAG", "set_tags", "_walls", "_mark_walls_verified", WALLS_TAG}
 
 
 def _places(tree: ast.Module) -> tuple[dict[int, str], dict[str, ast.AST]]:
@@ -523,7 +525,8 @@ def _walls_read_from_tags(function: ast.AST, value: ast.expr) -> bool:
 
 def _walls_tag_strays(module: str, text: str) -> list[str]:
     """Each place in ``text``, the source of ``module``, that writes the walls tag, or a handle's record of it, outside
-    its one writer, each place matched by module and qualified name, never by name alone.
+    its one writer, or calls that writer outside the self-test, each place matched by module and qualified name,
+    never by name alone.
 
     WALLS_TAG, bare, as an attribute or imported under another name, is named only in its definition, by the readers,
     and by the writer, the only one to put it in a dict or assign it. ``set_tags`` is reached, called or not, only on a
@@ -531,7 +534,8 @@ def _walls_tag_strays(module: str, text: str) -> list[str]:
     ``walls`` argument in the handle's ``__init__``; no call passes ``_walls=``, and ``walls=`` is passed only by the
     reattach, with what it read from the tags. None of these names, nor the tag's value, is made as a string, quoted
     any way, joined with ``+`` or in an f-string, outside the tag's definition. A module that mentions walls reaches
-    no object's ``__dict__`` or ``vars``, which would write ``_walls`` unnamed."""
+    no object's ``__dict__`` or ``vars``, which would write ``_walls`` unnamed. The writer, ``_mark_walls_verified``,
+    is named only by the self-test, ``verify_walls``, and imported nowhere."""
     tree = ast.parse(text)
     place, functions = _places(tree)
     writes, passthrough, definition = set(), set(), set()
@@ -559,6 +563,12 @@ def _walls_tag_strays(module: str, text: str) -> list[str]:
                 stray.append(f"{where} names WALLS_TAG")
         if isinstance(node, ast.alias) and node.name == "WALLS_TAG" and node.asname not in (None, "WALLS_TAG"):
             stray.append(f"{where} imports WALLS_TAG as {node.asname}")
+        if ((isinstance(node, ast.Name) and node.id == "_mark_walls_verified")
+                or (isinstance(node, ast.Attribute) and node.attr == "_mark_walls_verified")) \
+                and (module, where_in) != _WALLS_SELF_TEST:
+            stray.append(f"{where} names _mark_walls_verified")
+        if isinstance(node, ast.alias) and node.name == "_mark_walls_verified":
+            stray.append(f"{where} imports _mark_walls_verified")
         if isinstance(node, ast.Attribute) and node.attr == "set_tags" \
                 and not (isinstance(node.value, ast.Name) and node.value.id == "app"):
             stray.append(f"{where} sets tags")
@@ -645,6 +655,21 @@ _PLANTED_WALLS_WRITES = {
     "inside the writer, a nested function": ("def _mark_walls_verified(box):\n    def inner():\n"
                                              "        box._walls = WALLS_VERSION\n    inner()",
                                              "assigns _walls", _MODAL_VM_SANDBOX),
+    "writer called outside the self-test": ("async def create(box):\n    await _mark_walls_verified(box)",
+                                            "names _mark_walls_verified", _MODAL_VM_SANDBOX),
+    "writer held for later": ("def f():\n    return _mark_walls_verified", "names _mark_walls_verified",
+                              _MODAL_VM_SANDBOX),
+    "writer reached as an attribute": ("async def f(m, box):\n    await m._mark_walls_verified(box)",
+                                       "names _mark_walls_verified"),
+    "writer imported": (f"from {_MODAL_VM_SANDBOX} import _mark_walls_verified", "imports _mark_walls_verified"),
+    "writer through getattr": ("async def f(m, box):\n    await getattr(m, '_mark_walls_verified')(box)",
+                               "spells '_mark_walls_verified'"),
+    "a self-test of the same name in another module": ("async def verify_walls(box):\n"
+                                                       "    await _mark_walls_verified(box)",
+                                                       "names _mark_walls_verified"),
+    "the self-test as a method": ("class X:\n    async def verify_walls(self, box):\n"
+                                  "        await _mark_walls_verified(box)",
+                                  "names _mark_walls_verified", _MODAL_VM_SANDBOX),
 }
 
 
@@ -666,6 +691,7 @@ def test_the_walls_guard_lets_the_writer_readers_and_handle_do_their_part():
             "async def _mark_walls_verified(box):\n"
             "    tags = await _read_tags(box._sb)\n"
             "    await box._sb.set_tags.aio({**tags, WALLS_TAG: WALLS_VERSION})\n    box._walls = WALLS_VERSION\n"
+            "async def verify_walls(box):\n    await run_walls_probes(box)\n    await _mark_walls_verified(box)\n"
             f"{_REATTACH.format('tags.get(WALLS_TAG)')}\n"
             "class ModalVmSandbox:\n    def __init__(self, walls):\n        self._walls = walls\n"
         ),
