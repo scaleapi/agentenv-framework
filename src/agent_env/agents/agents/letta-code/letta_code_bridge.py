@@ -14,7 +14,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +22,8 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, web
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
+
+from agent_egress import clock_armed, egress_env
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +59,14 @@ def context_data_dir(context_id: str) -> Path:
     return Path(SESSIONS_ROOT) / ctx_hash
 
 
-def _context_env(context_id: str) -> dict[str, str]:
+def _context_env(context_id: str, urls: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for a context: its own data dir as HOME, and on an armed clock (``armed``) the egress
+    proxy (``egress_env``) for what the CLI and what it starts reach: the model relay, on loopback, which stays direct,
+    and the env's MCP servers (``urls``), which the CLI connects to itself."""
     home = context_data_dir(context_id)
     home.mkdir(parents=True, exist_ok=True)
     return {**os.environ, "HOME": str(home), "LETTA_LOCAL_BACKEND_DIR": str(home / ".letta/lc-local-backend"),
-            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1"}
+            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1", **egress_env(os.environ, urls, armed=armed)}
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
@@ -435,7 +440,7 @@ async def _turn(prompt, context_id, session_id, model, mcp_servers, system_promp
                 project_id, task_id, role, attachment_paths, effort, event_callback, workspace):
     model = model or DEFAULT_MODEL
     handle = "openai-compatible/" + model
-    env = _context_env(context_id)
+    env = _context_env(context_id, [info["url"] for info in (mcp_servers or {}).values()], armed=clock_armed())
     home = Path(env["HOME"])
     (home / "context.json").write_text(json.dumps({"home": str(home)}))
     attribution = _attribution_headers(project_id, task_id)
