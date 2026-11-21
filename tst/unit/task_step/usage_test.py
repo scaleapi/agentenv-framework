@@ -1,5 +1,7 @@
 """A role's step usage entry: the sums, what they leave out, how they're priced, and where the entry is kept."""
 
+import asyncio
+
 import pytest
 from agentenv_protocol.a2a_agent import Usage
 
@@ -63,6 +65,36 @@ def test_a_step_records_each_started_role_as_each_turn_ends_and_skips_one_never_
     [entry] = context.metadata["step_usage"]["solve"]
     assert (entry["role"], entry["model"], entry["endpoint_host"], entry["input_tokens"]) == ("solver", "m", "gw:443", 3)
     assert context.metadata["model_endpoints"] == {"solver": {"solve": {"model": "m", "endpoint_host": "gw:443"}}}
+
+
+@pytest.mark.parametrize("cut", [TimeoutError("no answer"), asyncio.CancelledError()])
+def test_a_turn_cut_off_before_its_reply_is_a_turn_of_unknown_usage(cut):
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "m", None)
+    usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(input_tokens=3, output_tokens=1)))
+
+    with pytest.raises(type(cut)), usage.awaiting(ModelRole.SOLVER):
+        raise cut
+    with pytest.raises(TimeoutError), usage.awaiting(ModelRole.USER_SIMULATOR):
+        raise TimeoutError("a human peer's turn")
+    with pytest.raises(ConnectionError), usage.awaiting(ModelRole.SOLVER):
+        raise ConnectionError("refused")
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 3, True)
+
+
+def test_a_role_whose_only_turn_was_cut_off_has_no_counts_and_is_partial():
+    context = TaskStepContext()
+    usage = StepUsage(context, "rate")
+    usage.start(ModelRole.USER_SIMULATOR, "m", None)
+
+    with pytest.raises(TimeoutError), usage.awaiting(ModelRole.USER_SIMULATOR):
+        raise TimeoutError
+
+    [entry] = context.metadata["step_usage"]["rate"]
+    assert (entry["turns"], entry["input_tokens"], entry["cost_usd"], entry["partial"]) == (1, None, None, True)
 
 
 def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_partial():

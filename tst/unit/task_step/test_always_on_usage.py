@@ -47,3 +47,41 @@ async def test_each_role_s_turns_are_summed_with_the_endpoint_it_called(monkeypa
         "user_simulator", None, "sim-proxy.example", reads, pytest.approx(0.001 * reads))
     assert ctx.metadata["step_usage"]["week"] == [solver, user]
     assert ctx.metadata["model_endpoints"]["user_simulator"]["week"]["endpoint_host"] == "sim-proxy.example"
+
+
+
+def _times_out_on_its_second_wake(n, texts, rig):
+    if n == 2:
+        raise TimeoutError("the agent's turn ran out")
+    rig.message("blue or green?")
+    return ""
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_times_out_leaves_the_agent_s_entry_a_lower_bound(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_times_out_on_its_second_wake, plugin=_AskingPlugin,
+              user_texts=['{"outcome": "reply", "message": "blue"}'])
+    rig.solver_usage = {"tool_call_count": 1, "input_tokens": 100, "output_tokens": 10}
+    ctx = rig.context()
+    await rig.arm()
+
+    await rig.run(rig.step(), ctx)
+
+    solver = ctx.metadata["step_usage"]["week"][0]
+    assert len(rig.sent) == 2
+    assert (solver["role"], solver["turns"], solver["input_tokens"], solver["partial"]) == ("solver", 2, 100, True)
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_times_out_leaves_the_user_sim_s_entry_a_lower_bound(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent, plugin=_AskingPlugin,
+              user_texts=[TimeoutError("the user sim took too long")])
+    rig.solver_usage = {"tool_call_count": 1, "input_tokens": 100, "output_tokens": 10}
+    ctx = rig.context()
+    await rig.arm()
+
+    await rig.run(rig.step(), ctx)
+
+    solver, user = ctx.metadata["step_usage"]["week"]
+    assert len(rig.user_calls) == 1 and solver["partial"] is False
+    assert (user["role"], user["turns"], user["input_tokens"], user["partial"]) == ("user_simulator", 1, None, True)

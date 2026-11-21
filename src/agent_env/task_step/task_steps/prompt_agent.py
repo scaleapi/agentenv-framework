@@ -8,7 +8,7 @@ import json
 import logging
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from collections.abc import Mapping
 from typing import Any, ClassVar, NamedTuple, Optional
@@ -697,12 +697,13 @@ class PromptAgentTaskStep(TaskStep):
 
                 following = live_turns.following(target_a2a_task_id) if live_turns is not None else nullcontext(None)
                 async with following as live_turn:
-                    sent_task_id, result = await send_and_wait(
-                        target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
-                        context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
-                        poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
-                        on_sent=live_turn.follow if live_turn else None,
-                    )
+                    with usage.awaiting(ModelRole.SOLVER):
+                        sent_task_id, result = await send_and_wait(
+                            target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
+                            context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
+                            poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
+                            on_sent=live_turn.follow if live_turn else None,
+                        )
                     target_state = result["status"]["state"]
                     if live_turn:
                         live_turn.ended(target_state)
@@ -1166,12 +1167,13 @@ class _UserSide:
         step = self._step
         message_id = uuid.uuid4().hex
         try:
-            task_id, result = await send_and_wait(
-                self._url, [{"kind": "text", "text": text}],
-                agent=self._user_sim if self._user_sim.sandbox_id else None,
-                message_id=message_id, context_id=self._conversation_id,
-                timeout_seconds=step.user_agent_timeout_seconds, poll_interval_seconds=step.poll_interval_seconds,
-            )
+            with self._awaiting():
+                task_id, result = await send_and_wait(
+                    self._url, [{"kind": "text", "text": text}],
+                    agent=self._user_sim if self._user_sim.sandbox_id else None,
+                    message_id=message_id, context_id=self._conversation_id,
+                    timeout_seconds=step.user_agent_timeout_seconds, poll_interval_seconds=step.poll_interval_seconds,
+                )
         except TimeoutError as e:
             return {"text": None, "error": f"timeout: {e}"}
         status = result.get("status") or {}
@@ -1230,13 +1232,14 @@ class _UserSide:
         try:
             # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
             # user_a2a_url, has none and reads the store itself.
-            _, user_result = await send_and_wait(
-                self._url, agent_parts,
-                agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
-                shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
-                timeout_seconds=step.user_agent_timeout_seconds,
-                poll_interval_seconds=step.poll_interval_seconds,
-            )
+            with self._awaiting():
+                _, user_result = await send_and_wait(
+                    self._url, agent_parts,
+                    agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
+                    shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
+                    timeout_seconds=step.user_agent_timeout_seconds,
+                    poll_interval_seconds=step.poll_interval_seconds,
+                )
         except TimeoutError as e:
             logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
             return {"end": "user_timeout"}
@@ -1273,6 +1276,10 @@ class _UserSide:
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+    def _awaiting(self) -> AbstractContextManager[None]:
+        """Around a user sim's turn, as ``StepUsage.awaiting``; a human peer's has no usage to mark."""
+        return self._usage.awaiting(ModelRole.USER_SIMULATOR) if self._usage is not None else nullcontext()
 
     def _record_usage(self, message: dict) -> protocol.TerminalResponse:
         """The user side's reply, a user sim's turn recorded as it ends; a human peer's has none to record."""

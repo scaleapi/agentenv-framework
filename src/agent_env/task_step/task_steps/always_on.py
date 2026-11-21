@@ -1274,7 +1274,8 @@ class _Run:
                  **({"files": files} if files else {}))
         t = time.time()
         try:
-            task_id, result = await self._agent_turn(parts, msg_id, record)
+            with self.usage.awaiting(ModelRole.SOLVER):
+                task_id, result = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
             self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
@@ -1354,7 +1355,8 @@ class _Run:
 
         t = time.time()
         try:
-            task_id, result = await self._agent_turn(parts, msg_id, record)
+            with self.usage.awaiting(ModelRole.SOLVER):
+                task_id, result = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
             self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
@@ -1564,11 +1566,12 @@ class _Run:
         if limit <= 0:
             return {"text": None, "structured": None, "error": "the read's time limit passed"}
         try:
-            user_task_id, result = await asyncio.wait_for(send_and_wait(
-                self.user_url, [{"kind": "text", "text": text}],
-                agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
-                context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
-                poll_interval_seconds=self.step.poll_interval_seconds), limit)
+            with self.usage.awaiting(ModelRole.USER_SIMULATOR):
+                user_task_id, result = await asyncio.wait_for(send_and_wait(
+                    self.user_url, [{"kind": "text", "text": text}],
+                    agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
+                    context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
+                    poll_interval_seconds=self.step.poll_interval_seconds), limit)
         except TimeoutError as e:
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
         status = (result.get("status") or {})
