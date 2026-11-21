@@ -54,8 +54,9 @@ from agent_env.env.gateway.constants import (
 from agent_env.env.envs.service_db import (
     CONSOLE_SERVICE_NAMES,
     DATABASE_SERVICE_NAME,
-    DB_MCP_CONTAINER_PORT,
+    DB_MCP_PORT,
     DB_MCP_SERVICE_NAME,
+    DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
 from agent_env.env.envs.computer.utils.boot import control_environment
@@ -75,7 +76,7 @@ from agent_env.providers.env_providers.env_provider import (
     _size_kwargs,
     _tool_names,
 )
-from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider, remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -885,9 +886,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 vm_kwargs["cpu"] = cpu
             if memory_mb is not None:
                 vm_kwargs["memory"] = memory_mb
+            # The SQL consoles are never tunnelled: the gateway serves them behind its control token. Only the local
+            # provider gets a host port for them (its own free port, published on 127.0.0.1), so two local envs don't clash.
+            console_ports = [DB_WEB_PORT, DB_MCP_PORT] if isinstance(sandbox_provider, LocalSandboxProvider) else []
             self._sandbox = await sandbox_provider.create_vm(
-                # The SQL consoles are never tunnelled: the gateway serves them behind its control token.
-                exposed_ports=[gateway_port] + [sc.host_port for sc in sidecars],
+                exposed_ports=[gateway_port, *console_ports] + [sc.host_port for sc in sidecars],
                 timeout=ttl_seconds,
                 disk_size_gb=disk_size_gb,
                 attribution=attribution,
@@ -1125,8 +1128,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             external: list[ExternalChild] = []
 
             mcp_results: list[tuple[str, "Sandbox"]] = []
-            pgweb_sb = None
-            db_mcp_sb = None
             consoles: dict[str, str] = {}
             errors: list[BaseException] = []
             for i, r in enumerate(all_results):
@@ -1145,10 +1146,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                     if r.private_host:
                         consoles[spec.name] = f"http://{r.private_host}:{spec.port}"
                     if spec.name == PGWEB_SERVICE_NAME:
-                        pgweb_sb = r
                         self._pgweb_sandbox = r
                     elif spec.name == DB_MCP_SERVICE_NAME:
-                        db_mcp_sb = r
                         self._db_mcp_sandbox = r
 
             if errors:

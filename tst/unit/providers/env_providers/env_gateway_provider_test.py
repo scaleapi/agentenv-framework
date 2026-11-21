@@ -1557,6 +1557,13 @@ async def test_deploy_via_vm_asks_for_no_tunnel_to_the_sql_consoles():
     assert DB_MCP_PORT not in exposed
 
 
+def test_a_local_deploy_still_gets_its_own_host_ports_for_the_consoles():
+    """Local envs need separate host ports for the loopback-only consoles so two deploys do not clash."""
+    import inspect
+    src = inspect.getsource(EnvironmentGatewayProvider._deploy_via_vm)
+    assert "isinstance(sandbox_provider, LocalSandboxProvider)" in src
+
+
 # --- name injection: SERVICE_NAME + ENVIRONMENT_NAME --------------------------
 #
 # The compose emitter injects the env's own name into every environment container so the
