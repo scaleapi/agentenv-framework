@@ -67,7 +67,6 @@ from hermes_bridge import (
     HERMES_ROOT,
     CallCounts,
     get_last_attribution_snapshot,
-    kill_orphaned_clis,
     kill_running_clis,
     profile_dir,
     run_hermes,
@@ -245,10 +244,7 @@ class _WorkspaceBarrier:
 @asynccontextmanager
 async def lifespan(app: Starlette):
     """As the server stops, the processes of turns still running are killed, which would otherwise go on in the
-    workspace after it; as it starts, so are those of turns a server killed outright left, which supervisord restarted
-    in its place (``kill_orphaned_clis``)."""
-    if stopped := kill_orphaned_clis():
-        logger.warning(f"Killed {stopped} hermes turn process(es) an earlier server left running")
+    workspace after it."""
     try:
         yield
     finally:

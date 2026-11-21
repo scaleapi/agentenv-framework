@@ -1,20 +1,17 @@
 """One turn as the bridge runs it, against a scripted `hermes` in a process of its own: the profile it writes for the
-turn, the events it reads off the pipe as they come, the result it makes of them, a turn that times out or is
-cancelled killing Hermes and every tool it started, and a starting server killing the turns an earlier one left."""
+turn, the events it reads off the pipe as they come, the result it makes of them, and a turn that times out or is
+cancelled killing Hermes and every tool it started."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
-import signal
-import subprocess
 import time
 
 import pytest
 
-from tst.unit.agents.hermes.agent import a2a_server, hermes_bridge
+from tst.unit.agents.hermes.agent import hermes_bridge
 
 _MCP = {"env": {"url": "https://mcp.example/mcp", "headers": {"X-Key": "k", "agentenv-role": "registered"}},
         "peer_agents": {"url": "http://127.0.0.1:8000/ext/peer-agents/mcp", "headers": None}}
@@ -156,49 +153,3 @@ def test_the_event_pipe_is_not_left_open_in_the_server(fake_hermes, folders):
     before = len(os.listdir("/dev/fd"))
     asyncio.run(hermes_bridge.run_hermes(prompt="go", context_id="ctx-f", workspace=str(folders)))
     assert len(os.listdir("/dev/fd")) == before
-
-
-@pytest.mark.skipif(not os.path.isdir("/proc"), reason="an earlier server's turns are found in /proc, which Linux has")
-def test_a_starting_server_kills_the_turns_an_earlier_one_left_and_what_they_started(tmp_path):
-    profiles, started = hermes_bridge.HERMES_ROOT / "profiles", tmp_path / "started"
-
-    def spawn(args: list[str], **env: str) -> subprocess.Popen:
-        return subprocess.Popen(args, env={"PATH": os.environ["PATH"], **env}, start_new_session=True)
-
-    # A turn as cli_env starts one, whose tool dropped its environment in a session of its own; and two that aren't
-    # turns: a home outside the profiles, and a profile's home without the event pipe.
-    turn = spawn(["sh", "-c", f"setsid env -i sleep 60 & echo $! > {started}; wait"],
-                 AGENTENV_EVENTS_FD="9", HERMES_HOME=str(profiles / "ctx-left"))
-    elsewhere = spawn(["sleep", "60"], AGENTENV_EVENTS_FD="9", HERMES_HOME=str(tmp_path / "elsewhere"))
-    no_pipe = spawn(["sleep", "60"], HERMES_HOME=str(profiles / "ctx-other"))
-    tool = None
-    try:
-        deadline = time.monotonic() + 10
-        while not (started.exists() and started.read_text().strip()):
-            assert time.monotonic() < deadline
-            time.sleep(0.02)
-        tool = int(started.read_text())
-
-        assert hermes_bridge.kill_orphaned_clis() == 1
-
-        assert turn.wait(5) == -signal.SIGKILL and _gone(tool)
-        assert elsewhere.poll() is None and no_pipe.poll() is None
-    finally:
-        for proc in (turn, elsewhere, no_pipe):
-            proc.kill()
-            proc.wait()
-        if tool:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(tool, signal.SIGKILL)
-
-
-@pytest.mark.asyncio
-async def test_the_server_kills_an_earlier_servers_turns_as_it_starts_and_its_own_as_it_stops(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(a2a_server, "kill_orphaned_clis", lambda: calls.append("orphaned") or 0)
-    monkeypatch.setattr(a2a_server, "kill_running_clis", lambda: calls.append("running") or 0)
-
-    async with a2a_server.lifespan(None):
-        assert calls == ["orphaned"]
-
-    assert calls == ["orphaned", "running"]

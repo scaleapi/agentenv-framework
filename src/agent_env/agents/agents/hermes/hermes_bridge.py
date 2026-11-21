@@ -307,30 +307,9 @@ def kill_running_clis() -> int:
     return len(running)
 
 
-def kill_orphaned_clis(proc: Path = Path("/proc")) -> int:
-    """Kill the turns an earlier server left running, and what each started; how many. A server killed outright never
-    ran its shutdown, and supervisord starts the next one beside its turns, which would go on writing the workspace and
-    the profiles. A turn is known by what ``cli_env`` gave it: the event pipe's descriptor and a home under the
-    profiles."""
-    profiles = f"{HERMES_ROOT / 'profiles'}{os.sep}".encode()
-    found = []
-    for entry in os.listdir(proc) if proc.is_dir() else ():
-        if not entry.isdigit() or int(entry) == os.getpid():
-            continue
-        try:
-            environ = (proc / entry / "environ").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        names = dict(item.partition(b"=")[::2] for item in environ)
-        if _EVENTS_FD_ENV.encode() in names and names.get(b"HERMES_HOME", b"").startswith(profiles):
-            found.append(int(entry))
-    for pid in found:
-        _kill_tree(pid)
-    return len(found)
-
-
 def _kill_cli(proc) -> None:
-    """Kill the turn's process and everything under it."""
+    """Kill the turn's process and everything under it: its process group, and, found by parent, the tools it starts
+    in a session of their own, which no group or session kill reaches."""
     pid = getattr(proc, "pid", None)
     if pid is None:
         with contextlib.suppress(ProcessLookupError):
@@ -338,12 +317,6 @@ def _kill_cli(proc) -> None:
         return
     if proc.returncode is not None:
         return  # the process is gone, and its pid may be another process's by now
-    _kill_tree(pid)
-
-
-def _kill_tree(pid: int) -> None:
-    """Kill ``pid``'s process group and, found by parent, the tools it starts in a session of their own, which no group
-    or session kill reaches."""
     tree = [pid, *_descendants(pid)]
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pid, signal.SIGKILL)
