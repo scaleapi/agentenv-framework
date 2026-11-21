@@ -155,7 +155,7 @@ async def test_each_turn_is_stored_live_under_its_own_prefix_and_joins_to_its_fi
     finals = context.prompt_responses[-1].target_agent_per_turn_trajectory_object_urls
     assert len(finals) == 2 and all(finals)
     assert context.prompt_responses[-1].target_agent_per_turn_trajectories == [
-        {"native_format": "agentenv-echo-agent/v1", "atif": None}] * 2
+        {"format": "agentenv-echo-agent/v1", "atif": None}] * 2
     turns = [store.get_object_key(url).removeprefix(f"{prefix_key}trajectory-").removesuffix(".json") for url in finals]
     assert len(set(turns)) == 2
     for turn, final_url in zip(turns, finals):
@@ -173,7 +173,8 @@ async def test_each_turn_is_stored_live_under_its_own_prefix_and_joins_to_its_fi
 
 @pytest.mark.asyncio
 async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_another(local_registry):
-    """And the run, which prescribes atif/1, stores the turn's copy in its folder with the image's file beside it."""
+    """And the run, which prescribes atif/1, has the turn's copy as its trajectory, stored in its folder with the image's
+    file beside it, and reads no native trajectory."""
     suffix = uuid.uuid4().hex[:8]
     native = "agentenv-echo-agent/v1"
     image = png(6, 4)
@@ -218,7 +219,8 @@ async def test_a_deployed_agent_serves_its_native_format_and_atif_and_refuses_an
     [turn] = context.prompt_responses[-1].target_agent_per_turn_trajectories
     record, store = turn["atif"], get_config().get_object_store()
     folder = context.metadata["atif_copies"]["agents"]["solver"]["folder"]
-    assert (turn["native_format"], record["status"], record["rules"]) == (native, "valid", [])
+    assert (turn["format"], record["status"], record["rules"]) == (ATIF, "valid", [])
+    assert context.prompt_responses[-1].target_agent_per_turn_trajectory_object_urls == [record["url"]]
     assert record["url"] == f"{folder}{document['trajectory_id']}.json"
     assert json.loads(store.get(record["url"])) == document
     assert json.loads(store.get(record["turn_context_url"])) == atif["turn_context"]

@@ -60,6 +60,7 @@ from .reader import (
     strip_profile,
     task_document,
     tasks,
+    tasks_document,
 )
 from .runner import AdapterRun, Fed, RecordedTask, replay
 from .served import AuxEntry, ContentItem, MediaItem, ServedData, ServedError, ServedMedia, ServedTurn
@@ -74,6 +75,6 @@ __all__ = [
     "ObservationResultProfile", "PROFILE_KEY", "profile_of", "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS",
     "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",
     "ServedData", "ServedError", "ServedMedia", "ServedTurn", "Step", "StepData", "StepError", "StepProfile", "StoredMedia",
-    "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "task_document", "tasks", "timestamp", "ToolCall",
+    "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "task_document", "tasks", "tasks_document", "timestamp", "ToolCall",
     "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "validate_media", "VOCABULARIES",
 ]

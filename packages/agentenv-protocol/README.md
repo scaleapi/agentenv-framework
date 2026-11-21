@@ -1307,8 +1307,10 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
   reader's earlier page is always a prefix of a later one. A step is rendered once a page serves it and kept, so a
   read costs one parse of the document, not a render of every step.
-- **Readers** (`load`, `tasks`, `media_paths`, `media_refs`, `strip_profile`, `is_prefix`) take any valid ATIF
-  document, with or without the profile, such as a Harbor task's trajectory.json. `media_refs` names each place a media
+- **Readers** (`load`, `tasks`, `task_document`, `media_paths`, `media_refs`, `strip_profile`, `is_prefix`) take any
+  valid ATIF document, with or without the profile, such as a Harbor task's trajectory.json. `task_document` cuts A2A
+  tasks out of a conversation's document as a document of their own (`tasks_document` for tasks found without ids), as a
+  reader showing one turn shows it. `media_refs` names each place a media
   file is named, with the profile's details for it; `validate(document, media=StoredMedia(sizes))` checks those
   details against files stored beside the document without reading their bytes.
 
