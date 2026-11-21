@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 import urllib.parse
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -54,7 +54,7 @@ from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
-from agent_env.env.envs.computer.utils.install import Install, Service
+from agent_env.env.envs.computer.utils.install import Install, MacInstall, Service, WindowsInstall
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, KnownFailure
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
 from agent_env import providers
@@ -585,36 +585,65 @@ def test_an_unprobed_image_a_release_published_is_probed_as_it_is_under_another_
     assert (len(docker.builds), len(docker.resolved)) == (builds, resolves)
 
 
-@pytest.mark.parametrize("requirements, pinned", [
-    ("agentenv-framework-protocol[app]==0.1.597\n", True),
-    ("# shipped by a release\nAgentenv_Framework.Protocol[app] === 0.1.597  # its own\nav>=17\n", True),
-    ("agentenv-framework-protocol[app]>=0.1.547\nav>=17\n", False),
-    ("agentenv-framework-protocol[app]==0.1.*\n", False),
-    ("-r more.txt\nav>=17\n", False),
-], ids=["pinned", "pinned-by-another-spelling", "a-floor", "a-wildcard", "not-named"])
-def test_an_apps_venv_adds_this_releases_protocol_unless_its_requirements_pin_the_protocol_exactly(
-        base, driver, docker, tmp_path, requirements, pinned):
+PINNED = "agentenv-framework-protocol[app]==0.1.597"
+RELEASE = f"agentenv-framework-protocol[app]=={importlib.metadata.version('agentenv-framework-protocol')}"
+
+
+@pytest.mark.parametrize("requirements, added", [
+    ("agentenv-framework-protocol[app]==0.1.597\n", PINNED),
+    ("# shipped by a release\nAgentenv_Framework.Protocol[app] === 0.1.597  # its own\nav>=17\n", PINNED),
+    ("agentenv-framework-protocol==0.1.597\n", PINNED),
+    ("agentenv-framework-protocol[app]==0.1.597; sys_platform == 'darwin'\n", RELEASE),
+    ("agentenv-framework-protocol[app]>=0.1.547\nav>=17\n", RELEASE),
+    ("agentenv-framework-protocol[app]==0.1.*\n", RELEASE),
+    ("-r more.txt\nav>=17\n", RELEASE),
+], ids=["pinned", "pinned-by-another-spelling", "pinned-without-the-app-extra", "pinned-on-a-condition", "a-floor",
+        "a-wildcard", "not-named"])
+def test_an_apps_venv_adds_its_protocol_at_the_version_its_requirements_pin_else_at_this_release(
+        base, driver, docker, tmp_path, requirements, added):
     mail = _app(base, driver, tmp_path / "mail", compose=False,
                 extra={"requirements.txt": requirements, "more.txt": "av>=17\n"})
 
     _put(base, driver, apps=[mail])
 
-    release = f"agentenv-framework-protocol[app]=={importlib.metadata.version('agentenv-framework-protocol')}"
     assert {tuple(layer["add"]) for _, request in docker.resolved for layer in request["python"]
-            if layer["name"] != "driver"} == {() if pinned else (release,)}
+            if layer["name"] != "driver"} == {(added,)}
 
 
 def test_a_checkout_adds_its_own_protocol_only_to_the_venvs_that_dont_pin_one(base, driver, docker, tmp_path,
                                                                              monkeypatch):
     monkeypatch.setattr(composer, "_protocol_source", lambda: _protocol_checkout(tmp_path))
-    mail = _app(base, driver, tmp_path / "mail", compose=False,
-                extra={"requirements.txt": "agentenv-framework-protocol[app]==0.1.597\n"})
+    mail = _app(base, driver, tmp_path / "mail", compose=False, extra={"requirements.txt": f"{PINNED}\n"})
 
     _put(base, driver, apps=[mail])
 
     assert {layer["name"]: tuple(layer["add"]) for _, request in docker.resolved for layer in request["python"]} == {
-        "driver": ("/ctx/protocol",), **{name: () for name in {
+        "driver": ("/ctx/protocol",), **{name: (PINNED,) for name in {
             layer["name"] for _, request in docker.resolved for layer in request["python"]} - {"driver"}}}
+
+
+@pytest.mark.parametrize("form", ["vm_bundle", "windows", "omarchy"])
+@pytest.mark.parametrize("requirements, source, added", [
+    (f"{PINNED}\n", False, PINNED),
+    (f"{PINNED}\n", True, PINNED),
+    ("av>=17\n", False, RELEASE),
+], ids=["pinned", "pinned-in-a-checkout", "not-pinned"])
+def test_each_disk_and_bundle_form_adds_an_apps_protocol_as_a_container_does(tmp_path, form, requirements, source,
+                                                                           added):
+    (tmp_path / "apps" / "mail").mkdir(parents=True)
+    (tmp_path / "apps" / "mail" / "requirements.txt").write_text(requirements)
+    install = {"vm_bundle": MacInstall, "windows": WindowsInstall}.get(form, Install).model_validate({
+        "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]})
+    layer = composer._Layer("apps/mail", "/opt/mail", install, "app-mail.conf", "@local/~/kit/mail", app=True,
+                            served="app.py:Mail")
+    if form == "vm_bundle":
+        spec = composer._part(layer, {}, {}, source, True, tmp_path).protocol
+    elif form == "windows":
+        (spec,) = composer._windows_part(layer, PureWindowsPath("C:/apps/mail"), {}, {}, source, tmp_path).wants
+    else:
+        (spec,) = composer._omarchy_part(layer, PurePosixPath("/opt/mail"), {}, {}, source, tmp_path).wants
+
+    assert spec == added
 
 
 def test_the_composers_digest_changes_with_a_files_bytes_and_with_its_executable_bit_alone(tmp_path, monkeypatch):
