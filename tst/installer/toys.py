@@ -17,6 +17,7 @@ from agent_env.task_step.task_step import TaskStep
 
 class GradeTaskStep(TaskStep):
     type: ClassVar[str] = "toy_grade"
+    entity_refs = ()
 
     @classmethod
     def from_dict(cls, data):
@@ -34,6 +35,7 @@ from agent_env.task_step.task_step import TaskStep
 
 class NavigateTaskStep(TaskStep):
     type: ClassVar[str] = "toy_navigate"
+    entity_refs = ()
 
     def __init__(self, id, version, url="about:blank", **base):
         super().__init__(id, version, **base)

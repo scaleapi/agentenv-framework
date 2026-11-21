@@ -7,7 +7,7 @@ import pytest
 from agent_env.artifact.registry import get_artifact_registry
 from agent_env.entity.paths import PATH, field_sites
 from agent_env.entity.refs import EntityKind, EntityRef, default_agent_refs, parse_toml_ref, ref_sites
-from agent_env.task_step.registry import _builtin_registry
+from agent_env.task_step.registry import _builtin_registry, step_ref_sites
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.add_skills import AddSkillsTaskStep
@@ -70,6 +70,20 @@ def test_sites_carry_scalar_list_and_element_relative_versions():
         ("env_id", "e", 3), ("env_ids[0]", "a", None), ("env_ids[2]", "b", None),
         ("artifacts[0].id", "x", None), ("artifacts[1].id", "y", 2),
     ]
+
+
+@pytest.mark.parametrize("step", [
+    DeployEnvTaskStep(id="d", version=None, env_id="crm", artifact_id="seed"),
+    {"id": "d", "type": "deploy_env", "env_id": "crm", "artifact_id": "seed"},
+], ids=["task_step", "dict"])
+def test_step_ref_sites_reads_a_step_by_its_registered_type(step):
+    assert [(s.path, s.ref.kind, s.value) for s in step_ref_sites(step)] == [
+        ("env_id", EntityKind.ENV, "crm"), ("artifact_id", EntityKind.ARTIFACT, "seed")]
+
+
+def test_step_ref_sites_refuses_a_type_nothing_registers():
+    with pytest.raises(ValueError, match="unknown task step type 'no_such_step'"):
+        step_ref_sites({"id": "s", "type": "no_such_step"})
 
 
 def test_absent_and_null_fields_yield_nothing():
