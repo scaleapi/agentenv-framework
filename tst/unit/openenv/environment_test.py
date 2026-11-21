@@ -79,6 +79,26 @@ async def _call(env, tool, **arguments):
     return await env.step_async(CallToolAction(tool_name=tool, arguments=arguments))
 
 
+def test_tasks_that_apply_server_config_share_a_probe_with_each_other_and_not_with_tasks_that_do_not(teardowns):
+    from agent_env.training._openenv import toolsets
+
+    def config(env_id="items", **args):
+        return {"id": "cfg", "type": "apply_server_config", "env_id": env_id,
+                "directives": [{"service": "items", "uri": "urn:example:set-errors/v1", "args": args}]}
+
+    def described(*tasks):
+        served = [ServedTask(task, f"t{n}", EpisodeSpec.from_task(task), _score_at("replies"))
+                  for n, task in enumerate(tasks)]
+        return {"all": [{"toolset": each.toolset, "index": n, "turns": 1} for n, each in enumerate(served)]}
+
+    plain, armed = _task(ITEMS, ALICE, TURN, REPLIES), _task(ITEMS, ALICE, config(), TURN, REPLIES)
+    assert len(toolsets("srv", described(plain, armed))) == 2
+    assert len(toolsets("srv", described(*(_task(ITEMS, ALICE, config(rate=rate), TURN, REPLIES)
+                                          for rate in (0.1, 0.2, 0.5))))) == 1
+    elsewhere = _task(ITEMS, ALICE, config("other"), TURN, REPLIES)
+    assert len(toolsets("srv", described(plain, elsewhere))) == 1
+
+
 @pytest.mark.asyncio
 async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(teardowns, tools):
     tasks = [_task(ITEMS, ALICE, {**TURN, "prompt": f"Add crate {n}."}, REPLIES, id=f"dock-{n}") for n in range(3)]
