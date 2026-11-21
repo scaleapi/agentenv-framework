@@ -275,15 +275,13 @@ async def _composed_card(children: dict[str, list]) -> dict:
 
 def _cardless() -> DeployedEnv:
     """A record that kept no card, which a sync reads live from the gateway."""
-    return DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None,
-                              sandbox_id="sb-1")
+    return DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", sandbox_id="sb-1")
 
 
 def _carded(card: dict) -> DeployedEnv:
     from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 
-    return DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None,
-                       sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card)
+    return DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card)
 
 
 def _mock_http(monkeypatch, state: dict | None = None, set_time_status: int = 200):

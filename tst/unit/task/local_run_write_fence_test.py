@@ -281,8 +281,7 @@ def exports(monkeypatch):
 
 
 def _deployed(env_id):
-    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None,
-                              sandbox_id="sb-1")
+    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="https://gw", mcp_url="https://gw/mcp", sandbox_id="sb-1")
 
 
 def _assert_snapshot(universe_id):
