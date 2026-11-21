@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shlex
 from dataclasses import dataclass
 
 from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
@@ -132,6 +133,32 @@ class StackLayout:
         if not layout.is_slot:
             raise ValueError(f"a recorded stack layout must be a slot's, got {data!r}")
         return layout
+
+    @property
+    def teardown_script(self) -> str:
+        """A root shell script that removes this slot's stack and nothing else on the VM: every container, volume and
+        network its compose project labels, then its dir and scratch files. Images stay, since every stack on the VM
+        shares them. Idempotent, and it needs no compose file, so it also clears a slot whose deploy failed before
+        writing one. Raises for the default stack, which has the VM to itself and goes with it, and for any layout
+        not made by ``for_slot``: a hand-built project such as ``s1-x`` would have its files caught by ``s1``'s glob."""
+        if not self.is_slot:
+            raise ValueError("only a slot's stack is torn down on its own; the default stack ends with its VM")
+        index = self.compose_project[1:]
+        if not (self.compose_project.startswith("s") and index.isascii() and index.isdigit()
+                and self == StackLayout.for_slot(int(index))):
+            raise ValueError(f"only a layout made by StackLayout.for_slot is torn down, so its dir and scratch glob "
+                             f"can't reach another stack's files; got {self}")
+        label = shlex.quote(f"label=com.docker.compose.project={self.compose_project}")
+        return "\n".join([
+            "set -eu",
+            f"containers=$(docker ps -aq --filter {label})",
+            '[ -z "$containers" ] || docker rm -f -v $containers >/dev/null',
+            f"volumes=$(docker volume ls -q --filter {label})",
+            '[ -z "$volumes" ] || docker volume rm -f $volumes >/dev/null',
+            f"networks=$(docker network ls -q --filter {label})",
+            '[ -z "$networks" ] || docker network rm $networks >/dev/null',
+            f"rm -rf {shlex.quote(self.app_dir)} {shlex.quote(self.scratch_prefix)}*",
+        ])
 
     def scratch_path(self, name: str) -> str:
         return f"{self.scratch_prefix}{name}"
