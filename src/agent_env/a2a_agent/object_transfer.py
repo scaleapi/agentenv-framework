@@ -204,8 +204,8 @@ async def invoke_transfer(
                     raise
                 raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
             body = resp.json()
-        except Exception:
-            if staged is not None:
+        except Exception as exc:
+            if staged is not None and not isinstance(exc, _UNSENT):
                 await _collect_staged(staged, operation)
             raise
         if staged is not None:
@@ -216,6 +216,10 @@ async def invoke_transfer(
     if call.mode == "objects" and response_model is not None:
         return parse_response(response_model, body, operation=operation)
     return body
+
+
+#: Failures of a call that never reached the agent, which therefore staged nothing to collect.
+_UNSENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 async def _collect_staged(staged: StagedObjectStore, operation: str) -> None:
