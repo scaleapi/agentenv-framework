@@ -9,7 +9,16 @@ from typing import Any, Callable
 
 import pytest
 
-from agentenv_protocol.atif import KIT_RULES, RULES, StoredMedia, errors_in, media_refs, validate, validate_live
+from agentenv_protocol.atif import (
+    KIT_RULES,
+    RULES,
+    StoredMedia,
+    errors_in,
+    media_refs,
+    validate,
+    validate_live,
+    validate_media,
+)
 from agentenv_protocol.atif.__main__ import main
 from atif_cases import CASES, FIXTURES, build
 
@@ -157,6 +166,15 @@ def test_stored_media_hold_the_profile_to_each_files_name_and_stored_size_withou
     holder["extra"]["agentenv"]["media"][first]["sha256"] = "0" * 64
     renamed = errors_in(validate(document, media=StoredMedia(sizes)))
     assert [f.rule for f in renamed] == ["media-bytes"] and "but the name has" in renamed[0].message
+
+
+def test_media_are_checked_on_their_own_for_a_document_newer_than_the_models():
+    document = {**_fixture("computer_use"), "schema_version": "ATIF-v1.9"}
+    sizes = {ref.path: ref.info["bytes"] for ref in media_refs(document)}
+    assert _rules(errors_in(validate(document, reader=True, media=StoredMedia({})))) == {"atif"}
+    assert validate_media(document, StoredMedia(sizes), reader=True) == []
+    assert _rules(errors_in(validate_media(document, StoredMedia({}), reader=True))) == {"media-bytes"}
+    assert validate_media(document, FIXTURES) == []
 
 
 def test_totals_sum_the_sub_agents_steps_and_skip_a_count_a_step_lacks():

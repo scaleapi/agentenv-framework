@@ -29,6 +29,7 @@ from agentenv_protocol.atif import (
     media_refs,
     profile_of,
     validate,
+    validate_media,
 )
 
 from agent_env.a2a_agent import A2AAgent
@@ -176,7 +177,10 @@ class AtifCopies:
             if isinstance(session_id, str):
                 await self._link(store, folder, session_id, trajectory_id)
             media = StoredMedia(await self._pull_media(refs, session_id, store, folder))
-        errors = errors_in(await asyncio.to_thread(validate, document, reader=newer, media=media))
+        found = await asyncio.to_thread(validate, document, reader=newer)
+        if media is not None:  # on its own, since validate stops at a document newer than its models
+            found += await asyncio.to_thread(validate_media, document, media, reader=newer)
+        errors = errors_in(found)
         status = NEWER if newer else INVALID if errors else VALID
         if status == INVALID:
             logger.warning(f"agent '{self._agent.agent_name}': the atif/1 copy of task {task_id} is invalid "

@@ -399,18 +399,33 @@ def _usage(document: Mapping[str, Any], found: _Findings) -> None:
                       f"cache reads and writes ({cache}) exceed prompt_tokens ({prompt}), which include them")
 
 
+def validate_media(document: Mapping[str, Any], media: Path | Mapping[str, bytes] | StoredMedia, *,
+                   reader: bool = False) -> list[Finding]:
+    """The ``media-bytes`` findings alone, for a document ``media_refs`` can walk, whether or not ATIF's models accept
+    it: a document newer than these models, which ``validate`` stops at, still names files a reader needs."""
+    found = _Findings(reader)
+    _media_files(document, found, media)
+    return found.items
+
+
 def _media(document: Mapping[str, Any], found: _Findings,
            media: Path | Mapping[str, bytes] | StoredMedia | None) -> None:
     for ref in media_refs(document):
+        if "://" in ref.path:
+            found.add("media-path", ref.where,
+                      f"{ref.path!r} is a URL; the profile's media are files beside the document")
+        elif not MEDIA_PATH.match(ref.path):
+            found.add("media-path", ref.where, f"{ref.path!r} isn't media/<sha256>.<ext>")
+    if media is not None:
+        _media_files(document, found, media)
+
+
+def _media_files(document: Mapping[str, Any], found: _Findings, media: Path | Mapping[str, bytes] | StoredMedia) -> None:
+    for ref in media_refs(document):
         where, path, info = ref.where, ref.path, ref.info
         if "://" in path:
-            found.add("media-path", where, f"{path!r} is a URL; the profile's media are files beside the document")
             continue
         named = MEDIA_PATH.match(path)
-        if not named:
-            found.add("media-path", where, f"{path!r} isn't media/<sha256>.<ext>")
-        if media is None:
-            continue
         if isinstance(media, StoredMedia):
             _stored(found, where, path, named, info, media)
             continue

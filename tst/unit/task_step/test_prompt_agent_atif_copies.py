@@ -274,6 +274,26 @@ async def test_a_copy_newer_than_the_worker_is_stored_and_recorded_newer(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_newer_copys_missing_media_are_in_its_rules(monkeypatch, tmp_path):
+    """ATIF's models stop at a newer schema, and the copy's media are still checked."""
+    run = _Run(monkeypatch, tmp_path)
+    card = run.card
+    trajectory = next(e for e in card["capabilities"]["extensions"] if e["uri"] == TRAJECTORY_V1.uri)
+    del trajectory["params"]["methods"]["media"]
+
+    def newer(answer: dict) -> dict:
+        answer["trajectory"]["schema_version"] = "ATIF-v1.9"
+        return answer
+
+    run.wire.rewrite_atif = newer
+
+    response = await run.execute(run.context(), card=card, max_conversation_turns=1)
+
+    [atif] = _atifs(response)
+    assert (atif["status"], atif["rules"]) == ("newer", ["atif", "media-bytes"])
+
+
+@pytest.mark.asyncio
 async def test_media_the_agent_cant_be_asked_for_makes_the_copy_invalid_under_media_bytes(monkeypatch, tmp_path):
     run = _Run(monkeypatch, tmp_path)
     card = run.card
