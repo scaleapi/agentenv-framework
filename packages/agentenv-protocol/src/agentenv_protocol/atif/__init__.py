@@ -62,7 +62,7 @@ from .reader import (
 )
 from .runner import AdapterRun, Fed, RecordedTask, replay
 from .served import AuxEntry, ContentItem, MediaItem, ServedData, ServedError, ServedMedia, ServedTurn
-from .validator import RULES, Finding, Rule, StoredMedia, errors_in, validate, validate_live
+from .validator import RULES, Finding, Rule, StoredMedia, errors_in, validate, validate_live, validate_media
 
 __all__ = [
     "Adapter", "AdapterRef", "AdapterRun", "AdapterSpec", "Agent", "AgentProfile", "Arrival", "atif_adapter",
@@ -74,5 +74,5 @@ __all__ = [
     "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",
     "ServedData", "ServedError", "ServedMedia", "ServedTurn", "Step", "StepData", "StepError", "StepProfile", "StoredMedia",
     "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "tasks", "timestamp", "ToolCall",
-    "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "VOCABULARIES",
+    "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "validate_media", "VOCABULARIES",
 ]
