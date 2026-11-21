@@ -152,9 +152,10 @@ class StepUsage:
 
     @contextmanager
     def awaiting(self, role: ModelRole) -> Iterator[None]:
-        """Around the wait for a turn of ``role``: a turn cut off by a time limit or a cancel never replies, yet the
-        calls it made are billed, so it is recorded as a turn whose usage is unknown, marking the role's entry a lower
-        bound. A role that wasn't started is skipped."""
+        """Around the wait for a turn of ``role``: a turn cut off by a time limit, by a cancel, or by its agent no longer
+        answering (``AgentUnreachableError``, a ``TimeoutError``) never replies, yet the calls it made are billed, so it
+        is recorded as a turn whose usage is unknown, marking the role's entry a lower bound. A turn that was never
+        sent, as on a connection error, isn't. A role that wasn't started is skipped."""
         try:
             yield
         except (TimeoutError, asyncio.CancelledError):

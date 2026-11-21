@@ -136,6 +136,18 @@ async def test_a_step_that_times_out_keeps_the_turns_before_it(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_solver_whose_sandbox_stops_answering_mid_turn_leaves_its_entry_a_lower_bound(monkeypatch):
+    _wire(monkeypatch, [_turn(100, 10), pa_mod.protocol.AgentUnreachableError("the agent's sandbox stopped answering")])
+    ctx = _context()
+
+    with pytest.raises(pa_mod.protocol.AgentUnreachableError):
+        await _step(2).execute(ctx)
+
+    solver = ctx.metadata["step_usage"]["solve"][0]
+    assert (solver["turns"], solver["input_tokens"], solver["partial"]) == (2, 100, True)
+
+
+@pytest.mark.asyncio
 async def test_a_user_sim_turn_that_times_out_leaves_its_entry_a_lower_bound(monkeypatch):
     _wire(monkeypatch, [_turn(100, 10), _turn(200, 20)], user_usage=TimeoutError("no answer"))
 
