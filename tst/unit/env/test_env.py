@@ -129,6 +129,10 @@ async def test_a_record_with_a_control_token_sends_it_on_each_extension_call_onl
     assert [deployed.control_headers_for(url) for url in (env, f"{env}/svc/clock/agentenv", f"{env}0/x",
                                                           "https://override/trajectory")] == [
         {"Authorization": "Bearer t0ken"}] * 2 + [{}] * 2
+    prefixed = _record(composed, _BASES[2])
+    prefixed.control_token = "t0ken"
+    assert [prefixed.control_headers_for(f"{prefixed.environment_url}{path}") for path in (
+        "/svc/clock/../x", "/svc/clock/../../../sb-other/x")] == [{"Authorization": "Bearer t0ken"}, {}]
     assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).control_token == "t0ken"
     assert _record(composed).control_headers == {} and _record(composed).control_headers_for(env) == {}
 
