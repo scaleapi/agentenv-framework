@@ -153,7 +153,7 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
 
 UNAFFECTED = frozenset({
     # They name no agent.
-    "aggregate_verifiers", "apply_server_config", "browser_activate_tab", "browser_clear_local_storage",
+    "aggregate_verifiers", "apply_server_config", "apply_sql", "browser_activate_tab", "browser_clear_local_storage",
     "browser_close_tab", "browser_delete_cookies", "browser_lease_context", "browser_open_tab",
     "browser_release_context", "browser_set_cookies", "browser_sign_in", "browser_set_local_storage", "build_mcp_cli",
     "combine_universe_verdicts", "computer_exec", "configure_scheduled_checks", "deploy_env", "deploy_sandbox", "end_browser_recording",
