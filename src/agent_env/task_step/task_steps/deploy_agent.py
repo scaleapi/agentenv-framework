@@ -29,7 +29,7 @@ from agent_env.a2a_agent.object_transfer import (
     snapshot_load_call,
 )
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
-from agent_env.config import get_config
+from agent_env.config import ConfigError, get_config
 from agent_env.config.model import ModelRole, endpoint_host
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
@@ -134,6 +134,18 @@ def bound_deployment(
             "to the deploy_env step this step should act on."
         )
     return matches[0] if matches else None
+
+
+def picks_another_agent(user_overrides: Mapping, stored_id: Optional[str]) -> bool:
+    """Whether a run-wide ``a2a_agent_id`` names an agent other than the step's own, which the step's pinned version
+    says nothing about."""
+    picked = user_overrides.get("a2a_agent_id")
+    if not picked or stored_id:
+        return bool(picked) and picked != stored_id
+    try:
+        return picked != get_config().get_default_a2a_agent_id()
+    except ConfigError:  # a pick needs no default agent, so an unreadable one must not fail the run
+        return True
 
 
 def _skill_fields(skill: dict) -> dict:
@@ -330,7 +342,7 @@ class DeployAgentTaskStep(TaskStep):
             return agent_id, step_overrides["a2a_agent_version"]
         if "a2a_agent_version" in user_overrides:
             return agent_id, user_overrides["a2a_agent_version"]
-        return agent_id, self.a2a_agent_version
+        return agent_id, None if picks_another_agent(user_overrides, self.a2a_agent_id) else self.a2a_agent_version
 
     def _run_system_prompt(self, context: TaskStepContext) -> Optional[str]:
         """The system prompt this run sets on the agent: ``system_prompt`` with the run's ``<seed>`` placeholders
