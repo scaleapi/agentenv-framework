@@ -102,7 +102,7 @@ _GVISOR_TARBALL_SHA512 = ("c87d792d5842efb70c38ee822124cfe0821a547715e7abcf3f2b1
                           "edaa0b91e238ec5c27a25a1b9e00bf98113398eb62a0778d8d20d4e222f8b0e0")
 _SHARED_BOX_DOCKERD_CONFIG = {
     "default-runtime": "runsc",
-    "runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}},
+    "runtimes": {"runsc": {"path": "/usr/local/bin/runsc", "runtimeArgs": ["--overlay2=none"]}},
     "userns-remap": "default",
     "no-new-privileges": True,
     "userland-proxy": False,

@@ -315,7 +315,7 @@ def test_a_shared_box_runs_from_the_vm_image_plus_a_pinned_checksummed_runsc_and
     assert configure.endswith("> /etc/docker/daemon.json")
     assert json.loads(written) == {
         "default-runtime": "runsc",
-        "runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}},
+        "runtimes": {"runsc": {"path": "/usr/local/bin/runsc", "runtimeArgs": ["--overlay2=none"]}},
         "userns-remap": "default",
         "no-new-privileges": True,
         "userland-proxy": False,
