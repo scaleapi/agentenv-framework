@@ -1650,6 +1650,24 @@ def test_extra_env_vars_overriding_only_service_name_diverges_the_pair():
     assert _env_values(block, "ENVIRONMENT_NAME") == [_ENV_NAME]
 
 
+@pytest.mark.parametrize("value", ["a\nprivileged: true", "x\n  evil:\n    image: busybox", "k: v", "\x07bell", " #x"])
+def test_an_env_value_stays_one_string_and_adds_no_key_or_service(value):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image=_ENV_IMAGE, environment_name=_ENV_NAME, extra_env_vars={"V": value})],
+        sidecars=[SidecarConfig(environment_name="relay", image_artifact=_FakeImageArtifact("ecr/relay:1.0.4"),
+                                container_port=8000, host_port=18768, env={"V": value})],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    ))
+    services = compose["services"]
+    assert set(services) == {"servicedb", _ENV_NAME, "gateway", "relay"}
+    for name in (_ENV_NAME, "relay"):
+        assert "privileged" not in services[name]
+        assert services[name]["environment"][-1] == f"V={value}"
+
+
 def test_service_name_still_emitted_until_fd1730_removes_it():
     """REGRESSION GUARD — the dual-inject is additive-only: SERVICE_NAME must keep being emitted
     for MCP servers AND website backends, because the deployed fleet still reads it. Dropping that

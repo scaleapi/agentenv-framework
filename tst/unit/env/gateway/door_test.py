@@ -146,6 +146,67 @@ async def test_a_websocket_without_the_token_gets_401(door_port):
     assert refused.value.response.status_code == 401
 
 
+@pytest_asyncio.fixture
+async def other_host():
+    """A server the door must never reach, with every request it gets."""
+    seen: list[str] = []
+
+    async def record(request: Request) -> JSONResponse:
+        seen.append(request.url.path)
+        return JSONResponse({"reached": "the other host"})
+
+    async def record_ws(websocket: WebSocket) -> None:
+        seen.append(websocket.url.path)
+        await websocket.accept()
+        await websocket.close()
+
+    enable_socket()  # loopback only
+    server, port = await _serve(Starlette(routes=[Route("/{path:path}", record), WebSocketRoute("/{path:path}", record_ws)]))
+    try:
+        yield port, seen
+    finally:
+        await server.shutdown()
+
+
+# {other} is the other host's port.
+_BAD_TARGETS = ["@127.0.0.1:{other}/echo", "//127.0.0.1:{other}/echo", "http://127.0.0.1:{other}/echo", "echo", "*"]
+
+
+async def _raw_status(port: int, request: bytes) -> int:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        writer.write(request)
+        await writer.drain()
+        status_line = await asyncio.wait_for(reader.readline(), 5)
+    finally:
+        writer.close()
+    return int(status_line.split()[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", _BAD_TARGETS)
+async def test_a_target_that_isnt_a_path_from_the_root_gets_400_and_reaches_no_other_host(door_port, other_host, target):
+    other_port, seen = other_host
+    target = target.format(other=other_port)
+    status = await _raw_status(door_port, f"GET {target} HTTP/1.1\r\nHost: x\r\n{SLOT_TOKEN_HEADER}: {TOKEN}\r\n"
+                                          f"Connection: close\r\n\r\n".encode())
+    assert status == 400
+    assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", _BAD_TARGETS)
+async def test_a_websocket_whose_target_isnt_a_path_from_the_root_gets_400_and_reaches_no_other_host(door_port, other_host,
+                                                                                                     target):
+    other_port, seen = other_host
+    target = target.format(other=other_port)
+    status = await _raw_status(door_port, (f"GET {target} HTTP/1.1\r\nHost: x\r\n{SLOT_TOKEN_HEADER}: {TOKEN}\r\n"
+                                           "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
+                                           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").encode())
+    assert status == 400
+    assert seen == []
+
+
 @pytest.mark.asyncio
 async def test_an_upstream_that_isnt_up_is_a_502_not_a_pass():
     enable_socket()

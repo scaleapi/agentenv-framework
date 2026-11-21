@@ -8,8 +8,10 @@ Standalone async helpers for the current gateway endpoints: ``POST /api/reset``
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -18,6 +20,7 @@ from agentenv_protocol import METHOD_GET, DataPart, client as protocol_v1
 from mcp import ClientSession
 from mcp.types import CallToolResult
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from agent_env.env.door_headers import granted_door_headers
 
@@ -267,18 +270,27 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
 
 
+@contextlib.asynccontextmanager
+async def _mcp_session(mcp_url: str) -> AsyncIterator[ClientSession]:
+    """An initialized MCP session with ``mcp_url``, on mcp's own client, sending the slot door's header the running
+    step's grant gives it (``granted_door_headers``)."""
+    async with create_mcp_http_client(headers=granted_door_headers(mcp_url) or None) as http_client, \
+            streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _), \
+            ClientSession(read_stream, write_stream) as session:
+        await session.initialize()
+        yield session
+
+
 async def offers_tool(mcp_url: str, name: str) -> bool:
     """Whether the MCP endpoint at ``mcp_url`` lists the tool ``name``, on any page of its tools."""
-    async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            cursor = None
-            while True:
-                page = await session.list_tools(cursor)
-                if any(tool.name == name for tool in page.tools):
-                    return True
-                if not (cursor := page.nextCursor):
-                    return False
+    async with _mcp_session(mcp_url) as session:
+        cursor = None
+        while True:
+            page = await session.list_tools(cursor)
+            if any(tool.name == name for tool in page.tools):
+                return True
+            if not (cursor := page.nextCursor):
+                return False
 
 
 async def reset_via_mcp_tool(
@@ -293,14 +305,12 @@ async def reset_via_mcp_tool(
     for attempt in range(max_retries):
         reset_done = False
         try:
-            async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    reset_tool_name = f"{environment_name}_reset"
-                    result = await session.call_tool(reset_tool_name, arguments)
-                    result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
-                    logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
-                    reset_done = True
+            async with _mcp_session(mcp_url) as session:
+                reset_tool_name = f"{environment_name}_reset"
+                result = await session.call_tool(reset_tool_name, arguments)
+                result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+                logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
+                reset_done = True
         except BaseExceptionGroup as eg:
             if reset_done:
                 logger.info("load_environment_artifact: succeeded (ignoring cleanup ExceptionGroup)")

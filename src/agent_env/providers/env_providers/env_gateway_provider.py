@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+import yaml
 from agentenv_protocol.client import control_headers
 from agentenv_protocol.website import (
     SESSION_SECRET_ENV,
@@ -508,8 +509,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 db_url = state_provider.url_for_environment(server.environment_name, instance=state_instance)
                 lines.append(f"      - DATABASE_URL={db_url}")
             if server.extra_env_vars:
-                for key, value in server.extra_env_vars.items():
-                    lines.append(f"      - {key}={value}")
+                lines.extend(_environment_line(key, value) for key, value in server.extra_env_vars.items())
             lines.extend([
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',
@@ -655,8 +655,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             ])
             if sc.env:
                 lines.append("    environment:")
-                for key, value in sc.env.items():
-                    lines.append(f"      - {key}={value}")
+                lines.extend(_environment_line(key, value) for key, value in sc.env.items())
             lines.extend([
                 "    ports:",
                 *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(sc.host_port), sc.container_port)),
@@ -1554,6 +1553,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if stack_layout.is_slot and (existing_sandbox is None or not existing_sandbox.walls_verified):
             raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a slot needs an existing sandbox "
                              f"whose walls between slots are verified")
+        if stack_layout.is_slot and children is not None:
+            raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a computer runs on a sandbox of "
+                             "its own, and its clock follower and site routing would need the slot's door token there")
         self._stack_layout = stack_layout
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
         self._state_instance = state_instance
@@ -1889,6 +1891,17 @@ def _settings_lines(settings: dict) -> list[str]:
     resolved = {name: get_config().resolve_reference(value) for name, value in settings.items()}
     return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}'.replace('$', '$$'))}"]
 
+
+
+def _environment_line(key: str, value: object) -> str:
+    """The compose line setting ``key`` to ``value`` in a service's environment list: as written when YAML reads it
+    back as that one string, else quoted, so a newline or a ``: `` in a value can't add a key or a service."""
+    entry = f"{key}={value}"
+    try:
+        plain = "\n" not in entry and "\r" not in entry and yaml.safe_load(f"- {entry}") == [entry]
+    except yaml.YAMLError:
+        plain = False
+    return f"      - {entry}" if plain else f"      - {json.dumps(entry)}"
 
 
 def _seconds(seconds: float) -> str:

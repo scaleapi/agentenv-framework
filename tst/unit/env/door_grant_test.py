@@ -4,19 +4,26 @@ its own sends it there; the default stack's grant and calls are what they always
 from __future__ import annotations
 
 import functools
+import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from agentenv_protocol import client as protocol_v1
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.env.gateway.constants import SLOT_TOKEN_HEADER
 from agent_env.explorer.routers import triggers
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
+from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.mcp_cli_builder.build_mcp_cli import _resolve_manifest_endpoint
 from agent_env.task_step.task_steps.mcp_cli_builder.codegen import generate_cli_script
+from agent_env.task_step.task_steps.mcp_env_validator.verify_spec_conformance import VerifySpecConformanceTaskStep
+from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 
 GATEWAY = "https://s1-gw.modal.host"
 PGWEB = "https://s1-pgweb.modal.host/"
@@ -118,3 +125,137 @@ def test_a_generated_cli_sends_the_slot_token_it_was_installed_with(monkeypatch,
         monkeypatch.setenv(namespace["SLOT_TOKEN_ENV"], token)
     assert namespace["_headers"]().get(SLOT_TOKEN_HEADER) == sent
     assert namespace["ROLE_HEADER"] in namespace["_headers"]()
+
+
+def _mcp_answer(request: httpx.Request) -> httpx.Response:
+    """A streamable-HTTP MCP server's answer to ``request``, with one tool, ``crm_reset``."""
+    if request.method != "POST":
+        return httpx.Response(405 if request.method == "GET" else 200)
+    message = json.loads(request.content)
+    if "id" not in message:
+        return httpx.Response(202)
+    results = {
+        "initialize": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                       "serverInfo": {"name": "crm", "version": "1"}},
+        "tools/list": {"tools": [{"name": "crm_reset", "inputSchema": {"type": "object"}}]},
+        "tools/call": {"content": [{"type": "text", "text": "reset"}], "isError": False},
+    }
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": results[message["method"]]})
+
+
+@pytest.fixture
+def served(monkeypatch) -> list[httpx.Request]:
+    """Every request any httpx client sends, answered as an MCP server at ``/mcp``, a card-less service elsewhere (404
+    for a card, a JSON body for ``/export-state``)."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/mcp"):
+            return _mcp_answer(request)
+        if request.url.path.endswith("/export-state"):
+            return httpx.Response(200, json={"rows": []})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    return requests
+
+
+def _door_sent(requests: list[httpx.Request]) -> set[str | None]:
+    return {request.headers.get(SLOT_TOKEN_HEADER) for request in requests}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("door_token", "sent"), [(None, None), ("door-tok", "door-tok")])
+async def test_the_legacy_mcp_reset_sends_the_door_header_under_a_slots_grant(served, door_token, sent):
+    with protocol_v1.authorized(_record(door_token).grants):
+        assert await legacy_protocol.offers_tool(f"{GATEWAY}/mcp", "crm_reset")
+        assert not (await legacy_protocol.reset_via_mcp_tool(f"{GATEWAY}/mcp", "crm", max_retries=1)).isError
+    assert {request.url.path for request in served} == {"/mcp"}
+    assert _door_sent(served) == {sent}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("door_token", "sent"), [(None, None), ("door-tok", "door-tok")])
+async def test_the_legacy_export_state_stream_sends_the_door_header_under_a_slots_grant(served, tmp_path, door_token, sent):
+    with protocol_v1.authorized(_record(door_token).grants):
+        suffix = await SnapshotEnvTaskStep._export_environment_to_file(GATEWAY, "slack", str(tmp_path / "out"), 30)
+    assert suffix == ".json"
+    assert served[-1].url.path == "/svc/mcp-slack/export-state"
+    assert _door_sent(served) == {sent}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("door_token", "sent"), [(None, None), ("door-tok", "door-tok")])
+async def test_the_spec_conformance_check_reads_live_tools_with_the_door_header(monkeypatch, door_token, sent):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/openapi.yaml"):
+            return httpx.Response(200, text="paths:\n  /reset:\n    post:\n      operationId: reset\n")
+        return _mcp_answer(request)
+
+    monkeypatch.setattr(httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    record = _record(door_token)
+    record.mcp_url = f"{GATEWAY}/mcp"
+    record.environment_card = {"name": "crm", "url": "/agentenv",
+                               "children_environments": [{"name": "crm", "url": "/svc/mcp-crm/agentenv"}]}
+    env = SimpleNamespace(environment_name="crm", merge_metadata=lambda _: None)
+    with patch("agent_env.env.env.Env.get", return_value=env):
+        await VerifySpecConformanceTaskStep(id="s", version=None, env_id="crm").execute(TaskStepContext(deployed_envs=[record]))
+    assert [request.url.path for request in requests if request.url.path == "/mcp"]
+    assert _door_sent(requests) == {sent}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("door_token", "sent"), [(None, {}), ("door-tok", DOOR)])
+async def test_the_in_process_proxy_registers_each_envs_mcp_server_with_its_door_header(monkeypatch, door_token, sent):
+    from agent_env.task.episode import run as episode_run
+    from agent_env.task.episode.steps import _EpisodeAgentStep
+
+    registrations: list[dict] = []
+    card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_MCP_CONFIG,
+                                             "params": {"endpoint": "/mcp-config", "methods": {"add": {"method": "POST"}}}}]}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/mcp-config":
+            registrations.append(json.loads(request.content))
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json=card)
+
+    monkeypatch.setattr(httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+
+    class _Proxy:
+        async def start(self) -> str:
+            return "http://127.0.0.1:1"
+
+    monkeypatch.setattr(episode_run, "InProcessProxy", _Proxy)
+    record = _record(door_token)
+    record.mcp_url = f"{GATEWAY}/mcp"
+    episode = SimpleNamespace(_in_process=[], _attach=AsyncMock())
+    episode._serve_in_process = functools.partial(episode_run.Episode._serve_in_process, episode)
+    step = SimpleNamespace(agent_name="a", env_ids=["crm"], env_step_id=None, role=None)
+    agent_step = _EpisodeAgentStep.__new__(_EpisodeAgentStep)
+    agent_step.step, agent_step.sandboxed, agent_step.id = step, False, "play"
+    context = TaskStepContext(deployed_envs=[record])
+    with patch("agent_env.task.episode.steps._episode_of", return_value=episode), \
+            patch("agent_env.task.episode.steps.bound_deployment", return_value=record):
+        await agent_step.execute(context)
+    assert registrations == [{"url": f"{GATEWAY}/mcp", **({"headers": sent} if sent else {})}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", [DEFAULT_STACK_LAYOUT, StackLayout.for_slot(2)])
+async def test_a_slot_refuses_computers_on_sandboxes_of_their_own_and_the_default_stack_takes_them(layout):
+    class _Stop(Exception):
+        pass
+
+    async def children(_url, _token):
+        return []
+
+    with patch.object(EnvironmentGatewayProvider, "in_vm", side_effect=_Stop), \
+            pytest.raises(ValueError if layout.is_slot else _Stop, match="sandbox of its own" if layout.is_slot else None):
+        await EnvironmentGatewayProvider()._deploy_gateway(
+            SimpleNamespace(), state_instance=None, mcp_servers=[], mcp_server_images=[],
+            existing_sandbox=SimpleNamespace(walls_verified=True), children=children, stack_layout=layout)

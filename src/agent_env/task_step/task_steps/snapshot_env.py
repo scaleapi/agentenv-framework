@@ -602,7 +602,7 @@ class SnapshotEnvTaskStep(TaskStep):
             return ".json"
 
         legacy_url = f"{legacy_protocol.environment_base_url(gateway_url, environment_name, mcp=True)}/export-state"
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=granted_door_headers(legacy_url)) as client:
             async with client.stream(
                 "GET",
                 legacy_url,

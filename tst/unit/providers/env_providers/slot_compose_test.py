@@ -138,6 +138,23 @@ def test_the_slots_compose_passes_its_own_wall_check(slot):
     (lambda s: s["gateway"]["volumes"].append("../s4:/other"), "bind-mounts ../s4"),
     (lambda s: s["gateway"]["volumes"].append("~/x:/x"), "bind-mounts ~/x"),
     (lambda s: s["gateway"]["volumes"].append({"type": "bind", "source": "/app", "target": "/a"}), "bind-mounts /app"),
+    (lambda s: s["gateway"]["volumes"].append("$HOME/x:/x"), "Compose would fill in"),
+    (lambda s: s["gateway"]["volumes"].append("./${OTHER}:/x"), "Compose would fill in"),
+    (lambda s: s["gateway"]["volumes"].append({"type": "bind", "source": "./$X", "target": "/x"}), "Compose would fill in"),
+    (lambda s: s["gateway"]["volumes"].append({"type": "npipe", "source": "x", "target": "/x"}), "mounts a 'npipe'"),
+    (lambda s: s["gateway"].update(env_file=["/etc/environment"]), "gateway sets env_file"),
+    (lambda s: s["gateway"].update(env_file=[f"{SLOT.app_dir}/../s4/.env"]), "gateway sets env_file"),
+    (lambda s: s["gateway"].update(extends={"file": "/other/compose.yml", "service": "x"}), "gateway sets extends"),
+    (lambda s: s["gateway"].update(build={"context": "/"}), "gateway sets build"),
+    (lambda s: s["gateway"].update(cgroup="host"), "gateway sets cgroup"),
+    (lambda s: s["gateway"].update(gpus="all"), "gateway sets gpus"),
+    (lambda s: s["gateway"].update(deploy={"resources": {"reservations": {"devices": [{"capabilities": ["gpu"]}]}}}),
+     "gateway sets deploy"),
+    (lambda s: s["gateway"].update(sysctls={"net.ipv4.ip_forward": 1}), "gateway sets sysctls"),
+    (lambda s: s["gateway"].update(volumes_from=["servicedb"]), "gateway sets volumes_from"),
+    (lambda s: s["gateway"].update(configs=["c"]), "gateway sets configs"),
+    (lambda s: s["gateway"].update(secrets=["s"]), "gateway sets secrets"),
+    (lambda s: s["gateway"].pop("runtime"), "gateway runs under None"),
 ])
 def test_the_wall_check_refuses_whatever_would_reach_past_the_slot(slot, change, problem):
     broken = copy.deepcopy(slot)
@@ -145,9 +162,37 @@ def test_the_wall_check_refuses_whatever_would_reach_past_the_slot(slot, change,
     assert any(problem in found for found in slot_compose_problems(broken, SLOT))
 
 
-def test_named_volumes_and_binds_inside_the_slots_dir_pass(slot):
+@pytest.mark.parametrize(("key", "value"), [
+    ("include", ["/other/compose.yml"]),
+    ("configs", {"c": {"file": "/etc/shadow"}}),
+    ("secrets", {"s": {"file": "../s4/secret"}}),
+])
+def test_the_wall_check_refuses_a_top_level_key_that_reads_a_file_from_the_box(slot, key, value):
+    broken = copy.deepcopy(slot)
+    broken[key] = value
+    assert f"the file sets {key}" in slot_compose_problems(broken, SLOT)
+
+
+@pytest.mark.parametrize("mount", ["logs:/var/log", {"type": "volume", "source": "logs", "target": "/var/log"}])
+@pytest.mark.parametrize("config", [
+    {"driver_opts": {"type": "none", "o": "bind", "device": "/etc"}},
+    {"driver_opts": {"device": "/var/run"}},
+    {"name": "aes4_logs"},
+    {"external": True},
+])
+def test_the_wall_check_refuses_a_named_volume_with_any_settings(slot, mount, config):
+    broken = copy.deepcopy(slot)
+    broken["services"]["gateway"]["volumes"].append(mount)
+    broken["volumes"] = {"logs": config}
+    assert any(found.startswith("volume logs sets") for found in slot_compose_problems(broken, SLOT))
+
+
+def test_named_and_anonymous_volumes_and_binds_inside_the_slots_dir_pass(slot):
     fine = copy.deepcopy(slot)
-    fine["services"]["gateway"]["volumes"] += ["logs:/var/log", "./data:/data", f"{SLOT.app_dir}/x:/x"]
+    fine["services"]["gateway"]["volumes"] += ["logs:/var/log", "./data:/data", f"{SLOT.app_dir}/x:/x",
+                                               "/var/lib/postgresql/data", {"type": "tmpfs", "target": "/tmp"},
+                                               {"type": "volume", "source": "logs", "target": "/l"}]
+    fine["volumes"] = {"logs": None}
     assert slot_compose_problems(fine, SLOT) == []
 
 

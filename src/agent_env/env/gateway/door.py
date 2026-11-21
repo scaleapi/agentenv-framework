@@ -5,7 +5,8 @@ A request gets through only with the slot's token as the ``X-Agentenv-Slot-Token
 the door removes that header and forwards the rest, ``Authorization`` and ``Host`` included, untouched. HTTP bodies
 stream both ways, so server-sent events and long downloads pass as they come, and WebSockets are relayed frame by
 frame. Every other request gets 401. Browsers can't set the header, and no cookie or ticket sign-in exists yet, so a
-browser is refused too.
+browser is refused too. A request target that isn't a path from the root (``//x``, ``@host/x``, ``http://host/x``) gets
+400, and the upstream address is built from the route alone, so no request can point the door at another host.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ _HOP_BY_HOP = frozenset({b"connection", b"keep-alive", b"proxy-authenticate", b"
                          b"trailer", b"transfer-encoding", b"upgrade", b"proxy-connection"})
 _REFUSAL = (f"401: this slot's door takes only the {SLOT_TOKEN_HEADER} header. Browser sign-in (a cookie or a "
             f"ticket) isn't supported yet.\n").encode()
+_BAD_TARGET = b"400: the door takes only a request target that is a path from the root, like /mcp\n"
 _UPSTREAM_CONNECT_TIMEOUT_S = 10.0
 
 
@@ -54,30 +56,33 @@ class Door:
     def __init__(self, upstream: str, token: str, client: httpx.AsyncClient):
         if not token:
             raise ValueError("a door needs a token")
+        host, _, port = upstream.rpartition(":")
         self._upstream = upstream
+        self._host, self._port = host, int(port)
         self._token = token.encode()
         self._client = client
 
     async def __call__(self, scope, receive, send) -> None:
         admitted = self._admitted(scope["headers"])
         headers = [(k, v) for k, v in scope["headers"] if k != _TOKEN_HEADER and k not in _HOP_BY_HOP]
+        target = _path_target(scope)
         if scope["type"] == "websocket":
-            await self._websocket(scope, receive, send, headers, admitted)
-        elif admitted:
-            await self._http(scope, receive, send, headers)
-        else:
+            await self._websocket(scope, receive, send, headers, admitted, target)
+        elif not admitted:
             await _respond(send, 401, _REFUSAL)
+        elif target is None:
+            await _respond(send, 400, _BAD_TARGET)
+        else:
+            await self._http(scope, receive, send, headers, target)
 
     def _admitted(self, headers) -> bool:
         tokens = [value for key, value in headers if key == _TOKEN_HEADER]
         return len(tokens) == 1 and hmac.compare_digest(tokens[0], self._token)
 
-    def _target(self, scope, scheme: str) -> str:
-        path = scope.get("raw_path") or scope["path"].encode()
-        query = f"?{scope['query_string'].decode('latin-1')}" if scope.get("query_string") else ""
-        return f"{scheme}://{self._upstream}{path.decode('latin-1')}{query}"
+    def _url(self, scheme: str, target: bytes) -> httpx.URL:
+        return httpx.URL(scheme=scheme, host=self._host, port=self._port, raw_path=target)
 
-    async def _http(self, scope, receive, send, headers) -> None:
+    async def _http(self, scope, receive, send, headers, target: bytes) -> None:
         has_body = any(key in (b"content-length", b"transfer-encoding") for key, _ in scope["headers"])
 
         async def body():
@@ -89,7 +94,7 @@ class Door:
                 if not message.get("more_body"):
                     return
 
-        request = self._client.build_request(scope["method"], self._target(scope, "http"), headers=headers,
+        request = self._client.build_request(scope["method"], self._url("http", target), headers=headers,
                                              content=body() if has_body else None)
         try:
             response = await self._client.send(request, stream=True)
@@ -106,16 +111,19 @@ class Door:
         finally:
             await response.aclose()
 
-    async def _websocket(self, scope, receive, send, headers, admitted: bool) -> None:
+    async def _websocket(self, scope, receive, send, headers, admitted: bool, target: bytes | None) -> None:
         if (await receive())["type"] != "websocket.connect":
             return
         if not admitted:
             await _deny_websocket(scope, send, 401, _REFUSAL)
             return
+        if target is None:
+            await _deny_websocket(scope, send, 400, _BAD_TARGET)
+            return
         forwarded = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in headers
                      if k != b"host" and not k.startswith(b"sec-websocket-")]
         try:
-            upstream = await connect(self._target(scope, "ws"), additional_headers=forwarded,
+            upstream = await connect(str(self._url("ws", target)), additional_headers=forwarded,
                                      subprotocols=scope.get("subprotocols") or None, max_size=None,
                                      open_timeout=_UPSTREAM_CONNECT_TIMEOUT_S)
         except Exception as e:
@@ -143,6 +151,14 @@ class Door:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await upstream.close()
+
+
+def _path_target(scope) -> bytes | None:
+    """The request's path and query as sent, when the path is one from the root (``/`` then not ``/``); else None."""
+    path = scope.get("raw_path") or scope["path"].encode()
+    if not path.startswith(b"/") or path.startswith(b"//"):
+        return None
+    return path + b"?" + scope["query_string"] if scope.get("query_string") else path
 
 
 async def _respond(send, status: int, body: bytes) -> None:

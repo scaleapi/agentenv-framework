@@ -24,10 +24,13 @@ DOOR_SERVICE_NAME = "agentenv-door"
 DOOR_COMMAND = ["python", "-m", "gateway.door"]
 SLOT_RUNTIME = "runsc"
 _BRIDGE_NAME_OPTION = "com.docker.network.bridge.name"
-# Compose keys that would let a slot's container reach past its walls: host devices and capabilities, another
-# namespace than its own, a looser seccomp or AppArmor profile.
-_REFUSED_KEYS = ("privileged", "cap_add", "devices", "device_cgroup_rules", "network_mode", "pid", "ipc", "uts",
-                 "userns_mode", "cgroup_parent", "security_opt", "volumes_from", "sysctls")
+# The only keys a slot's compose may use: the ones the default stack's generator and slot_compose write. Every other
+# key is refused rather than listed, as many reach past the walls: host devices, capabilities or namespaces, a looser
+# profile, a build context, files read from the box (env_file, include, extends, configs, secrets).
+_ALLOWED_TOP_LEVEL_KEYS = frozenset({"services", "networks", "volumes"})
+_ALLOWED_SERVICE_KEYS = frozenset({"image", "command", "depends_on", "environment", "extra_hosts", "healthcheck",
+                                   "networks", "ports", "restart", "shm_size", "volumes", "runtime"})
+_MOUNT_TYPES = frozenset({"bind", "volume", "tmpfs"})
 
 
 def resolv_conf_path(layout: StackLayout) -> str:
@@ -82,12 +85,14 @@ def slot_compose(compose: str, layout: StackLayout, *, door_image: str, door_tok
 
 
 def slot_compose_problems(doc: Mapping, layout: StackLayout) -> list[str]:
-    """Why a slot's parsed compose file would let a container past its walls: a key in ``_REFUSED_KEYS``, a runtime
-    other than gVisor, a published port on any service but the door, the docker socket, or a bind mount from outside
-    ``layout.app_dir``. Empty when there is none."""
-    problems = []
+    """Why a slot's parsed compose file would let a container past its walls: a key outside the allowed ones, a named
+    volume with any settings (a driver's options can bind any host path), a runtime other than gVisor, a published
+    port on any service but the door, the docker socket, a bind mount from outside ``layout.app_dir``, or a ``$`` in a
+    mount's source. Empty when there is none."""
+    problems = [f"the file sets {key}" for key in doc if key not in _ALLOWED_TOP_LEVEL_KEYS]
+    problems += [f"volume {name} sets {sorted(config)}" for name, config in (doc.get("volumes") or {}).items() if config]
     for name, service in (doc.get("services") or {}).items():
-        problems += [f"{name} sets {key}" for key in _REFUSED_KEYS if key in service]
+        problems += [f"{name} sets {key}" for key in service if key not in _ALLOWED_SERVICE_KEYS]
         if service.get("runtime") != SLOT_RUNTIME:
             problems.append(f"{name} runs under {service.get('runtime')!r}, not {SLOT_RUNTIME}")
         if service.get("ports") and name != DOOR_SERVICE_NAME:
@@ -144,13 +149,22 @@ def _addresses(services: Mapping[str, Mapping], networks: Mapping[str, tuple[IPv
 
 
 def _volume_problem(volume: object, app_dir: str) -> str | None:
-    """Why a service's volume would reach past its slot: the docker socket, or a bind from outside ``app_dir``."""
+    """Why a service's volume would reach past its slot: a ``$`` Compose would fill in, the docker socket, a mount
+    type other than bind, volume or tmpfs, or a bind from outside ``app_dir``. An anonymous volume (a container path
+    alone) and a named volume pass."""
     if isinstance(volume, Mapping):
         source = str(volume.get("source") or "")
-        bind = volume.get("type") == "bind"
+        kind = volume.get("type")
+        if kind not in _MOUNT_TYPES:
+            return f"mounts a {kind!r}, not one of {sorted(_MOUNT_TYPES)}"
+        bind = kind == "bind"
     else:
-        source = str(volume).split(":", 1)[0]
+        source, separator, _ = str(volume).partition(":")
+        if not separator:
+            source = ""
         bind = source.startswith(("/", ".", "~"))
+    if "$" in source:
+        return f"mounts {source}, which Compose would fill in from the box"
     if "docker.sock" in source:
         return f"mounts the docker socket ({source})"
     if not bind:
