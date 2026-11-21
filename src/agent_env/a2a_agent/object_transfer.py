@@ -191,19 +191,8 @@ async def invoke_transfer(
         if staged is not None:
             await staged.push()
         try:
-            async with httpx.AsyncClient() as client:
-                send = client.post if verb == "POST" else client.put
-                resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
-            try:
-                raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
-            except httpx.HTTPStatusError as exc:
-                hint = _STAGING_UNREACHABLE if staged is not None else (
-                    unreachable_hint(call.payload) if call.mode == "objects" else None
-                )
-                if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
-                    raise
-                raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
-            body = resp.json()
+            body = await _send(url, call, verb=verb, operation=operation, timeout=timeout, headers=headers,
+                               staged=staged is not None)
         except Exception as exc:
             if staged is not None and not isinstance(exc, _UNSENT):
                 await _collect_staged(staged, operation)
@@ -216,6 +205,23 @@ async def invoke_transfer(
     if call.mode == "objects" and response_model is not None:
         return parse_response(response_model, body, operation=operation)
     return body
+
+
+async def _send(url: str, call: TransferCall, *, verb: Literal["POST", "PUT"], operation: str, timeout: float,
+                headers: Mapping[str, str] | None, staged: bool) -> Any:
+    """The agent's answer to ``call``, raising for an error status with a hint when the agent couldn't reach the
+    objects the call named: its own staging when ``staged``, else the grants' store."""
+    async with httpx.AsyncClient() as client:
+        send = client.post if verb == "POST" else client.put
+        resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
+    try:
+        raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
+    except httpx.HTTPStatusError as exc:
+        hint = _STAGING_UNREACHABLE if staged else unreachable_hint(call.payload) if call.mode == "objects" else None
+        if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
+            raise
+        raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
+    return resp.json()
 
 
 #: Failures of a call that never reached the agent, which therefore staged nothing to collect.

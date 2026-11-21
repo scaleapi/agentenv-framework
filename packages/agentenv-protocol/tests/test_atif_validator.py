@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import pytest
 
-from agentenv_protocol.atif import KIT_RULES, RULES, errors_in, validate, validate_live
+from agentenv_protocol.atif import KIT_RULES, RULES, StoredMedia, errors_in, media_refs, validate, validate_live
 from agentenv_protocol.atif.__main__ import main
 from atif_cases import CASES, FIXTURES, build
 
@@ -140,6 +140,23 @@ def test_media_bytes_are_checked_against_their_name_and_profile():
     assert validate(document, media=FIXTURES) == []
     assert "media-bytes" in _rules(errors_in(validate(document, media={})))
     assert "media-bytes" in _rules(errors_in(validate(document, media={path: b"not the screenshot"})))
+
+
+def test_stored_media_hold_the_profile_to_each_files_name_and_stored_size_without_its_bytes():
+    document = _fixture("computer_use")
+    sizes = {ref.path: ref.info["bytes"] for ref in media_refs(document)}
+    assert validate(document, media=StoredMedia(sizes)) == []
+    assert validate(document, media=StoredMedia(dict.fromkeys(sizes))) == []  # a store that can't tell sizes
+    [first, *_] = sizes
+    missing = errors_in(validate(document, media=StoredMedia({p: n for p, n in sizes.items() if p != first})))
+    assert [(f.rule, f.message) for f in missing] == [("media-bytes", f"{first} isn't in the media given")]
+    resized = errors_in(validate(document, media=StoredMedia({**sizes, first: sizes[first] + 1})))
+    assert [f.rule for f in resized] == ["media-bytes"] and "bytes" in resized[0].message
+    [holder] = [result for step in document["steps"] for result in (step.get("observation") or {}).get("results", [])
+                if first in (result.get("extra") or {}).get("agentenv", {}).get("media", {})]
+    holder["extra"]["agentenv"]["media"][first]["sha256"] = "0" * 64
+    renamed = errors_in(validate(document, media=StoredMedia(sizes)))
+    assert [f.rule for f in renamed] == ["media-bytes"] and "but the name has" in renamed[0].message
 
 
 def test_totals_sum_the_sub_agents_steps_and_skip_a_count_a_step_lacks():

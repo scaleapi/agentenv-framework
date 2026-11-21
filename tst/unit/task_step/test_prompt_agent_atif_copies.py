@@ -7,8 +7,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import struct
-import zlib
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote
@@ -27,23 +25,16 @@ from agentenv_protocol.a2a_agent import (
 from agentenv_protocol.atif import FORMAT as ATIF, Adapter, atif_adapter, errors_in, media_paths, native, validate
 
 from agent_env.config import configure
-from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.snapshot_utils import atif_copies
 from agent_env.task_step.task_steps import prompt_agent as pa
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.unit.task_step.prompt_agent_rig import card_of, deployed, quiet_conversations, route_clients
 from tst.util.granting_object_store import GRANT_ORIGIN, GrantingObjectStore
+from tst.util.images import png
 
 NATIVE = "shots/1"
 _PREFIX = "prompt_agent_trajectories/prompt_id=solve/"
-
-
-def _png(width: int, height: int) -> bytes:
-    def chunk(kind: bytes, body: bytes) -> bytes:
-        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-
-    pixels = zlib.compress(b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height)))
-    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
 
 
 @atif_adapter(native_format=NATIVE, version="2.1.0", input_includes_cache=False)
@@ -69,7 +60,7 @@ def _app(*, atif: bool = True):
         async def run(self, request: TaskRequest) -> TaskResult:
             request.trajectory.set_format(NATIVE)
             n = next(shots)
-            request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(_png(n, 1)).decode()})
+            request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
             return TaskResult.text(f"shot {n}")
 
     return Agent().create_app()
@@ -136,13 +127,10 @@ class _Run:
         self.root = tmp_path / "store"
         self.store = GrantingObjectStore(str(self.root), reaches=True)
         configure(object_store=self.store)
-        for fn in ("create_conversation", "add_a2a_task", "complete_a2a_task", "mark_closed", "get_conversation"):
-            monkeypatch.setattr(pa.conversation_store, fn, lambda *a, **kw: None)
+        quiet_conversations(monkeypatch)
         self.wire = _Wire(self.store, atif=atif)
         self.asked: list[int] = []
-        real_client = httpx.AsyncClient
-        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(
-            *a, **{**kw, "transport": self.wire}))
+        route_clients(monkeypatch, self.wire)
 
         async def ask(user_side, number: int, reply: str, parts: list[dict]) -> dict:
             self.asked.append(number)
@@ -152,7 +140,7 @@ class _Run:
 
     @property
     def card(self) -> dict:
-        return self.wire.app.state.agentenv_a2a.card.model_dump(mode="json", exclude_none=True)
+        return card_of(self.wire.app)
 
     def context(self, formats: list[str] | None = (ATIF,), **kwargs) -> TaskStepContext:
         context = TaskStepContext(instance_id="ti-1", **kwargs)
@@ -161,8 +149,7 @@ class _Run:
         return context
 
     async def execute(self, context: TaskStepContext, *, card: dict | None = None, **step) -> PromptResponse:
-        context.deployed_agents[:] = [DeployedAgent(agent_name="solver", api_url="http://agent.test",
-                                                    a2a_url="http://agent.test", a2a_card=card or self.card)]
+        context.deployed_agents[:] = [deployed(card or self.card)]
         step.setdefault("max_conversation_turns", 2)
         step.setdefault("user_a2a_url", "http://user.test")  # whose answers ``ask`` stands in for
         await PromptAgentTaskStep(id="solve", version=None, prompt="go", agent_name="solver", poll_interval_seconds=0,
@@ -452,3 +439,16 @@ async def test_a_profile_that_misdescribes_a_stored_file_makes_the_copy_invalid(
     [atif] = _atifs(response)
     assert (atif["status"], atif["rules"]) == ("invalid", ["media-bytes"])
     assert ("bytes" if field == "bytes" else "sha256") in atif["reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["x" * 5000, "Not A Code", 7])
+async def test_an_error_code_the_sdk_wouldnt_send_isnt_kept_as_the_reason(monkeypatch, tmp_path, code):
+    run = _Run(monkeypatch, tmp_path)
+    run.wire.answer = lambda request, path, sent, response: (
+        httpx.Response(409, json={"error": {"code": code}}, request=request)
+        if path == "/ext/trajectory" and sent.get("format") == ATIF else None)
+
+    response = await run.execute(run.context(), max_conversation_turns=1)
+
+    assert [(atif["status"], atif["reason"]) for atif in _atifs(response)] == [("unavailable", "http_409")]
