@@ -20,6 +20,7 @@ from agent_env.env.gateway.gateway import Gateway
 from agent_env.env.gateway.triggers import TriggerEngine
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
+from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
 
 GATEWAY = "http://gateway.test"
@@ -294,5 +295,7 @@ class Rig:
             async def answer(version, person, history, read, ask):
                 rig.reads.append(read)
                 return rig.answers.pop(0) if rig.answers else {"outcome": "no_reply", "message": ""}
+
+            parse = staticmethod(user_sim_versions.parse)  # its answers (user_texts) are in our format
 
         return Plugin

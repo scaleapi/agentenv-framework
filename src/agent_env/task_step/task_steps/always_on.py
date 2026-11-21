@@ -502,6 +502,11 @@ class _Run:
             raise StepContextError(f"always_on: the user sim agent '{us['agent_name']}' is not deployed")
         self.user_url = self.user_agent.a2a_url or self.user_agent.api_url
         self.plugin = await self._load_plugin(us.get("plugin"))
+        if self.step.user_sim_gate is not None and not callable(getattr(self.plugin, "parse", None)):
+            # A rewrite is the user sim's answer again, in the plugin's own format: without its parse, a rewrite
+            # would read as nothing and never reach the agent.
+            raise ValueError(f"always_on: user_sim_gate needs the user sim's plugin to define parse(raw), which reads "
+                             f"one of its answers as answer() does; plugin {us.get('plugin')!r} has none")
         self.tz = ZoneInfo(self.zone)
 
         self.clock_envs = [d for d in ctx.deployed_envs if d.supports(EXT_CLOCK_URI, "state")]
@@ -1613,8 +1618,8 @@ class _Run:
 
         async def rewrite(note: str) -> Optional[str]:
             got = await ask(note)
-            new = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict)
-                                          else got.get("text"))
+            # The plugin's own parse: a plugin with another answer format reads its rewrite as it reads its answers.
+            new = self.plugin.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
             rewrites.append({**{k: new.get(k) for k in ("outcome", "message", "used", "schema_errors")},
                              "user_sim_error": got.get("error")})
             if got.get("error"):  # read() ends the run on it (user_sim_error), as on any failed ask

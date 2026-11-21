@@ -120,3 +120,51 @@ async def test_a_judge_only_gate_whose_judge_cant_be_set_up_fails_the_step(monke
     with pytest.raises(Exception, match="judge setup: KeyError.*with patterns off"):
         await rig.run(rig.step(max_wakes=4, user_sim_gate={"patterns": False, "judge_model": "judge-model"}))
     assert not _got(rig, "looks good")
+
+
+class _OwnFormatPlugin:
+    """A plugin whose user sim answers "REPLY: <text>" instead of our JSON, with its own parse."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+
+    def setup(self, version, person):
+        return {"system_prompt": "you are linda", "output_format": None}
+
+    async def answer(self, version, person, history, read, ask):
+        return self.answers.pop(0)
+
+    @staticmethod
+    def parse(raw):
+        text = raw if isinstance(raw, str) else ""
+        return {"outcome": "reply", "message": text.removeprefix("REPLY: "), "used": "none"} if text else {}
+
+
+@pytest.mark.asyncio
+async def test_a_plugins_rewrite_is_read_with_its_own_parse_and_reaches_the_agent(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_messages_once, user_texts=("REPLY: do those numbers hold up?",))
+    rig.plugin = _OwnFormatPlugin([{"outcome": "reply", "message": _SWAP}])
+    await rig.arm()
+    ctx = await rig.run(_gated(rig))
+
+    assert _got(rig, "do those numbers hold up?")      # parsed its way, not read as an empty no_reply
+    (read, *_) = rig.events(ctx, "user_sim_read")
+    assert read["message"] == "do those numbers hold up?"
+
+
+@pytest.mark.asyncio
+async def test_a_gate_with_a_plugin_that_cant_read_its_rewrites_is_refused_when_the_run_starts(monkeypatch, tmp_path):
+    class NoParse:
+        @staticmethod
+        def setup(version, person):
+            return {"system_prompt": "you are linda", "output_format": None}
+
+        @staticmethod
+        async def answer(version, person, history, read, ask):
+            return {"outcome": "reply", "message": "ok"}
+
+    rig = Rig(monkeypatch, tmp_path, agent=_messages_once)
+    rig.plugin = NoParse
+    await rig.arm()
+    with pytest.raises(ValueError, match="user_sim_gate needs the user sim's plugin to define parse"):
+        await rig.run(_gated(rig))

@@ -542,3 +542,15 @@ async def test_a_prompt_agent_chat_whose_agent_turn_failed_is_not_rated(monkeypa
         await _step().execute(ctx)
     await _hannah_rater().execute(ctx)
     assert ctx.metadata[SATISFACTION_KEY]["talk"]["skipped"] == "the agent's turn failed"
+
+
+
+@pytest.mark.parametrize("record, skipped", [
+    ({"end_reason": "user_sim_invalid", "error_type": "user_sim_invalid"},
+     "the user sim's answer still read as the assistant's after its rewrites"),
+    ({"end_reason": "user_sim_invalid"}, None),   # on_fail "end": no error, so the run is rated as one that ended
+], ids=["on_fail fail", "on_fail end"])
+def test_an_always_on_run_the_gate_failed_as_an_error_is_not_rated(record, skipped):
+    from agent_env.task_step.task_steps.agent import rate_user_satisfaction as rus
+
+    assert rus._always_on_session({"user_sim": {"name": "linda"}, **record}).skipped == skipped
