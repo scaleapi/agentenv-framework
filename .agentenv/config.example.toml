@@ -62,7 +62,9 @@ agent_default = "local"   # agents too
 
 # [trajectories]
 # formats = ["atif/1"]   # the formats beside native a run prescribes to each agent whose trajectory it reads;
-#                        # none by default, so agents build native only. Per run: user_overrides.trajectory_formats
+#                        # none by default, so agents build native only. Per run: user_overrides.trajectory_formats.
+#                        # With atif/1, a prompt step's turns are their atif/1 copies (native where one can't be had),
+#                        # stored under {prefix}atif/instance_id=<id>/<agent>/, and its judges grade them
 
 # [envs]
 # default_gateway_env_id = "default"                 # the gateway every gateway deploy runs

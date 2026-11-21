@@ -169,7 +169,11 @@ cross-check that reads them; per-part origins, when a reader needs them; and an 
 producer's output to profile 1.0. `reader=True` checks someone else's document for reading instead: what a producer
 must not write only warns, and the document fails only where agentenv couldn't read it. `media` is the folder the
 document's media paths are relative to, the one holding `media/`, or the files by path; without it only the paths' form
-is checked. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. A sub-agent's task is its spawning call's, found through the references, so an embedded sub-agent that no served step references isn't held to `live-unanswered`. On
+is checked. `StoredMedia(sizes)` stands for files stored beside the document whose bytes were checked against their
+names as they were stored, as agent-env's worker checks each file an agent pushes: `media-bytes` then holds the
+profile's sha256 to each file's name and its size to the stored one, without reading the bytes. `validate_media(document, media)` gives the `media-bytes` findings alone, for a document
+newer than these models, which `validate` stops at. `media_refs` lists each
+place a document names a media file, with the profile's details for it, as these checks walk them. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. A sub-agent's task is its spawning call's, found through the references, so an embedded sub-agent that no served step references isn't held to `live-unanswered`. On
 the command line: `python -m agentenv_protocol.atif validate FILE [--media DIR] [--reader]`, which prints each finding
 and exits 1 when one is an error.
 

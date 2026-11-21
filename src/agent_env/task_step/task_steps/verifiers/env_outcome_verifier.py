@@ -17,6 +17,7 @@ from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStepDependency
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import AtifDocuments, atif_turns, turns
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierTaskStep
@@ -29,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 class EnvOutcomeVerifierTaskStep(VerifierTaskStep):
     """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, a
-    ``trajectory`` parameter that prompt's agent trajectory, and an ``env_url`` parameter the env's address, which the
+    ``trajectory`` parameter that prompt's agent trajectory (one document per turn, each read by its label:
+    ``_trajectory``), a ``trajectory_formats`` parameter each turn's label, such as ``atif/1`` or the agent's native
+    format, and an ``env_url`` parameter the env's address, which the
     protocol client takes as it is: like every step, ``verify`` runs under ``Task.run``'s grant of each deployed env's
     control token, so its calls reach the env's framework-only routes as written."""
 
@@ -125,6 +128,8 @@ class EnvOutcomeVerifierTaskStep(VerifierTaskStep):
                 keywords["run"] = await load_run_context(context, self._graded_prompt(context))
             if "trajectory" in parameters:
                 keywords["trajectory"] = await asyncio.to_thread(_trajectory, self._graded_prompt(context))
+            if "trajectory_formats" in parameters:
+                keywords["trajectory_formats"] = _trajectory_formats(self._graded_prompt(context))
             results = await module.verify(deployed.mcp_url, **keywords)
         finally:
             if os.path.exists(tmp_path):
@@ -148,10 +153,27 @@ class EnvOutcomeVerifierTaskStep(VerifierTaskStep):
 
 
 def _trajectory(prompt_response: Optional[PromptResponse]) -> Optional[list]:
-    """The agent's trajectory of ``prompt_response``, one document per turn as the agent stored it, None for a turn it
-    stored none of; None when it stored none at all."""
+    """The agent's trajectory of ``prompt_response``, one document per turn by its label, None for a turn it stored none
+    of; None when it stored none at all. A native turn's document is as the agent stored it; an atif/1 turn's is that
+    turn alone, its A2A task cut out of the conversation's ATIF document (``agentenv_protocol.atif.task_document``:
+    steps numbered from 1, sub-agents it reaches kept, ``final_metrics`` dropped), its media paths relative to that
+    document's folder."""
     urls = ((prompt_response.target_agent_per_turn_trajectory_object_urls
              or [prompt_response.agent_trajectory_object_url]) if prompt_response is not None else [])
     if not any(urls):
         return None
-    return [json.loads(get_config().get_object_store_at(url).get(url)) if url else None for url in urls]
+    if atif_turns(prompt_response) is None:
+        return [json.loads(get_config().get_object_store_at(url).get(url)) if url else None for url in urls]
+    documents = AtifDocuments()
+    return [None if source is None else documents.view(source) if source.atif
+            else json.loads(get_config().get_object_store_at(source.url).get(source.url))
+            for source in turns(prompt_response)]
+
+
+def _trajectory_formats(prompt_response: Optional[PromptResponse]) -> Optional[list[Optional[str]]]:
+    """Each turn's label, beside ``_trajectory``'s entries: what that turn's document is, None where it says none."""
+    if prompt_response is None:
+        return None
+    records = prompt_response.target_agent_per_turn_trajectories or []
+    urls = prompt_response.target_agent_per_turn_trajectory_object_urls or [prompt_response.agent_trajectory_object_url]
+    return [records[index]["format"] if index < len(records) else None for index in range(len(urls))]

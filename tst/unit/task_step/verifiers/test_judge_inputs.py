@@ -1,8 +1,10 @@
 """Every built-in judge's input, pinned: what a model judge is sent (its prompt, images, system prompt and cached
 prefix), what an agent judge is given (its prompt and every file staged in its sandbox) and what a scripted verify is
-called with, for runs whose native trajectories are stored as a run stores them. Each is what its golden file holds,
+called with, for runs whose trajectories are stored as a run stores them. A native run's is what its golden file holds,
 recorded before prompt steps kept per-turn trajectory records, and stays so byte for byte when the run's prompt
-responses carry those records, read back from the stored form. Re-record after a deliberate change with
+responses carry records saying each turn's trajectory is native, read back from the stored form. A run that prescribed
+atif/1 (the ``*_atif_*`` cases) is judged from each turn's copy, the turn's own task cut out of the conversation's
+document, and a turn whose copy couldn't be had from its native trajectory. Re-record after a deliberate change with
 ``AGENTENV_TEST_RECORD_GOLDEN=1`` and review the file's diff. Several cases build their runs with other tests' setups
 (the always_on rig, user_sim_judge's fakes, the rubrics golden test's and run_context's helpers), so a change to one of
 those is re-recorded here too."""
@@ -24,7 +26,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.context import AtifRecord, DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers import always_on_agent_verifier
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter
@@ -33,7 +35,7 @@ from tst.unit.task_step import test_always_on_agent_verifier as A
 from tst.unit.task_step.verifiers import test_rubrics_verifier_golden as G
 from tst.unit.task_step.verifiers import test_run_context as R
 from tst.unit.task_step.verifiers import test_user_sim_judge as T
-from tst.util import verifier_golden
+from tst.util import atif_runs, verifier_golden
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -64,11 +66,17 @@ _RUN_FOLDERS = re.compile(
 
 
 def _recorded_form(context: TaskStepContext) -> TaskStepContext:
-    """``context`` as a run that kept per-turn trajectory records leaves it, read back from its stored form."""
+    """``context`` as a run whose per-turn records say each turn's trajectory is native leaves it: one that prescribed
+    atif/1 to an agent whose copies couldn't be had, so each turn fell back to native, read back from its stored form.
+    A run that prescribes nothing records the same with ``atif`` None, and its judges get the same input."""
     for response in context.prompt_responses:
         turns = response.target_agent_per_turn_trajectory_object_urls or [response.agent_trajectory_object_url]
         response.target_agent_per_turn_trajectories = [
-            {"native_format": "claude-code-stream-json", "atif": None} for _ in turns]
+            {"format": "claude-code-stream-json",
+             "atif": AtifRecord(url=None, task_id=f"task-{n}", through_step=None, status="unavailable", rules=[],
+                                reason="format_not_prescribed", validator_version=None, adapter_version=None,
+                                aux_url=None, turn_context_url=None)}
+            for n, _ in enumerate(turns)]
     return TaskStepContext.from_dict(context.to_dict())
 
 
@@ -122,6 +130,42 @@ def _run(*, turns: int = 1, agent_url: bool = True, first_turn_missing: bool = F
         agent_trajectory_object_url=urls[-1] if agent_url else None,
         target_agent_per_turn_trajectory_object_urls=urls,
         source_agent_per_turn_prompt_parts=[None, *[[{"kind": "text", "text": "And for Friday?"}]] * (len(urls) - 1)])])
+
+
+def _stored_form(context: TaskStepContext) -> TaskStepContext:
+    return TaskStepContext.from_dict(context.to_dict())
+
+
+async def _pinned_atif(case: str, judged: Callable[[Callable[[TaskStepContext], TaskStepContext]], Awaitable[Any]]
+                       ) -> None:
+    """``judged``'s input for a run that prescribed atif/1 is the golden file's, as the run is and read back from its
+    stored form."""
+    got = _normalised(await judged(lambda context: context))
+    verifier_golden.check(FILE, case, _digested(got))
+    if not verifier_golden.RECORDING:
+        assert _normalised(await judged(_stored_form)) == got
+
+
+def _atif_run(name: str = "two_turns", *, tasks: tuple[str, ...] = ("task-91c2", "task-91c3"),
+              native_first: bool = False, media: bool = True) -> TaskStepContext:
+    """A prompt step's context whose turns are ``tasks`` of the fixture ``name``, each an atif/1 copy at the one url
+    the turns share, the step's own url the last turn's; ``native_first``: the first turn's copy couldn't be had, so
+    its native trajectory was read in its place; ``media`` off, the media it names weren't stored."""
+    url = atif_runs.stored(name, media=media)
+    through = atif_runs.through_steps(name)
+    urls: list[str | None] = []
+    records = []
+    for n, task_id in enumerate(tasks):
+        if native_first and n == 0:
+            urls.append(_stored("turn-1.json", TURNS[0]))
+            records.append(atif_runs.native(task_id))
+        else:
+            urls.append(url)
+            records.append(atif_runs.record(url, task_id, through[task_id]))
+    return TaskStepContext(instance_id="inst-1", prompt_responses=[PromptResponse(
+        prompt_id="p1", response="Done.", prompt_text="Fix parse_date.", agent_trajectory_object_url=urls[-1],
+        target_agent_per_turn_trajectory_object_urls=urls, target_agent_per_turn_trajectories=records,
+        source_agent_per_turn_prompt_parts=[None, *[[{"kind": "text", "text": "And the offset?"}]] * (len(urls) - 1)])])
 
 
 class _Judge:
@@ -210,6 +254,43 @@ async def test_a_model_judges_input_is_pinned(case):
     await _pinned(case, _model_judged(step_kw, run))
 
 
+_FINAL_FRAMES = {"use_trajectory": True,
+                 "trajectory_filter": TrajectoryFilter(compaction_type="screenshot", screenshot_last_n=2)}
+MODEL_ATIF_CASES = {
+    "model_atif_one_turn": ({"use_trajectory": True}, lambda: _atif_run("computer_use", tasks=("task-c1",))),
+    "model_atif_one_turn_of_two_tasks_compacted": ({"use_trajectory": True, "trajectory_filter": TrajectoryFilter()},
+                                                   lambda: _atif_run(tasks=("task-91c3",))),
+    "model_atif_two_turns": ({"use_trajectory": True}, _atif_run),
+    "model_atif_two_turns_compacted": ({"use_trajectory": True, "trajectory_filter": TrajectoryFilter()}, _atif_run),
+    "model_atif_two_turns_first_native": ({"use_trajectory": True}, lambda: _atif_run(native_first=True)),
+    "model_atif_screenshots_final_frames": (_FINAL_FRAMES, lambda: _atif_run("computer_use", tasks=("task-c1",))),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", MODEL_ATIF_CASES)
+async def test_a_model_judges_input_on_atif_turns_is_pinned(case):
+    step_kw, run = MODEL_ATIF_CASES[case]
+    await _pinned_atif(case, _model_judged(step_kw, run))
+
+
+@pytest.mark.asyncio
+async def test_a_model_judges_input_on_atif_turns_graded_up_to_a_turn_is_pinned():
+    """Turn 1's own task, though its url's document holds turn 2's too."""
+    def run():
+        context = _atif_run()
+        context.metadata["user_overrides"] = {"step_params": {"verify": {"grade_up_to_turn": 1}}}
+        return context
+
+    await _pinned_atif("model_atif_graded_up_to_turn_one", _model_judged({"use_trajectory": True}, run))
+
+
+@pytest.mark.asyncio
+async def test_a_model_judges_screenshots_from_atif_media_are_pinned():
+    await _pinned_atif("model_atif_screenshots_per_criterion", _model_judged(
+        _SCREENSHOTS, lambda: _atif_run("computer_use", tasks=("task-c1",)), answer=lambda ids: G._evidence(ids)))
+
+
 @pytest.mark.asyncio
 async def test_a_model_judges_input_graded_up_to_a_turn_is_pinned():
     def run():
@@ -272,6 +353,24 @@ AGENT_CASES = {
 async def test_an_agent_judges_prompt_and_staged_files_are_pinned(monkeypatch, case):
     step_kw, run = AGENT_CASES[case]
     await _pinned(case, _agent_judged(monkeypatch, step_kw, run))
+
+
+AGENT_ATIF_CASES = {
+    "agent_atif_one_turn_with_media": ({"use_trajectory": True},
+                                       lambda: _atif_run("computer_use", tasks=("task-c1",))),
+    "agent_atif_one_turn_compacted": ({"use_trajectory": True, "trajectory_filter": TrajectoryFilter()},
+                                      lambda: _atif_run("computer_use", tasks=("task-c1",))),
+    "agent_atif_two_turns": ({"use_trajectory": True}, _atif_run),
+    "agent_atif_two_turns_compacted": ({"use_trajectory": True, "trajectory_filter": TrajectoryFilter()}, _atif_run),
+    "agent_atif_two_turns_first_native": ({"use_trajectory": True}, lambda: _atif_run(native_first=True)),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", AGENT_ATIF_CASES)
+async def test_an_agent_judges_prompt_and_staged_files_on_atif_turns_are_pinned(monkeypatch, case):
+    step_kw, run = AGENT_ATIF_CASES[case]
+    await _pinned_atif(case, _agent_judged(monkeypatch, step_kw, run))
 
 
 @pytest.mark.asyncio
@@ -348,3 +447,20 @@ async def test_what_a_scripted_verify_is_called_with_is_pinned(monkeypatch):
         return done.metadata["verifications"]["v"]["results"][0]["given"]
 
     await _pinned("scripted_verify", judged)
+
+
+@pytest.mark.asyncio
+async def test_what_a_scripted_verify_is_called_with_on_atif_turns_is_pinned(monkeypatch):
+    """A native turn as the agent stored it, an atif/1 turn its own task."""
+    script = (b"async def verify(url, trajectory):\n"
+              b"    return [{'id': 'c', 'score': 1.0, 'given': {'url': url, 'trajectory': trajectory}}]\n")
+    monkeypatch.setattr(FileArtifact, "get", staticmethod(lambda id, version=None: SimpleNamespace(load=lambda: script)))
+
+    async def judged(form):
+        context = _atif_run(native_first=True)
+        context.deployed_envs.append(DeployedEnv(env_id="e", env_version=1, mcp_url="http://mcp"))
+        step = EnvOutcomeVerifierTaskStep(id="outcome", version=None, env_id="e", file_artifact_id="s", verifier_id="v")
+        done = await step.execute(form(context))
+        return done.metadata["verifications"]["v"]["results"][0]["given"]
+
+    await _pinned_atif("scripted_verify_atif", judged)
