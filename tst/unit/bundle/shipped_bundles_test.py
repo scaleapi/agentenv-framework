@@ -62,6 +62,7 @@ def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_dri
         "mail": "@local/agentenv-framework/mail-mcp/mail", "reference": "@local/agentenv-framework/drivers/reference",
         "cua-driver": "@local/agentenv-framework/drivers/cua-driver", "page": "@local/agentenv-framework/drivers/page",
         "agent-desktop": "@local/agentenv-framework/drivers/agent-desktop",
+        "hcu": "@local/agentenv-framework/drivers/hcu",
         "macos-harness": "@local/agentenv-framework/drivers/macos-harness",
         "codex-computer-use": "@local/agentenv-framework/drivers/codex-computer-use",
         "aside": "@local/agentenv-framework/drivers/aside",
