@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -66,7 +67,8 @@ class DriverDeclaration(BaseModel):
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):
     """Subclass it and mark the methods that capture and send input (see ``operations``); the class is checked when
     it is defined. Features are class attributes, on the card; ``screenshot_delay_ms``, how long an input's screenshot
-    waits, is a class attribute that isn't. A subclass's ``__init__`` calls ``super().__init__()``.
+    waits, and ``marks_own_inputs`` are class attributes that aren't. A subclass's ``__init__`` calls
+    ``super().__init__()``.
     """
 
     buttons: ClassVar[tuple[str, ...]] = ("left",)
@@ -83,6 +85,10 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     #: show what an input did, as a smooth scroll or the page a key opens; a deploy's ``screenshot_delay_ms`` setting
     #: replaces it.
     screenshot_delay_ms: ClassVar[int] = 500
+    #: The driver's own or forwarded tools, by the names it serves them under, that draw their inputs on the
+    #: recordings that draw inputs themselves, through ``mark_inputs``; any other that may act is drawn as a chip
+    #: naming it.
+    marks_own_inputs: ClassVar[frozenset[str]] = frozenset()
     #: The (width, height) modes computer-display/v1 set takes; with ``@set_display`` only.
     display_modes: ClassVar[tuple] = ()
     layouts: ClassVar[tuple[str, ...]] = ("us",)
@@ -141,12 +147,40 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         if self._computer.recordings.annotating():
             try:
                 name = self._computer_prefix.own(context.tool)
-                if name not in COMPUTER_TOOLS and self._computer_tool_acts(name):
+                if (name not in COMPUTER_TOOLS and name not in self.marks_own_inputs
+                        and self._computer_tool_acts(name)):
                     self._computer.recordings.note([annotate.tool_mark(name, context.arguments, role=context.role,
                                                                        at=datetime.now(timezone.utc))])
             except Exception as e:  # a mark is best effort: the call goes ahead without one
                 _log.warning("couldn't mark %s on an annotated recording: %s: %s", context.tool, type(e).__name__, e)
         return None
+
+    def draws_inputs(self) -> bool:
+        """Whether a recording now draws inputs: until one does, a tool in ``marks_own_inputs`` has nothing to mark."""
+        return self._computer.recordings.annotating()
+
+    async def mark_inputs(self, inputs: Sequence[tuple[str, tuple]]) -> None:
+        """Draw what a call to a tool in ``marks_own_inputs`` did on the recordings that draw inputs, in the colour of
+        the role that made the call: each input a computer/v1 operation and its arguments as ``act`` takes them, at
+        points of the display in its units (``("click", (x, y, button, count, modifiers))``, ``("type_text",
+        (text,))``), or ``("tool", (name, arguments))``, a chip naming a tool and its main argument. Best effort, as an
+        SDK input's marks are: a mark that can't be made is logged."""
+        if not inputs or not self.draws_inputs():
+            return
+        try:
+            role, at = ToolContext.current().role, datetime.now(timezone.utc)
+            size = (1, 1)
+            if any(operation in annotate.POINTED for operation, _args in inputs):
+                display = await self._computer.display_now()
+                size = (display.width, display.height)
+            marks = []
+            for operation, args in inputs:
+                marks += ([annotate.tool_mark(*args, role=role, at=at)] if operation == "tool" else
+                          annotate.input_marks(operation, args, role=role, at=at, size=size))
+            self._computer.recordings.note(marks)
+        except Exception as e:
+            _log.warning("couldn't mark %s on an annotated recording: %s: %s", [operation for operation, _args in inputs],
+                         type(e).__name__, e)
 
     def _computer_tool_acts(self, name: str) -> bool:
         """Whether the driver's own or forwarded tool ``name``, by the name it is mounted under, may act: its

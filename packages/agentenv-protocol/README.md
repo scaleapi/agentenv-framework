@@ -782,7 +782,11 @@ class MyDriver(ComputerDriverEnvironment):
   of a double or triple), a trail for a drag, an
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
   each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
-  main argument. Where the frames can't show the pointer themselves, as frames polled from captures that
+  main argument, unless the driver draws what the call did itself: a tool named in its
+  `marks_own_inputs` hands `mark_inputs` the inputs it made, computer/v1 operations with their arguments
+  as `act` takes them at points of the display (`("click", (x, y, button, count, modifiers))`), drawn as
+  a `computer_*` input is, in the colour of the role that called it (cua-driver's input tools, as each
+  reply says it acted; `draws_inputs()` says whether a recording draws any). Where the frames can't show the pointer themselves, as frames polled from captures that
   leave it out do (cua-driver's), a pointer is drawn for each role and pointer that has acted, where its
   last input left it, along a drag's path as it moves, after a fading line from where it jumped: the one
   that moved last at full strength, the others fainter, each named once there are several. Every `computer_*` input is marked
