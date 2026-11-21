@@ -1495,6 +1495,68 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
     assert sidecar_art in loaded, "sidecar image_artifact was not side-loaded onto the VM"
 
 
+@pytest.mark.asyncio
+async def test_a_container_sidecar_is_created_with_no_public_tunnel():
+    """pgweb and db-mcp answer SQL without authentication, so the gateway alone reaches them, over the private network."""
+    from agent_env.providers.env_providers.env_gateway_provider import _ContainerDeploy
+
+    sandbox_provider = MagicMock()
+    sandbox_provider.create_container = AsyncMock(return_value=MagicMock())
+    deploy = _ContainerDeploy(sandbox_provider=sandbox_provider, cpu=None, disk_size_gb=10, ttl_seconds=60, attribution=None)
+    spec = MagicMock(image="pgweb:test", port=8081, env={}, command=None)
+    spec.name = "pgweb"
+
+    await EnvironmentGatewayProvider()._provision_sidecar(deploy, spec)
+
+    kwargs = sandbox_provider.create_container.call_args.kwargs
+    assert kwargs["expose_externally"] is False
+    assert kwargs["private_network"] is True
+
+
+@pytest.mark.asyncio
+async def test_deploy_via_vm_asks_for_no_tunnel_to_the_sql_consoles():
+    """A VM exposes the gateway port, never the unauthenticated pgweb and db-mcp ports."""
+    from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp = EnvironmentGatewayProvider()
+    state_provider = MagicMock(spec=DatabaseStateProvider)
+    state_provider.prepare = AsyncMock()
+    gp._state_provider = state_provider
+    gp._state_instance = MagicMock()
+    sandbox_provider = MagicMock()
+    sandbox_provider.create_vm = AsyncMock(return_value=AsyncMock())
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_env_get(env_id, *a, **k):
+        env = MagicMock(docker_image_artifact=_loadable(env_id)); env.environment_name = env_id; return env
+
+    with patch("agent_env.env.env.Env.get", side_effect=_fake_env_get), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", side_effect=_Stop):
+        with pytest.raises(_Stop):
+            await gp._deploy_via_vm(
+                sandbox_provider=sandbox_provider,
+                mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                mcp_server_images=[_loadable("mcp-slack")],
+                gateway_port=18765,
+                website_configs=None,
+                website_images=None,
+                gateway_mode=GatewayMode.PERFORMANCE,
+                ttl_seconds=60,
+                disk_size_gb=10,
+                sidecars=[],
+            )
+
+    exposed = sandbox_provider.create_vm.call_args.kwargs["exposed_ports"]
+    assert 18765 in exposed
+    assert DB_WEB_PORT not in exposed
+    assert DB_MCP_PORT not in exposed
+
+
 # --- name injection: SERVICE_NAME + ENVIRONMENT_NAME --------------------------
 #
 # The compose emitter injects the env's own name into every environment container so the

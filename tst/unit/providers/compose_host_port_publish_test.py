@@ -218,8 +218,9 @@ def test_gateway_compose_defaults_to_identity(stub_postgres):
         state_instance=_StateInstance(),
     )
 
-    assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' in compose
-    assert f'"{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in compose
+    # The consoles stay on loopback when no host IP is given; a sidecar keeps its bare binding.
+    assert f'"127.0.0.1:{DB_WEB_PORT}:{DB_WEB_PORT}"' in compose
+    assert f'"127.0.0.1:{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in compose
     assert '"18768:8000"' in compose
 
 
@@ -230,8 +231,8 @@ def test_postgres_sidecar_fragment_resolves_host_ports(stub_postgres):
         stub_postgres.render_sidecar_containers(["slack"], host_port=lambda p: p + OFFSET),
     )
 
-    assert f'"{DB_WEB_PORT + OFFSET}:{DB_WEB_PORT}"' in lines
-    assert f'"{DB_MCP_PORT + OFFSET}:{DB_MCP_CONTAINER_PORT}"' in lines
+    assert f'"127.0.0.1:{DB_WEB_PORT + OFFSET}:{DB_WEB_PORT}"' in lines
+    assert f'"127.0.0.1:{DB_MCP_PORT + OFFSET}:{DB_MCP_CONTAINER_PORT}"' in lines
     # Container side untouched: it is the env's internal contract.
     assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' not in lines
 
@@ -239,8 +240,19 @@ def test_postgres_sidecar_fragment_resolves_host_ports(stub_postgres):
 def test_postgres_sidecar_fragment_defaults_to_identity(stub_postgres):
     lines = "\n".join(stub_postgres.render_sidecar_containers(["slack"]))
 
-    assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' in lines
-    assert f'"{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in lines
+    assert f'"127.0.0.1:{DB_WEB_PORT}:{DB_WEB_PORT}"' in lines
+    assert f'"127.0.0.1:{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in lines
+
+
+def test_sql_consoles_are_never_published_on_every_interface(stub_postgres):
+    """A remote VM gives no host IP. The unauthenticated SQL consoles must still bind to loopback only."""
+    for host_ips in ((), ("127.0.0.1",)):
+        specs = [
+            line.strip() for line in stub_postgres.render_sidecar_containers(["slack"], host_ips=host_ips)
+            if _PORT_PAIR.search(line)
+        ]
+        assert len(specs) == 2
+        assert all(spec.startswith('- "127.0.0.1:') for spec in specs), specs
 
 
 @pytest.mark.parametrize("host_ips", [("127.0.0.1",), ("127.0.0.1", "172.17.0.1")], ids=["loopback", "loopback-and-bridge"])
