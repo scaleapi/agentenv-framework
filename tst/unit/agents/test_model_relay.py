@@ -44,11 +44,14 @@ class Endpoint:
         self.answers: list[tuple[int, str, str]] = []
         self.requests: list[dict] = []
         self.hold: asyncio.Event | None = None
+        self.hold_headers: asyncio.Event | None = None
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         self.requests.append({"method": request.method, "path": request.path_qs, "body": await request.read(),
                               "headers": {name.lower(): value for name, value in request.headers.items()}})
         status, body, kind = self.answers.pop(0)
+        if self.hold_headers is not None:
+            await self.hold_headers.wait()
         response = web.StreamResponse(status=status, headers={"content-type": kind})
         await response.prepare(request)
         chunks = body.split("\n\n")
@@ -157,6 +160,39 @@ def test_a_call_whose_cli_hung_up_is_read_to_its_end_and_counted():
     assert [usage.input_tokens for usage in calls.answered] == [20948]
 
 
+def test_a_call_whose_cli_hung_up_before_the_answer_began_is_still_counted():
+    async def exercise(client, root, endpoint):
+        endpoint.hold_headers = asyncio.Event()
+        with pytest.raises(httpx.ReadTimeout):
+            await client.post(f"{root}/v1/chat/completions", json={}, timeout=0.3)
+        endpoint.hold_headers.set()
+        await asyncio.sleep(0.3)
+
+    _, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
+
+    assert [usage.input_tokens for usage in calls.answered] == [20948]
+
+
+def test_a_long_streams_usage_is_read_however_long_it_ran():
+    """The usage comes last, so it's read as the stream passes, not from a kept prefix of it."""
+    chunk = 'data: {"choices": [{"delta": {"content": "%s"}}]}\n\n' % ("x" * 4000)
+    reader = model_relay.AnswerReader()
+    for _ in range(20_000):
+        reader.feed(chunk.encode())
+    reader.feed(CLAUDE_STREAM.encode())
+
+    assert reader.usage().input_tokens == 20948
+
+
+def test_a_streams_usage_split_across_reads_is_read_whole():
+    reader = model_relay.AnswerReader()
+    encoded = CLAUDE_STREAM.encode()
+    for start in range(0, len(encoded), 7):
+        reader.feed(encoded[start:start + 7])
+
+    assert (reader.usage().input_tokens, reader.usage().cache_write_tokens) == (20948, 199)
+
+
 def test_another_turns_path_reaches_nothing_and_other_routes_are_not_calls():
     async def exercise(client, root, endpoint):
         stale = await client.post(root.rsplit("/", 1)[0] + "/0123/v1/chat/completions", json={})
@@ -195,10 +231,11 @@ def test_an_unreachable_endpoint_is_a_502_and_counts_nothing():
 
 def test_the_calls_usage_sums_them_with_the_cache_in_the_input():
     calls = model_relay.Calls()
-    calls.add(200, CLAUDE_STREAM.encode())
-    calls.add(200, json.dumps({"usage": {"prompt_tokens": 1000, "completion_tokens": 10,
-                                         "prompt_tokens_details": {"cached_tokens": 900}}}).encode())
-    calls.add(200, b'data: {"choices": []}\n\n')
+    calls.add(200, model_relay.answer_usage(CLAUDE_STREAM.encode()))
+    calls.add(200, model_relay.answer_usage(json.dumps({"usage": {"prompt_tokens": 1000, "completion_tokens": 10,
+                                                                  "prompt_tokens_details": {"cached_tokens": 900}}})
+                                            .encode()))
+    calls.add(200, model_relay.answer_usage(b'data: {"choices": []}\n\n'))
 
     assert calls.usage(2).to_dict() == {
         "tool_call_count": 2, "input_tokens": 21948, "output_tokens": 53, "total_tokens": 22001,

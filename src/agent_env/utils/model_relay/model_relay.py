@@ -19,8 +19,8 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 _CALL_ROUTES = ("/chat/completions", "/responses", "/messages")
 _HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "accept-encoding"}
 _ANSWER_DROP_HEADERS = {"content-length", "transfer-encoding", "connection", "content-encoding"}
-# How much of an answer is kept to read its usage from: a stream's usage comes last, so more is never needed in practice.
-_KEPT_ANSWER_BYTES = 64 * 1024 * 1024
+# How much of a JSON answer is kept to read its usage from; a stream's is read as it passes, whatever its length.
+_KEPT_BODY_BYTES = 64 * 1024 * 1024
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 # How long the relay, once its turn is done, lets the calls it is still forwarding finish.
 _SHUTDOWN_S = 5.0
@@ -37,11 +37,11 @@ class Calls:
     unreported: int = 0
     refused: int = 0
 
-    def add(self, status: int | None, answer: bytes) -> None:
+    def add(self, status: int | None, usage: Usage | None) -> None:
+        """A call that ended with ``status`` (None when it had none), and the usage its answer carried."""
         if status is None or status >= 400:
             self.refused += 1
             return
-        usage = answer_usage(answer)
         if usage is None:
             self.unreported += 1
         else:
@@ -67,41 +67,73 @@ class Calls:
                      input_includes_cache=flags.pop() if len(flags) == 1 else None, provider_details=details)
 
 
-def answer_usage(answer: bytes) -> Usage | None:
-    """The usage an answer carried: a JSON body's ``usage``, or a stream's, from its last chunk with one (Chat
-    Completions), its ``response.completed`` (Responses), or its ``message_start`` and ``message_delta`` (Anthropic).
-    None when it carried none, or only zeros, as a gateway sends for a call it didn't count."""
-    text = answer.decode("utf-8", "replace")
-    usage: dict[str, Any] | None = None
-    try:
-        body = json.loads(text)
-    except json.JSONDecodeError:
-        for line in text.splitlines():
-            if not line.startswith("data:"):
-                continue
+class AnswerReader:
+    """Reads an answer's usage as its bytes pass: a stream's events one line at a time, keeping only the usage they
+    carry (its last chunk with one in Chat Completions, its ``response.completed`` in Responses, its
+    ``message_start`` and ``message_delta`` in Anthropic's Messages), or a JSON body's ``usage``."""
+
+    def __init__(self) -> None:
+        self._stream: bool | None = None
+        self._line = bytearray()
+        self._body = bytearray()
+        self._usage: dict[str, Any] | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        if self._stream is None:
+            if not chunk.strip():
+                return
+            self._stream = chunk.lstrip().startswith((b"data:", b"event:", b":"))
+        if not self._stream:
+            if len(self._body) < _KEPT_BODY_BYTES:
+                self._body.extend(chunk)
+            return
+        *lines, rest = (bytes(self._line) + chunk).split(b"\n")
+        for line in lines:
+            self._event(line)
+        self._line = bytearray(rest[:_KEPT_BODY_BYTES])
+
+    def _event(self, line: bytes) -> None:
+        if not line.startswith(b"data:"):
+            return
+        try:
+            event = json.loads(line[5:].strip())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "message_start":
+            self._usage = dict((event.get("message") or {}).get("usage") or {})
+        elif kind == "message_delta" and isinstance(event.get("usage"), dict):
+            self._usage = {**(self._usage or {}), **event["usage"]}
+        elif kind in ("response.completed", "response.incomplete") and isinstance(event.get("response"), dict):
+            self._usage = event["response"].get("usage") or self._usage
+        elif isinstance(event.get("usage"), dict) and event["usage"]:
+            self._usage = event["usage"]
+
+    def usage(self) -> Usage | None:
+        """The answer's usage, None when it carried none, or only zeros, as a gateway sends for a call it didn't
+        count."""
+        if self._stream:
+            self._event(bytes(self._line))
+            usage = self._usage
+        else:
             try:
-                event = json.loads(line[5:].strip())
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            kind = event.get("type")
-            if kind == "message_start":
-                usage = dict((event.get("message") or {}).get("usage") or {})
-            elif kind == "message_delta" and isinstance(event.get("usage"), dict):
-                usage = {**(usage or {}), **event["usage"]}
-            elif kind in ("response.completed", "response.incomplete") and isinstance(event.get("response"), dict):
-                usage = event["response"].get("usage") or usage
-            elif isinstance(event.get("usage"), dict) and event["usage"]:
-                usage = event["usage"]
-    else:
-        usage = body.get("usage") if isinstance(body, dict) else None
-    if not isinstance(usage, dict):
-        return None
-    read = Usage.from_model_response(usage)
-    if not any(getattr(read, name) for name in _COUNTS):
-        return None
-    return read
+                body = json.loads(bytes(self._body))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = None
+            usage = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(usage, dict):
+            return None
+        read = Usage.from_model_response(usage)
+        return read if any(getattr(read, name) for name in _COUNTS) else None
+
+
+def answer_usage(answer: bytes) -> Usage | None:
+    """The usage a whole answer carried, as ``AnswerReader`` reads it."""
+    reader = AnswerReader()
+    reader.feed(answer)
+    return reader.usage()
 
 
 @asynccontextmanager
@@ -127,7 +159,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
             # Answered as sent, so its usage can be read.
             outgoing["accept-encoding"] = "identity"
             call = request.method == "POST" and path.rstrip("/").endswith(_CALL_ROUTES)
-            status, kept = None, bytearray()
+            status, reader = None, AnswerReader()
             try:
                 async with client.request(request.method, f"{upstream}/{path}", params=request.query,
                                           data=await request.read(), headers=outgoing) as answer:
@@ -135,11 +167,14 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                     response = web.StreamResponse(status=answer.status, headers={
                         name: value for name, value in answer.headers.items()
                         if name.lower() not in _ANSWER_DROP_HEADERS})
-                    await response.prepare(request)
                     listening = True
+                    try:
+                        await response.prepare(request)
+                    except (ConnectionResetError, ClientError):
+                        listening = False
                     async for chunk in answer.content.iter_any():
-                        if call and len(kept) < _KEPT_ANSWER_BYTES:
-                            kept.extend(chunk)
+                        if call:
+                            reader.feed(chunk)
                         if listening:
                             try:
                                 await response.write(chunk)
@@ -155,7 +190,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                 raise
             finally:
                 if call:
-                    calls.add(status, bytes(kept))
+                    calls.add(status, reader.usage())
 
         app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
         app.router.add_route("*", "/{token}/{path:.*}", forward)

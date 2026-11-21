@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.opencode.agent import opencode_bridge
+from tst.unit.agents.opencode.agent import model_relay, opencode_bridge
 from tst.unit.agents.opencode.fake_cli import FakeCLI
 
 _build_config = opencode_bridge._build_config
@@ -198,7 +198,7 @@ def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_
     async def relay(upstream, calls, **kwargs):
         relays.append(upstream)
         for usage in CLAUDE_TURN:
-            calls.add(200, f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode())
+            calls.add(200, model_relay.answer_usage(f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode()))
         yield "http://127.0.0.1:41000/token"
 
     monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example/v1")
