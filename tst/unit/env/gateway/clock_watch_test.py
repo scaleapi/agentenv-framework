@@ -33,9 +33,10 @@ def gateway(tmp_path, monkeypatch):
     monkeypatch.setattr(ClockFollowers, "WATCH_S", HELD_S)
     made = []
 
-    def make(followers=TOKENS, control_token=None) -> Gateway:
+    def make(followers=TOKENS, control_token=None, child_control_tokens=None) -> Gateway:
         made.append(Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[],
-                            clock_followers=followers, control_token=control_token))
+                            clock_followers=followers, control_token=control_token,
+                            child_control_tokens=child_control_tokens))
         return made[-1]
 
     yield make
@@ -193,6 +194,21 @@ async def test_a_computer_whose_token_is_the_gateways_own_acknowledges_with_it(g
     gw = gateway({"desktop": "the-gateways"}, control_token="the-gateways")
     async with _client(gw) as client:
         follower = asyncio.create_task(_follow(client, "desktop", "the-gateways"))
+        try:
+            await _until_shown(gw, "desktop")
+            answer = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 5})
+        finally:
+            follower.cancel()
+    assert answer.status_code == 200, answer.json()
+
+
+@pytest.mark.asyncio
+async def test_a_computer_acknowledges_with_its_own_token(gateway):
+    """A multi env's computer boots with a token of its own, which its watch carries as its read token."""
+    gw = gateway({"desktop": "the-desktops"}, control_token="the-gateways",
+                 child_control_tokens={"desktop": "the-desktops"})
+    async with _client(gw) as client:
+        follower = asyncio.create_task(_follow(client, "desktop", "the-desktops"))
         try:
             await _until_shown(gw, "desktop")
             answer = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 5})
@@ -367,7 +383,7 @@ async def test_a_hundred_advances_are_each_acknowledged_in_order(gateway):
 def test_the_gateway_reads_its_declared_computers_from_its_environment():
     assert parse_clock_followers("") == {}
     assert parse_clock_followers(" desktop=read-d ,laptop=read-l,") == {"desktop": "read-d", "laptop": "read-l"}
-    for spec, fragment in (("desktop", "expected 'name=read token'"), ("=tok", "expected"), ("desktop=", "expected"),
+    for spec, fragment in (("desktop", "expected 'name=token'"), ("=tok", "expected"), ("desktop=", "expected"),
                            ("desktop=a,desktop=b", "twice")):
         with pytest.raises(ValueError, match=fragment):
             parse_clock_followers(spec)

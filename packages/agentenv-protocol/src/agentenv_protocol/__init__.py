@@ -56,6 +56,7 @@ from .manifest import (
 from .types import (
     CONTROL_TOKEN_ENV,
     CONTROL_TOKEN_HEADER,
+    CONTROL_TOKEN_SHA256_ENV,
     DATA_OBJECTS_EXTENSION_URI,
     INTAKE_EXTENSION_URI,
     MCP_PATH,
@@ -167,6 +168,7 @@ __all__ = [
     "RPC_PATH",
     "CONTROL_TOKEN_ENV",
     "CONTROL_TOKEN_HEADER",
+    "CONTROL_TOKEN_SHA256_ENV",
     "WELL_KNOWN_PATH",
     "METHOD_RESET",
     "METHOD_ADD",

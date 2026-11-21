@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from agent_env.cli.env import env as env_cli
 from agent_env.cli.task.run import _format_env
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
+from agent_env.env.gateway.console_session import LINK_PARAM, ConsoleSession
 
 _FRONTED = DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="https://gw.example", mcp_url="https://gw.example/mcp",
                               sandbox_id="gw", instance_id="i1")
@@ -68,6 +69,28 @@ def test_the_cli_prints_the_sql_consoles_at_the_gateway_and_never_their_tunnels(
         assert "https://gw.example/svc/pgweb/" in output and "https://gw.example/svc/db-mcp/mcp" in output
         assert "tunnel-" not in output
 
+
+
+def test_the_cli_prints_a_pgweb_link_a_browser_can_open_and_never_the_token():
+    token = "s3cret-token"
+    record = DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="https://gw.example",
+                                mcp_url="https://gw.example/mcp", sandbox_id="gw", instance_id="i1",
+                                db_web_gateway_url="https://gw.example/svc/pgweb/", control_token=token)
+
+    async def fake_deploy(**kwargs):
+        return record
+
+    with patch("agent_env.cli.env.deploy.Env") as Env, patch("agent_env.providers.build_sandbox_provider"):
+        Env.get.return_value = MagicMock(id="e1", version=1, type="mcp_server", deploy=fake_deploy)
+        deployed = CliRunner().invoke(env_cli, ["deploy", "--id", "e1"]).output
+    with patch("agent_env.env.store.get_env_instance_store") as store:
+        store.return_value.get.return_value = record
+        got = CliRunner().invoke(env_cli, ["get-instance", "--id", "i1"]).output
+    for output in (deployed, got):
+        assert token not in output
+        links = [w for w in output.split() if w.startswith(f"https://gw.example/svc/pgweb/?{LINK_PARAM}=")]
+        assert len(links) == 1, output
+        assert ConsoleSession(token).opens(links[0].split(f"{LINK_PARAM}=", 1)[1])
 
 def test_a_record_outside_our_sandboxes_prints_no_sandbox():
     with patch("agent_env.env.store.get_env_instance_store") as store:

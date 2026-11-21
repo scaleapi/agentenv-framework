@@ -5,6 +5,7 @@ import datetime
 import decimal
 import enum
 import functools
+import hashlib
 import hmac
 import inspect
 import json
@@ -29,7 +30,7 @@ from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS a
 from .tool_access import extensions as tool_access_extensions
 from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
-from .types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, SKILL_EXTENSION_URI, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
+from .types import CONTROL_TOKEN_ENV, CONTROL_TOKEN_SHA256_ENV, DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, SKILL_EXTENSION_URI, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
 
 logger = logging.getLogger(__name__)
 
@@ -1622,8 +1623,14 @@ def _error_response(error: AgentEnvError) -> Response:
 
 
 def control_check() -> Callable[[Any], bool]:
-    """Whether a call's headers carry the env's control token as their bearer, with ``CONTROL_TOKEN_ENV`` set; without
-    it, any do."""
+    """Whether a call's headers carry the env's control token as their bearer: one whose sha256 is
+    ``CONTROL_TOKEN_SHA256_ENV`` when that is set, else ``CONTROL_TOKEN_ENV``; with neither set, any do."""
+    if digest := os.environ.get(CONTROL_TOKEN_SHA256_ENV, "").strip().lower():
+        def verified(headers: Any) -> bool:
+            scheme, _, token = headers.get("authorization", "").partition(" ")
+            sent = hashlib.sha256(token.encode()).hexdigest() if scheme == "Bearer" and token else ""
+            return hmac.compare_digest(sent, digest)
+        return verified
     token = os.environ.get(CONTROL_TOKEN_ENV)
     if not token:
         return lambda headers: True
@@ -1633,9 +1640,9 @@ def control_check() -> Callable[[Any], bool]:
 
 def control_guard() -> Callable[[Callable], Callable]:
     """What wraps a framework-only route, everything an env serves but its MCP endpoint and its card: with
-    ``CONTROL_TOKEN_ENV`` set, a call that doesn't carry that token as its bearer is refused before the route runs;
-    without it, nothing."""
-    if not os.environ.get(CONTROL_TOKEN_ENV):
+    ``CONTROL_TOKEN_SHA256_ENV`` or ``CONTROL_TOKEN_ENV`` set, a call that doesn't carry the token as its bearer is
+    refused before the route runs (``control_check``); without either, nothing."""
+    if not (os.environ.get(CONTROL_TOKEN_SHA256_ENV) or os.environ.get(CONTROL_TOKEN_ENV)):
         return lambda handler: handler
     allowed = control_check()
 
