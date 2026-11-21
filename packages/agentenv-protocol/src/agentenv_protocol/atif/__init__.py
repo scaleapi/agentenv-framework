@@ -58,6 +58,7 @@ from .reader import (
     media_paths,
     media_refs,
     strip_profile,
+    task_document,
     tasks,
 )
 from .runner import AdapterRun, Fed, RecordedTask, replay
@@ -73,6 +74,6 @@ __all__ = [
     "ObservationResultProfile", "PROFILE_KEY", "profile_of", "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS",
     "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",
     "ServedData", "ServedError", "ServedMedia", "ServedTurn", "Step", "StepData", "StepError", "StepProfile", "StoredMedia",
-    "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "tasks", "timestamp", "ToolCall",
+    "strip_profile", "SubagentTrajectoryRef", "SubagentTrajectoryRefProfile", "Task", "task_document", "tasks", "timestamp", "ToolCall",
     "ToolCallProfile", "Trajectory", "TrajectoryProfile", "TurnContext", "validate", "validate_live", "validate_media", "VOCABULARIES",
 ]

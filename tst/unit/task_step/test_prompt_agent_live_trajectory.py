@@ -118,7 +118,7 @@ async def test_a_prompt_step_prescribes_the_runs_formats_before_its_first_messag
     assert run.prescriptions == [{"formats": formats or []}]
     assert run.sent.index("/ext/trajectory/prescribe") < run.sent.index("message/send")
     assert context.metadata["trajectory_formats"]["solve"]["built"] == ["test-events/1", *(formats or [])]
-    assert [read["format"] for read in run.final_reads] == ["test-events/1", *(formats or [])]
+    assert [read["format"] for read in run.final_reads] == ([ATIF] if formats else ["test-events/1"])
     async with httpx.AsyncClient() as client:
         read = await client.post("http://agent.test/ext/trajectory",
                                  json={"task_id": run.final_reads[0]["task_id"], "format": ATIF})
@@ -146,7 +146,7 @@ async def test_every_read_names_the_native_format_a_card_offers_and_the_turn_rec
     assert run.cursor_reads and {read.get("format") for read in run.cursor_reads} == {native}
     assert [read.get("format") for read in run.final_reads] == [native]
     assert result.prompt_responses[-1].target_agent_per_turn_trajectories == [
-        {"native_format": "test-events/1", "atif": None}]
+        {"format": "test-events/1", "atif": None}]
 
 
 @pytest.mark.asyncio

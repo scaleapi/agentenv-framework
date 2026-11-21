@@ -1,8 +1,9 @@
-"""A run's atif/1 copies: when the run prescribes atif/1, each turn's copy of the conversation is read inline from the
-agent once the turn ends and stored as ``<trajectory_id>.json`` in the run's folder for that agent, overwritten each
-turn, with the turn's aux log and turn context beside it and the media it names pulled into its ``media/``. It's
-checked as a producer's document and the turn records how it checked. The reads run one after another, off the turn's
-path, so the next message isn't held for them; a copy that can't be read or stored never fails the run."""
+"""A run's atif/1 copies: when the run prescribes atif/1 to an agent that offers it, each turn's copy of the
+conversation is the turn's trajectory. It's read inline from the agent once the turn ends and stored as
+``<trajectory_id>.json`` in the run's folder for that agent, overwritten each turn, with the turn's aux log and turn
+context beside it and the media it names pulled into its ``media/``; it's checked as a producer's document and the turn
+records how it checked. The reads run one after another, off the turn's path, so the next message isn't held for them.
+A copy that can't be had never fails the run: that turn's native trajectory is read in its place."""
 from __future__ import annotations
 
 import asyncio
@@ -12,8 +13,8 @@ import logging
 import mimetypes
 import re
 import uuid
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, Optional
 
 import httpx
 from agentenv_protocol.a2a_agent import TrajectoryMediaResponse
@@ -59,6 +60,8 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import trajectory_pr
 
 logger = logging.getLogger(__name__)
 
+#: Reads a turn's native trajectory: where it was stored, None when the agent returned none, and its format.
+NativeRead = Callable[[], Awaitable[tuple[Optional[str], Optional[str]]]]
 #: Where a run records its atif/1 folders (``AtifCopiesMetadata``).
 ATIF_COPIES_KEY = "atif_copies"
 VALID: AtifStatus = "valid"
@@ -98,55 +101,72 @@ class _Unavailable(Exception):
 
 
 class AtifCopies:
-    """A step's atif/1 copies of one agent's conversation: ``turn`` starts each ended turn's and ``join`` waits for
-    them, each filling its turn's record. A run that doesn't prescribe atif/1 records None; one that prescribes it to
-    an agent that doesn't offer it, ``unavailable`` with ``format_not_offered``."""
+    """A step's atif/1 copies of one agent's conversation. When the run prescribes atif/1 to an agent that offers it
+    (``replaces_native``), each turn's copy is the turn's trajectory: ``turn`` starts reading it once the turn ends, a
+    turn whose copy can't be had has its native trajectory read at once instead (the requested format is best effort),
+    and ``join`` fills each turn's record and gives each turn's url. Otherwise the step reads native as ever, and a
+    turn's record has None when the run doesn't prescribe atif/1, or ``unavailable`` with ``format_not_offered`` when
+    the agent doesn't offer it."""
 
     def __init__(self, context: TaskStepContext, agent: DeployedAgent, a2a_url: str,
                  extension: Mapping[str, Any] | None, *, prescribed: bool) -> None:
         self._context, self._agent, self._a2a_url, self._extension = context, agent, a2a_url, extension
         self._prescribed = prescribed
         self._offered = ATIF in TrajectoryFormats.of(extension).formats
-        self._pending: list[tuple[TurnTrajectory, asyncio.Task[AtifRecord]]] = []
+        self.replaces_native = prescribed and self._offered
+        self._pending: list[tuple[int, asyncio.Task[str | None]]] = []
         #: The media files the folder holds and their sizes (None until read), listed once and kept as this step pulls
         #: more.
         self._held: dict[str, int | None] | None = None
 
-    def turn(self, task_id: str, name: str, record: TurnTrajectory) -> None:
-        """Copy the ended task ``task_id``'s atif/1 document into ``record``, its aux log and turn context stored under
-        ``name``."""
+    def turn(self, index: int, task_id: str, name: str, record: TurnTrajectory, *, native: NativeRead) -> None:
+        """Turn ``index``'s trajectory, its ended A2A task ``task_id``: into ``record`` and, through ``join``, its url,
+        the copy's aux log and turn context stored under ``name``. ``native`` reads the turn's native trajectory."""
         if not self._prescribed:
             record["atif"] = None
         elif not self._offered:
-            record["atif"] = _unavailable("format_not_offered")
+            record["atif"] = _unavailable("format_not_offered", task_id)
         else:
             previous = self._pending[-1][1] if self._pending else None
-            self._pending.append((record, asyncio.create_task(self._copy(task_id, name, previous))))
+            self._pending.append((index, asyncio.create_task(self._turn(task_id, name, record, native, previous))))
 
-    async def join(self) -> None:
-        """Fill each turn's record once its copy has been stored; cancelled while waiting, it cancels the copies
-        left."""
+    async def join(self) -> dict[int, str | None]:
+        """Each copied turn's url, by its index, once every copy has been stored and its record filled; cancelled while
+        waiting, it cancels the copies left."""
         try:
-            for record, copy in self._pending:
-                record["atif"] = await copy
+            return {index: await job for index, job in self._pending}
         except BaseException:
             self.cancel()
             raise
 
     def cancel(self) -> None:
-        for _, copy in self._pending:
-            copy.cancel()
+        for _, job in self._pending:
+            job.cancel()
 
-    async def _copy(self, task_id: str, name: str, previous: asyncio.Task[AtifRecord] | None) -> AtifRecord:
+    async def _turn(self, task_id: str, name: str, record: TurnTrajectory, native: NativeRead,
+                    previous: asyncio.Task[str | None] | None) -> str | None:
         if previous is not None:  # each copy overwrites the one before, so they're stored in turn order
             await asyncio.wait([previous])
+        record["atif"] = atif = await self._copy(task_id, name)
+        if atif["status"] != UNAVAILABLE:
+            record["format"] = ATIF
+            return atif["url"]
+        try:  # at once, while the agent still holds it
+            url, record["format"] = await native()
+        except Exception as exc:
+            logger.warning(f"agent '{self._agent.agent_name}': task {task_id}'s native trajectory, read in place of its "
+                           f"atif/1 copy, failed too (continuing): {exc}")
+            return None
+        return url
+
+    async def _copy(self, task_id: str, name: str) -> AtifRecord:
         try:
             return await self._stored(task_id, name)
         except Exception as exc:
             reason = _reason(exc)
             logger.warning(f"agent '{self._agent.agent_name}': the atif/1 copy of task {task_id} is unavailable "
                            f"({reason}; continuing): {exc}")
-            return _unavailable(reason)
+            return _unavailable(reason, task_id)
 
     async def _stored(self, task_id: str, name: str) -> AtifRecord:
         _, path = A2AAgent.operation(self._extension, "get")
@@ -189,7 +209,7 @@ class AtifCopies:
         last = steps[-1] if isinstance(steps, list) and steps and isinstance(steps[-1], Mapping) else {}
         adapter = root.get("adapter")
         return AtifRecord(
-            url=url, through_step=last.get("step_id") if isinstance(last.get("step_id"), int) else None,
+            url=url, task_id=task_id, through_step=last.get("step_id") if isinstance(last.get("step_id"), int) else None,
             status=status, rules=sorted({finding.rule for finding in errors}),
             reason=str(errors[0])[:_REASON_CHARS] if errors else None, validator_version=_VALIDATOR_VERSION,
             adapter_version=adapter.get("version") if isinstance(adapter, Mapping) else None,
@@ -305,6 +325,6 @@ def _reason(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def _unavailable(reason: str) -> AtifRecord:
-    return AtifRecord(url=None, through_step=None, status=UNAVAILABLE, rules=[], reason=reason, validator_version=None,
-                      adapter_version=None, aux_url=None, turn_context_url=None)
+def _unavailable(reason: str, task_id: str) -> AtifRecord:
+    return AtifRecord(url=None, task_id=task_id, through_step=None, status=UNAVAILABLE, rules=[], reason=reason,
+                      validator_version=None, adapter_version=None, aux_url=None, turn_context_url=None)

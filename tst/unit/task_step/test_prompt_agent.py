@@ -276,7 +276,7 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
 
     uri = response.agent_trajectory_object_url
     assert requests == [{"task_id": "task-1"}]
-    assert response.target_agent_per_turn_trajectories == [{"native_format": None, "atif": None}]
+    assert response.target_agent_per_turn_trajectories == [{"format": None, "atif": None}]
     assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
 
@@ -292,7 +292,7 @@ async def test_a_card_that_offers_formats_is_asked_for_its_native_one_whatever_i
         lambda body: {"trajectory": [{"type": "echo"}], "format": body.get("format", "atif/1")})
 
     assert requests == [{"task_id": "task-1", "format": "echo/1"}]
-    assert response.target_agent_per_turn_trajectories == [{"native_format": "echo/1", "atif": None}]
+    assert response.target_agent_per_turn_trajectories == [{"format": "echo/1", "atif": None}]
     assert json.loads(store.get(response.agent_trajectory_object_url)) == [{"type": "echo"}]
 
 

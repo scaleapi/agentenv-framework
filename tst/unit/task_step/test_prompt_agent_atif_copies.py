@@ -22,7 +22,7 @@ from agentenv_protocol.a2a_agent import (
     a2a_agent,
     enable,
 )
-from agentenv_protocol.atif import FORMAT as ATIF, Adapter, atif_adapter, errors_in, media_paths, native, validate
+from agentenv_protocol.atif import FORMAT as ATIF, Adapter, atif_adapter, errors_in, media_paths, native, tasks, validate
 
 from agent_env.config import configure
 from agent_env.task_step.context import PromptResponse, TaskStepContext
@@ -75,6 +75,7 @@ class _Wire(httpx.AsyncBaseTransport):
         self._atif = atif
         self.restart()
         self.atif_reads: list[dict] = []
+        self.native_reads: list[dict] = []
         self.media_requests: list[dict] = []
         self.prescriptions: list[dict] = []
         self.hold: asyncio.Event | None = None
@@ -101,6 +102,8 @@ class _Wire(httpx.AsyncBaseTransport):
         if path in self.unreachable:
             return httpx.Response(503, request=request)
         atif_read = path == "/ext/trajectory" and sent.get("format") == ATIF and "after" not in sent
+        if path == "/ext/trajectory" and not atif_read and "after" not in sent:
+            self.native_reads.append(sent)
         if atif_read:
             self.atif_reads.append(sent)
             self.read_arrived.set()
@@ -168,7 +171,7 @@ def _atifs(response: PromptResponse) -> list[dict | None]:
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_prescribes_atif_stores_each_turns_copy_with_its_media_aux_log_and_turn_context(
+async def test_a_run_that_prescribes_atif_has_each_turns_copy_as_its_trajectory_and_reads_no_native(
         monkeypatch, tmp_path):
     run = _Run(monkeypatch, tmp_path)
     context = run.context()
@@ -181,6 +184,10 @@ async def test_a_run_that_prescribes_atif_stores_each_turns_copy_with_its_media_
     assert folder == f"{run.store.object_url('atif/instance_id=ti-1/solver')}/"
     document = run.read(second["url"])
     assert first["url"] == second["url"] == f"{folder}{document['trajectory_id']}.json"
+    assert response.target_agent_per_turn_trajectory_object_urls == [first["url"], second["url"]]
+    assert response.agent_trajectory_object_url == second["url"]
+    assert [turn["format"] for turn in response.target_agent_per_turn_trajectories] == [ATIF, ATIF]
+    assert [first["task_id"], second["task_id"]] == [task.task_id for task in tasks(document)]
     assert [first["status"], second["status"]] == ["valid", "valid"]
     assert first["rules"] == second["rules"] == [] and first["reason"] is None
     assert first["adapter_version"] == "2.1.0" and first["validator_version"] == atif_copies._VALIDATOR_VERSION
@@ -192,9 +199,7 @@ async def test_a_run_that_prescribes_atif_stores_each_turns_copy_with_its_media_
         assert record["aux_url"].startswith(f"{folder}turns/") and run.read(record["aux_url"]) == []
         assert run.read(record["turn_context_url"])["state"] == "completed"
     assert [read["format"] for read in run.wire.atif_reads] == [ATIF, ATIF]
-    native_urls = response.target_agent_per_turn_trajectory_object_urls
-    assert [run.read(url)[0]["type"] for url in native_urls] == ["shot", "shot"]
-    assert [turn["native_format"] for turn in response.target_agent_per_turn_trajectories] == [NATIVE, NATIVE]
+    assert run.wire.native_reads == [] and not run.store.list(_PREFIX)
 
 
 @pytest.mark.asyncio
@@ -210,19 +215,27 @@ async def test_a_run_that_prescribes_nothing_reads_and_stores_native_only(monkey
 
 
 @pytest.mark.asyncio
-async def test_atif_prescribed_to_an_agent_that_doesnt_offer_it_is_recorded_unavailable(monkeypatch, tmp_path):
+async def test_an_agent_that_doesnt_offer_atif_keeps_its_native_trajectory_as_ever(monkeypatch, tmp_path):
+    """Known before the first turn, so the step reads native on each turn's path, as a run that prescribes nothing."""
     run = _Run(monkeypatch, tmp_path, atif=False)
 
     response = await run.execute(run.context())
 
     assert [(atif["status"], atif["reason"]) for atif in _atifs(response)] == [
         ("unavailable", "format_not_offered")] * 2
-    assert run.wire.atif_reads == []
+    assert run.wire.atif_reads == [] and len(run.wire.native_reads) == 2
+    assert [turn["format"] for turn in response.target_agent_per_turn_trajectories] == [NATIVE, NATIVE]
+    assert [run.read(url)[0]["type"] for url in response.target_agent_per_turn_trajectory_object_urls] == ["shot"] * 2
+
+
+def _natives(run: _Run, response: PromptResponse) -> list[str | None]:
+    """The format of what each turn's url holds, read back."""
+    return [None if url is None else ("shot" if isinstance(run.read(url), list) else ATIF)
+            for url in response.target_agent_per_turn_trajectory_object_urls]
 
 
 @pytest.mark.asyncio
-async def test_a_read_the_agent_refuses_as_not_prescribed_is_recorded_unavailable_and_the_run_succeeds(
-        monkeypatch, tmp_path):
+async def test_a_turn_whose_copy_the_agent_refuses_has_its_native_trajectory_read_in_its_place(monkeypatch, tmp_path):
     run = _Run(monkeypatch, tmp_path)
     run.wire.unreachable.add("/ext/trajectory/prescribe")
 
@@ -230,7 +243,44 @@ async def test_a_read_the_agent_refuses_as_not_prescribed_is_recorded_unavailabl
 
     assert [(atif["status"], atif["reason"]) for atif in _atifs(response)] == [
         ("unavailable", "format_not_prescribed")] * 2
+    assert [turn["format"] for turn in response.target_agent_per_turn_trajectories] == [NATIVE, NATIVE]
+    assert _natives(run, response) == ["shot", "shot"] and len(run.wire.native_reads) == 2
     assert response.error_type is None
+
+
+@pytest.mark.asyncio
+async def test_one_turns_failed_copy_falls_back_to_native_and_the_others_keep_theirs(monkeypatch, tmp_path):
+    run = _Run(monkeypatch, tmp_path)
+    failed: list[str] = []
+
+    def first_read_fails(request: httpx.Request, path: str, sent: dict,
+                         response: httpx.Response) -> httpx.Response | None:
+        if path == "/ext/trajectory" and sent.get("format") == ATIF and not failed:
+            failed.append(sent["task_id"])
+            return httpx.Response(500, request=request)
+        return None
+
+    run.wire.answer = first_read_fails
+
+    response = await run.execute(run.context())
+
+    assert [turn["format"] for turn in response.target_agent_per_turn_trajectories] == [NATIVE, ATIF]
+    assert [atif["status"] for atif in _atifs(response)] == ["unavailable", "valid"]
+    assert _natives(run, response) == ["shot", ATIF] and [read["task_id"] for read in run.wire.native_reads] == failed
+    assert response.agent_trajectory_object_url == _atifs(response)[1]["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_copy_and_native_trajectory_both_fail_has_none(monkeypatch, tmp_path):
+    run = _Run(monkeypatch, tmp_path)
+    run.wire.answer = lambda request, path, sent, response: (
+        httpx.Response(500, request=request) if path == "/ext/trajectory" else None)
+
+    response = await run.execute(run.context(), max_conversation_turns=1)
+
+    assert response.target_agent_per_turn_trajectory_object_urls == [None]
+    assert response.target_agent_per_turn_trajectories == [{"format": None, "atif": _atifs(response)[0]}]
+    assert response.agent_trajectory_object_url is None and response.error_type is None
 
 
 @pytest.mark.asyncio
