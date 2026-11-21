@@ -39,7 +39,7 @@ or one of them only where it is used.
 
 | Command | What it does |
 |---|---|
-| `make lint` | `ruff check` over the repository, with the rules in `pyproject.toml` (pyflakes) |
+| `make lint` | `ruff check` over the repository, with the rules in `pyproject.toml` (pyflakes and the async checks) |
 | `make unit-test` | `tst/unit` and `packages/agentenv-protocol/tests`, in parallel, no network |
 | `make int-test-fast` | `tst/integration` minus `int_test_slow`, in parallel; needs Docker and a local OCI registry (`docker run -d -p 5000:5000 public.ecr.aws/docker/library/registry:2`) |
 | `make int-test-slow` | the `int_test_slow` tests, serially (they build the same Docker tags from module fixtures and race under xdist) |
