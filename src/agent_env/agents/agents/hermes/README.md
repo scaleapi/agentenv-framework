@@ -47,7 +47,8 @@ A turn's usage is Hermes' own report for its main model calls: tokens, `api_call
 endpoint's model list prices the model. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent. It
 starts as root, which runs the env clock's follower and egress proxy under supervisord (`start-agent`, `root.conf`),
 and the A2A server and Hermes run as the `agent` user, on Modal too; started as another user, it runs the A2A server
-alone as that user. Hermes' runtime (its own Python, Node and ripgrep) and the profiles are under `/data/.hermes`,
+alone as that user. Supervisord restarts a server that dies, which as it starts kills the turns the dead one left
+running, and the task it was running is lost with it. Hermes' runtime (its own Python, Node and ripgrep) and the profiles are under `/data/.hermes`,
 whatever the uid. It has no `install/v1`.
 
 ## The env's clock
@@ -83,5 +84,8 @@ itself stays on real time and the commands it runs follow the env's clock.
   modification times are.
 - **A clock armed mid-turn.** The command and environment are chosen as a turn starts. A turn already running when the
   clock is armed was started as an unarmed turn is, through the launcher with no marker, so its Hermes follows the
-  env's clock from then on, without the proxy, and its turn lease or stall check may stop it (`Session turn lease
-  ...`). The next turn is armed.
+  env's clock from then on, without the proxy. Its own model and MCP calls then check certificates on the env's
+  clock: Hermes' Python carries its own OpenSSL, which agent-env's TLS shim doesn't reach, so at a date outside the
+  endpoint's certificate they fail (`APIConnectionError: Connection error.`), and its turn lease or stall check may
+  stop it too (`Session turn lease ...`). The turn ends with that error, the conversation keeps its history, and the
+  next turn is armed.
