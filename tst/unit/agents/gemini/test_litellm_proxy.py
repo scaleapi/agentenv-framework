@@ -246,6 +246,28 @@ def test_the_clis_date_line_names_the_envs_date_on_an_armed_clock_and_is_forward
     assert request.content == (sent if today is None else sent.replace(b"Friday, November 20, 2026", today.encode()))
 
 
+def test_only_the_clis_own_context_names_the_envs_date_and_the_same_words_elsewhere_stay(upstream, agent, client):
+    """A prompt, a tool's result and a transcript the model reads may hold the CLI's date sentence, or its whole
+    context, as written on another day; the model gets them as they were, with the env's date in the CLI's own. A side
+    call of the CLI's, loop detection's say, sends recent turns without its context, and goes as sent."""
+    agent._routes[TOKEN] = a2a_server._Route(None, None, None, ENV_TODAY)
+    sentence = "Today's date is Monday, May 4, 2026 (formatted according to the user's locale)."
+    transcript = _CONTEXT.replace("Friday, November 20, 2026", "Monday, May 4, 2026")
+    shell = {"functionResponse": {"name": "run_shell_command", "response": {"output": f"{sentence}\n{transcript}"}}}
+    turns = [{"role": "user", "parts": [{"text": f"Is this right? {sentence}\n{transcript}"}]},
+             {"role": "user", "parts": [shell]}]
+    sent, side = (json.dumps({"contents": contents}, separators=(",", ":")).encode()
+                  for contents in ([{"role": "user", "parts": [{"text": _CONTEXT}]}, *turns], turns))
+
+    client.post(GENERATE, content=sent)
+    client.post(GENERATE, content=side)
+
+    turn, side_call = upstream.requests
+    assert turn.content == sent.replace(b"Friday, November 20, 2026", ENV_TODAY.encode())
+    assert turn.content.count(b"Monday, May 4, 2026") == 4
+    assert side_call.content == side
+
+
 def test_the_chat_completions_bridge_names_the_envs_date_too(vertex, agent, client):
     agent._routes[TOKEN] = a2a_server._Route("vertex_ai/global/gemini-3.1-pro-preview", "p-1", None, ENV_TODAY)
 

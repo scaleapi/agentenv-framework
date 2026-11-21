@@ -328,7 +328,9 @@ def cli_program(env: Mapping[str, str] | None) -> list[str]:
     return [shutil.which("node", path=path), script] if script.endswith(".js") else ["gemini"]
 
 
-# The date line of the CLI's environment context, which it words from its own clock.
+# The CLI's environment context, the first content of its chat's calls (getInitialChatHistory), and its date line,
+# which the CLI words from its own clock.
+_CONTEXT_OPENING = "<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\nToday's date is "
 _DATE_LINE = re.compile(rb"(Today's date is )[^\"\\]{1,80}?( \(formatted according to the user's locale\)\.)")
 
 
@@ -338,11 +340,20 @@ def env_today() -> str:
     return subprocess.run(["date", "+%A, %B %-d, %Y"], capture_output=True, text=True, check=True).stdout.strip()
 
 
+def _opens_with_context(body: bytes) -> bool:
+    try:
+        return json.loads(body)["contents"][0]["parts"][0]["text"].startswith(_CONTEXT_OPENING)
+    except (ValueError, LookupError):
+        return False
+
+
 def with_date(body: bytes, today: str | None) -> bytes:
-    """A model call's body with the CLI's date line naming ``today``, the env's; the body as it came without one."""
-    if today is None:
+    """A model call's body with the CLI's date line naming ``today``, the env's; the body as it came without one. Only
+    the line of a call's first content, the CLI's context, changes, the first in the body since the SDK writes
+    ``contents`` before the rest: the same words in a prompt, a tool's result or a side call stay as they came."""
+    if today is None or not _opens_with_context(body):
         return body
-    return _DATE_LINE.sub(lambda match: match[1] + today.encode() + match[2], body)
+    return _DATE_LINE.sub(lambda match: match[1] + today.encode() + match[2], body, count=1)
 
 
 @dataclass
