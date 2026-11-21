@@ -1561,7 +1561,7 @@ def test_a_local_deploy_still_gets_its_own_host_ports_for_the_consoles():
     """Local envs need separate host ports for the loopback-only consoles so two deploys do not clash."""
     import inspect
     src = inspect.getsource(EnvironmentGatewayProvider._deploy_via_vm)
-    assert "isinstance(sandbox_provider, LocalSandboxProvider)" in src
+    assert "if sandbox_provider.ON_THIS_MACHINE else []" in src
 
 
 # --- name injection: SERVICE_NAME + ENVIRONMENT_NAME --------------------------
