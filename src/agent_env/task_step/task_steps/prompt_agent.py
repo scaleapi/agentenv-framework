@@ -50,6 +50,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
+from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, judge_setup_failed, run_gate
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
@@ -177,6 +178,16 @@ class PromptAgentTaskStep(TaskStep):
         FieldScope.USER)}
     DEFAULT_PROMPT_TIMEOUT_SECONDS: ClassVar[int] = 600
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 2
+    # Whether this step type applies user_sim_gate. None: it does when it keeps prompt_agent's conversation; a
+    # subclass that runs its own loop sets True once that loop calls user_sim_gate.run_gate.
+    USER_SIM_GATE_SUPPORTED: ClassVar[Optional[bool]] = None
+    _CONVERSATION_METHODS: ClassVar[tuple[str, ...]] = ("_execute", "_execute_conversation", "_converse")
+
+    @classmethod
+    def applies_user_sim_gate(cls) -> bool:
+        if cls.USER_SIM_GATE_SUPPORTED is not None:
+            return cls.USER_SIM_GATE_SUPPORTED
+        return all(getattr(cls, m) is getattr(PromptAgentTaskStep, m) for m in cls._CONVERSATION_METHODS)
 
     def __init__(
         self,
@@ -212,6 +223,7 @@ class PromptAgentTaskStep(TaskStep):
         snapshot_config: Optional[SnapshotConfig] = None,
         live_trajectory: bool = False,
         post_turn_hooks: Optional[list[dict]] = None,
+        user_sim_gate: Optional[UserSimGate | dict] = None,
     ):
         # `prompt` is the legacy text-only field; `parts` is the multimodal
         # form that's the authoritative A2A wire shape. Exactly one must be set:
@@ -258,6 +270,15 @@ class PromptAgentTaskStep(TaskStep):
         self.snapshot_config = snapshot_config
         self.live_trajectory = live_trajectory
         self.post_turn_hooks = post_turn_hooks
+        # Checks each user-sim message before the agent gets it (user_sim_gate.py). A dict is accepted
+        # too, as JSON task files and the kwargs form of put() carry it.
+        self.user_sim_gate = (UserSimGate.from_dict(user_sim_gate) if isinstance(user_sim_gate, dict)
+                              else user_sim_gate)
+        if self.user_sim_gate is not None and not type(self).applies_user_sim_gate():
+            raise ValueError(
+                f"{type(self).__name__} '{id}': user_sim_gate is applied by prompt_agent's own conversation, which "
+                f"this step type replaces; it would be ignored. Call user_sim_gate.run_gate from its loop and set "
+                f"USER_SIM_GATE_SUPPORTED = True, or leave user_sim_gate out")
 
     @staticmethod
     def _validate_parts(parts: list[dict]) -> None:
@@ -317,6 +338,8 @@ class PromptAgentTaskStep(TaskStep):
             base["live_trajectory"] = True
         if self.post_turn_hooks is not None:
             base["post_turn_hooks"] = self.post_turn_hooks
+        if self.user_sim_gate is not None:
+            base["user_sim_gate"] = self.user_sim_gate.to_dict()
         return base
 
     @classmethod
@@ -354,6 +377,7 @@ class PromptAgentTaskStep(TaskStep):
             ),
             live_trajectory=data.get("live_trajectory", False),
             post_turn_hooks=data.get("post_turn_hooks"),
+            user_sim_gate=data.get("user_sim_gate"),
         )
 
     def _trajectory_prefix(self) -> str:
@@ -661,8 +685,12 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
+            opening_text="\n".join(p.get("text", "") for p in initial_parts if p.get("kind") == "text"),
             built_in=sim, usage=usage,
         )
+        if self.user_sim_gate is not None and not is_user_sim:
+            logger.warning(f"prompt_agent '{self.id}': user_sim_gate is set but the user side isn't a user-sim "
+                           "agent-env deployed; no message is checked")
         # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
         end_after: Optional[str] = None
 
@@ -846,6 +874,10 @@ class PromptAgentTaskStep(TaskStep):
             # As always_on marks it: verifiers skip the run instead of grading the agent's latest draft as its answer.
             error_type = "user_sim_error"
             final_error_for_response = final_error_for_response or f"The user simulator failed: {sim.error}"
+        if not error_type and user_side.gate_failure is not None:
+            # The conversation was cut off by the gate: verifiers skip it rather than grade the agent's latest draft.
+            error_type = "user_sim_invalid"
+            final_error_for_response = final_error_for_response or f"user_sim_gate: {user_side.gate_failure}"
         context.prompt_responses.append(PromptResponse(
             prompt_id=self.prompt_id,
             response=final_terminal.response_text,
@@ -867,6 +899,9 @@ class PromptAgentTaskStep(TaskStep):
             structured_output=structured_output,
             usage=usage.entries(),
         ))
+
+        if user_side.gate_failure is not None:
+            raise RuntimeError(f"user_sim_gate: {user_side.gate_failure}")
 
         if final_state == TaskState.failed:
             detail_parts = []
@@ -1117,7 +1152,8 @@ class _UserSide:
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
                  decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
-                 built_in: Optional[_BuiltInUserSim] = None, usage: Optional[StepUsage] = None) -> None:
+                 opening_text: str = "", built_in: Optional[_BuiltInUserSim] = None,
+                 usage: Optional[StepUsage] = None) -> None:
         self._step = step
         self._built_in = built_in
         self._usage = usage
@@ -1129,6 +1165,13 @@ class _UserSide:
         self._decide_url = decide_url
         self._decides_quietly = decides_quietly
         self._shareable = shareable
+        # The conversation as the user-sim gate reads it: (role, text), role "user" or "assistant".
+        self._history: list[tuple[str, str]] = [("user", opening_text)] if opening_text else []
+        self._gate = step.user_sim_gate if is_user_sim else None
+        self._gate_call_config = None
+        self._gate_judge_setup_error: Optional[str] = None
+        # Set once a user-sim message fails the gate after its rewrites, with on_fail "fail".
+        self.gate_failure: Optional[str] = None
         self._end_after: Optional[str] = None
 
     async def ask(self, number: int, solver_message: str, agent_parts: list[dict], note: Optional[str] = None) -> dict:
@@ -1137,7 +1180,17 @@ class _UserSide:
         conversation ends for that reason, and every later ask gets that end without asking anyone. ``note`` (from a
         post-turn hook) is shown to an LLM user sim with the reply, as something only it sees, and recorded in
         ``metadata["user_side_notes"]``; a human peer gets none. Nobody sees it either when an agent trigger answers
-        the turn, or once ``end_after`` has ended the conversation."""
+        the turn, or once ``end_after`` has ended the conversation. It goes with the first message only, never with a
+        user-sim gate's rewrite request, and the gate's judge is shown it."""
+        self._history.append(("assistant", solver_message or ""))
+        answer = await self._answer(number, agent_parts, solver_message, note)
+        if "message" in answer and "end" not in answer:
+            self._history.append(("user", "\n".join(p.get("text", "") for p in answer["message"]
+                                                     if p.get("kind") == "text")))
+        return answer
+
+    async def _answer(self, number: int, agent_parts: list[dict], solver_message: str,
+                      note: Optional[str] = None) -> dict:
         if self._end_after is not None:
             return {"end": self._end_after}
         if self._decide_url is not None:
@@ -1156,6 +1209,11 @@ class _UserSide:
                 self._record("user_side_notes", {"turn": number, "note": note})
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
                                               note=note)
+            if self._gate is not None and "message" in answer:
+                async def rewrite_built_in(why: str) -> dict:  # the gate's request alone: the hook's note went once
+                    return await self._built_in.rewrite(number, why, self._ask_built_in)
+
+                answer = await self._gated(number, answer, rewrite_built_in, hook_note=note)
             self._end_after = answer.get("end_after")
             return answer
         return await self._ask_peer(number, agent_parts, note)
@@ -1219,6 +1277,56 @@ class _UserSide:
         return answer
 
     async def _ask_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
+        answer = await self._send_to_peer(number, agent_parts, note)
+        if self._gate is None or "end" in answer:
+            return answer
+
+        async def rewrite_peer(why: str) -> dict:  # the gate's request alone: the hook's note went with the first send
+            return await self._send_to_peer(number, [{"kind": "text", "text": why}])
+
+        return await self._gated(number, answer, rewrite_peer, hook_note=note)
+
+    async def _gated(self, number: int, answer: dict, ask_rewrite, hook_note: Optional[str] = None) -> dict:
+        """Check the user-sim's message; while it fails, ask for a rewrite with ``ask_rewrite(note)``, which returns an
+        answer shaped as ``ask``'s, up to the gate's limit (``run_gate``). The judge is shown ``hook_note``, what a
+        post-turn hook told the user sim it found, so a message reporting that check reads as the user's."""
+        gate = self._gate
+        if self._gate_call_config is None and self._gate_judge_setup_error is None and gate.judge_model:
+            # Judge setup (its key, its endpoint) failing leaves the patterns' verdict standing, with the error
+            # recorded on it (run_gate); with patterns off it fails the step (judge_setup_failed).
+            try:
+                self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
+            except Exception as e:
+                self._gate_judge_setup_error = judge_setup_failed(gate, e)
+                logger.warning(f"user-sim gate {self._gate_judge_setup_error}; using patterns only")
+        latest = {"answer": answer}
+
+        async def rewrite(note: str) -> Optional[str]:
+            reply = await ask_rewrite(note)
+            latest["answer"] = reply
+            return None if "end" in reply else _text_of(reply["message"])
+
+        def on_verdict(attempt: int, text: str, verdict) -> None:
+            self._record("user_sim_gate", {"turn": number, "attempt": attempt, "chars": len(text), **verdict.to_dict()})
+            if not verdict.passed:
+                logger.warning(f"Turn {number}: user-sim message failed the gate (attempt {attempt + 1}/"
+                               f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
+
+        outcome = await run_gate(gate, _text_of(answer["message"]), self._history, rewrite,
+                                 call_config=self._gate_call_config, judge_unavailable=self._gate_judge_setup_error,
+                                 on_verdict=on_verdict, user_note=hook_note)
+        if not outcome.invalid:
+            return latest["answer"]
+        self._context.metadata.setdefault("user_sim_invalid", {})[self._step.id] = {
+            "turn": number, "reasons": outcome.reasons()}
+        if self._built_in is not None:
+            self._built_in.withhold()
+        if gate.on_fail == "fail":
+            self.gate_failure = (f"user-sim message at turn {number} still reads as the assistant's after "
+                                 f"{gate.max_rewrites} rewrite(s): {'; '.join(outcome.reasons())[:500]}")
+        return {"end": "user_sim_invalid"}
+
+    async def _send_to_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         step = self._step
         if note is not None and self._is_user_sim:
             # after the reply, so the sim reads it as its own check of the work; the agent never sees this message
@@ -1282,6 +1390,10 @@ class _UserSide:
         return term
 
 
+def _text_of(parts: list[dict]) -> str:
+    return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
+
+
 class _BuiltInUserSim:
     """The user deployed by deploy_user_sim_agent, read as always_on reads it, in one sitting: each agent reply is one
     read, done ends the conversation, and there is no phone."""
@@ -1340,6 +1452,51 @@ class _BuiltInUserSim:
             self.replies += 1
             if self._max_replies and self.replies >= int(self._max_replies):
                 # As in always_on: this last reply is delivered, then the user stops reading.
+                logger.info(f"Turn {number} user sim: reply {self.replies} of max_replies {self._max_replies}")
+                return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_gave_up"}
+            return {"message": [{"kind": "text", "text": ans["message"]}]}
+        if outcome == "done" and said:
+            return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
+        return {"end": "user_done" if outcome == "done" else "user_no_reply"}
+
+    def withhold(self) -> None:
+        """The gate held the read's answer back for good (its rewrites failed too): as in always_on, the read's record
+        becomes a no_reply with no message, keeping ``first_message`` and ``gate_rewrites``."""
+        reads = self._context.metadata.get("user_sim_reads", {}).get(self._step.id) or []
+        if reads:
+            reads[-1].setdefault("first_message", reads[-1].get("message"))
+            reads[-1].update(outcome="no_reply", message="", used=None)
+
+    async def rewrite(self, number: int, note: str, ask_user_sim) -> dict:
+        """The user's answer again, after the user-sim gate held its message back with ``note``, in the same session;
+        shaped as ``ask``'s. It replaces the held answer in the reply count, so ``max_replies`` holds whichever answer is
+        sent. As always_on's does, the read's record holds the answer delivered (``outcome``, ``message``, ``used``,
+        ``schema_errors`` are the latest rewrite's), keeps what the user sim first answered as ``first_message``, and
+        lists each rewrite under ``gate_rewrites``."""
+        got = await ask_user_sim(note)
+        ans = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
+        error = got.get("error")
+        rewrite = {k: ans.get(k) for k in ("outcome", "message", "used", "schema_errors")}
+        rewrite.update(user_sim_error=error, user_sim_trajectory_url=got.get("trajectory_url"))
+        reads = self._context.metadata.get("user_sim_reads", {}).get(self._step.id) or []
+        if reads:
+            reads[-1].setdefault("first_message", reads[-1].get("message"))
+            reads[-1].setdefault("gate_rewrites", []).append(rewrite)
+            reads[-1].update({k: v for k, v in rewrite.items() if k in ("outcome", "message", "used", "schema_errors")})
+        outcome, said = ans.get("outcome"), (ans.get("message") or "").strip()
+        if self.history:
+            held = self.history[-1]["answer"]
+            # ask counted the held answer if it was a reply; count this one in its place.
+            held_counted = held.get("outcome") == "reply" and bool((held.get("message") or "").strip())
+            self.replies += int(outcome == "reply" and bool(said) and not error) - int(held_counted)
+            # What the user is shown later counts this answer as hers: the one that reached the agent.
+            self.history[-1]["answer"] = {**held, **ans}
+        logger.info(f"Turn {number} user sim rewrite: outcome={outcome} error={error}")
+        if error:
+            self.error = error
+            return {"end": "user_sim_error"}
+        if outcome == "reply" and said:
+            if self._max_replies and self.replies >= int(self._max_replies):
                 logger.info(f"Turn {number} user sim: reply {self.replies} of max_replies {self._max_replies}")
                 return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_gave_up"}
             return {"message": [{"kind": "text", "text": ans["message"]}]}
