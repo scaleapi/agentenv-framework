@@ -246,15 +246,17 @@ async def test_a_driver_tool_that_acts_shows_as_a_chip_and_one_that_only_reads_o
 @pytest.mark.asyncio
 async def test_a_driver_tool_whose_inputs_the_driver_marks_is_drawn_as_it_marks_them_and_not_as_a_chip():
     driver = Marking()
+    noted = []
+    note = driver._computer.recordings.note
+    driver._computer.recordings.note = lambda marks: (noted.extend(marks), note(marks))
     async with http_client(driver) as http, mcp_session(driver) as session:
         started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
-        recording = driver._computer.recordings.running[started["recording_id"]]
         await asyncio.sleep(0.5)
         sent = datetime.now(timezone.utc)
         await session.call_tool("click", {"text": "Save"}, meta={ROLE_META_KEY: "user"})
         await session.call_tool("type", {"text": "Q4"})
         await session.call_tool("click", {"refuse": True})
-        marks = [(mark.kind, mark.role, mark.label, mark.points) for mark in recording.annotations.marks]
+        marks = [(mark.kind, mark.role, mark.label, mark.points) for mark in noted]
         await asyncio.sleep(0.5)
         manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
 
@@ -275,9 +277,10 @@ async def test_marking_a_drivers_own_inputs_is_best_effort_and_needs_a_recording
         assert driver.draws_inputs()
         recording = driver._computer.recordings.running[started["recording_id"]]
         await driver.mark_inputs([("click", ("nowhere",))])
+        kept = recording.annotations.marks
         await http.post(END, json={"recording_id": started["recording_id"]})
 
-    assert recording.annotations.marks == []
+    assert kept == []
     assert "couldn't mark ['click'] on an annotated recording" in caplog.text
 
 
