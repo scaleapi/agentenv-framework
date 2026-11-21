@@ -144,6 +144,8 @@ class _Run:
     session_id: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     assistant_messages: list[dict[str, Any]] = field(default_factory=list)
+    # Each compaction's summary usage: pi makes that call outside the agent loop and reports it only here.
+    summary_usages: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: int = 0
 
 
@@ -270,20 +272,23 @@ def _record(run: _Run, event: dict[str, Any]) -> None:
         run.assistant_messages.append(event["message"])
     elif kind == "tool_execution_end":
         run.tool_calls += 1
+    elif kind == "compaction_end":
+        run.summary_usages.append((event.get("result") or {}).get("usage") or {})
     if kind not in _UNRECORDED_EVENTS:
         run.events.append(event)
 
 
 def _usage(run: _Run) -> Usage:
-    """The turn's usage, summed over its assistant messages, with ``input_tokens`` counting the cache. A message whose
-    usage is all zero got none from its endpoint, as a streamed Claude answer through a LiteLLM proxy, and is counted
-    in ``unreported_calls`` instead of as nothing used."""
+    """The turn's usage, summed over its assistant messages and its compactions' summary calls, with ``input_tokens``
+    counting the cache. A usage that is all zero got none from its endpoint, as a streamed Claude answer through a
+    LiteLLM proxy, or a compaction that ended without one, and is counted in ``unreported_calls`` instead of as nothing
+    used; a message pi ended with an error and no usage was a request the endpoint refused, and counts nothing."""
     counted, cost, unreported = [], 0.0, 0
-    for message in run.assistant_messages:
-        usage = message.get("usage") or {}
+    usages = [(message.get("usage") or {}, message.get("stopReason") == "error") for message in run.assistant_messages]
+    for usage, refused in usages + [(usage, False) for usage in run.summary_usages]:
         counts = [int(usage.get(key) or 0) for key in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")]
         if not any(counts):
-            unreported += 1
+            unreported += not refused
             continue
         counted.append(_counted(*counts))
         cost += float((usage.get("cost") or {}).get("total") or 0)

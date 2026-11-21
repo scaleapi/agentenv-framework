@@ -57,7 +57,11 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   (`None` when it can't tell). Set it per call: through a gateway it depends on the model behind it. Where the runtime
   hands back a model response's own usage, `Usage.from_model_response` reads it. A call that came back with no usage,
   as a streamed answer through some gateways does, leaves the counts unset rather than zero and is counted in
-  `provider_details.unreported_calls`. Code that sets these fields needs a
+  `provider_details.unreported_calls`. Report the turn's usage, never the session's: a CLI that resumes a session can
+  report the session's totals, as Claude Code's `modelUsage` and `total_cost_usd` do, so count the turn as the
+  difference from the session's totals before it, and check that it covers every call the turn made, subagents'
+  included (Claude Code's `result` events count only the main agent's). A cost the runtime couldn't price is unset,
+  never 0. Code that sets these fields needs a
   `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
