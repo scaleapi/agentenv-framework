@@ -95,6 +95,12 @@ def task_document(document: Mapping[str, Any], task_ids: Iterable[str]) -> dict[
     missing = [task_id for task_id in wanted if task_id not in {task.task_id for task in picked}]
     if missing:
         raise KeyError(f"the document holds no task {', '.join(map(repr, missing))}")
+    return tasks_document(document, picked)
+
+
+def tasks_document(document: Mapping[str, Any], picked: Iterable[Task]) -> dict[str, Any]:
+    """``task_document`` for tasks already found among ``tasks(document)``, such as the tasks of a document without the
+    profile, which carry no ids."""
     steps = [copy.deepcopy(step) for task in picked for step in task.steps]
     numbers = {step.get("step_id"): n for n, step in enumerate(steps, 1)}
     for n, step in enumerate(steps, 1):
