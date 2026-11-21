@@ -267,17 +267,54 @@ PLAYED = [
 ]
 
 
-def test_preparing_for_a_caller_that_plays_the_agent_needs_only_that_agent_to_exist_no_more(bundle_dir):
+@pytest.mark.parametrize("options, expected_emulation", [({}, True), ({"emulate": False}, False)],
+                         ids=["default", "native-only"])
+def test_preparing_passes_composition_options_and_keeps_selection_without_running_tasks(
+        bundle_dir, monkeypatch, options, expected_emulation):
+    compositions, progress = [], []
+    write = run_module.materialize
+    provider = object()
+    providers = []
+
+    def selected_provider(name):
+        providers.append(name)
+        return provider
+
+    def record_composition(plan, **hooks):
+        compositions.append((hooks["composing"], hooks["sandbox"]))
+        return write(plan, **hooks)
+
+    monkeypatch.setattr(run_module, "build_sandbox_provider", selected_provider)
+    monkeypatch.setattr(run_module, "materialize", record_composition)
+    with namespace_routing():
+        prepared = prepare_bundle(
+            bundle_dir, tasks=["unnamed"], evals=["smoke"], sandbox="local",
+            id_root="@local/prepared", on_progress=progress.append, **options)
+
+    [(composing, sandbox)] = compositions
+    assert composing.emulate is expected_emulation
+    assert composing.forms_of == "deploys"
+    assert composing.sandbox_provider is None and composing.deploys_on is provider
+    assert sandbox == "local" and providers == ["local"]
+    assert [(entry.name, task.id, task.version) for entry, task in prepared.tasks] == [
+        ("a", "@local/prepared/a", 1), ("b", "@local/prepared/b", 1),
+        ("unnamed", "@local/prepared/unnamed", 1)]
+    assert progress
+    assert _Scored.seen == []
+
+
+@pytest.mark.parametrize("options", [{}, {"emulate": False}], ids=["default", "native-only"])
+def test_preparing_for_a_caller_that_plays_the_agent_needs_only_that_agent_to_exist_no_more(bundle_dir, options):
     layout(bundle_dir, {"tasks/play.json": json.dumps(PLAYED)})
     helper = {"id": "helper", "type": "deploy_agent", "agent_name": "helper", "a2a_agent_id": "nobody-else"}
 
     with namespace_routing():
         with pytest.raises(BundleError, match="'nobody'"):
-            prepare_bundle(bundle_dir, tasks=["play"])
-        prepared = prepare_bundle(bundle_dir, tasks=["play"], played=True)
+            prepare_bundle(bundle_dir, tasks=["play"], **options)
+        prepared = prepare_bundle(bundle_dir, tasks=["play"], played=True, **options)
         layout(bundle_dir, {"tasks/play.json": json.dumps([*PLAYED, helper])})
         with pytest.raises(BundleError) as refused:
-            prepare_bundle(bundle_dir, tasks=["play"], played=True)
+            prepare_bundle(bundle_dir, tasks=["play"], played=True, **options)
 
     [(entry, task)] = prepared.tasks
     assert (entry.name, [step.type for step in task.steps]) == (
