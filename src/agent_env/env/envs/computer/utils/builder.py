@@ -71,6 +71,8 @@ _VM = {"cpu": 4.0, "memory": 8192, "disk_size_gb": 40}
 #: How long a builder VM may run, natively and when it emulates the arch, which runs some 10-20 times slower.
 VM_TIMEOUT_S, EMULATED_VM_TIMEOUT_S = 7200, 21600
 _DOWNLOAD_TIMEOUT_S = 600
+#: How often a download that fails in transit is tried again, and how long apart: as the builder VM's helper has curl.
+_DOWNLOAD_RETRIES, _DOWNLOAD_RETRY_S = 5, 1.0
 _FETCHES_IN_FLIGHT = 8
 _CHUNK = 1 << 20
 
@@ -315,17 +317,23 @@ class LocalBuilder(Builder):
         return json.loads((out / "result.json").read_text())
 
     def download(self, url: str, sha256: str, path: str) -> None:
-        target, hashed = self.work / path, hashlib.sha256()
+        target = self.work / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with httpx.stream("GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S) as response:
-                response.raise_for_status()
-                with target.open("wb") as file:
-                    for chunk in response.iter_bytes(_CHUNK):
-                        hashed.update(chunk)
-                        file.write(chunk)
-        except httpx.HTTPError as e:
-            raise ResolveError(f"downloading {url} failed: {e}") from None
+        for attempt in range(_DOWNLOAD_RETRIES + 1):
+            hashed = hashlib.sha256()
+            try:
+                with httpx.stream("GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+                    response.raise_for_status()
+                    with target.open("wb") as file:
+                        for chunk in response.iter_bytes(_CHUNK):
+                            hashed.update(chunk)
+                            file.write(chunk)
+                break
+            except httpx.HTTPError as e:
+                if attempt == _DOWNLOAD_RETRIES:
+                    raise ResolveError(f"downloading {url} failed: {e}") from None
+                logger.warning(f"downloading {url} failed ({e}); trying again")
+                time.sleep(_DOWNLOAD_RETRY_S)
         if hashed.hexdigest() != sha256:
             raise ResolveError(f"{url} has the sha256 {hashed.hexdigest()}, not the {sha256} its download names")
 

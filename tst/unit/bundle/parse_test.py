@@ -1,5 +1,6 @@
 """Reading a bundle folder into its entities: ids, kinds, artifact types and every folder rule."""
 
+import json
 import os
 import sys
 import unicodedata
@@ -11,6 +12,9 @@ import pytest
 from agent_env.bundle import BundleError, BundleKind, is_ignored, parse_bundle
 from agent_env.bundle import _fs
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES
+
+TASK_SHAPE = ("a task file must be a JSON array of step objects, or an object whose steps is one and whose "
+              "headline_verifiers lists step ids")
 
 
 def build(root: Path, spec: dict[str, str | bytes | None]) -> Path:
@@ -624,15 +628,41 @@ class TestLength:
 
 class TestFiles:
     def test_task_must_be_an_array_of_objects(self, tmp_path):
-        root = build(tmp_path / "b", {"tasks/a.json": '{"steps": []}', "tasks/b.json": "[1]"})
-        assert problems(root) == (
-            "tasks/a.json: a task file must be a JSON array of step objects",
-            "tasks/b.json: a task file must be a JSON array of step objects",
-        )
+        root = build(tmp_path / "b", {"tasks/a.json": '{"steps": [1]}', "tasks/b.json": "[1]"})
+        assert problems(root) == (f"tasks/a.json: {TASK_SHAPE}", f"tasks/b.json: {TASK_SHAPE}")
 
     def test_null_is_not_a_task(self, tmp_path):
         root = build(tmp_path / "b", {"tasks/t.json": "null"})
-        assert problems(root) == ("tasks/t.json: a task file must be a JSON array of step objects",)
+        assert problems(root) == (f"tasks/t.json: {TASK_SHAPE}",)
+
+    def test_a_task_file_may_be_an_object_naming_its_headline_verifiers(self, tmp_path):
+        steps = [{"id": "final", "type": "aggregate_verifiers"}]
+        root = build(tmp_path / "b", {
+            "tasks/named.json": json.dumps({"headline_verifiers": ["final"], "steps": steps}),
+            "tasks/none.json": json.dumps({"headline_verifiers": [], "steps": steps}),
+            "tasks/bare.json": json.dumps(steps),
+        })
+
+        entries = {entry.name: entry for entry in parse_bundle(root).entries}
+
+        assert (entries["named"].config, entries["named"].headline_verifiers) == (steps, ("final",))
+        assert (entries["none"].config, entries["none"].headline_verifiers) == (steps, None)
+        assert (entries["bare"].config, entries["bare"].headline_verifiers) == (steps, None)
+
+    def test_a_task_files_object_takes_only_steps_and_a_list_of_headline_verifiers(self, tmp_path):
+        root = build(tmp_path / "b", {"tasks/a.json": '{"steps": [], "headline": ["final"]}',
+                                      "tasks/b.json": '{"steps": [], "headline_verifiers": "final"}'})
+        assert problems(root) == (
+            "tasks/a.json: unknown key 'headline'; a task file's object takes steps and headline_verifiers",
+            f"tasks/b.json: {TASK_SHAPE}",
+        )
+
+    def test_a_step_whose_id_or_type_is_an_array_or_object_is_refused(self, tmp_path):
+        root = build(tmp_path / "b", {"tasks/a.json": '[{"id": "box", "type": "x"}, {"id": ["box"], "type": "x"}]',
+                                      "tasks/b.json": '[{"id": "box", "type": {"name": "x"}}]',
+                                      "tasks/c.json": '[{"id": 1, "type": "x"}]'})
+        assert problems(root) == ("tasks/a.json: step #1's id is a JSON array; it must be a string",
+                                  "tasks/b.json: step #0's type is a JSON object; it must be a string")
 
     @pytest.mark.parametrize("rel, content", [
         ("tasks/t.json", "[" * 100_000 + "]" * 100_000),

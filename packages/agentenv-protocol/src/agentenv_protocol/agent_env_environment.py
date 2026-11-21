@@ -1242,6 +1242,30 @@ def _discover_tools(handler: Any, environment_name: str) -> list:
     return ordered
 
 
+def read_only_tools(handler: Any, environment_name: str) -> frozenset[str]:
+    """The ``@tool`` methods and forwarded tools ``handler`` serves whose MCP annotations say they only read
+    (``readOnlyHint``), by the names an app mounts them under for environment ``environment_name``, before its
+    ``serve_tools_as`` renames any."""
+    return frozenset(descriptor.name for descriptor, fn in _with_forwarded(_discover_tools(handler, environment_name),
+                                                                          handler)
+                     if _reads_only(_annotations_of(fn)))
+
+
+def _annotations_of(fn: Callable) -> Any:
+    """A tool's MCP annotations as it was given them: a forwarded tool's as its server lists them."""
+    if (forwarded := getattr(fn, _FORWARDED_ATTR, None)) is not None:
+        return forwarded.annotations
+    options = getattr(fn, _TOOL_OPTIONS_ATTR, None)
+    return options.annotations if options is not None else None
+
+
+def _reads_only(annotations: Any) -> bool:
+    """Whether MCP annotations, as a dict or a ``ToolAnnotations``, say a tool only reads."""
+    if isinstance(annotations, dict):
+        return annotations.get("readOnlyHint") is True
+    return getattr(annotations, "readOnlyHint", None) is True
+
+
 def _served_extensions(handler: Any, ext_handlers: list) -> list:
     """The extension handlers the handler's ``served_extensions`` keeps, with its descriptors."""
     hook = getattr(handler, "served_extensions", None)

@@ -8,11 +8,14 @@ import logging
 import subprocess
 import time
 import uuid
+from collections import deque
 from typing import Final
 
 import httpx
 import pytest
 from click.testing import CliRunner
+
+from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.a2a_agent import protocol
 from agent_env.artifact.store import reset_artifact_store
@@ -32,6 +35,16 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 AGENT: Final[str] = "@local/agentenv-framework/agents/openhands"
 MODEL: Final[str] = "fake-model-1"
 ECHO_ENV: Final[str] = "@local/agentenv-framework/echo-mcp/echo"
+# A tool call and an answer from Claude through a LiteLLM proxy, whose prompt leaves out the cache it wrote and read,
+# and an answer from GPT through its Chat Completions, whose prompt counts the cache.
+CLAUDE_CALLS: Final[list[dict]] = [
+    {"prompt_tokens": 10, "completion_tokens": 129, "total_tokens": 139, "cache_creation_input_tokens": 10363,
+     "cache_read_input_tokens": 0},
+    {"prompt_tokens": 13, "completion_tokens": 43, "total_tokens": 56, "cache_creation_input_tokens": 199,
+     "cache_read_input_tokens": 10363},
+]
+GPT_CALL: Final[dict] = {"prompt_tokens": 2303, "completion_tokens": 2, "total_tokens": 2305,
+                         "prompt_tokens_details": {"cached_tokens": 2048}}
 
 
 @pytest.fixture
@@ -222,6 +235,40 @@ def test_a_conversation_the_sdk_cannot_resume_fails_the_next_task_as_an_infra_er
     assert second["state"] == "failed", outcomes
     assert (second["data"]["error_code"], second["data"]["error_type"]) == ("openhands.start", "infra_error"), outcomes
     assert second["text"].startswith("OpenHands could not start the turn: "), outcomes
+
+
+def test_a_turns_usage_counts_the_cache_in_its_input_and_is_unknown_where_no_usage_came_back(state, endpoint):
+    outcomes = {}
+    endpoint.respond = answer("pong")
+
+    async def steps(context):
+        await DeployAgentTaskStep(id="agent", version=None, sandbox_type="local", a2a_agent_id=AGENT).execute(context)
+        (agent,) = context.deployed_agents
+        base_url = agent.a2a_url or agent.api_url
+        await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"model": MODEL}, headers=agent.control_headers)
+        claude = deque(CLAUDE_CALLS)
+        endpoint.respond = tool_then_answer("terminal", {"command": "echo hi", "security_risk": "LOW"},
+                                            prefix="the shell said: ")
+        endpoint.usage = lambda body: claude.popleft() if claude else None
+        outcomes["claude"] = await _send(base_url, "ctx", "Say hi with the shell.")
+        endpoint.respond, endpoint.usage = answer("pong"), lambda body: GPT_CALL
+        outcomes["gpt"] = await _send(base_url, "ctx", "Say pong.")
+        endpoint.usage = lambda body: None
+        outcomes["none"] = await _send(base_url, "ctx", "Say pong again.")
+
+    _with_agent(state, steps)
+
+    assert {outcome["state"] for outcome in outcomes.values()} == {"completed"}, outcomes
+    usage = {name: Usage.from_dict(outcome["data"]["usage"]) for name, outcome in outcomes.items()}
+    # GPT's prompt is as large as its cache, so whether it counts it is left unknown.
+    assert usage == {
+        "claude": Usage(tool_call_count=1, input_tokens=20948, output_tokens=172, total_tokens=21120,
+                        cache_read_tokens=10363, cache_write_tokens=10562, input_includes_cache=True,
+                        provider_details={"reasoning_tokens": 0}),
+        "gpt": Usage(tool_call_count=0, input_tokens=2303, output_tokens=2, total_tokens=2305, cache_read_tokens=2048,
+                     cache_write_tokens=0, input_includes_cache=None, provider_details={"reasoning_tokens": 0}),
+        "none": Usage(tool_call_count=0, provider_details={"reasoning_tokens": 0, "unreported_calls": 1}),
+    }, outcomes
 
 
 def test_a_model_endpoint_that_refuses_the_key_fails_the_task_as_an_infra_error(state, endpoint):

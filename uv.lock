@@ -48,7 +48,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1578"
+version = "0.9.1610"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -182,6 +182,9 @@ tenki = [
 tensorlake = [
     { name = "tensorlake" },
 ]
+tinker = [
+    { name = "openenv" },
+]
 trl = [
     { name = "datasets" },
     { name = "openenv" },
@@ -203,12 +206,13 @@ verl = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "harness", "openenv", "sail", "skyrl", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "harness", "openenv", "sail", "skyrl", "tensorlake", "tenki", "tinker", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'harness'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'miles'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'skyrl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'slime'" },
+    { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'tinker'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'verl'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
@@ -281,11 +285,11 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'dev'", specifier = ">=15" },
     { name = "zstandard", marker = "extra == 'dev'", specifier = ">=0.23" },
 ]
-provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "slime", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
+provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "slime", "tinker", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.593"
+version = "0.1.625"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },

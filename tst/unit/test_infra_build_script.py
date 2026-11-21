@@ -248,9 +248,7 @@ def test_publish_tags_each_new_images_platform_builds_as_one_and_leaves_a_publis
     assert _run(script, monkeypatch, "publish", json.dumps([json.loads(_gateway()), json.loads(_disk())])) == 0
 
     assert calls[0] == ["docker", "login", "ghcr.io", "--username", "bot", "--password-stdin"]
-    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new,
-                     "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
-                     "--annotation", "index:org.opencontainers.image.revision=c0ffee", f"{new}-amd64", f"{new}-arm64"]]
+    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new, f"{new}-amd64", f"{new}-arm64"]]
     assert f"{published} is published already, so it's left as it is" in capsys.readouterr().out
 
 
@@ -517,7 +515,7 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
 def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm, machine,
                                                                            how):
     console = "".join(f"success: {program} entered RUNNING\n"
-                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop"))
+                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop", "clock-panel"))
     calls, logs = [], iter(["agentenv-init: starting", console])
 
     def run(command, **kw):

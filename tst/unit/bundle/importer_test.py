@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.skill import SkillArtifact
-from agent_env.bundle import BundleError, parse_bundle
+from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task, task_images
 from agent_env.bundle.installed import InstalledBundle
@@ -99,6 +99,18 @@ def test_a_task_imports_as_its_stored_steps_naming_each_entity_it_uses_by_the_fo
         ("agents/solver", "agent", "solver", 1), ("artifacts/crm-data", "artifact", "crm-data", 1),
         ("envs/crm-env", "env", "crm-env", 2)]
     assert imported.pinned == ()
+
+
+def test_a_task_naming_headline_verifiers_imports_as_the_object_form_its_folder_reads_back(store):
+    Task.put(id="triage", steps=Task.get("triage").steps, headline_verifiers=["judge"])
+
+    root = import_task("triage", store / "triage").root
+
+    written = json.loads((root / "tasks/triage.json").read_text())
+    assert (written["headline_verifiers"], [step["id"] for step in written["steps"]]) == (
+        ["judge"], [step["id"] for step in STEPS])
+    (task,) = [entry for entry in parse_bundle(root).entries if entry.kind is BundleKind.TASK]
+    assert task.headline_verifiers == ("judge",)
 
 
 def test_an_id_a_step_of_the_task_writes_stays_unpinned_and_unchanged(store):

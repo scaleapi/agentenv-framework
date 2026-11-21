@@ -24,6 +24,9 @@ FOLLOWER = "/usr/local/lib/agentenv-clock/clock-follower"
 FOLLOWER_USER = "agentenv-clock"
 CONFIG = "/etc/agentenv/clock/follower.json"
 STATUS = "/run/agentenv-clock/status.json"
+#: The follower's clock file, replaced whole at each write: ``@<universe s> x<rate> ^<anchor s>`` while the clock is
+#: armed (the universe at real time ``anchor``, running at ``rate``), ``+0 x1`` on real time.
+CLOCK_FILE = "/run/agentenv-clock/clock"
 #: What a disk form's guest has, made from the computer's container image: core's root channel reaches its launcher,
 #: not the guest, so it can't configure a follower there, and a disk computer stays on real time for now.
 DISK_GUEST = "/etc/agentenv/vm/image.env"
@@ -36,6 +39,21 @@ _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def follows() -> bool:
     """Whether this computer follows the universe clock: its base runs the follower, and it isn't a disk guest."""
     return os.path.exists(FOLLOWER) and not os.path.exists(DISK_GUEST)
+
+
+def session_time() -> float:
+    """The time this machine's session programs read, in epoch seconds: the universe's, from the follower's clock file,
+    while the clock is armed, else real time. A process that stays on real time, as an agent's A2A server does, reads
+    its programs' time here."""
+    now = time.time()
+    try:
+        spec = Path(CLOCK_FILE).read_text().split()
+    except FileNotFoundError:
+        return now
+    if not spec[0].startswith("@"):
+        return now
+    universe, rate, anchor = float(spec[0][1:]), float(spec[1][1:]), float(spec[2][1:])
+    return universe if rate == 0 or now <= anchor else universe + (now - anchor) * rate
 
 
 def session_zone() -> str:

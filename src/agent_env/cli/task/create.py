@@ -20,27 +20,37 @@ def create(filepath: Path, task_id: str, skip_validation: bool):
     """Create a task from a JSON file containing step definitions.
 
     \b
-    The JSON file should contain a list of step dicts, e.g.:
+    The JSON file holds a list of step dicts, as a bundle's task file does, e.g.:
     [
         {"id": "step-1", "type": "deploy_env", "env_id": "my-env"},
         {"id": "step-2", "type": "prompt_agent", "prompt": "Hello"}
     ]
+    or an object with them as "steps" and the step ids of its reward as "headline_verifiers".
     """
+    from agent_env.bundle.parse import task_file_parts
     from agent_env.task import Task
+    from agent_env.task.lint import lint, unknown_fields
 
     click.echo(f"Reading steps from {filepath}...")
     with open(filepath) as f:
-        steps = json.load(f)
-
-    if not isinstance(steps, list):
-        click.echo("Error: JSON file must contain a list of step dicts", err=True)
+        data = json.load(f)
+    try:
+        steps, headlines = task_file_parts(data)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
+    if unknown := list(unknown_fields(steps)):
+        for finding in unknown:
+            click.echo(f"Error: {finding.text}", err=True)
+        raise SystemExit(1)
     built = _build_steps(steps)
-    _report_preflight(
-        Task(id=task_id, version=None, steps=[s for _, s in built]),
-        skip_validation,
-    )
+    try:
+        checked = Task(id=task_id, version=None, steps=[s for _, s in built], headline_verifiers=headlines)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    _report_preflight(checked, skip_validation, lint(checked, config=False))
 
     task_steps = []
     for i, (kwargs, step) in enumerate(built):
@@ -49,7 +59,7 @@ def create(filepath: Path, task_id: str, skip_validation: bool):
         task_steps.append(saved)
 
     click.echo(f"Creating task '{task_id}' with {len(task_steps)} steps...")
-    task = Task.put(id=task_id, steps=task_steps)
+    task = Task.put(id=task_id, steps=task_steps, headline_verifiers=headlines)
     click.echo(f"Created task: id={task.id} version={task.version} steps={len(task.steps)}")
 
 
@@ -85,8 +95,15 @@ def _build_steps(steps: list[dict]) -> list[tuple[dict, object]]:
     return built
 
 
-def _report_preflight(task, skip_validation: bool) -> None:
-    problems = task.preflight()
+def _report_preflight(task, skip_validation: bool, findings) -> None:
+    """Refuse ``task`` for its lint errors and preflight problems, unless ``skip_validation``; print its lint warnings
+    either way. ``findings`` leave out ``config_problems``, which the preflight reports."""
+    from agent_env.task.lint import Severity
+
+    for finding in findings:
+        if finding.severity is Severity.WARNING:
+            click.echo(f"Warning: {finding.text}", err=True)
+    problems = [finding.text for finding in findings if finding.severity is Severity.ERROR] + task.preflight()
     if not problems:
         return
     click.echo(f"Preflight found {len(problems)} problem(s):", err=True)

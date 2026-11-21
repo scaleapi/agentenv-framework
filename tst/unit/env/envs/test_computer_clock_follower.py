@@ -131,6 +131,21 @@ def test_the_followers_paths_are_the_ones_core_and_the_driver_use():
     assert f'"{protocol_clock.CONFIG}"' in source and f'"{protocol_clock.STATUS}"' in source
 
 
+def test_the_clock_file_the_follower_writes_reads_as_its_universe_to_a_server_on_real_time(tmp_path, monkeypatch):
+    assert f'"{protocol_clock.CLOCK_FILE}"' in (CLOCK / "clockpage.py").read_text()
+    assert f"FAKETIME_TIMESTAMP_FILE={protocol_clock.CLOCK_FILE}" in (CLOCK / "clock.conf").read_text()
+    clockpage = _clockpage(tmp_path / "page")
+    clockpage.FILE = str(tmp_path / "clock")
+    monkeypatch.setattr(protocol_clock, "CLOCK_FILE", clockpage.FILE)
+    assert protocol_clock.session_time() == pytest.approx(time.time(), abs=1)
+    anchor = time.time() - 10
+    clockpage.write(1, 1748768400.0, 2.0, anchor)
+    assert protocol_clock.session_time() == pytest.approx(
+        clockpage._universe_at(1, 1748768400 * 10**9, int(anchor * 10**9), 2.0, time.time_ns()) / 1e9, abs=0.5)
+    clockpage.write(0, 0.0, 1.0, time.time())
+    assert protocol_clock.session_time() == pytest.approx(time.time(), abs=1)
+
+
 def test_it_follows_the_gateway_its_config_names_and_acknowledges_each_version_with_its_next_watch(follower):
     gateway = Gateway()
     try:

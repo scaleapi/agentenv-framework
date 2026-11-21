@@ -612,6 +612,7 @@ from agentenv_protocol.computer import (
 class MyDriver(ComputerDriverEnvironment):
     buttons = ("left", "right")       # features, on the card
     max_click_count = 2
+    screenshot_delay_ms = 300         # how long after an input its screenshot is taken
 
     @display
     async def size(self) -> Display: ...                    # width, height, scale
@@ -668,7 +669,11 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
-  after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
+  taken `screenshot_delay_ms` after the input, so a smooth scroll or the page a key opens, which renders a couple
+  of hundred milliseconds after the input returns, shows: the driver class's `screenshot_delay_ms` (500 unless it
+  sets its own), or the deploy's setting of that name, 0 capturing at once. A driver's own tools don't wait: they keep
+  their own timing. Click and scroll leave out `x` and `y`
+  to act at the pointer on a computer with
   `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
   group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
   or `reload`s, `computer_tabs` lists, opens, switches and closes tabs by the browser's own ids and
@@ -719,8 +724,9 @@ other exception from an input operation is reported `delivery_failed` with `appl
 
 **Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
 (`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
-`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
-and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
+`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`,
+`exec_timeout_s` and `screenshot_delay_ms`, which replaces the driver's own. A driver reads them as `self.settings`,
+for example its tap hold in `@press`.
 
 Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
 names the caller whose latest frame and others' input a call uses.
@@ -755,7 +761,7 @@ class MyDriver(ComputerDriverEnvironment):
   of its own, the latest 8 frames wait for the encoder, and it is closed when the recording stops. A
   driver without `@record` records by the base class polling `@capture`, with a pointer drawn at
   `@pointer_position`: the slow path, at most 15 fps.
-- **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
+- **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?, annotate?}` returns
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
   and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
   grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
@@ -768,6 +774,22 @@ class MyDriver(ComputerDriverEnvironment):
   `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
   grant they stay under `~/.agentenv-recordings/`. An ended recording's manifest uploads beside its
   segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
+- **Annotations.** `start` with `annotate`, an object of options (`{}` for none; the card lists those a
+  driver takes under its params' `annotate.options`), draws each input over the frames captured while it
+  shows, in the colour of the role that sent it (the agent's always the same; another role's picked by its
+  name, so it's the same on every recording unless a role that acted earlier there has it): a ring where a click landed, round a
+  hollow dot that leaves the pointer's tip in sight (a square for the right button, a ring for each click
+  of a double or triple), a trail for a drag, an
+  arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
+  each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
+  main argument. Where the frames can't show the pointer themselves, as frames polled from captures that
+  leave it out do (cua-driver's), a pointer is drawn for each role and pointer that has acted, where its
+  last input left it, along a drag's path as it moves, after a fading line from where it jumped: the one
+  that moved last at full strength, the others fainter, each named once there are several. Every `computer_*` input is marked
+  as `act` delivers it, best effort, and shows on
+  every frame while it lasts and on the first one after it however late, as at a low fps. A segment a
+  native recorder finished is kept as it came. The manifest's `annotate` is the object the recording
+  drew with, and is left out for one that took a native recorder's segments.
 - **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
   `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
   SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,
@@ -1388,6 +1410,39 @@ Extensions come from explicit definitions, configured activations, and
 decorated handlers in one validated registry, so routes and card advertisement
 cannot drift.
 
+`Usage` reports what a task used: `tool_call_count`, `input_tokens`,
+`output_tokens`, `total_tokens`, `cost_usd`, the prompt-cache counts
+`cache_read_tokens` and `cache_write_tokens`, and `input_includes_cache`, which
+says whether `input_tokens` counts both cache counts (`True`), neither
+(`False`), or is unknown (`None`, the default). Set the flag whenever you set
+the cache counts: a price can't read them without it. Runtime-specific counts go
+in `provider_details`, but cache counts go in their own fields. `Usage.from_dict`
+reads what `to_dict` wrote under any protocol version, a field it leaves out
+being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
+usage=...)` carries usage on a failure as `success` does.
+
+Whoever makes a model call knows what its counts hold, so an agent builds its own
+`Usage`. `Usage.from_model_response(usage)` is the default reader for a model
+response's own usage, with `input_tokens` counting the cache
+(`input_includes_cache` true), for OpenAI's Chat Completions (`prompt_tokens`)
+and Responses (`input_tokens`) shapes and Anthropic's:
+
+- An OpenAI count, or a LiteLLM client's, counts the cache its
+  `prompt_tokens_details` or `input_tokens_details` names: `cached_tokens`, and
+  `cache_write_tokens` beside it.
+- Anthropic's `input_tokens` counts neither `cache_read_input_tokens` nor
+  `cache_creation_input_tokens`, and neither does the `prompt_tokens` a LiteLLM
+  proxy sends with those two beside it, so they're added, to `total_tokens` too.
+- A provider's split of its cache writes by how long they're kept, priced apart
+  (Anthropic's `cache_creation`, OpenAI's `cache_write_tokens_details`), is kept
+  in `provider_details`, and so are the keys of a usage in none of these shapes,
+  as `unrecognized`. A value that isn't a count is left out.
+
+Through a gateway, whether a response's input counts the cache depends on the
+model behind it: a LiteLLM proxy's Claude answers through Chat Completions leave
+it out, its GPT answers don't. Set `input_includes_cache` per call, never once
+per agent.
+
 `run(request)` is the required execution contract. It is an ordinary method
 and needs no decorator.
 
@@ -1565,6 +1620,136 @@ the most recent format its tasks set. Readers trust a response's `format` over
 the card. An agent that binds its own context reads should name, in their
 responses, the format it serves.
 
+#### Serving ATIF (`atif/1`)
+
+`atif` names the agent's ATIF adapter, an `@atif_adapter` class from
+`agentenv_protocol.atif` that reads the `native` format:
+
+```python
+enable(TRAJECTORY_V1, live=True, native="my-cli-events/1", atif=MyCliAtif)
+```
+
+The card then lists `atif/1` in `formats` too; `default` stays `native`.
+
+The agent builds `atif/1` only when prescribed: a run that reads its copies
+says so first with the trajectory extension's `prescribe`
+(`POST /ext/trajectory/prescribe`, `{formats: ["atif/1"]}`, each a format the
+card offers; it answers every format the agent now builds, native first).
+
+- A prescription holds for each A2A context started after it. A context keeps the
+  formats it started with, so no copy misses its first turns, and a later call
+  sets them for the contexts after it.
+- It's one setting for the whole agent. An agent that serves several runs builds,
+  for each new context, what the last call prescribed, whichever run made it.
+- With no call the agent builds native only: no ATIF document, no media spool,
+  and no turn count of its own. A snapshot restored into it still records the
+  count the snapshot carries, so a context prescribed `atif/1` later numbers its
+  turns on from there.
+- An `atif/1` read of a context that wasn't prescribed it is refused with `409
+  format_not_prescribed`. A read that names no format always gets native.
+
+For a context prescribed `atif/1`, the SDK keeps one ATIF document, run through
+one adapter instance, and feeds it every event the agent appends, as it appends it. A native
+trajectory returned at task end runs through the adapter then. The agent's own
+code feeds the adapter's aux files, records that aren't in the native log such
+as a hook's notes, with `request.trajectory.aux(name, record)`, where they
+happened among the events. An agent with an adapter that both appends events and
+returns a native trajectory fails the turn with code
+`framework.trajectory_appended_and_returned`, since its ATIF copy would come
+from one of them and its native record from the other.
+
+The SDK writes each task's user step from the inbound message and its final
+response from the result, both as [PROFILE.md](src/agentenv_protocol/atif/PROFILE.md)
+says, stamped on the clock the agent's programs read: the universe's when the
+agent follows the env's clock, though the server itself stays on real time. `session_id` is the A2A context id, and `trajectory_id` names the document.
+Reads naming `atif/1` are served by the SDK, context reads an agent binds
+included:
+
+- A task read returns the context's document as it stood when the task ended,
+  with `aux`, the task's aux log (each record with `after`, the number of events
+  before it), and `turn_context`, its TurnContext and how it ended: an
+  `AuxEntry` each and a `ServedTurn`, both in `agentenv_protocol.atif`. With
+  those and the native events, `RecordedTask.from_served` and `replay` rebuild
+  the document offline. In the objects form, `aux` and `turn_context` are optional
+  grants beside `trajectory`, uploaded only when given; other reads refuse them.
+- A context read returns the live page: every step that has closed and whose
+  calls are all answered, up to the first that isn't.
+- A cursor read pages those closed steps by `step_id`: `after` is the last
+  `step_id` read, and `next` is the last one served. Each page carries `header`,
+  the document's root without its steps (with `final_metrics` once no task is
+  open), and `subagents`, the embedded
+  sub-agent trajectories of the tasks its steps belong to, as far as each is
+  served. A sub-agent can gain steps while its task runs, so keep each one's
+  latest copy; the page that serves a task's last step, which closes only as the
+  task ends, carries them whole.
+
+Every `atif/1` answer names `schema_version` and `profile_version` beside
+`format`. An adapter that raises stops its context's copy, never the turn: the
+copy's reads then answer HTTP 409 with code `atif_unavailable`, and native reads
+are unaffected.
+
+Each task's user step carries its turn index, the number of tasks its context
+started before it. The SDK keeps each context's count on disk, under
+`agentenv/turns/` in the user's state folder (`$XDG_STATE_HOME`, else
+`~/.local/state`), so a restarted server, or a context it dropped
+from memory, goes on counting in a new document of the same session; a home it
+can't write keeps the counts in memory, with one warning. A snapshot carries the
+count in its `state` object, a JSON object that is the SDK's own: on save the
+SDK uploads it after the agent's handler returns and adds it to the answer, and
+on load it reads it before the agent's handler runs and seeds the context the
+handler restored into, whose next task goes on from the snapshot's count in a
+new document. While such a save or load is in flight, a task of its context
+waits to start until the agent's handler returns, so the count is the
+conversation's the agent captured; a task already running goes on, as a capture
+mid-task expects. The agent's handlers leave `state` alone. The card's snapshot
+extension names the state the SDK keeps (`"state": ["turns"]` in its params,
+`SNAPSHOT_STATE_PARAM`), and agent-env grants the object only to an agent whose
+card has it, since an SDK from before it refuses the object.
+
+Every `atif/1` read leaves out the secrets the SDK knows, each written
+`[redacted:<length>]` wherever it occurs: in the document, the aux log and the
+turn context, inline, uploaded and in cursor pages, whose byte budget counts
+what they serve. The SDK knows:
+
+- its control token, and the model credentials in its environment:
+  `LITELLM_API_KEY` and the values of `LITELLM_EXTRA_HEADERS`;
+- write-only agent-config values: a string whole, and in a mapping what a
+  credential-like key names (`Authorization`, `api_key`, `token`, `password`,
+  ...), so a mapping of sampling parameters keeps its ordinary words;
+- an MCP registration's header values and credential-like query values, and a
+  CDP endpoint's header values and the token in its URLs;
+- every transfer grant an extension call hands the agent: the parts of its URL
+  that carry the credential (a presigned URL's credential-like query values,
+  `X-Amz-Signature` but not `X-Amz-Algorithm`, decoded and as the URL writes
+  them; else a token-like path segment; a password), its headers other than `Content-Type` and the
+  like, and a signed upload form's signing fields. Every copy of the URL holds
+  those parts, so a URL an agent prints keeps its host and path and loses its
+  signature;
+- a clock follower's read token;
+- whatever the agent registers with `self.register_secret(value)`, once its app
+  exists (in `run`, say).
+
+They're taken from each extension call before any handler runs, the agent's own
+included. A value under 8 characters isn't scrubbed, with a warning naming where
+it came from. Each is matched raw, JSON-escaped and percent-encoded, the longest
+first, and a read scrubs as it serves, so a secret learned after a step was
+written is left out too. Native reads keep every secret byte for byte, so a
+replay of the served inputs holds what the served copy redacts.
+
+A copy's media files, `media/<sha256>.<ext>` beside the document, wait on the
+agent's disk as the adapter names them, one file per sha256, with a PNG, JPEG,
+GIF or WebP image's width and height read from its header. The worker pulls
+them at each turn's end with the trajectory extension's `media` call, listed on
+the card of an agent that serves `atif/1`: `{context_id, objects: {path: write
+grant}}` uploads each file the context holds under its exact-object grant, up
+to 8 at a time, checking each upload's bytes against its name. It answers what
+it uploaded, the paths it holds no file for (`missing`) and the uploads that
+failed (`failed`). Neither stops the rest. A file uploaded leaves the agent's
+disk, as do a context's files when it is evicted or restored over, and the
+rest when the server stops. A reader takes a part path only as
+`media/<sha256>.<ext>` and checks the bytes it reads against that name
+(`agentenv_protocol.atif.media_file` and `check_media`).
+
 `enable(..., description="...")` is reserved for declarations carrying
 configuration or metadata. It preserves the agent-specific extension prose
 published in the Agent Card. The versioned SDK definition provides a generic
@@ -1700,7 +1885,9 @@ counterpart. Without them, or `enable(TRAJECTORY_V1, live=True)`, the
 generated card advertises only the framework-owned completed-task variants:
 `{task_id}`, answered inline, and `{task_id, objects}`, answered by upload.
 Snapshot `save` and `load` are an atomic core contract, while its optional
-changelog handlers are enabled as an atomic feature group.
+changelog handlers are enabled as an atomic feature group. A snapshot's optional
+`state` object is the SDK's own, which its handlers leave alone (see
+[Serving ATIF](#serving-atif-atif1)).
 Each operation has at most one response model. The framework validates a
 handler's return value against it before serializing, so a response with a
 missing or unknown field is an HTTP 500.
@@ -1866,7 +2053,18 @@ operations:
   records a call, each action must be one the last recorded call made, by name and
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
-  Calls to tools the turn doesn't offer aren't checked.
+  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's: a `Usage` the
+  driver reports under `REPORTED_USAGE_KEY` (`{"agentenv_usage": usage.to_dict()}`), taken as
+  given, or else the model response's own, read by `Usage.from_model_response`. It rides in
+  `usage` rather than a field of its own, so a proxy on an earlier protocol still takes the
+  record. A reported `Usage` that isn't one gets 400 and leaves the turn as it was. The call's
+  input is made to count the cache, its `chat` span shows that reading, and its turn sums it.
+  The turn's `Usage`, on its reply or its error, sums each count over the calls that gave it,
+  `cost_usd` included. Its `provider_details` give `model_calls`, how many were recorded;
+  `unreported`, how many left out each count only some gave, so such a sum reads as a lower
+  bound; `cache_unsettled`, how many had cache counts with no word on whether their input held
+  them, which leaves the turn's flag unknown; `unrecognized`, how many usages were in no shape
+  the reader knows; and each provider's cache-write split, summed.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 

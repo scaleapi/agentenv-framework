@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 import httpx
+import pytest
 
 from tst.unit.agents.codex.agent import a2a_server, codex_bridge
 
@@ -86,6 +87,7 @@ def test_the_server_start_writes_the_model_endpoint_into_config_toml(codex, monk
     config = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
     assert config == {
         "features": {"multi_agent_v2": True},
+        "tools": {"update_plan": {"enabled": True}},
         "model_provider": "litellm",
         "model_providers": {"litellm": {
             "name": "LiteLLM proxy",
@@ -97,11 +99,12 @@ def test_the_server_start_writes_the_model_endpoint_into_config_toml(codex, monk
             "stream_idle_timeout_ms": 60000,
             "env_http_headers": {"x-litellm-customer-id": "LITELLM_CUSTOMER_ID", "x-litellm-tags": "LITELLM_TAGS"},
             "http_headers": {"X-Gateway": "g"},
+            "capabilities": {"remote_compaction": "v2"},
         }},
     }
 
 
-def test_without_an_endpoint_only_the_features_are_written(codex, monkeypatch):
+def test_without_an_endpoint_no_model_provider_is_written(codex, monkeypatch):
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
 
     async def exercise():
@@ -111,7 +114,7 @@ def test_without_an_endpoint_only_the_features_are_written(codex, monkeypatch):
     asyncio.run(exercise())
 
     config = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
-    assert config == {"features": {"multi_agent_v2": True}}
+    assert config == {"features": {"multi_agent_v2": True}, "tools": {"update_plan": {"enabled": True}}}
 
 
 def test_turns_of_different_roles_share_one_config_and_each_cli_gets_its_own_role(codex, monkeypatch):
@@ -271,3 +274,17 @@ def test_triggers_register_decide_and_state(codex):
     decided = _call(codex, "POST", "/ext/triggers/decide", {"turn": 1, "solver_message": "x"}).json()
     assert (decided["parts"], decided["done"], decided["fired"]) == ([{"kind": "text", "text": "hi"}], False, ["hello"])
     assert _call(codex, "GET", "/ext/triggers").json()["firing_log"]
+
+
+@pytest.mark.parametrize("base", ["https://llm.example.com/v1", "https://llm.example.com/v1/"])
+def test_an_endpoint_ending_in_v1_gets_litellms_openai_route_once(codex, monkeypatch, base):
+    monkeypatch.setenv("LITELLM_BASE_URL", base)
+
+    async def exercise():
+        async with codex.app.router.lifespan_context(codex.app):
+            pass
+
+    asyncio.run(exercise())
+
+    config = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
+    assert config["model_providers"]["litellm"]["base_url"] == "https://llm.example.com/openai/v1"

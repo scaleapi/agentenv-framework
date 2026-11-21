@@ -44,6 +44,8 @@ from agent_env.store.document_store import expecting_version
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from tst.unit.bundle._support import DIGEST, layout
+from tst.unit.bundle.computer_app_env_test import APP, TOML as APP_TOML
+from tst.unit.bundle.computer_driver_env_test import LINUX
 
 BOX = {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"}
 # Not a credential: what a remote URL's user info holds in the tests that its name drops, joined in at run time.
@@ -120,6 +122,18 @@ def test_each_entry_takes_its_prefix_and_name_and_each_task_names_the_versions_i
     assert [step["artifacts"] for step in steps[1:]] == [[{"id": "triage-greeting", "version": 1}],
                                                          [{"id": "triage-docs", "version": 1}]]
     assert Artifact.get("triage-docs").version == 1
+
+
+def test_a_universe_folder_registers_its_environments_under_the_universe_s_registry_id(home):
+    universe = {"artifacts/world-u/artifact.toml": 'type = "environment_universe"\n',
+                "artifacts/world-u/gmail/gmail.zip": "mail\n", "artifacts/world-u/shelfway/shelfway.json": "{}\n",
+                "tasks/t.json": json.dumps([BOX, _load("world", "world-u")])}
+
+    registered = register_bundle(layout(home / "triage", universe))
+
+    assert {done.write.id for done in registered.materialization.writes} == {"triage-world-u", "triage-t"}
+    environments = Artifact.get("triage-world-u").get_environment_artifacts()
+    assert sorted(env.id for env in environments) == ["triage-world-u__gmail", "triage-world-u__shelfway"]
 
 
 def test_registering_again_writes_nothing_and_an_edit_rewrites_only_what_it_reaches(home):
@@ -381,6 +395,22 @@ def test_the_cli_says_what_it_would_write_asks_before_a_shared_store_and_dry_run
     assert [task.version for task in [Task.get("triage-t")]] == [1]
 
 
+def test_the_cli_says_each_lint_warning_once_and_a_lint_error_refuses_before_anything_is_written(home):
+    root = layout(home / "triage", TRIAGE)
+    warning = "  tasks/t.json: warning: no step grades this task, so a run has no score"
+
+    dry = CliRunner().invoke(cli, ["bundle", "register", str(root), "--dry-run"])
+    written = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes"])
+    (root / "tasks/t.json").write_text(json.dumps([BOX, {**_load("greet", "greeting"), "destinaton_path": "/app"}]))
+    refused = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes"])
+
+    assert dry.output.splitlines().count(warning) == written.output.splitlines().count(warning) == 1
+    assert refused.exit_code == 1
+    assert ("tasks/t.json: step 'greet': load_artifact doesn't read 'destinaton_path' (did you mean "
+            "'destination_path'?), so it would be ignored") in refused.output
+    assert Task.get("triage-t").version == 1
+
+
 def test_a_bundle_with_no_tasks_registers_every_entity(home):
     registered = register_bundle(layout(home / "library", {"artifacts/greeting/hello.txt": "hello\n"}))
 
@@ -519,9 +549,33 @@ def test_chromium_registers_into_a_shared_store_with_its_driver_and_base_compute
     assert (chromium.type, chromium.computer.id, chromium.driver.id) == ("computer_app", "ubuntu-24.04-browser", "page")
 
 
-def _desktop(home, monkeypatch, compose):
+def test_the_installed_chromium_registers_over_its_own_driver_though_the_store_holds_another_under_the_alias(
+        home, composed, monkeypatch):
+    """As a later promotion registers it into the hub: the store's `page` is no longer the installed driver, and
+    the installed chromium, named by its own id, still binds its own, written again under the alias."""
+    for module in (register_module, env_store_module):
+        monkeypatch.setattr(module, "shared_store", lambda store: True)
+    bases = {image.ref() for image in COMPUTER_IMAGES}
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in bases else None)
+    monkeypatch.setattr(computer_artifact_module, "_inspect",
+                        lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
+    files = {"tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env",
+                                          "env_id": "@local/agentenv-framework/browsers/chromium"}])}
+    register_bundle(layout(home / "first", files))
+    edited = Env.get("page")
+    edited.description, edited.version = "edited in the store", None
+    env_store_module.get_env_store().put_document(edited)
+
+    registered = register_bundle(layout(home / "second", files))
+
+    versions = {done.write.id: done.version for done in registered.materialization.writes}
+    assert versions["page"] == 3 and Env.get("page").description != "edited in the store"
+    assert Env.get("chromium", versions["chromium"]).driver.version == 3
+
+
+def _desktop(home, monkeypatch, compose, extra=None):
     """A bundle of a computer env on the shipped base and driver, registered into a shared store as the hub is, under
-    their aliases, ``compose`` standing in for the composer."""
+    their aliases, ``compose`` standing in for the composer; ``extra`` replaces or adds files."""
     for module in (register_module, env_store_module):
         monkeypatch.setattr(module, "shared_store", lambda store: True)
     bases = {image.ref() for image in COMPUTER_IMAGES}
@@ -530,8 +584,26 @@ def _desktop(home, monkeypatch, compose):
                         lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
     monkeypatch.setattr(composer_module, "compose", compose)
     files = {"envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n',
-             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}])}
+             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}]), **(extra or {})}
     return layout(home / "desk", files)
+
+
+def test_a_registration_composes_the_desktop_its_task_deploys_and_not_each_app_on_it_alone(home, composed, monkeypatch):
+    """Each app names the computer and driver it deploys on alone, so each is a computer too, which no task deploys."""
+    apps = {f"envs/{name}/{file}": text for name in ("mail", "notes") for file, text in (
+        ("env.toml", APP_TOML + 'computer = "ubuntu-24.04"\ndriver = "reference"\n'),
+        ("app.py", APP.format(supports=LINUX, skill="skill.md", linux_skill="skill-linux.md")),
+        ("requirements.txt", "agentenv-framework-protocol\n"), ("skill.md", "# Mail\n"),
+        ("skill-linux.md", "# Mail on Linux\n"))}
+    composings = []
+    root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(env.id), {
+        **apps, "envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n'
+                                         'apps = ["mail", "notes"]\n'})
+
+    registered = register_bundle(root)
+
+    assert composings == ["desk-desktop"]
+    assert {done.write.id for done in registered.materialization.writes} >= {"desk-mail", "desk-notes", "desk-desktop"}
 
 
 def _link(containers=(), disks=()):
@@ -673,3 +745,17 @@ def test_a_registration_killed_after_a_write_and_before_its_row_is_done_resumes(
 
     assert {done.write.id: (done.version, done.reused) for done in resumed.materialization.writes} == {
         "triage-docs": (1, True), "triage-greeting": (1, False), "triage-t": (1, False)}
+
+
+def test_an_installed_app_a_registration_pulls_in_is_composed_though_no_task_deploys_it_alone(home, composed,
+                                                                                            monkeypatch):
+    """Every bundle shares the shared store's one write of an installed bundle's env, and a local run can't compose the
+    store's env at its first deploy, so the registration that writes it leaves it deployable."""
+    composings = []
+    root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(env.id), {
+        "envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n'
+                                 'apps = ["chromium"]\n'})
+
+    register_bundle(root)
+
+    assert sorted(composings) == ["chromium", "desk-desktop"]

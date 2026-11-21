@@ -18,6 +18,7 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode
+from .gateway.console_session import LINK_DEFAULT_SECONDS, LINK_PARAM, ConsoleSession
 from .gateway.constants import WELL_KNOWN_PATH
 from .store import get_env_store
 
@@ -230,6 +231,10 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     gateway_mode: str = GatewayMode.PERFORMANCE.value
     db_web_url: Optional[str] = None
     db_mcp_url: Optional[str] = None
+    # pgweb and db-mcp behind the gateway, which take the control token (``control_headers_for``); None when the deploy
+    # renders no such console, has no control token, or its gateway doesn't guard and reach the console.
+    db_web_gateway_url: Optional[str] = None
+    db_mcp_gateway_url: Optional[str] = None
     website_frontend_urls: Optional[dict[str, str]] = None
     vnc_url: Optional[str] = None
     # Ids of the EnvStateInstance record(s) this deploy's state was provisioned into
@@ -238,6 +243,9 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     # Each child env on a sandbox of its own, which the gateway fronts (a multi env's computers): its own deploy record,
     # by its environment name.
     child_envs: dict[str, dict] = field(default_factory=dict)
+    # Where the gateway's stack lives when it is one slot of a VM other runs share (StackLayout.to_record); None for
+    # the default stack, which has the VM to itself.
+    stack_layout: Optional[dict] = None
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -248,11 +256,21 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "gateway_mode": data.get("gateway_mode", GatewayMode.PERFORMANCE.value),
             "db_web_url": data.get("db_web_url"),
             "db_mcp_url": data.get("db_mcp_url"),
+            "db_web_gateway_url": data.get("db_web_gateway_url"),
+            "db_mcp_gateway_url": data.get("db_mcp_gateway_url"),
             "website_frontend_urls": data.get("website_frontend_urls"),
             "vnc_url": data.get("vnc_url"),
             "env_state_instance_ids": data.get("env_state_instance_ids") or [],
             "child_envs": data.get("child_envs") or {},
+            "stack_layout": data.get("stack_layout"),
         }
+
+    def pgweb_link(self, seconds: int = LINK_DEFAULT_SECONDS) -> Optional[str]:
+        """A link that opens pgweb in a browser once, within ``seconds``, without the control token ever reaching the
+        browser; None when the gateway serves no pgweb or the record holds no token."""
+        if not self.db_web_gateway_url or not self.control_token:
+            return None
+        return f"{self.db_web_gateway_url}?{LINK_PARAM}={ConsoleSession(self.control_token).link(seconds)}"
 
 
 @dataclass
@@ -583,5 +601,5 @@ def _record_class(data: dict) -> type[DeployedEnv]:
 
 
 # A record carrying any of these is a gateway's. Not gateway_mode: an older kernel writes its default into any record it round-trips.
-_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids",
-                        "child_envs")
+_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "db_web_gateway_url", "db_mcp_gateway_url",
+                        "website_frontend_urls", "vnc_url", "env_state_instance_ids", "child_envs", "stack_layout")

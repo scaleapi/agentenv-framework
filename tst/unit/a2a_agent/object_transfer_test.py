@@ -1,5 +1,7 @@
 """The core side of object transfer: choosing a form from the card, descriptors, responses."""
 
+import json
+
 import httpx
 import pytest
 from agentenv_protocol.a2a_agent import TrajectoryObjectsResponse
@@ -8,6 +10,7 @@ from pydantic import ValidationError
 
 from agent_env.a2a_agent import object_transfer
 from agent_env.a2a_agent.object_transfer import (
+    TrajectoryFormats,
     FetchedTrajectory,
     TrajectoryUpload,
     ObjectLimits,
@@ -218,6 +221,71 @@ async def test_fetch_trajectory_waits_for_the_agent_upload_it_granted(tmp_path, 
         object_transfer.TRANSFER_TIMEOUT_SECONDS,
         5,
     ]
+
+
+def test_a_cards_trajectory_formats_are_read_from_its_params_and_an_older_card_has_none():
+    offered = {"params": {"formats": ["claude-code-session/1", "atif/1"], "native": "claude-code-session/1",
+                          "default": "claude-code-session/1"}}
+    assert TrajectoryFormats.of(offered) == TrajectoryFormats(
+        ("claude-code-session/1", "atif/1"), "claude-code-session/1", "claude-code-session/1")
+    for older in (None, {}, {"params": {"endpoint": "/ext/trajectory"}}, {"params": {"formats": []}}):
+        assert TrajectoryFormats.of(older) == TrajectoryFormats((), None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_get_names_a_format_only_when_given_and_reports_the_one_served(tmp_path, monkeypatch):
+    sent = []
+    real_client = httpx.AsyncClient
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body)
+        served = {"format": body["format"]} if "format" in body else {}
+        if "objects" in body:
+            return httpx.Response(200, json={"objects": {"trajectory": {"size_bytes": 2}}, **served})
+        return httpx.Response(200, json={"trajectory": [], **served})
+
+    monkeypatch.setattr(
+        object_transfer.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(answer), **kwargs),
+    )
+    store = GrantingObjectStore(str(tmp_path))
+    url = store.object_url("t/trajectory.json")
+    endpoint = "https://agent.test/ext/trajectory"
+
+    unnamed = await fetch_trajectory(endpoint, {"task_id": "t"})
+    inline = await fetch_trajectory(endpoint, {"task_id": "t"}, format="echo/1")
+    uploaded = await fetch_trajectory(endpoint, {"task_id": "t"}, upload=TrajectoryUpload.to(store, url),
+                                      format="echo/1")
+
+    assert unnamed == FetchedTrajectory(inline=[])
+    assert inline == FetchedTrajectory(inline=[], format="echo/1")
+    assert uploaded == FetchedTrajectory(object_url=url, format="echo/1")
+    assert [set(body) for body in sent] == [{"task_id"}, {"task_id", "format"}, {"task_id", "format", "objects"}]
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_upload_grants_only_the_trajectory_so_a_pinned_agent_accepts_it(tmp_path, monkeypatch):
+    sent = []
+    real_client = httpx.AsyncClient
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"objects": {"trajectory": {"size_bytes": 2}}})
+
+    monkeypatch.setattr(
+        object_transfer.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(answer), **kwargs),
+    )
+    store = GrantingObjectStore(str(tmp_path))
+    upload = TrajectoryUpload.to(store, store.object_url("t/trajectory.json"))
+
+    await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"}, upload=upload)
+
+    [request] = sent
+    assert set(request["objects"]) == {"trajectory"}
 
 
 def _answering(monkeypatch, body: dict) -> None:

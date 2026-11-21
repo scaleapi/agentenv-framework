@@ -19,6 +19,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ from tar_changelog import (
 from claude_bridge import (
     CLAUDE_STATE_DIR,
     ClaudeCodeTools,
+    ClaudeResult,
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     kill_running_clis,
@@ -98,6 +100,8 @@ logger = logging.getLogger(__name__)
 HARNESS = "claude-code"
 # The versioned format of the stream-json events a turn's trajectory holds.
 TRAJECTORY_FORMAT = "claude-code-stream-json/1"
+# A context read's format: the records of the CLI's session file, the conversation so far. Never the native format.
+SESSION_TRAJECTORY_FORMAT = "claude-code-session/1"
 # The CLI loads skills from <state>/skills/<name>/SKILL.md.
 SKILLS_DIR = CLAUDE_STATE_DIR / "skills"
 # FileParts are written here, one folder per task, and their paths appended to the prompt: the CLI reads a path in
@@ -381,6 +385,78 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
             logger.info(f"Killed {stopped} claude CLI(s) still running a turn as the agent shut down")
 
 
+_RUN_COUNTS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+_CACHE_WRITE_SPLIT = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+# `modelUsage`'s names for _RUN_COUNTS, the cache writes' split, the thinking tokens and the cost.
+_TALLY = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+          "cache_read_input_tokens": "cacheReadInputTokens", "cache_creation_input_tokens": "cacheCreationInputTokens",
+          "ephemeral_5m_input_tokens": "cacheCreationEphemeral5mInputTokens",
+          "ephemeral_1h_input_tokens": "cacheCreationEphemeral1hInputTokens", "thinking_tokens": "thinkingTokens",
+          "cost_usd": "costUSD"}
+
+
+def _number(value: Any) -> float | None:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _turn_tally(result: ClaudeResult) -> dict[str, dict[str, float]] | None:
+    """The turn's own tally by model: the CLI's ``modelUsage`` at its last `result` less the session's before the turn,
+    which a resume restores into it. None when either is missing."""
+    if result.model_usage is None or result.session_base is None:
+        return None
+    turn = {}
+    for model, now in result.model_usage.items():
+        before = result.session_base.get(model) or {}
+        counts = {ours: (_number(now.get(theirs)) or 0) - (_number(before.get(theirs)) or 0)
+                  for ours, theirs in _TALLY.items()}
+        if any(counts.values()):
+            turn[model] = counts
+    return turn
+
+
+def _usage(result: ClaudeResult) -> Usage:
+    """The turn's tool calls and token counts, with ``input_tokens`` counting the cache. The counts are the CLI's own
+    tally for the turn (``_turn_tally``), which covers every call, its subagents' too, and its cost; the turn's
+    `result` events count only the main agent's calls, so the tally is used only when it covers at least those. When it
+    can't be (a resumed session this process hasn't run before), the counts are the `result` events', and the
+    subagents' calls are counted in ``unreported_calls``, which makes the turn a lower bound. A run cut off before its
+    `result` counts its model calls there too. The cache writes' 5-minute and 1-hour split, the thinking tokens and
+    each model's own counts are kept in ``provider_details``."""
+    unreported = result.unreported_calls
+    if not result.run_usage and not result.model_usage:
+        details = {"unreported_calls": unreported + result.subagent_calls} if unreported + result.subagent_calls else {}
+        return Usage(tool_call_count=result.tool_call_count, provider_details=details)
+
+    def total(read: Any) -> int:
+        return sum(value for run in result.run_usage if isinstance(value := read(run), int) and not isinstance(value, bool))
+
+    main = {key: total(lambda run, key=key: run.get(key)) for key in _RUN_COUNTS}
+    turn = _turn_tally(result)
+    tally = {key: sum(model[key] for model in turn.values()) for key in _TALLY} if turn is not None else None
+    cost, models = None, None
+    if tally is not None and all(tally[key] >= main[key] for key in _RUN_COUNTS) and min(tally.values()) >= 0:
+        counted = {key: int(tally[key]) for key in _RUN_COUNTS}
+        counted["cache_creation"] = {key: int(tally[key]) for key in _CACHE_WRITE_SPLIT}
+        thinking, cost = int(tally["thinking_tokens"]), tally["cost_usd"] or None
+        models = {model: {"input_tokens": int(counts["input_tokens"] + counts["cache_read_input_tokens"]
+                                              + counts["cache_creation_input_tokens"]),
+                          "output_tokens": int(counts["output_tokens"]),
+                          "cache_read_tokens": int(counts["cache_read_input_tokens"]),
+                          "cache_write_tokens": int(counts["cache_creation_input_tokens"]),
+                          **({"cost_usd": counts["cost_usd"]} if counts["cost_usd"] else {})}
+                  for model, counts in turn.items()}
+    else:
+        counted = dict(main)
+        counted["cache_creation"] = {key: total(lambda run, key=key: (run.get("cache_creation") or {}).get(key))
+                                     for key in _CACHE_WRITE_SPLIT}
+        thinking = total(lambda run: (run.get("output_tokens_details") or {}).get("thinking_tokens"))
+        unreported += result.subagent_calls
+    usage = Usage.from_model_response(counted)
+    return replace(usage, tool_call_count=result.tool_call_count, cost_usd=cost, provider_details={
+        **usage.provider_details, **({"unreported_calls": unreported} if unreported else {}),
+        **({"reasoning_tokens": thinking} if thinking else {}), **({"models": models} if models else {})})
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="Claude Code",
@@ -401,7 +477,7 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
     config_description="Set or read agent configuration such as model, role, and allowed tools.",
     lifespan=_turns_stop_with_the_server,
     extensions=(
-        enable(TRAJECTORY_V1, live=True, description=(
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, description=(
             "Retrieve a task's Claude Code stream-json trajectory, also while it runs, "
             "or a context's cumulative trajectory including a live run.")),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Claude Code CLI should connect to."),
@@ -523,7 +599,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             .add_text(result.response or (result.error or ""))
             .add_data(data)
             .session_ref(session_id)
-            .usage(Usage(tool_call_count=result.tool_call_count))
+            .usage(_usage(result))
             .build()
         )
 
@@ -538,6 +614,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             raise HTTPException(status_code=404, detail=f"No transcript yet for context_id '{context_id}'")
         return {
             "trajectory": trajectory,
+            "format": SESSION_TRAJECTORY_FORMAT,
             "session_lines": session_lines,
             "is_live": context_id in self._active_contexts,
             "session_id": session_id,
@@ -553,7 +630,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
     async def upload_context_trajectory(self, request: ContextObjectTrajectoryRequest) -> dict[str, Any]:
         trajectory = (await self._context_trajectory(request.context_id))["trajectory"]
         body = json.dumps(trajectory, separators=(",", ":"), default=str).encode()
-        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))}}
+        return {"objects": {"trajectory": _answer(await upload(request.objects.trajectory, body))},
+                "format": SESSION_TRAJECTORY_FORMAT}
 
     @extension(SKILL_CONFIG_V1.add.inline)
     async def add_inline_skill(self, request: InlineSkillRequest) -> SkillAddResponse:

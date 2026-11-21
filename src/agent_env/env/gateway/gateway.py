@@ -58,6 +58,7 @@ from .constants import (
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
+    IDLE_CONNECTION_TIMEOUT_S,
     MCP_TRANSPORT,
     METHOD_ADD,
     METHOD_GET,
@@ -71,6 +72,7 @@ from .constants import (
     WEBSITE_BROWSE_URL_PARAM,
     WELL_KNOWN_PATH,
     WILDCARD,
+    PGWEB_CONSOLE,
     GatewayMode,
     tool_name_clashes_text,
 )
@@ -80,6 +82,7 @@ from .changes import ChangeAttribution
 from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
 from .clock_followers import ClockFollowers, parse_wait
+from .console_session import ConsoleSession, LinkRedaction, without_session_cookie
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
     ROLE_HEADER_BYTES,
@@ -181,6 +184,8 @@ class Gateway:
         clock_followers: Mapping[str, str] | None = None,
         site_names: dict[str, Iterable[str]] | None = None,
         listed_by_name: Iterable[str] = (),
+        console_urls: Mapping[str, str] | None = None,
+        console_frame_ancestors: Iterable[str] = (),
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
         which the gateway takes off every request it forwards to a service behind it. `clock_followers` names the
@@ -190,7 +195,9 @@ class Gateway:
         computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
         /svc routes pass its control token on to, a multi env's computers, which take it. `computers` are its children
         that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
-        requests its browser sends take."""
+        requests its browser sends take. `console_urls` are the env's SQL consoles by key, each served at /svc/<key>/
+        only with the control token or, on pgweb, a session minted from it, and not at all without one;
+        `console_frame_ancestors` are the origins besides its own that may show pgweb in a frame."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -209,10 +216,16 @@ class Gateway:
             log = logging.getLogger(name)
             if not any(isinstance(f, TokenRedaction) for f in log.filters):
                 log.addFilter(TokenRedaction())
+                log.addFilter(LinkRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
+        self._consoles = dict(console_urls or {}) if control_token else {}
+        self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
+        self._console_csp = " ".join(["frame-ancestors 'self'", *console_frame_ancestors]).encode()
+        if clashes := sorted(self._consoles.keys() & self.rest_proxy_urls.keys()):
+            raise ValueError(f"console keys {clashes} are also backing servers' /svc keys")
         self._computers = frozenset(computers)
         # The computer each computer tool is one of, the computer tools that take input rather than read, and the role
         # driving each computer now: the last to make an input call to its tools.
@@ -266,14 +279,17 @@ class Gateway:
         self._env_get_time_url_cache: str | None = None
         self._install_role_filters()
 
-        if self.rest_proxy_urls:
+        if self.rest_proxy_urls or self._consoles:
             @self._mcp.custom_route(
                 "/svc/{service_name}/{path:path}",
                 methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
             )
             async def proxy_to_service(request: Request) -> Response:
+                if request.path_params["service_name"] in self._consoles:
+                    return await self._proxy_console_request(request)
                 return await self._proxy_rest_request(request)
 
+        if self.rest_proxy_urls:
             @self._mcp.custom_route(BROWSER_ROUTE, methods=["GET", "HEAD"])
             async def browser_discovery(request: Request) -> Response:
                 return await self._browsers.discovery(request)
@@ -565,15 +581,7 @@ class Gateway:
 
     def run(self) -> None:
         logger.info(f"Starting Gateway on {self.host}:{self.port} (mode={self.gateway_mode.value})")
-        config = uvicorn.Config(
-            self._asgi_app(),
-            host=self._mcp.settings.host,
-            port=self._mcp.settings.port,
-            log_level=self._mcp.settings.log_level.lower(),
-            ws_ping_interval=PING_INTERVAL_S,
-            ws_ping_timeout=PING_INTERVAL_S,
-        )
-        server = uvicorn.Server(config)
+        server = uvicorn.Server(self._server_config())
         if self._resolve_i6pn_host():
             # On Modal's i6pn, serve both families: IPv4 for the orchestrator's HTTPS tunnel and
             # IPv6 for backing servers reaching the gateway over the i6pn mesh. A lone `::` bind
@@ -582,6 +590,17 @@ class Gateway:
                                      self._listen_socket(socket.AF_INET6, "::")])
         else:
             anyio.run(server.serve)
+
+    def _server_config(self) -> uvicorn.Config:
+        return uvicorn.Config(
+            self._asgi_app(),
+            host=self._mcp.settings.host,
+            port=self._mcp.settings.port,
+            log_level=self._mcp.settings.log_level.lower(),
+            ws_ping_interval=PING_INTERVAL_S,
+            ws_ping_timeout=PING_INTERVAL_S,
+            timeout_keep_alive=IDLE_CONNECTION_TIMEOUT_S,
+        )
 
     # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
     # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
@@ -608,17 +627,28 @@ class Gateway:
         async def app(scope, receive, send):
             if self._control_bearer and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
-                if scope["type"] == "http" and self._takes_control_token(scope) and not hmac.compare_digest(
-                        dict(headers).get(b"authorization", b""), self._control_bearer):
-                    logger.warning("refused %s %s: it takes the env's control token", scope["method"], scope["path"])
-                    response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
-                    await response(scope, receive, send)
+                pgweb = scope["type"] == "http" and self._console_session is not None and self._is_pgweb(scope)
+                link = self._console_session.opening_link(scope) if pgweb else None
+                bearer = hmac.compare_digest(dict(headers).get(b"authorization", b""), self._control_bearer)
+                session = pgweb and not bearer and self._console_session.admits(scope)
+                if pgweb:
+                    send = self._pgweb_send(send, renew=session and self._console_session.renews(scope))
+                if link is not None and self._console_session.opens(link):
+                    await self._console_opened(scope)(scope, receive, send)
+                    return
+                if scope["type"] == "http" and self._takes_control_token(scope) and not bearer and not session:
+                    reason, error = (("its pgweb link is spent, expired or not this env's",
+                                      "this link is not valid for this env") if link is not None
+                                     else ("it takes the env's control token", "this route takes the env's control token"))
+                    logger.warning("refused %s %s: %s", scope["method"], scope["path"], reason)
+                    await self._json_response({"ok": False, "error": error}, 401)(scope, receive, send)
                     return
                 # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
                 # receive it, through their /svc routes; every other request goes on without it.
                 if not self._keeps_control_token(scope["path"]):
-                    scope = {**scope, "headers": [(name, value) for name, value in headers if not (
-                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
+                    headers = [(name, value) for name, value in headers if not (
+                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]
+                scope = {**scope, "headers": without_session_cookie(headers)}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
@@ -635,15 +665,43 @@ class Gateway:
 
         return app
 
+    def _console_opened(self, scope: dict) -> Response:
+        """The answer to a link that opened the pgweb console: its session cookie, and the console's index without the
+        link, relative to the request, so a proxy in front of the gateway keeps its own path prefix."""
+        location = "./" if scope["path"].endswith("/") else f"{PGWEB_CONSOLE}/"
+        return Response(status_code=303, headers={"location": location, "set-cookie": self._console_session.set_cookie(),
+                                                  "cache-control": "no-store", "referrer-policy": "no-referrer"})
+
+    def _pgweb_send(self, send, *, renew: bool):
+        """``send`` for a request to the pgweb console: every answer names the origins that may frame it, and one to a
+        session past half its life carries a fresh cookie."""
+        added = [(b"content-security-policy", self._console_csp),
+                 *([(b"set-cookie", self._console_session.set_cookie().encode())] if renew else [])]
+
+        async def sending(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), *added]}
+            await send(message)
+        return sending
+
+    @staticmethod
+    def _is_pgweb(scope: dict) -> bool:
+        """Whether ``scope`` is routed to the pgweb console: the service its path names, as the /svc route reads it."""
+        prefix, _, rest = scope["path"].lstrip("/").partition("/")
+        return prefix == "svc" and rest.partition("/")[0] == PGWEB_CONSOLE
+
     def _takes_control_token(self, scope: dict) -> bool:
-        """Whether a request takes the deploy's control token: a control route, the env's data plane, or one of
-        ``token_paths`` behind /svc, by the path as routed or by the one the backing server receives (``reaches``),
-        after dot-segment normalisation. A site's /website route never reaches its data plane."""
+        """Whether a request takes the deploy's control token: a control route, the env's data plane, any path of a SQL
+        console behind /svc, or one of ``token_paths`` behind /svc, by the path as routed or by the one the backing
+        server receives (``reaches``), after dot-segment normalisation. A site's /website route never reaches its data
+        plane."""
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
         prefix, _, rest = path.lstrip("/").partition("/")
         service, _, rest = rest.partition("/")
+        if prefix == "svc" and service in self._consoles:
+            return True
         guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
         raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
         return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
@@ -900,6 +958,13 @@ class Gateway:
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                              on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint,
                              site_names=site_names)
+
+    async def _proxy_console_request(self, request: Request) -> Response:
+        """Forward a request to one of the env's SQL consoles. Only the deploy's owner reaches one, with the control
+        token or, on pgweb, a session minted from it; what it writes there is no role's, so it opens no write window."""
+        return await forward(request, self._consoles[request.path_params["service_name"]],
+                             role=self._request_role(request), timeout=self.REST_PROXY_TIMEOUT, mcp_server=False,
+                             withheld=self._withheld)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.

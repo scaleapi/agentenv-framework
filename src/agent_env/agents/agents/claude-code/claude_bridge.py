@@ -11,17 +11,17 @@ import os
 import re
 import signal
 import stat
-import struct
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,10 @@ _MODEL_ALIASES = (
 )
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# Settings every CLI run takes. The CLI deletes files older than cleanupPeriodDays by its own clock, so on an env clock
+# ahead of real time it deleted the transcript it resumes. It refuses 0, and --no-session-persistence keeps none, so
+# this is every day a JavaScript date can be from 1970: the cutoff is never after 1970, whatever the clock says.
+CLI_SETTINGS = {"cleanupPeriodDays": 100_000_000}
 
 
 # The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.
@@ -150,6 +154,18 @@ class ClaudeResult:
     structured_output: dict | None = None
     # How many `claude -p` runs the turn took; more than one means it was resumed.
     attempts: int = 1
+    # Every `result` event's `usage`, across the turn's runs: the main agent's calls, never a subagent's.
+    run_usage: list[dict] = field(default_factory=list)
+    # The CLI's own tally, `modelUsage`, at the turn's last `result`: every call, subagents' too, over the whole
+    # session, since a resume restores the session's tally.
+    model_usage: dict | None = None
+    # The session's tally before the turn: empty for a new session, None when it isn't known (a resumed session this
+    # process hasn't run before), so the turn's own tally is ``model_usage`` less this.
+    session_base: dict | None = None
+    # The subagents' model calls the turn's runs streamed, by message id.
+    subagent_calls: int = 0
+    # The model calls of runs that ended without a `result`, by message id: their usage is unknown.
+    unreported_calls: int = 0
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -175,74 +191,17 @@ def _model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
-#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
-#: while the agent follows an armed clock.
-EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
-#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
-#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
-CLOCK_PAGE = "/dev/shm/agentenv-clock"
-_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
-_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
-#: The constant every page's check is salted with (clockpage.check).
-_PAGE_CHECK_SALT = 0x9E3779B97F4A7C15
-#: How often, and how far apart, a read retries a page a write is under way on: 50 ms in all, far longer than a write.
-_PAGE_READ_TRIES, _PAGE_RETRY_S = 50, 0.001
-_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
-
-
-def clock_armed(page_path: str | None = None) -> bool:
-    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
-    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
-    try:
-        with open(page_path or CLOCK_PAGE, "rb") as page:
-            for _ in range(_PAGE_READ_TRIES):
-                page.seek(0)
-                raw = page.read(_PAGE.size)
-                if len(raw) < _PAGE.size:
-                    return False
-                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
-                    _PAGE.unpack(raw)
-                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
-                    return False
-                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
-                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
-                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ _PAGE_CHECK_SALT) & _MASK
-                if seq % 2 == 0 and checked == expected:
-                    return bool(armed)
-                time.sleep(_PAGE_RETRY_S)
-    except OSError:
-        return False
-    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
-
-
-def model_direct_hosts(base_url: str | None) -> list[str]:
-    """The model endpoint's host when the CLI reaches it directly on an armed clock: over plain HTTP, which has no
-    certificate to check at the env's date. Over TLS it goes through the egress proxy, which checks the certificate on
-    real time and, in an agent's image, reaches a private network's address too (``AGENTENV_EGRESS_PRIVATE``)."""
-    endpoint = urlsplit(base_url or "")
-    return [endpoint.hostname] if endpoint.hostname and endpoint.scheme == "http" else []
-
-
-def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
-    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
-    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
-    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
-    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
-    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
-    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
-    ``no_proxy``) stay direct."""
-    proxy = environ.get(EGRESS_PROXY_ENV)
-    if not proxy or not armed:
-        return {}
-    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
-    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
-    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
-            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the CLI appends its own ``/v1/messages``. Core's ``api_root``, copied since this image can't import core; a unit
+    test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
 
 
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
             task_id: str | None = None, max_thinking_tokens: int | None = None,
-            direct_hosts: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
+            clock_armed: bool = False, mcp_urls: Iterable[str] = ()) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
     token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
     aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
@@ -251,7 +210,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if not env.get("ANTHROPIC_AUTH_TOKEN") and env.get("LITELLM_API_KEY"):
         env["ANTHROPIC_AUTH_TOKEN"] = env["LITELLM_API_KEY"]
     if not env.get("ANTHROPIC_BASE_URL") and env.get("LITELLM_BASE_URL"):
-        env["ANTHROPIC_BASE_URL"] = env["LITELLM_BASE_URL"]
+        env["ANTHROPIC_BASE_URL"] = _api_root(env["LITELLM_BASE_URL"])
     if env.get("ANTHROPIC_AUTH_TOKEN"):
         env["ANTHROPIC_API_KEY"] = ""
     if model and env.get("ANTHROPIC_BASE_URL"):
@@ -271,8 +230,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     # Older CLIs prepend a changing attribution block to the system prompt on custom base URLs, which defeats the
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
-    model_hosts = model_direct_hosts(env.get("ANTHROPIC_BASE_URL")) if clock_armed else []
-    env.update(egress_env(environ, [*direct_hosts, *model_hosts], armed=clock_armed))
+    env.update(egress_env(environ, [env.get("ANTHROPIC_BASE_URL", ""), *mcp_urls], armed=clock_armed))
     return env
 
 
@@ -357,6 +315,65 @@ def _endpoint_hint(trajectory: list[dict]) -> str | None:
     base = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("LITELLM_BASE_URL") or "the model endpoint"
     return (f"{base} answered 404: Claude Code needs an endpoint serving Anthropic's Messages API "
             "(<base>/v1/messages), such as a LiteLLM gateway, that knows the model")
+
+
+@dataclass(frozen=True)
+class RunUsage:
+    """What one run of the CLI says it used: each of its `result` events' ``usage`` (a run that hands work to a
+    subagent writes one, then another once the subagent answers), its last ``modelUsage``, the subagents' model calls
+    those `result` events span, and the model calls after its last `result` (all of them, for a run cut off before
+    any), which no `result` counts, so their usage is unknown. Calls are counted by message id; an assistant event's
+    own usage is no account of a call, being written as the message streams."""
+
+    results: list[dict]
+    model_usage: dict | None
+    subagent_calls: int
+    unreported_calls: int
+
+
+def _usage_of_run(trajectory: list[dict]) -> RunUsage:
+    last = max((index for index, event in enumerate(trajectory) if event.get("type") == "result"), default=-1)
+    results = [event for event in trajectory[:last + 1] if event.get("type") == "result"]
+    usage = [event["usage"] for event in results if isinstance(event.get("usage"), dict)]
+    tally = next((event["modelUsage"] for event in reversed(results) if isinstance(event.get("modelUsage"), dict)),
+                 None)
+
+    def calls(events: list[dict], subagent: bool | None = None) -> int:
+        return len({(event.get("message") or {}).get("id") for event in events if event.get("type") == "assistant"
+                    and (subagent is None or bool(event.get("parent_tool_use_id")) == subagent)} - {None})
+
+    return RunUsage(usage, tally, calls(trajectory[:last + 1], subagent=True), calls(trajectory[last + 1:]))
+
+
+# Each session's last tally (`modelUsage`) in this process: the base of its next turn when its transcript can't say.
+_SESSION_TALLIES: dict[str, dict] = {}
+
+
+def saved_session_tally(session_id: str) -> dict | None:
+    """The tally a resume of ``session_id`` starts from: the ``modelUsage`` of the last `cost-state` record in the
+    session's transcript, which the CLI writes as a run exits and restores on a resume, so a run killed before it
+    exited isn't in it. Empty for a session with no transcript or no model call yet; None when the transcript can't be
+    read, or has model calls but no `cost-state`."""
+    try:
+        data = session_jsonl_path(session_id).read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    tally, called = None, False
+    for raw_line in data.splitlines():
+        if b'"cost-state"' not in raw_line and b'"assistant"' not in raw_line:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "cost-state" and isinstance(record.get("modelUsage"), dict):
+            tally = record["modelUsage"]
+        called = called or record.get("type") == "assistant"
+    return tally if tally is not None else (None if called else {})
 
 
 def _ends_in_result(trajectory: list[dict]) -> bool:
@@ -507,6 +524,13 @@ async def run_claude(
     attempt_prompt, attempt_resume, attempt_session = prompt, resume, session_id
     trajectory: list[dict] = []
     tool_calls = 0
+    run_usage: list[dict] = []
+    model_usage: dict | None = None
+    session_base: dict | None = {}
+    if resume:
+        saved = await in_thread_to_its_end(saved_session_tally, session_id)
+        session_base = saved if saved is not None else _SESSION_TALLIES.get(session_id)
+    subagent_calls = unreported_calls = 0
     attempts = 0
     first_failure: str | None = None
 
@@ -524,6 +548,12 @@ async def run_claude(
         if result.session_id != attempt_session:
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)
         tool_calls += result.tool_call_count
+        run_usage += result.run_usage
+        model_usage = result.model_usage or model_usage
+        subagent_calls += result.subagent_calls
+        unreported_calls += result.unreported_calls
+        if result.model_usage is not None and result.session_id:
+            _SESSION_TALLIES[result.session_id] = result.model_usage
 
         failure = _resumable_api_failure(result)
         budget_left = deadline - time.monotonic()
@@ -539,7 +569,9 @@ async def run_claude(
             # The first attempt's `result` was dropped from the trajectory, so the error says how the turn began.
             error = result.error and _failure_message(result.error, result.error_detail, attempts, first_failure)
             return replace(result, response=_redact(result.response) if error else result.response,
-                           tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error)
+                           tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error,
+                           run_usage=run_usage, model_usage=model_usage, session_base=session_base,
+                           subagent_calls=subagent_calls, unreported_calls=unreported_calls)
 
         trajectory.extend(_without_terminal_result(result.trajectory))
         first_failure = first_failure or result.error_detail
@@ -685,7 +717,7 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
     the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
-           "--setting-sources", "user"]
+           "--setting-sources", "user", "--settings", json.dumps(CLI_SETTINGS)]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
         cmd += ["--model", _with_1m_window(model)]
@@ -753,8 +785,7 @@ async def _spawn_claude(
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
                     max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed(),
-                    direct_hosts=[urlsplit(str(entry.get("url") or "")).hostname or ""
-                                  for entry in (mcp_servers or {}).values()]),
+                    mcp_urls=[info["url"] for info in (mcp_servers or {}).values()]),
         cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))
@@ -816,8 +847,12 @@ async def _spawn_claude(
     except asyncio.TimeoutError:
         _kill_cli(proc)
         await _reap(proc)
+        # A CLI that wrote its `result` and then hung keeps the usage it reported.
+        used = _usage_of_run(trajectory)
         return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
-                            error=f"claude CLI timed out after {timeout_s}s")
+                            error=f"claude CLI timed out after {timeout_s}s", run_usage=used.results,
+                            model_usage=used.model_usage, subagent_calls=used.subagent_calls,
+                            unreported_calls=used.unreported_calls)
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.
         _kill_cli(proc)
@@ -840,9 +875,12 @@ async def _spawn_claude(
     if structured_output is not None:
         final_response = json.dumps(structured_output)
 
+    used = _usage_of_run(trajectory)
     return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
-                        error_detail=detail, structured_output=structured_output)
+                        error_detail=detail, structured_output=structured_output, run_usage=used.results,
+                        model_usage=used.model_usage, subagent_calls=used.subagent_calls,
+                        unreported_calls=used.unreported_calls)
 
 
 _TAGS_HEADER = "x-litellm-tags"

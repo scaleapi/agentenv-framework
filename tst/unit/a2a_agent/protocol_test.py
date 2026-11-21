@@ -20,6 +20,7 @@ from agent_env.a2a_agent.protocol import (
     TerminalResponse,
     extract_terminal_response,
     poll_a2a_task,
+    read_usage,
     raise_for_extension_status,
     wake_poll,
 )
@@ -29,6 +30,7 @@ from agentenv_protocol.a2a_agent import (
     AgentIdentity,
     TaskRequest,
     TaskResult,
+    TextPart,
     Usage,
     a2a_agent,
     enable,
@@ -166,6 +168,71 @@ def test_sdk_success_round_trips_through_platform_parser():
     assert parsed.response_text == "done"
     assert parsed.structured_output == {"answer": 42}
     assert parsed.tool_call_count == 3
+
+
+def test_a_terminal_message_with_cache_usage_parses_and_its_usage_reads_back_whole():
+    usage = Usage(tool_call_count=2, input_tokens=120, output_tokens=7, cache_read_tokens=100, cache_write_tokens=20,
+                  input_includes_cache=True)
+    message = _sdk_terminal_message(TaskResult.success(parts=(TextPart(text="done"),), usage=usage))
+
+    parsed = TerminalResponse.from_message(message)
+
+    assert (parsed.response_text, parsed.tool_call_count) == ("done", 2)
+    [sent] = [part["data"]["usage"] for part in message["parts"] if part.get("kind") == "data"]
+    assert Usage.from_dict(sent) == usage
+
+
+def test_the_host_reads_a_turns_whole_usage_from_the_sdk():
+    usage = Usage(tool_call_count=2, input_tokens=120, output_tokens=7, total_tokens=127, cache_read_tokens=100,
+                  input_includes_cache=True, cost_usd=0.004, provider_details={"unreported_calls": 1})
+
+    parsed = TerminalResponse.from_message(_sdk_terminal_message(TaskResult.success(parts=(TextPart(text="ok"),),
+                                                                                   usage=usage)))
+
+    assert (parsed.usage, parsed.usage_unparsed) == (usage, None)
+
+
+@pytest.mark.parametrize("raw, usage, unparsed", [
+    ({"tool_call_count": 3}, Usage(tool_call_count=3), None),
+    ({"input_tokens": 9, "vendor_tokens": 4}, Usage(input_tokens=9, provider_details={"vendor_tokens": 4}), None),
+    ({"input_tokens": 9, "provider_details": {"cache_read_tokens": 5, "cache_write_tokens": 2, "requests": 1}},
+     Usage(input_tokens=9, cache_read_tokens=5, cache_write_tokens=2, provider_details={"requests": 1}), None),
+    ({"input_tokens": -1, "output_tokens": "many", "input_includes_cache": "yes", "cost_usd": True},
+     Usage(), {"input_tokens": -1, "output_tokens": "many", "input_includes_cache": "yes", "cost_usd": True}),
+    ({"input_tokens": 1, "provider_details": ["not", "a", "mapping"]},
+     Usage(input_tokens=1), {"provider_details": ["not", "a", "mapping"]}),
+    ("garbage", None, {"usage": "garbage"}),
+    (None, None, None),
+], ids=["tool-calls-only", "unknown-key", "legacy-cache-keys", "bad-values", "bad-details", "not-a-mapping", "none"])
+def test_an_agents_usage_is_read_as_far_as_it_can_be_and_never_raises(raw, usage, unparsed):
+    assert read_usage(raw) == (usage, unparsed)
+
+
+def test_a_long_unreadable_value_is_kept_only_as_its_start():
+    usage, unparsed = read_usage({"input_tokens": 5, "output_tokens": "x" * 5000, "provider_details": ["y"] * 2000})
+
+    assert usage == Usage(input_tokens=5)
+    assert unparsed["output_tokens"].startswith('"xxx') and unparsed["output_tokens"].endswith("...")
+    assert all(len(value) == 203 for value in unparsed.values())
+
+
+def test_the_tool_call_count_is_read_as_it_always_was_whatever_the_rest_of_the_usage():
+    message = {"parts": [{"kind": "data", "data": {"usage": {"tool_call_count": "7", "input_tokens": 3}}}]}
+
+    parsed = TerminalResponse.from_message(message)
+
+    assert parsed.tool_call_count == "7"
+    assert parsed.usage == Usage(input_tokens=3) and parsed.usage_unparsed == {"tool_call_count": "7"}
+    assert extract_terminal_response(message)[1] == "7"
+
+
+def test_a_failed_turn_sends_its_usage():
+    usage = Usage(input_tokens=5, output_tokens=2, input_includes_cache=False)
+    message = _sdk_terminal_message(TaskResult.failure("agent.boom", "it broke", usage=usage))
+
+    [sent] = [part["data"]["usage"] for part in message["parts"] if part.get("kind") == "data"]
+    assert Usage.from_dict(sent) == usage
+    assert TerminalResponse.from_message(message).error_code == "agent.boom"
 
 
 def test_sdk_failure_round_trips_through_platform_parser():
