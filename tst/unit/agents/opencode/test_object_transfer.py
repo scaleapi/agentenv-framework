@@ -15,6 +15,7 @@ from agentenv_protocol.a2a_agent import TaskRequest, TextPart, Uploaded, card_re
 
 from tst.unit.agents.opencode.agent import a2a_server as server
 from tst.unit.agents.opencode.agent import opencode_kit
+from tst.util import recording_tar
 
 
 def _grant(kind):
@@ -511,6 +512,34 @@ async def test_failed_changelog_upload_preserves_incremental_baseline(monkeypatc
     assert starting_states == ["baseline", "baseline"]
     assert baseline.read_text() == "advanced"
     assert config["sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_changelogs_tar_runs_on_real_time(monkeypatch, tmp_path, oc, folders):
+    """tar keeps the time it starts at as the next capture's baseline and archives only the files changed since, by
+    their real mtimes: on an env clock ahead of real time it left every later edit out. The server runs on real time,
+    but libfaketime takes the marker out of its environment, so tar is given it again."""
+    log = recording_tar.install(tmp_path / "bin")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("AGENTENV_REAL_TIME", raising=False)
+    uploads = _KeptUploads()
+    monkeypatch.setattr(server, "NamespaceUploader", lambda _grant: uploads)
+    namespace = {
+        "root_path": "captures", "expires_at": _grant("http-put")["expires_at"],
+        "max_objects": 10, "max_object_bytes": 1 << 20, "max_total_bytes": 1 << 22,
+        "write": {"kind": "http-post-policy", "url": "https://objects.example.test/upload",
+                  "fields": {"key": "captures/"}, "path_field": "key", "file_field": "file"},
+    }
+    async with oc.client() as client:
+        enabled = await client.post("/ext/snapshot/changelog", json={"write_namespace": namespace,
+                                                                     "roots": [str(folders)]})
+        (folders / "edited.txt").write_text("after")
+        await oc.agent._capture_changelog()
+
+    assert enabled.status_code == 200, enabled.text
+    assert list(uploads.objects) == ["000000.tgz"]
+    runs = recording_tar.incremental_runs(log)
+    assert [("-cf" in run["args"], run["real_time"]) for run in runs] == [(True, "1"), (False, "1")]
 
 
 @pytest.mark.asyncio
