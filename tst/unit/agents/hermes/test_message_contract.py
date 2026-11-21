@@ -316,6 +316,36 @@ def test_a_delegate_task_childs_calls_are_counted_and_the_session_stays_the_turn
     assert (usage.input_tokens, usage.output_tokens, usage.provider_details["api_calls"]) == (45484, 172, 5)
 
 
+def test_a_priced_turn_with_a_delegate_task_child_has_no_cost():
+    """Hermes prices only the calls its usage file counts, which leave out a child's, so its figure is short."""
+    parser = _events(_call("A", "parent", 13081, 82), _call("B", "child", 9161, 60), _call("A", "parent", 13535, 4))
+    report = {"input_tokens": 26616, "output_tokens": 86, "total_tokens": 26702, "cache_read_tokens": 0,
+              "cache_write_tokens": 0, "api_calls": 2, "estimated_cost_usd": 0.0271, "cost_status": "estimated"}
+
+    alone = a2a_server._usage(result(usage=report))
+    delegated = a2a_server._usage(parser.result(b"", b"", 0, report))
+
+    assert (alone.cost_usd, delegated.cost_usd, delegated.input_tokens) == (0.0271, None, 26616 + 9161)
+
+
+def test_calls_that_reported_counts_are_kept_beside_those_that_reported_none():
+    """A streamed main answer without usage leaves the turn's title call and a child's call counted, and only the main
+    calls unreported."""
+    parser = _events(_call("A", "parent", 0, 0), _call("B", "child", 9161, 60))
+    report = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_read_tokens": 0,
+              "cache_write_tokens": 0, "api_calls": 2, "estimated_cost_usd": 0.0, "cost_status": "estimated",
+              "auxiliary": {"api_calls": 1, "input_tokens": 456, "output_tokens": 17, "cache_read_tokens": 0,
+                            "cache_write_tokens": 0, "total_tokens": 473},
+              "total_including_auxiliary": {"api_calls": 3}}
+
+    usage = a2a_server._usage(parser.result(b"", b"", 0, report))
+
+    assert usage.to_dict() == {
+        "tool_call_count": 0, "input_tokens": 456 + 9161, "output_tokens": 17 + 60, "total_tokens": 456 + 9161 + 17 + 60,
+        "cache_read_tokens": 0, "cache_write_tokens": 0, "input_includes_cache": True,
+        "provider_details": {"api_calls": 4, "unreported_calls": 2, "cost_status": "estimated"}}
+
+
 def test_a_killed_turn_keeps_the_calls_it_made_as_a_lower_bound():
     """hermes-timeout-claude, recorded on 2026-11-20: two calls (13,073 and 13,156 in, 53 and 81 out) before the turn
     ran out of time, killed before it wrote its usage file."""

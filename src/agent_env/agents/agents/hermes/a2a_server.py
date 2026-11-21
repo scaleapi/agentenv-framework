@@ -537,7 +537,8 @@ def _usage(result) -> Usage:
     Hermes' rule with the flag unknown. Calls that reported no counts at all got none from their endpoint, as streamed
     Claude answers through a LiteLLM proxy once did, so the turn's counts are unknown rather than nothing. A turn killed
     before it wrote its file counts the calls it made from their events, and one more call as unreported: the one in
-    flight, or its title call. Hermes' cost is kept only when it priced the calls."""
+    flight, or its title call. Each part whose calls reported no counts is counted in ``unreported_calls`` while the
+    others' counts are kept. Hermes' cost is kept only when it priced every call the turn made."""
     if result.killed_calls is not None:
         return _counted_calls(result.tool_call_count, result.killed_calls, unreported=1)
     report = result.usage or {}
@@ -548,13 +549,23 @@ def _usage(result) -> Usage:
                if report.get(key) is not None}
     if calls is not None or side is not None:
         details["api_calls"] = (calls or 0) + (side.calls if side else 0)
-    if side is not None and side.unreported:
-        details["unreported_calls"] = side.unreported
     counts = {name: _count(report, name) for name in ("input_tokens", "output_tokens", "total_tokens",
                                                        "cache_read_tokens", "cache_write_tokens")}
+    unreported = side.unreported if side is not None else 0
     if (_count(report, "api_calls") or 0) > 0 and not any(counts.values()):
-        return Usage(tool_call_count=result.tool_call_count,
-                     provider_details={**details, "unreported_calls": details["api_calls"]})
+        unreported += _count(report, "api_calls")
+        counts = dict.fromkeys(counts)
+    # Hermes' auxiliary counts are its canonical ones: input without the cache.
+    extra = {"input": sum(_count(aux, key) or 0 for key in ("input_tokens", "cache_read_tokens", "cache_write_tokens")),
+             "output": _count(aux, "output_tokens") or 0, "read": _count(aux, "cache_read_tokens") or 0,
+             "write": _count(aux, "cache_write_tokens") or 0}
+    if (_count(aux, "api_calls") or 0) > 0 and not (extra["input"] or extra["output"]):
+        unreported += _count(aux, "api_calls")
+    if side is not None:
+        extra = {"input": extra["input"] + side.input_tokens, "output": extra["output"] + side.output_tokens,
+                 "read": extra["read"] + side.cache_read_tokens, "write": extra["write"] + side.cache_write_tokens}
+    if unreported:
+        details["unreported_calls"] = unreported
     read, write = counts["cache_read_tokens"], counts["cache_write_tokens"]
     input_tokens, output, total = counts["input_tokens"], counts["output_tokens"], counts["total_tokens"]
     cached = (read or 0) + (write or 0)
@@ -565,27 +576,22 @@ def _usage(result) -> Usage:
         else:
             includes_cache = True if total == input_tokens + (output or 0) + cached else None
             input_tokens += cached
-    # Hermes' auxiliary counts are its canonical ones: input without the cache.
-    extra = {"input": sum(_count(aux, key) or 0 for key in ("input_tokens", "cache_read_tokens", "cache_write_tokens")),
-             "output": _count(aux, "output_tokens") or 0, "read": _count(aux, "cache_read_tokens") or 0,
-             "write": _count(aux, "cache_write_tokens") or 0}
-    if side is not None:
-        extra = {"input": extra["input"] + side.input_tokens, "output": extra["output"] + side.output_tokens,
-                 "read": extra["read"] + side.cache_read_tokens, "write": extra["write"] + side.cache_write_tokens}
-    if input_tokens is not None:
         input_tokens += extra["input"]
-    if output is not None:
-        output += extra["output"]
-    if total is not None:
-        total += extra["input"] + extra["output"]
-    if read is not None:
-        read += extra["read"]
-    if write is not None:
-        write += extra["write"]
+        output = None if output is None else output + extra["output"]
+        total = None if total is None else total + extra["input"] + extra["output"]
+        read = None if read is None else read + extra["read"]
+        write = None if write is None else write + extra["write"]
+    elif extra["input"] or extra["output"]:
+        input_tokens, output, total = extra["input"], extra["output"], extra["input"] + extra["output"]
+        read, write, includes_cache = extra["read"], extra["write"], True
+    elif unreported:
+        return Usage(tool_call_count=result.tool_call_count, provider_details=details)
     cost = report.get("estimated_cost_usd")
     if aux:
         cost = (report.get("total_including_auxiliary") or {}).get("estimated_cost_usd")
-    priced = report.get("cost_status") in _PRICED and isinstance(cost, (int, float)) and not isinstance(cost, bool)
+    # Hermes' cost leaves out a delegate_task child's calls, so a turn with some has none.
+    priced = (report.get("cost_status") in _PRICED and isinstance(cost, (int, float)) and not isinstance(cost, bool)
+              and not unreported and not (side and side.calls))
     return Usage(
         tool_call_count=result.tool_call_count,
         input_tokens=input_tokens,
