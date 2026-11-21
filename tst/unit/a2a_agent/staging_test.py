@@ -301,6 +301,44 @@ async def test_what_the_agent_staged_reaches_the_store_when_its_answer_is_lost(a
     assert store.get(target) == b'[{"type": "result"}]'
 
 
+class _Unreachable(httpx.AsyncBaseTransport):
+    """The agent, except that requests for ``path`` never reach it."""
+
+    def __init__(self, app, path: str) -> None:
+        self._agent, self._path = httpx.ASGITransport(app=app), path
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == self._path:
+            raise httpx.ConnectError("unreachable", request=request)
+        return await self._agent.handle_async_request(request)
+
+
+@pytest.mark.asyncio
+async def test_a_staged_call_that_never_reached_the_agent_collects_nothing(agent, store, monkeypatch):
+    """So an unreachable agent's call fails at once, not after collection's retries."""
+    card = _card(agent)
+    _, path = _method(card, TRAJECTORY_V1.uri, "get")
+    real_async_client = httpx._client.AsyncClient  # the fixture already serves the agent through the patched one
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kwargs: real_async_client(transport=_Unreachable(agent, path), **kwargs))
+    collected: list[int] = []
+    real_pull = StagedObjectStore.pull
+
+    async def pull(self) -> None:
+        collected.append(1)
+        await real_pull(self)
+
+    monkeypatch.setattr(StagedObjectStore, "pull", pull)
+    granting = transfer_store(store, URL, card, sandbox_type="modal")
+
+    with pytest.raises(httpx.ConnectError):
+        await fetch_trajectory(URL + path, {"task_id": "t"},
+                               upload=TrajectoryUpload.to(granting, store.object_url("trajectories/t.json")),
+                               store=granting)
+
+    assert collected == []
+
+
 async def _enable_changelog(agent, store) -> tuple[str, staging.StagedNamespace]:
     card = _card(agent)
     granting = transfer_store(store, URL, card, sandbox_type="modal")
