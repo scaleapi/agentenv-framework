@@ -10,6 +10,7 @@ from agentenv_protocol.atif import AtifError, errors_in, strip_profile, task_doc
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse
 from agent_env.task_step.task_steps.verifiers.judge_utils import atif_turns as T
+from agent_env.task_step.task_steps.verifiers.judge_utils.frame_selection import select_frames_per_criterion
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter
 from tst.util import atif_runs
 
@@ -177,3 +178,39 @@ def test_a_transcript_takes_actions_from_tool_calls_and_frames_from_result_image
     assert [(m.after_action, m.text) for m in transcript.messages] == [(3, "B2 is now 42 and the file is saved.")]
     transcript, frames = T.transcript_from_atif(atif_runs.fixture("computer_use"), lambda path: None)
     assert frames == [] and all(a.screenshot is None for a in transcript.actions)
+
+
+def test_a_copy_graded_as_stored_that_cant_be_walked_is_read_without_failing():
+    """An invalid copy is still the turn's trajectory: every reader skips what isn't a step, a result or a call."""
+    document = {**atif_runs.fixture("computer_use")}
+    document["steps"] = [None, *document["steps"], "not a step"]
+    document["steps"][2] = {**document["steps"][2], "observation": "not an observation", "tool_calls": [None]}
+    events, _ = T.compact_atif_trajectory(document, TrajectoryFilter())
+    transcript, frames = T.transcript_from_atif(document, lambda path: b"\x89PNG\r\n\x1a\n")
+    assert events and transcript.actions and frames
+    url = atif_runs.stored("computer_use", document={**document, "steps": [None]}, media=False)
+    assert T.AtifDocuments().staged_media(T.TurnSource(url, "task-c1", 5)) == []
+
+
+def test_a_sub_agent_nested_in_another_is_found_among_its_parents_children():
+    """ATIF makes an id unique only within its parent's array, so a reference resolves there first."""
+    parent = atif_runs.fixture("subagent")
+    child = parent["subagent_trajectories"][0]
+    grandchild = {**atif_runs.fixture("computer_use"), "trajectory_id": "sub1"}
+    [result] = child["steps"][0]["observation"]["results"]
+    result["subagent_trajectory_ref"] = [{"trajectory_id": "sub1"}]
+    child["subagent_trajectories"] = [grandchild]
+    events, _ = T.compact_atif_trajectory(parent, TrajectoryFilter())
+    transcript, frames = T.transcript_from_atif(parent, lambda path: b"\x89PNG\r\n\x1a\n")
+    assert {e["tool"] for e in events if e["type"] == "tool_call"} >= {
+        call["function_name"] for step in grandchild["steps"] for call in step.get("tool_calls") or []}
+    assert len(frames) == 3
+
+
+def test_a_screenshots_type_read_from_its_bytes_reaches_per_criterion_frames():
+    gif = b"GIF89a" + b"g" * 16
+    transcript, _ = T.transcript_from_atif(atif_runs.fixture("computer_use"), lambda path: gif)
+    shot = next(action for action in transcript.actions if action.screenshot)
+    assert shot.screenshot_media_type == "image/gif"
+    [labeled] = select_frames_per_criterion([shot], [{"id": "c", "description": "the page"}], max_frames=1)
+    assert labeled.frame.media_type == "image/gif"
