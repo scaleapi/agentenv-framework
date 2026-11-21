@@ -29,7 +29,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBase
 from mcp.types import CallToolResult, TextContent, Tool as MCPTool
-from pydantic import create_model
+from pydantic import ConfigDict, create_model
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import WebSocketRoute
@@ -1820,13 +1820,11 @@ class Gateway:
 
 
 class _ProxyArgModelBase(ArgModelBase):
-    """ArgModelBase subclass that excludes unset fields from model_dump_one_level().
+    """Forwards exactly the arguments the caller sent, as /step does: unset optional fields stay unset (an explicit
+    null is still sent) and keys the schema doesn't declare reach the child, whose own validation rejects or accepts
+    them, instead of being dropped here."""
 
-    This prevents the gateway proxy from forwarding null values for optional
-    parameters that the caller didn't provide. Pydantic's model_fields_set
-    tracks which fields were actually present in the input, so explicitly
-    provided null values are still forwarded correctly.
-    """
+    model_config = ConfigDict(extra="allow")
 
     def model_dump_one_level(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -1836,6 +1834,7 @@ class _ProxyArgModelBase(ArgModelBase):
             value = getattr(self, field_name)
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
+        kwargs.update(self.model_extra or {})
         return kwargs
 
 
