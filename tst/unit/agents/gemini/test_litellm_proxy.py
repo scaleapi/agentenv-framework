@@ -27,38 +27,6 @@ def _route(agent, model=None, project_id=None, task_id=None) -> None:
     agent._routes[TOKEN] = a2a_server._Route(model, project_id, task_id)
 
 
-class Upstream:
-    """LiteLLM behind the proxy: records each request and its client's options, and answers
-    with ``response`` (an exception is raised instead)."""
-
-    def __init__(self) -> None:
-        self.requests: list[httpx.Request] = []
-        self.client_options: list[dict] = []
-        self.response: httpx.Response | Exception = httpx.Response(200, json={"ok": True})
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
-
-
-@pytest.fixture
-def upstream(monkeypatch) -> Upstream:
-    fake = Upstream()
-    real_async_client = httpx.AsyncClient
-
-    def _client(**kwargs):
-        fake.client_options.append(kwargs)
-        return real_async_client(transport=httpx.MockTransport(fake), **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", _client)
-    monkeypatch.setenv("LITELLM_BASE_URL", BASE + "/")
-    monkeypatch.setenv("LITELLM_API_KEY", "sk-FAKEfake0000fake0000fak")
-    monkeypatch.setattr(gemini_bridge, "_last_attribution", {"project_id": None, "task_id": None, "last_seen_at_utc": None})
-    return fake
-
-
 def test_the_passthrough_forwards_verbatim_with_attribution(upstream, agent, client):
     upstream.response = httpx.Response(
         207, content=b'{"candidates":[]}',
