@@ -19,13 +19,13 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient as AnthropicHttpxClient
 from browser_use import Agent, Browser, Tools
 from browser_use.browser.browser import _daemon_request
 from browser_use.tools import TOOL_RETRIES
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient as OpenAIHttpxClient
 from pydantic import TypeAdapter
 from pydantic_ai import ModelRetry, Tool
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest
@@ -37,6 +37,21 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 TOOL_NAME = re.compile(r"[^a-zA-Z0-9_-]")
 _CHECKPOINT = TypeAdapter(ModelRequest | None)
+# The model requests the turn sent, and those the endpoint refused (an error answer bills nothing): a request cut off
+# before its response, by the run's timeout or a retry, has no usage in the run's own count.
+CALLS = {"sent": 0, "refused": 0}
+
+
+async def _sent(request) -> None:
+    CALLS["sent"] += 1
+
+
+async def _answered(response) -> None:
+    if response.status_code >= 400:
+        CALLS["refused"] += 1
+
+
+HOOKS = {"request": [_sent], "response": [_answered]}
 
 
 def _api_root(url: str) -> str:
@@ -52,10 +67,12 @@ def model(turn: dict):
     name, base_url, key = turn["model"], os.environ["LITELLM_BASE_URL"], os.environ["LITELLM_API_KEY"]
     headers = json.loads(os.environ.get("LITELLM_EXTRA_HEADERS") or "{}")
     if "claude" in name.lower():
-        client = AsyncAnthropic(auth_token=key, base_url=_api_root(base_url), default_headers=headers)
+        client = AsyncAnthropic(auth_token=key, base_url=_api_root(base_url), default_headers=headers,
+                                http_client=AnthropicHttpxClient(event_hooks=HOOKS))
         return AnthropicModel(name, provider=AnthropicProvider(anthropic_client=client),
                               profile=anthropic_model_profile(name.rsplit("/", 1)[-1]))
-    client = AsyncOpenAI(api_key=key, base_url=base_url, default_headers=headers)
+    client = AsyncOpenAI(api_key=key, base_url=base_url, default_headers=headers,
+                         http_client=OpenAIHttpxClient(event_hooks=HOOKS))
     settings = {"openai_reasoning_effort": turn["effort"]} if turn["effort"] else None
     return OpenAIChatModel(name, provider=OpenAIProvider(openai_client=client), settings=settings)
 
@@ -144,13 +161,16 @@ async def main() -> None:
         stack.push_async_callback(agent.close)
         if history.exists():
             restore(agent, history)
+        # The run's messages are the conversation's; the turn's own start here, as browser-use slices its usage.
+        prior = len(agent._history or [])
         result = await agent.run(**{key: turn[key] for key in ("max_steps", "timeout") if turn.get(key)})
         if agent._history:
             save(agent, history)
     print(json.dumps({"type": "result", "result": {
         "status": result.status, "text": result.text, "success": result.success, "error": result.error,
         "steps": result.steps, "usage": result.usage, "cost_usd": result.cost_usd, "model": turn["model"],
-        "messages": ModelMessagesTypeAdapter.dump_python(result.messages, mode="json"),
+        "messages": ModelMessagesTypeAdapter.dump_python(result.messages, mode="json"), "prior": prior,
+        "calls": CALLS,
     }}), flush=True)
 
 

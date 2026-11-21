@@ -50,7 +50,8 @@ class Harness:
 def result(**fields) -> SimpleNamespace:
     """What run_hermes returns, with a finished turn's defaults."""
     defaults = {"response": "done", "error": None, "error_code": None, "session_id": "s-1", "trajectory": [],
-                "tool_call_count": 0, "structured_output": None, "usage": {}}
+                "tool_call_count": 0, "structured_output": None, "usage": {}, "side_calls": None,
+                "killed_calls": None}
     return SimpleNamespace(**{**defaults, **fields})
 
 

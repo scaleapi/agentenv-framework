@@ -43,7 +43,10 @@ the model no one is there to answer.
 | `peer-agents/v1` | SDK default: Hermes reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `attribution-probe/v1` | the `project_id` and `task_id` the last turn sent |
 
-A turn's usage is Hermes' own report for its main model calls: tokens, `api_calls`, and its estimated cost where the
-endpoint's model list prices the model. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent, running
+A turn's usage counts every model call the turn made: its main calls and its auxiliary ones (title generation,
+compression), as Hermes' usage file reports them, and a `delegate_task` child's, from their `post_api_request` events,
+which the file leaves out. A turn killed before it wrote the file keeps the calls its events counted, marked as a lower
+bound. Hermes' estimated cost is kept only where it priced the calls. The profile turns Hermes' background review off:
+its fork outlives the turn's process, which kills it before it reports what the proxy billed. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent, running
 as the `agent` user. Hermes' runtime (its own Python, Node and ripgrep) and the profiles are under `/data/.hermes`,
 whatever the uid. It has no `install/v1`.
