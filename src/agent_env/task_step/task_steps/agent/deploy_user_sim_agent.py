@@ -105,7 +105,8 @@ from agent_env.config.model import ModelRole, ModelSource, resolve_model
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.user_sim_common import (attached, opening_parts, opening_problems, opening_text,
+from agent_env.task_step.task_steps.agent.user_sim_common import (USER_SIM_RESUME_PROMPT, attached, opening_parts,
+                                                                  opening_problems, opening_text,
                                                                   persona_fingerprint, recorded_opening)
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 
@@ -326,7 +327,9 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         from agent_env.a2a_agent import A2AAgent
 
         model, source = self._user_model(context)
-        wanted = {"model": model, "output_format": setup.get("output_format")}
+        # The resume prompt keeps a turn cut short by an API error the user's (user_sim_common); a card that takes none
+        # gets none, and its agent resumes with its own.
+        wanted = {"model": model, "output_format": setup.get("output_format"), "resume_prompt": USER_SIM_RESUME_PROMPT}
         negotiated = A2AAgent.negotiate_agent_config(agent.a2a_card or {}, {k: v for k, v in wanted.items() if v})
         if negotiated is None or "model" not in negotiated.fields:
             raise RuntimeError(f"{self.type} '{self.id}': agent '{self.agent_name}' takes no model through "

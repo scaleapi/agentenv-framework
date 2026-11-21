@@ -51,7 +51,7 @@ from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskS
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent.user_sim_common import USER_SIM_RESUME_PROMPT, iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -581,7 +581,8 @@ class PromptAgentTaskStep(TaskStep):
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model,
+                                             "resume_prompt": USER_SIM_RESUME_PROMPT}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
@@ -1230,7 +1231,7 @@ class _UserSide:
         try:
             # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
             # user_a2a_url, has none and reads the store itself.
-            _, user_result = await send_and_wait(
+            user_task_id, user_result = await send_and_wait(
                 self._url, agent_parts,
                 agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
                 shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
@@ -1240,6 +1241,9 @@ class _UserSide:
         except TimeoutError as e:
             logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
             return {"end": "user_timeout"}
+
+        if self._is_user_sim:
+            await self._save_user_sim_trajectory(number, user_task_id, user_a2a_task_id)
 
         user_state = (user_result.get("status") or {}).get("state")
         self._record_usage((user_result.get("status") or {}).get("message") or {})
@@ -1270,6 +1274,31 @@ class _UserSide:
             logger.info(f"user-sim signaled done=true at turn {number}; ending multi-turn")
             return {"end": "user_done"}
         return {"message": [{"kind": "text", "text": message_text}]}
+
+    async def _save_user_sim_trajectory(self, number: int, user_task_id: str, user_a2a_task_id: str) -> None:
+        """Store the user-sim's own trajectory for this answer, when its card serves one, and record where it went.
+        Best-effort: a failed fetch is logged and the conversation goes on."""
+        card = self._user_sim.a2a_card or {}
+        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        if not traj_ext:
+            return
+        prefix = self._step._trajectory_prefix().rstrip("/") + "/usersim/"
+        try:
+            # Bounded like _user_sim_trajectory: the next turn waits on this, and the trace is optional.
+            url = await asyncio.wait_for(
+                self._step._fetch_trajectory(
+                    self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
+                    card=card, sandbox_type=self._user_sim.sandbox_type,
+                ),
+                _USER_SIM_TRAJECTORY_FETCH_SECONDS,
+            )
+        except Exception as e:
+            logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")
+            return
+        if url is None:
+            logger.warning(f"user-sim trajectory fetch at turn {number} returned no trajectory; nothing stored")
+            return
+        self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": url})
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
