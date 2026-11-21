@@ -1130,3 +1130,112 @@ def _reattached_local_agent(tmp_path, monkeypatch, *, running: str):
 
     monkeypatch.setattr(LocalSandbox, "exec_with_output", exec_with_output)
     return _run(LocalSandboxProvider().get_sandbox("local-agent1")), calls
+
+
+class _Computer:
+    """A deployed `computer` env as collect sees it: no CUA marker, a card serving computer-exec/v1 ``run`` with an
+    output cap, and ``run`` answered by running the command for real, so the shell collect sends is exercised."""
+
+    def __init__(self, max_output_bytes: int = 1 << 20):
+        from agentenv_protocol.computer import COMPUTER_EXEC
+
+        self.env_id = "desk"
+        self.environment_url = "http://desk"
+        self.metadata = {"computer": {"port": 8080}}
+        self.environment_card = {"capabilities": {"extensions": [
+            {"uri": COMPUTER_EXEC, "params": {"max_output_bytes": max_output_bytes, "max_timeout_s": 3600}}]}}
+        self.max_output_bytes = max_output_bytes
+        self.calls: list[list[str]] = []
+        self._uri = COMPUTER_EXEC
+
+    def supports(self, uri, method):
+        return uri == self._uri and method == "run"
+
+    async def run(self, deployed, argv, *, timeout_s, env=None):
+        import subprocess
+
+        self.calls.append(argv)
+        done = subprocess.run(argv, capture_output=True, timeout=timeout_s)
+        cap = self.max_output_bytes
+        return {"exit_code": done.returncode, "stdout": done.stdout.decode()[:cap], "stderr": done.stderr.decode()[:cap],
+                "truncated": len(done.stdout) > cap or len(done.stderr) > cap, "timed_out": False}
+
+
+def _computer_context(computer):
+    ctx = TaskStepContext(instance_id="inst-1")
+    ctx.deployed_envs = [computer]
+    return ctx
+
+
+class TestComputerPath:
+    """`env_id` naming a framework `computer` env: collect reads inside the computer through computer-exec/v1 ``run``,
+    in ranges whose base64 fits the card's ``max_output_bytes``, instead of refusing it as a non-CUA env."""
+
+    def _collect(self, computer, tmp_path, entries):
+        step = CollectArtifactsTaskStep(id="collect", version=None, env_id="desk", base_path=str(tmp_path),
+                                        artifact_paths=entries)
+        uploaded = {}
+
+        def put(local_path, *a, **k):
+            with open(local_path, "rb") as fh:
+                uploaded[os.path.basename(local_path)] = fh.read()
+            return "s3://bucket/x"
+
+        store = MagicMock()
+        store.put_object_file.side_effect = lambda **k: put(k.get("file_path") or k.get("local_path"))
+        with patch("agent_env.env.envs.computer.utils.inside.run", new=computer.run), \
+             patch("agent_env.task_step.task_steps.collect_artifacts._upload_file",
+                   side_effect=lambda store, file_path, *a: put(file_path)), \
+             patch("agent_env.artifact.store.get_artifact_store", return_value=store), \
+             patch("agent_env.artifact.FileArtifactUniverse") as universe:
+            universe.put.return_value = MagicMock(id="inst-1", version=1)
+            ctx = _run(step.execute(_computer_context(computer)))
+        return ctx, uploaded
+
+    def test_a_small_file_is_read_in_one_call(self, tmp_path):
+        (tmp_path / "report.txt").write_bytes(b"hello computer")
+        computer = _Computer()
+        ctx, uploaded = self._collect(computer, tmp_path, ["report.txt"])
+        assert list(uploaded.values()) == [b"hello computer"]
+        assert ctx.metadata["artifacts"] == {"report.txt": "s3://bucket/x"}
+        assert all(argv[:2] == ["/bin/sh", "-c"] for argv in computer.calls)
+        assert not any("tail -c" in argv[2] for argv in computer.calls)
+
+    def test_a_file_past_the_output_cap_streams_in_ranges(self, tmp_path):
+        data = os.urandom(5000)
+        (tmp_path / "big.bin").write_bytes(data)
+        computer = _Computer(max_output_bytes=1024)
+        _, uploaded = self._collect(computer, tmp_path, ["big.bin"])
+        assert list(uploaded.values()) == [data]
+        ranged = [argv for argv in computer.calls if "tail -c" in argv[2]]
+        assert len(ranged) > 1  # several ranges, each under the cap
+        assert not any(argv for argv in computer.calls if argv[2].startswith("base64 <"))
+
+    def test_an_absent_file_is_skipped(self, tmp_path):
+        (tmp_path / "here.txt").write_bytes(b"x")
+        _, uploaded = self._collect(_Computer(), tmp_path, ["here.txt", "gone.txt"])
+        assert list(uploaded.values()) == [b"x"]
+
+    def test_no_list_enumerates_the_base_path(self, tmp_path):
+        (tmp_path / "a.txt").write_bytes(b"a")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.txt").write_bytes(b"b")
+        ctx, uploaded = self._collect(_Computer(), tmp_path, None)
+        assert sorted(uploaded.values()) == [b"a", b"b"]
+        assert sorted(ctx.metadata["artifacts"]) == ["a.txt", "sub/b.txt"]
+
+    def test_truncated_output_is_an_error_not_a_partial_file(self):
+        computer = _Computer()
+
+        async def truncated(deployed, argv, *, timeout_s, env=None):
+            return {"exit_code": 0, "stdout": "aGk=", "stderr": "", "truncated": True, "timed_out": False}
+
+        step = CollectArtifactsTaskStep(id="collect", version=None, env_id="desk")
+        with patch("agent_env.env.envs.computer.utils.inside.run", new=truncated):
+            with pytest.raises(RuntimeError, match="cut short"):
+                _run(step._controller_call(computer, "cua_get_file", {"path": "/x"}))
+
+    def test_a_cua_env_never_takes_the_computer_path(self):
+        cua = _cua_record()
+        step = CollectArtifactsTaskStep(id="collect", version=None, env_id="ubuntu-cua")
+        assert step._read_limits(cua) == (16 * 1024 * 1024, 8 * 1024 * 1024)

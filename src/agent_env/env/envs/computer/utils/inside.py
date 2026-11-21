@@ -46,6 +46,11 @@ def max_timeout_s(deployed: DeployedSandboxEnv) -> float:
     return protocol_v1.extension_params(deployed.environment_card, COMPUTER_EXEC)["max_timeout_s"]
 
 
+def max_output_bytes(deployed: DeployedSandboxEnv) -> int:
+    """The most bytes of stdout, and of stderr, one command returns whole, as the card's computer-exec/v1 says."""
+    return protocol_v1.extension_params(deployed.environment_card, COMPUTER_EXEC)["max_output_bytes"]
+
+
 def loopback(deployed: DeployedSandboxEnv) -> dict:
     """The env's id, address and MCP endpoint as code inside the computer reaches them, the driver on loopback, and
     the ``headers`` its framework-only routes take: code agent-env runs in the computer gets the computer's token."""
