@@ -8,7 +8,8 @@ moving a person's pointer over a background app. The daemon takes line-delimited
 Windows, and each call goes on a connection of its own, as cua-driver's own MCP server sends them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
 while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
-arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs. On a Hyprland desktop
+arrived. On a recording that draws inputs, a call to one of its input tools is drawn as cua-driver's reply says it acted,
+a click where it landed. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs. On a Hyprland desktop
 (Wayland) it runs cua-driver's Wayland backend at its own pin, sends text to the desktop and keys to the focused
 window in the foreground, Super and a key a menu holds the keyboard from going to the desktop, and is ready, and takes
 input, only while Hyprland has cua-driver's plugin loaded, asking Hyprland through hyprland.py."""
@@ -16,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import errno
 import functools
 import hashlib
 import importlib.util
 import json
+import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -62,6 +66,7 @@ from agentenv_protocol.computer import (
 
 import hyprland
 
+_log = logging.getLogger(__name__)
 MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
 #: A Hyprland desktop, on Wayland, where cua-driver runs its Wayland backend and its input goes through the seats of
 #: its Hyprland plugin; what follows reaches Hyprland's IPC, so it's Hyprland's session that turns it on, not any
@@ -124,6 +129,17 @@ NAMED = {
     "Insert": "insert", "Home": "home", "End": "end", "PageUp": "pageup", "PageDown": "pagedown", "ArrowUp": "up",
     "ArrowDown": "down", "ArrowLeft": "left", "ArrowRight": "right", **{f"F{n}": f"f{n}" for n in range(1, 13)},
 }
+#: cua-driver's tools whose inputs the driver draws where they landed on the recordings that draw inputs, as its reply
+#: says it did them: a pointer input at the screen point the reply names, else at the window's point the call names,
+#: keys and text as chips, and each step of a ``run_steps`` that ran. Its other tools that act are drawn as chips.
+MARKED = frozenset({"click", "double_click", "right_click", "scroll", "drag", "move_cursor", "type_text", "press_key",
+                    "hotkey", "set_value", "run_steps"})
+#: Where a reply says a pointer input landed on the screen.
+SCREEN_POINT = re.compile(r"screen_point=\((-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\)")
+#: cua-driver's key names and the W3C key values a mark names them by; any other is a character's.
+W3C_KEYS = {**{name: key for key, name in NAMED.items()}, "return": "Enter", "esc": "Escape", "ctrl": "Control",
+            "control": "Control", "shift": "Shift", "alt": "Alt", "option": "Alt", "super": "Meta", "cmd": "Meta",
+            "command": "Meta", "meta": "Meta", "win": "Meta"}
 #: How long the skill pack's writing may take.
 SKILL_TIMEOUT_S = 60
 #: The largest reply the daemon sends: a screenshot of a large display, base64.
@@ -146,6 +162,7 @@ class CuaDriver(ComputerDriverEnvironment):
     max_click_count = 3
     max_scroll_amount = 50
     keys = (*MODIFIERS, *NAMED, *PRINTABLE_KEYS)
+    marks_own_inputs = MARKED
 
     def __init__(self) -> None:
         super().__init__()
@@ -284,7 +301,68 @@ class CuaDriver(ComputerDriverEnvironment):
             return _refused(e.message)
         if not reply.get("ok"):
             return _refused(reply.get("error") or "daemon reported failure", reply.get("exit_code") or 1)
-        return CallToolResult.model_validate(reply["result"])
+        result = CallToolResult.model_validate(reply["result"])
+        if tool in MARKED and self.draws_inputs():
+            await self._mark(tool, arguments, result)
+        return result
+
+    async def _mark(self, tool: str, arguments: dict, result: CallToolResult) -> None:
+        """Draw what a call to one of cua-driver's input tools did, as its reply says, on the recordings that draw
+        inputs; best effort, so the reply goes back whether or not it could."""
+        try:
+            inputs = []
+            for name, args, summary in _done(tool, arguments, result):
+                inputs += await self._inputs(name, args, summary)
+        except Exception as e:
+            _log.warning("couldn't mark cua-driver's %s on an annotated recording: %s: %s", tool, type(e).__name__, e)
+            return
+        await self.mark_inputs(inputs)
+
+    async def _inputs(self, tool: str, args: dict, summary: str) -> list[tuple[str, tuple]]:
+        """The computer/v1 inputs one of cua-driver's input tools made, at points of the screen, ``summary`` its reply's:
+        a pointer input it gives no point for, as one on an element it acted on through accessibility, is the tool's
+        chip, and a key or text sent after a click to focus is drawn after that click."""
+        reported = _screen_point(summary)
+        if tool in ("click", "double_click", "right_click"):
+            point = reported or (await self._on_screen(args, ("x", "y")) or [None])[0]
+            button = "right" if tool == "right_click" else args.get("button") or "left"
+            count = 2 if tool == "double_click" else args.get("count") or 1
+            return [("click", (*point, button, count, []))] if point else [("tool", (tool, args))]
+        if tool == "scroll":
+            point = reported or (await self._on_screen(args, ("x", "y")) or [None])[0]
+            return ([("scroll", (*point, args.get("direction"), args.get("amount") or 3, []))] if point else
+                    [("tool", (tool, args))])
+        if tool == "drag":
+            path = await self._on_screen(args, ("from_x", "from_y"), ("to_x", "to_y"))
+            return ([("drag", (path, args.get("button") or "left", args.get("duration_ms") or 500, []))]
+                    if path else [("tool", (tool, args))])
+        if tool == "move_cursor":
+            return ([("pointer_move", (args["x"], args["y"]))] if args.get("x") is not None and args.get("y") is not None
+                    else [("tool", (tool, args))])
+        focused = [("click", (*reported, "left", 1, []))] if reported else []
+        if tool == "type_text":
+            return [*focused, ("type_text", (args.get("text") or "",))]
+        if tool in ("press_key", "hotkey"):
+            keys = [*(args.get("modifiers") or []), args.get("key")] if tool == "press_key" else args.get("keys") or []
+            return [*focused, ("press", ([W3C_KEYS.get(str(key).lower(), str(key)) for key in keys if key],))]
+        return [*focused, ("tool", (tool, args))]
+
+    async def _on_screen(self, args: dict, *names: tuple[str, str]) -> list[tuple[float, float]] | None:
+        """Where the points a call names, each by its arguments' names, are on the screen: as given in the desktop's
+        frame, else in its window's, offset by where cua-driver lists the window; None for a call missing one, naming
+        no window by id, or in a zoom's frame."""
+        points, target = [(args.get(x), args.get(y)) for x, y in names], args.get("target") or {}
+        if any(x is None or y is None for x, y in points) or args.get("from_zoom"):
+            return None
+        if args.get("coordinate_frame") == "desktop" or args.get("scope") == "desktop":
+            return points
+        window, pid = args.get("window_id", target.get("window_id")), args.get("pid", target.get("pid"))
+        if window is None:
+            return None
+        listed = await self._call("list_windows", DeviceUnavailable, **({"pid": pid} if pid is not None else {}))
+        bounds = next((w["bounds"] for w in _structured(listed).get("windows") or [] if w.get("window_id") == window),
+                      None)
+        return None if bounds is None else [(bounds["x"] + x, bounds["y"] + y) for x, y in points]
 
     async def _rest(self, x: int, y: int) -> None:
         await self._send("move_cursor", x=x, y=y, **FOREGROUND)
@@ -468,6 +546,49 @@ def _refused(message: str, exit_code: int = 1) -> CallToolResult:
     """A failed call as cua-driver's own MCP server answers one, which every tool's output schema admits."""
     return CallToolResult(isError=True, content=[TextContent(type="text", text=message)],
                           structuredContent={"code": "tool_invocation_failed", "exit_code": exit_code})
+
+
+def _done(tool: str, arguments: dict, result: CallToolResult) -> list[tuple[str, dict, str]]:
+    """Each input a call to one of cua-driver's input tools made, as its reply says, with its arguments and the reply's
+    summary: none for a call it refused, and for ``run_steps`` each step that ran, with the batch's window and delivery
+    where the step names none."""
+    reply = _structured(result.model_dump(mode="json"))
+    if tool != "run_steps":
+        return [] if result.isError else [(tool, arguments, str(reply.get("summary") or
+                                                                _text(result.model_dump(mode="json"))))]
+    batch = {key: arguments[key] for key in ("pid", "window_id", "app", "window", "delivery_mode") if key in arguments}
+    asked, done = arguments.get("steps") or [], []
+    for step in reply.get("steps") or []:
+        index = step.get("index")
+        if step.get("ok") and isinstance(index, int) and 0 <= index < len(asked):
+            name, args = _step(asked[index])
+            if name in MARKED and name != "run_steps":
+                done.append((name, {**batch, **args}, str(step.get("message") or "")))
+    return done
+
+
+def _step(step: dict) -> tuple[str, dict]:
+    """A ``run_steps`` step's tool and arguments: ``{"tool", "args"}``, or ``{tool: args}``."""
+    if "tool" in step:
+        return str(step["tool"]), dict(step.get("args") or {})
+    (name, args), = step.items()
+    return str(name), dict(args or {})
+
+
+def _structured(result: dict) -> dict:
+    """A tool's structured reply: its structured content, else its text when that is a JSON object."""
+    if isinstance(result.get("structuredContent"), dict):
+        return result["structuredContent"]
+    with contextlib.suppress(ValueError):
+        reply = json.loads(_text(result))
+        if isinstance(reply, dict):
+            return reply
+    return {}
+
+
+def _screen_point(summary: str) -> tuple[float, float] | None:
+    found = SCREEN_POINT.search(summary)
+    return (float(found[1]), float(found[2])) if found else None
 
 
 def _text(result: dict) -> str:
