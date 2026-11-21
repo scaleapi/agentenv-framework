@@ -1107,6 +1107,10 @@ class PromptAgentTaskStep(TaskStep):
         raise RuntimeError(f"could not read /triggers/state for env '{deployed.env_id}': {last_exc}")
 
 
+# How a post-turn hook's note reaches a peer user sim: one more text part after the agent's reply.
+PEER_NOTE = ("[Only you see this; the assistant doesn't. What you found when you checked its work yourself: {note}]")
+
+
 class _UserSide:
     """Who answers the agent between turns: agent triggers first, then the LLM user simulator or a human peer."""
 
@@ -1127,10 +1131,13 @@ class _UserSide:
         self._shareable = shareable
         self._end_after: Optional[str] = None
 
-    async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
+    async def ask(self, number: int, solver_message: str, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record. A
         user deployed by deploy_user_sim_agent may add ``end_after``: the agent answers the message, then the
-        conversation ends for that reason, and every later ask gets that end without asking anyone."""
+        conversation ends for that reason, and every later ask gets that end without asking anyone. ``note`` (from a
+        post-turn hook) is shown to an LLM user sim with the reply, as something only it sees, and recorded in
+        ``metadata["user_side_notes"]``; a human peer gets none. Nobody sees it either when an agent trigger answers
+        the turn, or once ``end_after`` has ended the conversation."""
         if self._end_after is not None:
             return {"end": self._end_after}
         if self._decide_url is not None:
@@ -1145,10 +1152,13 @@ class _UserSide:
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
-            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in)
+            if note is not None:  # where the peer path records it too: one place for what the user sim was told
+                self._record("user_side_notes", {"turn": number, "note": note})
+            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
+                                              note=note)
             self._end_after = answer.get("end_after")
             return answer
-        return await self._ask_peer(number, agent_parts)
+        return await self._ask_peer(number, agent_parts, note)
 
     async def _ask_built_in(self, text: str) -> dict:
         """One turn of the user sim deploy_user_sim_agent deployed, in this conversation's session: ``{"text",
@@ -1208,8 +1218,12 @@ class _UserSide:
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
         return answer
 
-    async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
+    async def _ask_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         step = self._step
+        if note is not None and self._is_user_sim:
+            # after the reply, so the sim reads it as its own check of the work; the agent never sees this message
+            agent_parts = [*agent_parts, {"kind": "text", "text": PEER_NOTE.format(note=note.strip())}]
+            self._record("user_side_notes", {"turn": number, "note": note})
         if self._url is None:
             self._url = get_config().get_default_human_a2a_url()
         user_a2a_task_id = uuid.uuid4().hex
@@ -1298,12 +1312,13 @@ class _BuiltInUserSim:
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
 
-    async def ask(self, number: int, reply: str, ask_user_sim) -> dict:
+    async def ask(self, number: int, reply: str, ask_user_sim, note: Optional[str] = None) -> dict:
         """The user's answer to the agent's ``reply``: ``{"message": parts}``, with ``end_after`` when the agent's answer
-        to it ends the conversation, or ``{"end": reason}``."""
+        to it ends the conversation, or ``{"end": reason}``. ``note`` goes in the read as ``user_note``: what the user
+        found checking the work themselves."""
         now = await _clock_now(self._step, self._clock_envs)
         read = {"time": now, "assistant_messages": [{"at": now, "text": reply}], "phone": [],
-                "you_sent": self._you_sent, "done_ends_run": True}
+                "you_sent": self._you_sent, "done_ends_run": True, **({"user_note": note.strip()} if note else {})}
         self._you_sent = []
         calls: list[dict] = []
 
