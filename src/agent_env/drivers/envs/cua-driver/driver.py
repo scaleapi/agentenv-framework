@@ -134,6 +134,8 @@ NAMED = {
 #: keys and text as chips, and each step of a ``run_steps`` that ran. Its other tools that act are drawn as chips.
 MARKED = frozenset({"click", "double_click", "right_click", "scroll", "drag", "move_cursor", "type_text", "press_key",
                     "hotkey", "set_value", "run_steps"})
+#: cua-driver's scroll amount and drag duration, in ms, when a call names none.
+SCROLL_AMOUNT, DRAG_MS = 3, 500
 #: Where a reply says a pointer input landed on the screen, as each OS's cua-driver words it: ``screen_point=(x, y)``
 #: on Linux, ``screen-point (x,y)`` on macOS, ``at screen (x,y)`` on Windows.
 SCREEN_POINT = re.compile(r"(?:screen[_-]point=?|at screen) ?\((-?\d+(?:\.\d+)?), ?(-?\d+(?:\.\d+)?)\)")
@@ -310,13 +312,17 @@ class CuaDriver(ComputerDriverEnvironment):
     async def _mark(self, tool: str, arguments: dict, result: CallToolResult) -> None:
         """Draw what a call to one of cua-driver's input tools did, as its reply says, on the recordings that draw
         inputs; best effort, so the reply goes back whether or not it could."""
+        inputs = []
         try:
-            inputs = []
-            for name, args, summary in _done(tool, arguments, result):
-                inputs += await self._inputs(name, args, summary)
+            done = _done(tool, arguments, result)
         except Exception as e:
+            done = []
             _log.warning("couldn't mark cua-driver's %s on an annotated recording: %s: %s", tool, type(e).__name__, e)
-            return
+        for name, args, summary in done:
+            try:
+                inputs += await self._inputs(name, args, summary)
+            except Exception as e:  # one input that can't be marked leaves the others drawn
+                _log.warning("couldn't mark cua-driver's %s on an annotated recording: %s: %s", name, type(e).__name__, e)
         await self.mark_inputs(inputs)
 
     async def _inputs(self, tool: str, args: dict, summary: str) -> list[tuple[str, tuple]]:
@@ -324,18 +330,19 @@ class CuaDriver(ComputerDriverEnvironment):
         a pointer input it gives no point for, as one on an element it acted on through accessibility, is the tool's
         chip, and a key or text sent after a click to focus is drawn after that click."""
         reported = _screen_point(summary)
+        held = _w3c(args.get("modifier") or [])
         if tool in ("click", "double_click", "right_click"):
             point = reported or (await self._on_screen(args, ("x", "y")) or [None])[0]
             button = "right" if tool == "right_click" else args.get("button") or "left"
             count = 2 if tool == "double_click" else args.get("count") or 1
-            return [("click", (*point, button, count, []))] if point else [("tool", (tool, args))]
+            return [("click", (*point, button, count, held))] if point else [("tool", (tool, args))]
         if tool == "scroll":
             point = reported or (await self._on_screen(args, ("x", "y")) or [None])[0]
-            return ([("scroll", (*point, args.get("direction"), args.get("amount") or 3, []))] if point else
-                    [("tool", (tool, args))])
+            return ([("scroll", (*point, args.get("direction"), args.get("amount") or SCROLL_AMOUNT, held))] if point
+                    else [("tool", (tool, args))])
         if tool == "drag":
             path = await self._on_screen(args, ("from_x", "from_y"), ("to_x", "to_y"))
-            return ([("drag", (path, args.get("button") or "left", args.get("duration_ms") or 500, []))]
+            return ([("drag", (path, args.get("button") or "left", args.get("duration_ms") or DRAG_MS, held))]
                     if path else [("tool", (tool, args))])
         if tool == "move_cursor":
             return ([("pointer_move", (args["x"], args["y"]))] if args.get("x") is not None and args.get("y") is not None
@@ -345,7 +352,7 @@ class CuaDriver(ComputerDriverEnvironment):
             return [*focused, ("type_text", (args.get("text") or "",))]
         if tool in ("press_key", "hotkey"):
             keys = [*(args.get("modifiers") or []), args.get("key")] if tool == "press_key" else args.get("keys") or []
-            return [*focused, ("press", ([W3C_KEYS.get(str(key).lower(), str(key)) for key in keys if key],))]
+            return [*focused, ("press", (_w3c(keys),))]
         return [*focused, ("tool", (tool, args))]
 
     async def _on_screen(self, args: dict, *names: tuple[str, str]) -> list[tuple[float, float]] | None:
@@ -355,7 +362,7 @@ class CuaDriver(ComputerDriverEnvironment):
         points, target = [(args.get(x), args.get(y)) for x, y in names], args.get("target") or {}
         if any(x is None or y is None for x, y in points) or args.get("from_zoom"):
             return None
-        if args.get("coordinate_frame") == "desktop" or args.get("scope") == "desktop":
+        if "desktop" in (args.get("coordinate_frame"), args.get("scope"), target.get("kind")):
             return points
         window, pid = args.get("window_id", target.get("window_id")), args.get("pid", target.get("pid"))
         if window is None:
@@ -561,19 +568,27 @@ def _done(tool: str, arguments: dict, result: CallToolResult) -> list[tuple[str,
     asked, done = arguments.get("steps") or [], []
     for step in reply.get("steps") or []:
         index = step.get("index")
-        if step.get("ok") and isinstance(index, int) and 0 <= index < len(asked):
-            name, args = _step(asked[index])
-            if name in MARKED and name != "run_steps":
-                done.append((name, {**batch, **args}, str(step.get("message") or "")))
+        if step.get("ok") and isinstance(index, int) and 0 <= index < len(asked) and (acted := _step(asked[index])):
+            name, args = acted
+            done.append((name, {**batch, **args}, str(step.get("message") or "")))
     return done
 
 
-def _step(step: dict) -> tuple[str, dict]:
-    """A ``run_steps`` step's tool and arguments: ``{"tool", "args"}``, or ``{tool: args}``."""
-    if "tool" in step:
-        return str(step["tool"]), dict(step.get("args") or {})
-    (name, args), = step.items()
-    return str(name), dict(args or {})
+def _step(step: Any) -> tuple[str, dict] | None:
+    """A ``run_steps`` step's action and its arguments: ``{"tool", "args", ...}``, or ``{tool: args, ...}`` beside its
+    checks (``expect``, ``wait_for``); None for one that names no input tool."""
+    if not isinstance(step, dict):
+        return None
+    name = step.get("tool") or next((key for key in step if key in MARKED), None)
+    args = step.get("args") if "tool" in step else step.get(name)
+    if name not in MARKED or name == "run_steps":
+        return None
+    return str(name), dict(args) if isinstance(args, dict) else {}
+
+
+def _w3c(keys: list) -> list[str]:
+    """cua-driver's key names as the W3C key values a mark names them by."""
+    return [W3C_KEYS.get(str(key).lower(), str(key)) for key in keys if key]
 
 
 def _structured(result: dict) -> dict:

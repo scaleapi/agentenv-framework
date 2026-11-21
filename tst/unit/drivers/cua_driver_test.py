@@ -852,13 +852,16 @@ async def test_a_point_a_reply_doesnt_name_is_found_in_the_window_the_call_names
                                            "amount": 15})
         await session.call_tool("drag", {"target": {"kind": "window", "pid": 7, "window_id": 3}, "from_x": 1,
                                          "from_y": 2, "to_x": 30, "to_y": 40, "duration_ms": 250})
-        await session.call_tool("right_click", {"x": 5, "y": 6, "coordinate_frame": "desktop"})
+        await session.call_tool("right_click", {"x": 5, "y": 6, "coordinate_frame": "desktop", "modifier": ["cmd"]})
+        await session.call_tool("drag", {"target": {"kind": "desktop", "display_id": "primary"}, "from_x": 1,
+                                         "from_y": 2, "to_x": 3, "to_y": 4, "modifier": ["shift"]})
         await session.call_tool("scroll", {"pid": 7, "window_id": 4, "x": 1, "y": 1, "direction": "up"})
         await session.call_tool("click", {"element_token": "s3:146"})
 
     assert marked == [[("scroll", (700, 451, "down", 15, []))],
                       [("drag", ([(41, 53), (70, 91)], "left", 250, []))],
-                      [("click", (5, 6, "right", 1, []))],
+                      [("click", (5, 6, "right", 1, ["Meta"]))],
+                      [("drag", ([(1, 2), (3, 4)], "left", 500, ["Shift"]))],
                       [("tool", ("scroll", {"pid": 7, "window_id": 4, "x": 1, "y": 1, "direction": "up"}))],
                       [("tool", ("click", {"element_token": "s3:146"}))]]
     windows = [(name, args) for name, args in daemon.calls() if name == "list_windows"]
@@ -892,7 +895,8 @@ async def test_each_step_of_a_batch_that_ran_is_marked_with_the_batchs_window_wh
         {"index": 3, "ok": False, "message": "press_key failed"}]}
     daemon.replies["run_steps"] = {"content": [{"type": "text", "text": json.dumps(ran)}]}
     steps = [{"tool": "set_value", "args": {"element_token": "s1:15", "value": "laptop"}},
-             {"tool": "click", "args": {"x": 5, "y": 6}}, {"scroll": {"x": 9, "y": 9, "direction": "down"}},
+             {"tool": "click", "args": {"x": 5, "y": 6}},
+             {"scroll": {"x": 9, "y": 9, "direction": "down"}, "expect": [{"text": "Q4"}], "wait_for": {"name": "Q3"}},
              {"tool": "press_key", "args": {"key": "enter"}}]
     async with mcp_session(module.CuaDriver()) as session:
         await session.call_tool("run_steps", {"pid": 7, "window_id": 3, "delivery_mode": "foreground",
@@ -924,10 +928,19 @@ async def test_a_call_cua_driver_refused_marks_nothing_and_nothing_is_read_for_m
 
 
 @pytest.mark.asyncio
-async def test_a_mark_that_cant_be_made_leaves_the_calls_reply_as_cua_driver_gave_it(module, daemon, marked, caplog):
+async def test_an_input_that_cant_be_marked_leaves_the_others_drawn_and_the_reply_as_cua_driver_gave_it(
+        module, daemon, marked, caplog):
     daemon.fail.add("list_windows")
+    ran = {"executed": 2, "ok": True, "steps": [
+        {"index": 0, "ok": True, "message": "Scrolled down 3 ticks."},
+        {"index": 1, "ok": True, "message": "Clicked at (5.0, 6.0). [window_point=(5, 6) screen_point=(5, 57)]"}]}
+    daemon.replies["run_steps"] = {"content": [{"type": "text", "text": "run_steps: 2/2 steps ok"}],
+                                   "structuredContent": ran}
     async with mcp_session(module.CuaDriver()) as session:
         scrolled = await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 1, "y": 1, "direction": "down"})
+        await session.call_tool("run_steps", {"pid": 7, "window_id": 3, "steps": [
+            {"tool": "scroll", "args": {"x": 1, "y": 1, "direction": "down"}}, {"tool": "click", "args": {"x": 5, "y": 6}}]})
 
     assert not scrolled.isError and scrolled.structuredContent["summary"] == "did scroll"
-    assert marked == [] and "couldn't mark cua-driver's scroll on an annotated recording" in caplog.text
+    assert marked == [[], [("click", (5.0, 57.0, "left", 1, []))]]
+    assert "couldn't mark cua-driver's scroll on an annotated recording" in caplog.text
