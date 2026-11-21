@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import io
 import json
 import os
 import tarfile
 from pathlib import Path
+
+import pytest
 
 from agentenv_protocol.transfers import Uploaded
 
@@ -344,3 +347,96 @@ def test_a_saved_conversation_holds_no_key_an_api_error_echoed(monkeypatch, tmp_
     saved = a2a_server._read_complete_session_jsonl(transcript).decode()
 
     assert key not in saved and "[redacted]" in saved and saved.startswith(f"{ok}\n")
+
+
+def test_the_workspace_archive_stores_bytes_as_they_are_in_a_gzip_stream_older_loaders_read(monkeypatch, tmp_path):
+    workspace, _ = _snapshot_roots(monkeypatch, tmp_path)
+    text = b"the same line of source code\n" * 40_000
+    text_size = len(text)
+    (workspace / "notes.txt").write_bytes(text)
+    archive = tmp_path / "workspace.tar.gz"
+
+    _, bytes_written = a2a_server._build_workspace_archive(archive)
+
+    assert bytes_written > text_size
+    with tarfile.open(archive, mode="r:gz") as tar:
+        assert tar.extractfile("notes.txt").read() == text
+
+
+@pytest.mark.parametrize("grant_bytes", [1 << 20, 200_000], ids=["fits-uncompressed", "fits-only-compressed"])
+def test_a_saved_workspace_fits_its_upload_grant(monkeypatch, tmp_path, agent, grant_bytes):
+    workspace, state = _snapshot_roots(monkeypatch, tmp_path)
+    text = b"the same line of source code\n" * 20_000
+    (workspace / "notes.txt").write_bytes(text)
+    session_dir = state / "projects" / "-app"
+    (session_dir / "session-1.jsonl").write_text(json.dumps({"type": "user", "sessionId": "session-1"}) + "\n")
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", session_dir)
+    agent.set_session_ref_for_context("ctx-1", "session-1")
+    uploaded: dict[str, bytes] = {}
+
+    async def _upload(target, source):
+        body = source.read_bytes()
+        assert len(body) <= target.max_bytes
+        uploaded[target.write.url] = body
+        return Uploaded(size_bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
+
+    monkeypatch.setattr(a2a_server, "upload", _upload)
+    request = a2a_server.ObjectSnapshotSaveRequest.model_validate({"context_id": "ctx-1", "objects": {
+        "trajectory": write_grant("snap/trajectory"), "workspace": write_grant("snap/workspace", max_bytes=grant_bytes)}})
+
+    asyncio.run(agent.save_snapshot(request))
+
+    with tarfile.open(fileobj=io.BytesIO(uploaded[request.objects.workspace.write.url]), mode="r:gz") as tar:
+        assert tar.extractfile("notes.txt").read() == text
+
+
+def test_a_workspace_too_big_for_the_disk_uncompressed_is_saved_compressed(monkeypatch, tmp_path):
+    workspace, _ = _snapshot_roots(monkeypatch, tmp_path)
+    text = b"the same line of source code\n" * 20_000
+    (workspace / "notes.txt").write_bytes(text)
+    archive = tmp_path / "workspace.tar.gz"
+    disk_bytes = 200_000
+    write_archive = a2a_server._write_workspace_archive
+
+    def _write_to_a_small_disk(path, **kwargs):
+        file_count, size = write_archive(path, **kwargs)
+        if size > disk_bytes:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return file_count, size
+
+    monkeypatch.setattr(a2a_server, "_write_workspace_archive", _write_to_a_small_disk)
+
+    _, bytes_written = a2a_server._build_workspace_archive(archive)
+
+    assert bytes_written <= disk_bytes
+    with tarfile.open(archive, mode="r:gz") as tar:
+        assert tar.extractfile("notes.txt").read() == text
+
+
+def _recompressed(archive: Path, level: int) -> Path:
+    with tarfile.open(archive, mode="r:gz") as source:
+        members = [(member, source.extractfile(member).read() if member.isfile() else None)
+                   for member in source.getmembers()]
+    copy = archive.with_name(f"level-{level}.tar.gz")
+    with tarfile.open(copy, mode="w:gz", compresslevel=level) as tar:
+        for member, data in members:
+            tar.addfile(member, io.BytesIO(data) if data is not None else None)
+    return copy
+
+
+@pytest.mark.parametrize("level", [None, 9], ids=["as-saved", "compressed-by-an-older-agent"])
+def test_a_workspace_archive_restores_whether_or_not_its_gzip_stream_is_compressed(monkeypatch, tmp_path, level):
+    _snapshot_roots(monkeypatch, tmp_path / "source")
+    archive = tmp_path / "workspace.tar.gz"
+    a2a_server._build_workspace_archive(archive)
+    if level is not None:
+        archive = _recompressed(archive, level)
+    destination_workspace = tmp_path / "destination" / "app"
+    destination_state = tmp_path / "destination" / "home" / ".claude"
+    monkeypatch.setattr(a2a_server, "WORKSPACE_DIR", destination_workspace)
+    monkeypatch.setattr(a2a_server, "CLAUDE_STATE_DIR", destination_state)
+
+    a2a_server._restore_workspace_archive(archive)
+
+    assert (destination_workspace / "report" / "answer.txt").read_text() == "done"
+    assert (destination_state / "projects" / "-app" / "memory" / "MEMORY.md").read_text() == "remember this"
