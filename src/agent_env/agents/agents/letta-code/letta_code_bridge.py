@@ -335,6 +335,11 @@ def _descendants(pid: int) -> list[int]:
 
 
 
+def _is_letta(cmdline: bytes) -> bool:
+    """A Letta Code process: the CLI run as itself, or by node as its script, whatever its other arguments name."""
+    return any(Path(arg.decode(errors="replace")).name in ("letta", "letta.js") for arg in cmdline.split(b"\0")[:2])
+
+
 def _stop_leftovers(turn: str) -> list[int]:
     """Kill the Letta Code processes a turn left running, found by its marker in their environment: a background
     Workflow's server and a subagent stuck in a tool outlive the CLI, and read the provider again on each step, so
@@ -347,7 +352,7 @@ def _stop_leftovers(turn: str) -> list[int]:
             continue
         try:
             found = (marker in (entry / "environ").read_bytes().split(b"\0")
-                     and b"letta" in (entry / "cmdline").read_bytes())
+                     and _is_letta((entry / "cmdline").read_bytes()))
         except OSError:
             continue
         if found:

@@ -385,8 +385,8 @@ async def test_a_turn_runs_through_a_relay_with_the_endpoints_key_and_reports_wh
 
 
 def test_a_turns_leftover_letta_processes_are_stopped_and_nothing_else(monkeypatch, tmp_path):
-    """Found by the turn's marker in a process's environment and Letta in its command line: another turn's, and the
-    model's own background job, keep running."""
+    """Found by the turn's marker in a process's environment and Letta as its executable or script: another turn's,
+    and the model's own background jobs, even one whose arguments name Letta, keep running."""
     def process(pid: int, environ: dict[str, str], *argv: str) -> None:
         folder = tmp_path / str(pid)
         folder.mkdir()
@@ -397,6 +397,7 @@ def test_a_turns_leftover_letta_processes_are_stopped_and_nothing_else(monkeypat
     process(101, mine, "node", "/opt/agent/node_modules/@letta-ai/letta-code/letta.js", "server", "--listen")
     process(102, {**mine, "LETTA_SUBAGENT_LAUNCH": "1"}, "node", "/usr/local/bin/letta", "-p", "subtask")
     process(103, mine, "python3", "-m", "http.server", "8080")
+    process(105, mine, "python", "/app/letta-demo/server.py", "--name", "letta")
     process(104, theirs, "node", "/usr/local/bin/letta", "server")
     (tmp_path / "self").mkdir()
     killed = []
