@@ -68,6 +68,7 @@ from codex_bridge import (
     SESSIONS_DIR,
     find_rollout_path,
     get_last_attribution_snapshot,
+    kill_orphaned_clis,
     kill_running_clis,
     now,
     run_codex,
@@ -245,8 +246,10 @@ class CodexConfig(AgentConfig):
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    """The model endpoint into config.toml as the server starts; as it stops, the CLIs of turns still running are
-    killed, which would otherwise go on in the workspace after it."""
+    """The model endpoint into config.toml as the server starts, and the CLIs a crashed server left running killed; as
+    it stops, the CLIs of turns still running are killed, which would otherwise go on in the workspace after it."""
+    if orphans := kill_orphaned_clis():
+        logger.warning(f"Killed {orphans} codex CLI(s) an earlier server left running")
     codex_config.write_base_config(os.environ)
     try:
         yield

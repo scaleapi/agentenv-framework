@@ -75,4 +75,6 @@ def codex(monkeypatch, tmp_path) -> Harness:
     monkeypatch.setattr(a2a_server, "_active_execution_tasks", {})
     monkeypatch.setattr(a2a_server, "_context_locks", {})
     monkeypatch.setattr(a2a_server, "_workspace_barrier", a2a_server._WorkspaceBarrier())
+    # The machine's own /proc isn't the image's: a test that sets the image's variables doesn't kill a CLI running here.
+    monkeypatch.setattr(a2a_server, "kill_orphaned_clis", lambda: 0)
     return Harness()
