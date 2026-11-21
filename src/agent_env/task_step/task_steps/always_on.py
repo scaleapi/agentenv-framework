@@ -668,16 +668,20 @@ class _Run:
 
     async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> tuple[str, dict]:
         """One turn of the agent on ``parts``: the task's clock runs at its rate while the agent works, and is frozen
-        again after."""
+        again after. The turn's usage is recorded as its reply arrives, before the clock is frozen."""
         step = self.step
         await self._clock_runs(True)
         try:
             # Cut off past its limit and grace, whatever send_and_wait's own retries do: a TimeoutError, as its own.
-            return await asyncio.wait_for(
-                send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
-                              context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
-                              poll_interval_seconds=step.poll_interval_seconds, before_send=record),
-                step.timeout_seconds + TURN_GRACE_SECONDS)
+            with self.usage.awaiting(ModelRole.SOLVER):
+                task_id, result = await asyncio.wait_for(
+                    send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
+                                  context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
+                                  poll_interval_seconds=step.poll_interval_seconds, before_send=record),
+                    step.timeout_seconds + TURN_GRACE_SECONDS)
+            self.usage.turn(ModelRole.SOLVER,
+                            protocol.TerminalResponse.from_message((result.get("status") or {}).get("message") or {}))
+            return task_id, result
         finally:
             await self._clock_runs(False)
 
@@ -1284,7 +1288,6 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
         traj = None
@@ -1365,7 +1368,6 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
         traj = None
@@ -1564,11 +1566,12 @@ class _Run:
         if limit <= 0:
             return {"text": None, "structured": None, "error": "the read's time limit passed"}
         try:
-            user_task_id, result = await asyncio.wait_for(send_and_wait(
-                self.user_url, [{"kind": "text", "text": text}],
-                agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
-                context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
-                poll_interval_seconds=self.step.poll_interval_seconds), limit)
+            with self.usage.awaiting(ModelRole.USER_SIMULATOR):
+                user_task_id, result = await asyncio.wait_for(send_and_wait(
+                    self.user_url, [{"kind": "text", "text": text}],
+                    agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
+                    context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
+                    poll_interval_seconds=self.step.poll_interval_seconds), limit)
         except TimeoutError as e:
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
         status = (result.get("status") or {})

@@ -4,7 +4,10 @@ step that raises keeps its finished turns. An entry's counts have ``Usage``'s ke
 
 from __future__ import annotations
 
+import asyncio
 import operator
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
@@ -85,7 +88,8 @@ class RoleUsage:
         token count gave input and output; otherwise its sums can't be charged in full, and it isn't priced short.
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
-        (``unreported_calls``, which the entry sums, or a proxy's ``unreported``)."""
+        (``unreported_calls``, which the entry sums, or a proxy's ``unreported``), or a turn was cut off
+        (``StepUsage.awaiting``)."""
         reported = [usage for usage in self.turns if usage is not None]
 
         def total(name: str) -> Any:
@@ -145,6 +149,20 @@ class StepUsage:
         if usage is not None:
             usage.add(reply.usage, reply.usage_unparsed)
             self.entries()
+
+    @contextmanager
+    def awaiting(self, role: ModelRole) -> Iterator[None]:
+        """Around the wait for a turn of ``role``: a turn cut off by a time limit or a cancel never replies, yet the
+        calls it made are billed, so it is recorded as a turn whose usage is unknown, marking the role's entry a lower
+        bound. A role that wasn't started is skipped."""
+        try:
+            yield
+        except (TimeoutError, asyncio.CancelledError):
+            usage = self._roles.get(role)
+            if usage is not None:
+                usage.add(Usage(provider_details={"unreported": True}))
+                self.entries()
+            raise
 
     def entries(self) -> Optional[list[UsageEntry]]:
         """The entries of the roles that ran turns, written to ``metadata["step_usage"]``; None, and nothing written,

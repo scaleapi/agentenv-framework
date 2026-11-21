@@ -52,7 +52,8 @@ class Rig:
     user sim's answers to its
     reads, in order; once they run out it answers no_reply. Every message the agent got is in ``sent``, every read the
     user sim got in ``reads``. A ``plugin`` replaces the scripted one; what it sends the user sim agent with ``ask`` is
-    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply). ``during`` has, for each of the agent's
+    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply; one that is an exception is raised).
+    ``during`` has, for each of the agent's
     turns, the gateway's settings and the agent's tools as the agent saw them. With ``takes_config`` the agent's card
     takes its config (``CONFIG_CARD``), whose posts land in ``configs``. ``solver_usage`` and ``user_usage``, when set,
     are the usage each of the agent's and the user sim agent's replies reports."""
@@ -251,6 +252,8 @@ class Rig:
         if url == USER_SIM:
             self.user_calls.append({"parts": list(parts), "context_id": kw.get("context_id")})
             text = self.user_texts.pop(0) if self.user_texts else '{"outcome": "no_reply", "message": ""}'
+            if isinstance(text, BaseException):
+                raise text
             return f"user-{len(self.user_calls)}", {"status": {"state": "completed", "message": {
                 "parts": [{"kind": "text", "text": text}, *self._usage_part(self.user_usage)]}}}
         assert url == SOLVER, url

@@ -52,6 +52,7 @@ from a2a.types import TaskState
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
 from agent_env.a2a_agent.object_transfer import send_and_wait
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
+from agent_env.config.model import ModelRole
 from agent_env.store import get_config
 from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -67,6 +68,7 @@ from agent_env.task_step.task_steps.always_on import (
     AlwaysOnTaskStep,
 )
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, fetch_native_trajectory, is_prompt_step
+from agent_env.task_step.usage import StepUsage
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +180,12 @@ class RateUserSatisfactionTaskStep(TaskStep):
                       "assistant_messages": [{"at": m.get("at"), "text": m["text"]} for m in session.unread]}
         calls: list[dict] = []
         deadline = time.monotonic() + self.timeout_seconds
+        context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, us.get("model"))
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.USER_SIMULATOR, us.get("model"), agent)
 
         async def ask(text: str) -> dict:
-            got = await self._ask(agent, session, text, deadline)
+            got = await self._ask(agent, session, text, deadline, usage)
             calls.append(got)
             return got
 
@@ -234,26 +239,30 @@ class RateUserSatisfactionTaskStep(TaskStep):
             session.skipped = f"the run step failed: {failed}"
         return session
 
-    async def _ask(self, agent: DeployedAgent, session: _Session, text: str, deadline: float) -> dict:
+    async def _ask(self, agent: DeployedAgent, session: _Session, text: str, deadline: float,
+                   usage: StepUsage) -> dict:
         """One user sim turn on ``text`` in the run's session, cut off at the step's ``deadline`` (time.monotonic()):
-        ``{"text", "structured", "trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``."""
+        ``{"text", "structured", "trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``. Its usage
+        goes into ``usage``, a turn cut off counting as one whose usage is unknown."""
         limit = deadline - time.monotonic()
         if limit <= 0:
             return {"text": None, "structured": None, "error": "the step's time limit passed"}
         url = agent.a2a_url or agent.api_url
         message_id = uuid.uuid4().hex
         try:
-            task_id, result = await asyncio.wait_for(send_and_wait(
-                url, [{"kind": "text", "text": text}], agent=agent if agent.sandbox_id else None,
-                message_id=message_id, context_id=session.context_id, timeout_seconds=limit,
-                poll_interval_seconds=self.poll_interval_seconds), limit)
+            with usage.awaiting(ModelRole.USER_SIMULATOR):
+                task_id, result = await asyncio.wait_for(send_and_wait(
+                    url, [{"kind": "text", "text": text}], agent=agent if agent.sandbox_id else None,
+                    message_id=message_id, context_id=session.context_id, timeout_seconds=limit,
+                    poll_interval_seconds=self.poll_interval_seconds), limit)
         except TimeoutError as e:
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
         status = result.get("status") or {}
-        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
-            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
         msg = status.get("message") or {}
         term = protocol.TerminalResponse.from_message(msg)
+        usage.turn(ModelRole.USER_SIMULATOR, term)
+        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
+            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
         raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output if isinstance(term.structured_output, dict) else None
         return {"text": raw, "structured": structured,
