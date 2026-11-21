@@ -71,7 +71,8 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
                     target = {"pid": parent["pid"], "window_id": parent["window_id"]}
                     await session.call_tool("get_window_state", {**target, "include_screenshot": True})
                     bounds = (await _window(session, "home - Thunar"))["bounds"]
-                    pixel = await session.call_tool("click", {**target, "x": 20, "y": bounds["height"] - 15})
+                    pixel = await session.call_tool("click", {**target, "x": 20, "y": bounds["height"] - 15,
+                                                              "delivery_mode": "foreground"})
             async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
                 async with ClientSession(read, write) as other:
                     await other.initialize()
