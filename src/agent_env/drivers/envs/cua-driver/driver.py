@@ -550,12 +550,12 @@ def _refused(message: str, exit_code: int = 1) -> CallToolResult:
 
 def _done(tool: str, arguments: dict, result: CallToolResult) -> list[tuple[str, dict, str]]:
     """Each input a call to one of cua-driver's input tools made, as its reply says, with its arguments and the reply's
-    summary: none for a call it refused, and for ``run_steps`` each step that ran, with the batch's window and delivery
-    where the step names none."""
+    summary: none for a call it refused, as an error or as its effect, and for ``run_steps`` each step that ran, with
+    the batch's window and delivery where the step names none."""
     reply = _structured(result.model_dump(mode="json"))
     if tool != "run_steps":
-        return [] if result.isError else [(tool, arguments, str(reply.get("summary") or
-                                                                _text(result.model_dump(mode="json"))))]
+        refused = result.isError or reply.get("effect") == "refused"
+        return [] if refused else [(tool, arguments, str(reply.get("summary") or _text(result.model_dump(mode="json"))))]
     batch = {key: arguments[key] for key in ("pid", "window_id", "app", "window", "delivery_mode") if key in arguments}
     asked, done = arguments.get("steps") or [], []
     for step in reply.get("steps") or []:

@@ -901,16 +901,19 @@ async def test_each_step_of_a_batch_that_ran_is_marked_with_the_batchs_window_wh
 async def test_a_call_cua_driver_refused_marks_nothing_and_nothing_is_read_for_marks_while_no_recording_draws_them(
         module, daemon, marked, monkeypatch):
     daemon.refuse.add("click")
+    daemon.replies["scroll"] = {**_summary("Background delivery is not available."),
+                                "structuredContent": {"effect": "refused", "route": "global_input", "summary": "refused"}}
     daemon.replies["run_steps"] = {"isError": True, "content": [
         {"type": "text", "text": "run_steps: step 1 of 1 failed; 0 step(s) ran before it"}]}
     async with mcp_session(module.CuaDriver()) as session:
         await session.call_tool("click", {"pid": 7, "window_id": 3, "x": 1, "y": 1})
         await session.call_tool("run_steps", {"steps": [{"tool": "click", "args": {"x": 1, "y": 1}}]})
         await session.call_tool("launch_app", {"name": "thunar"})
+        await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 1, "y": 1, "direction": "down"})
         monkeypatch.setattr(module.CuaDriver, "draws_inputs", lambda self: False)
         await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 1, "y": 1, "direction": "down"})
 
-    assert marked == [[], []]
+    assert marked == [[], [], []]
     assert "list_windows" not in [name for name, _args in daemon.calls()]
 
 
