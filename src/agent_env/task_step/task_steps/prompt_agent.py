@@ -1142,6 +1142,10 @@ class PromptAgentTaskStep(TaskStep):
         raise RuntimeError(f"could not read /triggers/state for env '{deployed.env_id}': {last_exc}")
 
 
+# How a post-turn hook's note reaches a peer user sim: one more text part after the agent's reply.
+PEER_NOTE = ("[Only you see this; the assistant doesn't. What you found when you checked its work yourself: {note}]")
+
+
 class _UserSide:
     """Who answers the agent between turns: agent triggers first, then the LLM user simulator or a human peer."""
 
@@ -1170,18 +1174,23 @@ class _UserSide:
         self.gate_failure: Optional[str] = None
         self._end_after: Optional[str] = None
 
-    async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
+    async def ask(self, number: int, solver_message: str, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record. A
         user deployed by deploy_user_sim_agent may add ``end_after``: the agent answers the message, then the
-        conversation ends for that reason, and every later ask gets that end without asking anyone."""
+        conversation ends for that reason, and every later ask gets that end without asking anyone. ``note`` (from a
+        post-turn hook) is shown to an LLM user sim with the reply, as something only it sees, and recorded in
+        ``metadata["user_side_notes"]``; a human peer gets none. Nobody sees it either when an agent trigger answers
+        the turn, or once ``end_after`` has ended the conversation. It goes with the first message only, never with a
+        user-sim gate's rewrite request, and the gate's judge is shown it."""
         self._history.append(("assistant", solver_message or ""))
-        answer = await self._answer(number, agent_parts, solver_message)
+        answer = await self._answer(number, agent_parts, solver_message, note)
         if "message" in answer and "end" not in answer:
             self._history.append(("user", "\n".join(p.get("text", "") for p in answer["message"]
                                                      if p.get("kind") == "text")))
         return answer
 
-    async def _answer(self, number: int, agent_parts: list[dict], solver_message: str) -> dict:
+    async def _answer(self, number: int, agent_parts: list[dict], solver_message: str,
+                      note: Optional[str] = None) -> dict:
         if self._end_after is not None:
             return {"end": self._end_after}
         if self._decide_url is not None:
@@ -1196,15 +1205,18 @@ class _UserSide:
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
-            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in)
+            if note is not None:  # where the peer path records it too: one place for what the user sim was told
+                self._record("user_side_notes", {"turn": number, "note": note})
+            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
+                                              note=note)
             if self._gate is not None and "message" in answer:
-                async def rewrite_built_in(note: str) -> dict:
-                    return await self._built_in.rewrite(number, note, self._ask_built_in)
+                async def rewrite_built_in(why: str) -> dict:  # the gate's request alone: the hook's note went once
+                    return await self._built_in.rewrite(number, why, self._ask_built_in)
 
-                answer = await self._gated(number, answer, rewrite_built_in)
+                answer = await self._gated(number, answer, rewrite_built_in, hook_note=note)
             self._end_after = answer.get("end_after")
             return answer
-        return await self._ask_peer(number, agent_parts)
+        return await self._ask_peer(number, agent_parts, note)
 
     async def _ask_built_in(self, text: str) -> dict:
         """One turn of the user sim deploy_user_sim_agent deployed, in this conversation's session: ``{"text",
@@ -1264,19 +1276,20 @@ class _UserSide:
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
         return answer
 
-    async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
-        answer = await self._send_to_peer(number, agent_parts)
+    async def _ask_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
+        answer = await self._send_to_peer(number, agent_parts, note)
         if self._gate is None or "end" in answer:
             return answer
 
-        async def rewrite_peer(note: str) -> dict:
-            return await self._send_to_peer(number, [{"kind": "text", "text": note}])
+        async def rewrite_peer(why: str) -> dict:  # the gate's request alone: the hook's note went with the first send
+            return await self._send_to_peer(number, [{"kind": "text", "text": why}])
 
-        return await self._gated(number, answer, rewrite_peer)
+        return await self._gated(number, answer, rewrite_peer, hook_note=note)
 
-    async def _gated(self, number: int, answer: dict, ask_rewrite) -> dict:
+    async def _gated(self, number: int, answer: dict, ask_rewrite, hook_note: Optional[str] = None) -> dict:
         """Check the user-sim's message; while it fails, ask for a rewrite with ``ask_rewrite(note)``, which returns an
-        answer shaped as ``ask``'s, up to the gate's limit (``run_gate``)."""
+        answer shaped as ``ask``'s, up to the gate's limit (``run_gate``). The judge is shown ``hook_note``, what a
+        post-turn hook told the user sim it found, so a message reporting that check reads as the user's."""
         gate = self._gate
         if self._gate_call_config is None and self._gate_judge_setup_error is None and gate.judge_model:
             # Judge setup (its key, its endpoint) failing leaves the patterns' verdict standing, with the error
@@ -1301,7 +1314,7 @@ class _UserSide:
 
         outcome = await run_gate(gate, _text_of(answer["message"]), self._history, rewrite,
                                  call_config=self._gate_call_config, judge_unavailable=self._gate_judge_setup_error,
-                                 on_verdict=on_verdict)
+                                 on_verdict=on_verdict, user_note=hook_note)
         if not outcome.invalid:
             return latest["answer"]
         self._context.metadata.setdefault("user_sim_invalid", {})[self._step.id] = {
@@ -1313,8 +1326,12 @@ class _UserSide:
                                  f"{gate.max_rewrites} rewrite(s): {'; '.join(outcome.reasons())[:500]}")
         return {"end": "user_sim_invalid"}
 
-    async def _send_to_peer(self, number: int, agent_parts: list[dict]) -> dict:
+    async def _send_to_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         step = self._step
+        if note is not None and self._is_user_sim:
+            # after the reply, so the sim reads it as its own check of the work; the agent never sees this message
+            agent_parts = [*agent_parts, {"kind": "text", "text": PEER_NOTE.format(note=note.strip())}]
+            self._record("user_side_notes", {"turn": number, "note": note})
         if self._url is None:
             self._url = get_config().get_default_human_a2a_url()
         user_a2a_task_id = uuid.uuid4().hex
@@ -1407,12 +1424,13 @@ class _BuiltInUserSim:
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
 
-    async def ask(self, number: int, reply: str, ask_user_sim) -> dict:
+    async def ask(self, number: int, reply: str, ask_user_sim, note: Optional[str] = None) -> dict:
         """The user's answer to the agent's ``reply``: ``{"message": parts}``, with ``end_after`` when the agent's answer
-        to it ends the conversation, or ``{"end": reason}``."""
+        to it ends the conversation, or ``{"end": reason}``. ``note`` goes in the read as ``user_note``: what the user
+        found checking the work themselves."""
         now = await _clock_now(self._step, self._clock_envs)
         read = {"time": now, "assistant_messages": [{"at": now, "text": reply}], "phone": [],
-                "you_sent": self._you_sent, "done_ends_run": True}
+                "you_sent": self._you_sent, "done_ends_run": True, **({"user_note": note.strip()} if note else {})}
         self._you_sent = []
         calls: list[dict] = []
 

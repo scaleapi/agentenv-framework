@@ -102,6 +102,8 @@ class PageDriver(ComputerDriverEnvironment):
     keys = sorted({*NAMED, *string.ascii_letters, *string.digits, *PUNCTUATION, *SHIFTED})
     recording = Recording(max_fps=10)
     screen_kind = "page"
+    #: Shorter than a desktop driver's: the page shows a key's scroll sooner than a desktop's browser window does.
+    screenshot_delay_ms = 300
     notes = ("This computer is one web page: the browser's active tab, with no address bar, tab strip or desktop "
              "around it. Its screen is the page's viewport. Go to a URL with computer_navigate, back, forward or "
              "reload with computer_history, and list, open, switch or close tabs with computer_tabs. Each screenshot "

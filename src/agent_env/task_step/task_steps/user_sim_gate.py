@@ -139,13 +139,23 @@ the assistant said, states a decision or a fact the user holds, or seems off top
 
 CONVERSATION SO FAR (most recent last):
 {history}
-
+{user_note}
 CANDIDATE (the user's next message):
 <<<
 {candidate}
 >>>
 
 Answer in JSON: {{"in_role": true or false, "reason": "one sentence citing the candidate"}}"""
+
+# What a post-turn hook told the user it found (prompt_agent's turn.ask_user(note=...)): a user who says it is
+# reporting their own check, not the assistant's work.
+_USER_NOTE = """
+WHAT THE USER FOUND checking the work themselves just now (only the user saw this, not the assistant). Saying it in \
+the user's own words ("I checked the folder and the sheet isn't there") is written as the user:
+<<<
+{note}
+>>>
+"""
 
 _JUDGE_SCHEMA = {
     "type": "object",
@@ -236,7 +246,7 @@ class UserSimGate:
         return asdict(self)
 
     async def check(self, candidate: str, history: list[tuple[str, str]], *, call_config=None,
-                    judge_unavailable: Optional[str] = None) -> GateVerdict:
+                    judge_unavailable: Optional[str] = None, user_note: Optional[str] = None) -> GateVerdict:
         """Check one message. ``history`` is the conversation so far as ``(role, text)``, role user/assistant.
         A judge that reads the message as the user's clears a hit on a phrase alone (``PHRASE_REASONS``); a shape hit
         stays a failure. A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict
@@ -248,7 +258,8 @@ class UserSimGate:
             return verdict
         if self.judge_model:
             try:
-                judged = await self._judge(candidate, history, call_config)
+                judged = await (self._judge(candidate, history, call_config, user_note=user_note) if user_note
+                                else self._judge(candidate, history, call_config))
             except Exception as e:  # the judge is a second opinion; never let it take the conversation down
                 logger.warning(f"user-sim gate judge call failed ({type(e).__name__}: {e}); using patterns only")
                 verdict.judge_error = f"{type(e).__name__}: {e}"[: self.RECORDED_ERROR_CHARS]
@@ -265,7 +276,8 @@ class UserSimGate:
                 verdict.cleared_by_judge = True
         return verdict
 
-    async def _judge(self, candidate: str, history: list[tuple[str, str]], route) -> Optional[dict]:
+    async def _judge(self, candidate: str, history: list[tuple[str, str]], route,
+                     user_note: Optional[str] = None) -> Optional[dict]:
         """One judge call through core's one model-call path (config/model_call.py), on ``route``
         (``judge_call_config``'s), or on the configured endpoint when none was given."""
         from agent_env.config import model_call
@@ -273,6 +285,7 @@ class UserSimGate:
         prompt = _JUDGE_PROMPT.format(
             history=render_history(history, self.context_turns, self.context_chars),
             candidate=candidate[: self.context_chars * 2],
+            user_note=_USER_NOTE.format(note=user_note.strip()) if user_note else "",
         )
         if route is None:
             route = judge_call_config(self, {})
@@ -337,15 +350,19 @@ async def run_gate(
     call_config=None,
     judge_unavailable: Optional[str] = None,
     on_verdict: Optional[Callable[[int, str, GateVerdict], None]] = None,
+    user_note: Optional[str] = None,
 ) -> GateOutcome:
     """Check ``text``; while it fails, send the user-sim ``rewrite_request`` through ``rewrite`` and check its new
     message, up to ``gate.max_rewrites`` times. ``rewrite`` returns the new message, or None when the user side
     ended instead. ``judge_unavailable`` is why the judge couldn't be set up, if it couldn't (see ``check``).
-    ``on_verdict(attempt, text, verdict)`` sees every check, for recording. Any conversation loop
+    ``on_verdict(attempt, text, verdict)`` sees every check, for recording. ``user_note`` is what a post-turn hook
+    told the user sim it found, shown to the judge. Any conversation loop
     can call this; ``prompt_agent`` does, between a user-sim's reply and the agent's next turn."""
     outcome = GateOutcome(text=text)
     for attempt in range(gate.max_rewrites + 1):
         extra = {} if judge_unavailable is None else {"judge_unavailable": judge_unavailable}
+        if user_note:  # what a post-turn hook told the user sim it found: the judge reads a report of it as the user's
+            extra["user_note"] = user_note
         verdict = await gate.check(text, history, call_config=call_config, **extra)
         outcome.verdicts.append(verdict)
         if on_verdict is not None:

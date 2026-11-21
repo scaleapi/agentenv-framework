@@ -254,3 +254,25 @@ def test_good_settings_load_and_round_trip():
 
     gate = UserSimGate.from_dict({"patterns": False, "judge_model": "j", "max_rewrites": 0, "judge_timeout_seconds": 30})
     assert UserSimGate.from_dict(gate.to_dict()) == gate
+
+
+
+def test_the_judge_is_shown_what_the_user_found_when_a_hook_told_it(monkeypatch):
+    import asyncio
+
+    from agent_env.config import model_call
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    prompts = []
+
+    async def complete(route, messages, *, timeout, response_format=None):
+        prompts.append(messages[0]["content"])
+        return model_call.ModelReply('{"in_role": true, "reason": "ok"}', "m", None, None, None)
+
+    monkeypatch.setattr(model_call, "complete", complete)
+    gate = UserSimGate(judge_model="judge-model")
+    asyncio.run(gate._judge("i checked and the sheet isn't there", [], "route", user_note="no sheet in the folder"))
+    asyncio.run(gate._judge("i checked and the sheet isn't there", [], "route"))
+
+    assert "WHAT THE USER FOUND" in prompts[0] and "no sheet in the folder" in prompts[0]
+    assert "WHAT THE USER FOUND" not in prompts[1]

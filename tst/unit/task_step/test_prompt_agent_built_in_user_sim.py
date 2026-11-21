@@ -506,3 +506,28 @@ async def test_a_reply_rewritten_into_a_done_no_longer_counts(monkeypatch):
 
     # The held reply and its rewrite count once, so her second reply is the one that reaches the limit.
     assert _to(peers, ctx, AGENT) == ["plan my parents' visit", "shorter, please", "and cheaper"]
+
+
+@pytest.mark.asyncio
+async def test_a_hook_note_is_in_the_users_read_after_the_reply_and_never_reaches_the_agent(monkeypatch):
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    hook = _hook("notes", """
+        async def post_turn(turn, params):
+            return None if turn.last else await turn.ask_user(note="The sheet has no total.")
+        """)
+    peers = Peers(monkeypatch, {AGENT: [text("Sheet's in the folder."), text("Added it.")],
+                                USER: [said("reply", "can it have a total?")]})
+    ctx = await _context(monkeypatch)
+
+    await _step(turns=2, post_turn_hooks=[{"file_artifact_id": hook, "params": {}}]).execute(ctx)
+
+    stored = _full(_reads(ctx)[0])
+    assert stored["read"]["user_note"] == "The sheet has no total."
+    # recorded where the peer path records it, so there's one place to look for what the user sim was told
+    assert [n["note"] for n in ctx.metadata["user_side_notes"]["talk"]] == ["The sheet has no total."]
+    rendered = stored["input"]
+    assert rendered.index("Sheet's in the folder.") < rendered.index(
+        "WHAT YOU FOUND WHEN YOU CHECKED ITS WORK YOURSELF (the assistant doesn't see this):\n  The sheet has no total.")
+    sent_to_agent = [r[2]["params"]["message"]["parts"] for r in peers.requests(ctx) if r[1] == f"{AGENT}/a2a"
+                     and r[2].get("method") == "message/send"]
+    assert all("no total" not in json.dumps(parts) for parts in sent_to_agent)
