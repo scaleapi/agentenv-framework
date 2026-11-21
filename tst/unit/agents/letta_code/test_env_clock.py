@@ -99,7 +99,7 @@ def _turn(monkeypatch, tmp_path, *, armed: bool, environ: dict[str, str]) -> lis
 
     @asynccontextmanager
     async def relay(*_args, **_kwargs):
-        yield RELAY
+        yield RELAY.removesuffix("/v1")
 
     monkeypatch.setattr(bridge.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(bridge, "model_relay", relay)
@@ -129,13 +129,14 @@ def test_on_an_armed_clock_every_command_of_a_turn_goes_out_through_the_proxy_bu
 
 
 def test_unarmed_a_turn_runs_mains_commands_with_mains_environment(monkeypatch, tmp_path):
-    """With the clock off, the bridge adds nothing to what the CLI ran with before the clock: the image's own variables
-    (the proxy's address, agent-env's CA bundles) pass through untouched, as every other variable of the server's."""
+    """With the clock off, the bridge adds nothing to what the CLI ran with before the clock but the turn's marker: the
+    image's own variables (the proxy's address, agent-env's CA bundles) pass through untouched, as every other variable
+    of the server's."""
     environ = {**IMAGE_ENV, "HOME": str(tmp_path / "data")}
     spawned = _turn(monkeypatch, tmp_path, armed=False, environ=environ)
     home = bridge.context_data_dir("ctx")
     base = {**environ, "HOME": str(home), "LETTA_LOCAL_BACKEND_DIR": str(home / ".letta/lc-local-backend"),
-            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1"}
+            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1", bridge._TURN_MARKER: spawned[0][1][bridge._TURN_MARKER]}
     handle = "openai-compatible/m"
 
     assert spawned == [
