@@ -17,6 +17,9 @@ import pytest
 from agentenv_protocol.a2a_agent import Usage
 from starlette.testclient import TestClient
 
+from agent_env.config.model_pricing import litellm_prices
+from agent_env.task_step.usage import RoleUsage
+
 from tst.unit.agents.openhands.agent import openhands_agent
 
 OpenHandsAgent = openhands_agent.OpenHandsAgent
@@ -703,11 +706,27 @@ def test_a_turns_usage_counts_the_cache_in_its_input() -> None:
 
 def test_a_turns_usage_is_unknown_where_no_usage_came_back() -> None:
     """A response that carried no usage, which OpenHands keeps no ``TokenUsage`` for, is counted apart, and a Chat
-    Completions prompt as large as its cache may or may not have counted it."""
+    Completions prompt as large as its cache counts it, by OpenAI's rule."""
     unreported = openhands_agent.turn_usage([], responses=1, tool_calls=0, cost=None)
-    ambiguous = openhands_agent.turn_usage([(_call(5000, 10, read=4000), False)], responses=2, tool_calls=2, cost=None)
+    counted = openhands_agent.turn_usage([(_call(5000, 10, read=4000), False)], responses=2, tool_calls=2, cost=None)
 
     assert unreported == Usage(tool_call_count=0, provider_details={"reasoning_tokens": 0, "unreported_calls": 1})
-    assert ambiguous == Usage(tool_call_count=2, input_tokens=5000, output_tokens=10, total_tokens=5010,
-                              cache_read_tokens=4000, cache_write_tokens=0, input_includes_cache=None,
-                              provider_details={"reasoning_tokens": 0, "unreported_calls": 1})
+    assert counted == Usage(tool_call_count=2, input_tokens=5000, output_tokens=10, total_tokens=5010,
+                            cache_read_tokens=4000, cache_write_tokens=0, input_includes_cache=True,
+                            provider_details={"reasoning_tokens": 0, "unreported_calls": 1})
+
+
+def test_a_claude_turn_through_a_proxy_that_counts_the_cache_is_priced_once() -> None:
+    """openhands-baseline-claude, recorded on 2026-11-20 through Scale's LiteLLM proxy, whose Claude prompt counts the
+    cache: the turn's cost is what the proxy's calls cost, not the cache charged twice."""
+    usage = openhands_agent.turn_usage([(_call(10381, 215, write=10371), False),
+                                        (_call(10813, 65, read=10371, write=428), False)],
+                                       responses=2, tool_calls=2, cost=0.01595985)
+    role = RoleUsage("solver", "claude-haiku-4-5-20251001")
+    role.add(usage)
+    entry = role.entry(litellm_prices())
+
+    assert (usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens, usage.input_includes_cache) == (
+        21194, 10371, 10799, True)
+    assert abs(entry["cost_usd"] - 0.01595985) < 1e-9 and entry["uncached_input_tokens"] == 24
+    assert "cost_assumed" not in entry
