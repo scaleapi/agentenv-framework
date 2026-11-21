@@ -462,44 +462,105 @@ async def test_marking_the_walls_verified_writes_nothing_unless_the_sandbox_is_t
 
 
 _WALLS_WRITER = "_mark_walls_verified"
-#: Functions that may name WALLS_TAG without writing it: its refusal in attribution and the reattach that reads it.
+#: Functions that may name WALLS_TAG without writing it: its refusal in attribution and the reattach that reads it,
+#: which alone passes what it read to a handle's ``walls``.
 _WALLS_READERS = {"_attribution_tags", "get_shared_box"}
+#: Names whose spelling as a string would reach the walls tag or the tags around getattr and setattr.
+_WALLS_NAMES = {"WALLS_TAG", "set_tags", "_walls"}
+
+
+def _walls_tag_strays(name: str, text: str) -> list[str]:
+    """Each place in the module ``text`` that writes the walls tag, or a handle's record of it, outside its one writer.
+
+    WALLS_TAG, bare or as an attribute, is named only in its definition, by the functions that read or refuse it, and
+    by the writer, the only one to put it in a dict or assign it. ``set_tags`` is reached, called or not, only on a
+    Modal App, named ``app``, or by the writer. A handle's ``_walls`` is assigned only by the writer, or from the
+    ``walls`` argument in ``__init__``, and ``walls=`` is passed only by the readers. None of these names is spelled
+    as a string, as for getattr, except by the writer."""
+    tree = ast.parse(text)
+    owner = {}
+    for function in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        for node in ast.walk(function):
+            owner.setdefault(id(node), function.name)
+    writes, passthrough = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            writes |= {id(k) for k in node.keys if k is not None}
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            writes.add(id(node.slice))
+        if isinstance(node, ast.Assign) and owner.get(id(node)) == "__init__" \
+                and isinstance(node.value, ast.Name) and node.value.id == "walls":
+            passthrough |= {id(t) for t in node.targets}
+    stray = []
+    for node in ast.walk(tree):
+        function = owner.get(id(node))
+        if function == _WALLS_WRITER:
+            continue
+        where = f"{name}:{getattr(node, 'lineno', '?')} in {function or 'module scope'}"
+        if (isinstance(node, ast.Name) and node.id == "WALLS_TAG") or \
+                (isinstance(node, ast.Attribute) and node.attr == "WALLS_TAG"):
+            if function is None and isinstance(node.ctx, ast.Store):
+                continue
+            if function not in _WALLS_READERS or id(node) in writes:
+                stray.append(f"{where} names WALLS_TAG")
+        if isinstance(node, ast.Attribute) and node.attr == "set_tags" \
+                and not (isinstance(node.value, ast.Name) and node.value.id == "app"):
+            stray.append(f"{where} sets tags")
+        if isinstance(node, ast.Attribute) and node.attr == "_walls" and not isinstance(node.ctx, ast.Load) \
+                and id(node) not in passthrough:
+            stray.append(f"{where} assigns _walls")
+        if isinstance(node, ast.keyword) and node.arg == "walls" and function not in _WALLS_READERS:
+            stray.append(f"{where} passes walls=")
+        callee = getattr(node, "func", None)
+        if isinstance(node, ast.Call) and getattr(callee, "id", getattr(callee, "attr", None)) == "ModalVmSandbox" \
+                and (len(node.args) > 4 or any(k.arg is None for k in node.keywords)):
+            stray.append(f"{where} may pass walls to ModalVmSandbox unnamed")
+        if isinstance(node, ast.Constant) and node.value in _WALLS_NAMES:
+            stray.append(f"{where} spells {node.value!r}")
+    return stray
 
 
 def test_only_the_walls_writer_writes_the_walls_tag_or_sets_a_sandboxs_tags():
-    """WALLS_TAG is named only in its definition, in imports, by the functions that read or refuse it, and by its one
-    writer, the only one to put it in a dict or assign it. Its value is spelled nowhere else. ``set_tags`` is called
-    only on a Modal App, named ``app``, or by the writer."""
     package = Path(modal_sandbox.__file__).parents[2]
     stray = []
     for source in package.rglob("*.py"):
         text = source.read_text()
         if f'"{WALLS_TAG}"' in text and source != Path(modal_sandbox.__file__):
             stray.append(f"{source.name} spells the walls tag's value")
-        tree = ast.parse(text)
-        owner = {}
-        for function in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
-            for node in ast.walk(function):
-                owner.setdefault(id(node), function.name)
-        writes = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Dict):
-                writes |= {id(k) for k in node.keys if k is not None}
-            if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
-                writes.add(id(node.slice))
-        for node in ast.walk(tree):
-            where = f"{source.name}:{getattr(node, 'lineno', '?')} in {owner.get(id(node), 'module scope')}"
-            if isinstance(node, ast.Name) and node.id == "WALLS_TAG":
-                function = owner.get(id(node))
-                if function is None and isinstance(node.ctx, ast.Store):
-                    continue
-                if function == _WALLS_WRITER or (function in _WALLS_READERS and id(node) not in writes):
-                    continue
-                stray.append(f"{where} names WALLS_TAG")
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "aio" \
-                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "set_tags":
-                receiver = node.func.value.value
-                if owner.get(id(node)) == _WALLS_WRITER or (isinstance(receiver, ast.Name) and receiver.id == "app"):
-                    continue
-                stray.append(f"{where} sets tags")
+        stray += _walls_tag_strays(source.name, text)
     assert stray == []
+
+
+_PLANTED_WALLS_WRITES = {
+    "tag in a dict, async set_tags": ("def f(sb):\n    sb.set_tags.aio({WALLS_TAG: WALLS_VERSION})", "names WALLS_TAG"),
+    "sync set_tags": ("def f(sb, tags):\n    sb.set_tags(tags)", "sets tags"),
+    "getattr set_tags": ("def f(sb, tags):\n    getattr(sb, 'set_tags').aio(tags)", "spells 'set_tags'"),
+    "set_tags held for later": ("def f(sb):\n    write = sb.set_tags\n    return write", "sets tags"),
+    "WALLS_TAG as an attribute": ("def f(m, tags):\n    tags[m.WALLS_TAG] = 'walls-v1'", "names WALLS_TAG"),
+    "reader writes the tag": ("def get_shared_box(m, tags):\n    tags[m.WALLS_TAG] = 'v'", "names WALLS_TAG"),
+    "getattr WALLS_TAG": ("def f(m):\n    return getattr(m, 'WALLS_TAG')", "spells 'WALLS_TAG'"),
+    "constructor walls=": ("def f(sb):\n    return ModalVmSandbox(sb, {}, walls=WALLS_VERSION)", "passes walls="),
+    "constructor positional": ("def f(sb):\n    return ModalVmSandbox(sb, {}, None, 'b', WALLS_VERSION)", "unnamed"),
+    "constructor **kwargs": ("def f(sb, kw):\n    return ModalVmSandbox(sb, {}, **kw)", "unnamed"),
+    "_walls assigned": ("def f(box):\n    box._walls = WALLS_VERSION", "assigns _walls"),
+    "_walls set in __init__ to a constant": ("def __init__(self):\n    self._walls = WALLS_VERSION", "assigns _walls"),
+    "setattr _walls": ("def f(box):\n    setattr(box, '_walls', WALLS_VERSION)", "spells '_walls'"),
+}
+
+
+@pytest.mark.parametrize("snippet, reason", _PLANTED_WALLS_WRITES.values(), ids=_PLANTED_WALLS_WRITES.keys())
+def test_the_walls_guard_catches_each_way_to_write_the_walls_outside_its_writer(snippet, reason):
+    assert any(reason in stray for stray in _walls_tag_strays("planted.py", snippet))
+
+
+def test_the_walls_guard_lets_the_writer_readers_and_handle_do_their_part():
+    clean = (
+        "WALLS_TAG = 'x'\n"
+        "def _mark_walls_verified(box, tags):\n"
+        "    box._sb.set_tags.aio({**tags, WALLS_TAG: WALLS_VERSION})\n    box._walls = WALLS_VERSION\n"
+        "def get_shared_box(sb, tags):\n    return ModalVmSandbox(sb, {}, walls=tags.get(WALLS_TAG))\n"
+        "def _attribution_tags(key):\n    return key == WALLS_TAG\n"
+        "def __init__(self, walls):\n    self._walls = walls\n"
+        "def f(app, tags):\n    app.set_tags.aio(tags)\n"
+    )
+    assert _walls_tag_strays("clean.py", clean) == []
