@@ -399,7 +399,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
             await self._capture_changelog()
 
         parts = [TextPart(text=result.response or result.error or "")]
-        usage = Usage(tool_call_count=result.tool_call_count)
+        usage = result.usage or Usage(tool_call_count=result.tool_call_count)
         if result.error:
             details = {"error_type": "cli_error", "error_message": result.error[:ERROR_MESSAGE_LIMIT]}
             if result.error_code:

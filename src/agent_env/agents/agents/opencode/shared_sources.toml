@@ -3,3 +3,4 @@
 clock = "utils/faketime_clock"
 egress = "utils/egress_proxy"
 agent_clock = "utils/agent_clock"
+model_relay = "utils/model_relay"

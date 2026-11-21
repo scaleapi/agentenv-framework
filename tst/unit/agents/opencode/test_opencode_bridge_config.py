@@ -9,11 +9,12 @@
 """
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.opencode.agent import opencode_bridge
+from tst.unit.agents.opencode.agent import model_relay, opencode_bridge
 from tst.unit.agents.opencode.fake_cli import FakeCLI
 
 _build_config = opencode_bridge._build_config
@@ -171,3 +172,46 @@ def test_a_turn_with_no_system_prompt_names_no_instructions(spawned):
 
     ((_argv, env),) = spawned
     assert "instructions" not in json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+
+# opencode-baseline-claude on claude-haiku-4-5, recorded on 2026-11-21 through Scale's LiteLLM proxy: each streamed
+# call's usage as the proxy answered it, the session title's first, then the turn's two steps.
+CLAUDE_TURN = [
+    {"prompt_tokens": 598, "completion_tokens": 6, "total_tokens": 604,
+     "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+    {"prompt_tokens": 9345, "completion_tokens": 95, "total_tokens": 9440,
+     "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 9342},
+     "cache_creation_input_tokens": 9342, "cache_read_input_tokens": 0},
+    {"prompt_tokens": 9546, "completion_tokens": 4, "total_tokens": 9550,
+     "prompt_tokens_details": {"cached_tokens": 9342, "cache_write_tokens": 197},
+     "cache_creation_input_tokens": 197, "cache_read_input_tokens": 9342},
+]
+
+
+def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_count(monkeypatch, spawned):
+    """The relay counts every call the CLI makes, the title's too: the recorded turn's equals the proxy's 19,489 in
+    (9,342 read from the cache, 9,539 written) and 105 out."""
+    relays = []
+
+    @asynccontextmanager
+    async def relay(upstream, calls, **kwargs):
+        relays.append(upstream)
+        for usage in CLAUDE_TURN:
+            calls.add(200, model_relay.answer_usage(f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode()))
+        yield "http://127.0.0.1:41000/token"
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setattr(opencode_bridge, "model_relay", relay)
+
+    result = asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m"))
+
+    ((_, env),) = spawned
+    assert relays == ["https://gateway.example"]
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["provider"]["litellm"]["options"]["baseURL"] == \
+        "http://127.0.0.1:41000/token/v1"
+    assert env["LITELLM_BASE_URL"] == "https://gateway.example/v1"
+    assert result.usage.to_dict() == {
+        "tool_call_count": 0, "input_tokens": 19489, "output_tokens": 105, "total_tokens": 19594,
+        "cache_read_tokens": 9342, "cache_write_tokens": 9539, "input_includes_cache": True,
+        "provider_details": {"model_calls": 3}}
