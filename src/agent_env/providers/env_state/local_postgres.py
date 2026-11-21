@@ -260,7 +260,8 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         """The pgweb + db-mcp direct-SQL browse UIs (VM/compose path), each gated on the
         servicedb's health. Beyond the mandatory readiness service."""
         # Opened from the host only, so kept off the bridge address containers reach the host through.
-        host_ips = host_ips[:1]
+        # A remote VM gives no address; a bare binding would publish the unauthenticated consoles on every interface.
+        host_ips = host_ips[:1] or ("127.0.0.1",)
         publish = host_port or (lambda port: port)
         cfg = self.service_db_config
         lines: list[str] = []
