@@ -36,7 +36,7 @@ def test_agent_card_advertises_unified_save_method(app):
     assert methods["save"] == {
         "method": "POST",
         "request": {"required": ["context_id", "objects"]},
-        "response": {"required": ["context_id", "objects"]},
+        "response": {"required": ["context_id", "objects"], "optional": ["stats"]},
     }
 
 
