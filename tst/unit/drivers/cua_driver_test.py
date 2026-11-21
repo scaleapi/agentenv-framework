@@ -824,17 +824,23 @@ def marked(module, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_pointer_input_is_marked_where_cua_driver_says_it_landed_on_the_screen(module, daemon, marked):
+async def test_a_pointer_input_is_marked_where_cua_driver_says_it_landed_on_the_screen_as_each_os_words_it(
+        module, daemon, marked):
     daemon.replies["click"] = _summary("Clicked at (620.0, 30.0) × 1 (delivery_mode=foreground, path=x11_xtest_fg); "
                                        "not verified. [window_point=(620, 30) screen_point=(620, 81)]")
     daemon.replies["double_click"] = _summary("Clicked element [58] (pid 2364) with a real pointer click. "
                                               "[window_point=(1023, 200) screen_point=(1023, 251)]")
+    daemon.replies["right_click"] = _summary("✅ Posted right-click at screen-point (515,329) for pid 704.")
+    daemon.replies["scroll"] = _summary("✅ Scrolled down via SendInput wheel (3 tick(s)) at screen (929,583).")
     async with mcp_session(module.CuaDriver()) as session:
         await session.call_tool("click", {"pid": 7, "window_id": 3, "x": 620, "y": 30, "button": "middle"})
         await session.call_tool("double_click", {"element_token": "s1:58"})
+        await session.call_tool("right_click", {"element_token": "s1:9"})
+        await session.call_tool("scroll", {"element_token": "s1:9", "direction": "down"})
 
-    assert marked == [[("click", (620.0, 81.0, "middle", 1, []))], [("click", (1023.0, 251.0, "left", 2, []))]]
-    assert [name for name, _args in daemon.calls()] == ["click", "double_click"]
+    assert marked == [[("click", (620.0, 81.0, "middle", 1, []))], [("click", (1023.0, 251.0, "left", 2, []))],
+                      [("click", (515.0, 329.0, "right", 1, []))], [("scroll", (929.0, 583.0, "down", 3, []))]]
+    assert [name for name, _args in daemon.calls()] == ["click", "double_click", "right_click", "scroll"]
 
 
 @pytest.mark.asyncio

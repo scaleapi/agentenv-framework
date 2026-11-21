@@ -134,8 +134,9 @@ NAMED = {
 #: keys and text as chips, and each step of a ``run_steps`` that ran. Its other tools that act are drawn as chips.
 MARKED = frozenset({"click", "double_click", "right_click", "scroll", "drag", "move_cursor", "type_text", "press_key",
                     "hotkey", "set_value", "run_steps"})
-#: Where a reply says a pointer input landed on the screen.
-SCREEN_POINT = re.compile(r"screen_point=\((-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\)")
+#: Where a reply says a pointer input landed on the screen, as each OS's cua-driver words it: ``screen_point=(x, y)``
+#: on Linux, ``screen-point (x,y)`` on macOS, ``at screen (x,y)`` on Windows.
+SCREEN_POINT = re.compile(r"(?:screen[_-]point=?|at screen) ?\((-?\d+(?:\.\d+)?), ?(-?\d+(?:\.\d+)?)\)")
 #: cua-driver's key names and the W3C key values a mark names them by; any other is a character's.
 W3C_KEYS = {**{name: key for key, name in NAMED.items()}, "return": "Enter", "esc": "Escape", "ctrl": "Control",
             "control": "Control", "shift": "Shift", "alt": "Alt", "option": "Alt", "super": "Meta", "cmd": "Meta",
