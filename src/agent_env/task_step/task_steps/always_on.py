@@ -668,16 +668,20 @@ class _Run:
 
     async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> tuple[str, dict]:
         """One turn of the agent on ``parts``: the task's clock runs at its rate while the agent works, and is frozen
-        again after."""
+        again after. The turn's usage is recorded as its reply arrives, before the clock is frozen."""
         step = self.step
         await self._clock_runs(True)
         try:
             # Cut off past its limit and grace, whatever send_and_wait's own retries do: a TimeoutError, as its own.
-            return await asyncio.wait_for(
-                send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
-                              context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
-                              poll_interval_seconds=step.poll_interval_seconds, before_send=record),
-                step.timeout_seconds + TURN_GRACE_SECONDS)
+            with self.usage.awaiting(ModelRole.SOLVER):
+                task_id, result = await asyncio.wait_for(
+                    send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
+                                  context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
+                                  poll_interval_seconds=step.poll_interval_seconds, before_send=record),
+                    step.timeout_seconds + TURN_GRACE_SECONDS)
+            self.usage.turn(ModelRole.SOLVER,
+                            protocol.TerminalResponse.from_message((result.get("status") or {}).get("message") or {}))
+            return task_id, result
         finally:
             await self._clock_runs(False)
 
@@ -1274,8 +1278,7 @@ class _Run:
                  **({"files": files} if files else {}))
         t = time.time()
         try:
-            with self.usage.awaiting(ModelRole.SOLVER):
-                task_id, result = await self._agent_turn(parts, msg_id, record)
+            task_id, result = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
             self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
@@ -1285,7 +1288,6 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
         traj = None
@@ -1355,8 +1357,7 @@ class _Run:
 
         t = time.time()
         try:
-            with self.usage.awaiting(ModelRole.SOLVER):
-                task_id, result = await self._agent_turn(parts, msg_id, record)
+            task_id, result = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
             self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
@@ -1367,7 +1368,6 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
         traj = None

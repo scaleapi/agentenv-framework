@@ -3,8 +3,11 @@ for the user sim agent's reads, each summed, with the endpoint each called."""
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from agent_env.task_step.task_steps import always_on as ao
 from tst.unit.task_step.always_on_harness import Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
@@ -85,3 +88,32 @@ async def test_a_read_that_times_out_leaves_the_user_sim_s_entry_a_lower_bound(m
     solver, user = ctx.metadata["step_usage"]["week"]
     assert len(rig.user_calls) == 1 and solver["partial"] is False
     assert (user["role"], user["turns"], user["input_tokens"], user["partial"]) == ("user_simulator", 1, None, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_as_the_clock", ["starts", "freezes"])
+async def test_a_cancel_while_the_clock_changes_records_only_the_turn_that_ran(monkeypatch, tmp_path,
+                                                                                 cancelled_as_the_clock):
+    """The clock runs before the agent is sent its turn and is frozen after the reply: a cancel in the first records no
+    turn, and one in the second keeps the reply's counts."""
+    rig = Rig(monkeypatch, tmp_path, agent=_agent, plugin=_AskingPlugin)
+    rig.solver_usage = {"tool_call_count": 1, "input_tokens": 100, "output_tokens": 10}
+    ctx = rig.context()
+    await rig.arm()
+    running = cancelled_as_the_clock == "starts"
+
+    async def clock_runs(self, now_running):
+        if now_running is running:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(ao._Run, "_clock_runs", clock_runs)
+
+    with pytest.raises(asyncio.CancelledError):
+        await rig.run(rig.step(), ctx)
+
+    usage = (ctx.metadata.get("step_usage") or {}).get("week")
+    if running:
+        assert usage is None and not rig.sent
+    else:
+        [solver] = usage
+        assert (solver["turns"], solver["input_tokens"], solver["partial"]) == (1, 100, False)

@@ -704,14 +704,14 @@ class PromptAgentTaskStep(TaskStep):
                             poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
                             on_sent=live_turn.follow if live_turn else None,
                         )
+                    status_msg = (result.get("status") or {}).get("message") or {}
+                    final_terminal = protocol.TerminalResponse.from_message(status_msg)
+                    usage.turn(ModelRole.SOLVER, final_terminal)
                     target_state = result["status"]["state"]
                     if live_turn:
                         live_turn.ended(target_state)
-                status_msg = (result.get("status") or {}).get("message") or {}
-                final_terminal = protocol.TerminalResponse.from_message(status_msg)
                 if final_terminal.tool_call_count is not None:
                     conversation_tool_call_count = (conversation_tool_call_count or 0) + final_terminal.tool_call_count
-                usage.turn(ModelRole.SOLVER, final_terminal)
                 agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
 
                 conversation_store.complete_a2a_task(
