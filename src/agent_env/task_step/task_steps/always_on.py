@@ -134,8 +134,7 @@ USER_PHONE = "user_phone"
 IN_FLIGHT = ("firing", "queued")
 POLL_SECONDS = 0.5
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-FINAL_REMINDER = ("(This is the last time you'll be woken for this job. Only what you send with message_user reaches "
-                  "{first}; your normal reply is not shown to them.)")
+FINAL_REMINDER = "(Only what you send with message_user reaches {first}; your normal reply is not shown to them.)"
 NUDGE_TEXT = ("Your closing text was not delivered. If the user should see it, send it with message_user; otherwise "
               "call stay_quiet.")
 WAKE_REMINDER_TEXT = "Reminder: only message_user reaches the user."
