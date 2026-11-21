@@ -4,6 +4,7 @@ the test's own folder."""
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import httpx
@@ -45,8 +46,19 @@ class Harness:
 def result(**fields) -> SimpleNamespace:
     """What run_opencode returns, with a finished turn's defaults."""
     defaults = {"response": "done", "error": None, "error_code": None, "session_id": "ses_1", "trajectory": [],
-                "tool_call_count": 0}
+                "tool_call_count": 0, "usage": None}
     return SimpleNamespace(**{**defaults, **fields})
+
+
+@pytest.fixture(autouse=True)
+def stand_in_relay(monkeypatch):
+    """A turn's model relay listens on loopback, which unit tests don't: a stand-in hands the CLI the endpoint's own
+    root, as before there was a relay. The relay's own tests use the real one."""
+    @asynccontextmanager
+    async def relay(upstream, calls, **kwargs):
+        yield upstream
+
+    monkeypatch.setattr(opencode_bridge, "model_relay", relay)
 
 
 @pytest.fixture(autouse=True)
