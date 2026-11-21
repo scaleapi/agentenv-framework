@@ -145,6 +145,124 @@ def test_long_results_go_to_side_files_and_email_bodies_are_decoded(run):
     assert staged.record["side_files"] >= 1 and staged.record["raw_bytes"] > staged.record["staged_bytes"]
 
 
+# ---- change_values: each app change in full, filed where it happened ------------------------------------------------
+
+# Changes of the recorded run as the env's changes record them (urn:agentenv:changes/v1's changed_fields): Tess's text,
+# which a trigger wrote while the clock moved to wake 2, and the order wake 3 cancelled.
+TESS_TEXT = {"content": "did you end up trying ember & saffron?? \U0001f440", "sender_id": "+15125550303",
+             "timestamp": "2026-11-06T21:00:00+00:00", "message_id": "c181c35f12a345f68c4066c04f62cf0d",
+             "attachment_name": None, "conversation_id": "conv-tess"}
+CANCELLED = {"status": {"new": "cancelled", "old": "scheduled"},
+             "cancelled_at": {"new": "2026-11-06T15:00:00", "old": None}}
+# The order wake 3 placed from the cart it filled, whose row the changelog's summary cuts in its first item.
+ITEMS = [("pb-atx-9301-veggie-feast-for-two", "Veggie Feast for Two (misir, shiro, gomen, atkilt, injera)", 42.0),
+         ("pb-atx-9301-sambusa", "Lentil Sambusa (3 pieces)", 9.0),
+         ("pb-atx-9301-baklava", "Honey Baklava (4 pieces)", 8.0),
+         ("pb-atx-9301-kik-alicha", "Kik Alicha (yellow split peas)", 14.0),
+         ("pb-atx-9301-tikil-gomen", "Tikil Gomen (cabbage, carrot, potato)", 13.0),
+         ("pb-atx-9301-extra-injera", "Extra Injera (3 rolls)", 4.5),
+         ("pb-atx-9301-timatim-salad", "Timatim Salad (tomato, jalapeno, onion)", 8.0),
+         ("pb-atx-9301-ethiopian-coffee", "Buna Ethiopian Coffee (serves 2)", 7.0),
+         ("pb-atx-9301-shai", "Shai Spiced Tea (serves 2)", 5.0)]
+ORDER = {"id": 53, "tip": 14.22, "fees": 9.48,
+         "items": json.dumps([{"item_id": i, "name": name, "quantity": 1, "price": price, "options": [],
+                               "note": "Shellfish allergy - please keep free of shellfish"}
+                              for i, name, price in ITEMS]),
+         "total": 134.2, "eta_at": "2026-11-06T20:00:00", "status": "scheduled", "user_id": 1, "currency": "USD",
+         "store_id": "pb-atx-9301", "subtotal": 110.5, "order_key": "PB-H7TQ2MZD", "placed_at": "2026-11-06T21:00:00",
+         "card_brand": "Visa", "card_last4": "4242", "store_name": "Lalibela Ethiopian Kitchen", "cancelled_at": None,
+         "fulfillment": "delivery", "delivery_fee": 0.0, "address_label": "Home", "scheduled_for": "2026-11-06T19:30:00"}
+
+
+def _placed_order(timeline: list[dict]) -> None:
+    """Wake 3's turn places the order, its summary cut as the changelog cuts an INSERT's."""
+    event = next(e for e in timeline if e["event"] == "app_changes" and e["wake"] == 3)
+    event["changes"].append({**event["changes"][0], "id": 24, "table": "porchbite.orders", "op": "INSERT",
+                             "row_id": "53", "summary": "Inserted: " + json.dumps(ORDER)[:200],
+                             "actors": [{"kind": "tool_call", "tool": "porchbite_place_order", "role": "assistant"}]})
+
+
+def test_given_the_changes_values_each_app_change_is_in_full_and_where_it_happened(run):
+    timeline, turns = run
+    values = {("world", 15): TESS_TEXT, ("world", 20): CANCELLED}
+
+    staged = stage_run(timeline, turns, change_values=values)
+
+    wake2 = _lines(staged.files, "wakes/wake_002.jsonl")
+    assert [line["event"] for line in wake2[:5]] == ["woke", "app_change", "app_change", "app_change", "wake_input"]
+    tess = wake2[2]
+    assert (tess["by"], tess["phase"], tess["changed_fields"]) == ("others", "before_turn", TESS_TEXT)
+    assert tess["actors"] == [{"kind": "trigger_action", "trigger_id": "noise-tess",
+                               "tool": "messaging_world_send_message", "role": "world"}]
+    last_call = max(i for i, line in enumerate(wake2) if line["event"] == "tool_call" and line["turn"] == "turn")
+    made = [i for i, line in enumerate(wake2) if line["event"] == "app_change" and line["phase"] == "turn"]
+    assert made and min(made) > last_call
+    assert made[-1] < next(i for i, line in enumerate(wake2) if line["event"] == "turn_end")
+    cancel = next(line for line in _lines(staged.files, "wakes/wake_003.jsonl")
+                  if line["event"] == "app_change" and line["id"] == 20)
+    assert cancel["changed_fields"] == CANCELLED and cancel["summary"].startswith("status: 'scheduled' -> 'cancelled'")
+    assert "changed_fields" not in wake2[1]  # the changes record has no row 14: its summary is all there is
+    keys = [(c["env_id"], c["id"]) for e in timeline if e["event"] == "app_changes" for c in e["changes"]]
+    found = sum(key in values for key in keys)
+    assert staged.record["app_change_values"] == {"found": found, "missing": len(keys) - found}
+    index = staged.files[INDEX_FILE]
+    assert "- the user (Fri Nov 6, 9:00 PM UTC)" in index and "app changes: 3 by others" in index
+
+
+def test_a_whole_row_too_long_for_a_line_is_in_its_own_file_and_the_line_keeps_the_summary(run):
+    timeline, turns = run
+    _placed_order(timeline)
+
+    staged = stage_run(timeline, turns, change_values={("world", 24): ORDER})
+
+    order = next(line for line in _lines(staged.files, "wakes/wake_003.jsonl")
+                 if line["event"] == "app_change" and line["id"] == 24)
+    assert "Shai Spiced Tea" not in order["summary"] and "changed_fields" not in order
+    assert order["changed_fields_file"].startswith("wakes/results/wake_003_line_")
+    assert order["changed_fields_preview"].startswith('{"id": 53, "tip": 14.22')
+    whole = staged.files[order["changed_fields_file"]]
+    assert all(name in whole for _, name, _ in ITEMS) and '"scheduled_for": "2026-11-06T19:30:00"' in whole
+    assert all(len(line) <= LINE_CHARS for line in staged.files["wakes/wake_003.jsonl"].splitlines())
+
+
+def test_a_change_seen_after_a_nudge_s_turn_is_filed_after_that_turn_not_before_the_nudge(run):
+    timeline, turns = run
+    nudge = next(i for i, e in enumerate(timeline) if e["event"] == "nudge")
+    reply = {"env_id": "world", "id": 30, "table": "messaging.messages", "op": "INSERT",
+             "row_id": "5d0e8a41c2b94c0fa3e1b7d26c9f8a10",
+             "summary": "Inserted: {\"content\": \"veggie is perfect, thank you!!\", \"sender_id\": \"+15125550303\"}",
+             "at": "2026-11-13T17:25:20.118204+00:00", "by": "others", "wake": 2, "phase": "nudge",
+             "actors": [{"kind": "trigger_action", "trigger_id": "nina-veggie", "tool": "messaging_world_send_message",
+                         "role": "world"}]}
+    # As always_on logs it: the nudge's changes are read before its event is.
+    timeline.insert(nudge, {"event": "app_changes", "wake": 2, "phase": "nudge", "env_id": "world", "count": 1,
+                            "changes": [reply]})
+    values = {("world", 30): {"content": "veggie is perfect, thank you!!", "sender_id": "+15125550303",
+                              "timestamp": "2026-11-06T21:00:00+00:00",
+                              "message_id": "5d0e8a41c2b94c0fa3e1b7d26c9f8a10", "attachment_name": None,
+                              "conversation_id": "conv-nina"}}
+
+    wake2 = _lines(stage_run(timeline, turns, change_values=values).files, "wakes/wake_002.jsonl")
+
+    events = [(line["event"], line.get("turn"), line.get("id")) for line in wake2]
+    at = events.index(("app_change", None, 30))
+    assert events[at - 1] == ("tool_call", "nudge", None) and events.index(("nudge", None, None)) < at
+    assert wake2[at]["changed_fields"]["content"] == "veggie is perfect, thank you!!"
+    default = [(line["event"], line.get("id")) for line in _lines(stage_run(timeline, turns).files,
+                                                                  "wakes/wake_002.jsonl")]
+    assert default.index(("app_change", 30)) < default.index(("nudge", None))  # as logged
+
+def test_without_the_changes_values_app_changes_are_staged_as_before(run):
+    timeline, turns = run
+    staged = stage_run(timeline, turns)
+
+    assert staged.files == stage_run(timeline, turns, change_values=None).files
+    assert "changed_fields" not in staged.files["events.jsonl"] and "app_change_values" not in staged.record
+    wake2 = _lines(staged.files, "wakes/wake_002.jsonl")
+    assert [line["event"] for line in wake2[:2]] == ["woke", "wake_input"]
+    assert all(line["phase"] == "before_turn" for line in wake2 if line["event"] == "app_change"
+               and line["by"] == "others")
+
 def _changed_by(timeline: list[dict], wake: int, tool: str) -> None:
     """An app change wake ``wake``'s turn made with ``tool``, as the apps' change log records it."""
     event = next(e for e in timeline if e["event"] == "app_changes" and e["wake"] == wake)

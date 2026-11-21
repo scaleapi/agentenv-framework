@@ -395,6 +395,109 @@ def test_use_trajectory_with_the_agent_judge_loads_and_round_trips_with_its_defa
             plain.judge_agent_config({})) == (1000, None, None, {})
 
 
+# ---- full_app_changes: each app change in full, filed where it happened ------------------------------------------
+
+# Two of the recorded run's changes as a snapshot_env step with include_env_changes records them: Tess's text, which a
+# trigger wrote while the clock moved to wake 2, and the order wake 3 cancelled.
+RECORDED_CHANGES = [
+    {"id": 15, "timestamp": "2026-11-13T17:24:44.664937+00:00", "schema_name": "messaging", "table_name": "messages",
+     "operation": "INSERT", "row_id": "c181c35f12a345f68c4066c04f62cf0d",
+     "summary": "Inserted: {\"content\": \"did you end up trying ember & saffron?? \U0001f440\", \"sender_id\": \"+15125550303\"}",
+     "changed_fields": {"content": "did you end up trying ember & saffron?? \U0001f440", "sender_id": "+15125550303",
+                        "timestamp": "2026-11-06T21:00:00+00:00", "message_id": "c181c35f12a345f68c4066c04f62cf0d",
+                        "attachment_name": None, "conversation_id": "conv-tess"},
+     "actors": [{"kind": "trigger_action", "event_id": "event_41", "trigger_id": "noise-tess",
+                 "tool": "messaging_world_send_message", "role": "world"}]},
+    {"id": 20, "timestamp": "2026-11-13T17:26:05.095493+00:00", "schema_name": "porchbite", "table_name": "orders",
+     "operation": "UPDATE", "row_id": "52",
+     "summary": "status: 'scheduled' -> 'cancelled', cancelled_at: NULL -> '2026-11-06T15:00:00'",
+     "changed_fields": {"status": {"new": "cancelled", "old": "scheduled"},
+                        "cancelled_at": {"new": "2026-11-06T15:00:00", "old": None}},
+     "actors": [{"kind": "tool_call", "event_id": "event_57", "tool": "porchbite_cancel_order", "role": "assistant"}]}]
+CHANGES_URL = "s3://env_changes/instance_id=week/world-1a2b3c4d.jsonl"
+
+
+@pytest.mark.asyncio
+async def test_with_full_app_changes_each_change_is_staged_in_full_from_the_run_s_recorded_changes(monkeypatch):
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    sources[CHANGES_URL] = "".join(json.dumps(row) + "\n" for row in RECORDED_CHANGES)
+    ctx.metadata["env_changes"] = {"world": {"object_url": CHANGES_URL, "change_count": 2, "attributed_count": 2,
+                                             "capture_step_id": "snapshot-end"}}
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", full_app_changes=True)
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    [root] = {path.split("/")[3] for path in sandbox.files}
+    wake2 = [json.loads(line) for line in sandbox.files[f"/tmp/always_on_run/{root}/wakes/wake_002.jsonl"].splitlines()]
+    assert [line["event"] for line in wake2[:5]] == ["woke", "app_change", "app_change", "app_change", "wake_input"]
+    assert wake2[2]["changed_fields"] == RECORDED_CHANGES[0]["changed_fields"] and wake2[2]["by"] == "others"
+    wake3 = sandbox.files[f"/tmp/always_on_run/{root}/wakes/wake_003.jsonl"]
+    assert '"changed_fields": {"status": {"new": "cancelled", "old": "scheduled"}' in wake3
+    prompt = captured["prompt"]
+    assert '"changed_fields" has the change in full: an UPDATE\'s changed fields, each with its "old" and "new"' in prompt
+    assert 'Each sits in its wake file where it happened, by its "phase"' in prompt
+    assert '13 app changes have no "changed_fields": the run\'s record of its apps\' changes doesn\'t have them' in prompt
+    staging = ctx.metadata["verifications"]["rubric"]["trajectory_staging"]
+    assert staging["app_change_values"] == {"found": 2, "missing": 13}
+
+
+@pytest.mark.asyncio
+async def test_with_full_app_changes_a_run_with_no_recorded_changes_keeps_the_summaries_and_says_so(monkeypatch, caplog):
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", full_app_changes=True)
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    assert "the run recorded no env_changes" in caplog.text
+    assert '15 app changes have no "changed_fields"' in captured["prompt"]
+    assert ctx.metadata["verifications"]["rubric"]["trajectory_staging"]["app_change_values"] == {
+        "found": 0, "missing": 15}
+
+
+@pytest.mark.asyncio
+async def test_without_full_app_changes_the_recorded_changes_are_not_read(monkeypatch):
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    ctx.metadata["env_changes"] = {"world": {"object_url": CHANGES_URL}}
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    assert not any("changed_fields" in text for text in sandbox.files.values())
+    assert '"changed_fields" has the change in full' not in captured["prompt"]
+    assert "app_change_values" not in ctx.metadata["verifications"]["rubric"]["trajectory_staging"]
+
+
+def _snapshot(id: str, after: list[str], changes: bool = True):
+    from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
+
+    return SnapshotEnvTaskStep(id, None, env_id="world", include_env_changes=changes, depends_on=after)
+
+
+def test_full_app_changes_needs_the_run_s_changes_recorded_after_it_and_before_the_judge():
+    with pytest.raises(ValueError, match="full_app_changes needs use_trajectory"):
+        _verifier(full_app_changes=True)
+    judge = dict(use_agent_judge=True, use_trajectory=True, full_app_changes=True)
+    refused = "has full_app_changes, which reads the app changes a snapshot_env step with include_env_changes " \
+              "records: make it depend on one that runs after always_on step 'week'"
+    for steps in ([_always_on(), _verifier(**judge)],
+                  [_snapshot("snapshot-start", []), _always_on(),
+                   _verifier(**judge, depends_on=["week", "snapshot-start"])],
+                  [_always_on(), _snapshot("snapshot-end", ["week"], changes=False), _verifier(**judge)],
+                  [_always_on(), _snapshot("snapshot-end", ["week"]), _verifier(**judge, depends_on=["week"])]):
+        with pytest.raises(ValueError, match=refused):
+            Task("t", 1, steps=steps)
+    task = Task("t", 1, steps=[_always_on(), _snapshot("snapshot-end", ["week"]),
+                               _verifier(**judge, depends_on=["snapshot-end"])])
+    stored = task.to_dict()["steps"][-1]
+    assert stored["full_app_changes"] is True
+    again = AlwaysOnAgentVerifier.from_dict(stored)
+    assert again.full_app_changes is True and again.to_dict() == stored
+    assert "full_app_changes" not in _verifier(use_agent_judge=True, use_trajectory=True).to_dict()
+
+
 def _judge_card(*tools: str) -> dict:
     """A judge's card whose agent-config takes builtin_tools naming ``tools``, as a harness's schema lists them."""
     schema = {"properties": {"builtin_tools": {"anyOf": [{"$ref": "#/$defs/Tools"}, {"type": "null"}]}},
