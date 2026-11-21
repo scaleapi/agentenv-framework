@@ -37,6 +37,11 @@ RELEASE_TARBALL = (r"https://github\.com/trycua/cua/releases/download/cua-driver
                    r"cua-driver-rs-\1-linux-x86_64-binary\.tar\.gz")
 
 
+#: cua-driver's tools that send input, whose results name their effect and route.
+INPUT_TOOLS = {"click", "double_click", "right_click", "scroll", "drag", "move_cursor", "type_text", "press_key",
+               "hotkey", "set_value"}
+
+
 def _png(width: int, height: int) -> str:
     out = io.BytesIO()
     PILImage.new("RGB", (width, height), (255, 0, 0)).save(out, "PNG")
@@ -48,8 +53,8 @@ class FakeDaemon:
     naming tools whose results are errors, ``fail`` tools it can't call, ``slow`` tools it answers after a second,
     ``drop`` tools whose connection it closes without answering, ``grab`` a layer such as a menu holding the keyboard,
     from which it refuses a key aimed at a window, ``unlaid`` the seat's keymap changed, for which it refuses one too
-    until a chord at the desktop of the layout's keys puts it back, which ``relaid`` false keeps it from, and ``tools``
-    what ``list`` lists."""
+    until a chord at the desktop of the layout's keys puts it back, which ``relaid`` false keeps it from, ``tools``
+    what ``list`` lists, ``windows`` what ``list_windows`` does, and ``replies`` a tool's result by its name."""
 
     def __init__(self, manifest: list[dict], path: Path) -> None:
         self.path = path
@@ -61,6 +66,8 @@ class FakeDaemon:
         self.grab = self.unlaid = False
         self.relaid = True
         self.tools = [{"name": t["name"], "input_schema": t["inputSchema"]} for t in manifest]
+        self.windows: list[dict] = []
+        self.replies: dict[str, dict] = {}
         self.connections = 0
         self.writers: list[asyncio.StreamWriter] = []
 
@@ -104,9 +111,11 @@ class FakeDaemon:
                 {"type": "text", "text": f"foreground_unavailable {why}"}]}}
         if name == "press_key" and "super" in request["args"]["modifiers"] and self.relaid:
             self.unlaid = False
+        if name in self.replies:
+            return {"ok": True, "result": self.replies[name]}
         if name == "list_windows":
-            return {"ok": True, "result": {"content": [{"type": "text", "text": "Found 0 windows"}],
-                                           "structuredContent": {"windows": []}}}
+            return {"ok": True, "result": {"content": [{"type": "text", "text": f"Found {len(self.windows)} windows"}],
+                                           "structuredContent": {"windows": self.windows}}}
         if name == "get_screen_size":
             return {"ok": True, "result": {"content": [{"type": "text", "text": "1280x800"}],
                                            "structuredContent": {"width": 1280, "height": 800, "scale_factor": 1.0}}}
@@ -114,6 +123,8 @@ class FakeDaemon:
             return {"ok": True, "result": {
                 "content": [{"type": "image", "data": _png(1280, 800), "mimeType": "image/png"}],
                 "structuredContent": {"screenshot_width": 1280, "screenshot_height": 800}}}
+        if name in INPUT_TOOLS:
+            return {"ok": True, "result": _summary(f"did {name}")}
         return {"ok": True, "result": {"content": [{"type": "text", "text": f"did {name}"}],
                                        "structuredContent": {"tool": name}}}
 
@@ -791,3 +802,145 @@ def test_omarchys_base_builds_the_hyprland_plugin_of_the_cua_driver_release_its_
     release = re.search(r"^plugin_release=\S+/cua-driver-rs-v(\S+)$", recipe, re.MULTILINE)[1]
     source = re.search(r"^plugin=cua-hyprland-plugin-(\S+)-[0-9a-f]{40}$", recipe, re.MULTILINE)[1]
     assert release == source == pin
+
+
+def _summary(text: str) -> dict:
+    """One of cua-driver's input tools' results, its summary ``text``."""
+    reply = {"effect": "unverifiable", "route": "global_input", "summary": text}
+    return {"content": [{"type": "text", "text": json.dumps(reply)}], "structuredContent": reply}
+
+
+@pytest.fixture
+def marked(module, monkeypatch):
+    """What the driver hands ``mark_inputs`` for each call it marks, while a recording draws inputs."""
+    inputs: list[list] = []
+
+    async def mark(self, given):
+        inputs.append(list(given))
+
+    monkeypatch.setattr(module.CuaDriver, "draws_inputs", lambda self: True)
+    monkeypatch.setattr(module.CuaDriver, "mark_inputs", mark)
+    return inputs
+
+
+@pytest.mark.asyncio
+async def test_a_pointer_input_is_marked_where_cua_driver_says_it_landed_on_the_screen_as_each_os_words_it(
+        module, daemon, marked):
+    daemon.replies["click"] = _summary("Clicked at (620.0, 30.0) × 1 (delivery_mode=foreground, path=x11_xtest_fg); "
+                                       "not verified. [window_point=(620, 30) screen_point=(620, 81)]")
+    daemon.replies["double_click"] = _summary("Clicked element [58] (pid 2364) with a real pointer click. "
+                                              "[window_point=(1023, 200) screen_point=(1023, 251)]")
+    daemon.replies["right_click"] = _summary("✅ Posted right-click at screen-point (515,329) for pid 704.")
+    daemon.replies["scroll"] = _summary("✅ Scrolled down via SendInput wheel (3 tick(s)) at screen (929,583).")
+    async with mcp_session(module.CuaDriver()) as session:
+        await session.call_tool("click", {"pid": 7, "window_id": 3, "x": 620, "y": 30, "button": "middle"})
+        await session.call_tool("double_click", {"element_token": "s1:58"})
+        await session.call_tool("right_click", {"element_token": "s1:9"})
+        await session.call_tool("scroll", {"element_token": "s1:9", "direction": "down"})
+
+    assert marked == [[("click", (620.0, 81.0, "middle", 1, []))], [("click", (1023.0, 251.0, "left", 2, []))],
+                      [("click", (515.0, 329.0, "right", 1, []))], [("scroll", (929.0, 583.0, "down", 3, []))]]
+    assert [name for name, _args in daemon.calls()] == ["click", "double_click", "right_click", "scroll"]
+
+
+@pytest.mark.asyncio
+async def test_a_point_a_reply_doesnt_name_is_found_in_the_window_the_call_names(module, daemon, marked):
+    daemon.windows = [{"window_id": 9, "pid": 7, "bounds": {"x": 0, "y": 0, "width": 50, "height": 50}},
+                      {"window_id": 3, "pid": 7, "bounds": {"x": 40, "y": 51, "width": 1200, "height": 749}}]
+    async with mcp_session(module.CuaDriver()) as session:
+        await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 660, "y": 400, "direction": "down",
+                                           "amount": 15})
+        await session.call_tool("drag", {"target": {"kind": "window", "pid": 7, "window_id": 3}, "from_x": 1,
+                                         "from_y": 2, "to_x": 30, "to_y": 40, "duration_ms": 250})
+        await session.call_tool("right_click", {"x": 5, "y": 6, "coordinate_frame": "desktop", "modifier": ["cmd"]})
+        await session.call_tool("drag", {"target": {"kind": "desktop", "display_id": "primary"}, "from_x": 1,
+                                         "from_y": 2, "to_x": 3, "to_y": 4, "modifier": ["shift"]})
+        await session.call_tool("scroll", {"pid": 7, "window_id": 4, "x": 1, "y": 1, "direction": "up"})
+        await session.call_tool("click", {"element_token": "s3:146"})
+
+    assert marked == [[("scroll", (700, 451, "down", 15, []))],
+                      [("drag", ([(41, 53), (70, 91)], "left", 250, []))],
+                      [("click", (5, 6, "right", 1, ["Meta"]))],
+                      [("drag", ([(1, 2), (3, 4)], "left", 500, ["Shift"]))],
+                      [("tool", ("scroll", {"pid": 7, "window_id": 4, "x": 1, "y": 1, "direction": "up"}))],
+                      [("tool", ("click", {"element_token": "s3:146"}))]]
+    windows = [(name, args) for name, args in daemon.calls() if name == "list_windows"]
+    assert windows == [("list_windows", {"pid": 7})] * 3
+
+
+@pytest.mark.asyncio
+async def test_keys_and_text_are_marked_as_typed_after_the_click_that_focused_them(module, daemon, marked):
+    daemon.replies["type_text"] = _summary("Typed 7 character(s). [window_point=(780, 108) screen_point=(780, 159)]")
+    async with mcp_session(module.CuaDriver()) as session:
+        await session.call_tool("type_text", {"pid": 7, "window_id": 3, "x": 780, "y": 108, "text": "laptop\n"})
+        await session.call_tool("press_key", {"pid": 7, "key": "enter", "modifiers": ["shift"]})
+        await session.call_tool("hotkey", {"pid": 7, "keys": ["ctrl", "w"]})
+        await session.call_tool("set_value", {"element_token": "s1:15", "value": "laptop"})
+        await session.call_tool("move_cursor", {"x": 10, "y": 20})
+
+    assert marked == [[("click", (780.0, 159.0, "left", 1, [])), ("type_text", ("laptop\n",))],
+                      [("press", (["Shift", "Enter"],))], [("press", (["Control", "w"],))],
+                      [("tool", ("set_value", {"element_token": "s1:15", "value": "laptop"}))],
+                      [("pointer_move", (10, 20))]]
+
+
+@pytest.mark.asyncio
+async def test_each_step_of_a_batch_that_ran_is_marked_with_the_batchs_window_where_it_names_none(
+        module, daemon, marked):
+    daemon.windows = [{"window_id": 3, "pid": 7, "bounds": {"x": 0, "y": 51, "width": 1280, "height": 749}}]
+    ran = {"executed": 3, "failed_step": 3, "ok": False, "steps": [
+        {"index": 0, "ok": True, "message": "Set value of element [15] to 'laptop'; read back 'laptop'."},
+        {"index": 1, "ok": True, "message": "Clicked at (5.0, 6.0). [window_point=(5, 6) screen_point=(5, 57)]"},
+        {"index": 2, "ok": True, "message": "Scrolled down 3 ticks."},
+        {"index": 3, "ok": False, "message": "press_key failed"}]}
+    daemon.replies["run_steps"] = {"content": [{"type": "text", "text": json.dumps(ran)}]}
+    steps = [{"tool": "set_value", "args": {"element_token": "s1:15", "value": "laptop"}},
+             {"tool": "click", "args": {"x": 5, "y": 6}},
+             {"scroll": {"x": 9, "y": 9, "direction": "down"}, "expect": [{"text": "Q4"}], "wait_for": {"name": "Q3"}},
+             {"tool": "press_key", "args": {"key": "enter"}}]
+    async with mcp_session(module.CuaDriver()) as session:
+        await session.call_tool("run_steps", {"pid": 7, "window_id": 3, "delivery_mode": "foreground",
+                                              "steps": steps})
+
+    batch = {"pid": 7, "window_id": 3, "delivery_mode": "foreground"}
+    assert marked == [[("tool", ("set_value", {**batch, "element_token": "s1:15", "value": "laptop"})),
+                       ("click", (5.0, 57.0, "left", 1, [])), ("scroll", (9, 60, "down", 3, []))]]
+
+
+@pytest.mark.asyncio
+async def test_a_call_cua_driver_refused_marks_nothing_and_nothing_is_read_for_marks_while_no_recording_draws_them(
+        module, daemon, marked, monkeypatch):
+    daemon.refuse.add("click")
+    daemon.replies["scroll"] = {**_summary("Background delivery is not available."),
+                                "structuredContent": {"effect": "refused", "route": "global_input", "summary": "refused"}}
+    daemon.replies["run_steps"] = {"isError": True, "content": [
+        {"type": "text", "text": "run_steps: step 1 of 1 failed; 0 step(s) ran before it"}]}
+    async with mcp_session(module.CuaDriver()) as session:
+        await session.call_tool("click", {"pid": 7, "window_id": 3, "x": 1, "y": 1})
+        await session.call_tool("run_steps", {"steps": [{"tool": "click", "args": {"x": 1, "y": 1}}]})
+        await session.call_tool("launch_app", {"name": "thunar"})
+        await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 1, "y": 1, "direction": "down"})
+        monkeypatch.setattr(module.CuaDriver, "draws_inputs", lambda self: False)
+        await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 1, "y": 1, "direction": "down"})
+
+    assert marked == [[], [], []]
+    assert "list_windows" not in [name for name, _args in daemon.calls()]
+
+
+@pytest.mark.asyncio
+async def test_an_input_that_cant_be_marked_leaves_the_others_drawn_and_the_reply_as_cua_driver_gave_it(
+        module, daemon, marked, caplog):
+    daemon.fail.add("list_windows")
+    ran = {"executed": 2, "ok": True, "steps": [
+        {"index": 0, "ok": True, "message": "Scrolled down 3 ticks."},
+        {"index": 1, "ok": True, "message": "Clicked at (5.0, 6.0). [window_point=(5, 6) screen_point=(5, 57)]"}]}
+    daemon.replies["run_steps"] = {"content": [{"type": "text", "text": "run_steps: 2/2 steps ok"}],
+                                   "structuredContent": ran}
+    async with mcp_session(module.CuaDriver()) as session:
+        scrolled = await session.call_tool("scroll", {"pid": 7, "window_id": 3, "x": 1, "y": 1, "direction": "down"})
+        await session.call_tool("run_steps", {"pid": 7, "window_id": 3, "steps": [
+            {"tool": "scroll", "args": {"x": 1, "y": 1, "direction": "down"}}, {"tool": "click", "args": {"x": 5, "y": 6}}]})
+
+    assert not scrolled.isError and scrolled.structuredContent["summary"] == "did scroll"
+    assert marked == [[], [("click", (5.0, 57.0, "left", 1, []))]]
+    assert "couldn't mark cua-driver's scroll on an annotated recording" in caplog.text
