@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import socket
@@ -20,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agent_env.runner import store as run_store
-from agent_env.runner.runner import KEEP_KEY, RunHandle, RunRecord, Runner, RunStatus, run_outcome
+from agent_env.runner.runner import KEEP_KEY, IdempotencyConflict, RunHandle, RunRecord, Runner, RunStatus, run_outcome
 from agent_env.task.store import new_instance_id
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
@@ -149,9 +150,15 @@ class LocalRunner(Runner):
         agent_artifact_id: Optional[str] = None,
         metadata: Optional[dict] = None,
         instance_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RunHandle:
-        run_id = f"local-{uuid.uuid4().hex}"
-        instance_id = instance_id or new_instance_id(task_id)        # minted here so callers can link immediately
+        if idempotency_key is None:
+            run_id = f"local-{uuid.uuid4().hex}"
+            instance_id = instance_id or new_instance_id(task_id)    # minted here so callers can link immediately
+        else:
+            digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
+            run_id = f"local-{digest[:32]}"
+            instance_id = instance_id or f"{task_id}-{digest[32:40]}"
         record = RunRecord(
             run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
             instance_id=instance_id, status=RunStatus.QUEUED,
@@ -162,6 +169,18 @@ class LocalRunner(Runner):
                 "metadata": metadata or {},
             },
         )
+        if idempotency_key is not None and (existing := run_store.get_run(run_id)) is not None:
+            # A key's ids are derived from it, so the stored run is the key's first request.
+            # No await separates this check from insert_run below, so concurrent submits
+            # on the event loop cannot both pass it. Must run before insert_run: a repeat
+            # of an id there would reset the run's instance.
+            if (existing.task_id, existing.task_version, existing.instance_id, existing.overrides) != (
+                record.task_id, record.task_version, record.instance_id, record.overrides,
+            ):
+                raise IdempotencyConflict(
+                    f"idempotency_key already used for a different request (run {run_id})"
+                )
+            return RunHandle(run_id=existing.run_id, instance_id=existing.instance_id)
         run_store.insert_run(record)
         self._inflight[run_id] = asyncio.create_task(self._run(record), name=f"agent-env-run-{run_id}")
         self._watching()

@@ -40,6 +40,10 @@ class RunHandle:
     instance_id: str
 
 
+class IdempotencyConflict(Exception):
+    """``submit`` was given an ``idempotency_key`` already used for a different request."""
+
+
 @dataclass
 class RunRecord:
     """The persisted state of one run."""
@@ -115,10 +119,15 @@ class Runner(ABC):
         agent_artifact_id: Optional[str] = None,
         metadata: Optional[dict] = None,
         instance_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RunHandle:
         """Enqueue a run and return its handle immediately, without waiting for it.
 
         With ``instance_id`` the run continues that instance from its stored context, at ``metadata["start_step"]``.
+        With an ``idempotency_key``, a repeat of the same request (task, version, ``instance_id`` and parameters)
+        returns the first call's handle and starts no second run, whatever state that run is in, including failed.
+        The same key with a different request raises ``IdempotencyConflict``. A key is scoped to the runner's store:
+        one key names one run. Without a key, every call starts a new run.
         A run whose ``metadata[KEEP_KEY]`` is set and that ends on its own, passed or failed, is left up: whoever
         submitted it tears it down. A cancelled run is torn down either way."""
 
