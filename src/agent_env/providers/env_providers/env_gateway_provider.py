@@ -76,7 +76,7 @@ from agent_env.providers.env_providers.env_provider import (
     _size_kwargs,
     _tool_names,
 )
-from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider, remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -888,7 +888,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 vm_kwargs["memory"] = memory_mb
             # The SQL consoles are never tunnelled: the gateway serves them behind its control token. Only the local
             # provider gets a host port for them (its own free port, published on 127.0.0.1), so two local envs don't clash.
-            console_ports = [DB_WEB_PORT, DB_MCP_PORT] if isinstance(sandbox_provider, LocalSandboxProvider) else []
+            console_ports = [DB_WEB_PORT, DB_MCP_PORT] if sandbox_provider.ON_THIS_MACHINE else []
             self._sandbox = await sandbox_provider.create_vm(
                 exposed_ports=[gateway_port, *console_ports] + [sc.host_port for sc in sidecars],
                 timeout=ttl_seconds,
