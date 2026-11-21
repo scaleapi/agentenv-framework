@@ -402,12 +402,12 @@ VERIFY_SEEDED = '''
 import httpx
 
 
-async def verify(mcp_url):
+async def verify(mcp_url, control_headers):
     gateway = mcp_url.rsplit("/mcp", 1)[0]
     results = []
     async with httpx.AsyncClient(timeout=30) as client:
         for server, items in CONFIG["servers"].items():
-            response = await client.get(f"{gateway}/svc/mcp-{server}/export-state")
+            response = await client.get(f"{gateway}/svc/mcp-{server}/export-state", headers=control_headers)
             listed = response.json() if response.status_code == 200 else {}
             description = f"{server} holds what it was seeded with, {items}: {response.status_code} {listed}"
             results.append({"id": server, "result": listed.get("items") == items, "description": description})
