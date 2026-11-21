@@ -43,13 +43,17 @@ the model no one is there to answer.
 | `peer-agents/v1` | SDK default: Hermes reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `attribution-probe/v1` | the `project_id` and `task_id` the last turn sent |
 
-A turn's usage is Hermes' own report for its main model calls: tokens, `api_calls`, and its estimated cost where the
-endpoint's model list prices the model. The image is `python:3.11-slim` with Hermes, `pdftoppm` and the agent. It
-starts as root, which runs the env clock's follower and egress proxy under supervisord (`start-agent`, `root.conf`),
-and the A2A server and Hermes run as the `agent` user, on Modal too; started as another user, it runs the A2A server
-alone as that user. Supervisord restarts a server that dies, which as it starts kills the turns the dead one left
-running, and the task it was running is lost with it. Hermes' runtime (its own Python, Node and ripgrep) and the profiles are under `/data/.hermes`,
-whatever the uid. It has no `install/v1`.
+A turn's usage counts every model call the turn made: its main calls and its auxiliary ones (title generation,
+compression), as Hermes' usage file reports them, and a `delegate_task` child's, from their `post_api_request` events,
+which the file leaves out. A turn killed before it wrote the file keeps the calls its events counted, marked as a lower
+bound. Hermes' estimated cost is kept only where it priced the calls. The profile turns Hermes' background review off:
+its fork outlives the turn's process, which kills it before it reports what the proxy billed. The image is
+`python:3.11-slim` with Hermes, `pdftoppm` and the agent. It starts as root, which runs the env clock's follower and
+egress proxy under supervisord (`start-agent`, `root.conf`), and the A2A server and Hermes run as the `agent` user, on
+Modal too; started as another user, it runs the A2A server alone as that user. A server that exits, for any reason,
+stops supervisord and the container with it, as when the server was the container's process, so the run fails at
+once; the follower and the proxy restart in place. Hermes' runtime (its own Python, Node and ripgrep) and the profiles
+are under `/data/.hermes`, whatever the uid. It has no `install/v1`.
 
 ## The env's clock
 

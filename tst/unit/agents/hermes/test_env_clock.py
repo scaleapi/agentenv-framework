@@ -107,6 +107,7 @@ def test_unarmed_the_bridge_starts_hermes_with_the_command_and_environment_it_al
         "providers": {"litellm": {"api": "https://litellm.example.com/v1", "key_env": "LITELLM_API_KEY",
                                   "transport": "chat_completions"}},
         "skills": {"external_dirs": [str(tmp_path / "skills")]}, "plugins": {"enabled": ["agentenv"]},
+        "auxiliary": {"background_review": {"enabled": False}},
         "mcp_servers": {name: {"url": info["url"]} for name, info in MCP.items()}}
 
 

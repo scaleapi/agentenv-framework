@@ -264,6 +264,51 @@ async def test_a_hook_that_asks_the_user_reaches_the_configured_human_peer(monke
     ]
 
 
+NOTES = """
+    async def post_turn(turn, params):
+        return None if turn.last else await turn.ask_user(note=f"the sheet has no total (turn {turn.number})")
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_hook_note_reaches_the_user_sim_after_the_reply_and_never_the_agent(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("add a total?")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("notes", NOTES), turns=2).execute(ctx)
+
+    note = ("[Only you see this; the assistant doesn't. What you found when you checked its work yourself: "
+            "the sheet has no total (turn 1)]")
+    assert peers.requests(ctx)[1:] == [
+        *exchange(AGENT, text("plan my week"), "<id1>", "<ctx>", "task-1"),
+        *exchange(USER, [*text("one"), *text(note)], "<id2>", "<ctx>", "task-2"),
+        *exchange(AGENT, text("add a total?"), "<id3>", "<ctx>", "task-3"),
+    ]
+    assert ctx.metadata["user_side_notes"]["talk"] == [{"turn": 1, "note": "the sheet has no total (turn 1)"}]
+
+
+@pytest.mark.asyncio
+async def test_a_human_peer_gets_no_hook_note(monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_HUMAN_A2A_URL", "http://human.test")
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one"), text("two")], "http://human.test": [text("go on")]})
+    ctx = _context()
+
+    await _step(_hook("notes", NOTES), turns=2).execute(ctx)
+
+    assert peers.requests(ctx)[2:4] == exchange("http://human.test", text("one"), "<id2>", "<ctx>", "task-2")
+    assert "user_side_notes" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", ["''", "'  '", "7"])
+async def test_a_hook_note_that_is_not_text_fails_the_step(monkeypatch, note):
+    EnvPeers(monkeypatch, {AGENT: [text("one")], USER: [sim("ok")]})
+    hook = _hook("bad", f"async def post_turn(turn, params):\n    return await turn.ask_user(note={note})\n")
+
+    with pytest.raises(ValueError, match="a note for the user side is non-empty text"):
+        await _step(hook, turns=2).execute(_context(user_card=_USER_SIM_CARD))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("returned, fragment", [
     ("'wake'", "returned 'wake'"),
@@ -571,3 +616,45 @@ async def test_with_no_armed_env_clock_stored_messages_carry_none(monkeypatch):
                               poll_interval_seconds=0).execute(ctx)
 
     assert all("env_clock" not in m for m in _stored(ctx, peers)["messages"])
+
+
+
+@pytest.mark.asyncio
+async def test_a_note_passed_after_the_user_side_was_asked_raises_instead_of_being_dropped():
+    from agent_env.task_step.task_steps.post_turn_hooks import _Answer
+
+    asked = []
+
+    async def ask_user(note=None):
+        asked.append(note)
+        return {"message": text("ok")}
+
+    async def no_trigger():
+        return None
+
+    answer = _Answer(ask_user, no_trigger)
+    assert await answer.ask_user() == {"message": text("ok")}
+    with pytest.raises(RuntimeError, match="already asked this turn without a note"):
+        await answer.ask_user(note="the sheet has no total")
+    assert await answer.ask_user() == {"message": text("ok")} and asked == [None]   # asked once
+
+    noted = _Answer(ask_user, no_trigger)
+    await noted.ask_user(note="first")
+    assert await noted.ask_user(note="first") == {"message": text("ok")}             # the same note is fine
+    with pytest.raises(RuntimeError, match="with another note"):
+        await noted.ask_user(note="second")
+
+
+@pytest.mark.asyncio
+async def test_a_note_after_an_agent_trigger_answered_the_turn_has_no_one_to_reach_and_isnt_an_error():
+    from agent_env.task_step.task_steps.post_turn_hooks import _Answer
+
+    async def ask_user(note=None):
+        raise AssertionError("the user side isn't asked once a trigger answered")
+
+    async def fired():
+        return {"message": text("nudge from a trigger")}
+
+    answer = _Answer(ask_user, fired)
+    assert await answer.user_triggers() == {"message": text("nudge from a trigger")}
+    assert await answer.ask_user(note="the sheet has no total") == {"message": text("nudge from a trigger")}
