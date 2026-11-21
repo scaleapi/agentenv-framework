@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -199,17 +199,22 @@ class GeminiConfig(AgentConfig):
 
 @dataclass
 class _Calls:
-    """The generate calls one run's route forwarded, each recorded as it ended, and how many are still running."""
+    """The generate calls one run's route forwarded, each recorded as it ended (and handed to ``sink``, the turn's
+    trajectory, so a turn cancelled midway keeps them), and how many are still running."""
 
     records: list[dict[str, Any]] = field(default_factory=list)
     running: int = 0
+    sink: Callable[[dict[str, Any]], None] | None = None
 
     def record(self, *, via: str, model: str | None, status: int | None, counts: dict[str, int] | None) -> None:
         """An answer the endpoint refused (an error status, or no status at all) counts nothing; one it gave without
         counts we could read counts as a call whose usage is unknown."""
         outcome = "refused" if status is None or status >= 400 else "answered" if counts is not None else "unreported"
-        self.records.append({"type": "agentenv.model_call", "via": via, "model": model, "status": status,
-                             "outcome": outcome, **({"usage": counts} if outcome == "answered" else {})})
+        record = {"type": "agentenv.model_call", "via": via, "model": model, "status": status, "outcome": outcome,
+                  **({"usage": counts} if outcome == "answered" else {})}
+        self.records.append(record)
+        if self.sink is not None:
+            self.sink(record)
 
 
 @dataclass(frozen=True)
@@ -219,11 +224,12 @@ class _Route:
     model: str | None
     project_id: str | None
     task_id: str | None
-    calls: _Calls = field(default_factory=_Calls)
+    calls: _Calls = field(default_factory=_Calls, compare=False)
 
 
-# How long a turn waits, once its CLI is done, for the model calls its proxy is still forwarding.
+# How long a turn waits, once its CLI is done, for the model calls its proxy is still forwarding, checking this often.
 _IN_FLIGHT_GRACE_S = 5.0
+_IN_FLIGHT_POLL_S = 0.05
 _COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 
 
@@ -232,7 +238,7 @@ async def _settled(calls: _Calls) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _IN_FLIGHT_GRACE_S
     while calls.running and loop.time() < deadline:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(_IN_FLIGHT_POLL_S)
 
 
 def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage:
@@ -636,7 +642,8 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
             async with self._context_locks_guard:
                 self._active_contexts.add(context_id)
             token = uuid.uuid4().hex
-            route = self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id)
+            route = self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id,
+                                                 _Calls(sink=request.trajectory.append))
             own = self.session_ref_for_context(context_id)
             try:
                 with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt) as settings:
@@ -669,13 +676,13 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                           .failed("infra_error", str(e)[:_ERROR_MESSAGE_LIMIT], error_type="infra_error")
                           .add_text(str(e)))
                 if route.calls.records or route.calls.running:
-                    failed.usage(await self._calls_usage(request, route.calls, 0, []))
+                    failed.usage(await self._calls_usage(route.calls, 0, []))
                 return failed.build()
             finally:
                 self._routes.pop(token, None)
                 self._active_contexts.discard(context_id)
 
-        usage = await self._calls_usage(request, route.calls, result.tool_call_count, result.trajectory)
+        usage = await self._calls_usage(route.calls, result.tool_call_count, result.trajectory)
 
         if result.session_id:
             self.set_session_ref_for_context(context_id, result.session_id)
@@ -696,12 +703,9 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         )
 
     @staticmethod
-    async def _calls_usage(request: TaskRequest[GeminiConfig], calls: _Calls, tool_calls: int,
-                           trajectory: list[dict]) -> Usage:
-        """The turn's usage, once its calls have settled, each of them recorded in its trajectory."""
+    async def _calls_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage:
+        """The turn's usage, once its calls have settled."""
         await _settled(calls)
-        for record in list(calls.records):
-            request.trajectory.append(record)
         return _turn_usage(calls, tool_calls, trajectory)
 
     def _on_event(self, event: dict, request: TaskRequest[GeminiConfig]) -> None:
