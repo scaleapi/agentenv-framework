@@ -214,3 +214,32 @@ def test_a_screenshots_type_read_from_its_bytes_reaches_per_criterion_frames():
     assert shot.screenshot_media_type == "image/gif"
     [labeled] = select_frames_per_criterion([shot], [{"id": "c", "description": "the page"}], max_frames=1)
     assert labeled.frame.media_type == "image/gif"
+
+
+def test_a_view_names_the_tools_offered_without_their_schemas():
+    """An agent's tool definitions run to tens of thousands of tokens; a judge sees their names, as a native turn has
+    them."""
+    def offered(*names):
+        return [{"type": "function", "function": {"name": name, "description": "long " * 500,
+                                                  "parameters": {"type": "object"}}} for name in names]
+    whole = atif_runs.fixture("two_turns")
+    whole["agent"] = {**whole["agent"], "tool_definitions": offered("Bash", "Read")}
+    url = atif_runs.stored("two_turns", document=whole)
+    documents = T.AtifDocuments()
+    view = documents.view(T.TurnSource(url, "task-91c3"))
+    assert view["agent"]["tool_definitions"] == [{"type": "function", "function": {"name": "Bash"}},
+                                                 {"type": "function", "function": {"name": "Read"}}]
+    assert documents.document(url)["agent"]["tool_definitions"] == offered("Bash", "Read")
+    assert errors_in(validate(view)) == []
+    as_stored = documents.view(T.TurnSource(url, "task-gone", 99))
+    assert [entry["function"] for entry in as_stored["agent"]["tool_definitions"]] == [{"name": "Bash"}, {"name": "Read"}]
+
+
+def test_a_sub_agents_tools_are_cut_to_their_names_at_any_depth():
+    leaf = {"trajectory_id": "leaf", "agent": {"name": "leaf", "tool_definitions": [
+        {"type": "function", "function": {"name": "Grep", "parameters": {"type": "object"}}}]}, "steps": []}
+    middle = {"trajectory_id": "mid", "agent": {"name": "mid"}, "steps": [], "subagent_trajectories": [leaf]}
+    cut = T._tool_names({"agent": {"name": "root"}, "steps": [], "subagent_trajectories": [middle]})
+    assert cut["subagent_trajectories"][0]["subagent_trajectories"][0]["agent"]["tool_definitions"] == [
+        {"type": "function", "function": {"name": "Grep"}}]
+    assert leaf["agent"]["tool_definitions"][0]["function"]["parameters"] == {"type": "object"}

@@ -2,7 +2,8 @@
 conversation at one url that its later turns overwrite, so a turn labelled ``atif/1`` is read as its own A2A task cut
 out of the document there (``task_document``): that turn alone, a document ATIF's models load. A turn with any other
 label keeps the native readers. Each document is read once per judge, and the media a view names are read from the
-document's folder, each checked against its name."""
+document's folder, each checked against its name. A view names the tools its agents were offered, as a native turn does,
+without their descriptions and schemas, which run to tens of thousands of tokens a turn."""
 
 from __future__ import annotations
 
@@ -86,6 +87,21 @@ def media_url(document_url: str, path: str) -> str:
     return f"{document_url.rsplit('/', 1)[0]}/{path}"
 
 
+def _tool_names(trajectory: Mapping[str, Any]) -> dict[str, Any]:
+    """``trajectory`` with each agent block's tool definitions cut to their names, its sub-agents' at any depth too."""
+    view = dict(trajectory)
+    agent = view.get("agent")
+    if isinstance(agent, Mapping) and isinstance(agent.get("tool_definitions"), list):
+        view["agent"] = {**agent, "tool_definitions": [
+            {"type": "function", "function": {"name": entry["function"]["name"]}}
+            for entry in agent["tool_definitions"]
+            if isinstance(entry, Mapping) and isinstance(entry.get("function"), Mapping) and "name" in entry["function"]]}
+    if isinstance(view.get("subagent_trajectories"), list):
+        view["subagent_trajectories"] = [_tool_names(sub) if isinstance(sub, Mapping) else sub
+                                         for sub in view["subagent_trajectories"]]
+    return view
+
+
 class AtifDocuments:
     """The atif/1 documents one judge reads, each read once, and the turn views cut from them. A media file's bytes are
     read only when a judge is handed them, and staging keeps only whether each file is stored as its name says."""
@@ -113,11 +129,12 @@ class AtifDocuments:
             except (AttributeError, TypeError):
                 picked = []
             if picked:
-                self._views[source] = tasks_document(document, picked[:1])
+                view = tasks_document(document, picked[:1])
             else:
                 logger.warning(f"the atif/1 copy at {source.url} holds neither task {source.task_id} nor a task ending at "
                                f"step {source.through_step}, so its judge reads the copy as stored")
-                self._views[source] = document
+                view = document
+            self._views[source] = _tool_names(view)
         return self._views[source]
 
     def text(self, source: TurnSource) -> str:
