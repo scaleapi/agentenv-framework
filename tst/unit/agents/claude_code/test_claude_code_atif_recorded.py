@@ -6,7 +6,8 @@ under ``tools/``, and named where they were fed.
 The scenarios: ``coding`` (two turns of one conversation), ``subagent`` (an Agent call), ``browser`` (screenshots from a
 browser's MCP tools), ``thinking`` (a thinking model), ``api-error`` (the endpoint refusing every call) and ``retried``
 (a stalled call that the bridge resumed). Regenerate the expected documents after an intended change with:
-python tst/unit/agents/claude_code/test_claude_code_atif_recorded.py"""
+python tst/unit/agents/claude_code/test_claude_code_atif_recorded.py. Record the runs again, as a bump of the pinned CLI
+asks, with ``tst/manual/claude_code_atif/record.py``, whose docstring has the steps."""
 from __future__ import annotations
 
 import json

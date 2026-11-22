@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tracemalloc
 
 import pytest
 
@@ -13,6 +14,13 @@ from tst.unit.agents.claude_code.support import send, terminal
 from tst.unit.agents.claude_code.test_claude_bridge_retry import _api_error_stdout, _event, scripted  # noqa: F401
 
 KEY = "sk-" + "Q" * 24
+
+
+@pytest.fixture(autouse=True, params=[1 << 20, 7], ids=["whole-pieces", "small-pieces"])
+def piece_size(request, monkeypatch):
+    """Each test with the tail reading in pieces as large as a whole small file, and as small as a few bytes, so lines
+    cross the pieces' edges."""
+    monkeypatch.setattr(claude_bridge, "_TRANSCRIPT_PIECE_BYTES", request.param)
 
 
 def _assistant(uuid, text="hi", msg="msg-1", **extra):
@@ -225,3 +233,26 @@ def test_a_task_that_opens_a_new_document_feeds_its_tools_again(turns, client, m
     send(client, "three", context_id="ctx-b")
     assert [call["new_document"] for call in turns] == [True, False, True]
     assert turns[2]["tool_shapes"] == set()
+
+
+def test_the_tail_never_holds_a_whole_transcript(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", tmp_path)
+    monkeypatch.setattr(claude_bridge, "_TRANSCRIPT_PIECE_BYTES", 1 << 16)
+    transcript = tmp_path / "sess-1.jsonl"
+    screenshot = {"type": "user", "uuid": "shot", "toolUseResult": {"file": "A" * (1 << 20)}}
+    transcript.write_bytes(_lines(_shape("h1"), *[{**screenshot, "uuid": f"shot-{i}"} for i in range(24)]))
+    tracemalloc.start()
+    try:
+        tail = claude_bridge.SessionTail("sess-1", set(), set(), new_document=True)
+        started = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        rewritten = transcript.read_bytes().replace(b'"uuid": "shot-0"', b'"uuid":"shot-0"') + _lines(_assistant("after"))
+        transcript.write_bytes(rewritten)
+        del rewritten
+        tracemalloc.start()
+        records, _, _ = tail.read()
+        read = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert [(name, record.get("uuid")) for name, record in records] == [("tools", None), ("session", "after")]
+    assert started < 6 * (1 << 20) and read < 6 * (1 << 20), (started, read)

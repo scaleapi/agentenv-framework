@@ -463,6 +463,8 @@ _TAIL_MESSAGE_KEYS = ("id", "model", "usage", "stop_reason")
 _SHAPE_RECORD = "api-request-shape"
 # How often a turn's transcripts are read for new records while the CLI runs.
 SESSION_POLL_S = 0.05
+# Where the tail reads a whole transcript, it reads it in pieces of this size.
+_TRANSCRIPT_PIECE_BYTES = 1 << 20
 _SUBAGENT_PREFIX = "agent-"
 
 
@@ -514,7 +516,8 @@ class SessionTail:
     taken as replaced when its inode or the line before the place it was read to changed.
     ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again. For a new
     document, ``new_document``, the first read also gives the latest request shape the transcript already held, which
-    the CLI writes once per session."""
+    the CLI writes once per session. Where it reads a whole file it reads it in pieces, since a long computer-use
+    session's transcript holds each screenshot twice."""
 
     def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]], *,
                  new_document: bool = False) -> None:
@@ -526,12 +529,11 @@ class SessionTail:
         self._earlier_shape: dict | None = None
         for path in self._paths():
             with contextlib.suppress(OSError):
-                data = path.read_bytes()
-                end = data.rfind(b"\n") + 1
-                self._files[path] = _TailedFile(path.stat().st_ino, end, data.count(b"\n", 0, end),
-                                                _line_before(data, end))
+                with path.open("rb") as file:
+                    end, lines, last = _skim(file)
+                    self._files[path] = _TailedFile(os.fstat(file.fileno()).st_ino, end, lines, last)
                 if new_document and path == self._main:
-                    self._earlier_shape = _last_shape(data[:end])
+                    self._earlier_shape = _last_shape(path, end)
 
     def _paths(self) -> list[Path]:
         subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
@@ -577,32 +579,68 @@ class SessionTail:
                 file.seek(offset)
                 data = file.read()
             else:
-                file.seek(0)
-                whole, offset = file.read(), 0
-                for _ in range(tailed.lines):
-                    offset = whole.find(b"\n", offset) + 1
-                    if offset == 0:
-                        return _TailedFile(status.st_ino, 0, 0), []
-                data, last = whole[offset:], _line_before(whole, offset)
+                offset, counted, last = _skim(file, tailed.lines)
+                if counted < tailed.lines:
+                    return _TailedFile(status.st_ino, 0, 0), []
+                file.seek(offset)
+                data = file.read()
         end = data.rfind(b"\n") + 1
         lines = [line for line in data[:end].split(b"\n") if line.strip()]
         return _TailedFile(status.st_ino, offset + end, tailed.lines + data.count(b"\n", 0, end),
                            _line_before(data, end) if end else last), lines
 
 
-def _last_shape(data: bytes) -> dict | None:
-    """The last request shape a transcript holds."""
-    marker = _SHAPE_RECORD.encode()
-    start = data.rfind(marker)
-    while start >= 0:
-        line_start = data.rfind(b"\n", 0, start) + 1
-        line_end = data.find(b"\n", start)
-        with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
-            record = json.loads(data[line_start:line_end if line_end >= 0 else None])
-            if isinstance(record, dict) and record.get("type") == _SHAPE_RECORD:
-                return record
-        start = data.rfind(marker, 0, line_start)
-    return None
+def _skim(file, lines: int | None = None) -> tuple[int, int, bytes]:
+    """Read ``file`` from its start, a piece at a time, to the end of its ``lines``-th line (its last whole line when
+    ``lines`` is None): the offset there, how many lines that is (fewer than ``lines`` when the file has fewer), and the
+    line just before it, newline included."""
+    file.seek(0)
+    offset = count = position = 0
+    while lines is None or count < lines:
+        piece = file.read(_TRANSCRIPT_PIECE_BYTES)
+        if not piece:
+            break
+        found = piece.count(b"\n")
+        if lines is None or count + found < lines:
+            if found:
+                count, offset = count + found, position + piece.rfind(b"\n") + 1
+        else:
+            at = -1
+            for _ in range(lines - count):
+                at = piece.find(b"\n", at + 1)
+            count, offset = lines, position + at + 1
+        position += len(piece)
+    return offset, count, _line_ending_at(file, offset)
+
+
+def _line_ending_at(file, end: int) -> bytes:
+    """The line just before ``end``, newline included; empty at the start. Read backward a piece at a time."""
+    size = _TRANSCRIPT_PIECE_BYTES
+    while end:
+        start = max(0, end - size)
+        file.seek(start)
+        data = file.read(end - start)
+        found = data.rfind(b"\n", 0, len(data) - 1)
+        if found >= 0 or start == 0:
+            return data[found + 1:]
+        size *= 2
+    return b""
+
+
+def _last_shape(path: Path, end: int) -> dict | None:
+    """The last request shape the transcript holds before ``end``, read a line at a time."""
+    shape, read, marker = None, 0, _SHAPE_RECORD.encode()
+    with path.open("rb") as file:
+        for raw in file:
+            read += len(raw)
+            if read > end:
+                break
+            if marker in raw:
+                with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                    record = json.loads(raw)
+                    if isinstance(record, dict) and record.get("type") == _SHAPE_RECORD:
+                        shape = record
+    return shape
 
 
 def _line_before(data: bytes, end: int) -> bytes:
