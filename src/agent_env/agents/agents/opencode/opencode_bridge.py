@@ -33,6 +33,8 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from agent_egress import clock_armed, egress_env
+from agentenv_protocol.a2a_agent import Usage
+from model_relay import Calls, model_relay
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +155,8 @@ class OpencodeResult:
     error: str | None = None
     error_code: str | None = None
     structured_output: object | None = None
+    # What the turn's model calls used, as its model relay counted them.
+    usage: Usage | None = None
 
 
 def validate_output_format(output_format: dict) -> dict:
@@ -424,7 +428,18 @@ def _descendants(pid: int) -> list[int]:
     return found
 
 
-async def run_opencode(
+async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult:
+    """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
+    counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
+    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported."""
+    calls = Calls()
+    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls) as relay:
+        result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
+    result.usage = calls.usage(result.tool_call_count)
+    return result
+
+
+async def _run_opencode(
     prompt: str,
     context_id: str,
     session_id: str | None = None,
@@ -442,8 +457,9 @@ async def run_opencode(
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
     max_turns: int | None = None,
+    base_url: str | None = None,
 ) -> OpencodeResult:
-    """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
+    """Run one `opencode run` turn in ``workspace``, its provider calling ``base_url``, the endpoint's when None. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
     ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
 
@@ -467,6 +483,7 @@ async def run_opencode(
         )
 
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
+                           environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
                            instructions=instructions, builtin_tools=builtin_tools)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`

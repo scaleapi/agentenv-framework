@@ -223,6 +223,30 @@ def test_a_canceled_turn_keeps_the_events_it_printed(cli, app):
     assert canceled["events"] == final["trajectory"] == [_INIT]
 
 
+def test_a_canceled_turn_keeps_the_model_calls_its_proxy_forwarded(cli, app):
+    """Each call is in the trajectory as it ends, so a turn canceled before its usage is built still records it."""
+    started = _blocked_cli(cli)
+    agent = app.state.agentenv_a2a.agent
+    counts = {"input_tokens": 7311, "output_tokens": 117, "cache_read_tokens": 0, "reasoning_tokens": 95}
+
+    async def exercise():
+        async with _client(app) as client:
+            task_id = await _send(client, "ctx-canceled-calls")
+            await _read_until(client, {"task_id": task_id, "after": 0}, lambda read: read["next"] >= 1)
+            (route,) = agent._routes.values()
+            route.calls.record(via="passthrough", model="gemini-2.5-flash", status=200, counts=counts)
+            await client.post("/a2a", json={"jsonrpc": "2.0", "id": 2, "method": "tasks/cancel", "params": {"id": task_id}})
+            await _read_until(client, {"task_id": task_id, "after": 0}, lambda read: read["state"] == "canceled")
+            return (await client.post(a2a_server.TRAJECTORY_V1.endpoint, json={"task_id": task_id})).json()
+
+    final = asyncio.run(exercise())
+
+    assert started[0].killed
+    assert final["trajectory"] == [_INIT, {"type": "agentenv.model_call", "via": "passthrough",
+                                           "model": "gemini-2.5-flash", "status": 200, "outcome": "answered",
+                                           "usage": counts}]
+
+
 def test_a_turn_whose_cli_fails_keeps_the_events_it_printed(cli, app):
     failed = {"type": "result", "status": "error", "error": {"message": "quota"}}
     cli.append(lambda: FakeCLI(_lines(_INIT, failed), returncode=1))

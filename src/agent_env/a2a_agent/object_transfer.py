@@ -355,6 +355,24 @@ async def readable_parts(
             await staging.release()
 
 
+@dataclass(frozen=True)
+class AgentTurn:
+    """An A2A peer's turn as it ended: its task id, its final task as the peer reported it, and the reply read from
+    the task's status message, whose ``usage`` is what the turn's model calls used."""
+
+    task_id: str
+    task: dict
+    reply: protocol.TerminalResponse
+
+    @property
+    def state(self) -> Any:
+        return (self.task.get("status") or {}).get("state")
+
+    @property
+    def message(self) -> dict:
+        return (self.task.get("status") or {}).get("message") or {}
+
+
 async def send_and_wait(
     a2a_url: str,
     parts: list[dict],
@@ -367,9 +385,9 @@ async def send_and_wait(
     before_send: Callable[[], None] | None = None,
     on_sent: Callable[[str], None] | None = None,
     shareable: Collection[str] | None = None,
-) -> tuple[str, dict]:
-    """Send ``parts`` to the A2A peer at ``a2a_url`` and wait for its task to end: the task's id and its
-    final state. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
+) -> AgentTurn:
+    """Send ``parts`` to the A2A peer at ``a2a_url`` and wait for its task to end, returning the turn with its
+    reply and the reply's usage. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
     owns, of those ``shareable`` names when given, as an HTTPS URL it can read (``readable_parts``); any
     other peer, such as a human's hub, reads the store itself and is sent the parts as they are.
     ``before_send`` runs once the parts are ready, just before the message goes out, and ``on_sent`` with the
@@ -389,10 +407,12 @@ async def send_and_wait(
         task_id, _ = await protocol.send_a2a_message(a2a_url, sent, message_id, context_id, timeout_seconds)
         if on_sent is not None:
             on_sent(task_id)
-        return task_id, await protocol.poll_a2a_task(
+        task = await protocol.poll_a2a_task(
             a2a_url, task_id, timeout_seconds, poll_interval_seconds,
             sandbox_id=agent.sandbox_id if agent is not None else None,
         )
+    message = (task.get("status") or {}).get("message") or {}
+    return AgentTurn(task_id=task_id, task=task, reply=protocol.TerminalResponse.from_message(message))
 
 
 def skill_bundle_request(

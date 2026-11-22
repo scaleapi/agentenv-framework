@@ -81,6 +81,47 @@ def test_a_judge_call_the_step_made_itself_is_its_own_entry_costed_as_its_endpoi
     assert (entry["cost_usd"], entry["cost_status"], entry["cost_source"]) == (pytest.approx(0.004), "reported",
                                                                               "provider")
 
+def test_judge_calls_costed_differently_each_count_their_own_cost_and_an_uncosted_one_makes_the_entry_partial():
+    context = TaskStepContext()
+    usage = StepUsage(context, "talk")
+    tokens = {"prompt_tokens": 50, "completion_tokens": 5}
+    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(0.002, CostStatus.REPORTED, "provider",
+                                                                               0.002)))
+    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(0.001, CostStatus.PRICED, "litellm@1",
+                                                                               None)))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["turns"], entry["cost_usd"], entry["partial"]) == (2, pytest.approx(0.003), False)
+
+    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(None, CostStatus.UNPRICED, None, None)))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["turns"], entry["cost_usd"], entry["partial"]) == (3, pytest.approx(0.003), True)
+
+
+def test_a_turn_cut_off_before_its_reply_is_a_turn_of_unknown_usage():
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "m", None)
+    usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(input_tokens=3, output_tokens=1)))
+
+    usage.cut_off(ModelRole.SOLVER)
+    usage.cut_off(ModelRole.USER_SIMULATOR)  # a human peer's role, never started
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 3, True)
+
+
+def test_a_role_whose_only_turn_was_cut_off_has_no_counts_and_is_partial():
+    context = TaskStepContext()
+    usage = StepUsage(context, "rate")
+    usage.start(ModelRole.USER_SIMULATOR, "m", None)
+
+    usage.cut_off(ModelRole.USER_SIMULATOR)
+
+    [entry] = context.metadata["step_usage"]["rate"]
+    assert (entry["turns"], entry["input_tokens"], entry["cost_usd"], entry["partial"]) == (1, None, None, True)
+
 
 def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_partial():
     role = RoleUsage("solver")

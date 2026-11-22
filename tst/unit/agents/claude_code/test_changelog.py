@@ -8,6 +8,7 @@ import email.parser
 import email.policy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from starlette.testclient import TestClient
 
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge, tar_changelog
 from tst.unit.agents.claude_code.support import expiry, extension_methods, read_grant
+from tst.util import recording_tar
 
 GNU_TAR = shutil.which("tar") is not None and tar_changelog.gnu_tar()
 needs_gnu_tar = pytest.mark.skipif(not GNU_TAR, reason="the changelog is a GNU incremental tar")
@@ -139,8 +141,8 @@ def test_the_hook_waits_long_enough_for_its_turn_and_the_script_reads_its_own_co
     log, _, _, _ = _changelog(tmp_path)
     assert tar_changelog.HOOK_TIMEOUT_S == 600
     assert f"CFG = {json.dumps(str(tmp_path / 'changelog' / 'config.json'))}" in log.capture_script()
-    assert log.hook_command.endswith(f"{tmp_path / 'changelog' / 'capture.py'}")
-    assert log.hook_command.split()[0] == sys.executable
+    capture = str(tmp_path / "changelog" / "capture.py")
+    assert shlex.split(log.hook_command) == ["/usr/bin/env", "AGENTENV_REAL_TIME=1", sys.executable, capture]
 
 
 def test_the_changelog_directory_is_one_per_port():
@@ -217,6 +219,58 @@ def test_enable_writes_the_script_and_config_baselines_and_installs_the_hook(tmp
     assert not any((directory / stale).exists() for stale in ("seq", "turn", "namespace.json", "held.3", "state.snar.2"))
     # The config holds the grant, so no other user reads the directory.
     assert directory.stat().st_mode & 0o777 == 0o700
+
+
+def test_the_changelogs_tar_runs_on_real_time(tmp_path, staging, monkeypatch):
+    """tar keeps the time it starts at as the next capture's baseline and archives only the files changed since, by
+    their real mtimes: on an env clock ahead of real time it left every later edit out. No process hands its children
+    the marker, which libfaketime takes out of the environment it's given in, so the server and the hook give tar it."""
+    log = recording_tar.install(tmp_path / "bin")
+    path = f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.delenv("AGENTENV_REAL_TIME", raising=False)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    changelog, _, _, _ = _changelog(tmp_path, roots=[str(root)])
+
+    _enable(changelog)
+    (root / "edited.txt").write_text("after")
+    result = _capture(changelog, staging.port, path=path)
+
+    assert result.returncode == 0 and "captured seq=0" in result.stderr, result.stderr
+    runs = recording_tar.incremental_runs(log)
+    assert [("-cf" in run["args"], run["real_time"]) for run in runs] == [(True, "1"), (False, "1")]
+
+
+@pytest.mark.parametrize("through_shell", [True, False], ids=["shell", "no-shell"])
+def test_the_hook_starts_on_real_time_with_or_without_a_shell(tmp_path, staging, monkeypatch, through_shell):
+    """The hook decides by its own clock whether the grant it uploads with has expired: on an env clock past the
+    grant's expiry it refused every upload. A sitecustomize records the environment the hook started in, through a
+    shell as the CLI runs it, and without one, where a bare assignment prefix wouldn't start the hook at all."""
+    seen = tmp_path / "hook-started-with.json"
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    (probe / "sitecustomize.py").write_text(
+        "import json, os, sys\n"
+        "if sys.argv[0].endswith('capture.py'):\n"
+        f"    open({str(seen)!r}, 'w').write(json.dumps(os.environ.get('AGENTENV_REAL_TIME')))\n")
+    recording_tar.install(tmp_path / "bin")
+    monkeypatch.delenv("AGENTENV_REAL_TIME", raising=False)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    changelog, _, _, _ = _changelog(tmp_path, roots=[str(root)])
+    _enable(changelog)
+
+    command = ["/bin/sh", "-c", changelog.hook_command] if through_shell else shlex.split(changelog.hook_command)
+    result = subprocess.run(
+        command, input=json.dumps({"tool_name": "Bash", "session_id": "s"}),
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "A2A_PORT": str(staging.port), "PYTHONPATH": str(probe),
+             "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 0 and "captured seq=0" in result.stderr, result.stderr
+    assert json.loads(seen.read_text()) == "1"
 
 
 def test_enable_refuses_an_empty_root_list(tmp_path):

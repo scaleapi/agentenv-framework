@@ -370,6 +370,8 @@ async def test_a_rating_that_fails_is_recorded_and_the_step_goes_on(monkeypatch,
     assert rating["score"] is None
     if error:
         assert rating["user_sim_error"].startswith("timeout")
+        [usage] = ctx.metadata["step_usage"]["rate"]
+        assert (usage["turns"], usage["input_tokens"], usage["partial"]) == (1, None, True)
     else:
         assert rating["retried"] is True and len(rating["schema_errors"]) == 2
 
@@ -385,6 +387,30 @@ async def test_a_rating_past_its_timeout_is_recorded(monkeypatch, tmp_path):
     await _rater(timeout_seconds=0.05).execute(ctx)
     rating = ctx.metadata[SATISFACTION_KEY]["week"]
     assert rating["score"] is None and rating["user_sim_error"].lower().startswith("timeout")
+    [usage] = ctx.metadata["step_usage"]["rate"]
+    assert (usage["turns"], usage["partial"]) == (1, True)
+
+
+@pytest.mark.asyncio
+async def test_the_rating_s_user_sim_turns_are_the_step_s_usage(monkeypatch, tmp_path):
+    rig, ctx = await _always_on_run(monkeypatch, tmp_path, _reply("blue!"), _reply("amazing, thanks"),
+                                    "a solid 4", json.dumps(rated(4)))
+    week = copy.deepcopy(ctx.metadata.get("step_usage", {}).get("week"))
+    rig.user_usage = {"input_tokens": 400, "output_tokens": 20, "cache_read_tokens": 300, "input_includes_cache": True}
+    sim = next(a for a in ctx.deployed_agents if a.agent_name == "user-sim")
+    sim.model_endpoint_host = "sim-proxy.example"
+
+    await _rater().execute(ctx)
+
+    [usage] = ctx.metadata["step_usage"]["rate"]
+    assert (usage["role"], usage["model"], usage["endpoint_host"], usage["turns"]) == (
+        "user_simulator", "sim-model", "sim-proxy.example", 2)
+    assert (usage["input_tokens"], usage["output_tokens"], usage["cache_read_tokens"], usage["partial"]) == (
+        800, 40, 600, False)
+    assert ctx.metadata["models"]["user simulator"]["rate"] == "sim-model"
+    assert ctx.metadata["model_endpoints"]["user_simulator"]["rate"] == {
+        "model": "sim-model", "endpoint_host": "sim-proxy.example"}
+    assert ctx.metadata.get("step_usage", {}).get("week") == week  # the run's own usage is as it was
 
 
 @pytest.mark.asyncio

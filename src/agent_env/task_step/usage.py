@@ -88,7 +88,8 @@ class RoleUsage:
         token count gave input and output; otherwise its sums can't be charged in full, and it isn't priced short.
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
-        (``unreported_calls``, which the entry sums, or a proxy's ``unreported``)."""
+        (``unreported_calls``, which the entry sums, or a proxy's ``unreported``), or a turn was cut off
+        (``StepUsage.cut_off``)."""
         reported = [usage for usage in self.turns if usage is not None]
 
         def total(name: str) -> Any:
@@ -151,16 +152,29 @@ class StepUsage:
 
     def call(self, role: ModelRole, reply: ModelReply) -> None:
         """One model call the step made itself as ``role`` (a user-sim gate's judge, through ``model_call``), written
-        at once; its cost is what the endpoint billed when it says, else the map's price."""
+        at once. Each call carries its own cost, what the endpoint billed, else the map's price, so the role's entry
+        sums every call; one with neither leaves the entry a lower bound, as ``cut_off`` does."""
         usage = self._roles.get(role)
         if usage is None:
             usage = self._roles[role] = RoleUsage(role.value, reply.model, reply.endpoint_host,
                                                   reported_by=ReportedBy.PROVIDER)
-        counts = Usage.from_model_response(reply.usage) if reply.usage else None
-        if reply.cost.reported_usd is not None:
-            counts = replace(counts or Usage(), cost_usd=reply.cost.reported_usd)
+        counts = Usage.from_model_response(reply.usage) if reply.usage else Usage()
+        if reply.cost.usd is not None:
+            counts = replace(counts, cost_usd=reply.cost.usd)
+        else:
+            counts = replace(counts, provider_details={**counts.provider_details, "unreported": True})
         usage.add(counts)
         self.entries()
+
+    def cut_off(self, role: ModelRole) -> None:
+        """A turn of ``role`` that was sent but never replied: cut off by a time limit, by a cancel, or by its agent no
+        longer answering (``AgentUnreachableError``, a ``TimeoutError``). Its calls are billed but their usage is
+        unknown, so it counts as a turn of unknown usage, marking the role's entry a lower bound. A role that wasn't
+        started, a human peer's, is skipped."""
+        usage = self._roles.get(role)
+        if usage is not None:
+            usage.add(Usage(provider_details={"unreported": True}))
+            self.entries()
 
     def entries(self) -> Optional[list[UsageEntry]]:
         """The entries of the roles that ran turns, written to ``metadata["step_usage"]``; None, and nothing written,

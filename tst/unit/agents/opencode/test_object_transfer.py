@@ -15,6 +15,7 @@ from agentenv_protocol.a2a_agent import TaskRequest, TextPart, Uploaded, card_re
 
 from tst.unit.agents.opencode.agent import a2a_server as server
 from tst.unit.agents.opencode.agent import opencode_kit
+from tst.util import recording_tar
 
 
 def _grant(kind):
@@ -86,7 +87,7 @@ async def test_a2a_run_and_framework_trajectory_upload(monkeypatch, oc):
     async def fake_run(**kwargs):
         called.update(kwargs)
         kwargs["event_callback"]({"type": "event"})
-        return SimpleNamespace(response="OK", error=None, error_code=None,
+        return SimpleNamespace(usage=None, response="OK", error=None, error_code=None,
                                session_id="ses_framework", trajectory=[{"type": "event"}],
                                tool_call_count=2)
 
@@ -123,7 +124,7 @@ async def test_output_format_reaches_opencode(monkeypatch, oc):
 
     async def fake_run(**kwargs):
         called.update(kwargs)
-        return SimpleNamespace(response='{"message":"done","done":true}', error=None,
+        return SimpleNamespace(usage=None, response='{"message":"done","done":true}', error=None,
                                error_code=None, session_id="ses_format", trajectory=[],
                                tool_call_count=0,
                                structured_output={"message": "done", "done": True})
@@ -163,7 +164,7 @@ async def test_bad_output_format_is_rejected_at_configuration_time(oc):
 @pytest.mark.asyncio
 async def test_json_null_is_returned_as_structured_output(monkeypatch, oc):
     async def fake_run(**_kwargs):
-        return SimpleNamespace(response="null", error=None, error_code=None,
+        return SimpleNamespace(usage=None, response="null", error=None, error_code=None,
                                session_id="ses_null", trajectory=[], tool_call_count=0,
                                structured_output=None)
 
@@ -190,6 +191,7 @@ async def test_failed_a2a_run_keeps_trajectory(monkeypatch, oc):
     async def fake_run(**kwargs):
         kwargs["event_callback"]({"type": "error", "message": "model call failed"})
         return SimpleNamespace(
+            usage=None,
             response="", error="model call failed", error_code="model_error",
             session_id="ses_failed", trajectory=[{"type": "error", "message": "model call failed"}],
             tool_call_count=1,
@@ -513,6 +515,34 @@ async def test_failed_changelog_upload_preserves_incremental_baseline(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_the_changelogs_tar_runs_on_real_time(monkeypatch, tmp_path, oc, folders):
+    """tar keeps the time it starts at as the next capture's baseline and archives only the files changed since, by
+    their real mtimes: on an env clock ahead of real time it left every later edit out. The server runs on real time,
+    but libfaketime takes the marker out of its environment, so tar is given it again."""
+    log = recording_tar.install(tmp_path / "bin")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("AGENTENV_REAL_TIME", raising=False)
+    uploads = _KeptUploads()
+    monkeypatch.setattr(server, "NamespaceUploader", lambda _grant: uploads)
+    namespace = {
+        "root_path": "captures", "expires_at": _grant("http-put")["expires_at"],
+        "max_objects": 10, "max_object_bytes": 1 << 20, "max_total_bytes": 1 << 22,
+        "write": {"kind": "http-post-policy", "url": "https://objects.example.test/upload",
+                  "fields": {"key": "captures/"}, "path_field": "key", "file_field": "file"},
+    }
+    async with oc.client() as client:
+        enabled = await client.post("/ext/snapshot/changelog", json={"write_namespace": namespace,
+                                                                     "roots": [str(folders)]})
+        (folders / "edited.txt").write_text("after")
+        await oc.agent._capture_changelog()
+
+    assert enabled.status_code == 200, enabled.text
+    assert list(uploads.objects) == ["000000.tgz"]
+    runs = recording_tar.incremental_runs(log)
+    assert [("-cf" in run["args"], run["real_time"]) for run in runs] == [(True, "1"), (False, "1")]
+
+
+@pytest.mark.asyncio
 async def test_snapshot_waits_for_active_workspace_turn(monkeypatch, oc):
     started = asyncio.Event()
     release = asyncio.Event()
@@ -523,7 +553,7 @@ async def test_snapshot_waits_for_active_workspace_turn(monkeypatch, oc):
     async def fake_run(**_kwargs):
         started.set()
         await release.wait()
-        return SimpleNamespace(response="OK", error=None, error_code=None,
+        return SimpleNamespace(usage=None, response="OK", error=None, error_code=None,
                                session_id="ses_locked", trajectory=[], tool_call_count=0)
 
     async def fake_export(_context, _session):

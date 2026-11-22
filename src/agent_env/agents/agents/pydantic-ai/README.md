@@ -53,7 +53,8 @@ Snapshot `load` answers 409 while a task is running, and 400 for an archive that
 other contexts, which work in the same workspace. When the workspace holds the agent's own `~/.pydantic-ai-a2a`, as an
 install in a home directory's does, the workspace snapshot leaves it out and `load` keeps it as it is.
 
-Usage is the run's: input, output and cached tokens, model requests and tool calls; no cost. A failed run's error code
+Usage is the run's, the runs it delegates to with `delegate_task` included: input, output and cached tokens, model
+requests and tool calls; no cost. A failed run's error code
 says whose failure it was: `pydantic_ai.model_http_<status>` and `pydantic_ai.model_api` for the model endpoint and
 `pydantic_ai.error` for anything else that stopped the run, such as an MCP server that can't be reached, are
 `infra_error`s; `pydantic_ai.usage_limit` (the request limit) and `pydantic_ai.unexpected_model_behavior` are
