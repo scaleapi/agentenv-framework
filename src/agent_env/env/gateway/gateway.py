@@ -911,16 +911,21 @@ class Gateway:
         async def filtered_call_tool(name, arguments, context=None, convert_result=False):
             caller = Caller.current()
             role = caller.role
-            # an MCP session keeps the role its initialize took, so a role protected or a membership ended since
-            # applies to it here
+            # an MCP session keeps the role its initialize took, so a role protected or a membership ended or begun
+            # since applies to it here, and the call records how it is authorized now
             if (refusal := self._roles.refusal(role, caller.source, caller.member)) is not None:
                 logger.warning("refused tools/call %s as %r: %s", name, role, refusal)
                 raise ToolError(f"refused: {refusal}")
             if self._is_disabled(role, name):
                 raise ToolError(f"Tool '{name}' is disabled for role '{role}'")
+            caller = dataclasses.replace(caller, source=self._roles.source_now(role, caller.source, caller.member))
             native = name not in self._tool_server_urls
             event_id = await self._log_native_tool_call(name, arguments, role, caller.source) if native else None
-            result = await original_call_tool(name, arguments, context=context, convert_result=convert_result)
+            token = caller.bind()
+            try:
+                result = await original_call_tool(name, arguments, context=context, convert_result=convert_result)
+            finally:
+                Caller.reset(token)
             if native:
                 await self._log_native_tool_result(event_id, result)
             barrier_tasks, barrier_timeout_s = self._fire_triggers(role, name, arguments, result)

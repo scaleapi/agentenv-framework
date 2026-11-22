@@ -421,6 +421,51 @@ async def test_mcp_tool_calls_proxied_and_native_record_the_sessions_role_auth(t
         (caller.role, caller.source) for caller in sessions for _ in range(2)]
 
 
+class _SeesCaller(_Child):
+    """A backing session that also records the caller each call was made under."""
+
+    def __init__(self):
+        super().__init__()
+        self.callers: list[Caller] = []
+
+    async def call_tool(self, name, arguments, *args, meta=None, **kwargs):
+        self.callers.append(Caller.current())
+        return await super().call_tool(name, arguments, *args, meta=meta, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_session_whose_token_joins_its_role_later_records_agent_token_and_is_refused_once_it_leaves(
+        tmp_path, monkeypatch):
+    """A session opened on an open role with a token that wasn't yet a member records each call by how the membership
+    stands at that call: header before the token joins, agent_token once the role is protected and it has, and a
+    refusal once it has left."""
+    child = _SeesCaller()
+    gw = _gateway(tmp_path, monkeypatch, child)
+    gw._create_and_register_proxy_tool(URL, TOOL)
+    gw._tool_server_urls[TOOL.name] = URL
+    opened = gw._roles.resolve(BROOKE, digest(MEMBER))
+    session = Caller(opened.role, "s1", opened.source, opened.member)
+    tools = (TOOL.name, "list_website_urls")
+    try:
+        before = [await _session_call(gw, session, tool) for tool in tools]
+        gw._roles.create(BROOKE, {"type": "token"})
+        member_id = gw._roles.add_member(BROOKE, MEMBER)["member_id"]
+        joined = [await _session_call(gw, session, tool) for tool in tools]
+        gw._roles.remove_member(BROOKE, member_id)
+        left = [await _session_call(gw, session, tool) for tool in tools]
+    finally:
+        await gw._close_child_sessions()
+
+    assert opened.source == "header" and opened.refusal is None
+    assert not any(answer.startswith("refused") for answer in before + joined)
+    assert left == [f"refused: this agent token isn't a member of role '{BROOKE}'"] * 2
+    assert [(e["tool_call"]["function_name"], e["role"], e["role_auth"]) for e in _events(tmp_path, "tool_call")] == [
+        (TOOL.name, BROOKE, "header"), ("list_website_urls", BROOKE, "header"),
+        (TOOL.name, BROOKE, "agent_token"), ("list_website_urls", BROOKE, "agent_token")]
+    assert [(c.role, c.source, c.member) for c in child.callers] == [
+        (BROOKE, "header", digest(MEMBER)), (BROOKE, "agent_token", digest(MEMBER))]
+
+
 @pytest.mark.asyncio
 async def test_svc_and_website_writes_record_how_the_role_was_established_and_changes_names_it(tmp_path, monkeypatch):
     gw = _gateway(tmp_path, monkeypatch)
@@ -552,6 +597,8 @@ async def test_a_session_opened_before_its_token_became_a_member_plays_the_role_
         await server.shutdown()
 
     assert not while_open.isError and not once_a_member.isError and child.roles == [BROOKE, BROOKE]
+    assert [(e["role"], e["role_auth"]) for e in _events(tmp_path, "tool_call")] == [
+        (BROOKE, "header"), (BROOKE, "agent_token")]
     assert after_removal.isError
     assert after_removal.content[0].text == f"refused: this agent token isn't a member of role '{BROOKE}'"
 

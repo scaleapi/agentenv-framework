@@ -372,5 +372,21 @@ def test_may_play_follows_membership_as_it_changes():
     assert roles.may_play("brooke@example.com", "computer_token", None)
 
 
+def test_source_now_follows_membership_as_it_changes():
+    """A token that joins its session's role counts from then on, and one that leaves an open role counts as the
+    header; the control and computer tokens stay as they were."""
+    roles = Roles()
+    roles.create("denise@example.com")
+    assert roles.source_now("denise@example.com", "header", digest(TOKEN)) == "header"
+    member = roles.add_member("denise@example.com", TOKEN)["member_id"]
+    assert roles.source_now("denise@example.com", "header", digest(TOKEN)) == "agent_token"
+    roles.remove_member("denise@example.com", member)
+    assert roles.source_now("denise@example.com", "agent_token", digest(TOKEN)) == "header"
+    assert roles.source_now("default", "default", digest(TOKEN)) == "default"
+    roles.add_member("denise@example.com", TOKEN)
+    for source in ("control_token", "computer_token"):
+        assert roles.source_now("denise@example.com", source, digest(TOKEN)) == source
+
+
 def test_a_resolution_never_shows_its_digest():
     assert digest(TOKEN) not in repr(_office().resolve("brooke@example.com", digest(TOKEN)))

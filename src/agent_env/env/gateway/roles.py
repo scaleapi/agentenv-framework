@@ -192,6 +192,16 @@ class Roles:
         computer's."""
         return source in _NEVER_REFUSED or self.auth_of(role) == AUTH_NONE or self._is_member(role, member)
 
+    def source_now(self, role: str, source: str, member: str | None = None) -> str:
+        """How such a caller acts as ``role`` now, as its MCP session's next call records it (role_auth): a member's
+        agent token while it is one, the header's once the membership it was established by has ended, else
+        ``source``."""
+        if source in _NEVER_REFUSED:
+            return source
+        if self._is_member(role, member):
+            return AGENT_TOKEN
+        return HEADER if source == AGENT_TOKEN else source
+
     def refusal(self, role: str, source: str, member: str | None = None) -> str | None:
         """Why such a caller may not act as ``role``; None when it may (``may_play``)."""
         if self.may_play(role, source, member):
