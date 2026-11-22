@@ -107,7 +107,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
     monkeypatch.setattr(verifier, "_configure_judge_a2a", AsyncMock())
     monkeypatch.setattr(verifier, "DEFAULT_MAX_RETRIES", 2)
 
-    async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent) -> dict:
+    async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent, **_) -> dict:
         prompts.append(eval_prompt)
         if len(prompts) == 1:
             return {"response": bad, "trajectory_object_url": None}

@@ -1472,8 +1472,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_a2a_url: str,
         judge_agent_card: dict,
         judge_agent,
+        model: Optional[str] = None,
+        usage: Optional[StepUsage] = None,
     ) -> dict:
-        """Send one evaluation prompt to an A2A judge and return its response."""
+        """Send one evaluation prompt to an A2A judge and return its response. The turn's reported usage goes into
+        ``usage`` as soon as the judge replies, a failed reply's too."""
         from agent_env.a2a_agent import protocol
 
         task_id, _ = await protocol.send_a2a_message(
@@ -1504,6 +1507,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
+        if usage is not None:
+            usage.call(ModelRole.JUDGE, tr.usage, model=model,
+                       endpoint_host=getattr(judge_agent, "model_endpoint_host", None))
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1536,7 +1542,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
             headers=judge_agent.control_headers,
         )
-        return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url, "turn_usage": tr.usage}
+        return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
 
     async def _judge_timed_out(self, why: str, judge_a2a_url: str, judge_agent_card: dict, task_id: str,
                                judge_agent: Any) -> JudgeTimeoutError:
@@ -1636,16 +1642,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         return None
 
     @staticmethod
-    def _record_call(usage: StepUsage, data: dict, *, model: str, judge_agent, use_agent_judge: bool) -> None:
-        """One judge call's usage in the step's ``judge`` entry: an agent judge's as its turn reported it, a direct
-        one's as the response carried it, the endpoint's bill its cost when it sent one."""
-        if use_agent_judge:
-            usage.call(ModelRole.JUDGE, data.get("turn_usage"), model=model,
-                       endpoint_host=getattr(judge_agent, "model_endpoint_host", None))
-            return
+    def _record_call(usage: StepUsage, data: dict, *, model: str) -> None:
+        """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
+        bill its cost when it sent one, with or without token counts."""
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
-        if read is not None and data.get("reported_cost_usd") is not None:
-            read = replace(read, cost_usd=data["reported_cost_usd"])
+        if data.get("reported_cost_usd") is not None:
+            read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])
         usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
                    reported_by=ReportedBy.PROVIDER)
 
@@ -1698,6 +1700,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     judge_a2a_url=judge_a2a_url,
                     judge_agent_card=judge_agent_card,
                     judge_agent=judge_agent,
+                    model=model,
+                    usage=usage,
                 )
             elif image_blocks:
                 data = await self._prompt_llm_judge(
@@ -1705,8 +1709,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 )
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
-            if usage is not None:
-                self._record_call(usage, data, model=model, judge_agent=judge_agent, use_agent_judge=use_agent_judge)
+            if usage is not None and not use_agent_judge:
+                self._record_call(usage, data, model=model)
 
             logger.info(f"Judge response: {data['response'][:200]}...")
             judge_trajectory_url = data.get("trajectory_object_url")

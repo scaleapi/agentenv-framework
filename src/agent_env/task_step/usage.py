@@ -105,7 +105,7 @@ class RoleUsage:
         includes = flags.pop() if len(flags) == 1 else None
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
-        cost = price(tokens, total("cost_usd"), model=self.model,
+        cost = price(tokens, self._reported(total("cost_usd")), model=self.model,
                      prices=prices, reported_by=self.reported_by)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
@@ -116,6 +116,13 @@ class RoleUsage:
             entry["unparsed"] = self.unparsed[:_UNPARSED_TURNS_KEPT]
             entry["unparsed_turns"] = len(self.unparsed)
         return entry
+
+    def _reported(self, summed: Optional[float]) -> Optional[float]:
+        """The turns' summed figure, as ``price`` takes it: an endpoint's bills only when every call carried one, since
+        a sum of some calls' bills isn't the role's cost; without, the map prices all of them."""
+        if self.reported_by is ReportedBy.PROVIDER and any(u is None or u.cost_usd is None for u in self.turns):
+            return None
+        return summed
 
 
 def _unreported_calls(usage: Usage) -> int:

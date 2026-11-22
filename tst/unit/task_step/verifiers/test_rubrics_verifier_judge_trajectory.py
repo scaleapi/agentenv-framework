@@ -425,5 +425,4 @@ async def test_invoke_judge_a2a_wires_the_captured_trajectory_onto_the_result(mo
     assert result == {
         "response": "ok",
         "trajectory_object_url": "s3://bucket/judge_trajectories/verifier_id=verifier-test/trajectory-task-1.json",
-        "turn_usage": None,
     }

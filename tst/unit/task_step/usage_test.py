@@ -206,3 +206,16 @@ def test_an_agents_own_cost_still_gives_way_to_the_map(monkeypatch):
                                      model="gpt-4o-mini", endpoint_host=None)
     [entry] = context.metadata["step_usage"]["grade"]
     assert (entry["cost_status"], entry["cost_usd"], entry["reported_cost_usd"]) == ("priced", pytest.approx(0.21), 0.5)
+
+
+def test_an_endpoint_that_billed_only_some_calls_has_the_map_price_them_all(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "grade")
+    counts = {"input_tokens": 1_000_000, "output_tokens": 100_000, "input_includes_cache": True}
+    usage.call(ModelRole.JUDGE, Usage(**counts, cost_usd=0.5), model="gpt-4o-mini", endpoint_host=None,
+               reported_by=ReportedBy.PROVIDER)
+    usage.call(ModelRole.JUDGE, Usage(**counts), model="gpt-4o-mini", endpoint_host=None)
+    [entry] = context.metadata["step_usage"]["grade"]
+    assert (entry["cost_status"], entry["cost_usd"]) == ("priced", pytest.approx(0.42))
+

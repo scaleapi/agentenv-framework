@@ -13,6 +13,7 @@ import pytest
 from agent_env.a2a_agent import protocol
 from agent_env.config.model import ModelRole
 from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.task_steps.verifiers import rubrics_verifier
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.usage import StepUsage
 
@@ -71,34 +72,70 @@ async def test_a_direct_judges_bill_is_its_cost():
     assert (entry["cost_status"], entry["cost_source"], entry["cost_usd"]) == ("reported", "provider", 0.02)
 
 
-@pytest.mark.asyncio
-async def test_an_agent_judges_reported_usage_is_its_calls(monkeypatch):
+def _agent_judge(monkeypatch, state: str, answer: str, reported: dict) -> RubricsVerifierTaskStep:
+    """A rubrics verifier whose agent judge ends its one turn in ``state``, replying ``answer`` and its usage."""
     verifier = RubricsVerifierTaskStep(id="verify", version=1, criteria=CRITERIA[:1], prompt_id="p", verifier_id="vt",
                                        use_trajectory=False)
-    answer = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "asked first"}]})
-    reported = {"input_tokens": 4000, "output_tokens": 80, "input_includes_cache": True, "cost_usd": 0.01}
 
     async def send(url, **kwargs):
         return "task-1", None
 
     async def poll(url, task_id, **kwargs):
-        return {"status": {"state": "completed", "message": {"parts": [
+        return {"status": {"state": state, "message": {"parts": [
             {"kind": "text", "text": answer}, {"kind": "data", "data": {"usage": reported}}]}}}
 
-    async def fetch(**kwargs):
+    async def nothing(*args, **kwargs):
         return None
 
     monkeypatch.setattr(protocol, "send_a2a_message", send)
     monkeypatch.setattr(protocol, "poll_a2a_task", poll)
-    monkeypatch.setattr(verifier, "_fetch_judge_trajectory", fetch)
-    context = TaskStepContext()
+    monkeypatch.setattr(verifier, "_fetch_judge_trajectory", nothing)
+    monkeypatch.setattr(rubrics_verifier, "fetch_container_logs", nothing)
+    return verifier
 
+
+async def _judge_once(verifier: RubricsVerifierTaskStep, context: TaskStepContext) -> None:
     await verifier._run_judge_with_output_retries(
         eval_prompt="grade it", criteria=CRITERIA[:1], context=context, model="claude-haiku-4-5",
         judge_a2a_url="http://judge.test", judge_agent_card={},
         judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}, model_endpoint_host="proxy.example:4000"),
         judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True,
         usage=StepUsage(context, "verify"))
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judges_failed_reply_still_counts_its_usage(monkeypatch):
+    verifier = _agent_judge(monkeypatch, "failed", "rate limited", {"input_tokens": 900, "output_tokens": 0,
+                                                                     "input_includes_cache": True})
+    context = TaskStepContext()
+
+    with pytest.raises(RuntimeError, match="Judge A2A task failed"):
+        await _judge_once(verifier, context)
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["role"], entry["turns"], entry["input_tokens"]) == ("judge", 1, 900)
+
+
+def test_a_billed_call_without_counts_keeps_its_bill():
+    context = TaskStepContext()
+    usage = StepUsage(context, "verify")
+    RubricsVerifierTaskStep._record_call(usage, {"response": "", "model": "m", "endpoint_host": None,
+                                                 "reported_cost_usd": 0.01}, model="m")
+    RubricsVerifierTaskStep._record_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+                                                 "model": "m", "endpoint_host": None, "reported_cost_usd": 0.02},
+                                         model="m")
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["cost_status"], entry["cost_usd"], entry["partial"]) == ("reported", pytest.approx(0.03), True)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judges_reported_usage_is_its_calls(monkeypatch):
+    answer = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "asked first"}]})
+    reported = {"input_tokens": 4000, "output_tokens": 80, "input_includes_cache": True, "cost_usd": 0.01}
+    verifier = _agent_judge(monkeypatch, "completed", answer, reported)
+    context = TaskStepContext()
+
+    await _judge_once(verifier, context)
 
     [entry] = context.metadata["step_usage"]["verify"]
     assert (entry["role"], entry["model"], entry["endpoint_host"], entry["turns"]) == (
@@ -109,11 +146,9 @@ async def test_an_agent_judges_reported_usage_is_its_calls(monkeypatch):
 def test_a_call_with_no_usage_is_a_turn_with_no_counts():
     context = TaskStepContext()
     usage = StepUsage(context, "verify")
-    RubricsVerifierTaskStep._record_call(usage, {"response": "", "model": "m", "endpoint_host": None}, model="m",
-                                         judge_agent=None, use_agent_judge=False)
+    RubricsVerifierTaskStep._record_call(usage, {"response": "", "model": "m", "endpoint_host": None}, model="m")
     RubricsVerifierTaskStep._record_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
-                                                 "model": "m", "endpoint_host": None},
-                                         model="m", judge_agent=None, use_agent_judge=False)
+                                                 "model": "m", "endpoint_host": None}, model="m")
     [entry] = context.metadata["step_usage"]["verify"]
     assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 10, True)
     assert entry["role"] == ModelRole.JUDGE.value
