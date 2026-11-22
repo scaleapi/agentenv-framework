@@ -124,13 +124,16 @@ def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_ser
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: float) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed with what it started, which would
-    otherwise hold its output open."""
+    otherwise hold its output open. Its session's group is killed even when the command has exited itself and left
+    something holding its output, which the group's id keeps from being another process's."""
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=dict(env), start_new_session=True,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except BaseException:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
         _kill_cli(proc)
         await _reap(proc)
         raise

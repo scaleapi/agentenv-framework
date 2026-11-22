@@ -108,6 +108,7 @@ def env_clock(tmp_path, monkeypatch):
     bin_dir.mkdir()
     (bin_dir / "date").write_text('#!/bin/sh\nenv > "$FAKE_DATE_ENV"\n[ "$1" = "+%s %N" ] || exit 2\n'
                                   '[ -n "$FAKE_DATE_SLEEP" ] && sleep "$FAKE_DATE_SLEEP"\n'
+                                  '[ -n "$FAKE_DATE_KID" ] && { sleep 30 & echo $! > "$FAKE_DATE_KID"; }\n'
                                   '[ -n "$FAKE_DATE_OUT" ] || { echo no clock >&2; exit 1; }\necho "$FAKE_DATE_OUT"\n'
                                   'exit "${FAKE_DATE_EXIT:-0}"\n')
     (bin_dir / "date").chmod(0o755)
@@ -245,6 +246,23 @@ def test_a_date_that_cant_be_read_refuses_the_call_rather_than_tell_the_model_re
 
     assert str(refused.value).startswith(f"the env's date couldn't be read for the model: {reason}")
     assert time.monotonic() - started < 6
+
+
+def test_a_date_that_exits_leaving_a_process_on_its_output_is_refused_and_that_process_killed(env_clock, monkeypatch,
+                                                                                              tmp_path):
+    """The date has exited, so only its session's group still reaches what it left holding the pipes."""
+    monkeypatch.setattr(opencode_bridge, "_DATE_TIMEOUT_S", 1)
+    monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
+    monkeypatch.setenv("FAKE_DATE_KID", str(tmp_path / "kid"))
+
+    with pytest.raises(opencode_bridge.Refusal, match="date gave no answer within 1 s"):
+        _rewrite(_call())
+
+    kid, deadline = (tmp_path / "kid").read_text().strip(), time.monotonic() + 5
+    while (state := subprocess.run(["ps", "-o", "stat=", "-p", kid], capture_output=True, text=True).stdout.strip()) \
+            and not state.startswith("Z") and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not state or state.startswith("Z"), state
 
 
 def test_an_env_block_without_a_date_line_this_knows_refuses_the_call(env_clock, monkeypatch):
