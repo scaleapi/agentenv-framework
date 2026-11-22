@@ -551,12 +551,12 @@ async def test_a_prompt_agent_chat_the_user_sim_gate_cut_off_is_not_rated_and_th
 
     ctx = await _context(monkeypatch)
     ctx.metadata.setdefault("a2a_conversations", {})["talk"] = None
-    ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="draft", error_type="user_sim_invalid",
-                                               error_message="user_sim_gate: user-sim message at turn 1 ...",
-                                               step_id="talk"))
+    ctx.prompt_responses.append(PromptResponse(
+        prompt_id="p", response="draft", error_type="user_sim_error",
+        error_message="The user simulator failed: user_sim_gate: user-sim message at turn 1 ...", step_id="talk"))
     await _hannah_rater().execute(ctx)
     rating = ctx.metadata[SATISFACTION_KEY]["talk"]
-    assert rating["skipped"] == "the user sim's message still read as the assistant's after its rewrites"
+    assert rating["skipped"] == "the user sim failed: user_sim_gate: user-sim message at turn 1 ..."
     assert rating["score"] is None
 
 
@@ -572,8 +572,7 @@ async def test_a_prompt_agent_chat_whose_agent_turn_failed_is_not_rated(monkeypa
 
 
 @pytest.mark.parametrize("record, skipped", [
-    ({"end_reason": "user_sim_invalid", "error_type": "user_sim_invalid"},
-     "the user sim's answer still read as the assistant's after its rewrites"),
+    ({"end_reason": "user_sim_error", "error_type": "user_sim_error"}, "the run ended on user_sim_error"),
     ({"end_reason": "user_sim_invalid"}, None),   # on_fail "end": no error, so the run is rated as one that ended
 ], ids=["on_fail fail", "on_fail end"])
 def test_an_always_on_run_the_gate_failed_as_an_error_is_not_rated(record, skipped):

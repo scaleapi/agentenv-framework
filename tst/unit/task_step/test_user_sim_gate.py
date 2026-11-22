@@ -7,7 +7,7 @@ import pytest
 from agent_env.config import model_call
 from agent_env.config.model_pricing import Cost, CostStatus
 from agent_env.task_step.task_steps.user_sim_gate import (
-    TALKS_LIKE_THE_ASSISTANT, GateVerdict, UserSimGate, parse_judge, pattern_reasons, render_history, rewrite_request)
+    TALKS_LIKE_THE_ASSISTANT, GateVerdict, UserSimGate, judge_call_config, parse_judge, pattern_reasons, render_history, rewrite_request)
 
 _FILLER = " The details are in the shared folder and the numbers come from last month's records." * 6
 
@@ -69,22 +69,25 @@ def test_the_rewrite_request_names_why_and_says_it_is_not_from_the_assistant():
     note = rewrite_request(GateVerdict(passed=False, pattern_reasons=["it opens like a report of work done"],
                                        judge_in_role=False, judge_reason="it answers its own question"))
     assert note.startswith("[Conversation system note, not from the assistant.]")
-    assert "it opens like a report of work done; it answers its own question" in note
+    assert "rather than yours: it answers its own question." in note   # the judge's reason; patterns are records
 
 
-def test_the_judge_alone_fails_only_a_long_message():
-    import asyncio
-    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+def test_only_the_judge_holds_a_message_back_at_any_length_and_patterns_are_recorded():
+    phrase = "Want me to send it to you?"
+    shape = "Done. Here's what I found when I went through the files." + _FILLER
+    short = "Contracted physicians are required in two states."
 
-    class Gate(UserSimGate):
-        async def _judge(self, candidate, history, call_config, **_):
-            return {"in_role": False, "reason": "reads as analysis"}
+    assert asyncio.run(_judged(False).check(short, [])).passed is False      # no length floor
+    for text in (phrase, shape):
+        cleared = asyncio.run(_judged(True).check(text, []))
+        assert cleared.passed is True and cleared.pattern_reasons             # a match alone holds nothing back
+    held = asyncio.run(_judged(False).check(shape, []))
+    assert (held.passed, held.reasons()) == (False, ["judged"])
 
-    gate = Gate(judge_model="judge-model")
-    short = asyncio.run(gate.check("Contracted physicians are required in two states.", []))
-    long = asyncio.run(gate.check("The two states that need contracted physicians are these." + _FILLER, []))
-    assert (short.passed, short.judge_in_role) == (True, False)     # recorded, not failed
-    assert long.passed is False
+
+def test_without_a_judge_the_gate_only_records_pattern_matches():
+    verdict = asyncio.run(UserSimGate().check("I checked my bank app and I verified the charge is there.", []))
+    assert verdict.passed is True and verdict.pattern_reasons
 
 
 # ---- run_gate, for any conversation loop ------------------------------------------------------------------------------
@@ -93,7 +96,7 @@ def _scripted_gate(verdicts, **settings):
     from agent_env.task_step.task_steps.user_sim_gate import GateVerdict, UserSimGate
 
     class Gate(UserSimGate):
-        async def check(self, candidate, history, *, call_config=None, judge_unavailable=None):
+        async def check(self, candidate, history, *, call_config=None, **_):
             return GateVerdict(passed=verdicts.pop(0), pattern_reasons=["it opens like a report of work done"])
 
     return Gate(**settings)
@@ -173,18 +176,22 @@ def test_an_always_on_step_keeps_its_gate_through_the_step_dict():
     assert AlwaysOnTaskStep.from_dict(plain.to_dict()).user_sim_gate is None
 
 
-def test_a_judge_that_couldnt_be_set_up_isnt_called_and_the_patterns_verdict_stands():
-    import asyncio
-    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+def test_a_judge_that_cant_be_set_up_fails_the_step_since_nothing_else_holds_a_message_back(monkeypatch):
+    def refuse(model, **kw):
+        raise KeyError("no key")
 
-    class NeverCalled(UserSimGate):
+    monkeypatch.setattr(model_call, "resolve_route", refuse)
+    with pytest.raises(RuntimeError, match="user_sim_gate: judge setup: KeyError"):
+        judge_call_config(UserSimGate(judge_model="judge-model"), {})
+
+
+def test_a_judge_call_that_errors_sends_the_message_with_the_error_recorded():
+    class Failing(UserSimGate):
         async def _judge(self, candidate, history, call_config, **_):
-            raise AssertionError("the judge was called")
+            raise TimeoutError("judge timed out")
 
-    for patterns in (True, False):
-        gate = NeverCalled(patterns=patterns, judge_model="judge-model")
-        verdict = asyncio.run(gate.check("shorter, please", [], judge_unavailable="judge setup: KeyError: x"))
-        assert (verdict.passed, verdict.judge_error) == (True, "judge setup: KeyError: x")
+    verdict = asyncio.run(Failing(judge_model="judge-model").check("Want me to send it to you?", []))
+    assert (verdict.passed, verdict.judge_error) == (True, "TimeoutError: judge timed out")
 
 
 def test_the_judge_calls_through_the_one_model_call_path_on_the_runs_route(monkeypatch):
@@ -227,21 +234,11 @@ def _judged(in_role):
     return Gate(judge_model="judge-model")
 
 
-def test_a_judge_reading_it_as_the_user_clears_a_phrase_but_not_a_reports_shape():
-    import asyncio
-
-    phrase = "Understood. Standing by."
-    shape = "Done. Here's what I found when I went through the files." + _FILLER
-    cleared = asyncio.run(_judged(True).check(phrase, []))
-    assert (cleared.passed, cleared.cleared_by_judge) == (True, True) and cleared.pattern_reasons
-    assert asyncio.run(_judged(True).check(shape, [])).passed is False  # shape + length: a failure whatever the judge
-    assert asyncio.run(_judged(False).check(phrase, [])).passed is False
-
 
 
 @pytest.mark.parametrize("settings, field", [
     ({"max_rewrites": 1.5}, "max_rewrites"), ({"max_rewrites": True}, "max_rewrites"),
-    ({"max_rewrites": -1}, "max_rewrites"), ({"judge_min_chars": None}, "judge_min_chars"),
+    ({"max_rewrites": -1}, "max_rewrites"),
     ({"patterns": "false"}, "patterns"), ({"context_turns": "4"}, "context_turns"),
     ({"context_chars": 0}, "context_chars"), ({"judge_timeout_seconds": 0}, "judge_timeout_seconds"),
     ({"judge_model": ""}, "judge_model"), ({"on_fail": "skip"}, "on_fail"),
@@ -280,6 +277,22 @@ def test_the_judge_is_shown_what_the_user_found_when_a_hook_told_it(monkeypatch)
 
     assert "WHAT THE USER FOUND" in prompts[0] and "no sheet in the folder" in prompts[0]
     assert "WHAT THE USER FOUND" not in prompts[1]
+
+
+def test_the_judge_is_shown_the_user_sims_instructions(monkeypatch):
+    prompts = []
+
+    async def complete(route, messages, *, timeout, response_format=None):
+        prompts.append(messages[0]["content"])
+        return model_call.ModelReply('{"in_role": true, "reason": "ok"}', "m", None, None, None)
+
+    monkeypatch.setattr(model_call, "complete", complete)
+    gate = UserSimGate(judge_model="judge-model")
+    asyncio.run(gate._judge("i checked my bank app", [], "route", instructions="You are Ana. You check your bank app."))
+    asyncio.run(gate._judge("i checked my bank app", [], "route"))
+
+    assert "THE USER'S INSTRUCTIONS" in prompts[0] and "You check your bank app." in prompts[0]
+    assert "THE USER'S INSTRUCTIONS" not in prompts[1]
 
 
 @pytest.mark.parametrize("text", ["I\u2019m an AI, so I can\u2019t open that.",

@@ -50,7 +50,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
-from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, judge_setup_failed, run_gate
+from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
@@ -878,9 +878,10 @@ class PromptAgentTaskStep(TaskStep):
             error_type = "user_sim_error"
             final_error_for_response = final_error_for_response or f"The user simulator failed: {sim.error}"
         if not error_type and user_side.gate_failure is not None:
-            # The conversation was cut off by the gate: verifiers skip it rather than grade the agent's latest draft.
-            error_type = "user_sim_invalid"
-            final_error_for_response = final_error_for_response or f"user_sim_gate: {user_side.gate_failure}"
+            # The gate cut the conversation off: a failed user sim, as above, so the run is redone.
+            error_type = "user_sim_error"
+            final_error_for_response = (final_error_for_response
+                                        or f"The user simulator failed: user_sim_gate: {user_side.gate_failure}")
         context.prompt_responses.append(PromptResponse(
             prompt_id=self.prompt_id,
             response=final_terminal.response_text,
@@ -902,9 +903,6 @@ class PromptAgentTaskStep(TaskStep):
             structured_output=structured_output,
             usage=usage.entries(),
         ))
-
-        if user_side.gate_failure is not None:
-            raise RuntimeError(f"user_sim_gate: {user_side.gate_failure}")
 
         if final_state == TaskState.failed:
             detail_parts = []
@@ -1172,7 +1170,6 @@ class _UserSide:
         self._history: list[tuple[str, str]] = [("user", opening_text)] if opening_text else []
         self._gate = step.user_sim_gate if is_user_sim else None
         self._gate_call_config = None
-        self._gate_judge_setup_error: Optional[str] = None
         # Set once a user-sim message fails the gate after its rewrites, with on_fail "fail".
         self.gate_failure: Optional[str] = None
         self._end_after: Optional[str] = None
@@ -1297,14 +1294,8 @@ class _UserSide:
         answer shaped as ``ask``'s, up to the gate's limit (``run_gate``). The judge is shown ``hook_note``, what a
         post-turn hook told the user sim it found, so a message reporting that check reads as the user's."""
         gate = self._gate
-        if self._gate_call_config is None and self._gate_judge_setup_error is None and gate.judge_model:
-            # Judge setup (its key, its endpoint) failing leaves the patterns' verdict standing, with the error
-            # recorded on it (run_gate); with patterns off it fails the step (judge_setup_failed).
-            try:
-                self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
-            except Exception as e:
-                self._gate_judge_setup_error = judge_setup_failed(gate, e)
-                logger.warning(f"user-sim gate {self._gate_judge_setup_error}; using patterns only")
+        if self._gate_call_config is None and gate.judge_model:  # a judge that can't be set up fails the step
+            self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
         latest = {"answer": answer}
 
         async def rewrite(note: str) -> Optional[str]:
@@ -1319,8 +1310,8 @@ class _UserSide:
                                f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
 
         outcome = await run_gate(gate, _text_of(answer["message"]), self._history, rewrite,
-                                 call_config=self._gate_call_config, judge_unavailable=self._gate_judge_setup_error,
-                                 on_verdict=on_verdict, user_note=hook_note,
+                                 call_config=self._gate_call_config, on_verdict=on_verdict, user_note=hook_note,
+                                 instructions=self._built_in.instructions if self._built_in is not None else None,
                                  on_call=self._judge_call if self._usage is not None else None)
         if not outcome.invalid:
             return latest["answer"]
@@ -1424,6 +1415,7 @@ class _BuiltInUserSim:
         self._max_replies = person.get("max_replies")
         self.replies = 0
         self.error: Optional[str] = None  # the user sim's error, once a read ended on one
+        self.instructions: Optional[str] = None  # its system prompt, as the user-sim gate's judge reads it
 
     @classmethod
     async def start(cls, step: PromptAgentTaskStep, context: TaskStepContext, record: dict, zone: str,
@@ -1437,7 +1429,11 @@ class _BuiltInUserSim:
                    if text else None)
         person = {**person_of(record), "max_replies": record.get("max_replies"), "time_zone": zone,
                   "opening": opening, "done_ends_run": True}
-        return cls(step, context, person, opening, clock_envs)
+        sim = cls(step, context, person, opening, clock_envs)
+        if step.user_sim_gate is not None and step.user_sim_gate.judge_model:
+            from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import recorded_instructions
+            sim.instructions = recorded_instructions(record, context.metadata.get("seed") or {})
+        return sim
 
     async def ask(self, number: int, reply: str, ask_user_sim, note: Optional[str] = None) -> dict:
         """The user's answer to the agent's ``reply``: ``{"message": parts}``, with ``end_after`` when the agent's answer

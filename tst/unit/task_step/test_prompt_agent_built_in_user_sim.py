@@ -18,9 +18,9 @@ from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, Sto
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step
 from tst.unit.task_step.test_prompt_agent_user_side import (
-    _SWAP, AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, text)
+    _SWAP, AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, pattern_judge, text)  # noqa: F401
 
-pytestmark = pytest.mark.usefixtures("local_stores")
+pytestmark = pytest.mark.usefixtures("local_stores", "pattern_judge")
 
 _CONFIG_CARD = {"capabilities": {"extensions": [{"uri": "urn:agentenv:agent-config/v1", "params": {
     "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": ["output_format", "model"]}}}}}]}}
@@ -417,7 +417,7 @@ async def test_agent_triggers_registered_for_the_built_in_user_are_refused_befor
 
 # ---- the user-sim gate ----------------------------------------------------------------------------------------------
 def _gated(turns: int = 3, **gate) -> PromptAgentTaskStep:
-    return _step(turns=turns, user_sim_gate={"patterns": True, **gate})
+    return _step(turns=turns, user_sim_gate={"patterns": True, "judge_model": "judge", **gate})
 
 
 def _to(peers: Peers, ctx: TaskStepContext, url: str) -> list[str]:
@@ -449,12 +449,11 @@ async def test_the_gate_holds_back_a_built_in_users_answer_that_reads_as_the_ass
 
 
 @pytest.mark.asyncio
-async def test_a_built_in_users_answer_that_still_fails_ends_the_run_and_fails_the_step(monkeypatch):
+async def test_a_built_in_users_answer_that_still_fails_ends_the_run_as_a_failed_user_sim(monkeypatch):
     peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [said("reply", _SWAP)] * 3})
     ctx = await _context(monkeypatch)
 
-    with pytest.raises(RuntimeError, match=r"user_sim_gate: user-sim message at turn 1 still reads as the assistant's"):
-        await _gated().execute(ctx)
+    await _gated().execute(ctx)
 
     assert [v["passed"] for v in ctx.metadata["user_sim_gate"]["talk"]] == [False, False, False]
     assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1
@@ -462,9 +461,10 @@ async def test_a_built_in_users_answer_that_still_fails_ends_the_run_and_fails_t
     # Nothing reached the agent, so the read is a no_reply with no message, as in always_on.
     read = _reads(ctx)[0]
     assert (read["outcome"], read["message"], read["first_message"]) == ("no_reply", "", _SWAP)
-    # Verifiers skip a response with an error_type, so a cut-off conversation isn't graded as the agent's answer.
-    assert ctx.prompt_responses[-1].error_type == "user_sim_invalid"
-    assert ctx.prompt_responses[-1].error_message.startswith("user_sim_gate: user-sim message at turn 1")
+    # A failed user sim: verifiers skip the run and it is redone, rather than graded as the agent's answer.
+    assert ctx.prompt_responses[-1].error_type == "user_sim_error"
+    assert ctx.prompt_responses[-1].error_message.startswith(
+        "The user simulator failed: user_sim_gate: user-sim message at turn 1")
     assert _to(peers, ctx, AGENT) == ["plan my parents' visit"]   # nothing she wrote reached the agent
 
 
@@ -531,3 +531,23 @@ async def test_a_hook_note_is_in_the_users_read_after_the_reply_and_never_reache
     sent_to_agent = [r[2]["params"]["message"]["parts"] for r in peers.requests(ctx) if r[1] == f"{AGENT}/a2a"
                      and r[2].get("method") == "message/send"]
     assert all("no total" not in json.dumps(parts) for parts in sent_to_agent)
+
+
+@pytest.mark.asyncio
+async def test_the_judge_reads_the_built_in_users_own_instructions(monkeypatch):
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    seen = []
+
+    async def judge(self, candidate, history, call_config, instructions=None, **_):
+        seen.append(instructions)
+        return {"in_role": True, "reason": "asks"}
+
+    monkeypatch.setattr(UserSimGate, "_judge", judge)
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("you're welcome")],
+                        USER: [said("done", "great, thanks")]})
+    ctx = await _context(monkeypatch)
+
+    await _gated().execute(ctx)
+
+    assert len(seen) == 1 and seen[0] and "Hannah" in seen[0]

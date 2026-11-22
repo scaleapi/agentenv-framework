@@ -351,11 +351,6 @@ def _always_on_session(record: dict) -> _Session:
     if record.get("end_reason") in ERROR_ENDS:
         session.skipped = f"the run ended on {record['end_reason']}"
         return session
-    if record.get("error_type") == "user_sim_invalid":
-        # The user-sim gate cut the run off as an error (on_fail "fail"): the user sim broke it, not the agent. A plain
-        # on_fail "end" sets no error, and the run is rated as one that ended.
-        session.skipped = "the user sim's answer still read as the assistant's after its rewrites"
-        return session
     timeline = record.get("timeline_tail") or []
     if record.get("object_url"):
         try:
@@ -383,10 +378,6 @@ async def _prompt_agent_session(context: TaskStepContext, run_id: str, response:
                        context_id=conversation_id)
     if response.error_type == "user_sim_error":
         session.skipped = f"the user sim failed: {(response.error_message or '').removeprefix(SIM_FAILED_PREFIX)}"
-        return session
-    if response.error_type == "user_sim_invalid":
-        # The user-sim gate cut the conversation off: the user sim, not the agent, broke it.
-        session.skipped = "the user sim's message still read as the assistant's after its rewrites"
         return session
     if response.error_type or response.error_message:
         session.skipped = "the agent's turn failed"

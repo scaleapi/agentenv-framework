@@ -8,9 +8,9 @@ import json
 import pytest
 
 from tst.unit.task_step.always_on_harness import Rig
-from tst.unit.task_step.test_prompt_agent_user_side import _SWAP
+from tst.unit.task_step.test_prompt_agent_user_side import _SWAP, pattern_judge  # noqa: F401
 
-pytestmark = pytest.mark.usefixtures("local_stores")
+pytestmark = pytest.mark.usefixtures("local_stores", "pattern_judge")
 
 NOTE = "[Conversation system note, not from the assistant.] Your last message was not sent"
 
@@ -28,7 +28,7 @@ def _messages_once(n, texts, rig):
 
 
 def _gated(rig: Rig, **gate):
-    return rig.step(max_wakes=4, user_sim_gate={"patterns": True, **gate})
+    return rig.step(max_wakes=4, user_sim_gate={"patterns": True, "judge_model": "judge", **gate})
 
 
 def _got(rig: Rig, text: str) -> bool:
@@ -66,8 +66,8 @@ async def test_an_answer_that_still_fails_never_reaches_the_agent_and_ends_the_r
     assert not _got(rig, "None of the three reported numbers")
     assert len(rig.sent) == 1                      # no wake after hers: the run ended at her read
     record = rig.record(ctx)
-    assert record["end_reason"] == "user_sim_invalid"
-    assert record["error_type"] == "user_sim_invalid"   # verifiers skip a run that broke, as on a user sim error
+    assert record["end_reason"] == "user_sim_error"     # a failed user sim: the run is redone
+    assert record["error_type"] == "user_sim_error"
     assert ctx.metadata["user_sim_invalid"]["week"]["wake"] == 1
     (read,) = rig.events(ctx, "user_sim_read")
     assert read["outcome"] == "no_reply" and read["user_sim_gate"]["invalid"] is True
@@ -84,7 +84,7 @@ async def test_a_rewrite_with_nothing_to_send_holds_the_message_back_and_fails_t
 
     assert not _got(rig, "None of the three reported numbers")
     record = rig.record(ctx)
-    assert record["end_reason"] == "user_sim_invalid" and record["error_type"] == "user_sim_invalid"
+    assert record["end_reason"] == "user_sim_error" and record["error_type"] == "user_sim_error"
     assert ctx.metadata["user_sim_invalid"]["week"]["reasons"][-1] == "its rewrite sent nothing in its place"
     (read,) = rig.events(ctx, "user_sim_read")
     assert read["outcome"] == "no_reply" and read["user_sim_gate"]["invalid"] is True
@@ -108,9 +108,37 @@ async def test_an_in_role_answer_passes_with_no_rewrite(monkeypatch, tmp_path):
     await rig.arm()
     ctx = await rig.run(_gated(rig))
     (read, *_) = rig.events(ctx, "user_sim_read")
-    assert read["user_sim_gate"] == {"verdicts": [{"attempt": 0, "chars": 15, "passed": True}], "rewrites": [],
-                                     "invalid": False}
+    assert read["user_sim_gate"] == {"verdicts": [{"attempt": 0, "chars": 15, "passed": True, "judge_in_role": True,
+                                                   "judge_reason": "written as the user"}],
+                                     "rewrites": [], "invalid": False}
     assert rig.user_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_gate_without_a_judge_records_pattern_matches_and_holds_nothing_back(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_messages_once, answers=[{"outcome": "reply", "message": _SWAP}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=4, user_sim_gate={}))
+    (read, *_) = rig.events(ctx, "user_sim_read")
+    assert read["user_sim_gate"]["verdicts"][0]["passed"] is True and read["user_sim_gate"]["verdicts"][0]["pattern_reasons"]
+    assert _got(rig, "None of the three reported numbers") and rig.user_calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_judge_reads_the_user_sims_own_instructions(monkeypatch, tmp_path):
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    seen = []
+
+    async def judge(self, candidate, history, call_config, instructions=None, **_):
+        seen.append(instructions)
+        return {"in_role": True, "reason": "asks"}
+
+    monkeypatch.setattr(UserSimGate, "_judge", judge)
+    rig = Rig(monkeypatch, tmp_path, agent=_messages_once, answers=[{"outcome": "reply", "message": "shorter, please"}])
+    await rig.arm()
+    await rig.run(_gated(rig))
+    assert len(seen) == 1 and seen[0] and "Linda" in seen[0]
 
 
 @pytest.mark.asyncio
@@ -124,8 +152,8 @@ async def test_without_the_gate_nothing_is_checked(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_judge_only_gate_whose_judge_cant_be_set_up_fails_the_step(monkeypatch, tmp_path):
-    # A setup failure won't recover, and with patterns off nothing else would check her answers.
+async def test_a_gate_whose_judge_cant_be_set_up_fails_the_step(monkeypatch, tmp_path):
+    # A setup failure won't recover, and only the judge holds an answer back.
     def no_endpoint(model, **kw):
         raise KeyError("no endpoint configured for judge-model")
 
@@ -133,8 +161,8 @@ async def test_a_judge_only_gate_whose_judge_cant_be_set_up_fails_the_step(monke
     rig = Rig(monkeypatch, tmp_path, agent=_messages_once, answers=[{"outcome": "reply", "message": "looks good"}])
     await rig.arm()
 
-    with pytest.raises(Exception, match="judge setup: KeyError.*with patterns off"):
-        await rig.run(rig.step(max_wakes=4, user_sim_gate={"patterns": False, "judge_model": "judge-model"}))
+    with pytest.raises(Exception, match="judge setup: KeyError.*only the judge holds"):
+        await rig.run(rig.step(max_wakes=4, user_sim_gate={"judge_model": "judge-model"}))
     assert not _got(rig, "looks good")
 
 

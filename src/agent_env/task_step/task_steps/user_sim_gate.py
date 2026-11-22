@@ -5,15 +5,14 @@ done, or offers to do the agent's job. Once one such message is in the conversat
 is no longer a test of the agent. The gate checks each user-sim message, asks the user-sim to rewrite one
 that fails, and, if the rewrites fail too, ends the conversation and marks the run.
 
-Two checks, either of which can fail a message:
+The judge decides:
 
-- ``patterns``: phrases and shapes that belong to the assistant's side (a report of work done, a
-  formatted deliverable, offers to do the work). Free, and deliberately narrow.
-- ``judge_model``: one model call that reads the last turns and the candidate message and says whether
-  the message is written as the user.
-
-With both, a judge that reads the message as the user's clears a hit on a phrase alone (``PHRASE_REASONS``), which
-counts at any length; a hit on a report's shape and length stays a failure.
+- ``judge_model``: one model call that reads the user sim's instructions, the last turns and the candidate message,
+  and says whether the message is written as the user, by the rule user_sim_judge's rogue check fails a run for
+  ("spoke as the assistant"). Only the judge holds a message back.
+- ``patterns``: phrases and shapes that belong to the assistant's side (a report of work done, a formatted
+  deliverable, offers to do the work). Free and narrow; a match is recorded on the verdict, never a reason to hold a
+  message back on its own. Without a judge the gate only records them.
 
 Opt in with ``user_sim_gate`` on a ``prompt_agent`` step whose user is a user-sim agent-env deployed: a peer
 user-sim, or the built-in one deploy_user_sim_agent deploys, whose rewrite is parsed as its own answer. ``always_on``
@@ -21,6 +20,9 @@ applies it to each of the built-in user-sim's answers. A step type that runs its
 with ``run_gate``, and sets ``USER_SIM_GATE_SUPPORTED``::
 
     {"judge_model": "<a small, fast model>", "max_rewrites": 2, "on_fail": "fail"}
+
+A message that still fails after its rewrites, with ``on_fail`` "fail", marks the run ``error_type: user_sim_error``,
+as a failed user sim does, so the run is redone.
 
 Each judge call is in the step's usage, role ``judge``. In ``always_on`` the gate costs time budget even when it never
 fires: each read reserves room for ``max_rewrites`` more user sim turns and, with a judge, a judge timeout per check.
@@ -97,9 +99,6 @@ class PatternLimits:
 
 TALKS_LIKE_THE_ASSISTANT = "it talks like the assistant (offers to do the work, waits on the user, or speaks as the AI)"
 NOW_LIVE = "it says something is now live"
-# The reasons a phrase gives at any length: a judge that reads the message as the user's clears them. The rest need a
-# report's shape and length, and stay failures whatever the judge says.
-PHRASE_REASONS = frozenset({TALKS_LIKE_THE_ASSISTANT, NOW_LIVE})
 
 
 _APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
@@ -136,18 +135,20 @@ _JUDGE_PROMPT = """You check one message in a test conversation. A model is play
 a task. The assistant does the work; the user asks, answers questions the assistant put to them, decides, approves, \
 pushes back, or ends the conversation.
 
-Decide whether the CANDIDATE message is written as the user. It is NOT written as the user when it does the \
-assistant's job: it answers the question the user should be asking, reports work as done or findings it produced \
-("Done. Here's what I found", "I've updated the page"), presents analysis or a deliverable, apologizes for "my \
-previous answer", offers to do work ("I'll draft it", "Standing by", "Want me to send it?"), or speaks as the AI.
+Decide whether the CANDIDATE message is written as the user. It is NOT written as the user when it speaks as the \
+assistant: a report or summary in the assistant's voice (findings it produced, work it says it did for the task), \
+an offer to do the assistant's tasks ("Want me to send it to you?" offering the assistant's own work, "Standing by"), \
+the person's own questions asked back as if it were the assistant, an apology for "my previous answer", or \
+speaking as the AI.
 
 It IS written as the user when it asks, instructs, approves, pushes back, answers a question the assistant asked, \
-or shares the user's own knowledge, even if it is long, formatted, quotes the assistant's numbers, or pastes an \
-email or document. Length and markdown alone are not evidence.
+or says what the user knows, has, did or checked themselves, as the user's instructions describe this person, even \
+if it is long, formatted, quotes the assistant's numbers, or pastes an email or document. "I checked my bank app \
+and the charge is there" is the user reporting their own check. Length and markdown alone are not evidence.
 
 Judge only whose voice the message is in. A user message that repeats an earlier one, ignores or contradicts what \
 the assistant said, states a decision or a fact the user holds, or seems off topic is still written as the user.
-
+{instructions}
 CONVERSATION SO FAR (most recent last):
 {history}
 {user_note}
@@ -165,6 +166,14 @@ WHAT THE USER FOUND checking the work themselves just now (only the user saw thi
 the user's own words ("I checked the folder and the sheet isn't there") is written as the user:
 <<<
 {note}
+>>>
+"""
+
+# What the model playing the user was told: who this person is and what they know, do and decide.
+_INSTRUCTIONS = """
+THE USER'S INSTRUCTIONS (what the model playing the user was told; the assistant never saw them):
+<<<
+{instructions}
 >>>
 """
 
@@ -206,19 +215,18 @@ class UserSimGate:
     patterns: bool = True
     judge_model: Optional[str] = None
     max_rewrites: int = 2
-    # What happens when a message still fails after its rewrites: "fail" ends the conversation and fails the
-    # step, "end" ends the conversation and lets the step finish, "send" sends it anyway (record only).
+    # What happens when a message still fails after its rewrites: "fail" ends the conversation as a failed user sim
+    # (error_type user_sim_error, so the run is redone), "end" ends it plainly, "send" sends it anyway (record only).
     on_fail: str = "fail"
     context_turns: int = 4
-    # The judge alone fails only a message at least this long; a shorter one also needs a pattern. Swaps are long or
-    # match a pattern, and without the scenario the judge misreads short scripted answers that correct the agent.
-    judge_min_chars: int = 300
     context_chars: int = 3000
     judge_timeout_seconds: float = 60
 
     # How much of a judge error and of the judge's reason a verdict keeps.
     RECORDED_ERROR_CHARS: ClassVar[int] = 300
     RECORDED_REASON_CHARS: ClassVar[int] = 500
+    # How much of the user sim's instructions the judge is shown.
+    INSTRUCTIONS_MAX_CHARS: ClassVar[int] = 40_000
 
     def __post_init__(self) -> None:
         """Refuse a setting of the wrong type or range here, when the task loads, rather than mid-conversation."""
@@ -235,7 +243,6 @@ class UserSimGate:
         need(whole(self.max_rewrites) and self.max_rewrites >= 0, "max_rewrites", "a whole number >= 0")
         need(self.on_fail in ON_FAIL, "on_fail", f"one of {ON_FAIL}")
         need(whole(self.context_turns) and self.context_turns >= 0, "context_turns", "a whole number >= 0")
-        need(whole(self.judge_min_chars) and self.judge_min_chars >= 0, "judge_min_chars", "a whole number >= 0")
         need(whole(self.context_chars) and self.context_chars > 0, "context_chars", "a whole number > 0")
         need(isinstance(self.judge_timeout_seconds, (int, float)) and not isinstance(self.judge_timeout_seconds, bool)
              and self.judge_timeout_seconds > 0, "judge_timeout_seconds", "a number > 0")
@@ -257,40 +264,33 @@ class UserSimGate:
         return asdict(self)
 
     async def check(self, candidate: str, history: list[tuple[str, str]], *, call_config=None,
-                    judge_unavailable: Optional[str] = None, user_note: Optional[str] = None,
+                    user_note: Optional[str] = None, instructions: Optional[str] = None,
                     on_call: Optional[Callable[[ModelReply], None]] = None) -> GateVerdict:
-        """Check one message. ``history`` is the conversation so far as ``(role, text)``, role user/assistant.
-        A judge that reads the message as the user's clears a hit on a phrase alone (``PHRASE_REASONS``); a shape hit
-        stays a failure. A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict
-        stands. So does a judge that couldn't be set up (``judge_unavailable``, the reason), which isn't called.
-        ``on_call`` sees each judge call's reply, for the step's usage."""
-        reasons = pattern_reasons(candidate) if self.patterns else []
-        verdict = GateVerdict(passed=not reasons, pattern_reasons=reasons)
-        if self.judge_model and judge_unavailable is not None:
-            verdict.judge_error = judge_unavailable[: self.RECORDED_ERROR_CHARS]
+        """Check one message. ``history`` is the conversation so far as ``(role, text)``, role user/assistant;
+        ``instructions`` the user sim's own, shown to the judge. Only the judge fails a message; pattern matches are
+        recorded. A judge call that errors or can't be parsed passes the message with the error recorded. ``on_call``
+        sees each judge call's reply, for the step's usage."""
+        verdict = GateVerdict(passed=True, pattern_reasons=pattern_reasons(candidate) if self.patterns else [])
+        if not self.judge_model:
             return verdict
-        if self.judge_model:
-            try:
-                extra = {k: v for k, v in (("user_note", user_note), ("on_call", on_call)) if v}
-                judged = await self._judge(candidate, history, call_config, **extra)
-            except Exception as e:  # the judge is a second opinion; never let it take the conversation down
-                logger.warning(f"user-sim gate judge call failed ({type(e).__name__}: {e}); using patterns only")
-                verdict.judge_error = f"{type(e).__name__}: {e}"[: self.RECORDED_ERROR_CHARS]
-                return verdict
-            if judged is None:
-                verdict.judge_error = "unparseable judge output"
-                return verdict
-            verdict.judge_in_role = judged["in_role"]
-            verdict.judge_reason = str(judged.get("reason", ""))[: self.RECORDED_REASON_CHARS]
-            if not judged["in_role"] and (reasons or len(candidate) >= self.judge_min_chars):
-                verdict.passed = False
-            elif judged["in_role"] and reasons and set(reasons) <= PHRASE_REASONS:
-                verdict.passed = True  # a phrase alone, which the judge reads as the user's
-                verdict.cleared_by_judge = True
+        try:
+            extra = {k: v for k, v in (("user_note", user_note), ("instructions", instructions),
+                                       ("on_call", on_call)) if v}
+            judged = await self._judge(candidate, history, call_config, **extra)
+        except Exception as e:  # never let the judge take the conversation down
+            logger.warning(f"user-sim gate judge call failed ({type(e).__name__}: {e}); the message is sent")
+            verdict.judge_error = f"{type(e).__name__}: {e}"[: self.RECORDED_ERROR_CHARS]
+            return verdict
+        if judged is None:
+            verdict.judge_error = "unparseable judge output"
+            return verdict
+        verdict.judge_in_role = judged["in_role"]
+        verdict.judge_reason = str(judged.get("reason", ""))[: self.RECORDED_REASON_CHARS]
+        verdict.passed = judged["in_role"]
         return verdict
 
     async def _judge(self, candidate: str, history: list[tuple[str, str]], route,
-                     user_note: Optional[str] = None,
+                     user_note: Optional[str] = None, instructions: Optional[str] = None,
                      on_call: Optional[Callable[[ModelReply], None]] = None) -> Optional[dict]:
         """One judge call through core's one model-call path (config/model_call.py), on ``route``
         (``judge_call_config``'s), or on the configured endpoint when none was given."""
@@ -300,6 +300,8 @@ class UserSimGate:
             history=render_history(history, self.context_turns, self.context_chars),
             candidate=candidate[: self.context_chars * 2],
             user_note=_USER_NOTE.format(note=user_note.strip()) if user_note else "",
+            instructions=(_INSTRUCTIONS.format(instructions=instructions.strip()[: self.INSTRUCTIONS_MAX_CHARS])
+                          if instructions else ""),
         )
         if route is None:
             route = judge_call_config(self, {})
@@ -319,13 +321,10 @@ class GateVerdict:
     judge_in_role: Optional[bool] = None
     judge_reason: Optional[str] = None
     judge_error: Optional[str] = None
-    cleared_by_judge: Optional[bool] = None  # the judge read a phrase-only hit as the user's
 
     def reasons(self) -> list[str]:
-        out = list(self.pattern_reasons)
-        if self.judge_in_role is False and self.judge_reason:
-            out.append(self.judge_reason)
-        return out
+        """Why the judge held the message back; empty for one it passed."""
+        return [self.judge_reason or "it reads as the assistant's message"] if self.judge_in_role is False else []
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v not in (None, [])}
@@ -364,23 +363,26 @@ async def run_gate(
     rewrite: Callable[[str], Awaitable[Optional[str]]],
     *,
     call_config=None,
-    judge_unavailable: Optional[str] = None,
     on_verdict: Optional[Callable[[int, str, GateVerdict], None]] = None,
     user_note: Optional[str] = None,
+    instructions: Optional[str] = None,
     on_call: Optional[Callable[[ModelReply], None]] = None,
 ) -> GateOutcome:
     """Check ``text``; while it fails, send the user-sim ``rewrite_request`` through ``rewrite`` and check its new
     message, up to ``gate.max_rewrites`` times. ``rewrite`` returns the new message, or None when the user side
-    ended instead. ``judge_unavailable`` is why the judge couldn't be set up, if it couldn't (see ``check``).
+    ended instead.
     ``on_verdict(attempt, text, verdict)`` sees every check, for recording. ``user_note`` is what a post-turn hook
-    told the user sim it found, shown to the judge. ``on_call`` sees each judge call's reply, for the step's usage.
+    told the user sim it found, and ``instructions`` the user sim's own, both shown to the judge. ``on_call`` sees each
+    judge call's reply, for the step's usage.
     Any conversation loop
     can call this; ``prompt_agent`` does, between a user-sim's reply and the agent's next turn."""
     outcome = GateOutcome(text=text)
     for attempt in range(gate.max_rewrites + 1):
-        extra = {} if judge_unavailable is None else {"judge_unavailable": judge_unavailable}
+        extra = {}
         if user_note:  # what a post-turn hook told the user sim it found: the judge reads a report of it as the user's
             extra["user_note"] = user_note
+        if instructions:
+            extra["instructions"] = instructions
         if on_call is not None:
             extra["on_call"] = on_call
         verdict = await gate.check(text, history, call_config=call_config, **extra)
@@ -403,27 +405,20 @@ async def run_gate(
 JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
 
 
-def judge_setup_failed(gate: UserSimGate, error: Exception) -> str:
-    """What a step records when the gate's judge can't be set up (``judge_call_config`` raised), so the patterns'
-    verdict stands. With patterns off nothing would check the user sim's messages for the rest of the run, and a
-    setup failure won't recover, so that raises instead."""
-    reason = f"judge setup: {type(error).__name__}: {error}"
-    if not gate.patterns:
-        raise RuntimeError(f"user_sim_gate: {reason}; with patterns off, nothing would check the user sim's "
-                           "messages, so the step fails rather than run unchecked") from error
-    return reason[: gate.RECORDED_ERROR_CHARS]
-
-
 def judge_call_config(gate: UserSimGate, user_overrides: dict):
     """The route of the gate's judge calls (a ``model_call.ModelRoute``), honoring a run's judge or LiteLLM
-    overrides as the rubrics verifier does; None without a judge. Raises ConfigError, as a setup failure, for an
-    endpoint the run gives no key for."""
+    overrides as the rubrics verifier does; None without a judge. A judge that can't be set up (an endpoint the run
+    gives no key for) raises, failing the step: without its judge the gate holds nothing back."""
     if not gate.judge_model:
         return None
     from agent_env.config import model_call
 
-    return model_call.resolve_route(
-        gate.judge_model,
-        api_key=user_overrides.get("judge_litellm_api_key") or user_overrides.get("litellm_api_key"),
-        api_base=user_overrides.get("judge_litellm_base_url") or user_overrides.get("litellm_base_url"),
-        who="user_sim_gate", key_how=JUDGE_KEY_HOW)
+    try:
+        return model_call.resolve_route(
+            gate.judge_model,
+            api_key=user_overrides.get("judge_litellm_api_key") or user_overrides.get("litellm_api_key"),
+            api_base=user_overrides.get("judge_litellm_base_url") or user_overrides.get("litellm_base_url"),
+            who="user_sim_gate", key_how=JUDGE_KEY_HOW)
+    except Exception as e:
+        raise RuntimeError(f"user_sim_gate: judge setup: {type(e).__name__}: {e}; only the judge holds a message "
+                           "back, so the step fails rather than run unchecked") from e

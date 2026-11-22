@@ -67,9 +67,11 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
 - ``user_sim_gate`` (user_sim_gate.py) checks each answer the user sim would send before the agent gets it. One that
   reads as the assistant's is held back and the user sim, told why in its session, answers again, up to the gate's
   ``max_rewrites``; each read's event records the checks (``user_sim_gate``: verdicts, rewrites, the first message).
-  An answer that still fails is never delivered and ends the run (user_sim_invalid, also recorded in
-  ``metadata["user_sim_invalid"][step_id]``): with ``on_fail`` "fail" it sets ``error_type`` too, so verifiers skip
-  the run; "end" ends it plainly; "send" delivers it anyway. A rewrite with nothing to send (a no_reply, an empty reply)
+  Only the gate's judge, which reads the user sim's own instructions, holds an answer back; its pattern matches are
+  recorded. An answer that still fails is never delivered and ends the run (recorded in
+  ``metadata["user_sim_invalid"][step_id]``): with ``on_fail`` "fail" as a failed user sim, ``user_sim_error`` for both
+  the end reason and ``error_type``, so the run is redone; "end" ends it plainly (user_sim_invalid); "send" delivers it
+  anyway. A rewrite with nothing to send (a no_reply, an empty reply)
   holds the message back for good too. Her last read's answer, never delivered, isn't checked. The gate's judge calls
   are in the step's usage, role ``judge``. Turning the gate on reserves each read's worst case out of the run's time
   budget whether or not it ever fires: ``max_rewrites`` more user sim turns, each up to ``user_timeout_seconds`` plus its
@@ -126,14 +128,14 @@ from agent_env.task_step.context import PromptResponse, StepContextError, TaskSt
 from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, recorded_instructions, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     fetch_native_trajectory,
     prescribe_formats,
 )
-from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, judge_setup_failed, run_gate
+from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
@@ -405,7 +407,7 @@ class _Run:
         # The conversation as the user-sim gate reads it, (role, text); and the gate's judge settings, set up once.
         self.gate_history: list[tuple[str, str]] = []
         self.gate_call_config = None
-        self.gate_setup_error: Optional[str] = None
+        self.user_sim_prompt: Optional[str] = None  # its system prompt, as the gate's judge reads it
         self.replies = 0
         self.gave_up = False
         self.final_sent = False
@@ -649,8 +651,11 @@ class _Run:
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
             self.user_setup = dict(self.us["setup"])
             self.usage.start(ModelRole.USER_SIMULATOR, self.user_model, self.user_agent)
+            if step.user_sim_gate is not None and step.user_sim_gate.judge_model:
+                self.user_sim_prompt = recorded_instructions(self.us, ctx.metadata.get("seed") or {}, self.multi_day)
             return
         setup = self.plugin.setup(self.version, self.person)
+        self.user_sim_prompt = setup.get("system_prompt")
         self.user_model, self.user_model_from = self._user_model()
         user_config = {"model": self.user_model, "system_prompt": setup.get("system_prompt"),
                        "output_format": setup.get("output_format")}
@@ -1607,15 +1612,11 @@ class _Run:
         """The user sim's answer after the user-sim gate (user_sim_gate.py): each failing message is held back and the
         user sim, told why through ``ask`` in its session, answers again, up to the gate's limit. Returns the answer to
         use and the gate's record for the read. A message that still fails is never delivered: the answer becomes a
-        no_reply, and the run ends ("user_sim_invalid"; an error, so verifiers skip it, when ``on_fail`` is "fail"),
-        unless ``on_fail`` is "send"."""
+        no_reply, and the run ends: as a failed user sim (``user_sim_error``) when ``on_fail`` is "fail", plainly
+        ("user_sim_invalid") when it is "end"; "send" sends it."""
         gate = self.step.user_sim_gate
-        if self.gate_call_config is None and self.gate_setup_error is None and gate.judge_model:
-            try:
-                self.gate_call_config = judge_call_config(gate, self.ctx.metadata.get("user_overrides", {}))
-            except Exception as e:  # as in prompt_agent: the patterns' verdict stands; with patterns off, it raises
-                self.gate_setup_error = judge_setup_failed(gate, e)
-                logger.warning(f"always_on: user-sim gate {self.gate_setup_error}; using patterns only")
+        if self.gate_call_config is None and gate.judge_model:  # a judge that can't be set up fails the step
+            self.gate_call_config = judge_call_config(gate, self.ctx.metadata.get("user_overrides", {}))
         latest = {"ans": ans, "dropped": False}
         verdicts: list[dict] = []
         rewrites: list[dict] = []
@@ -1645,7 +1646,7 @@ class _Run:
                                f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
 
         outcome = await run_gate(gate, ans["message"], self.gate_history, rewrite, call_config=self.gate_call_config,
-                                 judge_unavailable=self.gate_setup_error, on_verdict=on_verdict,
+                                 instructions=self.user_sim_prompt, on_verdict=on_verdict,
                                  on_call=lambda reply: self.usage.call(ModelRole.JUDGE, reply))
         if latest["dropped"] and gate.on_fail != "send":
             outcome.invalid = True
@@ -1659,7 +1660,8 @@ class _Run:
         if gate.on_fail == "fail":
             self.error = (f"user-sim answer at wake {self.wakes} still reads as the assistant's after "
                           f"{gate.max_rewrites} rewrite(s): {'; '.join(reasons)[:500]}")
-            self.error_type = "user_sim_invalid"
+            self.error_type = "user_sim_error"  # a failed user sim: the run is redone
+            self.end_reason = self.end_reason or "user_sim_error"
         self.end_reason = self.end_reason or "user_sim_invalid"
         return {**latest["ans"], "outcome": "no_reply", "message": "", "used": None}, record
 
