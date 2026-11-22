@@ -36,6 +36,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def failure_text(error: BaseException) -> str:
+    """A run's recorded error: ``str(error)``, or its class (and its cause's) when that is empty.
+
+    ``TimeoutError()``, ``httpx.ConnectError('')`` and others have no message, and a failed run
+    recorded with ``str()`` of one says nothing about why it failed."""
+    text = str(error)
+    if text:
+        return text
+    name = type(error).__name__
+    cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    if cause is None:
+        return name
+    return f"{name} (from {type(cause).__name__}: {cause})" if str(cause) else f"{name} (from {type(cause).__name__})"
+
 TASKS_COLLECTION = "tasks"
 TASK_INSTANCES_COLLECTION = "task_instances"
 TASK_STEP_JOURNAL_COLLECTION = "task_step_journal"
@@ -760,7 +775,7 @@ class TaskInstanceStore:
         spec = UpdateSpec(
             set={
                 "status": "failed",
-                "error": str(error),
+                "error": failure_text(error),
                 "context": context.to_safe_dict(),
                 "completed_at_utc": completed_at_utc,
             },
