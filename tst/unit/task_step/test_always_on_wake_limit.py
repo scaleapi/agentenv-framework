@@ -21,6 +21,7 @@ MAX_TURNS_ERROR = "claude CLI exited with code 1: Reached maximum number of turn
 @pytest.fixture(autouse=True)
 def _quick(monkeypatch):
     monkeypatch.setattr(ao, "TURN_GRACE_SECONDS", 0)  # the step gives up on a turn at its time limit itself
+    monkeypatch.setattr(ao, "CUT_OFF_GRACE_SECONDS", 0)  # unless a test waits for a late tool call
 
 
 def _alert_later(rig: Rig) -> None:
@@ -78,6 +79,37 @@ async def test_a_turn_past_its_time_limit_is_canceled_and_the_run_goes_on_to_the
     assert response.response == "[Mon Nov 9, 9:00 AM EST] on it: comparing the three houses"  # the wake's work stands
     [turn, _] = rig.events(ctx, "agent_turn_end")
     assert (turn["state"], turn["cut_off"], turn["messages_to_user"]) == ("timeout", "time_limit", 1)
+
+
+@pytest.mark.asyncio
+async def test_what_a_canceled_turn_still_does_in_the_grace_counts_in_the_cut_off_wake(monkeypatch, tmp_path):
+    """The agent reads the turn canceled before its work has stopped, and a tool call already under way lands 3 s
+    later: the step waits out its grace, the task's clock frozen, so that call is the cut-off wake's, at the time the
+    wake was cut off, and the next wake is clean."""
+    monkeypatch.setattr(ao, "CUT_OFF_GRACE_SECONDS", 4)
+
+    def late_booking(rig):
+        rig.app_write("bookings", "blue house held, $855 a night", tool="stayncook_request_booking")
+        rig.message("held the blue house, $855 a night")
+
+    def agent(n, texts, rig):
+        if n == 1:
+            rig.message("on it: comparing the three houses")
+            return Slow(5, stopping_seconds=3, while_stopping=late_booking)
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent, rate=60)
+    rig.keep_changelog()
+    ctx = await _run(rig, timeout_seconds=1, continue_after_wake_limit=True)
+
+    [first, second] = rig.events(ctx, "agent_turn_end")
+    assert (first["messages_to_user"], second["messages_to_user"]) == (2, 0)
+    late = [e for e in rig.events(ctx, "message_to_user") if e["text"] == "held the blue house, $855 a night"]
+    assert [(e["wake"], e["virtual_time"]) for e in late] == [(1, first["virtual_time"])]  # the clock stood still
+    changes = [c for e in rig.events(ctx, "app_changes") for c in e["changes"]]
+    assert [(c["table"], c["by"], c["wake"], c["phase"]) for c in changes] == [("public.bookings", "agent", 1, "turn")]
+    assert rig.record(ctx)["cut_off_wakes"][0]["stopped"] == "canceled"
 
 
 @pytest.mark.asyncio
@@ -274,10 +306,12 @@ async def test_an_agent_that_stops_answering_still_ends_the_run(monkeypatch, tmp
 
 @pytest.mark.asyncio
 async def test_off_a_turn_past_its_time_limit_ends_the_run_as_before(monkeypatch, tmp_path):
+    monkeypatch.setattr(ao, "CUT_OFF_GRACE_SECONDS", 30)  # off, the step never waits it out
     rig = Rig(monkeypatch, tmp_path, agent=_slow_first_turn)
     ctx = await _run(rig, timeout_seconds=1)
 
     assert rig.cancels == [] and len(rig.sent) == 1
+    assert rig.record(ctx)["real_seconds"] < 10
     record = rig.record(ctx)
     assert (record["end_reason"], record["error_type"]) == ("agent_turn_timeout", "agent_turn_timeout")
     assert "cut_off_wakes" not in record and "cut_off_wakes" not in record["counts"]
@@ -305,4 +339,6 @@ def test_the_setting_is_off_unless_set_and_survives_a_round_trip(monkeypatch, tm
     assert off.continue_after_wake_limit is False and off.to_dict()["continue_after_wake_limit"] is False
     assert ao.AlwaysOnTaskStep.from_dict(on.to_dict()).continue_after_wake_limit is True
     # On, one wake's worst case also holds the time it takes to stop a turn cut off at its time limit.
-    assert on.wake_reserve_seconds() - off.wake_reserve_seconds() == ao.STOP_TURN_SECONDS * 2  # the turn and its nudge
+    # The turn and its nudge each get the time to stop and the grace after.
+    stopping = ao.STOP_TURN_SECONDS + ao.CUT_OFF_GRACE_SECONDS
+    assert on.wake_reserve_seconds() - off.wake_reserve_seconds() == stopping * 2

@@ -56,11 +56,15 @@ class Slow:
     """An agent's turn that works for ``seconds`` of real time, then acts with ``then(rig)`` and ends with what it
     returns (its closing text, or a ``Fail``). The work runs as the agent's own, so the step giving up on the turn
     doesn't stop it; only a cancel of its A2A task does, unless ``stops_on_cancel`` is False (an agent that won't
-    stop)."""
+    stop). As the agent framework's executor does, the agent reports a task it cancels canceled at once, while its work
+    takes ``stopping_seconds`` more to stop and may still act meanwhile (``while_stopping(rig)``, a tool call already
+    under way)."""
 
     def __init__(self, seconds: float, then: Optional[Callable[["Rig"], Any]] = None,
-                 stops_on_cancel: bool = True) -> None:
+                 stops_on_cancel: bool = True, stopping_seconds: float = 0,
+                 while_stopping: Optional[Callable[["Rig"], Any]] = None) -> None:
         self.seconds, self.then, self.stops_on_cancel = seconds, then, stops_on_cancel
+        self.stopping_seconds, self.while_stopping = stopping_seconds, while_stopping
 
 
 class Rig:
@@ -108,6 +112,7 @@ class Rig:
         self._contacts: dict[str, dict] = {}
         self.agent_tasks: dict[str, tuple[asyncio.Task, Slow]] = {}
         self.cancels: list[str] = []
+        self.canceled: set[str] = set()  # the tasks the agent canceled, so A2A reads them canceled
         self._monkeypatch = monkeypatch
         monkeypatch.setattr(ao, "POLL_SECONDS", 0)
         monkeypatch.setattr(ao, "send_and_wait", self._send_and_wait)
@@ -314,7 +319,13 @@ class Rig:
         return _turn(task_id, "completed", reply)
 
     async def _work(self, slow: Slow) -> Any:
-        await asyncio.sleep(slow.seconds)
+        try:
+            await asyncio.sleep(slow.seconds)
+        except asyncio.CancelledError:
+            await asyncio.sleep(slow.stopping_seconds)
+            if slow.while_stopping:
+                slow.while_stopping(self)
+            raise
         return slow.then(self) if slow.then else ""
 
     async def _cancel_a2a_task(self, url: str, task_id: str) -> None:
@@ -323,12 +334,15 @@ class Rig:
         self.cancels.append(task_id)
         work, slow = self.agent_tasks.get(task_id, (None, None))
         if work is not None and slow.stops_on_cancel:
+            self.canceled.add(task_id)
             work.cancel()
 
     async def _poll_a2a_task(self, url: str, task_id: str, timeout_seconds: float, poll_interval_seconds: float = 10,
                              **kw) -> dict:
-        """A2A tasks/get until the task ends: canceled, or completed once its work is done; TimeoutError past
-        ``timeout_seconds``."""
+        """A2A tasks/get until the task ends: canceled as soon as the agent canceled it, its work maybe still stopping;
+        else completed once its work is done; TimeoutError past ``timeout_seconds``."""
+        if task_id in self.canceled:
+            return {"id": task_id, "status": {"state": "canceled"}}
         work, _ = self.agent_tasks.get(task_id, (None, None))
         if work is not None:
             done, _ = await asyncio.wait({work}, timeout=timeout_seconds)

@@ -60,11 +60,14 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
 - With ``continue_after_wake_limit`` on, a turn (a wake's, or its nudge's) that reaches its time limit
   (``timeout_seconds``) or its tool-call limit (``max_turns``) ends only that wake: what it did stands, its messages to
   the user are taken as any wake's are, and the run goes on to its next event, still bounded by ``max_wakes`` and the
-  time budget. A turn cut off at its time limit is first canceled (A2A tasks/cancel) and the step waits for the agent
-  to confirm it stopped, so none of its tool calls land in a later wake; one the agent can't confirm stopped ends the
-  run as before. The next wake opens with a note that the last turn was cut off (``CUT_OFF_TEXT``). Each cut-off is
-  in the timeline (``wake_cut_off``, and ``cut_off`` on the turn's end), the run's record (``cut_off_wakes``) and what
-  the judge reads. A turn that fails for any other reason (an agent crash, a protocol error) still ends the run.
+  time budget. A turn cut off at its time limit is first canceled (A2A tasks/cancel); once the agent reports it
+  canceled, the step waits ``CUT_OFF_GRACE_SECONDS`` more, the task's clock frozen, before it reads the turn's app
+  changes and takes its messages, so a tool call the turn still had under way counts in the cut-off wake. An agent
+  reports a task canceled before its cleanup ends, so a call landing after the grace is not stopped. A turn the agent
+  can't confirm canceled ends the run as before. The next wake opens with a note that the last turn was cut off
+  (``CUT_OFF_TEXT``). Each cut-off is in the timeline (``wake_cut_off``, and ``cut_off`` on the turn's end), the run's
+  record (``cut_off_wakes``) and what the judge reads. A turn that fails for any other reason (an agent crash, a
+  protocol error) still ends the run.
 - Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
@@ -192,6 +195,10 @@ TIME_LIMIT_PATTERN = re.compile(r"[\w .-]{1,40} timed out after \d")
 TIME_LIMIT_CODE_SUFFIX = ".timeout"
 # How long the step gives the agent to cancel a turn cut off at its time limit and report it ended.
 STOP_TURN_SECONDS = 30
+# After that, how long the step still waits, the task's clock frozen, before it reads the turn's app changes and takes
+# its messages: an agent reports a canceled task canceled before its cleanup ends, so a tool call already under way can
+# land meanwhile, and is the cut-off wake's. One that lands later is not caught.
+CUT_OFF_GRACE_SECONDS = 10
 # What each end reason means, for the end marker in the graded conversation; {wakes} and {first} are filled in.
 END_NOTES = {
     "end_time": "The run reached its end time.",
@@ -312,13 +319,13 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         """The longest one turn of the loop, or the run's closing, can take, each part hard-capped: a clock jump's
         settle (settle_cap_seconds), then a wake (the agent's turn and, with nudges on, its nudge turn, each at most
         timeout_seconds + TURN_GRACE_SECONDS plus a trajectory fetch, and with continue_after_wake_limit on,
-        STOP_TURN_SECONDS to stop one cut off at its time limit; one settle; GATEWAY_ALLOWANCE_SECONDS of the step's own
-        calls), then a read (read_cap_seconds and GATEWAY_ALLOWANCE_SECONDS). The loop cuts off a turn of its own that
-        runs past this (a step error), so it is a real bound. ``contact_seconds`` is the longest contact time limit, as
-        for settle_cap_seconds."""
+        STOP_TURN_SECONDS and CUT_OFF_GRACE_SECONDS to stop one cut off at its time limit; one settle;
+        GATEWAY_ALLOWANCE_SECONDS of the step's own calls), then a read (read_cap_seconds and
+        GATEWAY_ALLOWANCE_SECONDS). The loop cuts off a turn of its own that runs past this (a step error), so it is a
+        real bound. ``contact_seconds`` is the longest contact time limit, as for settle_cap_seconds."""
         turn = self.timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS
         if self.continue_after_wake_limit:
-            turn += STOP_TURN_SECONDS
+            turn += STOP_TURN_SECONDS + CUT_OFF_GRACE_SECONDS
         settle = self.settle_cap_seconds(contact_seconds)
         wake = turn * (2 if self.nudge else 1) + settle + GATEWAY_ALLOWANCE_SECONDS
         return settle + wake + self.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
@@ -732,17 +739,22 @@ class _Run:
 
     async def _stopped_at_time_limit(self, error: TimeoutError) -> Optional[str]:
         """A turn that ran out of time, with continue_after_wake_limit on: the state the agent confirms it stopped in
-        (``_stop_turn``). None, so the run ends as an error, with the setting off, for an agent that stopped answering
-        (its sandbox died, which is not the time limit), or when the stop can't be confirmed."""
+        (``_stop_turn``), once CUT_OFF_GRACE_SECONDS more have passed, so what the turn still had under way lands
+        before the wake reads its changes and messages. None, so the run ends as an error, with the setting off, for
+        an agent that stopped answering (its sandbox died, which is not the time limit), or when the stop can't be
+        confirmed."""
         if not self.step.continue_after_wake_limit or isinstance(error, protocol.AgentUnreachableError):
             return None
-        return await self._stop_turn()
+        stopped = await self._stop_turn()
+        if stopped is not None:
+            await asyncio.sleep(CUT_OFF_GRACE_SECONDS)  # the task's clock stays frozen, as between any two turns
+        return stopped
 
     async def _stop_turn(self) -> Optional[str]:
-        """Stop a turn cut off at its time limit before the run goes on, so none of its tool calls land in a later
-        wake: ask the agent to cancel its task (A2A tasks/cancel) and wait, up to STOP_TURN_SECONDS, for the agent to
-        report the task ended. Its final state ("canceled", or "failed" or "completed" when it ended on its own just
-        then); None when it can't be confirmed: no task was ever accepted, or the agent doesn't answer in time."""
+        """Stop a turn cut off at its time limit before the run goes on: ask the agent to cancel its task (A2A
+        tasks/cancel) and wait, up to STOP_TURN_SECONDS, for the agent to report the task ended. Its final state
+        ("canceled", or "failed" or "completed" when it ended on its own just then); None when it can't be confirmed:
+        no task was ever accepted, or the agent doesn't answer in time."""
         task_id = self.turn_task_id
         if task_id is None:
             return None
