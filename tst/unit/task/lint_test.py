@@ -288,6 +288,21 @@ def test_pooling_an_aggregate_by_verifier_ids_warns_that_it_adds_no_rows():
             ) in found
 
 
+@pytest.mark.parametrize(("output_format", "refused"), [("rubric_evidence_with_mistakes", False),
+                                                        ("rubric_evidence", True)])
+def test_an_aggregate_of_verifier_ids_reads_a_rubrics_mistakes_entry_only_when_its_output_format_writes_one(
+        output_format, refused):
+    rubric = {**RUBRIC, "output_format": output_format, "use_agent_judge": False, "use_trajectory": True,
+              "trajectory_filter": {"compaction_type": "screenshot", "frame_strategy": "per_criterion"}}
+    found = _found(_task(BOX, rubric, UNIT, _combined(verifier_ids=["rubric", "rubric-trajectory-mistakes", "unit"]),
+                         headline_verifiers=["final"]))
+
+    assert any(rule == "aggregate-source" for _, rule, _ in found) is refused
+    assert ("warning", "lopsided-pooling", "step 'final': verifier_ids source 'unit' is 1 of the 21 rows it pools (5%), "
+            "so it barely moves the score; naming the sources in sources with combine: weighted_mean weighs each "
+            "equally") in found
+
+
 @pytest.mark.parametrize("fields", [
     {"sources": ["rubric", "unit"], "combine": "weighted_mean"},
     {"sources": ["rubric", "unit"], "score_aggregator": "all_pass"},

@@ -12,12 +12,14 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from agent_env.entity.refs import RefRole, ref_sites
 from agent_env.store.ids import is_local_id
-from agent_env.task.task import Task
+from agent_env.task.task import Task, _ancestor_ids, _dependency_ids
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import StepRole, TaskStep, attach_base_fields
-from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import POOLED, AggregateVerifiersTaskStep
-from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, trajectory_mistakes_key
+from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import (
+    POOLED,
+    AggregateVerifiersTaskStep,
+    legacy_entry_writers,
+)
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 from agent_env.task_step.task_steps.verifiers.verifier import VerifierTaskStep
 
@@ -231,13 +233,7 @@ def _headlines(task: Task) -> Iterator[Finding]:
 def _aggregate_sources(steps: Sequence[TaskStep]) -> Iterator[Finding]:
     """An aggregate source that no verifier in the task writes, which fails the aggregate when it grades: an error when
     lint sees every key the task's steps write, else a warning naming the steps it can't see into."""
-    written, unseen = set(), [step.id for step in steps if not _seen_into(step)]
-    for step in steps:
-        if isinstance(getattr(step, "verifier_id", None), str):
-            written.add(step.verifier_id)
-            if (isinstance(step, RubricsVerifierTaskStep)
-                    and step.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES):
-                written.add(trajectory_mistakes_key(step.verifier_id))
+    written, unseen = legacy_entry_writers(steps), [step.id for step in steps if not _seen_into(step)]
     for step in steps:
         if isinstance(step, AggregateVerifiersTaskStep) and step.names_steps:
             yield from _named_sources(step, steps)
@@ -258,7 +254,7 @@ def _named_sources(aggregate: AggregateVerifiersTaskStep, steps: Sequence[TaskSt
     """Each source or gate an aggregate names by step id that a run can't read a grade of: no step in the task, a step
     off the VerifierTaskStep base, which writes none, or one that doesn't run before it. Its own config problems, such
     as naming itself, are its ``config_problems``."""
-    by_id, before = {step.id: step for step in steps}, _upstream(steps)[aggregate.id]
+    by_id, before = {step.id: step for step in steps}, _ancestor_ids(aggregate.id, _dependency_ids(list(steps)))
     for field in ("sources", "gates"):
         names = getattr(aggregate, field)
         if not isinstance(names, list):
@@ -278,25 +274,12 @@ def _named_sources(aggregate: AggregateVerifiersTaskStep, steps: Sequence[TaskSt
             yield Finding(Severity.ERROR, "aggregate-source", f"{field} names {name!r}, {problem}", aggregate.id)
 
 
-def _upstream(steps: Sequence[TaskStep]) -> dict[str, set[str]]:
-    """Each step's id, mapped to the ids of the steps that run before it: those its ``depends_on`` names and theirs, or,
-    naming none, every step before it."""
-    before: dict[str, set[str]] = {}
-    for index, step in enumerate(steps):
-        if step.depends_on is None:
-            before[step.id] = {earlier.id for earlier in steps[:index]}
-        else:
-            before[step.id] = set().union(*({dep.task_step_id} | before.get(dep.task_step_id, set())
-                                            for dep in step.depends_on))
-    return before
-
-
 def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:
     """A pooled, weighted-average aggregate one of whose sources is under ``LOPSIDED_SHARE`` of its rows, so it barely
     moves the score, counting only the sources whose rows their config says (``criterion_rows``). An aggregate of
-    ``verifier_ids`` reads a nested aggregate's entry, which has none, so that source adds nothing."""
-    by_id = {step.id: step for step in steps}
-    by_verifier_id = {step.verifier_id: step for step in steps if isinstance(getattr(step, "verifier_id", None), str)}
+    ``verifier_ids`` reads a nested aggregate's entry, which has none, so that source adds nothing; a rubric's
+    trajectory-mistakes entry has rows only a run can tell."""
+    by_id, writers = {step.id: step for step in steps}, legacy_entry_writers(steps)
     for step in steps:
         if (not isinstance(step, AggregateVerifiersTaskStep)
                 or step.score_aggregator is not ScoreAggregator.WEIGHTED_AVERAGE):
@@ -306,10 +289,12 @@ def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:
                 continue
             field, sources = "sources", {name: by_id.get(name) for name in step.sources if isinstance(name, str)}
         else:
-            field, sources = "verifier_ids", {vid: by_verifier_id.get(vid) for vid in step.verifier_ids
+            field, sources = "verifier_ids", {vid: by_id.get(writers.get(vid)) for vid in step.verifier_ids
                                               if isinstance(vid, str)}
         rows = {}
         for name, source in sources.items():
+            if not step.names_steps and getattr(source, "verifier_id", None) != name:
+                continue
             if isinstance(source, AggregateVerifiersTaskStep) and not step.names_steps:
                 rows[name] = 0
             elif isinstance(source, VerifierTaskStep) and (count := source.criterion_rows()) is not None:

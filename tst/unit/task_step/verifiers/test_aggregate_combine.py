@@ -183,9 +183,24 @@ def test_its_source_steps_are_the_steps_it_names_or_those_whose_verifier_ids_it_
     steps = [rubric, tests]
 
     assert _aggregate(sources=["rubric"], gates=["tests", "rubric"]).source_steps(steps) == ["rubric", "tests"]
-    assert _aggregate(verifier_ids=["tests-vid", "rubric-vid-trajectory-mistakes", "rubric-vid", "gone"]).source_steps(
-        steps) == ["tests", "rubric"]
+    assert _aggregate(verifier_ids=["tests-vid", "rubric-vid", "gone"]).source_steps(steps) == ["tests", "rubric"]
     assert _aggregate(sources=7, gates=[None, "tests"]).source_steps(steps) == ["tests"]
+
+
+#: What a rubric_evidence_with_mistakes rubric needs: a direct judge reading the trajectory's screenshots per criterion.
+DIRECT_SCREENSHOT_JUDGE = {"use_agent_judge": False, "use_trajectory": True,
+                           "trajectory_filter": {"compaction_type": "screenshot", "frame_strategy": "per_criterion"}}
+
+
+@pytest.mark.parametrize(("output_format", "resolved"), [("rubric_evidence_with_mistakes", ["judge"]),
+                                                          ("rubric_evidence", [])])
+def test_a_rubrics_trajectory_mistakes_entry_resolves_to_it_only_when_its_output_format_writes_one(output_format,
+                                                                                                    resolved):
+    task = Task.from_dict({"id": "t", "version": 1, "steps": [
+        {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge-vid", "prompt_id": "ask",
+         "criteria": [{"criterion": "says hi"}], "output_format": output_format, **DIRECT_SCREENSHOT_JUDGE}]})
+
+    assert _aggregate(verifier_ids=["judge-vid-trajectory-mistakes"]).source_steps(task.steps) == resolved
 
 
 def test_a_stored_aggregate_of_one_rubric_as_the_hubs_are_loads_and_resolves_its_source():

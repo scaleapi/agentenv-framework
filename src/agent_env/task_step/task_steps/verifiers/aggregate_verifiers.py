@@ -20,6 +20,7 @@ from typing import Any, ClassVar, Optional, Sequence
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, trajectory_mistakes_key
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.verifiers.verifier import (
     GRADES_KEY,
@@ -70,20 +71,14 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
 
     def source_steps(self, steps: Sequence[TaskStep]) -> list[str]:
         """The ids of the steps in ``steps`` whose results this aggregate reads, sources then gates: for the older
-        form, the steps whose ``verifier_id`` each of its ``verifier_ids`` names, a rubric's trajectory-mistakes entry
-        resolving to its rubric. An id no step writes is left out, as are sources or gates not given as a list of step
-        ids, which are its config problems."""
+        form, the steps that write the legacy entries its ``verifier_ids`` name (``legacy_entry_writers``). An entry no
+        step writes is left out, as are sources or gates not given as a list of step ids, which are its config
+        problems."""
         if self.names_steps:
             named = [name for field in (self.sources, self.gates) if isinstance(field, list) for name in field]
             return list(dict.fromkeys(name for name in named if isinstance(name, str)))
-        by_verifier_id = {}
-        for step in steps:
-            verifier_id = getattr(step, "verifier_id", None)
-            if isinstance(verifier_id, str):
-                by_verifier_id.setdefault(verifier_id, step.id)
-                by_verifier_id.setdefault(f"{verifier_id}-trajectory-mistakes", step.id)
-        return list(dict.fromkeys(by_verifier_id[vid] for vid in self.verifier_ids
-                                  if isinstance(vid, str) and vid in by_verifier_id))
+        writers = legacy_entry_writers(steps)
+        return list(dict.fromkeys(writers[vid] for vid in self.verifier_ids if isinstance(vid, str) and vid in writers))
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -222,6 +217,20 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
             f"{len(non_skipped)}/{len(merged_results)} criteria evaluated, score={score}"
         )
         return Verification(score=score, output={"source_verifier_ids": list(self.verifier_ids)})
+
+
+def legacy_entry_writers(steps: Sequence[TaskStep]) -> dict[str, str]:
+    """Each legacy ``verifications`` key the steps write, mapped to the id of the first step that writes it: a step's
+    ``verifier_id``, and a rubric's trajectory-mistakes entry when its output format writes one."""
+    writers: dict[str, str] = {}
+    for step in steps:
+        verifier_id = getattr(step, "verifier_id", None)
+        if not isinstance(verifier_id, str):
+            continue
+        writers.setdefault(verifier_id, step.id)
+        if isinstance(step, RubricsVerifierTaskStep) and step.writes_mistakes_entry:
+            writers.setdefault(trajectory_mistakes_key(verifier_id), step.id)
+    return writers
 
 
 def _grade(grades: dict[str, Grade], step: str, role: str) -> Grade:
