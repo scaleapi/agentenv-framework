@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_env.a2a_agent import protocol
+from agent_env.a2a_agent import A2AAgent, protocol
 from agent_env.config.model import ModelRole
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers import rubrics_verifier
@@ -89,18 +89,37 @@ def _agent_judge(monkeypatch, state: str, answer: str, reported: dict) -> Rubric
 
     monkeypatch.setattr(protocol, "send_a2a_message", send)
     monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+    monkeypatch.setattr(protocol, "post_agent_config", nothing)
     monkeypatch.setattr(verifier, "_fetch_judge_trajectory", nothing)
     monkeypatch.setattr(rubrics_verifier, "fetch_container_logs", nothing)
     return verifier
 
 
-async def _judge_once(verifier: RubricsVerifierTaskStep, context: TaskStepContext) -> None:
+_TAKES_A_MODEL = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {
+    "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": ["model"]}}}}}]}}
+
+
+async def _judge_once(verifier: RubricsVerifierTaskStep, context: TaskStepContext, card: dict = _TAKES_A_MODEL) -> None:
     await verifier._run_judge_with_output_retries(
         eval_prompt="grade it", criteria=CRITERIA[:1], context=context, model="claude-haiku-4-5",
-        judge_a2a_url="http://judge.test", judge_agent_card={},
+        judge_a2a_url="http://judge.test", judge_agent_card=card,
         judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}, model_endpoint_host="proxy.example:4000"),
         judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True,
         usage=StepUsage(context, "verify"))
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judge_that_runs_its_own_model_is_priced_by_none(monkeypatch):
+    answer = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "asked first"}]})
+    verifier = _agent_judge(monkeypatch, "completed", answer, {"input_tokens": 4000, "output_tokens": 80,
+                                                               "input_includes_cache": True})
+    context = TaskStepContext()
+
+    await _judge_once(verifier, context, card={})
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["model"], entry["input_tokens"], entry["cost_status"]) == (None, 4000, "unpriced")
+    assert context.metadata["model_endpoints"]["judge"]["verify"]["model"] is None
 
 
 @pytest.mark.asyncio

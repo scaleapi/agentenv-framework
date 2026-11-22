@@ -1434,7 +1434,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_max_thinking_tokens: Optional[int],
         context: TaskStepContext,
         headers: Mapping[str, str],
-    ) -> None:
+    ) -> Optional[str]:
+        """Configure the judge agent through its agent-config extension; the model it took, None for one that runs its
+        own."""
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent import protocol
 
@@ -1464,6 +1466,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
         # What the judge agent took; one that doesn't accept a model grades on its own.
         context.record_model(ModelRole.JUDGE.record_key, self.id, config_payload.get("model"))
+        return config_payload.get("model")
 
     async def _invoke_judge_a2a(
         self,
@@ -1678,11 +1681,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         prompt = eval_prompt
         discrepancy_log: list[dict] = []
         judge_trajectory_url: Optional[str] = None
+        agent_model: Optional[str] = None
 
         if use_agent_judge:
             if not judge_a2a_url:
                 raise RuntimeError("Judge A2A URL is required when use_agent_judge=True")
-            await self._configure_judge_a2a(
+            agent_model = await self._configure_judge_a2a(
                 judge_a2a_url=judge_a2a_url,
                 judge_agent_card=judge_agent_card,
                 model=model,
@@ -1700,7 +1704,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     judge_a2a_url=judge_a2a_url,
                     judge_agent_card=judge_agent_card,
                     judge_agent=judge_agent,
-                    model=model,
+                    model=agent_model,
                     usage=usage,
                 )
             elif image_blocks:
