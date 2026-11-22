@@ -115,6 +115,22 @@ def test_a_cut_keeps_the_sub_agents_its_steps_reach_and_remaps_arrivals():
         "at": "2026-11-04T17:09:12.004Z"}
 
 
+
+def test_a_cut_resolves_each_reference_where_it_sits_at_any_depth():
+    """sub1 embeds inner, whose reference names the root's sibling, so the cut keeps sibling; sub1's own reference names
+    its own inner, so the root's inner, which that shadows, is left out."""
+    document = fixture("subagent")
+    [task] = tasks(document)
+    sub1 = document["subagent_trajectories"][0]
+    inner, decoy, sibling = ({**copy.deepcopy(sub1), "trajectory_id": name} for name in ("inner", "inner", "sibling"))
+    inner["steps"][0]["observation"]["results"][0]["subagent_trajectory_ref"] = [{"trajectory_id": "sibling"}]
+    sub1["steps"][0]["observation"]["results"][0]["subagent_trajectory_ref"] = [{"trajectory_id": "inner"}]
+    sub1["subagent_trajectories"] = [inner]
+    document["subagent_trajectories"] += [decoy, sibling]
+    cut = task_document(document, [task.task_id])
+    assert [sub["trajectory_id"] for sub in cut["subagent_trajectories"]] == ["sub1", "sibling"]
+    assert [finding for finding in validate(cut) if finding.rule == "reference"] == []
+
 def test_a_page_is_a_prefix_only_when_its_steps_lead_every_trajectory():
     final = fixture("subagent")
     page = {**final, "steps": final["steps"][:2],

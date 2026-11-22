@@ -26,7 +26,7 @@ from .profile import (
     StepError,
     profile_of,
 )
-from .reader import MEDIA_PATH, _trajectories, is_prefix, media_refs, tasks
+from .reader import MEDIA_PATH, _resolver, _trajectories, is_prefix, media_refs, tasks
 
 ERROR = "error"
 WARNING = "warning"
@@ -321,20 +321,6 @@ def _outside_keys(objects: list[tuple[str, str, Mapping[str, Any]]], found: _Fin
             if key != PROFILE_KEY and not (kind == "ToolCall" and key == RAW_ARGUMENTS):
                 found.add("outside-key", f"{where}.extra.{key}".lstrip("."),
                           f"the profile names no key outside extra.{PROFILE_KEY} here")
-
-
-def _resolver(document: Mapping[str, Any], prefix: str = "",
-              outer: Mapping[Any, str] | None = None) -> dict[str, dict[Any, str]]:
-    """For each trajectory, by its path prefix, the sub-agent each id a reference in it names: one embedded in it,
-    else the nearest one embedded around it, by path prefix. ATIF makes an id unique only within its parent's array,
-    and the builder embeds every sub-agent in the root."""
-    subs = list(document.get("subagent_trajectories") or [])
-    visible = {**(outer or {}), **{sub.get("trajectory_id"): f"{prefix}subagent_trajectories[{index}]."
-                                   for index, sub in enumerate(subs)}}
-    out = {prefix: visible}
-    for index, sub in enumerate(subs):
-        out.update(_resolver(sub, f"{prefix}subagent_trajectories[{index}].", visible))
-    return out
 
 
 def _calls_and_references(document: Mapping[str, Any], found: _Findings) -> None:

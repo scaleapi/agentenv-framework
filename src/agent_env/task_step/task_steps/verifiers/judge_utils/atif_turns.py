@@ -126,11 +126,10 @@ class AtifDocuments:
                 found = tasks(document)
                 picked = ([task for task in found if task.task_id == source.task_id]
                           or [task for task in found if task.steps and task.steps[-1].get("step_id") == source.through_step])
+                view = tasks_document(document, picked[:1]) if picked else None
             except (AttributeError, TypeError):
-                picked = []
-            if picked:
-                view = tasks_document(document, picked[:1])
-            else:
+                view = None
+            if view is None:
                 logger.warning(f"the atif/1 copy at {source.url} holds neither task {source.task_id} nor a task ending at "
                                f"step {source.through_step}, so its judge reads the copy as stored")
                 view = document
@@ -217,21 +216,25 @@ def _by_call(step: Mapping[str, Any]) -> list[tuple[Optional[Mapping[str, Any]],
 
 
 class _SubAgents:
-    """The embedded sub-agents a trajectory's results start, each walked once: a reference names one among its
-    trajectory's own, else the nearest around it, as ATIF makes an id unique only within its parent's array (the
-    builder embeds them all in the root)."""
+    """The embedded sub-agents a trajectory's results start, each walked once. A reference names one among its
+    trajectory's own, else the nearest around where that trajectory sits, whoever reached it, as ATIF makes an id unique
+    only within its parent's array (the builder embeds them all in the root)."""
 
-    def __init__(self) -> None:
+    def __init__(self, document: Mapping[str, Any]) -> None:
         self._walked: set[int] = set()
+        self._visible: dict[int, dict[Any, Mapping[str, Any]]] = {}
+        self._scope(document, {})
 
-    @staticmethod
-    def visible(trajectory: Mapping[str, Any], outer: Mapping[Any, Mapping[str, Any]]) -> dict[Any, Mapping[str, Any]]:
+    def _scope(self, trajectory: Mapping[str, Any], outer: Mapping[Any, Mapping[str, Any]]) -> None:
         subs = trajectory.get("subagent_trajectories")
-        return {**outer, **{sub.get("trajectory_id"): sub for sub in subs if isinstance(sub, Mapping)}} \
-            if isinstance(subs, list) else dict(outer)
+        subs = [sub for sub in subs if isinstance(sub, Mapping)] if isinstance(subs, list) else []
+        visible = {**outer, **{sub.get("trajectory_id"): sub for sub in subs}}
+        self._visible[id(trajectory)] = visible
+        for sub in subs:
+            self._scope(sub, visible)
 
-    def started(self, result: Mapping[str, Any],
-                visible: Mapping[Any, Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    def started(self, trajectory: Mapping[str, Any], result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        visible = self._visible[id(trajectory)]
         refs = result.get("subagent_trajectory_ref")
         found = []
         for ref in refs if isinstance(refs, list) else []:
@@ -252,12 +255,11 @@ def compact_atif_trajectory(
     events: list[dict] = []
     files: list[tuple[str, str]] = []
     numbers = itertools.count(1)
-    subagents = _SubAgents()
+    subagents = _SubAgents(document)
     calls_on = trajectory_filter.include_tool_calls
     results_on = trajectory_filter.include_tool_call_results
 
-    def walk(trajectory: Mapping[str, Any], outer: Mapping[Any, Mapping[str, Any]]) -> None:
-        visible = subagents.visible(trajectory, outer)
+    def walk(trajectory: Mapping[str, Any]) -> None:
         for step in _steps(trajectory):
             if step.get("source") != "agent":
                 continue
@@ -281,10 +283,10 @@ def compact_atif_trajectory(
                         else:
                             events.append({"type": "tool_result", "tool": tool, "output": output,
                                            "timestamp": timestamp})
-                    for sub in subagents.started(result, visible):
-                        walk(sub, visible)
+                    for sub in subagents.started(trajectory, result):
+                        walk(sub)
 
-    walk(document, {})
+    walk(document)
     if trajectory_filter.include_response:
         final = next((step for step in reversed(_steps(document))
                       if step.get("source") == "agent" and _text(step.get("message")).strip()), None)
@@ -305,10 +307,9 @@ def transcript_from_atif(
     actions: list[TrajectoryAction] = []
     messages: list[AgentMessage] = []
     frames: list[ImageFrame] = []
-    subagents = _SubAgents()
+    subagents = _SubAgents(document)
 
-    def walk(trajectory: Mapping[str, Any], outer: Mapping[Any, Mapping[str, Any]]) -> None:
-        visible = subagents.visible(trajectory, outer)
+    def walk(trajectory: Mapping[str, Any]) -> None:
         for step in _steps(trajectory):
             if step.get("source") != "agent":
                 continue
@@ -335,10 +336,10 @@ def transcript_from_atif(
                         screenshot=shots[0].data if shots else None, result=result_text or None,
                         screenshot_media_type=shots[0].media_type if shots else None))
                 for result in results:
-                    for sub in subagents.started(result, visible):
-                        walk(sub, visible)
+                    for sub in subagents.started(trajectory, result):
+                        walk(sub)
 
-    walk(document, {})
+    walk(document)
     return Transcript(actions, messages), frames
 
 

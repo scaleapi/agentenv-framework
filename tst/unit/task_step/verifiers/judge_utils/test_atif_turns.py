@@ -207,6 +207,26 @@ def test_a_sub_agent_nested_in_another_is_found_among_its_parents_children():
     assert len(frames) == 3
 
 
+
+def _agent(trajectory_id, call, *refs, subs=()):
+    """A trajectory whose one step calls ``call`` and whose result starts the sub-agents ``refs`` name."""
+    result = {"source_call_id": call, "content": "ok", "subagent_trajectory_ref": [{"trajectory_id": r} for r in refs]}
+    step = {"step_id": 1, "source": "agent", "message": "",
+            "tool_calls": [{"tool_call_id": call, "function_name": call, "arguments": {}}],
+            "observation": {"results": [result]}}
+    return {"trajectory_id": trajectory_id, "agent": {"name": call}, "steps": [step], "subagent_trajectories": list(subs)}
+
+
+def test_a_sub_agent_resolves_its_references_where_it_sits_not_where_it_was_reached_from():
+    """B sits in the root, so the X it starts is the root's, though A, whose own X shadows the root's, started B."""
+    document = _agent(None, "root", "A", subs=[_agent("A", "in A", "B", subs=[_agent("X", "A's X")]),
+                                               _agent("B", "in B", "X"), _agent("X", "root's X")])
+    events, _ = T.compact_atif_trajectory(document, TrajectoryFilter())
+    transcript, _ = T.transcript_from_atif(document, lambda path: None)
+    walked = ["root", "in A", "in B", "root's X"]
+    assert [event["tool"] for event in events if event["type"] == "tool_call"] == walked
+    assert [action.tool for action in transcript.actions] == walked
+
 def test_a_screenshots_type_read_from_its_bytes_reaches_per_criterion_frames():
     gif = b"GIF89a" + b"g" * 16
     transcript, _ = T.transcript_from_atif(atif_runs.fixture("computer_use"), lambda path: gif)

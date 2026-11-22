@@ -87,9 +87,9 @@ def tasks(document: Mapping[str, Any]) -> list[Task]:
 
 def task_document(document: Mapping[str, Any], task_ids: Iterable[str]) -> dict[str, Any]:
     """The A2A tasks ``task_ids`` names, cut out of ``document`` as a document of their own that ATIF's models load: their
-    steps in order, renumbered from 1 with each result's arrival step to match, the embedded sub-agents those steps reach
-    (through one another too) kept whole, and the root's ``final_metrics`` and ``continued_trajectory_ref`` dropped, since
-    they describe the whole document. A reader that shows one turn shows this. KeyError naming a task it doesn't hold."""
+    steps in order, renumbered from 1 with each result's arrival step to match, the root's sub-agents those steps reach
+    kept whole (and those a kept one reaches, from any depth inside it, each reference resolved where it sits), and the
+    root's ``final_metrics`` and ``continued_trajectory_ref`` dropped, since they describe the whole document. A reader that shows one turn shows this. KeyError naming a task it doesn't hold."""
     wanted = list(task_ids)
     picked = [task for task in tasks(document) if task.task_id in wanted]
     missing = [task_id for task_id in wanted if task_id not in {task.task_id for task in picked}]
@@ -112,27 +112,47 @@ def tasks_document(document: Mapping[str, Any], picked: Iterable[Task]) -> dict[
                     arrived["step_id"] = numbers[arrived["step_id"]]
                 else:
                     del arrived["step_id"]
-    subs = {sub.get("trajectory_id"): sub for sub in document.get("subagent_trajectories") or []}
-    reached: set[Any] = set()
-    frontier = _references(steps)
+    subs = list(document.get("subagent_trajectories") or [])
+    resolve = _resolver(document)
+    reached: set[int] = set()
+    frontier = _reached(resolve[""], steps)
     while frontier:
-        trajectory_id = frontier.pop()
-        if trajectory_id in subs and trajectory_id not in reached:
-            reached.add(trajectory_id)
-            frontier += _references(subs[trajectory_id].get("steps") or [])
+        index = frontier.pop()
+        if index not in reached:
+            reached.add(index)
+            for prefix, trajectory in _trajectories(subs[index], f"subagent_trajectories[{index}]."):
+                frontier += _reached(resolve[prefix], trajectory.get("steps") or [])
     cut = {key: copy.deepcopy(value) for key, value in document.items()
            if key not in ("steps", "subagent_trajectories", "final_metrics", "continued_trajectory_ref")}
     cut["steps"] = steps
-    kept = [copy.deepcopy(sub) for sub in document.get("subagent_trajectories") or []
-            if sub.get("trajectory_id") in reached]
+    kept = [copy.deepcopy(sub) for index, sub in enumerate(subs) if index in reached]
     if kept:
         cut["subagent_trajectories"] = kept
     return cut
 
 
-def _references(steps: Iterable[Mapping[str, Any]]) -> list[Any]:
-    return [ref.get("trajectory_id") for step in steps for result in (step.get("observation") or {}).get("results") or []
-            for ref in result.get("subagent_trajectory_ref") or []]
+def _reached(visible: Mapping[Any, str], steps: Iterable[Mapping[str, Any]]) -> list[int]:
+    """The index among the root's sub-agents of each one the references in ``steps`` name, or name one inside."""
+    return [int(_ROOT_SUB.match(visible[ref.get("trajectory_id")])[1]) for step in steps
+            for result in (step.get("observation") or {}).get("results") or []
+            for ref in result.get("subagent_trajectory_ref") or [] if ref.get("trajectory_id") in visible]
+
+
+_ROOT_SUB = re.compile(r"subagent_trajectories\[(\d+)\]\.")
+
+
+def _resolver(document: Mapping[str, Any], prefix: str = "",
+              outer: Mapping[Any, str] | None = None) -> dict[str, dict[Any, str]]:
+    """For each trajectory, by its path prefix, the sub-agent each id a reference in it names: one embedded in it,
+    else the nearest one embedded around it, by path prefix. ATIF makes an id unique only within its parent's array,
+    and the builder embeds every sub-agent in the root."""
+    subs = list(document.get("subagent_trajectories") or [])
+    visible = {**(outer or {}), **{sub.get("trajectory_id"): f"{prefix}subagent_trajectories[{index}]."
+                                   for index, sub in enumerate(subs)}}
+    out = {prefix: visible}
+    for index, sub in enumerate(subs):
+        out.update(_resolver(sub, f"{prefix}subagent_trajectories[{index}].", visible))
+    return out
 
 
 def _trajectories(document: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, Mapping[str, Any]]]:
