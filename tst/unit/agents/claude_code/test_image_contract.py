@@ -31,14 +31,14 @@ def test_every_file_the_image_copies_is_in_the_folder():
 
     assert copied and all(_in_context(name) for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
-    assert {"a2a_server.py", "claude_bridge.py", "kit.py", "tar_changelog.py", "entrypoint.sh", "install.sh", "run.sh"} <= set(copied)
+    assert {"a2a_server.py", "claude_bridge.py", "claude_code_atif.py", "kit.py", "tar_changelog.py", "entrypoint.sh", "install.sh", "run.sh"} <= set(copied)
 
 
 def test_the_image_installs_the_protocol_alone_from_its_requirements():
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.597"]
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.623"]
 
 
 def test_the_image_gives_the_model_node_alone_from_a_pinned_image():

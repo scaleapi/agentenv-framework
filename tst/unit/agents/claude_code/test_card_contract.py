@@ -51,7 +51,10 @@ def test_extensions_and_their_routes(app):
     }
     assert routes == {
         "urn:agentenv:agent-config/v1": ("/ext/agent-config", {"set": ("POST", None), "get": ("GET", None)}),
-        "urn:agentenv:trajectory/v1": ("/ext/trajectory", {"get": ("POST", None)}),
+        "urn:agentenv:trajectory/v1": ("/ext/trajectory", {
+            "get": ("POST", None), "prescribe": ("POST", "/ext/trajectory/prescribe"),
+            "media": ("POST", "/ext/trajectory/media"),
+        }),
         "urn:agentenv:mcp-config/v1": ("/ext/mcp-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:peer-agents/v1": ("/ext/peer-agents", {"set": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:skill-config/v1": ("/ext/skill-config", {"add": ("POST", None), "list": ("GET", None)}),
@@ -176,3 +179,9 @@ def test_the_install_scripts_parse():
 def test_install_sh_installs_the_cli_version_the_image_pins():
     pinned = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", (AGENT_DIR / "Dockerfile").read_text(), re.MULTILINE)
     assert pinned and "sed -n 's/^ARG CLAUDE_CODE_VERSION=//p'" in (AGENT_DIR / "install.sh").read_text()
+
+
+def test_the_card_offers_atif_beside_stream_json_which_stays_the_default(app):
+    params = _extensions(app)["urn:agentenv:trajectory/v1"]["params"]
+    assert params["formats"] == ["claude-code-stream-json/1", "atif/1"]
+    assert params["native"] == params["default"] == "claude-code-stream-json/1"

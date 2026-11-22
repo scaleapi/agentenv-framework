@@ -12,11 +12,11 @@ import re
 import signal
 import stat
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -455,6 +455,154 @@ def scrub_session_transcript(session_id: str | None) -> None:
     os.replace(staged, path)
 
 
+# What the ATIF adapter takes of a transcript record (claude_code_atif's `session` and `tools` aux files): a message's
+# ids, time and final usage, its content only when stdout hasn't carried it, as for a sub-agent's last answer, and each
+# request shape's tools.
+_TAIL_RECORD_KEYS = ("type", "uuid", "timestamp", "agentId", "isSidechain", "isApiErrorMessage")
+_TAIL_MESSAGE_KEYS = ("id", "model", "usage", "stop_reason")
+_SHAPE_RECORD = "api-request-shape"
+# How often a turn's transcripts are read for new records while the CLI runs.
+SESSION_POLL_S = 0.05
+_SUBAGENT_PREFIX = "agent-"
+
+
+def session_aux(record: dict, agent_id: str | None, on_stdout: Collection[str],
+                shapes: set[tuple[str | None, str]]) -> tuple[str, dict] | None:
+    """A transcript record as the ATIF adapter's aux record, ``(file, record)``, or None when it takes nothing of it.
+    ``agent_id`` names the sub-agent whose transcript it's from; ``shapes`` holds the request shapes already fed, by
+    agent and hash, and gains this one's."""
+    kind = record.get("type")
+    if kind in ("assistant", "user"):
+        if _is_api_error(record):
+            record = _redact_values(record)
+        kept = {key: record[key] for key in _TAIL_RECORD_KEYS if key in record}
+        if agent_id is not None:
+            kept.setdefault("agentId", agent_id)
+        message = record.get("message")
+        if isinstance(message, dict):
+            kept["message"] = {key: message[key] for key in _TAIL_MESSAGE_KEYS if key in message}
+            if kind == "assistant" and record.get("uuid") not in on_stdout and "content" in message:
+                kept["message"]["content"] = message["content"]
+        return "session", kept
+    shape = record.get("shape")
+    if kind == _SHAPE_RECORD and isinstance(shape, dict) and isinstance(record.get("shapeHash"), str):
+        key = (agent_id, record["shapeHash"])
+        if key in shapes:
+            return None
+        shapes.add(key)
+        tools = {"type": kind, "shapeHash": record["shapeHash"], "tools": shape.get("tools") or []}
+        if agent_id is not None:
+            tools["agentId"] = agent_id
+        return "tools", tools
+    return None
+
+
+@dataclass(frozen=True)
+class _TailedFile:
+    inode: int
+    offset: int
+    lines: int
+
+
+class SessionTail:
+    """One turn's new transcript records, its sub-agents' transcripts' too, as the CLI appends them, each as the ATIF
+    adapter's aux record (``session_aux``). It starts where each file ends, so an earlier turn isn't fed again, and
+    finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps.
+    ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again."""
+
+    def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]]) -> None:
+        self._main = session_jsonl_path(session_id)
+        self._subagents = self._main.with_suffix("") / "subagents"
+        self._on_stdout = on_stdout
+        self._shapes = shapes
+        self._files: dict[Path, _TailedFile] = {}
+        for path in self._paths():
+            with contextlib.suppress(OSError):
+                data = path.read_bytes()
+                end = data.rfind(b"\n") + 1
+                self._files[path] = _TailedFile(path.stat().st_ino, end, data.count(b"\n", 0, end))
+
+    def _paths(self) -> list[Path]:
+        subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
+        return ([self._main] if self._main.exists() else []) + subagents
+
+    def read(self) -> tuple[list[tuple[str, dict]], dict[Path, _TailedFile], set[tuple[str | None, str]]]:
+        """The aux records the files gained since the last ``advance``, where each file is read to, and the request
+        shapes fed then."""
+        records: list[tuple[str, dict]] = []
+        files: dict[Path, _TailedFile] = {}
+        shapes = set(self._shapes)
+        for path in self._paths():
+            try:
+                tailed, lines = self._new_lines(path, self._files.get(path))
+            except OSError:
+                continue
+            files[path] = tailed
+            agent_id = path.stem.removeprefix(_SUBAGENT_PREFIX) if path.parent == self._subagents else None
+            for raw in lines:
+                try:
+                    record = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(record, dict) and (fed := session_aux(record, agent_id, self._on_stdout, shapes)):
+                    records.append(fed)
+        return records, files, shapes
+
+    def advance(self, files: Mapping[Path, _TailedFile], shapes: set[tuple[str | None, str]]) -> None:
+        self._files.update(files)
+        self._shapes.update(shapes)
+
+    @staticmethod
+    def _new_lines(path: Path, tailed: _TailedFile | None) -> tuple[_TailedFile, list[bytes]]:
+        status = path.stat()
+        if tailed is None:
+            tailed = _TailedFile(status.st_ino, 0, 0)
+        with path.open("rb") as file:
+            if status.st_ino != tailed.inode or status.st_size < tailed.offset:
+                data, offset = file.read(), 0
+                for _ in range(tailed.lines):
+                    offset = data.find(b"\n", offset) + 1
+                    if offset == 0:
+                        return _TailedFile(status.st_ino, 0, 0), []
+                data = data[offset:]
+            else:
+                offset = tailed.offset
+                file.seek(offset)
+                data = file.read()
+        end = data.rfind(b"\n") + 1
+        lines = [line for line in data[:end].split(b"\n") if line.strip()]
+        return _TailedFile(status.st_ino, offset + end, tailed.lines + data.count(b"\n", 0, end)), lines
+
+
+async def _stop_following(following: asyncio.Task, tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
+    """Stop following once the CLI has exited, then feed what its transcripts gained since the last read. A follower
+    that failed is logged; the turn goes on without its records."""
+    following.cancel()
+    try:
+        await following
+    except asyncio.CancelledError:
+        if (current := asyncio.current_task()) is not None and current.cancelling():
+            raise
+    except Exception:
+        logger.warning("following the session transcript failed; the ATIF copy lacks its later records", exc_info=True)
+        return
+    await _feed_tail(tail, feed)
+
+
+async def _follow(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
+    """Feed ``tail``'s records while the CLI runs."""
+    while True:
+        await _feed_tail(tail, feed)
+        await asyncio.sleep(SESSION_POLL_S)
+
+
+async def _feed_tail(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
+    records, files, shapes = await asyncio.to_thread(tail.read)
+    tail.advance(files, shapes)
+    for name, record in records:
+        feed(name, record)
+
+
 def _one_line(text: str) -> str:
     return _LINE_BREAK_PATTERN.sub(" ", text).strip()
 
@@ -508,19 +656,26 @@ async def run_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    aux_callback: Callable[[str, Any], None] | None = None,
+    tool_shapes: set[tuple[str | None, str]] | None = None,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
     is left of ``timeout_s``, so the turn never outlives its caller's deadline. ``CLAUDE_API_ERROR_RETRIES=0`` turns
     resumes off. ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is
-    held until it's known not to be resumed."""
+    held until it's known not to be resumed. ``aux_callback``, given, gets the ATIF adapter's aux records, in order
+    with the stdout events: the transcripts' new records as the CLI writes them, each resumed attempt's error
+    `result`; ``tool_shapes`` holds the request shapes the conversation was fed already."""
     deadline = time.monotonic() + timeout_s
     retries_left = _configured_api_error_retries()
+    on_stdout: set[str] = set()
     spawn = partial(
         _spawn_claude, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
         system_prompt=system_prompt, output_format=output_format, project_id=project_id, task_id=task_id,
         role=role, effort=effort, max_turns=max_turns, max_thinking_tokens=max_thinking_tokens,
-        builtin_tools=builtin_tools, event_callback=event_callback,
+        builtin_tools=builtin_tools, event_callback=event_callback, on_stdout=on_stdout,
     )
+    tail = (await asyncio.to_thread(SessionTail, session_id, on_stdout, tool_shapes if tool_shapes is not None
+                                    else set())) if aux_callback is not None else None
     attempt_prompt, attempt_resume, attempt_session = prompt, resume, session_id
     trajectory: list[dict] = []
     tool_calls = 0
@@ -540,10 +695,15 @@ async def run_claude(
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
         # Each scrub ends before the turn does, cancelled or not: a later turn on the context mustn't start while it
         # can still replace the transcript that turn appends to.
+        following = asyncio.create_task(_follow(tail, aux_callback)) if tail is not None else None
         try:
             result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
                                  timeout_s=attempt_timeout_s)
+            if following is not None:
+                await _stop_following(following, tail, aux_callback)
         finally:
+            if following is not None:
+                following.cancel()
             await in_thread_to_its_end(scrub_session_transcript, attempt_session)
         if result.session_id != attempt_session:
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)
@@ -574,6 +734,8 @@ async def run_claude(
                            subagent_calls=subagent_calls, unreported_calls=unreported_calls)
 
         trajectory.extend(_without_terminal_result(result.trajectory))
+        if aux_callback is not None and _ends_in_result(result.trajectory):
+            aux_callback("attempt", result.trajectory[-1])
         first_failure = first_failure or result.error_detail
         retries_left -= 1
         attempt_prompt, attempt_resume, attempt_session = _RESUME_PROMPT, True, result.session_id
@@ -772,6 +934,7 @@ async def _spawn_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    on_stdout: set[str] | None = None,
 ) -> ClaudeResult:
     cmd = _command(session_id, resume, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
@@ -813,6 +976,8 @@ async def _spawn_claude(
             # A failure's text can echo the endpoint's key, and the event is kept and streamed like any other.
             event = _redact_values(event)
         trajectory.append(event)
+        if on_stdout is not None and isinstance(event.get("uuid"), str):
+            on_stdout.add(event["uuid"])
         etype = event.get("type")
         if etype == "system" and event.get("subtype") == "init":
             cli_session_id = event.get("session_id", cli_session_id)

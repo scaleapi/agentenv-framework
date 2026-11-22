@@ -20,8 +20,10 @@ def _write_jsonl(path: Path, records: list[dict], trailing: bytes = b"") -> None
     path.write_bytes(body + trailing)
 
 
-def test_agent_card_advertises_one_get_trajectory_method(app):
-    assert extension_methods(app, a2a_server.TRAJECTORY_V1.uri) == {
+def test_agent_card_advertises_one_get_trajectory_method_beside_the_sdks_atif_methods(app):
+    methods = extension_methods(app, a2a_server.TRAJECTORY_V1.uri)
+    assert set(methods) == {"get", "prescribe", "media"}
+    assert {"get": methods["get"]} == {
         "get": {
             "method": "POST",
             "request": {

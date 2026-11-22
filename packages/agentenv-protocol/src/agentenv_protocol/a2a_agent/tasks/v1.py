@@ -180,6 +180,12 @@ class TrajectoryLog:
     def format(self) -> str | None:
         return self._format
 
+    @property
+    def builds_atif(self) -> bool:
+        """Whether this task feeds an atif/1 copy: the agent has an ATIF adapter and the run prescribed atif/1. An agent
+        gathers what only its aux files take, such as a log it tails, only then."""
+        return self._atif is not None
+
     def set_format(self, format: str) -> None:
         """Name the events' versioned format, such as ``my-cli-events/1``; once an event is
         appended, it stays."""

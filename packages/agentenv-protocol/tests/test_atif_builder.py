@@ -688,3 +688,78 @@ def test_a_served_turn_keeps_a_null_it_requires_so_replay_rebuilds_the_document(
 def test_a_served_turn_or_aux_log_that_breaks_its_shape_is_refused(turn, aux):
     with pytest.raises(ValidationError):
         RecordedTask.from_served(turn, [], aux)
+
+
+def tooled():
+    @atif_adapter(native_format="toy-events/1", version="0.1.0", input_includes_cache=False)
+    class Tooled(Adapter):
+        @native(type="tools")
+        def tools(self, r, turn):
+            turn.tool_definitions(r["tools"], agent=r.get("agent"))
+
+        @native(type="call")
+        def call(self, r, turn):
+            turn.tool_call(step=r["step"], tool_call_id=r["id"], function_name="Agent", arguments={})
+
+        @native(type="spawn")
+        def spawn(self, r, turn):
+            turn.subagent("sub", spawned_by=r["id"])
+
+        @native(type="say")
+        def say(self, r, turn):
+            turn.message(step=r["step"], text=r["text"], agent=r.get("agent"))
+    return Tooled
+
+
+def tool(name, description="", **schema):
+    return {"type": "function", "function": {"name": name, "description": description,
+                                             "parameters": {"type": "object", "properties": schema}}}
+
+
+def test_tool_definitions_go_on_the_agent_block_and_a_later_one_replaces_its_name_in_place():
+    run, pages = run_task([
+        {"type": "say", "step": "a", "text": "first"},
+        {"type": "tools", "tools": [tool("Bash", "Run a command", command={"type": "string"}), tool("Read")]},
+        {"type": "say", "step": "b", "text": "second"},
+        {"type": "tools", "tools": [tool("Bash", "Run a shell command"), tool("Write")]},
+    ], cls=tooled())
+    definitions = run.document()["agent"]["tool_definitions"]
+    assert [d["function"]["name"] for d in definitions] == ["Bash", "Read", "Write"]
+    assert definitions[0]["function"]["description"] == "Run a shell command"
+    assert "tool_definitions" not in pages[1]["agent"] and all(is_prefix(a, b) for a, b in zip(pages, pages[1:]))
+    check(run.document())
+
+
+def test_a_sub_agent_has_tool_definitions_of_its_own():
+    run, _ = run_task([
+        {"type": "call", "step": "a", "id": "spawn-1"}, {"type": "spawn", "id": "spawn-1"},
+        {"type": "tools", "tools": [tool("Bash")], "agent": "sub"},
+        {"type": "say", "step": "s", "text": "from the sub-agent", "agent": "sub"},
+    ], cls=tooled())
+    document = run.document()
+    assert "tool_definitions" not in document["agent"]
+    assert [d["function"]["name"] for d in document["subagent_trajectories"][0]["agent"]["tool_definitions"]] == [
+        "Bash"]
+
+
+def test_a_read_hands_out_a_copy_of_the_tool_definitions():
+    run, _ = run_task([{"type": "tools", "tools": [tool("Bash")]}, {"type": "say", "step": "a", "text": "hi"}],
+                      cls=tooled())
+    run.document()["agent"]["tool_definitions"][0]["function"]["name"] = "changed"
+    assert run.document()["agent"]["tool_definitions"][0]["function"]["name"] == "Bash"
+
+
+@pytest.mark.parametrize("definition", [
+    {"name": "Bash"},
+    {"type": "function", "function": {"description": "no name"}},
+    {"type": "function", "function": {"name": "Bash", "parameters": "not a schema"}},
+    {"type": "function", "function": {"name": "Bash", "description": 3}},
+    {"type": "function", "function": {"name": "Bash", "parameters": {"bad": math.nan}}},
+])
+def test_a_tool_definition_that_isnt_a_function_entry_is_refused_and_nothing_is_written(definition):
+    run = AdapterRun(tooled())
+    run.start_task(CTX)
+    with pytest.raises(AtifError):
+        run.native({"type": "tools", "tools": [tool("Read"), definition]})
+    run.native({"type": "say", "step": "a", "text": "hi"})
+    assert "tool_definitions" not in run.document()["agent"]
