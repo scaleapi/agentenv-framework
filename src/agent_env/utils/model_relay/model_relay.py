@@ -7,7 +7,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,6 +25,10 @@ _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 # How long the relay, once its turn is done, lets the calls it is still forwarding finish.
 _SHUTDOWN_S = 5.0
 _COUNTS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+class Refusal(Exception):
+    """A model call the relay answers itself, with this reason, rather than forward."""
 
 
 @dataclass
@@ -138,13 +142,16 @@ def answer_usage(answer: bytes) -> Usage | None:
 
 @asynccontextmanager
 async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str] | None = None,
-                      models: list[str] | None = None) -> AsyncIterator[str]:
+                      models: list[str] | None = None,
+                      rewrite: Callable[[bytes], Awaitable[bytes]] | None = None) -> AsyncIterator[str]:
     """Serve a relay to ``upstream``, the endpoint's API root, on loopback, and yield its root, which takes the
     endpoint's paths after it (``<root>/v1/chat/completions``). Its path names a token of its own, so a process left
     from another turn reaches no other turn's relay. Each model call it forwards is added to ``calls`` once its answer
     has ended, read to its end even when the CLI hung up. ``headers`` replace the CLI's own on every request, so the
     endpoint's credentials need never reach the CLI; without them, the CLI's are forwarded. ``models`` is the list a
-    ``GET .../models`` is answered with, sparing a CLI that lists them the endpoint's whole catalog."""
+    ``GET .../models`` is answered with, sparing a CLI that lists them the endpoint's whole catalog. ``rewrite`` takes
+    each model call's request body and gives the one to forward; a ``Refusal`` it raises is the call's answer, a 400,
+    which no CLI retries, and the call goes no further."""
     token = secrets.token_hex(16)
     async with ClientSession(timeout=ClientTimeout(total=None)) as client:
         async def forward(request: web.Request) -> web.StreamResponse:
@@ -161,8 +168,16 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
             call = request.method == "POST" and path.rstrip("/").endswith(_CALL_ROUTES)
             status, reader = None, AnswerReader()
             try:
+                body = await request.read()
+                if call and rewrite is not None:
+                    try:
+                        body = await rewrite(body)
+                    except Refusal as exc:
+                        status = 400
+                        return web.json_response({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                                                 status=status)
                 async with client.request(request.method, f"{upstream}/{path}", params=request.query,
-                                          data=await request.read(), headers=outgoing) as answer:
+                                          data=body, headers=outgoing) as answer:
                     status = answer.status
                     reader = AnswerReader(stream=answer.content_type == "text/event-stream")
                     response = web.StreamResponse(status=answer.status, headers={

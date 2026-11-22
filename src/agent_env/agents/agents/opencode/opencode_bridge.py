@@ -23,6 +23,7 @@ import os
 import re
 import signal
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,7 +35,8 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from agent_egress import clock_armed, egress_env
 from agentenv_protocol.a2a_agent import Usage
-from model_relay import Calls, model_relay
+from agentenv_protocol.a2a_agent.clock import follows
+from model_relay import Calls, Refusal, model_relay
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +47,13 @@ ERROR_MESSAGE_LIMIT = 4000
 ROLE_HEADER = "AgentEnv-Role"
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
-# The CLI's plugin that tells the model the env's date (env_date.js), beside this file in the image and in an install.
-ENV_DATE_PLUGIN = Path(__file__).with_name("env_date.js")
+# Where the CLI, on real time, puts its own date in a model call: the <env> block's line in its system prompt and the
+# websearch tool's year, as TOOLS_CLI_VERSION writes them (src/session/system.ts, src/tool/websearch.txt).
+_ENV_DATE = re.compile(r"(<env>\n(?:  [^\n]*\n)*?  Today's date: )[^\n]*")
+_SEARCH_YEAR = re.compile(r"The current year is -?\d+\.")
+_DATE_TIMEOUT_S = 5
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 # Root under which each A2A context_id gets its own OpenCode data dir; lives
 # under $HOME so host-mode instances don't share session state.
@@ -106,12 +113,13 @@ def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_ser
             clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
     armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
-    connects to itself. The CLI starts on real time: it orders a session's messages by when they were written and
-    takes no time before 1970, so on the env's clock a set behind them broke the session. What it starts, the model's
-    commands, reads the env's time, as does the date its plugin tells the model (``ENV_DATE_PLUGIN``)."""
+    connects to itself. Where the image follows the env's clock, the CLI starts on real time: it orders a session's
+    messages by when they were written and takes no time before 1970, so on the env's clock a set behind them broke
+    the session. What it starts, the model's commands, reads the env's time, and the relay puts the env's date in the
+    model calls (``env_date_rewrite``)."""
     urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
     return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed),
-            "AGENTENV_REAL_TIME": "1"}
+            **({"AGENTENV_REAL_TIME": "1"} if follows() else {})}
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
@@ -127,6 +135,70 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
         await proc.wait()
         raise
     return proc.returncode, out, err
+
+
+async def _env_today() -> tuple[str, int]:
+    """The env's date, as the CLI's ``Date.toDateString()`` writes one in this zone, and its year, read from ``date``,
+    which libfaketime fakes for what this server starts, as for the model's commands."""
+    environ = {name: value for name, value in os.environ.items() if name != "AGENTENV_REAL_TIME"}
+    try:
+        code, out, err = await _communicate("date", "+%s %N", env=environ, timeout_s=_DATE_TIMEOUT_S)
+        seconds, _ = out.decode().split()
+        day = time.localtime(int(seconds))
+    except (OSError, ValueError, OverflowError, TimeoutError) as exc:
+        raise Refusal(f"the env's date couldn't be read for the model: {type(exc).__name__}: {exc}") from exc
+    if code != 0:
+        raise Refusal(f"the env's date couldn't be read for the model: date exited {code}: "
+                      f"{err.decode(errors='replace')[:200]}")
+    return f"{_DAYS[day.tm_wday]} {_MONTHS[day.tm_mon - 1]} {day.tm_mday:02d} {day.tm_year:04d}", day.tm_year
+
+
+def _texts(request: dict, roles: tuple[str, ...]):
+    """Each text of the request's messages in ``roles``, as (holder, key)."""
+    for message in request.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") not in roles:
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            yield message, "content"
+        elif isinstance(content, list):
+            yield from ((part, "text") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+
+
+def _search_descriptions(request: dict):
+    for tool in request.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict) and function.get("name") == "websearch" \
+                and isinstance(function.get("description"), str):
+            yield function, "description"
+
+
+async def env_date_rewrite(body: bytes) -> bytes:
+    """A model call as the CLI, on real time, wrote it, with the env's date where the CLI put its own, while this agent
+    follows an armed clock; as written otherwise, when the two dates are one. A system prompt whose <env> block has no
+    date line this knows, or a date that can't be read, refuses the call, so the model is never told the real date on
+    the env's clock."""
+    if not clock_armed():
+        return body
+    try:
+        request = json.loads(body)
+    except ValueError:
+        return body
+    if not isinstance(request, dict):
+        return body
+    system = [(holder, key) for holder, key in _texts(request, ("system", "developer")) if "<env>\n" in holder[key]]
+    search = [(holder, key) for holder, key in _search_descriptions(request) if _SEARCH_YEAR.search(holder[key])]
+    if not system and not search:
+        return body
+    if any(not _ENV_DATE.search(holder[key]) for holder, key in system):
+        raise Refusal("OpenCode's <env> block has no date line this agent knows, so the model can't be told the env's "
+                      "date")
+    today, year = await _env_today()
+    for holder, key in system:
+        holder[key] = _ENV_DATE.sub(lambda match: match.group(1) + today, holder[key], count=1)
+    for holder, key in search:
+        holder[key] = _SEARCH_YEAR.sub(f"The current year is {year}.", holder[key], count=1)
+    return json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
@@ -338,7 +410,6 @@ def _build_config(
         # selects otherwise.
         "permission": _permission(builtin_tools, mcp_servers),
         "autoupdate": False,
-        "plugin": [ENV_DATE_PLUGIN.as_uri()],
     }
     if instructions:
         config["instructions"] = list(instructions)
@@ -437,9 +508,10 @@ def _descendants(pid: int) -> list[int]:
 async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult:
     """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
     counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
-    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported."""
+    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported. The relay
+    puts the env's date in each call (``env_date_rewrite``)."""
     calls = Calls()
-    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls) as relay:
+    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, rewrite=env_date_rewrite) as relay:
         result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
     result.usage = calls.usage(result.tool_call_count)
     return result
