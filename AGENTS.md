@@ -368,6 +368,12 @@ orchestrators call it the same way. What callers rely on:
   `instance_id` makes it an idempotent upsert. After each step `record_step_complete()` writes only
   the fields that step changed (a path-level diff) and derives `current_step` / `status`; failures go
   through `record_task_failure()`, retries through `undo_steps()`.
+- The instance keeps the run's usage ledger beside the context (`task/usage_ledger.py`): `usage`, every step's
+  `metadata.step_usage` entries keyed by attempt epoch, step and role, and `usage_total`, their sum. Each of those
+  writes merges into it: a completion its step's entries, even one a later attempt refused; `undo_steps()` the
+  rolled-back steps' (`usage=`); `record_task_failure()` and `record_teardown()` the context's; and
+  `record_task_cancelled()` the `usage=` it is given. A re-register keeps it, so it holds every attempt and
+  generation. A runner that writes the instance some other way loses that spend from the ledger.
 - The runner writes its run identifier to `context.metadata["workflow_id"]` before calling `run()`;
   core stores it opaquely with the instance.
 - Each step runs under `protocol_v1.authorized` for the deployed envs in its context: a protocol-client
