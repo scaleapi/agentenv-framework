@@ -81,6 +81,29 @@ async def test_a_turn_past_its_time_limit_is_canceled_and_the_run_goes_on_to_the
 
 
 @pytest.mark.asyncio
+async def test_what_a_cut_off_turn_does_while_it_stops_counts_in_its_own_wake_not_the_next(monkeypatch, tmp_path):
+    """An agent can take a while to stop (interrupting a worker thread), and a tool call already under way can still
+    land meanwhile: the step goes on only once the agent reports the turn stopped, so that call is the cut-off wake's
+    and the next wake is clean."""
+    def agent(n, texts, rig):
+        if n == 1:
+            rig.message("on it: comparing the three houses")
+            return Slow(5, stopping_seconds=0.5,
+                        while_stopping=lambda rig: rig.message("the blue house is $855 a night"))
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    ctx = await _run(rig, timeout_seconds=1, continue_after_wake_limit=True)
+
+    assert [(e["text"], e["wake"]) for e in rig.events(ctx, "message_to_user")] == [
+        ("on it: comparing the three houses", 1), ("the blue house is $855 a night", 1)]
+    [first, second] = rig.events(ctx, "agent_turn_end")
+    assert (first["messages_to_user"], second["messages_to_user"]) == (2, 0)
+    assert rig.record(ctx)["cut_off_wakes"][0]["stopped"] == "canceled"
+
+
+@pytest.mark.asyncio
 async def test_the_next_wake_opens_by_telling_the_agent_its_last_turn_was_cut_off(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_slow_first_turn)
     ctx = await _run(rig, timeout_seconds=1, continue_after_wake_limit=True)

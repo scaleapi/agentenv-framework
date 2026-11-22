@@ -1491,11 +1491,13 @@ A successful `TaskResult` must contain at least one text, file, or data part;
 the framework rejects empty successes rather than emitting an ungradeable task.
 The SDK does not retry tasks.
 
-A client that gives up on a task sends `tasks/cancel`. The framework marks the
-task canceled and cancels `run()`, which gets `asyncio.CancelledError` at its
-next `await`. A process `run()` started keeps running unless `run()` stops it,
-so kill it before re-raising. Trajectory events it appended, including any it
-appends while cleaning up, are kept, and its log ends `canceled`.
+A client that gives up on a task sends `tasks/cancel`. The framework cancels
+`run()`, which gets `asyncio.CancelledError` at its next `await`, and marks the
+task canceled once `run()` has stopped, its cleanup done; the `tasks/cancel`
+request answers then. So a client that reads the task canceled knows nothing of
+its run still acts. A process `run()` started keeps running unless `run()` stops
+it, so kill it before re-raising. Trajectory events it appended, including any
+it appends while cleaning up, are kept, and its log ends `canceled`.
 
 #### The control token
 

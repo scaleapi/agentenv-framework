@@ -1493,6 +1493,9 @@ class _StandardExecutor:
         self._workspace = workspace
         self._streaming = streaming
         self._context_locks = _BoundedContextLocks()
+        # The tasks ``execute`` is running, and those of them whose cancel waits for their run to stop (``cancel``).
+        self._running: set[str] = set()
+        self._held_cancels: set[str] = set()
 
     async def execute(self, context: Any, event_queue: Any) -> None:
         from a2a.server.tasks import TaskUpdater
@@ -1509,6 +1512,7 @@ class _StandardExecutor:
         trajectories = self._services.task_trajectories
         # Before any await: once the client holds this task id, the log knows it.
         trajectory = trajectories.register(task.id, task.context_id)
+        self._running.add(task.id)
         try:
             if context.current_task is None:
                 await event_queue.enqueue_event(task)
@@ -1579,12 +1583,20 @@ class _StandardExecutor:
                 error=result.error,
             )
             message = updater.new_agent_message(parts=parts)
-            if result.outcome is TaskOutcome.FAILED:
+            if task.id in self._held_cancels:  # canceled, though its run returned: it ends canceled, as it's sealed
+                await updater.cancel()
+            elif result.outcome is TaskOutcome.FAILED:
                 await updater.failed(message=message)
             else:
                 await updater.complete(message=message)
         except asyncio.CancelledError:
             trajectories.seal(task.id, TrajectoryState.CANCELED)
+            if task.id in self._held_cancels:
+                # The run has stopped, its own cleanup done: now the task reads canceled.
+                try:
+                    await updater.cancel()
+                except Exception:
+                    logger.exception("could not mark canceled task %s canceled", task.id)
             raise
         except Exception:
             correlation_id = uuid.uuid4().hex
@@ -1602,6 +1614,9 @@ class _StandardExecutor:
             await updater.failed(
                 message=updater.new_agent_message(parts=_to_a2a_parts(failure))
             )
+        finally:
+            self._running.discard(task.id)
+            self._held_cancels.discard(task.id)
 
     async def _run_streaming(
         self,
@@ -1669,11 +1684,17 @@ class _StandardExecutor:
             )
 
     async def cancel(self, context: Any, event_queue: Any) -> None:
-        """Mark the task canceled. The SDK then cancels the coroutine running it, so ``agent.run`` gets
-        ``CancelledError`` at its next ``await`` and should stop whatever it started, such as a CLI process."""
+        """Cancel the task. The SDK then cancels the coroutine running it, so ``agent.run`` gets ``CancelledError``
+        at its next ``await`` and should stop whatever it started, such as a CLI process. A task ``execute`` is running
+        is marked canceled only once that run has stopped (``execute`` marks it), so a client that reads it canceled
+        knows nothing of its run still acts; the cancel request returns then. Any other task is marked canceled at
+        once."""
         from a2a.server.tasks import TaskUpdater
 
         self._services.task_trajectories.request_cancel(context.task_id)
+        if context.task_id in self._running:
+            self._held_cancels.add(context.task_id)
+            return
         await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
 
 

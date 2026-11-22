@@ -741,7 +741,8 @@ class _Run:
     async def _stop_turn(self) -> Optional[str]:
         """Stop a turn cut off at its time limit before the run goes on, so none of its tool calls land in a later
         wake: ask the agent to cancel its task (A2A tasks/cancel) and wait, up to STOP_TURN_SECONDS, for the agent to
-        report the task ended. Its final state ("canceled", or "failed" or "completed" when it ended on its own just
+        report the task ended (the agent framework's executor marks a canceled task canceled only once its run has
+        stopped). Its final state ("canceled", or "failed" or "completed" when it ended on its own just
         then); None when it can't be confirmed: no task was ever accepted, or the agent doesn't answer in time."""
         task_id = self.turn_task_id
         if task_id is None:
