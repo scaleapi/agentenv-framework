@@ -1167,8 +1167,8 @@ def _running(pid: int) -> bool:
 
 
 async def _execd(pid: int, program: str, sandbox_id: str, within_s: float = 10, poll_s: float = 0.01) -> None:
-    """Wait until ``pid`` runs ``program`` and reads as ``sandbox_id``'s: bash execs the last command of ``-c``, and
-    while it execs /proc shows it no environment, so a teardown scanning then wouldn't see it."""
+    """Wait until ``pid`` has exec'd ``program`` and reads as ``sandbox_id``'s: while a process execs, /proc shows it no
+    environment, so a teardown scanning then wouldn't see it."""
     deadline = time.monotonic() + within_s
     while time.monotonic() < deadline:
         argv0 = Path(f"/proc/{pid}/cmdline").read_text().split("\0")[0]
@@ -1230,7 +1230,7 @@ async def test_teardown_stops_what_a_command_left_running_and_only_that(tmp_path
 async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     sandbox = LocalSandbox(work_dir=tmp_path)
-    stubborn = await _detached(sandbox, "bash -c 'trap \"\" TERM; sleep 300'")
+    stubborn = await _detached(sandbox, "bash -c 'trap \"\" TERM; exec sleep 300'")
     await _execd(stubborn, "sleep", sandbox.sandbox_id)
 
     await ls._stop_marked(sandbox.sandbox_id)
