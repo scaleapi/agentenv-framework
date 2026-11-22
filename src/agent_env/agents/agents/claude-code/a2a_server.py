@@ -73,6 +73,7 @@ from tar_changelog import (
     outermost,
     remove_settings_hooks,
 )
+from claude_code_atif import ClaudeCodeAtif
 from claude_bridge import (
     CLAUDE_STATE_DIR,
     ClaudeCodeTools,
@@ -414,6 +415,12 @@ def _turn_tally(result: ClaudeResult) -> dict[str, dict[str, float]] | None:
     return turn
 
 
+def _builds_atif(request: TaskRequest[ClaudeCodeConfig]) -> bool:
+    """Whether the task feeds an atif/1 copy; a protocol from before ``builds_atif`` is taken to, and its copy is built
+    only when the run prescribed it."""
+    return getattr(request.trajectory, "builds_atif", True)
+
+
 def _usage(result: ClaudeResult) -> Usage:
     """The turn's tool calls and token counts, with ``input_tokens`` counting the cache. The counts are the CLI's own
     tally for the turn (``_turn_tally``), which covers every call, its subagents' too, and its cost; the turn's
@@ -477,9 +484,9 @@ def _usage(result: ClaudeResult) -> Usage:
     config_description="Set or read agent configuration such as model, role, and allowed tools.",
     lifespan=_turns_stop_with_the_server,
     extensions=(
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, description=(
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=ClaudeCodeAtif, description=(
             "Retrieve a task's Claude Code stream-json trajectory, also while it runs, "
-            "or a context's cumulative trajectory including a live run.")),
+            "or a context's cumulative trajectory including a live run; atif/1 when the run prescribes it.")),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Claude Code CLI should connect to."),
         enable(PEER_AGENTS_V1, description=(
             "Delegate to the task's other agents: the CLI reaches them through the SDK's peer_agents MCP tools.")),
@@ -514,6 +521,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
         # without waiting on the turn; a snapshot load holds the lock across its restore.
         self._active_contexts: set[str] = set()
         self._contexts_lock = asyncio.Lock()
+        # Each conversation's request shapes its ATIF document has the tools of, so a shape is fed to a document once.
+        self._tool_shapes: dict[str, set[tuple[str | None, str]]] = {}
 
     async def run(self, request: TaskRequest[ClaudeCodeConfig]) -> TaskResult:
         # The CLI's stdout events, appended as it prints them, are the turn's trajectory.
@@ -575,6 +584,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
                 event_callback=request.trajectory.append,
+                **self._atif_feed(request),
             )
         except Exception as e:
             logger.error(f"claude CLI invocation raised: {e}", exc_info=True)
@@ -585,6 +595,9 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             session_id = result.session_id
             self.set_session_ref_for_context(context_id, session_id)
 
+        usage = _usage(result)
+        if usage.cost_usd is not None and _builds_atif(request):
+            request.trajectory.aux("turn", {"type": "turn", "cost_usd": usage.cost_usd})
         data: dict[str, Any] = {"tool_call_count": result.tool_call_count}
         if result.attempts > 1:
             data["cli_attempts"] = result.attempts
@@ -599,9 +612,19 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             .add_text(result.response or (result.error or ""))
             .add_data(data)
             .session_ref(session_id)
-            .usage(_usage(result))
+            .usage(usage)
             .build()
         )
+
+    def _atif_feed(self, request: TaskRequest[ClaudeCodeConfig]) -> dict[str, Any]:
+        """What run_claude feeds the ATIF adapter beside stdout, when the task builds an atif/1 copy."""
+        if not _builds_atif(request):
+            return {}
+        new_document = getattr(request.trajectory, "starts_document", False)
+        shapes = self._tool_shapes.setdefault(request.context_id, set())
+        if new_document:
+            shapes.clear()
+        return {"aux_callback": request.trajectory.aux, "tool_shapes": shapes, "new_document": new_document}
 
     async def _context_trajectory(self, context_id: str) -> dict[str, Any]:
         session_id = self.session_ref_for_context(context_id)
