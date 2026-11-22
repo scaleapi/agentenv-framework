@@ -185,3 +185,18 @@ def test_a_task_that_builds_an_atif_copy_is_fed_its_records_and_the_turns_cost(t
     assert {"name": "turn", "record": {"type": "turn", "cost_usd": 0.25}} in [
         {key: entry[key] for key in ("name", "record")} for entry in read["aux"]]
     assert read["trajectory"]["final_metrics"]["total_cost_usd"] == 0.25
+
+
+def test_a_transcript_rewritten_under_the_same_inode_is_followed_by_its_line_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", tmp_path)
+    transcript = tmp_path / "sess-1.jsonl"
+    leaked = _assistant("err", text=f"API Error: {KEY}" + "!" * 200, isApiErrorMessage=True)
+    transcript.write_bytes(_lines(leaked, _assistant("seen")))
+    tail = claude_bridge.SessionTail("sess-1", set(), set())
+    inode = transcript.stat().st_ino
+    with transcript.open("r+b") as file:
+        file.write(_lines(_assistant("err", text="API Error: [redacted]", isApiErrorMessage=True),
+                          _assistant("seen"), _assistant("after")))
+        file.truncate()
+    assert transcript.stat().st_ino == inode
+    assert [record["uuid"] for _, record in tail.read()[0]] == ["after"]

@@ -502,12 +502,16 @@ class _TailedFile:
     inode: int
     offset: int
     lines: int
+    # The last line read, newline included: a file whose bytes before ``offset`` no longer end in it was replaced, even
+    # where a new file took the old one's inode number.
+    last: bytes = b""
 
 
 class SessionTail:
     """One turn's new transcript records, its sub-agents' transcripts' too, as the CLI appends them, each as the ATIF
     adapter's aux record (``session_aux``). It starts where each file ends, so an earlier turn isn't fed again, and
-    finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps.
+    finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps; a file is
+    taken as replaced when its inode or the line before the place it was read to changed.
     ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again."""
 
     def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]]) -> None:
@@ -520,7 +524,8 @@ class SessionTail:
             with contextlib.suppress(OSError):
                 data = path.read_bytes()
                 end = data.rfind(b"\n") + 1
-                self._files[path] = _TailedFile(path.stat().st_ino, end, data.count(b"\n", 0, end))
+                self._files[path] = _TailedFile(path.stat().st_ino, end, data.count(b"\n", 0, end),
+                                                _line_before(data, end))
 
     def _paths(self) -> list[Path]:
         subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
@@ -558,20 +563,35 @@ class SessionTail:
         if tailed is None:
             tailed = _TailedFile(status.st_ino, 0, 0)
         with path.open("rb") as file:
-            if status.st_ino != tailed.inode or status.st_size < tailed.offset:
-                data, offset = file.read(), 0
-                for _ in range(tailed.lines):
-                    offset = data.find(b"\n", offset) + 1
-                    if offset == 0:
-                        return _TailedFile(status.st_ino, 0, 0), []
-                data = data[offset:]
-            else:
-                offset = tailed.offset
+            if status.st_ino == tailed.inode and status.st_size >= tailed.offset and _ends_in(file, tailed):
+                offset, last = tailed.offset, tailed.last
                 file.seek(offset)
                 data = file.read()
+            else:
+                file.seek(0)
+                whole, offset = file.read(), 0
+                for _ in range(tailed.lines):
+                    offset = whole.find(b"\n", offset) + 1
+                    if offset == 0:
+                        return _TailedFile(status.st_ino, 0, 0), []
+                data, last = whole[offset:], _line_before(whole, offset)
         end = data.rfind(b"\n") + 1
         lines = [line for line in data[:end].split(b"\n") if line.strip()]
-        return _TailedFile(status.st_ino, offset + end, tailed.lines + data.count(b"\n", 0, end)), lines
+        return _TailedFile(status.st_ino, offset + end, tailed.lines + data.count(b"\n", 0, end),
+                           _line_before(data, end) if end else last), lines
+
+
+def _line_before(data: bytes, end: int) -> bytes:
+    """The line ``data`` holds just before ``end``, newline included; empty at the start."""
+    return data[data.rfind(b"\n", 0, end - 1) + 1:end] if end else b""
+
+
+def _ends_in(file, tailed: _TailedFile) -> bool:
+    """Whether the file's bytes before ``tailed.offset`` still end in the last line read there."""
+    if not tailed.last:
+        return True
+    file.seek(tailed.offset - len(tailed.last))
+    return file.read(len(tailed.last)) == tailed.last
 
 
 async def _stop_following(following: asyncio.Task, tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
