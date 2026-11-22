@@ -636,7 +636,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
     def _judge_model(self, context: TaskStepContext) -> str:
         """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
-        role and default, and claude-sonnet-4-6 last."""
+        role and default, and claude-sonnet-5-5 last."""
         overrides = context.metadata.get("user_overrides") or {}
         return get_config().resolve_model(ModelRole.JUDGE, run=overrides.get("judge_model"), step=self.default_model).model
 
