@@ -216,7 +216,8 @@ class UserSimGate:
     judge_model: Optional[str] = None
     max_rewrites: int = 2
     # What happens when a message still fails after its rewrites: "fail" ends the conversation as a failed user sim
-    # (error_type user_sim_error, so the run is redone), "end" ends it plainly, "send" sends it anyway (record only).
+    # (error_type user_sim_error; prompt_agent also fails the step, so its retry_config redoes it), "end" ends it
+    # plainly, "send" sends it anyway (record only).
     on_fail: str = "fail"
     context_turns: int = 4
     context_chars: int = 3000

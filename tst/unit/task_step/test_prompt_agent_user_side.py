@@ -547,11 +547,12 @@ async def test_a_message_that_reads_as_the_assistants_is_held_back_and_rewritten
 
 
 @pytest.mark.asyncio
-async def test_a_message_that_still_fails_after_its_rewrites_ends_the_run_as_a_failed_user_sim(monkeypatch):
+async def test_a_message_that_still_fails_after_its_rewrites_fails_the_step_as_a_failed_user_sim(monkeypatch):
     peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [sim(_SWAP), sim(_SWAP), sim(_SWAP)]})
     ctx = _context(user_card=_USER_SIM_CARD)
 
-    await _gated(turns=3).execute(ctx)
+    with pytest.raises(RuntimeError, match=r"user_sim_gate: user-sim message at turn 1 still reads as the assistant's"):
+        await _gated(turns=3).execute(ctx)
 
     assert [v["passed"] for v in ctx.metadata["user_sim_gate"]["talk"]] == [False, False, False]
     assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1

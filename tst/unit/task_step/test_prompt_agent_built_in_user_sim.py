@@ -449,11 +449,12 @@ async def test_the_gate_holds_back_a_built_in_users_answer_that_reads_as_the_ass
 
 
 @pytest.mark.asyncio
-async def test_a_built_in_users_answer_that_still_fails_ends_the_run_as_a_failed_user_sim(monkeypatch):
+async def test_a_built_in_users_answer_that_still_fails_fails_the_step_as_a_failed_user_sim(monkeypatch):
     peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [said("reply", _SWAP)] * 3})
     ctx = await _context(monkeypatch)
 
-    await _gated().execute(ctx)
+    with pytest.raises(RuntimeError, match=r"user_sim_gate: user-sim message at turn 1 still reads as the assistant's"):
+        await _gated().execute(ctx)
 
     assert [v["passed"] for v in ctx.metadata["user_sim_gate"]["talk"]] == [False, False, False]
     assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1

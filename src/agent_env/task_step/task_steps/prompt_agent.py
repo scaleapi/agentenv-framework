@@ -904,6 +904,10 @@ class PromptAgentTaskStep(TaskStep):
             usage=usage.entries(),
         ))
 
+        if user_side.gate_failure is not None:
+            # Recorded above as a failed user sim; raising lets retry_config redo the run and fail_task_on_error apply.
+            raise RuntimeError(f"user_sim_gate: {user_side.gate_failure}")
+
         if final_state == TaskState.failed:
             detail_parts = []
             if final_terminal.error_type:
