@@ -1416,7 +1416,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     logger.warning(f"LLM judge attempt {attempt}/{self.DEFAULT_MAX_RETRIES} failed ({type(exc).__name__}: {exc}), retrying...")
                 else:
                     logger.error(f"LLM judge failed after {self.DEFAULT_MAX_RETRIES} attempts ({type(exc).__name__}: {exc})")
-        raise RuntimeError(f"LLM judge failed after {self.DEFAULT_MAX_RETRIES} attempts") from last_exc
+        raise RuntimeError(f"LLM judge on {model} failed after {self.DEFAULT_MAX_RETRIES} attempts "
+                           f"({type(last_exc).__name__}: {last_exc})") from last_exc
 
     async def _configure_judge_a2a(
         self,
