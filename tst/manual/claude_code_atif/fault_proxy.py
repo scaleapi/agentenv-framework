@@ -17,7 +17,10 @@ import threading
 import time
 import urllib.parse
 
-UPSTREAM = urllib.parse.urlsplit(os.environ["UPSTREAM"])
+UPSTREAM = urllib.parse.urlsplit(os.environ["UPSTREAM"].strip())
+# The endpoint's root, as the bridge's ``_api_root`` takes it: the CLI appends its own /v1/messages.
+ROOT = UPSTREAM.path.rstrip("/").removesuffix("/v1").rstrip("/")
+CONNECTION = http.client.HTTPSConnection if UPSTREAM.scheme == "https" else http.client.HTTPConnection
 RESUME = b"interrupted by a transient API error"
 HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "host",
        "content-length", "accept-encoding"}
@@ -60,9 +63,9 @@ def handler(mode):
             self.forward(body)
 
         def forward(self, body):
-            conn = http.client.HTTPSConnection(UPSTREAM.hostname, UPSTREAM.port or 443, timeout=600)
+            conn = CONNECTION(UPSTREAM.hostname, UPSTREAM.port, timeout=600)
             headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
-            conn.request(self.command, UPSTREAM.path.rstrip("/") + self.path, body=body or None, headers=headers)
+            conn.request(self.command, ROOT + self.path, body=body or None, headers=headers)
             response = conn.getresponse()
             self.send_response(response.status)
             for key, value in response.getheaders():
