@@ -369,11 +369,14 @@ def _build_config(
     environ: Mapping[str, str] = os.environ,
     instructions: list[str] | None = None,
     builtin_tools: OpenCodeTools | None = None,
+    clock_armed: bool = False,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
     Everything dynamic (model, MCP servers, headers) is rebuilt per turn so there
-    is no on-disk config to race on."""
+    is no on-disk config to race on. On an armed clock only the endpoint is enabled, whose calls the turn's relay
+    dates: a provider a project's config adds would tell the model the real date, and a model named on one isn't
+    found."""
     options: dict = {"baseURL": _base_url(environ), "apiKey": "{env:LITELLM_API_KEY}"}
     if headers:
         options["headers"] = dict(headers)
@@ -423,6 +426,8 @@ def _build_config(
     }
     if instructions:
         config["instructions"] = list(instructions)
+    if clock_armed:
+        config["enabled_providers"] = ["litellm"]
 
     if mcp_servers:
         mcp: dict[str, dict] = {}
@@ -570,9 +575,10 @@ async def _run_opencode(
             + json.dumps(schema, separators=(",", ":"))
         )
 
+    armed = clock_armed()
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
                            environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
-                           instructions=instructions, builtin_tools=builtin_tools)
+                           instructions=instructions, builtin_tools=builtin_tools, clock_armed=armed)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn
@@ -593,7 +599,7 @@ async def _run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=armed),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
     }
 

@@ -53,8 +53,9 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   before 1970, so a clock set behind a session's messages broke it. Where the image follows the clock, its bridge
   starts the CLI with the real-time marker instead, so the commands it runs read the env's time, and the turn's model
   relay puts the env's date, read from `date` as those commands read it, in the prompt's "Today's date" line and the
-  websearch tool's year while the clock is armed. A call whose date can't be read, or whose `<env>` block has no date
-  line the relay knows, is refused, failing the turn rather than telling the model the real date.
+  websearch tool's year while the clock is armed, and the CLI enables no provider but the endpoint, so none bypasses
+  the relay. A call whose date can't be read, or whose `<env>` block has no date line the relay knows, is refused,
+  failing the turn rather than telling the model the real date.
 - **For the rest of the run.** An agent that follows goes on following: a later `sync_env_clock` without `agent_clock`
   re-arms the clock it follows, and only agents that never followed keep real time.
 - **Through the egress proxy.** While the agent follows an armed clock, the CLI goes out through the egress proxy, which
