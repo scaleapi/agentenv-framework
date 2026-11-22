@@ -227,6 +227,16 @@ def test_a_sub_agent_resolves_its_references_where_it_sits_not_where_it_was_reac
     assert [event["tool"] for event in events if event["type"] == "tool_call"] == walked
     assert [action.tool for action in transcript.actions] == walked
 
+
+def test_an_id_held_as_a_list_or_an_object_names_nothing_and_stops_no_walk():
+    """A copy graded as stored may hold one anywhere, in a sub-agent nothing references too."""
+    unused = _agent("unused", "never", subs=[_agent([], "bad id")])
+    document = _agent(None, "root", "A", {"x": 1}, subs=[_agent("A", "in A", ["A"]), unused])
+    events, _ = T.compact_atif_trajectory(document, TrajectoryFilter())
+    transcript, _ = T.transcript_from_atif(document, lambda path: None)
+    assert [event["tool"] for event in events if event["type"] == "tool_call"] == ["root", "in A"]
+    assert [action.tool for action in transcript.actions] == ["root", "in A"]
+
 def test_a_screenshots_type_read_from_its_bytes_reaches_per_criterion_frames():
     gif = b"GIF89a" + b"g" * 16
     transcript, _ = T.transcript_from_atif(atif_runs.fixture("computer_use"), lambda path: gif)
