@@ -218,8 +218,8 @@ def _by_call(step: Mapping[str, Any]) -> list[tuple[Optional[Mapping[str, Any]],
 class _SubAgents:
     """The embedded sub-agents a trajectory's results start, each walked once. A reference names one among its
     trajectory's own, else the nearest around where that trajectory sits, whoever reached it, as ATIF makes an id unique
-    only within its parent's array (the builder embeds them all in the root). An id a copy graded as stored holds as a
-    list or an object names nothing."""
+    only within its parent's array (the builder embeds them all in the root). A copy graded as stored may lack an id, or
+    hold one as a list or an object, and such an id names nothing."""
 
     def __init__(self, document: Mapping[str, Any]) -> None:
         self._walked: set[int] = set()
@@ -229,7 +229,8 @@ class _SubAgents:
     def _scope(self, trajectory: Mapping[str, Any], outer: Mapping[Any, Mapping[str, Any]]) -> None:
         subs = trajectory.get("subagent_trajectories")
         subs = [sub for sub in subs if isinstance(sub, Mapping)] if isinstance(subs, list) else []
-        visible = {**outer, **{sub["trajectory_id"]: sub for sub in subs if isinstance(sub.get("trajectory_id"), Hashable)}}
+        named = {_name(sub.get("trajectory_id")): sub for sub in subs}
+        visible = {**outer, **{name: sub for name, sub in named.items() if name is not None}}
         self._visible[id(trajectory)] = visible
         for sub in subs:
             self._scope(sub, visible)
@@ -239,12 +240,15 @@ class _SubAgents:
         refs = result.get("subagent_trajectory_ref")
         found = []
         for ref in refs if isinstance(refs, list) else []:
-            named = ref.get("trajectory_id") if isinstance(ref, Mapping) else None
-            sub = visible.get(named) if isinstance(named, Hashable) else None
+            sub = visible.get(_name(ref.get("trajectory_id"))) if isinstance(ref, Mapping) else None
             if sub is not None and id(sub) not in self._walked:
                 self._walked.add(id(sub))
                 found.append(sub)
         return found
+
+
+def _name(trajectory_id: Any) -> Any:
+    return trajectory_id if isinstance(trajectory_id, Hashable) else None
 
 
 def compact_atif_trajectory(
