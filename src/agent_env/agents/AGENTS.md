@@ -156,7 +156,9 @@ secrets the SDK holds and is handed (the model key, write-only config, MCP and C
 other with `self.register_secret(value)`, in `run` or later, and the SDK writes it `[redacted:<length>]` there.
 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
-`event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. A runtime
+`event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. Its adapter,
+`claude_code_atif.py`, builds steps from stream-json with each message's time, usage and tools from the CLI's session
+transcript, which `claude_bridge.SessionTail` feeds as aux records only while `request.trajectory.builds_atif`. A runtime
 that only has a record at the end returns it with `native_trajectory(...)`: `agents/pi/pi_agent.py` `_result`.
 
 ### `skill-config/v1`, `/ext/skill-config`

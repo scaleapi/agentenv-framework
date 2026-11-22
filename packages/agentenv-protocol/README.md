@@ -1311,7 +1311,9 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
 
   The builder closes a step when the next one starts, puts every result in its call's step, writes `prompt_tokens`
   with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
-  record no method takes is counted in the root profile.
+  record no method takes is counted in the root profile. `turn.tool_definitions([...], agent=None)` writes the tools
+  the model was offered, in OpenAI's function form, to a trajectory's `agent.tool_definitions`; a later call adds
+  tools and replaces those of the same name.
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
@@ -1657,7 +1659,9 @@ one adapter instance, and feeds it every event the agent appends, as it appends 
 trajectory returned at task end runs through the adapter then. The agent's own
 code feeds the adapter's aux files, records that aren't in the native log such
 as a hook's notes, with `request.trajectory.aux(name, record)`, where they
-happened among the events. An agent with an adapter that both appends events and
+happened among the events. `request.trajectory.builds_atif` says whether the task
+feeds a copy, so an agent gathers what only its aux files take, such as a log it
+tails, only then. An agent with an adapter that both appends events and
 returns a native trajectory fails the turn with code
 `framework.trajectory_appended_and_returned`, since its ATIF copy would come
 from one of them and its native record from the other.
