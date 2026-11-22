@@ -11,7 +11,8 @@ from typing import Any, Callable, Optional
 import httpx
 from mcp.types import CallToolResult, TextContent, Tool
 
-from agent_env.a2a_agent import A2AAgent, conversation_store
+from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
+from agent_env.a2a_agent.object_transfer import AgentTurn
 from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
@@ -35,6 +36,13 @@ CONFIG_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG
         "model", "system_prompt", "effort", "output_format", "timeout_seconds", "max_turns"]}}}}}]}}
 
 
+
+def _turn(task_id: str, state: str, parts: list[dict]) -> AgentTurn:
+    """The turn send_and_wait returns for a task that ended in ``state`` with a reply of ``parts``."""
+    message = {"parts": parts}
+    return AgentTurn(task_id=task_id, task={"status": {"state": state, "message": message}},
+                     reply=protocol.TerminalResponse.from_message(message))
+
 class Fail:
     """What an agent's turn returns to end in the failed state, as a harness reports a turn that broke; or in another
     state that isn't completed (``state``: canceled, rejected)."""
@@ -52,7 +60,8 @@ class Rig:
     user sim's answers to its
     reads, in order; once they run out it answers no_reply. Every message the agent got is in ``sent``, every read the
     user sim got in ``reads``. A ``plugin`` replaces the scripted one; what it sends the user sim agent with ``ask`` is
-    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply). ``during`` has, for each of the agent's
+    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply; one that is an exception is raised).
+    ``during`` has, for each of the agent's
     turns, the gateway's settings and the agent's tools as the agent saw them. With ``takes_config`` the agent's card
     takes its config (``CONFIG_CARD``), whose posts land in ``configs``. ``solver_usage`` and ``user_usage``, when set,
     are the usage each of the agent's and the user sim agent's replies reports."""
@@ -251,8 +260,10 @@ class Rig:
         if url == USER_SIM:
             self.user_calls.append({"parts": list(parts), "context_id": kw.get("context_id")})
             text = self.user_texts.pop(0) if self.user_texts else '{"outcome": "no_reply", "message": ""}'
-            return f"user-{len(self.user_calls)}", {"status": {"state": "completed", "message": {
-                "parts": [{"kind": "text", "text": text}, *self._usage_part(self.user_usage)]}}}
+            if isinstance(text, BaseException):
+                raise text
+            return _turn(f"user-{len(self.user_calls)}", "completed",
+                         [{"kind": "text", "text": text}, *self._usage_part(self.user_usage)])
         assert url == SOLVER, url
         self.solver_contexts.append(kw.get("context_id"))
         if before_send:
@@ -269,11 +280,11 @@ class Rig:
         if isinstance(closing, Fail):
             data = {"error_message": closing.message, **({"error_type": closing.error_type}
                                                           if closing.error_type else {})}
-            return f"task-{len(self.sent)}", {"status": {"state": closing.state, "message": {"parts": [
-                {"kind": "text", "text": closing.message}, {"kind": "data", "data": data}]}}}
+            return _turn(f"task-{len(self.sent)}", closing.state,
+                         [{"kind": "text", "text": closing.message}, {"kind": "data", "data": data}])
         reply = [{"kind": "text", "text": closing}] if closing else []
         reply += self._usage_part(self.solver_usage)
-        return f"task-{len(self.sent)}", {"status": {"state": "completed", "message": {"parts": reply}}}
+        return _turn(f"task-{len(self.sent)}", "completed", reply)
 
     @staticmethod
     def _usage_part(usage: Optional[dict]) -> list[dict]:
