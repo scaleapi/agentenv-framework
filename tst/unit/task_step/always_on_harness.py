@@ -44,6 +44,17 @@ class Fail:
         self.message, self.error_type, self.state = message, error_type, state
 
 
+class Slow:
+    """An agent's turn that works for ``seconds`` of real time, then acts with ``then(rig)`` and ends with what it
+    returns (its closing text, or a ``Fail``). The work runs as the agent's own, so the step giving up on the turn
+    doesn't stop it; only a cancel of its A2A task does, unless ``stops_on_cancel`` is False (an agent that won't
+    stop)."""
+
+    def __init__(self, seconds: float, then: Optional[Callable[["Rig"], Any]] = None,
+                 stops_on_cancel: bool = True) -> None:
+        self.seconds, self.then, self.stops_on_cancel = seconds, then, stops_on_cancel
+
+
 class Rig:
     """The world, the agent and the user sim for one always_on run.
 
@@ -55,7 +66,9 @@ class Rig:
     in ``user_calls``, answered in turn by ``user_texts`` (then no_reply). ``during`` has, for each of the agent's
     turns, the gateway's settings and the agent's tools as the agent saw them. With ``takes_config`` the agent's card
     takes its config (``CONFIG_CARD``), whose posts land in ``configs``. ``solver_usage`` and ``user_usage``, when set,
-    are the usage each of the agent's and the user sim agent's replies reports."""
+    are the usage each of the agent's and the user sim agent's replies reports. A turn that returns ``Slow`` works on
+    as the agent's own task (``agent_tasks``, by A2A task id); the A2A task ids the step asked to cancel are in
+    ``cancels``."""
 
     def __init__(self, monkeypatch, tmp_path, *, agent: Optional[Turn] = None, answers: tuple = (), rate: float = 0,
                  t0: str = T0, plugin: Any = None, user_texts: tuple = (), takes_config: bool = False):
@@ -84,9 +97,13 @@ class Rig:
         self.solver_usage: Optional[dict] = None
         self.user_usage: Optional[dict] = None
         self._contacts: dict[str, dict] = {}
+        self.agent_tasks: dict[str, tuple[asyncio.Task, Slow]] = {}
+        self.cancels: list[str] = []
         self._monkeypatch = monkeypatch
         monkeypatch.setattr(ao, "POLL_SECONDS", 0)
         monkeypatch.setattr(ao, "send_and_wait", self._send_and_wait)
+        monkeypatch.setattr(ao.protocol, "cancel_a2a_task", self._cancel_a2a_task)
+        monkeypatch.setattr(ao.protocol, "poll_a2a_task", self._poll_a2a_task)
         monkeypatch.setattr(ao._Run, "_load_plugin", self._load_plugin)
         if takes_config:
             async def post(url, fields, headers=None):
@@ -175,8 +192,10 @@ class Rig:
                                              CallToolResult(content=[TextContent(type="text", text="{}")]))
 
     async def close(self) -> None:
-        """Cancel what the gateway's triggers still have running."""
+        """Cancel what the gateway's triggers, and the agent's work on turns nobody stopped, still have running."""
         await self.gw._trigger_engine.cancel_scheduled()
+        for work, _ in self.agent_tasks.values():
+            work.cancel()
 
     def notify_at(self, trigger_id: str, at: str, text: str, *, channel: str = "Messages", to: str = ROLE) -> dict:
         return {"id": trigger_id, "when": {"type": "time", "at": at},
@@ -265,15 +284,46 @@ class Rig:
         texts = [p["text"] for p in parts if p.get("kind") == "text"]
         self.sent.append(texts)
         self.parts.append(list(parts))
+        task_id = f"task-{len(self.sent)}"
+        if kw.get("on_sent"):
+            kw["on_sent"](task_id)
         closing = self.agent(len(self.sent), texts, self)  # a TimeoutError it raises is the turn timing out
+        if isinstance(closing, Slow):
+            work = asyncio.ensure_future(self._work(closing))
+            self.agent_tasks[task_id] = (work, closing)
+            closing = await asyncio.shield(work)  # the step giving up on the turn leaves the agent's work running
         if isinstance(closing, Fail):
             data = {"error_message": closing.message, **({"error_type": closing.error_type}
                                                           if closing.error_type else {})}
-            return f"task-{len(self.sent)}", {"status": {"state": closing.state, "message": {"parts": [
+            return task_id, {"status": {"state": closing.state, "message": {"parts": [
                 {"kind": "text", "text": closing.message}, {"kind": "data", "data": data}]}}}
         reply = [{"kind": "text", "text": closing}] if closing else []
         reply += self._usage_part(self.solver_usage)
-        return f"task-{len(self.sent)}", {"status": {"state": "completed", "message": {"parts": reply}}}
+        return task_id, {"status": {"state": "completed", "message": {"parts": reply}}}
+
+    async def _work(self, slow: Slow) -> Any:
+        await asyncio.sleep(slow.seconds)
+        return slow.then(self) if slow.then else ""
+
+    async def _cancel_a2a_task(self, url: str, task_id: str) -> None:
+        """A2A tasks/cancel: the agent stops the task's work, unless it's one that won't."""
+        assert url == SOLVER, url
+        self.cancels.append(task_id)
+        work, slow = self.agent_tasks.get(task_id, (None, None))
+        if work is not None and slow.stops_on_cancel:
+            work.cancel()
+
+    async def _poll_a2a_task(self, url: str, task_id: str, timeout_seconds: float, poll_interval_seconds: float = 10,
+                             **kw) -> dict:
+        """A2A tasks/get until the task ends: canceled, or completed once its work is done; TimeoutError past
+        ``timeout_seconds``."""
+        work, _ = self.agent_tasks.get(task_id, (None, None))
+        if work is not None:
+            done, _ = await asyncio.wait({work}, timeout=timeout_seconds)
+            if not done:
+                raise TimeoutError(f"A2A task {task_id} did not complete within {timeout_seconds}s")
+        state = "canceled" if work is not None and work.cancelled() else "completed"
+        return {"id": task_id, "status": {"state": state}}
 
     @staticmethod
     def _usage_part(usage: Optional[dict]) -> list[dict]:
