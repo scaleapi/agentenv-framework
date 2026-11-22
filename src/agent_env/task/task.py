@@ -26,6 +26,7 @@ from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
 from agent_env.task.outcome import FailedStep
 from agent_env.task.teardown import env_record_ids
+from agent_env.task.usage_ledger import entries_of
 from agent_env.task_step.context import (
     ATTEMPT_EPOCH,
     ENTITY_IDS_KEY,
@@ -35,6 +36,7 @@ from agent_env.task_step.context import (
 )
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig, TaskStep
+from agent_env.task_step.usage import STEP_USAGE_KEY
 
 if TYPE_CHECKING:
     from agent_env.task.store import TaskInstance, TaskQuery
@@ -292,9 +294,10 @@ async def _roll_back_span(
             "context.metadata.retry_resets": resets + [entry],
         })
 
-    persist = asyncio.ensure_future(
-        _store.undo_steps(instance_id, rollback_ids, extra_ops=_audit, bump_epoch=True, attempt_epoch=state.epoch)
-    )
+    persist = asyncio.ensure_future(_store.undo_steps(
+        instance_id, rollback_ids, extra_ops=_audit, bump_epoch=True, attempt_epoch=state.epoch,
+        usage=entries_of(context.metadata.get(STEP_USAGE_KEY), rollback_ids),
+    ))
     try:
         doc = await asyncio.shield(persist)
     except asyncio.CancelledError:
@@ -836,6 +839,7 @@ class Task:
             if instance_id and first_error is None and isinstance(exc, asyncio.CancelledError):
                 await asyncio.to_thread(
                     _store.record_task_cancelled, instance_id, str(exc) or "cancelled", Task._utc_now_str(), state.epoch,
+                    entries_of(context.metadata.get(STEP_USAGE_KEY)),
                 )
             elif instance_id:
                 # Record with the fatal step's attribution: a cancellation landing
