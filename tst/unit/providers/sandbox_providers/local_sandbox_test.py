@@ -8,6 +8,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1165,15 +1166,16 @@ def _running(pid: int) -> bool:
         return False
 
 
-async def _execd(pid: int, program: str, sandbox_id: str) -> None:
+async def _execd(pid: int, program: str, sandbox_id: str, within_s: float = 10, poll_s: float = 0.01) -> None:
     """Wait until ``pid`` runs ``program`` and reads as ``sandbox_id``'s: bash execs the last command of ``-c``, and
     while it execs /proc shows it no environment, so a teardown scanning then wouldn't see it."""
-    for _ in range(1000):
+    deadline = time.monotonic() + within_s
+    while time.monotonic() < deadline:
         argv0 = Path(f"/proc/{pid}/cmdline").read_text().split("\0")[0]
         if argv0 == program and pid in ls._marked_pids(sandbox_id):
             return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"{pid} never ran {program} marked as {sandbox_id}")
+        await asyncio.sleep(poll_s)
+    raise AssertionError(f"{pid} never ran {program} marked as {sandbox_id} within {within_s} s")
 
 
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
