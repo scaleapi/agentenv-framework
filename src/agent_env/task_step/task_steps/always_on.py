@@ -96,7 +96,7 @@ from zoneinfo import ZoneInfo
 from a2a.types import TaskState
 
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
-from agent_env.a2a_agent.object_transfer import send_and_wait
+from agent_env.a2a_agent.object_transfer import AgentTurn, send_and_wait
 from agent_env.artifact import FileArtifact
 from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE
@@ -666,22 +666,24 @@ class _Run:
             await _call(env, EXT_CLOCK_URI, "set_rate", {"virtual_seconds_per_real_second": rate if running else 0},
                         attempts=3)
 
-    async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> tuple[str, dict]:
+    async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> AgentTurn:
         """One turn of the agent on ``parts``: the task's clock runs at its rate while the agent works, and is frozen
         again after. The turn's usage is recorded as its reply arrives, before the clock is frozen."""
         step = self.step
         await self._clock_runs(True)
         try:
             # Cut off past its limit and grace, whatever send_and_wait's own retries do: a TimeoutError, as its own.
-            with self.usage.awaiting(ModelRole.SOLVER):
-                task_id, result = await asyncio.wait_for(
-                    send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
-                                  context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
-                                  poll_interval_seconds=step.poll_interval_seconds, before_send=record),
-                    step.timeout_seconds + TURN_GRACE_SECONDS)
-            self.usage.turn(ModelRole.SOLVER,
-                            protocol.TerminalResponse.from_message((result.get("status") or {}).get("message") or {}))
-            return task_id, result
+            turn = await asyncio.wait_for(
+                send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
+                              context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
+                              poll_interval_seconds=step.poll_interval_seconds, before_send=record),
+                step.timeout_seconds + TURN_GRACE_SECONDS)
+        except (TimeoutError, asyncio.CancelledError):
+            self.usage.cut_off(ModelRole.SOLVER)
+            raise
+        else:
+            self.usage.turn(ModelRole.SOLVER, turn.reply)
+            return turn
         finally:
             await self._clock_runs(False)
 
@@ -1278,14 +1280,12 @@ class _Run:
                  **({"files": files} if files else {}))
         t = time.time()
         try:
-            task_id, result = await self._agent_turn(parts, msg_id, record)
+            turn = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
             self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
             return
-        state = result["status"]["state"]
-        status_msg = (result.get("status") or {}).get("message") or {}
-        term = protocol.TerminalResponse.from_message(status_msg)
+        task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
         messages, quiet = await self._take_messages()
@@ -1357,15 +1357,13 @@ class _Run:
 
         t = time.time()
         try:
-            task_id, result = await self._agent_turn(parts, msg_id, record)
+            turn = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
             self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
                      state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1))
             return
-        state = result["status"]["state"]
-        status_msg = (result.get("status") or {}).get("message") or {}
-        term = protocol.TerminalResponse.from_message(status_msg)
+        task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
         messages, quiet = await self._take_messages()
@@ -1566,21 +1564,22 @@ class _Run:
         if limit <= 0:
             return {"text": None, "structured": None, "error": "the read's time limit passed"}
         try:
-            with self.usage.awaiting(ModelRole.USER_SIMULATOR):
-                user_task_id, result = await asyncio.wait_for(send_and_wait(
-                    self.user_url, [{"kind": "text", "text": text}],
-                    agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
-                    context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
-                    poll_interval_seconds=self.step.poll_interval_seconds), limit)
+            turn = await asyncio.wait_for(send_and_wait(
+                self.user_url, [{"kind": "text", "text": text}],
+                agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
+                context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
+                poll_interval_seconds=self.step.poll_interval_seconds), limit)
+        except asyncio.CancelledError:
+            self.usage.cut_off(ModelRole.USER_SIMULATOR)
+            raise
         except TimeoutError as e:
+            self.usage.cut_off(ModelRole.USER_SIMULATOR)
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
-        status = (result.get("status") or {})
-        msg = status.get("message") or {}
-        term = protocol.TerminalResponse.from_message(msg)
+        user_task_id, term = turn.task_id, turn.reply
         self.usage.turn(ModelRole.USER_SIMULATOR, term)
-        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
-            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
-        raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
+        if turn.state != TaskState.completed and str(turn.state) != "completed":
+            return {"text": None, "structured": None, "error": f"state {turn.state}"}
+        raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output
         if structured is None:
             try:

@@ -8,7 +8,7 @@ import json
 import logging
 import time
 import uuid
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from collections.abc import Mapping
 from typing import Any, ClassVar, NamedTuple, Optional
@@ -697,17 +697,19 @@ class PromptAgentTaskStep(TaskStep):
 
                 following = live_turns.following(target_a2a_task_id) if live_turns is not None else nullcontext(None)
                 async with following as live_turn:
-                    with usage.awaiting(ModelRole.SOLVER):
-                        sent_task_id, result = await send_and_wait(
+                    try:
+                        agent_turn = await send_and_wait(
                             target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
                             context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
                             poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
                             on_sent=live_turn.follow if live_turn else None,
                         )
-                    status_msg = (result.get("status") or {}).get("message") or {}
-                    final_terminal = protocol.TerminalResponse.from_message(status_msg)
-                    usage.turn(ModelRole.SOLVER, final_terminal)
-                    target_state = result["status"]["state"]
+                    except (TimeoutError, asyncio.CancelledError):
+                        usage.cut_off(ModelRole.SOLVER)
+                        raise
+                    usage.turn(ModelRole.SOLVER, agent_turn.reply)
+                    sent_task_id, status_msg, final_terminal = agent_turn.task_id, agent_turn.message, agent_turn.reply
+                    target_state = agent_turn.state
                     if live_turn:
                         live_turn.ended(target_state)
                 if final_terminal.tool_call_count is not None:
@@ -1167,23 +1169,25 @@ class _UserSide:
         step = self._step
         message_id = uuid.uuid4().hex
         try:
-            with self._awaiting():
-                task_id, result = await send_and_wait(
-                    self._url, [{"kind": "text", "text": text}],
-                    agent=self._user_sim if self._user_sim.sandbox_id else None,
-                    message_id=message_id, context_id=self._conversation_id,
-                    timeout_seconds=step.user_agent_timeout_seconds, poll_interval_seconds=step.poll_interval_seconds,
-                )
+            turn = await send_and_wait(
+                self._url, [{"kind": "text", "text": text}],
+                agent=self._user_sim if self._user_sim.sandbox_id else None,
+                message_id=message_id, context_id=self._conversation_id,
+                timeout_seconds=step.user_agent_timeout_seconds, poll_interval_seconds=step.poll_interval_seconds,
+            )
+        except asyncio.CancelledError:
+            self._cut_off()
+            raise
         except TimeoutError as e:
+            self._cut_off()
             return {"text": None, "error": f"timeout: {e}"}
-        status = result.get("status") or {}
-        msg = status.get("message") or {}
-        term = self._record_usage(msg)
-        if status.get("state") != TaskState.completed:
-            return {"text": None, "error": f"state {status.get('state')}"}
-        raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
+        self._record_usage(turn.reply)
+        if turn.state != TaskState.completed:
+            return {"text": None, "error": f"state {turn.state}"}
+        term = turn.reply
+        raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         return {"text": raw, "structured": term.structured_output if isinstance(term.structured_output, dict) else None,
-                "trajectory_url": await self._user_sim_trajectory(task_id, message_id)}
+                "trajectory_url": await self._user_sim_trajectory(turn.task_id, message_id)}
 
     async def _user_sim_trajectory(self, task_id: str, message_id: str) -> Optional[str]:
         """The user sim's trajectory for one turn, stored where always_on stores it; None when its card offers none."""
@@ -1232,26 +1236,27 @@ class _UserSide:
         try:
             # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
             # user_a2a_url, has none and reads the store itself.
-            with self._awaiting():
-                _, user_result = await send_and_wait(
-                    self._url, agent_parts,
-                    agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
-                    shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
-                    timeout_seconds=step.user_agent_timeout_seconds,
-                    poll_interval_seconds=step.poll_interval_seconds,
-                )
+            user_turn = await send_and_wait(
+                self._url, agent_parts,
+                agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
+                shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
+                timeout_seconds=step.user_agent_timeout_seconds,
+                poll_interval_seconds=step.poll_interval_seconds,
+            )
+        except asyncio.CancelledError:
+            self._cut_off()
+            raise
         except TimeoutError as e:
             logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
+            self._cut_off()
             return {"end": "user_timeout"}
 
-        user_state = (user_result.get("status") or {}).get("state")
-        self._record_usage((user_result.get("status") or {}).get("message") or {})
-        if user_state != TaskState.completed:
-            logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
+        self._record_usage(user_turn.reply)
+        if user_turn.state != TaskState.completed:
+            logger.info(f"user_a2a_url returned state={user_turn.state}; ending multi-turn")
             return {"end": "user_not_completed"}
 
-        user_msg = (user_result.get("status") or {}).get("message") or {}
-        parts = user_msg.get("parts") or []
+        parts = user_turn.message.get("parts") or []
         if not parts:
             logger.warning("user_a2a_url returned no parts; ending multi-turn")
             return {"end": "user_no_parts"}
@@ -1277,16 +1282,15 @@ class _UserSide:
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
 
-    def _awaiting(self) -> AbstractContextManager[None]:
-        """Around a user sim's turn, as ``StepUsage.awaiting``; a human peer's has no usage to mark."""
-        return self._usage.awaiting(ModelRole.USER_SIMULATOR) if self._usage is not None else nullcontext()
-
-    def _record_usage(self, message: dict) -> protocol.TerminalResponse:
-        """The user side's reply, a user sim's turn recorded as it ends; a human peer's has none to record."""
-        term = protocol.TerminalResponse.from_message(message)
+    def _record_usage(self, reply: protocol.TerminalResponse) -> None:
+        """A user sim's turn, recorded as it ends; a human peer's has no usage to record."""
         if self._usage is not None:
-            self._usage.turn(ModelRole.USER_SIMULATOR, term)
-        return term
+            self._usage.turn(ModelRole.USER_SIMULATOR, reply)
+
+    def _cut_off(self) -> None:
+        """A user sim's turn sent but never answered, its usage unknown; a human peer's has none to record."""
+        if self._usage is not None:
+            self._usage.cut_off(ModelRole.USER_SIMULATOR)
 
 
 class _BuiltInUserSim:

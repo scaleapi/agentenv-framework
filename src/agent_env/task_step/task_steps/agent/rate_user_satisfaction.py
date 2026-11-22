@@ -49,7 +49,7 @@ from typing import ClassVar, Optional
 
 from a2a.types import TaskState
 
-from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
+from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent.object_transfer import send_and_wait
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.config.model import ModelRole
@@ -250,23 +250,24 @@ class RateUserSatisfactionTaskStep(TaskStep):
         url = agent.a2a_url or agent.api_url
         message_id = uuid.uuid4().hex
         try:
-            with usage.awaiting(ModelRole.USER_SIMULATOR):
-                task_id, result = await asyncio.wait_for(send_and_wait(
-                    url, [{"kind": "text", "text": text}], agent=agent if agent.sandbox_id else None,
-                    message_id=message_id, context_id=session.context_id, timeout_seconds=limit,
-                    poll_interval_seconds=self.poll_interval_seconds), limit)
+            turn = await asyncio.wait_for(send_and_wait(
+                url, [{"kind": "text", "text": text}], agent=agent if agent.sandbox_id else None,
+                message_id=message_id, context_id=session.context_id, timeout_seconds=limit,
+                poll_interval_seconds=self.poll_interval_seconds), limit)
+        except asyncio.CancelledError:
+            usage.cut_off(ModelRole.USER_SIMULATOR)
+            raise
         except TimeoutError as e:
+            usage.cut_off(ModelRole.USER_SIMULATOR)
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
-        status = result.get("status") or {}
-        msg = status.get("message") or {}
-        term = protocol.TerminalResponse.from_message(msg)
+        term = turn.reply
         usage.turn(ModelRole.USER_SIMULATOR, term)
-        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
-            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
-        raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
+        if turn.state != TaskState.completed and str(turn.state) != "completed":
+            return {"text": None, "structured": None, "error": f"state {turn.state}"}
+        raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output if isinstance(term.structured_output, dict) else None
         return {"text": raw, "structured": structured,
-                "trajectory_url": await self._trajectory(agent, session, task_id, message_id, deadline)}
+                "trajectory_url": await self._trajectory(agent, session, turn.task_id, message_id, deadline)}
 
     async def _trajectory(self, agent: DeployedAgent, session: _Session, task_id: str, message_id: str,
                           deadline: float) -> Optional[str]:
