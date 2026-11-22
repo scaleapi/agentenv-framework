@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
-from agent_env.config.model_pricing import PriceTable, ReportedBy, Tokens, litellm_prices, price
+from agent_env.config.model_pricing import Cost, CostStatus, PriceTable, ReportedBy, Tokens, litellm_prices, price
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
 if TYPE_CHECKING:
@@ -63,8 +63,8 @@ class UsageEntry(TypedDict):
 @dataclass
 class RoleUsage:
     """One role's turns in one step: the model it ran, the host of the endpoint it called, the attempt epoch the step
-    ran under, and each turn's usage, None for a turn that reported none. ``reported_by`` is who reports its cost: an
-    agent's harness, or, for calls core makes itself, the endpoint that billed them."""
+    ran under, and each turn's usage, None for a turn that reported none. ``call_costs`` are the costs of calls core
+    made itself (``StepUsage.call``), each costed when it was made; a role with them is costed from them alone."""
 
     role: str
     model: Optional[str] = None
@@ -72,7 +72,7 @@ class RoleUsage:
     attempt: Optional[int] = field(default_factory=ATTEMPT_EPOCH.get)
     turns: list[Optional[Usage]] = field(default_factory=list)
     unparsed: list[dict] = field(default_factory=list)
-    reported_by: ReportedBy = ReportedBy.HARNESS
+    call_costs: list[Cost] = field(default_factory=list)
 
     def add(self, usage: Optional[Usage], unparsed: Optional[dict] = None) -> None:
         """One finished turn's usage, and what of it couldn't be read."""
@@ -105,8 +105,8 @@ class RoleUsage:
         includes = flags.pop() if len(flags) == 1 else None
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
-        cost = price(tokens, total("cost_usd"), model=self.model,
-                     prices=prices, reported_by=self.reported_by)
+        cost = (_combined(self.call_costs) if self.call_costs
+                else price(tokens, total("cost_usd"), model=self.model, prices=prices, reported_by=ReportedBy.HARNESS))
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
@@ -116,6 +116,26 @@ class RoleUsage:
             entry["unparsed"] = self.unparsed[:_UNPARSED_TURNS_KEPT]
             entry["unparsed_turns"] = len(self.unparsed)
         return entry
+
+
+def _combined(costs: list[Cost]) -> Cost:
+    """Calls' costs summed: billed (``reported``) only when every costed call was billed, otherwise ``priced``, an
+    estimate, with the source of the priced calls, the assumptions any made, and the bills kept in ``reported_usd``.
+    Unpriced when none was costed; a call with no cost is left out of the sum, which ``partial`` marks."""
+    costed = [c for c in costs if c.usd is not None]
+    if not costed:
+        return Cost(None, CostStatus.UNPRICED, None, None, unpriced=costs[-1].unpriced)
+    status = CostStatus.REPORTED if all(c.status is CostStatus.REPORTED for c in costed) else CostStatus.PRICED
+    sources = {c.source for c in costed if c.status is status}
+    bills = [c.reported_usd for c in costs if c.reported_usd is not None]
+    assumed = tuple(dict.fromkeys(a for c in costed for a in c.assumed))
+    priced = [c for c in costed if c.status is CostStatus.PRICED]
+    uncached = [c.uncached_input for c in priced]
+    rates = {repr(c.unit_prices): c.unit_prices for c in priced}
+    return Cost(sum(c.usd for c in costed), status, sources.pop() if len(sources) == 1 else None,
+                sum(bills) if bills else None,
+                uncached_input=sum(uncached) if priced and None not in uncached else None,
+                unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed)
 
 
 def _unreported_calls(usage: Usage) -> int:
@@ -152,17 +172,15 @@ class StepUsage:
 
     def call(self, role: ModelRole, reply: ModelReply) -> None:
         """One model call the step made itself as ``role`` (a user-sim gate's judge, through ``model_call``), written
-        at once. Each call carries its own cost, what the endpoint billed, else the map's price, so the role's entry
-        sums every call; one with neither leaves the entry a lower bound, as ``cut_off`` does."""
+        at once. Its cost is kept as the call was costed (``_combined`` sums them); one with no cost leaves the entry a
+        lower bound, as ``cut_off`` does."""
         usage = self._roles.get(role)
         if usage is None:
-            usage = self._roles[role] = RoleUsage(role.value, reply.model, reply.endpoint_host,
-                                                  reported_by=ReportedBy.PROVIDER)
+            usage = self._roles[role] = RoleUsage(role.value, reply.model, reply.endpoint_host)
         counts = Usage.from_model_response(reply.usage) if reply.usage else Usage()
-        if reply.cost.usd is not None:
-            counts = replace(counts, cost_usd=reply.cost.usd)
-        else:
+        if reply.cost.usd is None:
             counts = replace(counts, provider_details={**counts.provider_details, "unreported": True})
+        usage.call_costs.append(reply.cost)
         usage.add(counts)
         self.entries()
 
