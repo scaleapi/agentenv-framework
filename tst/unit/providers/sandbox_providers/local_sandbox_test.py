@@ -1165,6 +1165,17 @@ def _running(pid: int) -> bool:
         return False
 
 
+async def _execd(pid: int, program: str, sandbox_id: str) -> None:
+    """Wait until ``pid`` runs ``program`` and reads as ``sandbox_id``'s: bash execs the last command of ``-c``, and
+    while it execs /proc shows it no environment, so a teardown scanning then wouldn't see it."""
+    for _ in range(1000):
+        argv0 = Path(f"/proc/{pid}/cmdline").read_text().split("\0")[0]
+        if argv0 == program and pid in ls._marked_pids(sandbox_id):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{pid} never ran {program} marked as {sandbox_id}")
+
+
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
     """Start ``command`` the way a host install starts its agent, outliving the exec that started it, and wait until
     it reads as marked: while a process execs, /proc shows it no environment, which on a loaded machine can last."""
@@ -1218,6 +1229,7 @@ async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, mon
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     sandbox = LocalSandbox(work_dir=tmp_path)
     stubborn = await _detached(sandbox, "bash -c 'trap \"\" TERM; sleep 300'")
+    await _execd(stubborn, "sleep", sandbox.sandbox_id)
 
     await ls._stop_marked(sandbox.sandbox_id)
 
