@@ -97,7 +97,10 @@ async def test_every_click_lands_while_the_display_records_at_30_fps(image):
         cells = await _clicked_cells(driver, 64)
         manifest = await _end(driver, started)
     span = (_when(manifest.segments[-1].ended_at) - _when(manifest.segments[0].started_at)).total_seconds()
-    assert len(cells) == 64 and sum(s.frames for s in manifest.segments) / span > 25
+    missing = sorted({f"{i // 8},{i % 8}" for i in range(64)} - set(cells), key=lambda c: tuple(map(int, c.split(","))))
+    assert not missing, f"no click landed on cells {missing}; cells clicked more than once: " \
+                        f"{sorted(c for c, n in cells.items() if n > 1)}"
+    assert sum(s.frames for s in manifest.segments) / span > 25
 
 
 @pytest.mark.asyncio
