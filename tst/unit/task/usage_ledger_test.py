@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 from agentenv_protocol.a2a_agent import Usage
@@ -13,6 +14,7 @@ from agentenv_protocol.a2a_agent import Usage
 from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config import set_document_store
 from agent_env.config.model import ModelRole
+import agent_env.task.task as task_mod
 from agent_env.store import LocalSqliteDocumentStore
 from agent_env.task.store import SupersededAttemptError, TaskInstanceStore, get_task_instance_store, \
     set_task_instance_store
@@ -34,14 +36,14 @@ def store(tmp_path):
 
 
 class _Spends(TaskStep):
-    """Records one solver turn of ``input_tokens`` on gpt-4.1-mini, then sets ``spent``, waits for ``hold`` and fails
-    on the attempts ``fail_on`` names."""
+    """Records one solver turn of ``input_tokens`` on gpt-4.1-mini (``grows`` more each later attempt), then sets
+    ``spent``, waits for ``hold`` and fails on the attempts ``fail_on`` names."""
 
     type = "spends"
 
-    def __init__(self, id, *, input_tokens=100, fail_on=(), hold=None, **kwargs):
+    def __init__(self, id, *, input_tokens=100, fail_on=(), hold=None, grows=0, **kwargs):
         super().__init__(id, 1, **kwargs)
-        self.input_tokens, self.fail_on, self.hold, self.attempts = input_tokens, set(fail_on), hold, 0
+        self.input_tokens, self.fail_on, self.hold, self.grows, self.attempts = input_tokens, set(fail_on), hold, grows, 0
         self.spent = asyncio.Event()
 
     async def execute(self, context):
@@ -49,7 +51,7 @@ class _Spends(TaskStep):
         usage = StepUsage(context, self.id)
         usage.start(ModelRole.SOLVER, "gpt-4.1-mini", None)
         usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
-            input_tokens=self.input_tokens, output_tokens=10, input_includes_cache=True)))
+            input_tokens=self.input_tokens + self.grows * (self.attempts - 1), output_tokens=10, input_includes_cache=True)))
         self.spent.set()
         if self.hold is not None:
             await self.hold.wait()
@@ -167,3 +169,13 @@ async def test_a_resumed_run_keeps_the_usage_from_before_it(store):
         context=persisted, start_step=1, instance_id=context.instance_id)
     assert _ledger(store, resumed.instance_id) == [(0, "a", 5), (0, "b", 9), (1, "b", 9)]
     assert store.get(resumed.instance_id).usage_total["input_tokens"] == 23
+
+
+@pytest.mark.asyncio
+async def test_a_runner_that_sets_no_attempt_epoch_still_keeps_each_attempt(store, monkeypatch):
+    """As the hub's worker runs steps today: the entries carry no attempt, and the ledger places them by the write's."""
+    monkeypatch.setattr(task_mod, "ATTEMPT_EPOCH", SimpleNamespace(set=lambda epoch: None))
+    step = _Spends("ask", grows=20, fail_on={1}, retry_config=RetryConfig(retry_from_step_id="ask"))
+    context = await Task(id="t", version=1, steps=[step, _Spends("next", input_tokens=5)]).run(context=TaskStepContext())
+    assert [e["attempt"] for e in context.metadata["step_usage"]["ask"]] == [None]
+    assert _ledger(store, context.instance_id) == [(0, "ask", 100), (1, "ask", 120), (1, "next", 5)]

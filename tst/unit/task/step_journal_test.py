@@ -783,3 +783,18 @@ def test_resuming_an_instance_stored_before_the_ledger_keeps_the_usage_its_conte
     assert [(e["attempt"], e["step_id"], e["input_tokens"]) for e in resumed.usage] == [(0, "a", 5)]
     assert resumed.usage_total["input_tokens"] == 5 and resumed.attempt_epoch == 1
     assert "step_usage" not in _doc(store, "old")["context"]["metadata"]
+
+
+def test_attempts_of_a_step_whose_runner_sets_no_epoch_keep_apart_and_a_gathered_write_adds_none_twice(store):
+    iid = _new(store)
+    _record(store, iid, "a", _spends({}, "a", _spent(None, input_tokens=5)))
+    _record(store, iid, "s", _spends({"a": [_spent(None, input_tokens=5)]}, "s", _spent(None, input_tokens=10)))
+    # The undo gathers the span's entries: s's the ledger holds already, f's (it never completed) not yet.
+    store.undo_steps_sync(iid, {"s", "f"}, bump_epoch=True, usage=[{**_spent(None, input_tokens=10), "step_id": "s"},
+                                                                 {**_spent(None, input_tokens=3), "step_id": "f"}])
+    _record(store, iid, "s", _spends({"a": [_spent(None, input_tokens=5)]}, "s", _spent(None, input_tokens=12)), epoch=1)
+    context = TaskStepContext(metadata={"step_usage": {"a": [_spent(None, input_tokens=5)],
+                                                       "s": [_spent(None, input_tokens=12)]}})
+    store.record_task_failure_sync(iid, None, context, RuntimeError("boom"), "now", attempt_epoch=1)
+    assert _ledger(store, iid) == [(0, "a", "solver", 5), (0, "s", "solver", 10), (0, "f", "solver", 3),
+                                   (1, "s", "solver", 12)]

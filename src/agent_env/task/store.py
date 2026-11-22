@@ -739,7 +739,7 @@ class TaskInstanceStore:
 
         def _mutate(doc: dict) -> UpdateSpec | None:
             declined.clear()
-            spent = ledger_fields(doc, _step_usage_after(doc, ops, step_id))
+            spent = ledger_fields(doc, _step_usage_after(doc, ops, step_id), attempt=attempt_epoch)
             if journaled_generation is not None and doc.get(_GENERATION, 0) != journaled_generation:
                 declined.append(f"the run was re-registered (generation {journaled_generation} -> "
                                 f"{doc.get(_GENERATION, 0)}) after the step journaled")

@@ -56,10 +56,34 @@ def total(ledger: list[dict]) -> dict[str, Any]:
             "unpriced_entries": sum(1 for e in ledger if e.get("cost_usd") is None)}
 
 
-def ledger_fields(doc: dict, entries: list[dict]) -> dict[str, Any]:
+def ledger_fields(doc: dict, entries: list[dict], *, attempt: Optional[int] = None) -> dict[str, Any]:
     """The instance fields that merge ``entries`` into ``doc``'s ledger, to set in the same write; none when there are
-    no entries."""
+    no entries. An entry with no ``attempt``, from a runner that doesn't set the attempt epoch, is placed first
+    (``_placed``), so two attempts of a step never share a key."""
     if not entries:
         return {}
-    ledger = merged(doc.get(LEDGER_KEY) or [], entries)
+    ledger = doc.get(LEDGER_KEY) or []
+    placed = [e for e in (_placed(e, ledger, attempt, doc.get("attempt_epoch", 0)) for e in entries) if e is not None]
+    if not placed:
+        return {}
+    ledger = merged(ledger, placed)
     return {LEDGER_KEY: ledger, TOTAL_KEY: total(ledger)}
+
+
+def _placed(entry: dict, ledger: list[dict], attempt: Optional[int], current: int) -> Optional[dict]:
+    """``entry`` with an attempt. A completion passes ``attempt``, the epoch its step was dispatched under. A write that
+    gathers a whole context passes none: an entry the ledger already holds, its counts equal, an earlier write
+    recorded under the attempt it ran in, so it is left out (None); any other ran in the instance's ``current``
+    attempt."""
+    if entry.get("attempt") is not None:
+        return entry
+    if attempt is not None:
+        return {**entry, "attempt": attempt}
+    same = _without_attempt(entry)
+    if any(_without_attempt(e) == same for e in ledger):
+        return None
+    return {**entry, "attempt": current}
+
+
+def _without_attempt(entry: dict) -> dict:
+    return {k: v for k, v in entry.items() if k != "attempt"}
