@@ -45,6 +45,8 @@ ERROR_MESSAGE_LIMIT = 4000
 ROLE_HEADER = "AgentEnv-Role"
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# The CLI's plugin that tells the model the env's date (env_date.js), beside this file in the image and in an install.
+ENV_DATE_PLUGIN = Path(__file__).with_name("env_date.js")
 
 # Root under which each A2A context_id gets its own OpenCode data dir; lives
 # under $HOME so host-mode instances don't share session state.
@@ -104,9 +106,12 @@ def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_ser
             clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
     armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
-    connects to itself."""
+    connects to itself. The CLI starts on real time: it orders a session's messages by when they were written and
+    takes no time before 1970, so on the env's clock a set behind them broke the session. What it starts, the model's
+    commands, reads the env's time, as does the date its plugin tells the model (``ENV_DATE_PLUGIN``)."""
     urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
-    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed)}
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed),
+            "AGENTENV_REAL_TIME": "1"}
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
@@ -333,6 +338,7 @@ def _build_config(
         # selects otherwise.
         "permission": _permission(builtin_tools, mcp_servers),
         "autoupdate": False,
+        "plugin": [ENV_DATE_PLUGIN.as_uri()],
     }
     if instructions:
         config["instructions"] = list(instructions)

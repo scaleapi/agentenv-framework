@@ -49,7 +49,7 @@ def spawned(monkeypatch):
 
 def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawned):
     """The whole config and argv of a turn without a selection, as origin/main builds them, except that the prompt
-    goes on stdin rather than as the positional message."""
+    goes on stdin rather than as the positional message and the date plugin is loaded."""
     monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
     monkeypatch.delenv("LITELLM_EXTRA_HEADERS", raising=False)
 
@@ -72,6 +72,7 @@ def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawn
         "model": "litellm/m",
         "permission": {"*": "allow", "question": "deny"},
         "autoupdate": False,
+        "plugin": [opencode_bridge.ENV_DATE_PLUGIN.as_uri()],
         "mcp": {"env": {"type": "remote", "url": "https://gw/mcp", "enabled": True}},
     })
 
