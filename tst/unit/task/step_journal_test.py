@@ -19,7 +19,6 @@ from agent_env.task.store import (
     seed_task_instance_context, set_task_instance_store,
     undo_steps,
 )
-from agent_env.task.usage_ledger import entries_of
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.config import set_document_store
@@ -786,32 +785,16 @@ def test_resuming_an_instance_stored_before_the_ledger_keeps_the_usage_its_conte
     assert "step_usage" not in _doc(store, "old")["context"]["metadata"]
 
 
-def test_attempts_of_a_step_whose_runner_sets_no_epoch_keep_apart_and_a_gathered_write_adds_none_twice(store):
+
+def test_a_runner_that_sets_no_epoch_gets_each_steps_usage_once(store):
+    """Its entries carry no attempt, so they are kept by step and role: right for a run without retries, and a
+    gathered write that holds them again adds nothing."""
     iid = _new(store)
     _record(store, iid, "a", _spends({}, "a", _spent(None, input_tokens=5)))
-    _record(store, iid, "s", _spends({"a": [_spent(None, input_tokens=5)]}, "s", _spent(None, input_tokens=10)))
-    # The undo gathers the span's entries: s's the ledger holds already, f's (it never completed) not yet.
-    store.undo_steps_sync(iid, {"s", "f"}, bump_epoch=True, usage=[{**_spent(None, input_tokens=10), "step_id": "s"},
-                                                                 {**_spent(None, input_tokens=3), "step_id": "f"}])
-    _record(store, iid, "s", _spends({"a": [_spent(None, input_tokens=5)]}, "s", _spent(None, input_tokens=12)), epoch=1)
+    _record(store, iid, "b", _spends({"a": [_spent(None, input_tokens=5)]}, "b", _spent(None, input_tokens=9)))
     context = TaskStepContext(metadata={"step_usage": {"a": [_spent(None, input_tokens=5)],
-                                                       "s": [_spent(None, input_tokens=12)]}})
-    store.record_task_failure_sync(iid, None, context, RuntimeError("boom"), "now", attempt_epoch=1)
-    assert _ledger(store, iid) == [(0, "a", "solver", 5), (0, "s", "solver", 10), (0, "f", "solver", 3),
-                                   (1, "s", "solver", 12)]
-
-
-def test_a_late_gathered_write_from_an_older_attempt_keeps_its_usage_apart(store):
-    """A runner that sets no epoch: attempt 0's failure arrives after a resume made attempt 1 the owner and recorded
-    the same step."""
-    store.upsert_instance("i", "t", 1, total_steps=2)
-    seed_task_instance_context("i", TaskStepContext())
-    store.upsert_instance("i", "t", 1, total_steps=2)
-    seed_task_instance_context("i", TaskStepContext(), 1)
-    _record(store, "i", "s", _spends({}, "s", _spent(None, input_tokens=12)), total=2, epoch=1)
-    late = TaskStepContext(metadata={"step_usage": {"s": [_spent(None, input_tokens=7)]}})
-    store.record_task_failure_sync("i", "s", late, RuntimeError("boom"), "now", attempt_epoch=0)
-    store.record_task_cancelled_sync("i", "Ctrl-C", "now", attempt_epoch=0, usage=entries_of({"s": [_spent(None, input_tokens=7)]}))
-    store.record_teardown_sync("i", late, attempt_epoch=0)
-    assert _doc(store, "i")["status"] == "running"
-    assert sorted(_ledger(store, "i")) == [(0, "s", "solver", 7), (1, "s", "solver", 12)]
+                                                       "b": [_spent(None, input_tokens=9)]}})
+    store.record_task_failure_sync(iid, None, context, RuntimeError("boom"), "now")
+    store.record_teardown_sync(iid, context, attempt_epoch=0)
+    assert _ledger(store, iid) == [(None, "a", "solver", 5), (None, "b", "solver", 9)]
+    assert _doc(store, iid)["usage_total"]["input_tokens"] == 14

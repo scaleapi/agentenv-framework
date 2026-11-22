@@ -56,31 +56,12 @@ def total(ledger: list[dict]) -> dict[str, Any]:
             "unpriced_entries": sum(1 for e in ledger if e.get("cost_usd") is None)}
 
 
-def completion_usage(doc: dict, entries: list[dict], attempt: int) -> dict[str, Any]:
-    """The instance fields that merge a completion's ``entries``, its step's, into ``doc``'s ledger, to set in the same
-    write; none when there are none. An entry with no attempt, from a runner that doesn't set the attempt epoch, takes
-    ``attempt``, the epoch the step was dispatched under, so two attempts of a step never share a key."""
-    return _fields(doc, [e if e.get("attempt") is not None else {**e, "attempt": attempt} for e in entries])
-
-
-def gathered_usage(doc: dict, entries: list[dict], attempt: Optional[int] = None) -> dict[str, Any]:
-    """The instance fields that merge a whole context's ``entries`` into ``doc``'s ledger, for a failure, cancel,
-    undo, teardown or re-register; none when there are none. An entry with no attempt is left out when the ledger
-    already holds it, its counts equal (an earlier write recorded it under its own attempt); any other takes
-    ``attempt``, the attempt the write ends, or the instance's current one when the write names none."""
-    epoch = attempt if attempt is not None else doc.get("attempt_epoch", 0)
-    ledger = doc.get(LEDGER_KEY) or []
-    held = [_without_attempt(e) for e in ledger]
-    return _fields(doc, [e if e.get("attempt") is not None else {**e, "attempt": epoch} for e in entries
-                         if e.get("attempt") is not None or _without_attempt(e) not in held])
-
-
-def _fields(doc: dict, entries: list[dict]) -> dict[str, Any]:
+def ledger_fields(doc: dict, entries: list[dict]) -> dict[str, Any]:
+    """The instance fields that merge ``entries`` into ``doc``'s ledger, to set in the same write; none when there are
+    no entries. An entry with no attempt, from a runner that doesn't set the attempt epoch, is kept by step and role
+    alone: exact for a run without retries, and a lower bound for one with, since a later attempt's entry replaces
+    an earlier one's."""
     if not entries:
         return {}
     ledger = merged(doc.get(LEDGER_KEY) or [], entries)
     return {LEDGER_KEY: ledger, TOTAL_KEY: total(ledger)}
-
-
-def _without_attempt(entry: dict) -> dict:
-    return {k: v for k, v in entry.items() if k != "attempt"}

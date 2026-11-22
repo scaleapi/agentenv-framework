@@ -373,10 +373,9 @@ orchestrators call it the same way. What callers rely on:
   writes merges into it: a completion its step's entries, even one a later attempt refused; `undo_steps()` the
   rolled-back steps' (`usage=`); `record_task_failure()` and `record_teardown()` the context's; and
   `record_task_cancelled()` the `usage=` it is given. A re-register keeps it, so it holds every attempt and
-  generation. An entry with no attempt, from a runner that doesn't set `ATTEMPT_EPOCH`, takes the epoch of the
-  write that carries it (the attempt a completion was dispatched under, or a failure, cancel, undo or teardown ends;
-  the instance's current one when the write names none), and a write that gathers a whole context leaves out one
-  the ledger already holds. A runner that writes the instance some other way loses that spend from the ledger.
+  generation. A runner that doesn't set `ATTEMPT_EPOCH` writes entries with no attempt, kept by step and role
+  alone: exact for a run without retries, a lower bound for one with. A runner that writes the instance some other
+  way loses that spend from the ledger.
 - The runner writes its run identifier to `context.metadata["workflow_id"]` before calling `run()`;
   core stores it opaquely with the instance.
 - Each step runs under `protocol_v1.authorized` for the deployed envs in its context: a protocol-client
