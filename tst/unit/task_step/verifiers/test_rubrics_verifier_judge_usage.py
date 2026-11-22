@@ -1,0 +1,119 @@
+"""A rubrics judge's model calls are the step's usage: one ``judge`` entry in ``metadata.step_usage[<step id>]``,
+summed over the step's calls (every batch, every output retry), so the task instance's usage ledger counts judging as
+it counts the agents' turns. A direct judge's call is read from its response, the endpoint's bill its cost when it sent
+one; an agent judge's from the usage its turn reported."""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from agent_env.a2a_agent import protocol
+from agent_env.config.model import ModelRole
+from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.usage import StepUsage
+
+CRITERIA = [{"id": f"c{i}", "title": f"Criterion {i}"} for i in range(1, 8)]
+
+
+def _verifier(**kw) -> RubricsVerifierTaskStep:
+    return RubricsVerifierTaskStep(id="verify", version=1, criteria=CRITERIA, prompt_id="p1", use_agent_judge=False,
+                                   use_trajectory=False, verifier_id="vt", **kw)
+
+
+def _context() -> TaskStepContext:
+    return TaskStepContext(prompt_responses=[PromptResponse(prompt_id="p1", response="done", prompt_text="do it")])
+
+
+def _direct_judge(verifier, *, billed=None):
+    """Answers every batch it's sent, each call reporting 1,000 prompt and 50 completion tokens."""
+    calls = []
+
+    async def judge(prompt: str, *, model: str, context: TaskStepContext) -> dict:
+        calls.append(prompt)
+        ids = [c["id"] for c in json.loads(prompt[prompt.index("["):prompt.index("]", prompt.index("[")) + 1])]
+        return {"response": json.dumps({"results": [{"id": i, "score": 1.0, "justification": f"Checked record {i} with the sheet tool"} for i in ids]}),
+                "trajectory_object_url": None, "usage": {"prompt_tokens": 1000, "completion_tokens": 50},
+                "model": "gpt-4.1-mini", "endpoint_host": "proxy.example:4000", "reported_cost_usd": billed}
+
+    verifier._prompt_llm_judge = judge
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_direct_judges_calls_over_every_batch_are_one_judge_entry():
+    verifier = _verifier(judge_batch_size=3)
+    calls = _direct_judge(verifier)
+    context = _context()
+
+    await verifier.execute(context)
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert len(calls) == 3
+    assert (entry["role"], entry["model"], entry["endpoint_host"], entry["turns"]) == (
+        "judge", "gpt-4.1-mini", "proxy.example:4000", 3)
+    assert (entry["input_tokens"], entry["output_tokens"], entry["cost_status"]) == (3000, 150, "priced")
+    assert context.metadata["model_endpoints"]["judge"]["verify"]["endpoint_host"] == "proxy.example:4000"
+
+
+@pytest.mark.asyncio
+async def test_a_direct_judges_bill_is_its_cost():
+    verifier = _verifier()
+    _direct_judge(verifier, billed=0.02)
+    context = _context()
+
+    await verifier.execute(context)
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["cost_status"], entry["cost_source"], entry["cost_usd"]) == ("reported", "provider", 0.02)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judges_reported_usage_is_its_calls(monkeypatch):
+    verifier = RubricsVerifierTaskStep(id="verify", version=1, criteria=CRITERIA[:1], prompt_id="p", verifier_id="vt",
+                                       use_trajectory=False)
+    answer = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "asked first"}]})
+    reported = {"input_tokens": 4000, "output_tokens": 80, "input_includes_cache": True, "cost_usd": 0.01}
+
+    async def send(url, **kwargs):
+        return "task-1", None
+
+    async def poll(url, task_id, **kwargs):
+        return {"status": {"state": "completed", "message": {"parts": [
+            {"kind": "text", "text": answer}, {"kind": "data", "data": {"usage": reported}}]}}}
+
+    async def fetch(**kwargs):
+        return None
+
+    monkeypatch.setattr(protocol, "send_a2a_message", send)
+    monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+    monkeypatch.setattr(verifier, "_fetch_judge_trajectory", fetch)
+    context = TaskStepContext()
+
+    await verifier._run_judge_with_output_retries(
+        eval_prompt="grade it", criteria=CRITERIA[:1], context=context, model="claude-haiku-4-5",
+        judge_a2a_url="http://judge.test", judge_agent_card={},
+        judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}, model_endpoint_host="proxy.example:4000"),
+        judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True,
+        usage=StepUsage(context, "verify"))
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["role"], entry["model"], entry["endpoint_host"], entry["turns"]) == (
+        "judge", "claude-haiku-4-5", "proxy.example:4000", 1)
+    assert (entry["input_tokens"], entry["output_tokens"], entry["reported_cost_usd"]) == (4000, 80, 0.01)
+
+
+def test_a_call_with_no_usage_is_a_turn_with_no_counts():
+    context = TaskStepContext()
+    usage = StepUsage(context, "verify")
+    RubricsVerifierTaskStep._record_call(usage, {"response": "", "model": "m", "endpoint_host": None}, model="m",
+                                         judge_agent=None, use_agent_judge=False)
+    RubricsVerifierTaskStep._record_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+                                                 "model": "m", "endpoint_host": None},
+                                         model="m", judge_agent=None, use_agent_judge=False)
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 10, True)
+    assert entry["role"] == ModelRole.JUDGE.value

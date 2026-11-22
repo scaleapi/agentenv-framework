@@ -11,6 +11,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
+from agentenv_protocol.a2a_agent import Usage
+
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
     fetch_trajectory,
@@ -22,6 +24,7 @@ from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.config import model_call
 from agent_env.config.model import ModelRole, no_key_for
+from agent_env.config.model_pricing import ReportedBy
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -50,6 +53,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context, render_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.verifiers.verifier import VERIFICATIONS_KEY, Verification, VerifierTaskStep
@@ -1091,6 +1095,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
                                    f"output_format={self.output_format.value} is graded in one judge call.")
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
+            usage = StepUsage(context, self.id)
 
             async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
                 prompt = eval_prompt_for(batch)
@@ -1112,6 +1117,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         criteria=batch,
                         image_blocks=image_blocks,
                         reject_bulk_verdicts=batch_size is not None and self._spec().checks_bulk_verdicts,
+                        usage=usage,
                     )
 
             if len(batches) == 1:
@@ -1360,9 +1366,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         cached_prefix: Optional[str] = None,
     ) -> dict:
         """Direct judge — no agent boot, no tools — through core's one model call (``config.model_call``). Returns
-        ``response`` and ``trajectory_object_url`` (None), and the call's record for a caller that keeps it (this step
-        doesn't): its ``usage`` as the response carried it, the ``model`` called, the ``endpoint_host`` it reached, and
-        its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's price map's figure.
+        ``response`` and ``trajectory_object_url`` (None), and the call's record, which the step keeps in its usage
+        (``_record_call``): its ``usage`` as the response carried it, the ``model`` called, the ``endpoint_host`` it
+        reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's price map's figure.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1530,7 +1536,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
             headers=judge_agent.control_headers,
         )
-        return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
+        return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url, "turn_usage": tr.usage}
 
     async def _judge_timed_out(self, why: str, judge_a2a_url: str, judge_agent_card: dict, task_id: str,
                                judge_agent: Any) -> JudgeTimeoutError:
@@ -1629,6 +1635,20 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         )
         return None
 
+    @staticmethod
+    def _record_call(usage: StepUsage, data: dict, *, model: str, judge_agent, use_agent_judge: bool) -> None:
+        """One judge call's usage in the step's ``judge`` entry: an agent judge's as its turn reported it, a direct
+        one's as the response carried it, the endpoint's bill its cost when it sent one."""
+        if use_agent_judge:
+            usage.call(ModelRole.JUDGE, data.get("turn_usage"), model=model,
+                       endpoint_host=getattr(judge_agent, "model_endpoint_host", None))
+            return
+        read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
+        if read is not None and data.get("reported_cost_usd") is not None:
+            read = replace(read, cost_usd=data["reported_cost_usd"])
+        usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
+                   reported_by=ReportedBy.PROVIDER)
+
     async def _run_judge_with_output_retries(
         self,
         *,
@@ -1644,9 +1664,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         criteria: list[dict],
         image_blocks: Optional[list[dict]] = None,
         reject_bulk_verdicts: bool = False,
+        usage: Optional[StepUsage] = None,
     ) -> tuple[list[dict], int, list[dict], Optional[str]]:
         """Invoke the judge, retrying with corrective feedback when output ids/count are wrong and, with
-        ``reject_bulk_verdicts``, when the rows read as bulk verdicts (kept, and logged, on the last attempt).
+        ``reject_bulk_verdicts``, when the rows read as bulk verdicts (kept, and logged, on the last attempt). Each
+        call's usage goes into ``usage``, the step's.
 
         ``use_agent_judge`` is the run-resolved value (passed in, not read off self — see execute()).
         """
@@ -1683,6 +1705,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 )
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
+            if usage is not None:
+                self._record_call(usage, data, model=model, judge_agent=judge_agent, use_agent_judge=use_agent_judge)
 
             logger.info(f"Judge response: {data['response'][:200]}...")
             judge_trajectory_url = data.get("trajectory_object_url")
