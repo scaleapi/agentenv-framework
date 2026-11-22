@@ -115,3 +115,19 @@ def test_a_task_says_whether_it_feeds_an_atif_copy() -> None:
     trajectories.start("t2", turn)
     assert (unprescribed.builds_atif, waiting, prescribed.builds_atif) == (False, False, True)
     assert TaskTrajectories(native=NATIVE).register("t3", "ctx").builds_atif is False
+
+
+def test_a_task_says_whether_it_opens_a_new_document_of_its_conversation() -> None:
+    trajectories = TaskTrajectories(native=NATIVE, atif=Shots)
+    trajectories.prescribe([FORMAT])
+    turn = TurnStart(message_id=None, parts=(TextPart(text="hi"),), agent_name="toy", agent_version="1",
+                     agent_model=None)
+    opened = []
+    for task_id in ("t1", "t2", "t3"):
+        log = trajectories.register(task_id, "ctx")
+        trajectories.start(task_id, turn)
+        opened.append(log.starts_document)
+        trajectories.seal(task_id, TrajectoryState.COMPLETED, final=(TextPart(text="done"),))
+        if task_id == "t2":
+            trajectories.restored("ctx", 2)
+    assert opened == [True, False, True]

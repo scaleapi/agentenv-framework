@@ -5,9 +5,10 @@ starting usage on every record it splits the message into. A record waits for it
 never sees a step change. One whose session record never comes is written without them once a later record of the
 same agent has its own, or the task ends.
 
-Sub-agents are embedded trajectories, each named by the call that spawned it. Their final answer reaches only their
-own transcript, so a message the session gives and stdout doesn't is written from the session record. Records match
-across the two by uuid, the CLI's own id for each."""
+Sub-agents are embedded trajectories, each named by the call that spawned it in its task. Their final answer reaches
+only their own transcript, so a message the session gives and stdout doesn't is written from the session record.
+Records match across the two by uuid, the CLI's own id for each. A sub-agent the CLI continues in a later task is a new
+trajectory there, under the call that continued it."""
 from __future__ import annotations
 
 import base64
@@ -75,7 +76,8 @@ class ClaudeCodeAtif(Adapter):
         self._spawner_of_uuid: dict[str, str] = {}
         self._agent_of_cli: dict[str, str] = {}
         self._cli_of_uuid: dict[str, str] = {}
-        self._declared: set[str] = set()
+        self._task = 0
+        self._declared: dict[str, int] = {}
         self._spawn_names: dict[str, str] = {}
         self._stamped: set[str] = set()
         self._held_tools: dict[str, list[dict[str, Any]]] = {}
@@ -136,7 +138,7 @@ class ClaudeCodeAtif(Adapter):
         if cli_agent is None:
             self._define(turn, definitions, None)
         elif (spawner := self._agent_of_cli.get(cli_agent)) is not None and spawner in self._declared:
-            if spawner not in self._unplaced:
+            if self._placed(spawner):
                 self._define(turn, definitions, spawner)
         else:
             self._held_tools[cli_agent] = definitions
@@ -159,8 +161,12 @@ class ClaudeCodeAtif(Adapter):
         self._session.clear()
         self._matched.clear()
         self._held_tools.clear()
+        self._spawner_of_uuid.clear()
+        self._agent_of_cli.clear()
+        self._cli_of_uuid.clear()
         self._inits = 0
         self._attempt_step = None
+        self._task += 1
 
     # The queue: records in the order they came, each written once its session record is in
 
@@ -217,7 +223,7 @@ class ClaudeCodeAtif(Adapter):
         session = self._session.get(entry.uuid) if entry.uuid is not None else None
         if entry.agent is not None and entry.agent not in self._declared:
             self._declare(entry.agent, turn)
-        if entry.agent in self._unplaced:
+        if entry.agent is not None and not self._placed(entry.agent):
             return
         if kind == "assistant":
             self._assistant(record, session, entry.agent, turn)
@@ -227,7 +233,7 @@ class ClaudeCodeAtif(Adapter):
     def _declare(self, agent: str, turn: Any) -> None:
         """Embed the sub-agent the call ``agent`` spawned. One whose call already has its result, as when its first
         record came after it, has nowhere to go, and its records are left to the native log."""
-        self._declared.add(agent)
+        self._declared[agent] = self._task
         try:
             turn.subagent(agent, spawned_by=agent, name=self._spawn_names.get(agent))
         except AtifError:
@@ -236,6 +242,10 @@ class ClaudeCodeAtif(Adapter):
         cli_agent = next((cli for cli, spawner in self._agent_of_cli.items() if spawner == agent), None)
         if cli_agent is not None and cli_agent in self._held_tools:
             self._define(turn, self._held_tools.pop(cli_agent), agent)
+
+    def _placed(self, agent: str) -> bool:
+        """Whether the sub-agent's records can go in its trajectory: it was embedded, in this task."""
+        return agent not in self._unplaced and self._declared.get(agent) == self._task
 
     def _define(self, turn: Any, definitions: list[dict[str, Any]], agent: str | None) -> None:
         """The tools on the trajectory's agent block, where the protocol has them (agentenv-framework-protocol from

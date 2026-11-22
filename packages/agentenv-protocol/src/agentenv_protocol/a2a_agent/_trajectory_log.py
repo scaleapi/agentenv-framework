@@ -155,6 +155,7 @@ class TaskTrajectories:
         built = self._built.setdefault(record.context_id, self._prescribed)
         if self._atif is not None and turn is not None and ATIF_FORMAT in built:
             copy = self._copies.get(record.context_id)
+            record.log._starts_document = copy is None
             if copy is None:
                 copy = self._copies[record.context_id] = AtifCopy(
                     self._atif, record.context_id, media=self.media.sink(record.context_id),

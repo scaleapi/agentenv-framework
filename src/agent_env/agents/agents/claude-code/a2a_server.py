@@ -521,7 +521,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
         # without waiting on the turn; a snapshot load holds the lock across its restore.
         self._active_contexts: set[str] = set()
         self._contexts_lock = asyncio.Lock()
-        # Each conversation's request shapes its ATIF copy has the tools of, so a shape is fed once in this process.
+        # Each conversation's request shapes its ATIF document has the tools of, so a shape is fed to a document once.
         self._tool_shapes: dict[str, set[tuple[str | None, str]]] = {}
 
     async def run(self, request: TaskRequest[ClaudeCodeConfig]) -> TaskResult:
@@ -620,8 +620,11 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
         """What run_claude feeds the ATIF adapter beside stdout, when the task builds an atif/1 copy."""
         if not _builds_atif(request):
             return {}
-        return {"aux_callback": request.trajectory.aux,
-                "tool_shapes": self._tool_shapes.setdefault(request.context_id, set())}
+        new_document = getattr(request.trajectory, "starts_document", False)
+        shapes = self._tool_shapes.setdefault(request.context_id, set())
+        if new_document:
+            shapes.clear()
+        return {"aux_callback": request.trajectory.aux, "tool_shapes": shapes, "new_document": new_document}
 
     async def _context_trajectory(self, context_id: str) -> dict[str, Any]:
         session_id = self.session_ref_for_context(context_id)

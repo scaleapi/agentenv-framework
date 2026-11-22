@@ -163,6 +163,7 @@ class TrajectoryLog:
 
     __slots__ = (
         "_events", "_size_bytes", "_format", "_native", "_sealed", "_task_id", "_warned", "_adapter", "_atif",
+        "_starts_document",
     )
 
     def __init__(self, *, native: str | None = None, adapter: AdapterSpec | None = None) -> None:
@@ -175,6 +176,7 @@ class TrajectoryLog:
         self._warned = False
         self._adapter = adapter
         self._atif: Any = None
+        self._starts_document = False
 
     @property
     def format(self) -> str | None:
@@ -185,6 +187,13 @@ class TrajectoryLog:
         """Whether this task feeds an atif/1 copy: the agent has an ATIF adapter and the run prescribed atif/1. An agent
         gathers what only its aux files take, such as a log it tails, only then."""
         return self._atif is not None
+
+    @property
+    def starts_document(self) -> bool:
+        """Whether this task opens a new atif/1 document of its conversation: the conversation's first, or the first
+        since the copy was dropped (a restart, an eviction, a snapshot restore). What an agent feeds a document once,
+        such as the tools its model is offered, it feeds again then."""
+        return self._starts_document
 
     def set_format(self, format: str) -> None:
         """Name the events' versioned format, such as ``my-cli-events/1``; once an event is

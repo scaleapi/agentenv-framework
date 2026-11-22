@@ -200,3 +200,28 @@ def test_a_transcript_rewritten_under_the_same_inode_is_followed_by_its_line_cou
         file.truncate()
     assert transcript.stat().st_ino == inode
     assert [record["uuid"] for _, record in tail.read()[0]] == ["after"]
+
+
+def test_a_new_document_is_fed_the_latest_shape_its_transcript_already_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", tmp_path)
+    (tmp_path / "sess-1.jsonl").write_bytes(_lines(_shape("h1"), _assistant("old"), _shape("h2")))
+    shapes = {(None, "h2")}
+    plain = claude_bridge.SessionTail("sess-1", set(), set(shapes))
+    fresh = claude_bridge.SessionTail("sess-1", set(), set(), new_document=True)
+    records, files, seen = fresh.read()
+    assert plain.read()[0] == []
+    assert [(name, record["shapeHash"]) for name, record in records] == [("tools", "h2")]
+    fresh.advance(files, seen)
+    assert fresh.read()[0] == []
+
+
+def test_a_task_that_opens_a_new_document_feeds_its_tools_again(turns, client, monkeypatch):
+    client.post("/ext/trajectory/prescribe", json={"formats": ["atif/1"]}).raise_for_status()
+    send(client, "one", context_id="ctx-b")
+    turns[0]["tool_shapes"].add((None, "h1"))
+    send(client, "two", context_id="ctx-b")
+    agent = client.app.state.agentenv_a2a.services.task_trajectories
+    agent.restored("ctx-b", 2)
+    send(client, "three", context_id="ctx-b")
+    assert [call["new_document"] for call in turns] == [True, False, True]
+    assert turns[2]["tool_shapes"] == set()

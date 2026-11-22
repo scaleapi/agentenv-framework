@@ -512,20 +512,26 @@ class SessionTail:
     adapter's aux record (``session_aux``). It starts where each file ends, so an earlier turn isn't fed again, and
     finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps; a file is
     taken as replaced when its inode or the line before the place it was read to changed.
-    ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again."""
+    ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again. For a new
+    document, ``new_document``, the first read also gives the latest request shape the transcript already held, which
+    the CLI writes once per session."""
 
-    def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]]) -> None:
+    def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]], *,
+                 new_document: bool = False) -> None:
         self._main = session_jsonl_path(session_id)
         self._subagents = self._main.with_suffix("") / "subagents"
         self._on_stdout = on_stdout
         self._shapes = shapes
         self._files: dict[Path, _TailedFile] = {}
+        self._earlier_shape: dict | None = None
         for path in self._paths():
             with contextlib.suppress(OSError):
                 data = path.read_bytes()
                 end = data.rfind(b"\n") + 1
                 self._files[path] = _TailedFile(path.stat().st_ino, end, data.count(b"\n", 0, end),
                                                 _line_before(data, end))
+                if new_document and path == self._main:
+                    self._earlier_shape = _last_shape(data[:end])
 
     def _paths(self) -> list[Path]:
         subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
@@ -537,6 +543,8 @@ class SessionTail:
         records: list[tuple[str, dict]] = []
         files: dict[Path, _TailedFile] = {}
         shapes = set(self._shapes)
+        if self._earlier_shape is not None and (fed := session_aux(self._earlier_shape, None, (), shapes)):
+            records.append(fed)
         for path in self._paths():
             try:
                 tailed, lines = self._new_lines(path, self._files.get(path))
@@ -556,6 +564,7 @@ class SessionTail:
     def advance(self, files: Mapping[Path, _TailedFile], shapes: set[tuple[str | None, str]]) -> None:
         self._files.update(files)
         self._shapes.update(shapes)
+        self._earlier_shape = None
 
     @staticmethod
     def _new_lines(path: Path, tailed: _TailedFile | None) -> tuple[_TailedFile, list[bytes]]:
@@ -579,6 +588,21 @@ class SessionTail:
         lines = [line for line in data[:end].split(b"\n") if line.strip()]
         return _TailedFile(status.st_ino, offset + end, tailed.lines + data.count(b"\n", 0, end),
                            _line_before(data, end) if end else last), lines
+
+
+def _last_shape(data: bytes) -> dict | None:
+    """The last request shape a transcript holds."""
+    marker = _SHAPE_RECORD.encode()
+    start = data.rfind(marker)
+    while start >= 0:
+        line_start = data.rfind(b"\n", 0, start) + 1
+        line_end = data.find(b"\n", start)
+        with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+            record = json.loads(data[line_start:line_end if line_end >= 0 else None])
+            if isinstance(record, dict) and record.get("type") == _SHAPE_RECORD:
+                return record
+        start = data.rfind(marker, 0, line_start)
+    return None
 
 
 def _line_before(data: bytes, end: int) -> bytes:
@@ -678,13 +702,15 @@ async def run_claude(
     event_callback: Callable[[dict], None] | None = None,
     aux_callback: Callable[[str, Any], None] | None = None,
     tool_shapes: set[tuple[str | None, str]] | None = None,
+    new_document: bool = False,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
     is left of ``timeout_s``, so the turn never outlives its caller's deadline. ``CLAUDE_API_ERROR_RETRIES=0`` turns
     resumes off. ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is
     held until it's known not to be resumed. ``aux_callback``, given, gets the ATIF adapter's aux records, in order
     with the stdout events: the transcripts' new records as the CLI writes them, each resumed attempt's error
-    `result`; ``tool_shapes`` holds the request shapes the conversation was fed already."""
+    `result`; ``tool_shapes`` holds the request shapes the conversation's document was fed already, and
+    ``new_document`` says the turn opens a new one, which is fed the transcript's latest shape first."""
     deadline = time.monotonic() + timeout_s
     retries_left = _configured_api_error_retries()
     on_stdout: set[str] = set()
@@ -694,8 +720,9 @@ async def run_claude(
         role=role, effort=effort, max_turns=max_turns, max_thinking_tokens=max_thinking_tokens,
         builtin_tools=builtin_tools, event_callback=event_callback, on_stdout=on_stdout,
     )
-    tail = (await asyncio.to_thread(SessionTail, session_id, on_stdout, tool_shapes if tool_shapes is not None
-                                    else set())) if aux_callback is not None else None
+    tail = (await asyncio.to_thread(partial(SessionTail, session_id, on_stdout, tool_shapes if tool_shapes is not None
+                                            else set(), new_document=new_document))
+            if aux_callback is not None else None)
     attempt_prompt, attempt_resume, attempt_session = prompt, resume, session_id
     trajectory: list[dict] = []
     tool_calls = 0

@@ -305,3 +305,47 @@ def test_from_atif_gives_back_stream_json_events():
 def test_the_pinned_cli_is_one_the_fixtures_were_recorded_on():
     pinned = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", (AGENT_DIR / "Dockerfile").read_text(), re.MULTILINE)
     assert pinned and pinned.group(1) in ClaudeCodeAtif.spec.tested_with
+
+
+def _sub_agent_turn(feed, spawn_id, at, *, parent=None, cli="a7f9", step="s"):
+    """A sub-agent's turn under call ``spawn_id``: its prompt, a call and its result on stdout (``parent`` the call
+    stdout names), and its last answer only in its transcript."""
+    parent = parent or spawn_id
+    prompt = user(f"{step}-p", text("go"), parent=parent)
+    sub_call = assistant(f"m-{step}1", f"{step}-c", call(f"{step}-call"), parent=parent)
+    sub_result = user(f"{step}-r", result(f"{step}-call", "out"), parent=parent)
+    answer = assistant(f"m-{step}2", f"{step}-a", text(f"answer {step}"), parent=parent)
+    feed.out(prompt).transcript(prompt, at, agent=cli).out(sub_call).transcript(sub_call, at, agent=cli)
+    feed.out(sub_result).transcript(sub_result, at, agent=cli).transcript(answer, at, agent=cli)
+
+
+def test_a_sub_agent_continued_in_a_later_task_is_a_trajectory_of_that_task():
+    first, second = Feed(), Feed()
+    spawn = assistant("msg-1", "u1", call("spawn-1", "Agent", prompt="go"))
+    first.out(spawn).transcript(spawn, "2026-11-22T02:01:00Z")
+    _sub_agent_turn(first, "spawn-1", "2026-11-22T02:01:01Z", step="a")
+    back = user("u2", result("spawn-1", "done"))
+    first.out(back).transcript(back, "2026-11-22T02:01:02Z")
+    resume = assistant("msg-2", "u3", call("send-1", "SendMessage", to="a7f9", message="again"))
+    second.out(resume).transcript(resume, "2026-11-22T02:02:00Z")
+    _sub_agent_turn(second, "send-1", "2026-11-22T02:02:01Z", step="b")
+    again = user("u4", result("send-1", "done again"))
+    second.out(again).transcript(again, "2026-11-22T02:02:02Z")
+    document = run(first, second).document
+    subs = {sub["trajectory_id"]: [s.get("message") for s in sub["steps"]] for sub in document["subagent_trajectories"]}
+    assert subs == {"spawn-1": ["", "answer a"], "send-1": ["", "answer b"]}
+
+
+def test_a_sub_agent_a_later_task_names_by_its_first_call_is_left_to_the_native_log():
+    first, second = Feed(), Feed()
+    spawn = assistant("msg-1", "u1", call("spawn-1", "Agent", prompt="go"))
+    first.out(spawn).transcript(spawn, "2026-11-22T02:01:00Z")
+    _sub_agent_turn(first, "spawn-1", "2026-11-22T02:01:01Z", step="a")
+    back = user("u2", result("spawn-1", "done"))
+    first.out(back).transcript(back, "2026-11-22T02:01:02Z")
+    answer = assistant("msg-2", "u3", text("still here"))
+    _sub_agent_turn(second, "spawn-1", "2026-11-22T02:02:01Z", step="b")
+    second.out(answer).transcript(answer, "2026-11-22T02:02:02Z")
+    document = run(first, second).document
+    assert [len(sub["steps"]) for sub in document["subagent_trajectories"]] == [2]
+    assert agent_steps(document)[-1]["message"] == "still here"
