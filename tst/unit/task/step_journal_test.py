@@ -12,6 +12,7 @@ import pytest
 import agent_env.task.step_journal as journal_mod
 import agent_env.task.store as store_mod
 from agent_env.store import Filter, LocalSqliteDocumentStore, Sort
+from agent_env.store.document_store import UpdateSpec
 from agent_env.task.step_journal import _union, commit_ordered, replay_context
 from agent_env.task.store import (
     TASK_STEP_JOURNAL_COLLECTION, SupersededAttemptError, TaskInstanceStore, TaskStepResult, TaskStepStatus,
@@ -768,3 +769,17 @@ def test_a_resumed_run_keeps_the_usage_from_before_it(store):
             epoch=1)
     assert _ledger(store, "i") == [(0, "a", "solver", 5), (0, "b", "solver", 7), (1, "b", "solver", 11)]
     assert store.get("i").usage_total["input_tokens"] == 23
+
+
+def test_resuming_an_instance_stored_before_the_ledger_keeps_the_usage_its_context_holds(store):
+    store.upsert_instance("old", "t", 1, total_steps=2)
+    seed_task_instance_context("old", TaskStepContext())
+    _record(store, "old", "a", _spends({}, "a", _spent(0, input_tokens=5)), total=2)
+    store._doc_store.update(INST, Filter.of(instance_id="old"), UpdateSpec(unset={"usage", "usage_total"}))
+    assert "usage" not in _doc(store, "old")
+
+    resumed = store.upsert_instance("old", "t", 1, total_steps=2, start_step=1)
+
+    assert [(e["attempt"], e["step_id"], e["input_tokens"]) for e in resumed.usage] == [(0, "a", 5)]
+    assert resumed.usage_total["input_tokens"] == 5 and resumed.attempt_epoch == 1
+    assert "step_usage" not in _doc(store, "old")["context"]["metadata"]

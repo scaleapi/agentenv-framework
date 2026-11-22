@@ -383,15 +383,17 @@ class TaskInstanceStore:
             self._journal_seeded_completions(store, instance_id, completed_step_docs)
             return TaskInstance.from_dict(fresh_doc)
         except DuplicateKeyError:
-            # atomic inc (not read-then-set rev): stays monotonic under concurrent re-registers + racing step CAS.
-            # The same write bumps the generation, retiring the old journal without a delete that
-            # could race a completion still landing.
-            updated = store.update_one_and_get(
-                TASK_INSTANCES_COLLECTION,
-                Filter.of(instance_id=instance_id),
-                UpdateSpec(set={k: v for k, v in run_state.items() if k != "attempt_epoch"},
-                           inc={_REV: 1, _GENERATION: 1, "attempt_epoch": 1}),
-                return_after=True,
+            # A CAS on rev, so it stays monotonic under concurrent re-registers and racing step CASes. The same
+            # write bumps the generation, retiring the old journal without a delete that could race a completion
+            # still landing, and puts the usage the context it resets holds into the ledger (an instance stored
+            # before the ledger has it only there).
+            fresh = {k: v for k, v in run_state.items() if k != "attempt_epoch"}
+            updated = compare_and_swap(
+                store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id),
+                lambda doc: UpdateSpec(
+                    set={**fresh, **ledger_fields(doc, entries_of(_get_path(doc, _STEP_USAGE_PATH)))},
+                    inc={_GENERATION: 1, "attempt_epoch": 1}),
+                counter_field=_REV,
             )
             if updated is None:
                 raise RuntimeError(
