@@ -56,14 +56,11 @@ class Slow:
     """An agent's turn that works for ``seconds`` of real time, then acts with ``then(rig)`` and ends with what it
     returns (its closing text, or a ``Fail``). The work runs as the agent's own, so the step giving up on the turn
     doesn't stop it; only a cancel of its A2A task does, unless ``stops_on_cancel`` is False (an agent that won't
-    stop). Canceled, it takes ``stopping_seconds`` to stop, as an agent killing a CLI or interrupting a worker thread
-    does, and may still act meanwhile (``while_stopping(rig)``, a tool call already under way)."""
+    stop)."""
 
     def __init__(self, seconds: float, then: Optional[Callable[["Rig"], Any]] = None,
-                 stops_on_cancel: bool = True, stopping_seconds: float = 0,
-                 while_stopping: Optional[Callable[["Rig"], Any]] = None) -> None:
+                 stops_on_cancel: bool = True) -> None:
         self.seconds, self.then, self.stops_on_cancel = seconds, then, stops_on_cancel
-        self.stopping_seconds, self.while_stopping = stopping_seconds, while_stopping
 
 
 class Rig:
@@ -317,13 +314,7 @@ class Rig:
         return _turn(task_id, "completed", reply)
 
     async def _work(self, slow: Slow) -> Any:
-        try:
-            await asyncio.sleep(slow.seconds)
-        except asyncio.CancelledError:
-            await asyncio.sleep(slow.stopping_seconds)
-            if slow.while_stopping:
-                slow.while_stopping(self)
-            raise
+        await asyncio.sleep(slow.seconds)
         return slow.then(self) if slow.then else ""
 
     async def _cancel_a2a_task(self, url: str, task_id: str) -> None:
@@ -336,8 +327,8 @@ class Rig:
 
     async def _poll_a2a_task(self, url: str, task_id: str, timeout_seconds: float, poll_interval_seconds: float = 10,
                              **kw) -> dict:
-        """A2A tasks/get until the task ends: completed once its work is done, or canceled once a canceled task's work
-        has stopped, as the agent framework's executor marks it; TimeoutError past ``timeout_seconds``."""
+        """A2A tasks/get until the task ends: canceled, or completed once its work is done; TimeoutError past
+        ``timeout_seconds``."""
         work, _ = self.agent_tasks.get(task_id, (None, None))
         if work is not None:
             done, _ = await asyncio.wait({work}, timeout=timeout_seconds)

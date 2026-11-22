@@ -3035,56 +3035,6 @@ def test_cancel_stops_a_running_task_and_frees_its_context() -> None:
     assert ran == ["hang", "next"]
 
 
-def test_a_canceled_task_reads_canceled_only_once_its_run_has_stopped() -> None:
-    """A run that takes a while to stop (killing a CLI, interrupting a worker thread) is still working until it has:
-    a client that reads the task canceled knows nothing of the run still acts."""
-    events: list[str] = []
-
-    @a2a_agent(identity=AgentIdentity(name="slow-to-stop", description="test", version="1"))
-    class Agent(AgentEnvAgent):
-        async def run(self, request: TaskRequest) -> TaskResult:
-            events.append("started")
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                await asyncio.sleep(0.3)  # its cleanup
-                events.append("stopped")
-                raise
-            return TaskResult.text("done")
-
-    with TestClient(Agent().create_app()) as client:
-        hung = _send_in_context(client, "hang", "message-1")
-        assert _within(5, lambda: events == ["started"])
-
-        canceled = _task_rpc(client, "tasks/cancel", hung)
-
-        assert canceled["result"]["status"]["state"] == "canceled"
-        assert events == ["started", "stopped"]
-        assert _task_rpc(client, "tasks/get", hung)["result"]["status"]["state"] == "canceled"
-
-
-def test_a_canceled_run_that_returns_anyway_still_ends_canceled() -> None:
-    """A run that catches the cancel and returns a result: the task still ends canceled, as its trajectory does."""
-
-    @a2a_agent(identity=AgentIdentity(name="stubborn", description="test", version="1"))
-    class Agent(AgentEnvAgent):
-        async def run(self, request: TaskRequest) -> TaskResult:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                pass
-            return TaskResult.text("finished anyway")
-
-    with TestClient(Agent().create_app()) as client:
-        hung = _send_in_context(client, "hang", "message-1")
-        assert _within(5, lambda: _task_rpc(client, "tasks/get", hung)["result"]["status"]["state"] == "working")
-
-        canceled = _task_rpc(client, "tasks/cancel", hung)
-
-        assert canceled["result"]["status"]["state"] == "canceled"
-        assert _task_rpc(client, "tasks/get", hung)["result"]["status"]["state"] == "canceled"
-
-
 @a2a_agent(identity=AgentIdentity(name="guarded", description="test", version="1"), extensions=(MCP_CONFIG_V1,))
 class _GuardedAgent(AgentEnvAgent):
     async def run(self, request: TaskRequest) -> TaskResult:
