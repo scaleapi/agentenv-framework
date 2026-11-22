@@ -85,7 +85,8 @@ class RoleUsage:
         token count gave input and output; otherwise its sums can't be charged in full, and it isn't priced short.
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
-        (``unreported_calls``, which the entry sums, or a proxy's ``unreported``)."""
+        (``unreported_calls``, which the entry sums, or a proxy's ``unreported``), or a turn was cut off
+        (``StepUsage.cut_off``)."""
         reported = [usage for usage in self.turns if usage is not None]
 
         def total(name: str) -> Any:
@@ -144,6 +145,16 @@ class StepUsage:
         usage = self._roles.get(role)
         if usage is not None:
             usage.add(reply.usage, reply.usage_unparsed)
+            self.entries()
+
+    def cut_off(self, role: ModelRole) -> None:
+        """A turn of ``role`` that was sent but never replied: cut off by a time limit, by a cancel, or by its agent no
+        longer answering (``AgentUnreachableError``, a ``TimeoutError``). Its calls are billed but their usage is
+        unknown, so it counts as a turn of unknown usage, marking the role's entry a lower bound. A role that wasn't
+        started, a human peer's, is skipped."""
+        usage = self._roles.get(role)
+        if usage is not None:
+            usage.add(Usage(provider_details={"unreported": True}))
             self.entries()
 
     def entries(self) -> Optional[list[UsageEntry]]:

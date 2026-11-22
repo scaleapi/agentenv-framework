@@ -65,6 +65,30 @@ def test_a_step_records_each_started_role_as_each_turn_ends_and_skips_one_never_
     assert context.metadata["model_endpoints"] == {"solver": {"solve": {"model": "m", "endpoint_host": "gw:443"}}}
 
 
+def test_a_turn_cut_off_before_its_reply_is_a_turn_of_unknown_usage():
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "m", None)
+    usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(input_tokens=3, output_tokens=1)))
+
+    usage.cut_off(ModelRole.SOLVER)
+    usage.cut_off(ModelRole.USER_SIMULATOR)  # a human peer's role, never started
+
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 3, True)
+
+
+def test_a_role_whose_only_turn_was_cut_off_has_no_counts_and_is_partial():
+    context = TaskStepContext()
+    usage = StepUsage(context, "rate")
+    usage.start(ModelRole.USER_SIMULATOR, "m", None)
+
+    usage.cut_off(ModelRole.USER_SIMULATOR)
+
+    [entry] = context.metadata["step_usage"]["rate"]
+    assert (entry["turns"], entry["input_tokens"], entry["cost_usd"], entry["partial"]) == (1, None, None, True)
+
+
 def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_partial():
     role = RoleUsage("solver")
     role.add(Usage(total_tokens=100))
