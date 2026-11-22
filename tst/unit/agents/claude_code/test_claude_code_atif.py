@@ -323,6 +323,7 @@ def test_a_sub_agent_continued_in_a_later_task_is_a_trajectory_of_that_task():
     first, second = Feed(), Feed()
     spawn = assistant("msg-1", "u1", call("spawn-1", "Agent", prompt="go"))
     first.out(spawn).transcript(spawn, "2026-11-22T02:01:00Z")
+    first.fed({"type": "api-request-shape", "shapeHash": "h-sub", "shape": {"tools": [{"name": "Bash"}]}}, "a7f9")
     _sub_agent_turn(first, "spawn-1", "2026-11-22T02:01:01Z", step="a")
     back = user("u2", result("spawn-1", "done"))
     first.out(back).transcript(back, "2026-11-22T02:01:02Z")
@@ -334,6 +335,8 @@ def test_a_sub_agent_continued_in_a_later_task_is_a_trajectory_of_that_task():
     document = run(first, second).document
     subs = {sub["trajectory_id"]: [s.get("message") for s in sub["steps"]] for sub in document["subagent_trajectories"]}
     assert subs == {"spawn-1": ["", "answer a"], "send-1": ["", "answer b"]}
+    assert [[d["function"]["name"] for d in sub["agent"]["tool_definitions"]]
+            for sub in document["subagent_trajectories"]] == [["Bash"], ["Bash"]]
 
 
 def test_a_sub_agent_a_later_task_names_by_its_first_call_is_left_to_the_native_log():

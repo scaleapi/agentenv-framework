@@ -80,7 +80,8 @@ class ClaudeCodeAtif(Adapter):
         self._declared: dict[str, int] = {}
         self._spawn_names: dict[str, str] = {}
         self._stamped: set[str] = set()
-        self._held_tools: dict[str, list[dict[str, Any]]] = {}
+        # Each CLI sub-agent's latest tools, for every trajectory it gets in this document, a continuation's included.
+        self._tools_of_cli: dict[str, list[dict[str, Any]]] = {}
         self._unplaced: set[str] = set()
         self._inits = 0
         self._attempt_step: str | None = None
@@ -137,11 +138,11 @@ class ClaudeCodeAtif(Adapter):
         cli_agent = record.get("agentId") if isinstance(record.get("agentId"), str) else None
         if cli_agent is None:
             self._define(turn, definitions, None)
-        elif (spawner := self._agent_of_cli.get(cli_agent)) is not None and spawner in self._declared:
-            if self._placed(spawner):
-                self._define(turn, definitions, spawner)
         else:
-            self._held_tools[cli_agent] = definitions
+            self._tools_of_cli[cli_agent] = definitions
+            spawner = self._agent_of_cli.get(cli_agent)
+            if spawner is not None and self._placed(spawner):
+                self._define(turn, definitions, spawner)
 
     @aux("attempt", type="result")
     def attempt(self, record: dict[str, Any], turn: Any) -> None:
@@ -160,7 +161,6 @@ class ClaudeCodeAtif(Adapter):
         self._queue.clear()
         self._session.clear()
         self._matched.clear()
-        self._held_tools.clear()
         self._spawner_of_uuid.clear()
         self._agent_of_cli.clear()
         self._cli_of_uuid.clear()
@@ -240,8 +240,8 @@ class ClaudeCodeAtif(Adapter):
             self._unplaced.add(agent)
             return
         cli_agent = next((cli for cli, spawner in self._agent_of_cli.items() if spawner == agent), None)
-        if cli_agent is not None and cli_agent in self._held_tools:
-            self._define(turn, self._held_tools.pop(cli_agent), agent)
+        if cli_agent is not None and cli_agent in self._tools_of_cli:
+            self._define(turn, self._tools_of_cli[cli_agent], agent)
 
     def _placed(self, agent: str) -> bool:
         """Whether the sub-agent's records can go in its trajectory: it was embedded, in this task."""
