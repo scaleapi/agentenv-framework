@@ -14,9 +14,11 @@ import os
 import subprocess
 import time
 
+import httpx
 import pytest
+from aiohttp import web
 
-from tst.unit.agents.opencode.agent import AGENT_DIR, agent_egress, opencode_bridge
+from tst.unit.agents.opencode.agent import AGENT_DIR, agent_egress, model_relay, opencode_bridge
 
 PROXY = "http://127.0.0.1:3128"
 
@@ -100,13 +102,14 @@ def _call(system=SYSTEM, *, parts=False, tools=True, user=SYSTEM) -> dict:
 
 @pytest.fixture
 def env_clock(tmp_path, monkeypatch):
-    """An armed clock, in UTC, whose time a stand-in ``date`` prints (``FAKE_DATE_OUT``; it fails without one),
-    recording the environment it got."""
+    """An armed clock, in UTC, whose time a stand-in ``date`` prints (``FAKE_DATE_OUT``; it fails without one) before
+    it exits (``FAKE_DATE_EXIT``), recording the environment it got."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "date").write_text('#!/bin/sh\nenv > "$FAKE_DATE_ENV"\n[ "$1" = "+%s %N" ] || exit 2\n'
                                   '[ -n "$FAKE_DATE_SLEEP" ] && sleep "$FAKE_DATE_SLEEP"\n'
-                                  '[ -n "$FAKE_DATE_OUT" ] || { echo no clock >&2; exit 1; }\necho "$FAKE_DATE_OUT"\n')
+                                  '[ -n "$FAKE_DATE_OUT" ] || { echo no clock >&2; exit 1; }\necho "$FAKE_DATE_OUT"\n'
+                                  'exit "${FAKE_DATE_EXIT:-0}"\n')
     (bin_dir / "date").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_DATE_ENV", str(tmp_path / "date.env"))
@@ -144,6 +147,58 @@ def test_on_an_armed_clock_the_model_is_told_the_env_date_a_command_reads(env_cl
     assert "AGENTENV_REAL_TIME" not in env_clock.read_text() and "TZ=UTC" in env_clock.read_text()
 
 
+def test_every_env_blocks_date_line_takes_the_env_date_so_the_clis_does_wherever_it_comes(env_clock, monkeypatch):
+    """A config's agent prompt, which comes before the CLI's block, or its instructions, after it, may hold an <env>
+    block of their own."""
+    monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
+    prompt = "You are careful.\n<env>\n  Platform: linux\n  Today's date: Mon Jan 01 2001\n</env>\n"
+    written = prompt + SYSTEM + "\n" + prompt
+
+    system = _rewrite(_call(written))["messages"][0]["content"]
+
+    assert system == written.replace("Mon Jan 01 2001", "Thu Feb 04 2027").replace("Sat Nov 21 2026", "Thu Feb 04 2027")
+
+
+def test_a_lone_surrogate_in_a_tool_an_mcp_server_sent_goes_as_it_came(env_clock, monkeypatch):
+    """The CLI sends it escaped, as a server's tool list had it; UTF-8 can't encode it unescaped."""
+    monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
+    call = _call()
+    call["tools"].append({"type": "function", "function": {"name": "env_cut", "description": "cut \ud83d"}})
+
+    assert _rewrite(call)["tools"][2]["function"]["description"] == "cut \ud83d"
+
+
+@pytest.mark.usefixtures("socket_enabled")
+def test_the_relay_sends_the_endpoint_the_call_with_the_env_date(env_clock, monkeypatch):
+    monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
+    received = []
+
+    async def endpoint(request):
+        received.append((request.headers["Content-Length"], await request.read()))
+        return web.json_response({"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    async def run():
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", endpoint)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        upstream = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        try:
+            async with model_relay.model_relay(upstream, model_relay.Calls(),
+                                               rewrite=opencode_bridge.env_date_rewrite) as root:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    return (await client.post(f"{root}/v1/chat/completions", content=json.dumps(_call()))).status_code
+        finally:
+            await runner.cleanup()
+
+    assert asyncio.run(run()) == 200
+    ((length, body),) = received
+    assert int(length) == len(body) and json.loads(body)["stream"] is True
+    assert json.loads(body)["messages"][0]["content"] == SYSTEM.replace("Sat Nov 21 2026", "Thu Feb 04 2027")
+
+
 def test_the_date_is_written_in_the_zone_the_cli_writes_its_own_in(env_clock, monkeypatch):
     monkeypatch.setenv("FAKE_DATE_OUT", "1801785600 000000000")  # 2027-02-05T00:00Z, still the 4th in New York
     monkeypatch.setenv("TZ", "America/New_York")
@@ -157,23 +212,39 @@ def test_a_call_with_nothing_to_rewrite_or_off_the_clock_goes_as_written_and_rea
                                                                                           armed):
     monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
     monkeypatch.setattr(opencode_bridge, "clock_armed", lambda: armed)
-    calls = [json.dumps(_call(), indent=1).encode()] if not armed else []
-    calls += [json.dumps(_call("A title for this conversation", tools=False, user="hi")).encode(), b"not json"]
+    calls = [json.dumps(_call(), indent=1).encode(), b"not json"] if not armed else []
+    calls += [json.dumps(_call("A title for this conversation", tools=False, user="hi")).encode()]
 
     for body in calls:
         assert asyncio.run(opencode_bridge.env_date_rewrite(body)) == body
     assert not env_clock.exists()
 
 
-@pytest.mark.parametrize("environ", [{}, {"FAKE_DATE_OUT": "soon"}, {"FAKE_DATE_OUT": "1 0", "FAKE_DATE_SLEEP": "5"}])
+def test_on_an_armed_clock_a_call_that_isnt_json_is_refused_rather_than_sent_with_the_real_date(env_clock):
+    with pytest.raises(opencode_bridge.Refusal, match="isn't JSON"):
+        asyncio.run(opencode_bridge.env_date_rewrite(json.dumps(_call()).encode()[:-1]))
+
+
+@pytest.mark.parametrize("environ, reason", [
+    ({}, "date exited 1: no clock"),
+    ({"FAKE_DATE_OUT": "1801742400 000000000", "FAKE_DATE_EXIT": "3"}, "date exited 3"),
+    ({"FAKE_DATE_OUT": "soon"}, "date printed 'soon\\n'"),
+    ({"FAKE_DATE_OUT": "1 0", "FAKE_DATE_SLEEP": "10"}, "date gave no answer within 2 s"),
+])
 def test_a_date_that_cant_be_read_refuses_the_call_rather_than_tell_the_model_real_time(env_clock, monkeypatch,
-                                                                                         environ):
-    monkeypatch.setattr(opencode_bridge, "_DATE_TIMEOUT_S", 0.5)
+                                                                                         environ, reason):
+    """A date that hangs is killed with the sleep it started, which holds its output open, so the refusal comes in
+    its time."""
+    monkeypatch.setattr(opencode_bridge, "_DATE_TIMEOUT_S", 2)
     for name, value in environ.items():
         monkeypatch.setenv(name, value)
+    started = time.monotonic()
 
-    with pytest.raises(opencode_bridge.Refusal, match="the env's date couldn't be read"):
+    with pytest.raises(opencode_bridge.Refusal) as refused:
         _rewrite(_call())
+
+    assert str(refused.value).startswith(f"the env's date couldn't be read for the model: {reason}")
+    assert time.monotonic() - started < 6
 
 
 def test_an_env_block_without_a_date_line_this_knows_refuses_the_call(env_clock, monkeypatch):

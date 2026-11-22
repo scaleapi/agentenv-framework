@@ -150,8 +150,8 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
     has ended, read to its end even when the CLI hung up. ``headers`` replace the CLI's own on every request, so the
     endpoint's credentials need never reach the CLI; without them, the CLI's are forwarded. ``models`` is the list a
     ``GET .../models`` is answered with, sparing a CLI that lists them the endpoint's whole catalog. ``rewrite`` takes
-    each model call's request body and gives the one to forward; a ``Refusal`` it raises is the call's answer, a 400,
-    which no CLI retries, and the call goes no further."""
+    each model call's request body and gives the one to forward; what it raises is the call's answer, a 400 with a
+    ``Refusal``'s reason or the error's name, which no CLI retries as it would a 500, and the call goes no further."""
     token = secrets.token_hex(16)
     async with ClientSession(timeout=ClientTimeout(total=None)) as client:
         async def forward(request: web.Request) -> web.StreamResponse:
@@ -172,9 +172,10 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                 if call and rewrite is not None:
                     try:
                         body = await rewrite(body)
-                    except Refusal as exc:
+                    except Exception as exc:
                         status = 400
-                        return web.json_response({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                        reason = str(exc) if isinstance(exc, Refusal) else f"model relay: {type(exc).__name__}: {exc}"
+                        return web.json_response({"error": {"message": reason, "type": "invalid_request_error"}},
                                                  status=status)
                 async with client.request(request.method, f"{upstream}/{path}", params=request.query,
                                           data=body, headers=outgoing) as answer:

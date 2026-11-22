@@ -122,17 +122,17 @@ def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_ser
             **({"AGENTENV_REAL_TIME": "1"} if follows() else {})}
 
 
-async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
-    """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
+async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: float) -> tuple[int, bytes, bytes]:
+    """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed with what it started, which would
+    otherwise hold its output open."""
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=dict(env),
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=dict(env), start_new_session=True,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except BaseException:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        await proc.wait()
+        _kill_cli(proc)
+        await _reap(proc)
         raise
     return proc.returncode, out, err
 
@@ -140,16 +140,23 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 async def _env_today() -> tuple[str, int]:
     """The env's date, as the CLI's ``Date.toDateString()`` writes one in this zone, and its year, read from ``date``,
     which libfaketime fakes for what this server starts, as for the model's commands."""
+    def unread(reason: str) -> Refusal:
+        return Refusal(f"the env's date couldn't be read for the model: {reason}")
+
     environ = {name: value for name, value in os.environ.items() if name != "AGENTENV_REAL_TIME"}
     try:
         code, out, err = await _communicate("date", "+%s %N", env=environ, timeout_s=_DATE_TIMEOUT_S)
+    except TimeoutError:
+        raise unread(f"date gave no answer within {_DATE_TIMEOUT_S} s") from None
+    except OSError as exc:
+        raise unread(f"{type(exc).__name__}: {exc}") from exc
+    if code != 0:
+        raise unread(f"date exited {code}: {err.decode(errors='replace').strip()[:200]}")
+    try:
         seconds, _ = out.decode().split()
         day = time.localtime(int(seconds))
-    except (OSError, ValueError, OverflowError, TimeoutError) as exc:
-        raise Refusal(f"the env's date couldn't be read for the model: {type(exc).__name__}: {exc}") from exc
-    if code != 0:
-        raise Refusal(f"the env's date couldn't be read for the model: date exited {code}: "
-                      f"{err.decode(errors='replace')[:200]}")
+    except (ValueError, OverflowError, OSError) as exc:
+        raise unread(f"date printed {out.decode(errors='replace')[:100]!r}") from exc
     return f"{_DAYS[day.tm_wday]} {_MONTHS[day.tm_mon - 1]} {day.tm_mday:02d} {day.tm_year:04d}", day.tm_year
 
 
@@ -174,16 +181,18 @@ def _search_descriptions(request: dict):
 
 
 async def env_date_rewrite(body: bytes) -> bytes:
-    """A model call as the CLI, on real time, wrote it, with the env's date where the CLI put its own, while this agent
-    follows an armed clock; as written otherwise, when the two dates are one. A system prompt whose <env> block has no
+    """A model call as the CLI, on real time, wrote it, with the env's date on each <env> block's date line, the CLI's
+    among any a prompt or instructions add, and in websearch's year, while this agent follows an armed clock; as
+    written otherwise, when the two dates are one. A call that isn't JSON, a system prompt whose <env> block has no
     date line this knows, or a date that can't be read, refuses the call, so the model is never told the real date on
     the env's clock."""
     if not clock_armed():
         return body
     try:
         request = json.loads(body)
-    except ValueError:
-        return body
+    except ValueError as exc:
+        raise Refusal("the model call isn't JSON this agent can read, so the model can't be told the env's date") \
+            from exc
     if not isinstance(request, dict):
         return body
     system = [(holder, key) for holder, key in _texts(request, ("system", "developer")) if "<env>\n" in holder[key]]
@@ -195,10 +204,11 @@ async def env_date_rewrite(body: bytes) -> bytes:
                       "date")
     today, year = await _env_today()
     for holder, key in system:
-        holder[key] = _ENV_DATE.sub(lambda match: match.group(1) + today, holder[key], count=1)
+        holder[key] = _ENV_DATE.sub(lambda match: match.group(1) + today, holder[key])
     for holder, key in search:
         holder[key] = _SEARCH_YEAR.sub(f"The current year is {year}.", holder[key], count=1)
-    return json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+    # Escaped, so a lone surrogate an MCP server's tool sent, which UTF-8 can't encode, goes as it came.
+    return json.dumps(request, separators=(",", ":")).encode()
 
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:

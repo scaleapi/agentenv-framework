@@ -270,6 +270,20 @@ def test_a_refused_call_is_answered_by_the_relay_with_its_reason_and_goes_no_fur
     assert endpoint.requests == [] and (calls.answered, calls.unreported, calls.refused) == ([], 0, 1)
 
 
+def test_a_rewrite_that_fails_is_answered_by_the_relay_with_the_error_rather_than_a_500_a_cli_retries():
+    async def rewrite(body):
+        raise ValueError("bad body")
+
+    async def exercise(client, root, endpoint):
+        answer = await _chat(client, root)
+        return answer.status_code, answer.json()
+
+    (status, answer), calls, endpoint = _through_relay([], exercise, rewrite=rewrite)
+
+    assert status == 400 and answer["error"]["message"] == "model relay: ValueError: bad body"
+    assert endpoint.requests == [] and (calls.answered, calls.unreported, calls.refused) == ([], 0, 1)
+
+
 def test_an_unreachable_endpoint_is_a_502_and_counts_nothing():
     calls = model_relay.Calls()
 
