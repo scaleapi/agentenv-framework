@@ -19,6 +19,7 @@ from agent_env.task.store import (
     seed_task_instance_context, set_task_instance_store,
     undo_steps,
 )
+from agent_env.task.usage_ledger import entries_of
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.config import set_document_store
@@ -798,3 +799,19 @@ def test_attempts_of_a_step_whose_runner_sets_no_epoch_keep_apart_and_a_gathered
     store.record_task_failure_sync(iid, None, context, RuntimeError("boom"), "now", attempt_epoch=1)
     assert _ledger(store, iid) == [(0, "a", "solver", 5), (0, "s", "solver", 10), (0, "f", "solver", 3),
                                    (1, "s", "solver", 12)]
+
+
+def test_a_late_gathered_write_from_an_older_attempt_keeps_its_usage_apart(store):
+    """A runner that sets no epoch: attempt 0's failure arrives after a resume made attempt 1 the owner and recorded
+    the same step."""
+    store.upsert_instance("i", "t", 1, total_steps=2)
+    seed_task_instance_context("i", TaskStepContext())
+    store.upsert_instance("i", "t", 1, total_steps=2)
+    seed_task_instance_context("i", TaskStepContext(), 1)
+    _record(store, "i", "s", _spends({}, "s", _spent(None, input_tokens=12)), total=2, epoch=1)
+    late = TaskStepContext(metadata={"step_usage": {"s": [_spent(None, input_tokens=7)]}})
+    store.record_task_failure_sync("i", "s", late, RuntimeError("boom"), "now", attempt_epoch=0)
+    store.record_task_cancelled_sync("i", "Ctrl-C", "now", attempt_epoch=0, usage=entries_of({"s": [_spent(None, input_tokens=7)]}))
+    store.record_teardown_sync("i", late, attempt_epoch=0)
+    assert _doc(store, "i")["status"] == "running"
+    assert sorted(_ledger(store, "i")) == [(0, "s", "solver", 7), (1, "s", "solver", 12)]

@@ -56,33 +56,32 @@ def total(ledger: list[dict]) -> dict[str, Any]:
             "unpriced_entries": sum(1 for e in ledger if e.get("cost_usd") is None)}
 
 
-def ledger_fields(doc: dict, entries: list[dict], *, attempt: Optional[int] = None) -> dict[str, Any]:
+def ledger_fields(doc: dict, entries: list[dict], *, attempt: Optional[int] = None,
+                  gathered: bool = False) -> dict[str, Any]:
     """The instance fields that merge ``entries`` into ``doc``'s ledger, to set in the same write; none when there are
-    no entries. An entry with no ``attempt``, from a runner that doesn't set the attempt epoch, is placed first
-    (``_placed``), so two attempts of a step never share a key."""
+    no entries. ``attempt`` is the epoch the write was made under: a completion's, the epoch its step was dispatched
+    under; a failure's, cancel's, undo's or teardown's, the attempt it ends. An entry with no attempt, from a runner
+    that doesn't set the attempt epoch, takes it (the instance's current epoch when the write has none), so two
+    attempts of a step never share a key. A ``gathered`` write, one that takes a whole context's entries, leaves out
+    such an entry when the ledger already holds it, its counts equal: an earlier write recorded it under its own
+    attempt."""
     if not entries:
         return {}
     ledger = doc.get(LEDGER_KEY) or []
-    placed = [e for e in (_placed(e, ledger, attempt, doc.get("attempt_epoch", 0)) for e in entries) if e is not None]
+    epoch = attempt if attempt is not None else doc.get("attempt_epoch", 0)
+    placed = [e for e in (_placed(e, ledger, epoch, gathered) for e in entries) if e is not None]
     if not placed:
         return {}
     ledger = merged(ledger, placed)
     return {LEDGER_KEY: ledger, TOTAL_KEY: total(ledger)}
 
 
-def _placed(entry: dict, ledger: list[dict], attempt: Optional[int], current: int) -> Optional[dict]:
-    """``entry`` with an attempt. A completion passes ``attempt``, the epoch its step was dispatched under. A write that
-    gathers a whole context passes none: an entry the ledger already holds, its counts equal, an earlier write
-    recorded under the attempt it ran in, so it is left out (None); any other ran in the instance's ``current``
-    attempt."""
+def _placed(entry: dict, ledger: list[dict], epoch: int, gathered: bool) -> Optional[dict]:
     if entry.get("attempt") is not None:
         return entry
-    if attempt is not None:
-        return {**entry, "attempt": attempt}
-    same = _without_attempt(entry)
-    if any(_without_attempt(e) == same for e in ledger):
+    if gathered and any(_without_attempt(e) == _without_attempt(entry) for e in ledger):
         return None
-    return {**entry, "attempt": current}
+    return {**entry, "attempt": epoch}
 
 
 def _without_attempt(entry: dict) -> dict:

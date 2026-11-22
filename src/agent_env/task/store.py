@@ -391,7 +391,7 @@ class TaskInstanceStore:
             updated = compare_and_swap(
                 store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id),
                 lambda doc: UpdateSpec(
-                    set={**fresh, **ledger_fields(doc, entries_of(_get_path(doc, _STEP_USAGE_PATH)))},
+                    set={**fresh, **ledger_fields(doc, entries_of(_get_path(doc, _STEP_USAGE_PATH)), gathered=True)},
                     inc={_GENERATION: 1, "attempt_epoch": 1}),
                 counter_field=_REV,
             )
@@ -651,7 +651,7 @@ class TaskInstanceStore:
                 "current_step": len(completed),
                 _RERECORDED: rerecords,
             }
-            fields.update(ledger_fields(doc, usage or []))
+            fields.update(ledger_fields(doc, usage or [], attempt=attempt_epoch, gathered=True))
             if bump_epoch:
                 fields["attempt_epoch"] = doc.get("attempt_epoch", 0) + 1
             if len(completed) < len(before):
@@ -812,7 +812,7 @@ class TaskInstanceStore:
                   if failing_step_id is not None else None)
 
         def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, entries)
+            spent = ledger_fields(doc, entries, attempt=attempt_epoch, gathered=True)
             if not _owns(doc, attempt_epoch):
                 return UpdateSpec(set=spent) if spent else None
             completed = doc.get("completed_steps", [])
@@ -833,7 +833,7 @@ class TaskInstanceStore:
         later attempt than ``attempt_epoch`` owns. ``usage``, the entries of the steps that ran, joins the ledger
         either way."""
         def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, usage or [])
+            spent = ledger_fields(doc, usage or [], attempt=attempt_epoch, gathered=True)
             if not _owns(doc, attempt_epoch):
                 return UpdateSpec(set=spent) if spent else None
             return UpdateSpec(set={"status": "cancelled", "error": reason, "completed_at_utc": completed_at_utc,
@@ -851,7 +851,7 @@ class TaskInstanceStore:
         entries = entries_of(context.metadata.get(STEP_USAGE_KEY))
 
         def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, entries)
+            spent = ledger_fields(doc, entries, attempt=attempt_epoch, gathered=True)
             if doc.get("attempt_epoch", 0) > attempt_epoch:
                 return UpdateSpec(set=spent) if spent else None
             return UpdateSpec(set={"context": safe, **spent})
