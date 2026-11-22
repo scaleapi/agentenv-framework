@@ -21,8 +21,13 @@ REPO = Path(__file__).resolve().parents[4]
 if __name__ == "__main__":
     sys.path.insert(0, str(REPO))
 
-from agentenv_protocol.atif import RecordedTask, check_adapter  # noqa: E402
+from agentenv_protocol.atif import RecordedTask, check_adapter, check_media, task_document, tasks  # noqa: E402
 
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (  # noqa: E402
+    compact_atif_trajectory,
+    transcript_from_atif,
+)
+from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter  # noqa: E402
 from tst.unit.agents.claude_code.agent import claude_code_atif  # noqa: E402
 
 FIXTURES = REPO / "tst" / "data" / "claude_code_atif"
@@ -108,6 +113,30 @@ def test_the_recordings_cover_what_the_adapter_maps():
     assert any(step.get("extra", {}).get("agentenv", {}).get("attempt") == 2 for step in retried)
     assert any("error" in step.get("extra", {}).get("agentenv", {}) for step in documents["api-error"]["steps"])
     assert any(step.get("extra", {}).get("agentenv", {}).get("reasoning") for step in documents["thinking"]["steps"])
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_screenshots(scenario):
+    """What the judges take from each turn's copy, cut out as its own task: every tool call and result, a sub-agent's
+    included, the final answer, and each screenshot as a frame whose bytes match its name."""
+    kit = replay(scenario)
+    for task in tasks(kit.document):
+        view = task_document(kit.document, [task.task_id])
+        steps = [step for trajectory in _trajectories(view) for step in trajectory["steps"] if step["source"] == "agent"]
+        results = [result for step in steps for result in (step.get("observation") or {}).get("results") or ()]
+        images = [part for result in results for part in result.get("content") or ()
+                  if isinstance(part, dict) and part.get("type") == "image"]
+        events, _ = compact_atif_trajectory(view, TrajectoryFilter())
+        kinds = [event["type"] for event in events]
+        assert kinds.count("tool_call") == sum(len(step.get("tool_calls") or ()) for step in steps)
+        assert kinds.count("tool_result") == len(results)
+        assert ("final_response" in kinds) == any(isinstance(step.get("message"), str) and step["message"].strip()
+                                                 for step in view["steps"] if step["source"] == "agent")
+        transcript, frames = transcript_from_atif(view, lambda path: check_media(path, kit.media[path]) or kit.media[path])
+        assert len(transcript.actions) == kinds.count("tool_call")
+        assert len(frames) == len(images)
+    if scenario == "browser":
+        assert images and frames
 
 
 def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():
