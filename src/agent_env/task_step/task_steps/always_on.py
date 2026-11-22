@@ -183,11 +183,13 @@ TIME_LIMIT, TOOL_CALL_LIMIT = "time_limit", "tool_call_limit"
 LIMIT_WORDS = {TIME_LIMIT: "time limit", TOOL_CALL_LIMIT: "tool-call limit"}
 CUT_OFF_TEXT = ("(Your last turn was cut off at its {limit} before you finished. What you did before then stands; "
                 "anything you were in the middle of did not finish.)")
-# A harness reports a turn it ended at the step's limits in its own words, as a failed turn; no A2A field names the
-# limit. At the tool-call limit every harness says Claude Code's words; at its time limit each says "<harness> timed out
-# after <n>s", first in its error.
+# A harness reports a turn it ended at the step's limits as a failed turn; no A2A field names the limit. At the
+# tool-call limit every harness says Claude Code's words. At its time limit a harness gives an error code ending in
+# ".timeout" (Pi, Pydantic AI, OpenHands, browser-use), or says "<harness> timed out after <n>s" first in its error
+# (the CLI harnesses).
 TOOL_CALL_LIMIT_PATTERN = re.compile(r"Reached maximum number of turns")
 TIME_LIMIT_PATTERN = re.compile(r"[\w .-]{1,40} timed out after \d")
+TIME_LIMIT_CODE_SUFFIX = ".timeout"
 # How long the step gives the agent to cancel a turn cut off at its time limit and report it ended.
 STOP_TURN_SECONDS = 30
 # What each end reason means, for the end marker in the graded conversation; {wakes} and {first} are filled in.
@@ -755,7 +757,7 @@ class _Run:
         text = term.error_message or term.response_text or ""
         if TOOL_CALL_LIMIT_PATTERN.search(text):
             return TOOL_CALL_LIMIT
-        if TIME_LIMIT_PATTERN.match(text):
+        if (term.error_code or "").endswith(TIME_LIMIT_CODE_SUFFIX) or TIME_LIMIT_PATTERN.match(text):
             return TIME_LIMIT
         return None
 
@@ -1391,8 +1393,8 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        if stopped is None:
-            self.usage.turn(ModelRole.SOLVER, term)
+        # A turn cut off at its time limit reports no usage: it counts as a turn whose usage is unknown.
+        self.usage.turn(ModelRole.SOLVER, term)
         cut_off = TIME_LIMIT if stopped is not None else self._limit_reached(state, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
@@ -1482,8 +1484,8 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        if stopped is None:
-            self.usage.turn(ModelRole.SOLVER, term)
+        # A turn cut off at its time limit reports no usage: it counts as a turn whose usage is unknown.
+        self.usage.turn(ModelRole.SOLVER, term)
         cut_off = TIME_LIMIT if stopped is not None else self._limit_reached(state, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")

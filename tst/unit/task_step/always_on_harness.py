@@ -37,11 +37,11 @@ CONFIG_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG
 
 class Fail:
     """What an agent's turn returns to end in the failed state, as a harness reports a turn that broke; or in another
-    state that isn't completed (``state``: canceled, rejected)."""
+    state that isn't completed (``state``: canceled, rejected). ``error_code`` is the harness's code for the failure."""
 
     def __init__(self, message: str = "the CLI crashed", error_type: Optional[str] = None,
-                 state: str = "failed") -> None:
-        self.message, self.error_type, self.state = message, error_type, state
+                 state: str = "failed", error_code: Optional[str] = None) -> None:
+        self.message, self.error_type, self.state, self.error_code = message, error_type, state, error_code
 
 
 class Slow:
@@ -293,8 +293,9 @@ class Rig:
             self.agent_tasks[task_id] = (work, closing)
             closing = await asyncio.shield(work)  # the step giving up on the turn leaves the agent's work running
         if isinstance(closing, Fail):
-            data = {"error_message": closing.message, **({"error_type": closing.error_type}
-                                                          if closing.error_type else {})}
+            data = {"error_message": closing.message,
+                    **({"error_type": closing.error_type} if closing.error_type else {}),
+                    **({"error_code": closing.error_code} if closing.error_code else {})}
             return task_id, {"status": {"state": closing.state, "message": {"parts": [
                 {"kind": "text", "text": closing.message}, {"kind": "data", "data": data}]}}}
         reply = [{"kind": "text", "text": closing}] if closing else []

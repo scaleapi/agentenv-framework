@@ -94,11 +94,18 @@ async def test_the_next_wake_opens_by_telling_the_agent_its_last_turn_was_cut_of
 
 
 @pytest.mark.asyncio
-async def test_a_turn_the_harness_ended_at_its_own_time_limit_is_cut_off_without_a_cancel(monkeypatch, tmp_path):
+@pytest.mark.parametrize("timed_out", [
+    Fail("claude CLI timed out after 1s", error_code="cli_error"),  # the CLI harnesses say so first in the error
+    Fail("pi did not finish within 1s", error_code="pi.timeout"),  # the others give a .timeout code
+    Fail("Pydantic AI did not finish within 1s", error_code="pydantic_ai.timeout"),
+    Fail("OpenHands did not finish within 1s", error_code="openhands.timeout"),
+], ids=["claude-code", "pi", "pydantic-ai", "openhands"])
+async def test_a_turn_the_harness_ended_at_its_own_time_limit_is_cut_off_without_a_cancel(monkeypatch, tmp_path,
+                                                                                         timed_out):
     def agent(n, texts, rig):
         if n == 1:
             rig.message("on it")
-            return Fail("claude CLI timed out after 1s")
+            return timed_out
         rig.quiet()
         return ""
 
@@ -108,7 +115,19 @@ async def test_a_turn_the_harness_ended_at_its_own_time_limit_is_cut_off_without
     assert rig.cancels == []  # the harness already stopped it
     assert rig.sent[1][0] == TIME_NOTE
     [cut] = rig.record(ctx)["cut_off_wakes"]
-    assert (cut["limit"], cut["error"]) == ("time_limit", "claude CLI timed out after 1s")
+    assert (cut["limit"], cut["error"]) == ("time_limit", timed_out.message)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cut_off_at_its_time_limit_counts_in_the_usage_as_a_turn_with_none_reported(monkeypatch,
+                                                                                                 tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_slow_first_turn)
+    rig.solver_usage = {"input_tokens": 1200, "output_tokens": 300}  # what the agent's later turn reports
+    ctx = await _run(rig, timeout_seconds=1, continue_after_wake_limit=True)
+
+    [solver] = [e for e in ctx.prompt_responses[0].usage if e["role"] == "solver"]
+    assert (solver["turns"], solver["input_tokens"]) == (2, 1200)
+    assert solver["partial"] is True  # the cut-off turn's usage is unknown, so the sum is a lower bound
 
 
 @pytest.mark.asyncio
