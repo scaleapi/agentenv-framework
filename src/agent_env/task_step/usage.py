@@ -5,7 +5,7 @@ step that raises keeps its finished turns. An entry's counts have ``Usage``'s ke
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 
@@ -17,6 +17,7 @@ from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepCo
 
 if TYPE_CHECKING:
     from agent_env.a2a_agent.protocol import TerminalResponse
+    from agent_env.config.model_call import ModelReply
 
 STEP_USAGE_KEY = "step_usage"
 _COUNTERS = ("tool_call_count", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
@@ -62,7 +63,8 @@ class UsageEntry(TypedDict):
 @dataclass
 class RoleUsage:
     """One role's turns in one step: the model it ran, the host of the endpoint it called, the attempt epoch the step
-    ran under, and each turn's usage, None for a turn that reported none."""
+    ran under, and each turn's usage, None for a turn that reported none. ``reported_by`` is who reports its cost: an
+    agent's harness, or, for calls core makes itself, the endpoint that billed them."""
 
     role: str
     model: Optional[str] = None
@@ -70,6 +72,7 @@ class RoleUsage:
     attempt: Optional[int] = field(default_factory=ATTEMPT_EPOCH.get)
     turns: list[Optional[Usage]] = field(default_factory=list)
     unparsed: list[dict] = field(default_factory=list)
+    reported_by: ReportedBy = ReportedBy.HARNESS
 
     def add(self, usage: Optional[Usage], unparsed: Optional[dict] = None) -> None:
         """One finished turn's usage, and what of it couldn't be read."""
@@ -102,7 +105,7 @@ class RoleUsage:
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
         cost = price(tokens, total("cost_usd"), model=self.model,
-                     prices=prices, reported_by=ReportedBy.HARNESS)
+                     prices=prices, reported_by=self.reported_by)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
@@ -145,6 +148,19 @@ class StepUsage:
         if usage is not None:
             usage.add(reply.usage, reply.usage_unparsed)
             self.entries()
+
+    def call(self, role: ModelRole, reply: ModelReply) -> None:
+        """One model call the step made itself as ``role`` (a user-sim gate's judge, through ``model_call``), written
+        at once; its cost is what the endpoint billed when it says, else the map's price."""
+        usage = self._roles.get(role)
+        if usage is None:
+            usage = self._roles[role] = RoleUsage(role.value, reply.model, reply.endpoint_host,
+                                                  reported_by=ReportedBy.PROVIDER)
+        counts = Usage.from_model_response(reply.usage) if reply.usage else None
+        if reply.cost.reported_usd is not None:
+            counts = replace(counts or Usage(), cost_usd=reply.cost.reported_usd)
+        usage.add(counts)
+        self.entries()
 
     def entries(self) -> Optional[list[UsageEntry]]:
         """The entries of the roles that ran turns, written to ``metadata["step_usage"]``; None, and nothing written,

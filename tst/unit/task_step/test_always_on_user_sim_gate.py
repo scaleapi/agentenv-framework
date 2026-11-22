@@ -75,6 +75,22 @@ async def test_an_answer_that_still_fails_never_reaches_the_agent_and_ends_the_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rewrite", [_answer("no_reply"), _answer("reply", "  ")])
+async def test_a_rewrite_with_nothing_to_send_holds_the_message_back_and_fails_the_run(monkeypatch, tmp_path, rewrite):
+    rig = Rig(monkeypatch, tmp_path, agent=_messages_once, answers=[{"outcome": "reply", "message": _SWAP}],
+              user_texts=(rewrite,))
+    await rig.arm()
+    ctx = await rig.run(_gated(rig))
+
+    assert not _got(rig, "None of the three reported numbers")
+    record = rig.record(ctx)
+    assert record["end_reason"] == "user_sim_invalid" and record["error_type"] == "user_sim_invalid"
+    assert ctx.metadata["user_sim_invalid"]["week"]["reasons"][-1] == "its rewrite sent nothing in its place"
+    (read,) = rig.events(ctx, "user_sim_read")
+    assert read["outcome"] == "no_reply" and read["user_sim_gate"]["invalid"] is True
+
+
+@pytest.mark.asyncio
 async def test_on_fail_end_ends_the_run_without_marking_it_an_error(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_messages_once, answers=[{"outcome": "reply", "message": _SWAP}],
               user_texts=(_answer("reply", _SWAP),))

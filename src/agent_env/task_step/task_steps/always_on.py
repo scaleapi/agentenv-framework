@@ -69,7 +69,11 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   ``max_rewrites``; each read's event records the checks (``user_sim_gate``: verdicts, rewrites, the first message).
   An answer that still fails is never delivered and ends the run (user_sim_invalid, also recorded in
   ``metadata["user_sim_invalid"][step_id]``): with ``on_fail`` "fail" it sets ``error_type`` too, so verifiers skip
-  the run; "end" ends it plainly; "send" delivers it anyway. Her last read's answer, never delivered, isn't checked.
+  the run; "end" ends it plainly; "send" delivers it anyway. A rewrite with nothing to send (a no_reply, an empty reply)
+  holds the message back for good too. Her last read's answer, never delivered, isn't checked. The gate's judge calls
+  are in the step's usage, role ``judge``. Turning the gate on reserves each read's worst case out of the run's time
+  budget whether or not it ever fires: ``max_rewrites`` more user sim turns, each up to ``user_timeout_seconds`` plus its
+  grace and trajectory fetch, and with a judge ``max_rewrites + 1`` judge timeouts (``read_budget_seconds``).
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``. Its ``user_sim`` names the user
   sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over.
@@ -1612,7 +1616,7 @@ class _Run:
             except Exception as e:  # as in prompt_agent: the patterns' verdict stands; with patterns off, it raises
                 self.gate_setup_error = judge_setup_failed(gate, e)
                 logger.warning(f"always_on: user-sim gate {self.gate_setup_error}; using patterns only")
-        latest = {"ans": ans}
+        latest = {"ans": ans, "dropped": False}
         verdicts: list[dict] = []
         rewrites: list[dict] = []
 
@@ -1627,7 +1631,12 @@ class _Run:
                 return None
             latest["ans"] = {**ans, **new}
             said = (new.get("message") or "").strip()
-            return said if new.get("outcome") in ("reply", "done") and said else None
+            if new.get("outcome") in ("reply", "done") and said:
+                return said
+            # A rewrite with nothing to send in place of the held message, a no_reply or an empty reply, holds it back
+            # for good, as a failed one does; a done without a message ends the run as the user's own end.
+            latest["dropped"] = new.get("outcome") != "done"
+            return None
 
         def on_verdict(attempt: int, text: str, verdict) -> None:
             verdicts.append({"attempt": attempt, "chars": len(text), **verdict.to_dict()})
@@ -1636,13 +1645,16 @@ class _Run:
                                f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
 
         outcome = await run_gate(gate, ans["message"], self.gate_history, rewrite, call_config=self.gate_call_config,
-                                 judge_unavailable=self.gate_setup_error, on_verdict=on_verdict)
+                                 judge_unavailable=self.gate_setup_error, on_verdict=on_verdict,
+                                 on_call=lambda reply: self.usage.call(ModelRole.JUDGE, reply))
+        if latest["dropped"] and gate.on_fail != "send":
+            outcome.invalid = True
         record = {"verdicts": verdicts, "rewrites": rewrites, "invalid": outcome.invalid}
         if rewrites:
             record["first_message"] = ans["message"]
         if not outcome.invalid:
             return latest["ans"], record
-        reasons = outcome.reasons()
+        reasons = outcome.reasons() + (["its rewrite sent nothing in its place"] if latest["dropped"] else [])
         self.ctx.metadata.setdefault("user_sim_invalid", {})[self.step.id] = {"wake": self.wakes, "reasons": reasons}
         if gate.on_fail == "fail":
             self.error = (f"user-sim answer at wake {self.wakes} still reads as the assistant's after "

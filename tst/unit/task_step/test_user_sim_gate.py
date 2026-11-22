@@ -1,9 +1,13 @@
 """The user-sim gate's own checks: the patterns, the judge's output parsing and the history it is shown."""
 
+import asyncio
+
 import pytest
 
+from agent_env.config import model_call
+from agent_env.config.model_pricing import Cost, CostStatus
 from agent_env.task_step.task_steps.user_sim_gate import (
-    GateVerdict, parse_judge, pattern_reasons, render_history, rewrite_request)
+    TALKS_LIKE_THE_ASSISTANT, GateVerdict, UserSimGate, parse_judge, pattern_reasons, render_history, rewrite_request)
 
 _FILLER = " The details are in the shared folder and the numbers come from last month's records." * 6
 
@@ -73,7 +77,7 @@ def test_the_judge_alone_fails_only_a_long_message():
     from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
 
     class Gate(UserSimGate):
-        async def _judge(self, candidate, history, call_config):
+        async def _judge(self, candidate, history, call_config, **_):
             return {"in_role": False, "reason": "reads as analysis"}
 
     gate = Gate(judge_model="judge-model")
@@ -174,7 +178,7 @@ def test_a_judge_that_couldnt_be_set_up_isnt_called_and_the_patterns_verdict_sta
     from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
 
     class NeverCalled(UserSimGate):
-        async def _judge(self, candidate, history, call_config):
+        async def _judge(self, candidate, history, call_config, **_):
             raise AssertionError("the judge was called")
 
     for patterns in (True, False):
@@ -217,7 +221,7 @@ def _judged(in_role):
     from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
 
     class Gate(UserSimGate):
-        async def _judge(self, candidate, history, call_config):
+        async def _judge(self, candidate, history, call_config, **_):
             return {"in_role": in_role, "reason": "judged"}
 
     return Gate(judge_model="judge-model")
@@ -276,3 +280,24 @@ def test_the_judge_is_shown_what_the_user_found_when_a_hook_told_it(monkeypatch)
 
     assert "WHAT THE USER FOUND" in prompts[0] and "no sheet in the folder" in prompts[0]
     assert "WHAT THE USER FOUND" not in prompts[1]
+
+
+@pytest.mark.parametrize("text", ["I\u2019m an AI, so I can\u2019t open that.",
+                                  "Let me know if you\u2019d like me to resend it."])
+def test_curly_apostrophes_read_as_straight_ones(text):
+    assert TALKS_LIKE_THE_ASSISTANT in pattern_reasons(text)
+
+
+def test_each_judge_call_is_handed_to_on_call_for_the_steps_usage(monkeypatch):
+    reply = model_call.ModelReply('{"in_role": true, "reason": "asks"}', "judge-m", None, None,
+                                  Cost(0.001, CostStatus.REPORTED, "provider", 0.001))
+
+    async def complete(route, messages, **kw):
+        return reply
+
+    monkeypatch.setattr(model_call, "complete", complete)
+    seen = []
+    verdict = asyncio.run(UserSimGate(judge_model="judge-m").check("can you check the totals?", [], call_config=object(),
+                                                                   on_call=seen.append))
+
+    assert verdict.passed and seen == [reply]

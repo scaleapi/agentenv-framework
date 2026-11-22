@@ -667,7 +667,7 @@ async def test_with_a_user_sim_gate_the_note_goes_with_the_first_send_only_and_t
 
     shown = []
 
-    async def judge(self, candidate, history, call_config, user_note=None):
+    async def judge(self, candidate, history, call_config, user_note=None, **_):
         shown.append(user_note)
         return {"in_role": not candidate.startswith("Done."), "reason": "judged"}
 

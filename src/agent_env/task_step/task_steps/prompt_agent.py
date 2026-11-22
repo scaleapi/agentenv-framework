@@ -1314,7 +1314,8 @@ class _UserSide:
 
         outcome = await run_gate(gate, _text_of(answer["message"]), self._history, rewrite,
                                  call_config=self._gate_call_config, judge_unavailable=self._gate_judge_setup_error,
-                                 on_verdict=on_verdict, user_note=hook_note)
+                                 on_verdict=on_verdict, user_note=hook_note,
+                                 on_call=self._judge_call if self._usage is not None else None)
         if not outcome.invalid:
             return latest["answer"]
         self._context.metadata.setdefault("user_sim_invalid", {})[self._step.id] = {
@@ -1325,6 +1326,9 @@ class _UserSide:
             self.gate_failure = (f"user-sim message at turn {number} still reads as the assistant's after "
                                  f"{gate.max_rewrites} rewrite(s): {'; '.join(outcome.reasons())[:500]}")
         return {"end": "user_sim_invalid"}
+
+    def _judge_call(self, reply) -> None:
+        self._usage.call(ModelRole.JUDGE, reply)
 
     async def _send_to_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         step = self._step

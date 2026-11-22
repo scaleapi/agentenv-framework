@@ -5,7 +5,8 @@ from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config.model import ModelRole
-from agent_env.config.model_pricing import ModelPrice, PriceTable
+from agent_env.config.model_call import ModelReply
+from agent_env.config.model_pricing import Cost, CostStatus, ModelPrice, PriceTable
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 from agent_env.task_step import usage as usage_module
 from agent_env.task_step.usage import RoleUsage, StepUsage
@@ -63,6 +64,22 @@ def test_a_step_records_each_started_role_as_each_turn_ends_and_skips_one_never_
     [entry] = context.metadata["step_usage"]["solve"]
     assert (entry["role"], entry["model"], entry["endpoint_host"], entry["input_tokens"]) == ("solver", "m", "gw:443", 3)
     assert context.metadata["model_endpoints"] == {"solver": {"solve": {"model": "m", "endpoint_host": "gw:443"}}}
+
+
+def test_a_judge_call_the_step_made_itself_is_its_own_entry_costed_as_its_endpoint_billed_it():
+    context = TaskStepContext()
+    usage = StepUsage(context, "talk")
+    billed = Cost(0.002, CostStatus.REPORTED, "provider", 0.002)
+
+    for _ in range(2):
+        usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", "gw:443", {"prompt_tokens": 50, "completion_tokens": 5},
+                                               billed))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["role"], entry["model"], entry["endpoint_host"], entry["turns"]) == ("judge", "judge-m", "gw:443", 2)
+    assert (entry["input_tokens"], entry["output_tokens"]) == (100, 10)
+    assert (entry["cost_usd"], entry["cost_status"], entry["cost_source"]) == (pytest.approx(0.004), "reported",
+                                                                              "provider")
 
 
 def test_a_turn_that_reported_any_token_count_makes_a_turn_that_reported_none_partial():

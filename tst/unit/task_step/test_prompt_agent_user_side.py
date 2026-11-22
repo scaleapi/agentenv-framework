@@ -559,7 +559,7 @@ async def test_the_judge_fails_a_message_the_patterns_pass_and_sees_the_conversa
 
     seen = []
 
-    async def judge(self, candidate, history, call_config):
+    async def judge(self, candidate, history, call_config, **_):
         seen.append((candidate, list(history)))
         return {"in_role": candidate != _TAKEOVER, "reason": "it offers to do the work"}
 
@@ -581,7 +581,7 @@ async def test_the_judge_fails_a_message_the_patterns_pass_and_sees_the_conversa
 async def test_a_judge_that_errors_leaves_the_patterns_verdict(monkeypatch):
     from agent_env.task_step.task_steps import user_sim_gate
 
-    async def judge(self, candidate, history, call_config):
+    async def judge(self, candidate, history, call_config, **_):
         raise TimeoutError("judge timed out")
 
     monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
@@ -618,7 +618,7 @@ async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_
 
     called = []
 
-    async def judge(self, candidate, history, call_config):
+    async def judge(self, candidate, history, call_config, **_):
         called.append(candidate)
         return {"in_role": True}
 

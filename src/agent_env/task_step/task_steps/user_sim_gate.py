@@ -21,6 +21,9 @@ applies it to each of the built-in user-sim's answers. A step type that runs its
 with ``run_gate``, and sets ``USER_SIM_GATE_SUPPORTED``::
 
     {"judge_model": "<a small, fast model>", "max_rewrites": 2, "on_fail": "fail"}
+
+Each judge call is in the step's usage, role ``judge``. In ``always_on`` the gate costs time budget even when it never
+fires: each read reserves room for ``max_rewrites`` more user sim turns and, with a judge, a judge timeout per check.
 """
 from __future__ import annotations
 
@@ -28,7 +31,10 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Awaitable, Callable, ClassVar, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Optional
+
+if TYPE_CHECKING:
+    from agent_env.config.model_call import ModelReply
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +102,14 @@ NOW_LIVE = "it says something is now live"
 PHRASE_REASONS = frozenset({TALKS_LIKE_THE_ASSISTANT, NOW_LIVE})
 
 
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+
+
 def pattern_reasons(text: str) -> list[str]:
-    """Why ``text`` reads as the assistant's message, one reason per pattern that matched; empty if none."""
+    """Why ``text`` reads as the assistant's message, one reason per pattern that matched; empty if none. Curly
+    apostrophes read as straight ones, as many models write them."""
     lim = PatternLimits
+    text = text.translate(_APOSTROPHES)
     reasons = []
     n = len(text)
     if _AS_ASSISTANT.search(text):
@@ -246,11 +257,13 @@ class UserSimGate:
         return asdict(self)
 
     async def check(self, candidate: str, history: list[tuple[str, str]], *, call_config=None,
-                    judge_unavailable: Optional[str] = None, user_note: Optional[str] = None) -> GateVerdict:
+                    judge_unavailable: Optional[str] = None, user_note: Optional[str] = None,
+                    on_call: Optional[Callable[[ModelReply], None]] = None) -> GateVerdict:
         """Check one message. ``history`` is the conversation so far as ``(role, text)``, role user/assistant.
         A judge that reads the message as the user's clears a hit on a phrase alone (``PHRASE_REASONS``); a shape hit
         stays a failure. A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict
-        stands. So does a judge that couldn't be set up (``judge_unavailable``, the reason), which isn't called."""
+        stands. So does a judge that couldn't be set up (``judge_unavailable``, the reason), which isn't called.
+        ``on_call`` sees each judge call's reply, for the step's usage."""
         reasons = pattern_reasons(candidate) if self.patterns else []
         verdict = GateVerdict(passed=not reasons, pattern_reasons=reasons)
         if self.judge_model and judge_unavailable is not None:
@@ -258,8 +271,8 @@ class UserSimGate:
             return verdict
         if self.judge_model:
             try:
-                judged = await (self._judge(candidate, history, call_config, user_note=user_note) if user_note
-                                else self._judge(candidate, history, call_config))
+                extra = {k: v for k, v in (("user_note", user_note), ("on_call", on_call)) if v}
+                judged = await self._judge(candidate, history, call_config, **extra)
             except Exception as e:  # the judge is a second opinion; never let it take the conversation down
                 logger.warning(f"user-sim gate judge call failed ({type(e).__name__}: {e}); using patterns only")
                 verdict.judge_error = f"{type(e).__name__}: {e}"[: self.RECORDED_ERROR_CHARS]
@@ -277,7 +290,8 @@ class UserSimGate:
         return verdict
 
     async def _judge(self, candidate: str, history: list[tuple[str, str]], route,
-                     user_note: Optional[str] = None) -> Optional[dict]:
+                     user_note: Optional[str] = None,
+                     on_call: Optional[Callable[[ModelReply], None]] = None) -> Optional[dict]:
         """One judge call through core's one model-call path (config/model_call.py), on ``route``
         (``judge_call_config``'s), or on the configured endpoint when none was given."""
         from agent_env.config import model_call
@@ -293,6 +307,8 @@ class UserSimGate:
             route, [{"role": "user", "content": prompt}], timeout=self.judge_timeout_seconds,
             response_format={"type": "json_schema",
                              "json_schema": {"name": "user_sim_gate", "schema": _JUDGE_SCHEMA, "strict": True}})
+        if on_call is not None:
+            on_call(reply)
         return parse_judge(reply.content)
 
 
@@ -351,18 +367,22 @@ async def run_gate(
     judge_unavailable: Optional[str] = None,
     on_verdict: Optional[Callable[[int, str, GateVerdict], None]] = None,
     user_note: Optional[str] = None,
+    on_call: Optional[Callable[[ModelReply], None]] = None,
 ) -> GateOutcome:
     """Check ``text``; while it fails, send the user-sim ``rewrite_request`` through ``rewrite`` and check its new
     message, up to ``gate.max_rewrites`` times. ``rewrite`` returns the new message, or None when the user side
     ended instead. ``judge_unavailable`` is why the judge couldn't be set up, if it couldn't (see ``check``).
     ``on_verdict(attempt, text, verdict)`` sees every check, for recording. ``user_note`` is what a post-turn hook
-    told the user sim it found, shown to the judge. Any conversation loop
+    told the user sim it found, shown to the judge. ``on_call`` sees each judge call's reply, for the step's usage.
+    Any conversation loop
     can call this; ``prompt_agent`` does, between a user-sim's reply and the agent's next turn."""
     outcome = GateOutcome(text=text)
     for attempt in range(gate.max_rewrites + 1):
         extra = {} if judge_unavailable is None else {"judge_unavailable": judge_unavailable}
         if user_note:  # what a post-turn hook told the user sim it found: the judge reads a report of it as the user's
             extra["user_note"] = user_note
+        if on_call is not None:
+            extra["on_call"] = on_call
         verdict = await gate.check(text, history, call_config=call_config, **extra)
         outcome.verdicts.append(verdict)
         if on_verdict is not None:
