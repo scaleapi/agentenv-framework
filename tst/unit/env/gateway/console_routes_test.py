@@ -309,6 +309,22 @@ async def test_the_bearer_token_still_opens_pgweb_and_the_cookie_still_does_not_
 
 
 @pytest.mark.asyncio
+async def test_a_pgweb_session_is_never_refused_a_role_and_opens_no_service_that_takes_one(monkeypatch):
+    """A SQL console acts for the env's owner and for no role, so a pgweb session, which carries no control token,
+    reaches it even when ``default`` takes a member's token; the same request to a service is refused."""
+    upstream = _Upstream(monkeypatch)
+    gw = _gateway(TOKEN)
+    gw._roles.create("default", {"type": "token"})
+    headers = {**SAME_ORIGIN, "Cookie": _cookie()}
+    console, _ = await _send(gw, "POST", "/svc/pgweb/api/query", headers)
+    service, _ = await _send(gw, "POST", "/svc/shop/api/orders", headers)
+    await _send(gw, "POST", "/svc/pgweb/../shop/api/orders", headers)
+    assert (console, service) == (200, 403)
+    assert upstream.requests[0] == ("pgweb", "/api/query", None)
+    assert all(host != "shop-backend" for host, _, _ in upstream.requests)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("token, consoles", [(TOKEN, {"db-mcp": CONSOLES["db-mcp"]}), (None, CONSOLES)],
                          ids=["no-pgweb", "no-token"])
 async def test_a_gateway_with_no_pgweb_behind_its_token_takes_no_link(monkeypatch, token, consoles):

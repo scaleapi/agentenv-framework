@@ -237,9 +237,11 @@ def test_step_request_schema_matches_what_step_accepts(body, valid):
     assert jsonschema.Draft202012Validator(schema).is_valid(body) is valid
 
 
-def test_every_advertised_endpoint_is_a_served_route():
+@pytest.mark.parametrize("control_token", [None, "s3cret"], ids=["without-control-token", "with-control-token"])
+def test_every_advertised_endpoint_is_a_served_route(control_token):
     """Each (endpoint, verb) the card advertises is a route the gateway serves, resolved the way consumers resolve it."""
-    gw = _gateway({})
+    gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[],
+                 control_token=control_token)
     served = {(route.path, verb) for route in gw._mcp.streamable_http_app().routes for verb in getattr(route, "methods", None) or ()}
     card = {"capabilities": {"extensions": gw._gateway_extensions()}}
     advertised = set()
@@ -250,8 +252,22 @@ def test_every_advertised_endpoint_is_a_served_route():
     assert advertised <= served, advertised - served
 
 
+def test_the_roles_extension_is_on_the_card_only_of_a_gateway_with_a_control_token():
+    """A gateway without a control token is open to everyone, so it neither serves nor advertises roles."""
+    unguarded = _gateway({})._gateway_extensions()
+    guarded = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[],
+                      control_token="s3cret")._gateway_extensions()
+    assert "urn:agentenv:roles/v1" not in [e["uri"] for e in unguarded]
+    assert [e["uri"] for e in guarded] == [e["uri"] for e in unguarded] + ["urn:agentenv:roles/v1"]
+    card = {"capabilities": {"extensions": guarded}}
+    found = {name: (m["method"], m["endpoint"]) for name in ("create", "state", "delete", "add_member", "remove_member")
+             if (m := protocol_client.find_extension_method(card, "urn:agentenv:roles/v1", name))}
+    assert found == {"create": ("POST", "/roles"), "state": ("GET", "/roles"), "delete": ("DELETE", "/roles"),
+                     "add_member": ("POST", "/roles/members"), "remove_member": ("DELETE", "/roles/members")}
+
+
 @pytest.mark.parametrize("name", ["WELL_KNOWN_PATH", "RPC_PATH", "PROTOCOL_VERSION", "METHOD_RESET", "METHOD_ADD", "METHOD_GET", "MCP_TRANSPORT",
-                                  "CONTROL_TOKEN_ENV"])
+                                  "CONTROL_TOKEN_ENV", "AGENT_TOKEN_HEADER", "COMPUTER_TOKEN_HEADER"])
 def test_gateway_constants_mirror_the_protocol(name):
     """constants.py copies these by hand because the gateway image has no agentenv_protocol dependency."""
     assert getattr(gateway_constants, name) == getattr(agentenv_protocol, name)

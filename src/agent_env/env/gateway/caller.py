@@ -1,11 +1,14 @@
 """Who the gateway acts for on one inbound request.
 
-A ``Caller`` is the role the request's ``AgentEnv-Role`` header named (``default`` when it named none) and the key of
-the MCP session the request belongs to (empty on the REST and harness paths, which have no session). It is bound in
-three scopes, which read in order in ``gateway.py``: per HTTP request by the served app (the role), per inbound MCP
-session by the session lifespan (the key, kept for every tools/call of that session), and never per process. Every
-child ``tools/call`` carries ``Caller.meta()``, so the three places that stamp one (the MCP proxy tool, ``/step`` and
-the trigger engine) cannot disagree about the wire shape.
+A ``Caller`` is the role the gateway resolved the request to (``Roles.resolve``: ``default`` when it named none), the
+key of the MCP session the request belongs to (empty on the REST and harness paths, which have no session), how the
+role was established (``source``, a role_auth value) and the digest of the agent token it carried (``member``), known
+to the gateway or not, so an MCP session's every tool call can check the role again as memberships change. It is
+bound in three scopes, which read in order in ``gateway.py``: per HTTP request by the served app (the role, source and
+member), per inbound MCP session by the session lifespan (the key, kept for every tools/call of that session), and
+never per process.
+Every child ``tools/call`` carries ``Caller.meta()``, so the three places that stamp one (the MCP proxy tool,
+``/step`` and the trigger engine) cannot disagree about the wire shape.
 """
 
 from __future__ import annotations
@@ -14,12 +17,15 @@ import dataclasses
 from contextvars import ContextVar, Token
 
 from .constants import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY, DEFAULT_ROLE
+from .roles import DEFAULT
 
 
 @dataclasses.dataclass(frozen=True)
 class Caller:
     role: str = DEFAULT_ROLE
     session: str = ""
+    source: str = DEFAULT
+    member: str | None = dataclasses.field(default=None, repr=False)
 
     @staticmethod
     def current() -> "Caller":

@@ -21,6 +21,12 @@ RPC_PATH = "/agentenv"
 CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 #: The header a control token travels in where it must not collide with a front door's own ``Authorization``.
 CONTROL_TOKEN_HEADER = "AgentEnv-Control-Token"
+#: The header an agent sends its agent token in, its identity on an env's gateway: a role the gateway declared with
+#: token auth answers only to the agent token of one of its members. The gateway strips it before proxying anything.
+AGENT_TOKEN_HEADER = "AgentEnv-Agent-Token"
+#: The header a computer's site proxy sends that computer's attribution token in, beside ``AgentEnv-Computer``, which
+#: the gateway believes only together with it. The gateway strips both before proxying anything.
+COMPUTER_TOKEN_HEADER = "AgentEnv-Computer-Token"
 
 # A card declares its MCP endpoint as an `additionalInterfaces` entry with this transport; a card
 # without one is reached at MCP_PATH by convention.

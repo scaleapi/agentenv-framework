@@ -54,6 +54,8 @@ from .manifest import (
     manifest_compatible,
 )
 from .types import (
+    AGENT_TOKEN_HEADER,
+    COMPUTER_TOKEN_HEADER,
     CONTROL_TOKEN_ENV,
     CONTROL_TOKEN_HEADER,
     DATA_OBJECTS_EXTENSION_URI,
@@ -167,6 +169,8 @@ __all__ = [
     "RPC_PATH",
     "CONTROL_TOKEN_ENV",
     "CONTROL_TOKEN_HEADER",
+    "AGENT_TOKEN_HEADER",
+    "COMPUTER_TOKEN_HEADER",
     "WELL_KNOWN_PATH",
     "METHOD_RESET",
     "METHOD_ADD",

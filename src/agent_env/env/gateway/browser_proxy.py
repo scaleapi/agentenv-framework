@@ -30,6 +30,7 @@ from websockets.asyncio.client import ClientConnection, connect
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import EXT_BROWSER_URI, EXT_COMPUTER_APP_URI
 from .rest_proxy import client_headers, fetch_child_card, operations, upstream_headers, upstream_url
+from .roles import Resolution
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +129,12 @@ class TokenRedaction(logging.Filter):
 class BrowserRoutes:
     """The ``/browser/<key>/cdp/<token>/`` route over a gateway's ``/svc`` children, and the rewrite of a browser's
     ``cdp`` answer on their ``/svc`` route. ``log_event`` writes a trajectory event, ``attribution`` names a role's
-    caller for one, and ``role_of`` reads the role a connection's ``AgentEnv-Role`` header names. The headers named in
-    ``withheld`` (lower case), the sandbox provider's credentials, reach no browser."""
+    caller for one, with how the role was established, and ``role_of`` reads who a connection acts as. The headers
+    named in ``withheld`` (lower case), the sandbox provider's credentials, reach no browser."""
 
     def __init__(self, rest_proxy_urls: dict[str, str], timeout: httpx.Timeout,
-                 log_event: Callable[[dict], Awaitable[Any]], attribution: Callable[[str], dict],
-                 role_of: Callable[[Request | WebSocket], str], *, withheld: frozenset[bytes] = frozenset()):
+                 log_event: Callable[[dict], Awaitable[Any]], attribution: Callable[[str, str], dict],
+                 role_of: Callable[[Request | WebSocket], Resolution], *, withheld: frozenset[bytes] = frozenset()):
         self._urls = rest_proxy_urls
         self._withheld = withheld
         self._timeout = timeout
@@ -207,8 +208,9 @@ class BrowserRoutes:
         every ``PING_INTERVAL_S``; refused before it opens when its browser can't be found, refuses it or doesn't
         answer. Each attempt is a ``browser_connection`` trajectory event once it ends, without its token."""
         key = websocket.path_params["key"]
+        identity = self._role_of(websocket)
         event = {"event_type": "browser_connection", "browser": key, "path": websocket.path_params.get("path", ""),
-                 **self._attribution(self._role_of(websocket))}
+                 **self._attribution(identity.role, identity.source)}
         browser = await self.browser(key)
         if isinstance(browser, Response):
             await websocket.close(code=REFUSED)

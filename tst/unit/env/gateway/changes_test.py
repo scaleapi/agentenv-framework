@@ -324,6 +324,7 @@ async def test_a_write_through_the_rest_proxy_is_a_logged_window_and_a_read_is_n
     _, body_bytes = await _http(gw, "GET", "/changes")
     [first, second] = json.loads(body_bytes)["changes"]
     assert first["actors"] == [{"kind": "request", "event_id": requests[0]["event_id"], "role": "bob@example.com",
+                                "role_auth": "header",
                                 "caused_by": [{"trigger_id": "reply", "action_index": 0, "fire": 2}],
                                 "request": {"route": "website", "service": "mail", "method": "POST",
                                             "path": "/api/drafts", "status": 201}}]
