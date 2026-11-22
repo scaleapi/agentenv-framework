@@ -44,6 +44,11 @@ agent_default = "local"   # agents too
 # api_key = "secret:agent37_api_key"  # or "env:AGENT37_API_KEY"
 # region = "us"                       # or "eu", "ap-south"
 
+# Optional kosa8 Cloud microVMs (no extra needed):
+# [sandbox.providers.kosa8.config]
+# api_key = "secret:kosa8_api_key"    # or "env:KOSA8_API_KEY"
+# region = "us"                       # optional: "us", "eu", "us-ash1" or "eu-hel1"
+
 # Optional CoreWeave Sandboxes (install the 'coreweave' extra):
 # [sandbox.providers.coreweave.config]
 # api_key = "secret:cwsandbox_api_key"   # or wandb_api_key, with optional wandb_entity and wandb_project
@@ -54,6 +59,10 @@ agent_default = "local"   # agents too
 # [agents]
 # default_a2a_agent_id = "my-agent"   # what a deploy_agent step that names no agent deploys; by default the
 #                                     # agents bundle's Claude Code, @local/agentenv-framework/agents/claude-code
+
+# [trajectories]
+# formats = ["atif/1"]   # the formats beside native a run prescribes to each agent whose trajectory it reads;
+#                        # none by default, so agents build native only. Per run: user_overrides.trajectory_formats
 
 # [envs]
 # default_gateway_env_id = "default"                 # the gateway every gateway deploy runs
@@ -77,6 +86,11 @@ impl = "agent_env.runner.local_runner:LocalRunner"
 
 [runner.config]
 workers = 2
+
+# [gateway]
+# The origins besides a gateway's own that may show its pgweb console in a frame, such as an app that embeds it. A
+# browser opens pgweb with a link from DeployedGatewayEnv.pgweb_link(); with no origin here, only a tab of its own can.
+# console_frame_ancestors = ["https://app.example.com"]
 
 [explorer]
 # The explorer is an unauthenticated local control plane, so `agent-env up` always binds

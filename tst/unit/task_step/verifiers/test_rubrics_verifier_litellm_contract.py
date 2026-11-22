@@ -1,6 +1,6 @@
 """The rubrics judge's calls go through the installed litellm, not a stand-in.
 
-``_prompt_llm_judge`` is the only caller of litellm: ``acompletion`` with a strict ``json_schema`` response_format over
+``_prompt_llm_judge`` calls litellm through ``config.model_call``: ``acompletion`` with a strict ``json_schema`` response_format over
 text or text-and-image content, read through ``.choices[0].message.content``, sent again without the response_format
 when an endpoint refuses it with images. Each test hands the real ``litellm.acompletion`` exactly the kwargs the
 judge builds, adding only litellm's ``mock_response`` so nothing leaves the process, so a litellm release that stops
@@ -13,10 +13,9 @@ import json
 import litellm
 import pytest
 
-from agent_env.config.model import ModelConfig
-from agent_env.store import LocalSecretStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 _VERDICT = {"results": [{"criterion_id": "c1", "passed": True}]}
 _IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
@@ -24,14 +23,7 @@ _IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR
 
 @pytest.fixture
 def judge(monkeypatch):
-    import agent_env.config as cfg_mod
-
-    config = cfg_mod.Config()
-    config.set_secret_store(LocalSecretStore(values={"litellm_api_key": "k"}, use_env=False))
-    monkeypatch.setattr(config, "_model_cfg", ModelConfig())
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: config)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, secrets={"litellm_api_key": "k"}, base_url="https://judge.invalid/v1")
     return RubricsVerifierTaskStep(
         id="v", version=1, criteria=[], prompt_id="p", use_agent_judge=False,
         default_model_api_base="https://judge.invalid/v1", verifier_id="vt",
@@ -94,7 +86,8 @@ async def test_a_default_call_sends_one_user_message_and_returns_its_usage_and_c
 
     assert calls[0]["messages"] == [{"role": "user", "content": "grade it"}]
     assert out["usage"]["total_tokens"] > 0
-    assert isinstance(out["cost"], float) and out["cost"] > 0
+    assert (out["model"], out["endpoint_host"], out["cost_status"]) == ("openai/gpt-4o", "judge.invalid", "priced")
+    assert out["cost_source"].startswith("litellm@") and out["cost_usd"] > 0 and out["reported_cost_usd"] is None
 
 
 @pytest.mark.asyncio

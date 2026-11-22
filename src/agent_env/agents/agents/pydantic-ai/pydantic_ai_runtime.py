@@ -8,10 +8,10 @@ from typing import Any, Final
 
 from agentenv_protocol.a2a_agent import Usage
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.capabilities import Hooks, LocalWorkspace
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import BinaryContent, ModelMessage, ModelMessagesTypeAdapter, UserContent
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelMessagesTypeAdapter, ModelResponse, UserContent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.vllm import VLLMProvider
@@ -20,7 +20,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness import Skills
 from pydantic_ai_harness.coder import Coder
 
-from pydantic_ai_agent import MESSAGES, Outcome, Turn, to_completion
+from pydantic_ai_agent import MESSAGES, Outcome, Turn, to_completion, turn_usage
 
 # Consecutive retries a tool gets for arguments it refuses, as many as Coder gives its file tools, so a model that
 # fumbles a command twice doesn't end the task.
@@ -49,11 +49,20 @@ def _settings(turn: Turn) -> ModelSettings:
     return settings
 
 
-def _agent(turn: Turn) -> Agent:
+def _agent(turn: Turn, responses: list[ModelResponse]) -> Agent:
+    """The turn's agent, which puts every model response it gets in ``responses``: its own, and those of the runs it
+    delegates to with delegate_task, which run this agent again with messages of their own, so they're never in the
+    turn's messages. Listed last, the recorder is the first to see each response."""
+
+    async def keep(_ctx: Any, /, *, request_context: Any, response: ModelResponse) -> ModelResponse:
+        responses.append(response)
+        return response
+
     # The agent runs in a sandbox of its own, so its file tools reach the files attached outside the workspace.
     capabilities: list[Any] = [LocalWorkspace(turn.workspace), Coder(unrestricted_filesystem=True)]
     if turn.skill_names:
         capabilities.append(Skills(turn.skills_dir, include=turn.skill_names))
+    capabilities.append(Hooks(after_model_request=keep))
     toolsets = [
         MCPToolset(registration["url"], id=name, headers=dict(registration.get("headers") or {}))
         for name, registration in turn.mcp_servers.items()
@@ -85,18 +94,10 @@ def _events(messages: Sequence[ModelMessage]) -> list[dict[str, Any]]:
     return ModelMessagesTypeAdapter.dump_python(list(messages), mode="json")
 
 
-def _usage(usage: RunUsage) -> Usage:
-    return Usage(
-        tool_call_count=usage.tool_calls,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.input_tokens + usage.output_tokens,
-        provider_details={
-            "requests": usage.requests,
-            "cache_read_tokens": usage.cache_read_tokens,
-            "cache_write_tokens": usage.cache_write_tokens,
-        },
-    )
+def _usage(responses: Sequence[ModelResponse], usage: RunUsage) -> Usage:
+    """The turn's usage from each of its model responses', delegated runs' included, and its tool calls and requests
+    from the run's, which counts the delegated runs' too."""
+    return turn_usage((response.usage for response in responses), tool_calls=usage.tool_calls, requests=usage.requests)
 
 
 def _failure(exc: Exception, usage: Usage) -> Outcome:
@@ -144,8 +145,10 @@ class PydanticAIRuntime:
         prompt: list[UserContent] = [turn.text]
         for image in turn.images:
             prompt.append(BinaryContent(data=await asyncio.to_thread(image.path.read_bytes), media_type=image.media_type))
-        agent = _agent(turn)
+        responses: list[ModelResponse] = []
+        agent = _agent(turn, responses)
         recorded = len(history)
+        messages: list[ModelMessage] = list(history)
         usage = RunUsage()
         try:
             async with agent.iter(prompt, message_history=history,
@@ -158,13 +161,14 @@ class PydanticAIRuntime:
                     usage = run.usage
             result = run.result
         except asyncio.CancelledError:
-            turn.on_usage(_usage(usage))
+            turn.on_usage(_usage(responses, usage))
             raise
         except Exception as exc:  # every failure is the task's, typed by whose it was
-            return _failure(exc, _usage(usage))
+            return _failure(exc, _usage(responses, usage))
         messages = result.all_messages()
         for event in _events(messages[recorded:]):
             turn.on_event(event)
         # A turn whose run finished is saved whole even if it is cancelled meanwhile, before its locks are let go.
         await to_completion(_save, turn, messages)
-        return Outcome(result.output.strip() or "The agent finished without a reply.", _usage(result.usage))
+        return Outcome(result.output.strip() or "The agent finished without a reply.",
+                       _usage(responses, result.usage))

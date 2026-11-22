@@ -673,6 +673,47 @@ def is_generate_path(rest: str) -> bool:
     return any(path.endswith(a) for a in _GEMINI_GENERATE_ACTIONS)
 
 
+def call_model(rest: str) -> str | None:
+    """The model a native Gemini call names in its path (``.../models/<model>:<action>``)."""
+    path = rest.split("?", 1)[0]
+    _, found, after = path.rpartition("models/")
+    return after.split(":", 1)[0] or None if found else None
+
+
+def native_call_usage(body: bytes) -> dict[str, int] | None:
+    """A native Gemini answer's counts, from the last ``usageMetadata`` in it: one JSON object, a JSON array of
+    chunks, or a stream's ``data:`` events, whose last usage holds the call's totals. ``promptTokenCount`` counts
+    the cached content, and a tool-use prompt (``toolUsePromptTokenCount``) is input too; the output is the
+    candidates and the thoughts, unless the total says the candidates hold the thoughts already. Google leaves zero
+    counts out, so a missing one is 0. None when the answer carried no usage."""
+    text = body.decode("utf-8", "replace")
+    try:
+        parsed = json.loads(text)
+        chunks = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        chunks = []
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    chunks.append(json.loads(line[5:].strip()))
+                except json.JSONDecodeError:
+                    pass
+    meta = next((chunk["usageMetadata"] for chunk in reversed(chunks)
+                 if isinstance(chunk, dict) and isinstance(chunk.get("usageMetadata"), dict)), None)
+    if meta is None:
+        return None
+
+    def count(name: str) -> int:
+        value = meta.get(name)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    inputs = count("promptTokenCount") + count("toolUsePromptTokenCount")
+    candidates, thoughts = count("candidatesTokenCount"), count("thoughtsTokenCount")
+    output = candidates if thoughts and count("totalTokenCount") == inputs + candidates else candidates + thoughts
+    return {"input_tokens": inputs, "output_tokens": output, "cache_read_tokens": count("cachedContentTokenCount"),
+            "reasoning_tokens": thoughts}
+
+
 def wants_sse(rest: str, query_alt: str | None = None) -> bool:
     path = rest.split("?", 1)[0]
     return path.endswith(":streamGenerateContent") or (query_alt == "sse")

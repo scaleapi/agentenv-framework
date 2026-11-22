@@ -17,7 +17,9 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 - At start, `model_providers.litellm` points Codex at `$LITELLM_BASE_URL/openai/v1` with the Responses API, its key
   from `LITELLM_API_KEY`, `[model.headers]` (`LITELLM_EXTRA_HEADERS`) on every model call, and a run's `project_id`
   and `task_id` as `x-litellm-customer-id` and `x-litellm-tags`. The run's tags join an `x-litellm-tags` that
-  `[model.headers]` names, whose own keys, such as `taskId`, win.
+  `[model.headers]` names, whose own keys, such as `taskId`, win. Its `capabilities.remote_compaction = "v2"` makes
+  Codex compact through the endpoint, with the turn's tools declared, instead of locally. `tools.update_plan.enabled`
+  is set too, since Codex leaves `update_plan` off by default.
 - Before each task, every registered MCP server, the task's `peer_agents` tools included, as an `mcp-remote` stdio
   server. Its `AgentEnv-Role` header is the role its registration names, unless the task has a role of its own, which
   reaches that task's CLI alone as `-c` overrides, so tasks of different roles running at once share the file. Codex
@@ -54,7 +56,7 @@ tools it names, and a list to turn off those whose tools it names. A list names 
 | `create_goal`, `get_goal`, `update_goal` | `features.goals=false` |
 | `web_search` | `web_search="disabled"` |
 
-No setting turns off `apply_patch`: a model's entry in Codex's model catalog offers it (every GPT model 0.147.0 ships
+No setting turns off `apply_patch`: a model's entry in Codex's model catalog offers it (every GPT model 0.162.1 ships
 with does). So a selection without it (`{"disable": "*"}`, a list naming it, or an `{"only": [...]}` that doesn't)
 writes a copy of the catalog the CLI would use, with `apply_patch_tool_type` null for every model, to
 `$CODEX_HOME/model_catalog_without_apply_patch.json`, and points the task's CLI at it with `-c model_catalog_json=...`.

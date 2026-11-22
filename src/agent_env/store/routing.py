@@ -271,6 +271,11 @@ class RoutingDocumentStore(DocumentStore):
         return self.namespaces[LOCAL_NAMESPACE]
 
     def find_one(self, collection: str, filter: Filter, sort: Optional[Sort] = None) -> Optional[dict]:
+        if not sort or not sort.keys:
+            for store in self._readers(collection, filter):
+                if (doc := self._read(store, lambda: store.find_one(collection, filter, sort))) is not None:
+                    return doc
+            return None
         found = [
             doc for store in self._readers(collection, filter)
             if (doc := self._read(store, lambda: store.find_one(collection, filter, sort))) is not None
@@ -577,6 +582,12 @@ def configured_store(store: Any) -> Any:
     """The configured store behind ``store``: a routing store's or view's configured side, else
     ``store`` itself. For reports that name the backend a user configured."""
     return store.configured if isinstance(store, (RoutingDocumentStore, LocalRunObjectStore, LocalRunImageStore)) else store
+
+
+def shared_store(store: DocumentStore) -> bool:
+    """Whether the configured store behind ``store`` is other than this machine's own, so others read what's written
+    to it."""
+    return not isinstance(configured_store(store), LocalSqliteDocumentStore)
 
 
 def image_store_holding(ref: str, configured: ImageStore, local: ImageStore) -> ImageStore:

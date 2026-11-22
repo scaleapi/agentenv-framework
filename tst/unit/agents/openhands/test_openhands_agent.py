@@ -9,12 +9,16 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 
 import httpx
 import pytest
 from agentenv_protocol.a2a_agent import Usage
 from starlette.testclient import TestClient
+
+from agent_env.config.model_pricing import litellm_prices
+from agent_env.task_step.usage import RoleUsage
 
 from tst.unit.agents.openhands.agent import openhands_agent
 
@@ -656,7 +660,10 @@ def test_install_extension_is_declared_on_the_card(client: TestClient) -> None:
                  for command in install["install_commands"]]
     assert formatted[-1].endswith("c sh /opt/openhands-a2a/start.sh")
     assert all("sk-secret" not in command.splitlines()[0] for command in formatted)
-    assert "LITELLM_API_KEY='sk-secret'" in formatted[-2].splitlines()
+    [env_file] = [command for command in formatted if "LITELLM_API_KEY" in command]
+    assert "LITELLM_API_KEY='sk-secret'" in env_file.splitlines()
+    assert install["optional_params"] == ["control_token"]
+    assert formatted[-2].splitlines()[1] == "AGENTENV_CONTROL_TOKEN=${AGENTENV_CONTROL_TOKEN:-}"
 
 
 def test_the_card_advertises_the_extensions_agent_env_validates(client: TestClient) -> None:
@@ -673,3 +680,53 @@ def test_the_card_version_is_the_pinned_sdk() -> None:
 
     assert f"openhands-sdk=={openhands_agent.OPENHANDS_VERSION}" in requirements
     assert f"openhands-tools=={openhands_agent.OPENHANDS_VERSION}" in requirements
+
+
+def _call(prompt: int, completion: int, read: int = 0, write: int = 0) -> SimpleNamespace:
+    """The ``TokenUsage`` OpenHands keeps for a model call."""
+    return SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion, cache_read_tokens=read,
+                           cache_write_tokens=write, reasoning_tokens=0)
+
+
+def test_a_turns_usage_counts_the_cache_in_its_input() -> None:
+    """A smoke run's two calls through a LiteLLM proxy: Claude's through Chat Completions, whose prompt leaves the cache
+    out, and GPT's through the Responses API, whose input counts it."""
+    claude = openhands_agent.turn_usage([(_call(10, 129, write=10363), False), (_call(13, 43, 10363, 199), False)],
+                                        responses=2, tool_calls=1, cost=0.0151)
+    gpt = openhands_agent.turn_usage([(_call(7803, 22), True), (_call(7878, 3, read=7680), True)], responses=2,
+                                     tool_calls=1, cost=0.004)
+
+    assert claude == Usage(tool_call_count=1, input_tokens=20948, output_tokens=172, total_tokens=21120,
+                           cache_read_tokens=10363, cache_write_tokens=10562, input_includes_cache=True, cost_usd=0.0151,
+                           provider_details={"reasoning_tokens": 0})
+    assert gpt == Usage(tool_call_count=1, input_tokens=15681, output_tokens=25, total_tokens=15706,
+                        cache_read_tokens=7680, cache_write_tokens=0, input_includes_cache=True, cost_usd=0.004,
+                        provider_details={"reasoning_tokens": 0})
+
+
+def test_a_turns_usage_is_unknown_where_no_usage_came_back() -> None:
+    """A response that carried no usage, which OpenHands keeps no ``TokenUsage`` for, is counted apart, and a Chat
+    Completions prompt as large as its cache counts it, by OpenAI's rule."""
+    unreported = openhands_agent.turn_usage([], responses=1, tool_calls=0, cost=None)
+    counted = openhands_agent.turn_usage([(_call(5000, 10, read=4000), False)], responses=2, tool_calls=2, cost=None)
+
+    assert unreported == Usage(tool_call_count=0, provider_details={"reasoning_tokens": 0, "unreported_calls": 1})
+    assert counted == Usage(tool_call_count=2, input_tokens=5000, output_tokens=10, total_tokens=5010,
+                            cache_read_tokens=4000, cache_write_tokens=0, input_includes_cache=True,
+                            provider_details={"reasoning_tokens": 0, "unreported_calls": 1})
+
+
+def test_a_claude_turn_through_a_proxy_that_counts_the_cache_is_priced_once() -> None:
+    """openhands-baseline-claude, recorded on 2026-11-20 through Scale's LiteLLM proxy, whose Claude prompt counts the
+    cache: the turn's cost is what the proxy's calls cost, not the cache charged twice."""
+    usage = openhands_agent.turn_usage([(_call(10381, 215, write=10371), False),
+                                        (_call(10813, 65, read=10371, write=428), False)],
+                                       responses=2, tool_calls=2, cost=0.01595985)
+    role = RoleUsage("solver", "claude-haiku-4-5-20251001")
+    role.add(usage)
+    entry = role.entry(litellm_prices())
+
+    assert (usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens, usage.input_includes_cache) == (
+        21194, 10371, 10799, True)
+    assert abs(entry["cost_usd"] - 0.01595985) < 1e-9 and entry["uncached_input_tokens"] == 24
+    assert "cost_assumed" not in entry

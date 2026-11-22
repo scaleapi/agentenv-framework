@@ -101,6 +101,7 @@ from typing import Any, ClassVar, Optional
 
 from agent_env.a2a_agent import protocol
 from agent_env.config import get_config
+from agent_env.config.model import ModelRole, ModelSource, resolve_model
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.agent import user_sim_versions
@@ -217,6 +218,16 @@ def recorded_person(us: dict, seed: dict, multi_day: Optional[bool] = None) -> d
                   us["multi_day"] if us.get("multi_day") is not None else multi_day)
 
 
+_USER_SIM_MODEL_SOURCES = {ModelSource.STEP_PARAMS: "user_sim_step_params", ModelSource.RUN: "run_user_model"}
+
+
+def user_sim_model(*, own: Optional[str], run: Optional[str], step: Optional[str]) -> tuple[Optional[str], str]:
+    """A user sim's model, and where it came from as its record names it: its deploy step's own ``step_params``, the
+    run's ``user_model``, then the step's ``model``. ``[model.roles]`` isn't read: the step names its model."""
+    resolved = resolve_model(ModelRole.USER_SIMULATOR, step_params=own, run=run, step=step)
+    return resolved.model, _USER_SIM_MODEL_SOURCES.get(resolved.source, "user_sim_step")
+
+
 class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
     """Deploys the agent that plays the task's user, its persona set at deploy, and records the user under
     ``agent_name`` in ``metadata["user_sims"]``."""
@@ -298,13 +309,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
 
     def _user_model(self, context: TaskStepContext) -> tuple[str, str]:
         """The model for this run, and where it came from."""
-        own = self.step_param_overrides(context).get("model")
-        if own:
-            return own, "user_sim_step_params"
-        run = (context.metadata.get("user_overrides") or {}).get("user_model")
-        if run:
-            return run, "run_user_model"
-        return self.model, "user_sim_step"
+        return user_sim_model(own=self.step_param_overrides(context).get("model"),
+                              run=(context.metadata.get("user_overrides") or {}).get("user_model"), step=self.model)
 
     async def _execute(self, context: TaskStepContext, deployed_agents: list) -> TaskStepContext:
         # Inside deploy_agent's execute, so an agent whose model can't be set is closed like any failed deploy.
@@ -328,8 +334,9 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         if negotiated is None or "model" not in negotiated.fields:
             raise RuntimeError(f"{self.type} '{self.id}': agent '{self.agent_name}' takes no model through "
                                f"{A2AAgent.EXT_AGENT_CONFIG}, so it would play the user on a model of its own")
-        await protocol.post_agent_config((agent.a2a_url or agent.api_url) + negotiated.endpoint, negotiated.fields)
-        context.record_model("user simulator", self.id, model)
+        await protocol.post_agent_config((agent.a2a_url or agent.api_url) + negotiated.endpoint, negotiated.fields,
+                                         headers=agent.control_headers)
+        context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, model)
         prompt = setup["system_prompt"]
         persona = self.persona
         context.metadata.setdefault(USER_SIMS_KEY, {})[self.agent_name] = {

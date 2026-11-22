@@ -146,7 +146,7 @@ async def test_the_finished_task_is_readable_by_cursor(monkeypatch, oc):
     async def fake_run(**kwargs):
         for event in events:
             kwargs["event_callback"](event)
-        return SimpleNamespace(response="done", error=None, error_code=None,
+        return SimpleNamespace(usage=None, response="done", error=None, error_code=None,
                                session_id="ses_1", trajectory=events, tool_call_count=0)
 
     monkeypatch.setattr(server, "run_opencode", fake_run)

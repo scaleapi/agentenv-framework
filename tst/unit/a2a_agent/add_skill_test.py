@@ -98,7 +98,7 @@ def agent(monkeypatch: pytest.MonkeyPatch) -> _Agent:
     monkeypatch.setattr(Skill, "validate", lambda self: None)
     agent = _Agent()
 
-    async def post(self, url, *, json, timeout):
+    async def post(self, url, *, json, timeout, headers=None):
         agent.requests.append({"url": url, "json": json, "timeout": timeout})
         body = (
             {"status": "added", "name": json["name"], "source": "s3"}
@@ -381,7 +381,7 @@ async def test_an_s3_url_skill_s_skill_md_is_read_off_the_event_loop(
     get = store.get
     monkeypatch.setattr(store, "get", lambda url: (on_loop.append(on_event_loop()), get(url))[1])
 
-    async def post(self, url, *, json, timeout):
+    async def post(self, url, *, json, timeout, headers=None):
         return httpx.Response(200, json={"status": "added", "name": json["name"]}, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "post", post)

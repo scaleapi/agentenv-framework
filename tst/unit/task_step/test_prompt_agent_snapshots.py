@@ -14,6 +14,7 @@ import time
 import pytest
 
 from agent_env.config import set_object_store
+from agent_env.config.model import resolve_model
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.snapshot_utils import agent_state_capture as mod
 from agent_env.task_step.snapshot_utils import snapshot_series as ps
@@ -1292,8 +1293,11 @@ class _Conversation:
             def get_default_human_a2a_url(self):
                 return _Conversation.USER_URL
 
-            def get_model_for_role(self, role, *, or_default=True):
-                return None
+            def resolve_model(self, role, **layers):
+                return resolve_model(role, **layers)
+
+            def get_trajectory_formats(self):
+                return ()
 
         monkeypatch.setattr(pa_mod, "get_config", lambda: _Cfg())
 

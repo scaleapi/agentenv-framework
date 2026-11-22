@@ -111,6 +111,11 @@ INSTALL_COMMANDS = [
     "LITELLM_API_KEY={litellm_api_key}\n"
     "LITELLM_BASE_URL={litellm_base_url}\n"
     "PI_A2A_ENV",
+    # agent-env's control token for the agent, which the runner exports when it has one (install/v1 optional_params),
+    # the same way: expanded by the install's shell into the heredoc, empty without one, which leaves the agent open.
+    f"{_DOCKER} exec -i {{container}} sh -c 'cat >> {INSTALL_DIR}/{ENV_FILE}' <<PI_A2A_TOKEN\n"
+    "AGENTENV_CONTROL_TOKEN=${{AGENTENV_CONTROL_TOKEN:-}}\n"
+    "PI_A2A_TOKEN",
     f"{_DOCKER} exec -d -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
 ]
 
@@ -132,6 +137,8 @@ class _Run:
     session_id: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     assistant_messages: list[dict[str, Any]] = field(default_factory=list)
+    # Each compaction's summary usage: pi makes that call outside the agent loop and reports it only here.
+    summary_usages: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: int = 0
 
 
@@ -245,26 +252,51 @@ def _record(run: _Run, event: dict[str, Any]) -> None:
         run.assistant_messages.append(event["message"])
     elif kind == "tool_execution_end":
         run.tool_calls += 1
+    elif kind == "compaction_end":
+        run.summary_usages.append((event.get("result") or {}).get("usage") or {})
     if kind not in _UNRECORDED_EVENTS:
         run.events.append(event)
 
 
 def _usage(run: _Run) -> Usage:
-    totals = {"input": 0, "output": 0, "totalTokens": 0, "cacheRead": 0, "cacheWrite": 0}
-    cost = 0.0
-    for message in run.assistant_messages:
-        usage = message.get("usage") or {}
-        for key in totals:
-            totals[key] += int(usage.get(key) or 0)
+    """The turn's usage, summed over its assistant messages and its compactions' summary calls, with ``input_tokens``
+    counting the cache. A usage that is all zero got none from its endpoint, as a streamed Claude answer through a
+    LiteLLM proxy, or a compaction that ended without one, and is counted in ``unreported_calls`` instead of as nothing
+    used; a message pi ended with an error and no usage was a request the endpoint refused, and counts nothing."""
+    counted, cost, unreported = [], 0.0, 0
+    usages = [(message.get("usage") or {}, message.get("stopReason") == "error") for message in run.assistant_messages]
+    for usage, refused in usages + [(usage, False) for usage in run.summary_usages]:
+        counts = [int(usage.get(key) or 0) for key in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")]
+        if not any(counts):
+            unreported += not refused
+            continue
+        counted.append(_counted(*counts))
         cost += float((usage.get("cost") or {}).get("total") or 0)
+    details = {"unreported_calls": unreported} if unreported else {}
+    if not counted:
+        return Usage(tool_call_count=run.tool_calls, provider_details=details)
+    input_tokens, output_tokens, read, write, total, settled = (sum(column) for column in zip(*counted))
     return Usage(
         tool_call_count=run.tool_calls,
-        input_tokens=totals["input"],
-        output_tokens=totals["output"],
-        total_tokens=totals["totalTokens"],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total,
+        cache_read_tokens=read,
+        cache_write_tokens=write,
+        input_includes_cache=True if settled == len(counted) else None,
         cost_usd=cost or None,
-        provider_details={"cache_read_tokens": totals["cacheRead"], "cache_write_tokens": totals["cacheWrite"]},
+        provider_details=details,
     )
+
+
+def _counted(input: int, output: int, read: int, write: int, total: int) -> tuple[int, ...]:
+    """A message's input counting its cache, its output, cache read, cache write and total, and 1 when its total
+    confirms which its input was, else 0. pi's ``input`` is the prompt less its cache reads and writes, and its total
+    counts them, so they're added back; a total of the input and output alone says the input already holds them. A
+    total that says neither keeps pi's rule, unconfirmed."""
+    if read + write == 0 or total == input + output:
+        return input, output, read, write, total, 1
+    return input + read + write, output, read, write, total, int(total == input + output + read + write)
 
 
 def _text(message: Mapping[str, Any]) -> str:
@@ -363,7 +395,8 @@ def _unpack(archive: Path, directory: Path) -> None:
     config_description="Configure the pi runtime: model, effort, system prompt and tool allowlist.",
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, description="The pi JSON-mode event stream of a completed task."),
+        enable(TRAJECTORY_V1, native=TRAJECTORY_FORMAT,
+               description="The pi JSON-mode event stream of a completed task."),
         enable(
             SNAPSHOT_V1,
             description=(
@@ -378,6 +411,7 @@ def _unpack(archive: Path, directory: Path) -> None:
         enable(
             INSTALL_V1,
             install_commands=INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=["container", "agent_ctx_tar", "a2a_port", "litellm_api_key", "litellm_base_url"],
             a2a_port=8000,
         ),

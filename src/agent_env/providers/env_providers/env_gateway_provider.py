@@ -12,7 +12,7 @@ import secrets
 import shlex
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
@@ -32,10 +32,15 @@ from agentenv_protocol.website import (
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
+from agent_env.config.errors import ConfigError
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
+from agent_env.env.gateway.console_session import frame_ancestor_problem
 from agent_env.env.gateway.constants import (
     CLOCK_FOLLOWERS_ENV,
+    COMPUTERS_ENV,
+    CONSOLE_FRAME_ANCESTORS_ENV,
+    CONSOLE_URLS_ENV,
     CONTROL_TOKEN_CHILDREN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
@@ -47,6 +52,7 @@ from agent_env.env.gateway.constants import (
     tool_name_clashes_text,
 )
 from agent_env.env.envs.service_db import (
+    CONSOLE_SERVICE_NAMES,
     DATABASE_SERVICE_NAME,
     DB_MCP_CONTAINER_PORT,
     DB_MCP_PORT,
@@ -61,11 +67,10 @@ from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
     AGENT_ENV_WEBSITE_HEALTH_PATH,
-    DOCKER_COMPOSE_PATH,
-    GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
     GATEWAY_SERVICE_NAMES,
 )
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.providers.env_providers.env_provider import (
     DeployRefused,
     _SandboxEnvironmentProvider,
@@ -143,6 +148,8 @@ class DeployedGateway:
     mcp_url: str
     db_web_url: str
     db_mcp_url: str | None = None
+    db_web_gateway_url: str | None = None
+    db_mcp_gateway_url: str | None = None
     website_frontend_urls: dict[str, str] | None = None
     mcp_server_name: str | None = None
     # Ids of the EnvStateInstance record(s) this deploy acquired; the caller records them
@@ -205,6 +212,25 @@ class SidecarConfig:
         """The local image tag compose references — the same tag ``load_docker_images``
         restores on the VM (the artifact's agent-env image name)."""
         return self.image_artifact.image_name
+
+
+async def _console_answer(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> int | str:
+    """The status ``url`` answers, or the name of the error when it doesn't answer. A console still booting, or a
+    sandbox tunnel dropping a connection, leaves a timeout, a connection error or a 502-504, so such an answer is asked
+    again, ``_CONSOLE_ATTEMPTS`` times in all."""
+    answer: int | str = "unasked"
+    for attempt in range(_CONSOLE_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_CONSOLE_RETRY_PAUSE_S)
+        try:
+            answer = (await client.get(url, headers=headers)).status_code
+            if answer not in (502, 503, 504):
+                return answer
+        except httpx.TransportError as e:
+            answer = type(e).__name__
+        except httpx.HTTPError as e:
+            return type(e).__name__
+    return answer
 
 
 class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
@@ -292,7 +318,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
             async def store_exec(argv: list[str]) -> tuple[int, str, str]:
                 return await self._sandbox.exec_with_output(
-                    "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH,
+                    "sudo", *self._stack_layout.compose_argv,
                     "exec", "-T", store_name, *argv,
                 )
 
@@ -547,10 +573,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
+        gateway_env.extend(f"      - {key}={value}" for key, value in consoles_environment(state_provider.console_urls()).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}"
                            for key, value in control_token_children_environment(external_children, control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in computers_environment(external_children).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
@@ -700,6 +728,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sandbox_id=self._sandbox.sandbox_id, sandbox_type=self._sandbox.type,
             sandbox_ids=self._sandbox_ids(always_name_gateway=topology.names_gateway_on_vm),
             db_mcp_url=deployed.db_mcp_url,
+            db_web_gateway_url=deployed.db_web_gateway_url,
+            db_mcp_gateway_url=deployed.db_mcp_gateway_url,
             environment_card_url=f"{deployed.gateway_url}{WELL_KNOWN_PATH}",
             environment_card=deployed.environment_card,
             environment_card_read_at_utc=deployed.environment_card_read_at_utc,
@@ -707,6 +737,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
             control_token=deployed.control_token,
+            stack_layout=self._stack_layout.to_record(),
         )
 
     async def create_gateway(
@@ -821,6 +852,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         website_configs = website_configs or []
         website_images = website_images or []
         sidecars = sidecars or []
+        layout = self._stack_layout
 
         config = get_config()
         gateway_env = Env.get(gateway_env_id(config))
@@ -863,6 +895,19 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 **vm_kwargs,
             )
         sandbox = self._sandbox
+
+        def publish(port: int) -> int:
+            return sandbox.host_port(layout.host_port(port))
+
+        def tunnel_url(port: int) -> str | None:
+            host_port = layout.host_port(port)
+            url = sandbox.tunnel_urls.get(host_port)
+            if url is None and layout.is_slot:
+                raise RuntimeError(
+                    f"Sandbox {sandbox.sandbox_id} has no tunnel for slot port {host_port} (container port {port}); "
+                    "a shared VM must be created exposing every slot's ports"
+                )
+            return url
         await sandbox.load_docker_images(all_images)
 
         # Compose declares the local_state service by name, so "standing up" is just naming the host;
@@ -896,7 +941,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             sidecars=sidecars,
             state_provider=self._state_provider,
             state_instance=state_instance,
-            host_port=sandbox.host_port,
+            host_port=publish,
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
@@ -907,16 +952,16 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         # Write files to VM
         logger.info("Writing files to VM...")
-        await sandbox.exec_script(f"mkdir -p {GATEWAY_APP_DIR}", max_retries=2)
+        await sandbox.exec_script(f"mkdir -p {layout.app_dir}", max_retries=2)
 
         # Only local postgres needs its init script to be directly run by the gateway's servicedb
         # container; remote/external stores are already initialized upstream.
         if self._needs_local_postgres:
             init_script = local_store_spec.init_sql
             logger.info(f"Generated init-schemas.sql:\n{init_script}")
-            await self._write_file(sandbox, f"{GATEWAY_APP_DIR}/init-schemas.sql", init_script)
+            await self._write_file(sandbox, layout.init_schemas_file, init_script)
 
-        await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose_content)
+        await self._write_file(sandbox, layout.compose_file, compose_content)
 
         # Start MCP services with docker compose
         logger.info("Starting MCP services...")
@@ -926,14 +971,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             # Everything but the gateway, beside the children; then the gateway, which waits for every child it fronts.
             # Both run to the end before either's failure is raised, so no child is still starting when the deploy closes.
             up, started = await asyncio.gather(self._compose_up(sandbox, f"--scale {GATEWAY_SERVICE_NAME}=0"),
-                                               children(sandbox.tunnel_urls.get(gateway_port), control_token),
+                                               children(tunnel_url(gateway_port), control_token),
                                                return_exceptions=True)
             for result in (up, started):
                 if isinstance(result, BaseException):
                     raise result
             external = tuple(replace(child, mcp_url=sandbox.url_from_sandbox(child.mcp_url),
                                      base_url=sandbox.url_from_sandbox(child.base_url)) for child in started)
-            await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose(external_children=external))
+            await self._write_file(sandbox, layout.compose_file, compose(external_children=external))
             await self._compose_up(sandbox)
 
         # Wait for containers to start
@@ -946,17 +991,16 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if exit_code != 0:
             raise RuntimeError(f"docker ps failed: {stderr}")
 
-        # Check gateway container is running
-        exit_code, stdout, stderr = await sandbox.exec_with_output( "sudo", "docker", "ps")
-        if GATEWAY_SERVICE_NAME not in stdout:
+        running, listing = await self._gateway_running(sandbox)
+        if not running:
             down = await self._down_services(sandbox)
             raise RuntimeError(f"Gateway container not running:\n{down}" if down else
-                               f"Gateway container not running. docker ps: {stdout}")
+                               f"Gateway container not running. docker ps: {listing}")
 
         # Wait for gateway to be fully ready (needs time to discover internal servers)
         # Host-side port: exec_with_output runs inside the VM on per-VM backends but on
         # the host for LocalSandbox, where the gateway is published elsewhere.
-        gateway_ready = await self._wait_for_gateway(sandbox, sandbox.host_port(gateway_port))
+        gateway_ready = await self._wait_for_gateway(sandbox, publish(gateway_port))
 
         # Print gateway logs for debugging
         logger.info("Gateway logs:")
@@ -975,10 +1019,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if not await self._log_service(sandbox, name):
                 logger.warning(f"{name} container not found")
 
-        gateway_url = sandbox.tunnel_urls.get(gateway_port)
-        db_web_base_url = sandbox.tunnel_urls.get(DB_WEB_PORT) if PGWEB_SERVICE_NAME in sidecar_names else None
+        gateway_url = tunnel_url(gateway_port)
+        db_web_base_url = tunnel_url(DB_WEB_PORT) if PGWEB_SERVICE_NAME in sidecar_names else None
         db_web_url = f"{db_web_base_url}/" if db_web_base_url else None
-        db_mcp_base_url = sandbox.tunnel_urls.get(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
+        db_mcp_base_url = tunnel_url(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
         db_mcp_url = f"{db_mcp_base_url}/mcp" if db_mcp_base_url else None
         logger.info(f"pgweb URL: {db_web_url}")
         if db_mcp_url:
@@ -995,6 +1039,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
+        consoles = await self._served_consoles(gateway_url, sidecar_names, control_token)
 
         website_frontend_urls = _frontend_urls(gateway_url, website_configs)
         for svc_name, url in (website_frontend_urls or {}).items():
@@ -1003,6 +1048,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         logger.info(f"Gateway URL: {gateway_url}")
         return DeployedGateway(
             gateway_url=gateway_url, mcp_url=mcp_url, db_web_url=db_web_url, db_mcp_url=db_mcp_url,
+            db_web_gateway_url=consoles.get(PGWEB_SERVICE_NAME), db_mcp_gateway_url=consoles.get(DB_MCP_SERVICE_NAME),
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
             environment_card=card, environment_card_read_at_utc=card_read_at_utc, control_token=control_token,
@@ -1086,6 +1132,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_results: list[tuple[str, "Sandbox"]] = []
             pgweb_sb = None
             db_mcp_sb = None
+            consoles: dict[str, str] = {}
             errors: list[BaseException] = []
             for i, r in enumerate(all_results):
                 if isinstance(r, BaseException):
@@ -1100,6 +1147,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                     external = r
                 else:
                     spec = sidecar_specs[i - len(mcp_coros)]
+                    if r.private_host:
+                        consoles[spec.name] = f"http://{r.private_host}:{spec.port}"
                     if spec.name == PGWEB_SERVICE_NAME:
                         pgweb_sb = r
                         self._pgweb_sandbox = r
@@ -1126,10 +1175,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                                              *(f"{c.name}={sandbox_provider.url_from_sandbox(c.base_url)}" for c in external)]),
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
+                **consoles_environment(consoles),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
                 **control_environment(control_token),
                 **clock_followers_environment(external),
                 **control_token_children_environment(external, control_token),
+                **computers_environment(external),
                 **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
@@ -1154,11 +1205,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
             db_web_url = pgweb_sb.tunnel_urls[DB_WEB_PORT] + "/" if pgweb_sb else None
             db_mcp_url = db_mcp_sb.tunnel_urls[DB_MCP_CONTAINER_PORT] + "/mcp" if db_mcp_sb else None
+            served = await self._served_consoles(gateway_url, consoles, control_token)
             return DeployedGateway(
                 gateway_url=gateway_url,
                 mcp_url=_mcp_url(gateway_url, card),
                 db_web_url=db_web_url,
                 db_mcp_url=db_mcp_url,
+                db_web_gateway_url=served.get(PGWEB_SERVICE_NAME),
+                db_mcp_gateway_url=served.get(DB_MCP_SERVICE_NAME),
                 website_frontend_urls=None,
                 mcp_server_name=mcp_server_name,
                 env_state_instance_ids=[state_instance.instance_id],
@@ -1169,6 +1223,32 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         except Exception:
             await self.close()
             raise
+
+    async def _served_consoles(self, gateway_url: str, consoles: Iterable[str],
+                               control_token: str | None) -> dict[str, str]:
+        """Each of ``consoles`` at the gateway, by key, that the gateway guards and reaches: it refuses a request without
+        its control token, and with the token it gets the console's answer rather than a 5xx. An older gateway image
+        answers 404, and a console the gateway can't reach (a server bound to an address family the private network
+        lacks) leaves it a 502, so the record names neither."""
+        keys = list(consoles)
+        if not keys or not control_token:
+            return {}
+
+        async def served(client: httpx.AsyncClient, key: str) -> bool:
+            url = f"{gateway_url}/svc/{key}/"
+            if (bare := await _console_answer(client, url, {})) != 401:
+                logger.warning(f"the gateway answered {bare}, not 401, at /svc/{key}/: the record names no {key}")
+                return False
+            if not isinstance(answer := await _console_answer(client, url, control_headers(control_token)), int) \
+                    or answer >= 500:
+                logger.warning(f"the gateway answered {answer} with its token at /svc/{key}/: it can't reach {key}, so "
+                               f"the record names none")
+                return False
+            return True
+
+        async with httpx.AsyncClient(timeout=_CONSOLE_PROBE_TIMEOUT_S) as client:
+            found = await asyncio.gather(*(served(client, key) for key in keys))
+        return {key: f"{gateway_url}/svc/{key}{_CONSOLE_PATHS[key]}" for key, ok in zip(keys, found) if ok}
 
     async def _refuse_tool_name_clashes(self, gateway_url: str) -> None:
         """Refuse the deploy when the gateway reports tool names more than one of its sources serves, which leaves it
@@ -1246,7 +1326,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         """``docker compose up -d`` the stack, whose failure names each service that went down and ends with its
         output, which compose's own error leaves out."""
         try:
-            await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose up -d {args}".rstrip(), max_retries=2)
+            layout = self._stack_layout
+            await sandbox.exec_script(f"cd {layout.app_dir} && {layout.compose_command_from_app_dir} up -d {args}".rstrip(),
+                                      max_retries=2)
         except RuntimeError as e:
             down = await self._down_services(sandbox)
             if down is None:
@@ -1266,7 +1348,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     async def _read_down_services(self, sandbox: VmSandbox) -> str | None:
         try:
             exit_code, stdout, stderr = await sandbox.exec_with_output(
-                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "--format", "json"
+                "sudo", *self._stack_layout.compose_argv, "ps", "-a", "--format", "json"
             )
             if exit_code != 0:
                 logger.warning(f"Can't list the stack's services: docker compose ps exited {exit_code}: {stderr.strip()[-500:]}")
@@ -1319,7 +1401,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         exec transport failed (exit -1) is retried, then raised: it can't tell "no container" apart."""
         for attempt in range(_TRAJECTORY_READ_ATTEMPTS):
             exit_code, stdout, stderr = await sandbox.exec_with_output(
-                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "-q", compose_service
+                "sudo", *self._stack_layout.compose_argv, "ps", "-a", "-q", compose_service
             )
             if exit_code != -1:
                 break
@@ -1328,6 +1410,22 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             raise RuntimeError(f"Could not look up the {compose_service} container: exec transport failed {_TRAJECTORY_READ_ATTEMPTS} times")
         container_id = stdout.strip()
         return container_id if container_id else None
+
+    async def _gateway_running(self, sandbox: VmSandbox) -> tuple[bool, str]:
+        """Whether this stack's gateway container is running, and the listing that says so.
+
+        The default stack keeps today's plain ``docker ps`` check, which any gateway container on the VM satisfies. That is
+        safe because a VM runs either one default stack or only slot stacks, never both. A slot asks its own compose project
+        (``compose ps --status running -q``), since another slot's gateway would satisfy the plain check.
+        """
+        layout = self._stack_layout
+        if not layout.is_slot:
+            _, stdout, _ = await sandbox.exec_with_output("sudo", "docker", "ps")
+            return GATEWAY_SERVICE_NAME in stdout, stdout
+        _, stdout, _ = await sandbox.exec_with_output(
+            "sudo", *layout.compose_argv, "ps", "--status", "running", "-q", GATEWAY_SERVICE_NAME
+        )
+        return bool(stdout.strip()), stdout
 
     async def _provision_sidecar(self, deploy: _ContainerDeploy, spec) -> Sandbox:
         logger.info(f"Provisioning {spec.name} from {spec.image}...")
@@ -1466,12 +1564,20 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
+        stack_layout: StackLayout = DEFAULT_STACK_LAYOUT,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
         server on its private network. ``website_browser`` runs among its MCP servers, on the network it shares with
-        the sites; by default the run's (``run_website_browser``) when there are websites, which only a VM runs."""
+        the sites; by default the run's (``run_website_browser``) when there are websites, which only a VM runs.
+
+        ``stack_layout`` places the stack in a VM; the provider keeps it for the commands it later runs on that stack.
+        """
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
+        if stack_layout.is_slot and (existing_sandbox is None or not existing_sandbox.walls_verified):
+            raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a slot needs an existing sandbox "
+                             f"whose walls between slots are verified")
+        self._stack_layout = stack_layout
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
         self._state_instance = state_instance
         self._state_provider = (
@@ -1530,9 +1636,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         return sandbox_ids
 
     async def _reattach(self, env: Env, deployed: DeployedEnv) -> Sandbox:
-        """A record this provider wrote, reattached: a MultiEnv's through its own rebuild, any other env's as the base reattaches it."""
+        """A record this provider wrote, reattached: a MultiEnv's through its own rebuild, any other env's as the base reattaches it.
+        Either way the provider takes back the stack layout the record kept, so its commands reach the same stack."""
         from agent_env.env.envs.multi_env import MultiEnv
 
+        self._stack_layout = StackLayout.from_record(getattr(deployed, "stack_layout", None))
         if isinstance(env, MultiEnv):
             return await self._reattach_multi_env(deployed)
         return await super()._reattach(env, deployed)
@@ -1697,6 +1805,8 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
     problems += [f"two of its services would both be named {name!r}" for name, count in services.items() if count > 1]
     problems += [f"environment name {name!r} is one a gateway deploy names its own containers "
                  f"({', '.join(sorted(GATEWAY_SERVICE_NAMES))})" for name in services if name in GATEWAY_SERVICE_NAMES]
+    problems += [f"website name {w.environment_name!r} is the /svc key of a SQL console the gateway serves"
+                 for w in website_configs or [] if w.environment_name in CONSOLE_SERVICE_NAMES]
     return problems
 
 
@@ -1756,6 +1866,10 @@ def _http_probe(port: int, *paths: str) -> str:
     return f"{pick}else exit 1; fi; for u in {urls}; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"
 
 
+# Where each SQL console's users open it under its /svc/<key>/ route: pgweb's UI, db-mcp's MCP endpoint.
+_CONSOLE_PATHS = {PGWEB_SERVICE_NAME: "/", DB_MCP_SERVICE_NAME: "/mcp"}
+
+
 def _network_lines(*networks: str) -> list[str]:
     return ["    networks:", *(f"      - {network}" for network in networks)]
 
@@ -1779,6 +1893,34 @@ def control_token_children_environment(children: Iterable[ExternalChild], contro
     deployed with that token (``children``)."""
     names = ",".join(child.name for child in children) if control_token else ""
     return {CONTROL_TOKEN_CHILDREN_ENV: names} if names else {}
+
+
+def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
+    """The gateway's computers: every child it fronts on a sandbox of its own (``children``), a multi env's computers,
+    with or without a control token."""
+    names = ",".join(child.name for child in children)
+    return {COMPUTERS_ENV: names} if names else {}
+
+
+def consoles_environment(consoles: Mapping[str, str]) -> dict[str, str]:
+    """The env's SQL consoles the gateway serves behind its control token, each at its address on the env's network,
+    and the origins configured to show pgweb in a frame."""
+    value = ",".join(f"{name}={url}" for name, url in consoles.items())
+    if not value:
+        return {}
+    ancestors = " ".join(console_frame_ancestors())
+    return {CONSOLE_URLS_ENV: value, **({CONSOLE_FRAME_ANCESTORS_ENV: ancestors} if ancestors else {})}
+
+
+def console_frame_ancestors() -> tuple[str, ...]:
+    """``[gateway] console_frame_ancestors``: the origins besides a gateway's own that may show pgweb in a frame, such as
+    the apps that embed it; none by default."""
+    origins = get_config().section("gateway").get("console_frame_ancestors", [])
+    if not isinstance(origins, list) or not all(isinstance(origin, str) for origin in origins):
+        raise ConfigError("[gateway] console_frame_ancestors is a list of origins, like [\"https://app.example.com\"]")
+    if problems := [problem for origin in origins if (problem := frame_ancestor_problem(origin))]:
+        raise ConfigError(f"[gateway] console_frame_ancestors: {'; '.join(problems)}")
+    return tuple(origins)
 
 
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:
@@ -1806,6 +1948,10 @@ def _seconds(seconds: float) -> str:
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
 # time, if startup's didn't complete.
 _STATE_READ_TIMEOUT_S = 60.0
+# Asking the gateway for each SQL console at deploy: each request's budget, and how often and how far apart it asks.
+_CONSOLE_PROBE_TIMEOUT_S = 30.0
+_CONSOLE_RETRY_PAUSE_S = 5.0
+_CONSOLE_ATTEMPTS = 4
 
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0

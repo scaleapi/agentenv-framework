@@ -1,0 +1,23 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "exec-desk"},
+  {"id": "write", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["env"],
+   "command": ["sh", "-c", "mkdir -p Desktop && echo computer-exec > Desktop/note.txt && cat Desktop/note.txt"]},
+  {"id": "launch", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["write"],
+   "command": ["thunar", "Desktop"], "background": true},
+  {"id": "window", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["launch"], "timeout_s": 60,
+   "command": "for i in $(seq 100); do xwininfo -root -tree | grep -i -m1 'thunar' && exit 0; sleep 0.5; done; exit 1"},
+  {"id": "tolerated", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["window"],
+   "command": "echo nope >&2; exit 7", "check": false},
+  {"id": "missing", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["tolerated"],
+   "command": ["no-such-app", "Desktop"], "background": true, "check": false},
+  {"id": "missing-string", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["missing"],
+   "command": "thunarr Desktop", "background": true, "check": false},
+  {"id": "bad-flag", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["missing-string"],
+   "command": ["ls", "--no-such-flag"], "background": true, "check": false},
+  {"id": "root", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["bad-flag"], "scope": "system",
+   "command": "id -u; pwd; echo ~; touch /etc/computer-exec-root"},
+  {"id": "owner", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["root"],
+   "command": ["stat", "-c", "%U", "/etc/computer-exec-root"]},
+  {"id": "denied", "type": "computer_exec", "env_id": "exec-desk", "depends_on": ["owner"],
+   "command": "touch /etc/computer-exec-denied", "check": false}
+]

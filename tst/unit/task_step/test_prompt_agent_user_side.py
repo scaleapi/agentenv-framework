@@ -12,6 +12,7 @@ from agent_env.a2a_agent import conversation_store
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.task_steps import prompt_agent as prompt_agent_module
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 AGENT = "http://agent.test"
@@ -458,11 +459,11 @@ _USER_SIM_CARD_WITH_TRAJ = {"capabilities": {"extensions": [_AGENT_CONFIG, _TRAJ
 async def test_the_user_sims_own_trajectory_is_stored_per_answer_under_the_steps_prefix(monkeypatch):
     fetched = []
 
-    async def fake_fetch(self, a2a_url, traj_ext, server_task_id, prefix, name, *, sandbox_type, card=None):
+    async def fake_fetch(a2a_url, traj_ext, server_task_id, prefix, name, *, sandbox_type, headers, card=None):
         fetched.append((a2a_url, server_task_id, prefix, sandbox_type))
-        return f"{prefix}{name}.json"
+        return prompt_agent_module.StoredTrajectory(f"{prefix}{name}.json")
 
-    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", fake_fetch)
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", fake_fetch)
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two"), text("draft three")], USER: [sim("one"), sim("two")]})
     ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
 
@@ -485,7 +486,7 @@ async def test_a_failed_user_sim_trajectory_fetch_is_not_recorded_and_the_conver
     async def failing_fetch(*args, **kwargs):
         raise RuntimeError("no trajectory")
 
-    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", failing_fetch)
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", failing_fetch)
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
     ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
 
@@ -498,12 +499,11 @@ async def test_a_failed_user_sim_trajectory_fetch_is_not_recorded_and_the_conver
 @pytest.mark.asyncio
 async def test_a_user_sim_trajectory_fetch_that_hangs_is_cut_off_and_the_conversation_goes_on(monkeypatch):
     import asyncio
-    from agent_env.task_step.task_steps import prompt_agent as prompt_agent_module
 
     async def hanging_fetch(*args, **kwargs):
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", hanging_fetch)
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", hanging_fetch)
     monkeypatch.setattr(prompt_agent_module, "_USER_SIM_TRAJECTORY_FETCH_SECONDS", 0.05)
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
     ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
@@ -517,9 +517,9 @@ async def test_a_user_sim_trajectory_fetch_that_hangs_is_cut_off_and_the_convers
 @pytest.mark.asyncio
 async def test_a_user_sim_trajectory_fetch_that_stores_nothing_is_not_recorded(monkeypatch):
     async def empty_fetch(*args, **kwargs):
-        return None
+        return prompt_agent_module.StoredTrajectory()
 
-    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", empty_fetch)
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", empty_fetch)
     peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
     ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
 

@@ -2,22 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from agentenv_protocol import EnvironmentTool, ToolResult
 from agentenv_protocol.a2a_agent import (
+    REPORTED_USAGE_KEY,
     ProxyBashAction,
     ProxyBashResult,
     ProxySkill,
     ProxyTextPart,
     ProxyToolAction,
+    Usage,
 )
 
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
+from agent_env.runner import store as run_store
+from agent_env.runner.runner import RunRecord, RunStatus, run_outcome
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.episode.proxy import InProcessProxy, ProxyClient, ProxyRefused
 from agent_env.task.store import record_task_cancelled
@@ -66,11 +73,14 @@ class Turn:
         return TurnTools(self, timeout)
 
     async def record_model_call(self, message: str | dict[str, Any], *, model: str | None = None,
-                                usage: dict[str, Any] | None = None) -> None:
+                                usage: Usage | dict[str, Any] | None = None) -> None:
         """Record one of the model's calls, once it has returned: an OpenAI chat message, an Anthropic message or a
         string. From then on each call to the turn's tools must be one the last recorded call made, and all must run
         before the next is recorded or the turn ends; else ``EpisodeError``. Calls to tools the turn doesn't offer
-        aren't checked."""
+        aren't checked. ``usage`` is the call's: a ``Usage``, taken as given, from a caller that knows what its counts
+        hold, or the response's own usage, which the proxy reads with ``Usage.from_model_response``."""
+        if isinstance(usage, Usage):
+            usage = {REPORTED_USAGE_KEY: usage.to_dict()}
         await self._checked(self._proxy.record(self._task_id, message, model, usage))
 
     async def end(self, response: str | None = None) -> None:
@@ -249,10 +259,17 @@ class Episode:
         resolves."""
         running.set()
         with namespace_routing():
+            failure: BaseException | None = None
             try:
+                # Before any await, so start() returns with the run listed; a write that fails is the run's error, and
+                # the finally below still takes the episode out of _live.
+                _record_run(self._task, self.id, self._context.metadata)
                 await self._task.run(context=self._context, instance_id=self.id)
                 self._ran = True
                 self._notify()
+            except BaseException as e:
+                failure = e
+                raise
             finally:
                 self._tearing_down = True
                 try:
@@ -264,7 +281,19 @@ class Episode:
                     if self._abandoned is not None:
                         await asyncio.to_thread(_record_cancelled, self._task.id, self.id, self._abandoned)
                 finally:
-                    del _live[self.id]
+                    try:
+                        await asyncio.to_thread(_record_ended, self._task.id, self.id, *self._outcome(failure))
+                    finally:
+                        del _live[self.id]
+
+    def _outcome(self, failure: BaseException | None) -> tuple[RunStatus, str | None]:
+        """How the run ended, by the rule every runner records a run's end by (``run_outcome``: a step that failed
+        without failing the task fails the run too), but cancelled when it was abandoned or cancelled."""
+        if self._abandoned is not None:
+            return RunStatus.CANCELED, self._abandoned
+        if isinstance(failure, asyncio.CancelledError):
+            return RunStatus.CANCELED, "the episode was cancelled"
+        return run_outcome(self._context, failure)
 
     async def _wait(self, changed: asyncio.Future[None]) -> None:
         """Until the run ends or what was ``changed`` when the caller last looked changes again."""
@@ -303,7 +332,7 @@ class Episode:
 
     async def _attach(self, agent: str, deployed: DeployedAgent) -> None:
         """Claim ``agent``'s proxy and hand out the turns it opens."""
-        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {})
+        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {}, headers=deployed.control_headers)
         self._proxies.append(proxy)
         await proxy.claim()
         self._drains.append(asyncio.create_task(self._drain(agent, proxy)))
@@ -366,6 +395,28 @@ class Episode:
 
 def _episode_of(context: TaskStepContext) -> Episode:
     return _live[context.metadata["episode"]["id"]]
+
+
+def _record_run(task: Task, instance_id: str, metadata: dict[str, Any]) -> None:
+    """The episode in the run index as a runner records the runs it accepts, so the explorer lists it, in its run group
+    when ``start`` was given one; in the local stores for an ``@local`` task, as ``Task.run`` scopes its records."""
+    now = datetime.now(timezone.utc).isoformat()
+    with run_scope(task.id):
+        run_store.insert_run(RunRecord(
+            run_id=_run_id(instance_id), runner="episode", task_id=task.id, task_version=task.version,
+            instance_id=instance_id, status=RunStatus.RUNNING, started_at_utc=now,
+            owner={"host": socket.gethostname(), "pid": os.getpid(), "seen": now},
+            overrides={"metadata": {key: metadata[key] for key in ("episode", "run_group_id", "seed")
+                                    if key in metadata}}))
+
+
+def _record_ended(task_id: str, instance_id: str, status: RunStatus, error: str | None) -> None:
+    with run_scope(task_id):
+        run_store.mark_terminal(_run_id(instance_id), status, error=error)
+
+
+def _run_id(instance_id: str) -> str:
+    return f"episode-{instance_id}"
 
 
 def _record_cancelled(task_id: str, instance_id: str, reason: str) -> None:

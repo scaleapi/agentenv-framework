@@ -34,7 +34,8 @@ from agent_env.config import configure, reset_config
 from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
-from agent_env.env.envs.computer.utils import builder, inside
+from agent_env.env.envs.computer.utils import builder, composer, inside
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
@@ -86,10 +87,19 @@ def base():
 
 @pytest.fixture(scope="module")
 def desktop(tmp_path_factory):
-    """The shipped desktop example's computer env, composed for the module in stores of the module's own: an image for
-    each arch this machine's Docker builds, the native one probed by gate 3."""
+    """The shipped desktop example's computer env, composed for the module in stores of the module's own as a run on
+    this machine composes it: the container of each arch this machine's Docker builds, the native one probed by gate 3.
+    A deploy of its disk form composes that first."""
     bundle = find_bundle("desktop")
     yield from _composed(tmp_path_factory.mktemp("desktop"), parse_bundle(bundle.root, id_root=bundle.id_root))
+
+
+@pytest.fixture(scope="module")
+def desktop_with_disk(tmp_path_factory):
+    """``desktop`` with its disk forms composed too, for a test that boots its disk image itself."""
+    bundle = find_bundle("desktop")
+    yield from _composed(tmp_path_factory.mktemp("desktop"), parse_bundle(bundle.root, id_root=bundle.id_root),
+                         disks=True)
 
 
 @pytest.fixture(scope="module")
@@ -158,7 +168,11 @@ def cdp_clients(tmp_path_factory) -> Path:
     return folder
 
 
-def _composed(root: Path, bundle, env_id: str | None = None):
+def _composed(root: Path, bundle, env_id: str | None = None, disks: bool = False):
+    """``bundle`` written and its computers composed as a run on this machine composes them, its containers alone,
+    unless ``disks``, which composes every form of each base too. A computer app among them is composed alone only
+    when it's ``env_id`` or with ``disks``: a fixture of a desktop deploys its apps on the desktop, never alone, and a
+    test that deploys one alone has its deploy compose it first."""
     patch = pytest.MonkeyPatch()
     patch.chdir(root)
     patch.setenv("XDG_STATE_HOME", str(root / "state"))
@@ -169,9 +183,14 @@ def _composed(root: Path, bundle, env_id: str | None = None):
     package_cache.seed()
     with namespace_routing():
         plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
+        alone = pytest.MonkeyPatch()
+        if not disks:
+            alone.setattr(composer, "compose", _no_app_alone_but(env_id))
         try:
-            materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
+            materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)),
+                        composing=Composing() if disks else Composing.for_run(None))
         finally:
+            alone.undo()
             package_cache.keep()
         yield Env.get(env_id or f"{bundle.id_root}/desktop")
     reset_artifact_store()
@@ -179,8 +198,27 @@ def _composed(root: Path, bundle, env_id: str | None = None):
     patch.undo()
 
 
+def _no_app_alone_but(target: str | None):
+    """``composer.compose``, but composing no computer app alone other than ``target``."""
+    compose = composer.compose
+
+    def composing(env, pairs=None, composing=Composing()):
+        return {} if env.type == "computer_app" and env.id != target else compose(env, pairs, composing)
+
+    return composing
+
+
+#: How many characters of docker's stderr a failed call's error carries: the last, where docker says what failed.
+DOCKER_ERROR_CHARS = 2000
+
+
 def docker(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], check=True, capture_output=True)
+    """``docker`` with ``args``; a failure carries docker's own error, which the exception alone doesn't show."""
+    try:
+        return subprocess.run(["docker", *args], check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        e.add_note(f"docker's stderr: {e.stderr.decode(errors='replace')[-DOCKER_ERROR_CHARS:]}")
+        raise
 
 
 @pytest.fixture

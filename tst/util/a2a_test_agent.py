@@ -41,9 +41,10 @@ def build_test_agent_image(artifact_id: str) -> DockerImageArtifact:
 _NO_MODEL_ENV = {"LITELLM_API_KEY": "unused", "LITELLM_BASE_URL": "http://unused.invalid"}
 
 
-def put_test_agent(agent_id: str) -> A2AAgent:
+def put_test_agent(agent_id: str, *, env: dict[str, str] | None = None) -> A2AAgent:
+    """The echo agent, its environment ``env`` over the stand-in model variables."""
     return A2AAgent.put(
         id=agent_id,
         docker_image_artifact=build_test_agent_image(f"{agent_id}-image"),
-        default_env_vars=_NO_MODEL_ENV,
+        default_env_vars={**_NO_MODEL_ENV, **(env or {})},
     )

@@ -104,8 +104,10 @@ What it writes, all in one place, ``metadata["verifications"][verifier_id]``:
   "the judge couldn't decide any check — check its setup" when every check is undecided.
 - ``run_step_id``, ``run_kind``, ``user_sim``, ``judge_model``; ``instructions`` (``source``, ``prompt_sha256``,
   ``recorded_prompt_sha256``, ``matches``); ``rubric_persona`` (when ``rubric_persona_sha256`` is set); ``notes``
-  (what the judge was told about gaps in the record); ``graded_turns``, ``turns``; ``calls``, ``usage``, ``cost``; and
-  rubrics_verifier's ``judge_output_retries`` / ``judge_output_discrepancies`` / ``judge_batches``.
+  (what the judge was told about gaps in the record); ``graded_turns``, ``turns``; ``calls``, ``usage``, ``cost`` (the
+  calls' costs summed, each what the endpoint billed, else LiteLLM's price map's figure; None when no call's has one)
+  and ``unpriced_calls`` (the calls whose cost has no figure, when there are some); and rubrics_verifier's
+  ``judge_output_retries`` / ``judge_output_discrepancies`` / ``judge_batches``.
 - ``skipped`` instead, with ``score`` None and no rows, for a run that isn't judged: one that ended in an error (the
   always_on record's or the prompt response's ``error_type``: every verifier skips its prompt anyway), a chat run
   whose user sim never read, and a run with no graded turn.
@@ -148,11 +150,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional
 
+from agent_env.config import model_call
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers import user_sim_judge_core as core
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerdict, RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
+from agent_env.task_step.task_steps.verifiers.verifier import Verification
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +180,8 @@ PINNED: dict[str, Any] = {
     **dict.fromkeys(("criteria", "prompt_id", "default_model", "default_model_api_base", "agent_name",
                      "trajectory_filter", "max_thinking_tokens", "effort", "judge_a2a_agent_id", "judge_sandbox_type",
                      "grading_policy_prompt", "context_facts_for_judge", "grade_up_to_turn", "run_context_for_judge",
-                     "judge_batch_size", "judge_batch_concurrency", "judge_timeout_retries", "judge_max_turns"))}
+                     "judge_batch_size", "judge_batch_concurrency", "judge_timeout_retries", "judge_max_turns",
+                     "min_passing_score"))}
 NOT_FAILING_OFF = "fail_task_when_not_passing is off: verdicts are recorded only"
 NOT_FAILING_UNCONFIRMED = ("the judge's copy of the user sim's instructions isn't confirmed to be the one it ran with, "
                            "so it doesn't fail the task")
@@ -202,7 +208,8 @@ class _ThisRun:
     first_error: Optional[BaseException] = None  # what the first call raised, if it did
     calls: int = 0
     usage: list[Any] = field(default_factory=list)
-    cost: float = 0.0
+    cost: float = 0.0  # the calls' costs that have a figure
+    unpriced: int = 0  # the calls whose cost has none
 
 
 class UserSimJudge(RubricsVerifierTaskStep):
@@ -228,6 +235,8 @@ class UserSimJudge(RubricsVerifierTaskStep):
         judge_timeout_seconds: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        score_aggregator: Optional[ScoreAggregator | str] = None,
+        min_passing_score: Optional[float] = None,
     ):
         """``run_step_id`` is required (it is a keyword with a default only so the refusal can say what's missing)."""
         if not isinstance(run_step_id, str) or not run_step_id.strip():
@@ -242,7 +251,8 @@ class UserSimJudge(RubricsVerifierTaskStep):
             id, version, criteria=[], prompt_id=None, default_model=judge_model, verifier_id=verifier_id,
             use_agent_judge=False, use_trajectory=False, output_format=JudgeOutputFormat.USER_SIM_CHECKS,
             judge_timeout_seconds=judge_timeout_seconds, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
-            fail_task_when_not_passing=fail_task_when_not_passing is True)
+            fail_task_when_not_passing=fail_task_when_not_passing is True, score_aggregator=score_aggregator,
+            min_passing_score=min_passing_score)
         self.fail_task_when_not_passing = fail_task_when_not_passing  # as given, so config_problems sees a non-bool
         self.run_step_id = run_step_id
         self.judge_model = judge_model  # None: rubrics_verifier's default, the config's judge model
@@ -313,26 +323,22 @@ class UserSimJudge(RubricsVerifierTaskStep):
                    judge_model=data.get("judge_model"), rubric_items=data.get("rubric_items"),
                    rubric_persona_sha256=data.get("rubric_persona_sha256"),
                    fail_task_when_not_passing=data.get("fail_task_when_not_passing", True),
-                   verifier_id=data.get("verifier_id"), judge_timeout_seconds=data.get("judge_timeout_seconds"))
+                   judge_timeout_seconds=data.get("judge_timeout_seconds"))
+
+    def _recorded_values(self, context: TaskStepContext) -> dict[str, Any]:
+        """rubrics_verifier's, but the criteria, which each run's plan replaces, and the trajectory filter: its judge
+        reads no trajectory."""
+        return {k: v for k, v in super()._recorded_values(context).items() if k not in ("criteria", "trajectory_filter")}
 
     # ---- the run -----------------------------------------------------------------------------------------------
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        context = await self._grade(context)
-        error = context.metadata["verifications"][self.verifier_id]["user_sim_error"]
-        if error.get("fails_task"):
-            raise VerifierNotPassingError(
-                f"user_sim_judge '{self.id}': the user sim slipped in a way that could change the assistant's grade "
-                f"({', '.join(error['because'])}), so the run doesn't count; run it again")
-        return context
-
-    async def _grade(self, context: TaskStepContext) -> TaskStepContext:
+    async def verify(self, context: TaskStepContext) -> Verification:
         problems = self.config_problems()
         if problems:
             raise ValueError(f"user_sim_judge '{self.id}': " + "; ".join(problems))
         items = [core.RubricItem.from_dict(i) for i in self.rubric_items]
         kind, step_id = self._find_run(context)
         response = _prompt_response(context, step_id)
-        model = (context.metadata.get("user_overrides") or {}).get("judge_model") or self.default_model
+        model = self._judge_model(context)
         entry: dict[str, Any] = {"run_step_id": step_id, "run_kind": kind, "judge_model": model}
         record = (context.metadata.get(ALWAYS_ON_KEY) or {}).get(step_id) if kind == ALWAYS_ON else None
         error_type = (record or {}).get("error_type") or (response.error_type if response else None)
@@ -357,26 +363,20 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 raise StepContextError(f"user_sim_judge '{self.id}': step '{step_id}' left no prompt response")
         if skipped:
             logger.warning(f"user_sim_judge '{self.id}': skipped, {skipped}")
-            context.metadata.setdefault("verifications", {})[self.verifier_id] = {
-                **self._entry_format_fields(), "results": [], "score": None, **entry, "skipped": skipped,
-                "user_sim_error": {**core.NOT_JUDGED, "fails_task": False}}
-            return context
+            return Verification(skipped=skipped, output={
+                **self._entry_format_fields(), **entry, "user_sim_error": {**core.NOT_JUDGED, "fails_task": False}})
 
         unusable = LINE_UNCHECKED if (entry.get("rubric_persona") or {}).get("status") == "unknown" else ""
         plan = core.plan_run(run, checks=list(core.CHECK_NAMES), items=items,
                              error_checks=list(core.DEFAULT_ERROR_CHECKS), lines_unusable=unusable)
         judge = copy.copy(self)  # this run's own copy: the step is shared by every run of the task
         judge.prompt_id, judge._run = response.prompt_id, _ThisRun(plan=plan, text=core.run_text(run))
-        if plan.criteria:
-            await RubricsVerifierTaskStep._grade(judge, context)
-        else:  # nothing for a model: only rows settled without one
-            judge._write_entries(context, [], {}, unjudged=plan.unjudged)
-        self._finish(context.metadata["verifications"][self.verifier_id], entry, judge._run)
-        return context
+        return self._finish(await judge._judged(context), entry, judge._run)
 
-    def _finish(self, written: dict, entry: dict, this: _ThisRun) -> None:
-        """The written entry with its rows in the plan's order and shape, the run's verdict, and the run's details."""
-        rows = core.finish_rows(written["results"], this.plan)
+    def _finish(self, judged: RubricsVerdict, entry: dict, this: _ThisRun) -> Verification:
+        """The judge's verdict with its rows in the plan's order and shape, the run's verdict and details, and its
+        score: 0 when a row fails, else 1. A slip the gate counts fails the step once recorded."""
+        rows = core.finish_rows(judged.criteria, this.plan)
         error = core.user_sim_error(rows)
         error["fails_task"] = False
         if error["value"] == "yes":
@@ -386,16 +386,20 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 error["not_failing"] = NOT_FAILING_UNCONFIRMED
             else:
                 error["fails_task"] = True
-        written.update(results=rows, score=0.0 if any(r.get("result") is False for r in rows) else 1.0, **entry,
-                       user_sim_error=error, calls=this.calls, usage=core.usage_total(this.usage),
-                       cost=round(this.cost, COST_DECIMALS))
+        output = {**judged.output, **entry, "user_sim_error": error, "calls": this.calls,
+                  "usage": core.usage_total(this.usage), **_cost(this)}
         if error["value"] == "unknown":
-            judged = [r for r in rows if r["id"] in core.CHECKS]
-            written["flag"] = FLAG_NONE_DECIDED if judged and all(r["verdict"] == "error" for r in judged) \
+            checks = [r for r in rows if r["id"] in core.CHECKS]
+            output["flag"] = FLAG_NONE_DECIDED if checks and all(r["verdict"] == "error" for r in checks) \
                 else FLAG_UNDECIDED
         logger.info(f"user_sim_judge '{self.id}': {entry['run_kind']} '{entry['run_step_id']}' user_sim_error="
                     f"{error['value']} ({', '.join(error['because'] + error['unknown']) or 'no row'}), fails_task="
                     f"{error['fails_task']}; " + ", ".join(f"{r['id']}={r['verdict']}" for r in rows))
+        slipped = VerifierNotPassingError(
+            f"user_sim_judge '{self.id}': the user sim slipped in a way that could change the assistant's grade "
+            f"({', '.join(error['because'])}), so the run doesn't count; run it again") if error["fails_task"] else None
+        return Verification(criteria=rows, score=0.0 if any(r.get("result") is False for r in rows) else 1.0,
+                            output=output, raise_after=slipped)
 
     def _find_run(self, context: TaskStepContext) -> tuple[str, str]:
         """The kind of run ``run_step_id`` left and its step id: always_on when it left an always_on record, else a
@@ -447,7 +451,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 cached_prefix=head)
             this.calls += 1
             this.usage.append(got.get("usage"))
-            this.cost += got.get("cost") or 0.0
+            if got.get("cost_usd") is None:
+                this.unpriced += 1
+            else:
+                this.cost += got["cost_usd"]
             return got
 
         if this.first is None:
@@ -500,20 +507,20 @@ def _root(e: BaseException) -> BaseException:
 
 
 def _setup_error(e: BaseException) -> Optional[BaseException]:
-    """The setup error behind a failed judge call, or None for a flaky one. Setup: agent-env's ConfigError (no key,
-    missing config) and LiteLLM's AuthenticationError, PermissionDeniedError, NotFoundError (an unknown model),
-    BadRequestError (with its kinds: an unknown provider, unsupported params, a prompt over the context window),
-    UnprocessableEntityError and BudgetExceededError. Anything else is flaky (Timeout, RateLimitError,
-    ServiceUnavailableError, InternalServerError, BadGatewayError, APIConnectionError, an agent judge's TimeoutError,
-    JudgeTimeoutError or AgentUnreachableError, an answer still unusable after its retries) and leaves the call's rows
-    undecided."""
-    import litellm
-
-    from agent_env.config.errors import ConfigError
-
-    setup = (ConfigError, litellm.AuthenticationError, litellm.PermissionDeniedError, litellm.NotFoundError,
-             litellm.BadRequestError, litellm.UnprocessableEntityError, litellm.BudgetExceededError)
+    """The setup error behind a failed judge call (``model_call.setup_errors``), or None for a flaky one. Anything
+    else is flaky (Timeout, RateLimitError, ServiceUnavailableError, InternalServerError, BadGatewayError,
+    APIConnectionError, an agent judge's TimeoutError, JudgeTimeoutError or AgentUnreachableError, an answer still
+    unusable after its retries) and leaves the call's rows undecided."""
+    setup = model_call.setup_errors()
     return next((x for x in _chain(e) if isinstance(x, setup)), None)
+
+
+def _cost(this: _ThisRun) -> dict[str, Any]:
+    """The run's ``cost``: its calls' costs summed, None when no call's cost has a figure, and ``unpriced_calls``, the
+    calls left out of the sum, when there are some."""
+    priced = this.calls - this.unpriced
+    total = round(this.cost, COST_DECIMALS) if priced or not this.calls else None
+    return {"cost": total, **({"unpriced_calls": this.unpriced} if this.unpriced else {})}
 
 
 def _problems(model: Any, items: Any, gate: Any, rubric_persona: Any = None) -> list[str]:

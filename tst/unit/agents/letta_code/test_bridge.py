@@ -2,15 +2,15 @@
 import asyncio
 import json
 import shutil
+import signal
 import subprocess
 import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from pytest_socket import enable_socket
 
-from tst.unit.agents.letta_code.agent import a2a_server, letta_code_bridge as bridge
+from tst.unit.agents.letta_code.agent import a2a_server, letta_code_bridge as bridge, model_relay
 
 
 @pytest.mark.asyncio
@@ -204,15 +204,16 @@ async def test_cancelled_caller_waits_for_the_file_thread():
 
 
 @pytest.mark.asyncio
-async def test_attribution_is_recorded_only_when_the_relay_forwards(monkeypatch):
+@pytest.mark.parametrize("forwarded", [False, True])
+async def test_attribution_is_recorded_only_when_the_relay_forwards(monkeypatch, forwarded):
     monkeypatch.setitem(bridge._last_attribution, "project_id", None)
     monkeypatch.setitem(bridge._last_attribution, "task_id", None)
-    seen = []
 
     @asynccontextmanager
-    async def relay(headers, model, on_forward=None):
-        seen.append(on_forward)
-        yield "http://relay/v1"
+    async def relay(upstream, calls, **kwargs):
+        if forwarded:
+            calls.add(200, model_relay.answer_usage(b'{"usage": {"prompt_tokens": 9, "completion_tokens": 1}}'))
+        yield "http://relay"
 
     monkeypatch.setattr(bridge, "model_relay", relay)
 
@@ -227,10 +228,8 @@ async def test_attribution_is_recorded_only_when_the_relay_forwards(monkeypatch)
     monkeypatch.setattr(bridge.asyncio, "create_subprocess_exec", spawn)
     with pytest.raises(OSError):
         await bridge.run_letta_code("hi", "ctx-attr", project_id="p1", task_id="t1", workspace="/tmp")
-    assert bridge.get_last_attribution_snapshot()["project_id"] is None
-    seen[0]()
     snapshot = bridge.get_last_attribution_snapshot()
-    assert snapshot["project_id"] == "p1" and snapshot["task_id"] == "t1"
+    assert (snapshot["project_id"], snapshot["task_id"]) == (("p1", "t1") if forwarded else (None, None))
 
 
 def test_cleanup_failure_after_a_successful_swap_keeps_the_new_conversation(monkeypatch, tmp_path):
@@ -318,18 +317,95 @@ async def test_a_cancelled_changelog_apply_holds_the_workspace_until_its_extract
     assert not agent._workspace._writer
 
 
+# letta-code-baseline-gpt on gpt-4.1-mini, recorded on 2026-11-21 through Scale's LiteLLM proxy: each call's usage as the
+# proxy answered the relay.
+GPT_TURN = [
+    {"prompt_tokens": 22860, "completion_tokens": 72, "total_tokens": 22932,
+     "prompt_tokens_details": {"cached_tokens": 0}},
+    {"prompt_tokens": 22993, "completion_tokens": 2, "total_tokens": 22995,
+     "prompt_tokens_details": {"cached_tokens": 22784}},
+]
+
+
 @pytest.mark.asyncio
-async def test_the_relay_lists_only_the_turns_model_and_forwards_nothing_for_it(monkeypatch):
-    enable_socket()  # the relay listens on loopback
-    # An endpoint that refuses every connection: the list must not come from it.
-    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:9")
-    forwarded = []
-    async with bridge.model_relay({}, "openai/gpt-4.1-mini", on_forward=lambda: forwarded.append(True)) as relay:
-        async with bridge.ClientSession() as client:
-            async with client.get(relay + "/models") as response:
-                listed = await response.json()
-    assert listed == {"object": "list", "data": [{"id": "openai/gpt-4.1-mini", "object": "model"}]}
-    assert forwarded == []
+async def test_a_turn_runs_through_a_relay_with_the_endpoints_key_and_reports_what_it_counted(monkeypatch, tmp_path):
+    """The relay sends the endpoint's key and the run's headers, lists the turn's model alone, and counts every call
+    the CLI makes; the CLI is connected to it with a placeholder key."""
+    monkeypatch.setattr(bridge, "SESSIONS_ROOT", str(tmp_path / "sessions"))
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-endpoint")
+    relays, commands = [], []
+
+    @asynccontextmanager
+    async def relay(upstream, calls, **kwargs):
+        relays.append((upstream, kwargs))
+        for usage in GPT_TURN:
+            calls.add(200, model_relay.answer_usage(json.dumps({"usage": usage}).encode()))
+        yield "http://127.0.0.1:41000/token"
+
+    async def command(env, *args):
+        commands.append((args, env[bridge._TURN_MARKER]))
+        return b'{"id":"agent-local-1"}'
+
+    class Proc:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def spawn(*args, **kwargs):
+        return Proc()
+
+    async def stream(proc, on_line):
+        on_line(json.dumps({"type": "result", "subtype": "success", "result": "42", "conversation_id": "c-1"}))
+        return b""
+
+    monkeypatch.setattr(bridge, "model_relay", relay)
+    monkeypatch.setattr(bridge, "_command", command)
+    monkeypatch.setattr(bridge, "_configure_agent", lambda *args: None)
+    monkeypatch.setattr(bridge.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(bridge, "_stream_cli", stream)
+
+    result = await bridge.run_letta_code("hi", "ctx-relay", model="gpt-4.1-mini", project_id="p1",
+                                         workspace=str(tmp_path))
+
+    ((upstream, options),) = relays
+    assert upstream == "https://gateway.example"
+    assert options["models"] == ["gpt-4.1-mini"]
+    assert options["headers"]["authorization"] == "Bearer sk-endpoint"
+    assert options["headers"]["x-litellm-customer-id"] == "p1"
+    connect, = [args for args, _ in commands if args[0] == "connect"]
+    assert connect == ("connect", "openai-compatible", "--base-url", "http://127.0.0.1:41000/token/v1",
+                       "--api-key", "relay")
+    assert len({marker for _, marker in commands}) == 1
+    # The proxy's own usage for the turn: 45,853 in (22,784 cached) and 74 out.
+    assert result.usage.to_dict() == {
+        "tool_call_count": 0, "input_tokens": 45853, "output_tokens": 74, "total_tokens": 45927,
+        "cache_read_tokens": 22784, "input_includes_cache": True, "provider_details": {"model_calls": 2}}
+
+
+def test_a_turns_leftover_letta_processes_are_stopped_and_nothing_else(monkeypatch, tmp_path):
+    """Found by the turn's marker in a process's environment and Letta as its executable or script: another turn's,
+    and the model's own background jobs, even one whose arguments name Letta, keep running."""
+    def process(pid: int, environ: dict[str, str], *argv: str) -> None:
+        folder = tmp_path / str(pid)
+        folder.mkdir()
+        (folder / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in environ.items()) + b"\0")
+        (folder / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in argv) + b"\0")
+
+    mine, theirs = {bridge._TURN_MARKER: "turn-1"}, {bridge._TURN_MARKER: "turn-2"}
+    process(101, mine, "node", "/opt/agent/node_modules/@letta-ai/letta-code/letta.js", "server", "--listen")
+    process(102, {**mine, "LETTA_SUBAGENT_LAUNCH": "1"}, "node", "/usr/local/bin/letta", "-p", "subtask")
+    process(103, mine, "python3", "-m", "http.server", "8080")
+    process(105, mine, "python", "/app/letta-demo/server.py", "--name", "letta")
+    process(104, theirs, "node", "/usr/local/bin/letta", "server")
+    (tmp_path / "self").mkdir()
+    killed = []
+    monkeypatch.setattr(bridge, "_PROC", tmp_path)
+    monkeypatch.setattr(bridge.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    assert sorted(bridge._stop_leftovers("turn-1")) == [101, 102]
+    assert sorted(killed) == [(101, signal.SIGKILL), (102, signal.SIGKILL)]
 
 
 @pytest.mark.asyncio

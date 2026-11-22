@@ -10,7 +10,8 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from typing import Any, ClassVar, Optional
+from collections.abc import Mapping
+from typing import Any, ClassVar, NamedTuple, Optional
 import httpx
 from a2a.types import TaskState
 from agentenv_protocol.a2a_agent import card_request_accepts
@@ -18,6 +19,7 @@ from agentenv_protocol.a2a_agent import card_request_accepts
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
+    TrajectoryFormats,
     TrajectoryUpload,
     fetch_trajectory,
     send_and_wait,
@@ -25,7 +27,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
 from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
-from agent_env.config.model import MODEL_PARAMS_RESERVED
+from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
     EXT_CLOCK_URI,
@@ -35,10 +37,17 @@ from agent_env.env.gateway.constants import (
 )
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
-from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.context import (
+    DeployedAgent,
+    PromptResponse,
+    StepContextError,
+    TaskStepContext,
+    TurnTrajectory,
+)
+from agent_env.task_step.usage import StepUsage
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
-from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
@@ -155,6 +164,7 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
 
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
+    step_role = StepRole.AGENT
     DEFAULT_USER_AGENT_NAME: ClassVar[str] = "human_agent"
     entity_refs = (
         EntityRef.env("snapshot_config.env_id"),
@@ -391,16 +401,17 @@ class PromptAgentTaskStep(TaskStep):
         """Model and effort for this run: this step's ``step_overrides`` win over the run-wide ``agent_model`` / ``agent_effort`` and the stored values."""
         step_overrides = self.step_param_overrides(context)
         overrides = context.metadata.get("user_overrides", {})
-        model = step_overrides.get("model") or context.agent_model or self.model or context.default_agent_model
+        model = resolve_model(ModelRole.SOLVER, step_params=step_overrides.get("model"), run=context.agent_model,
+                              step=self.model, agent=context.default_agent_model).model
         effort = step_overrides.get("effort") or overrides.get("agent_effort") or self.effort
         return model, effort
 
     def _resolve_user_model(self, context: TaskStepContext) -> Optional[str]:
         """The user simulator's model for this run: this step's ``step_overrides``, then the run's ``user_model``, the
         stored value, and the config's ``user`` role when it names one."""
-        return (self.step_param_overrides(context).get("user_model")
-                or context.metadata.get("user_overrides", {}).get("user_model") or self.user_model
-                or get_config().get_model_for_role("user", or_default=False))
+        return get_config().resolve_model(
+            ModelRole.USER_SIMULATOR, step_params=self.step_param_overrides(context).get("user_model"),
+            run=context.metadata.get("user_overrides", {}).get("user_model"), step=self.user_model).model
 
     def _built_in_user_sim(self, context: TaskStepContext) -> Optional[tuple[dict, str]]:
         """The user deploy_user_sim_agent deployed, when it is this step's user, and their time zone; None for any other
@@ -554,13 +565,19 @@ class PromptAgentTaskStep(TaskStep):
             desired_config["model_params"] = model_params
         negotiated = A2AAgent.negotiate_agent_config(card, desired_config)
         if negotiated:
-            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(target_url + negotiated.endpoint, negotiated.fields,
+                                             headers=agent.control_headers)
+        await prescribe_formats(context, self.id, agent, target_url)
         # A model the agent's card doesn't accept is never sent, and the agent runs its own.
-        context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
+        solver_model = negotiated.fields.get("model") if negotiated else None
+        context.record_model(ModelRole.SOLVER.record_key, self.id, solver_model)
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, solver_model, agent)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
-            context.record_model("user simulator", self.id, built_in[0].get("model"))
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
+            usage.start(ModelRole.USER_SIMULATOR, built_in[0].get("model"), user_sim)
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
@@ -568,9 +585,12 @@ class PromptAgentTaskStep(TaskStep):
                                              "resume_prompt": USER_SIM_RESUME_PROMPT}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
-                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
+                await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
+                                                 headers=user_sim.control_headers)
                 logger.info(f"Configured user-sim '{self.user_agent_name}' with structured output_format for done-signal")
-            context.record_model("user simulator", self.id, negotiated.fields.get("model") if negotiated else None)
+            user_model = negotiated.fields.get("model") if negotiated else None
+            context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, user_model)
+            usage.start(ModelRole.USER_SIMULATOR, user_model, user_sim)
 
         triggers_registered = is_user_sim and any(
             r.get("agent_name") == self.user_agent_name
@@ -622,11 +642,15 @@ class PromptAgentTaskStep(TaskStep):
         conversation_tool_call_count: Optional[int] = None
         final_task_id = ""
         per_turn_trajectory_urls: list[str | None] = []
+        per_turn_trajectories: list[TurnTrajectory] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        formats = TrajectoryFormats.of(traj_ext_cached)
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
-            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds) if live is not None else None
+            LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers,
+                      format=formats.native)
+            if live is not None else None
         )
         final_state: str = TaskState.completed.value
         trajectory_url: Optional[str] = None
@@ -638,7 +662,7 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
-            built_in=sim,
+            built_in=sim, usage=usage,
         )
         # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
         end_after: Optional[str] = None
@@ -674,17 +698,21 @@ class PromptAgentTaskStep(TaskStep):
 
                 following = live_turns.following(target_a2a_task_id) if live_turns is not None else nullcontext(None)
                 async with following as live_turn:
-                    sent_task_id, result = await send_and_wait(
-                        target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
-                        context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
-                        poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
-                        on_sent=live_turn.follow if live_turn else None,
-                    )
-                    target_state = result["status"]["state"]
+                    try:
+                        agent_turn = await send_and_wait(
+                            target_url, current_user_parts, agent=agent, message_id=target_a2a_task_id,
+                            context_id=solver_context_id, timeout_seconds=self.timeout_seconds,
+                            poll_interval_seconds=self.poll_interval_seconds, before_send=record_turn,
+                            on_sent=live_turn.follow if live_turn else None,
+                        )
+                    except (TimeoutError, asyncio.CancelledError):
+                        usage.cut_off(ModelRole.SOLVER)
+                        raise
+                    usage.turn(ModelRole.SOLVER, agent_turn.reply)
+                    sent_task_id, status_msg, final_terminal = agent_turn.task_id, agent_turn.message, agent_turn.reply
+                    target_state = agent_turn.state
                     if live_turn:
                         live_turn.ended(target_state)
-                status_msg = (result.get("status") or {}).get("message") or {}
-                final_terminal = protocol.TerminalResponse.from_message(status_msg)
                 if final_terminal.tool_call_count is not None:
                     conversation_tool_call_count = (conversation_tool_call_count or 0) + final_terminal.tool_call_count
                 agent_response_parts = status_msg.get("parts") or [{"kind": "text", "text": final_terminal.response_text}]
@@ -697,15 +725,17 @@ class PromptAgentTaskStep(TaskStep):
                 )
 
                 if traj_ext_cached:
-                    turn_traj_uri: str | None = None
+                    stored = StoredTrajectory()
                     try:
-                        turn_traj_uri = await self._fetch_trajectory(
+                        stored = await fetch_native_trajectory(
                             target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
                             target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
+                            headers=agent.control_headers,
                         )
                     except Exception as e:
                         logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
-                    per_turn_trajectory_urls.append(turn_traj_uri)
+                    per_turn_trajectory_urls.append(stored.url)
+                    per_turn_trajectories.append(TurnTrajectory(native_format=stored.format, atif=None))
 
                 final_task_id = sent_task_id
                 final_state = target_state
@@ -774,7 +804,7 @@ class PromptAgentTaskStep(TaskStep):
         if trig_ext and triggers_registered:  # best-effort firing-log readback (provenance only; never fails the run)
             try:
                 async with httpx.AsyncClient() as client:
-                    r = await client.get(state_url, timeout=15)
+                    r = await client.get(state_url, headers=user_sim.control_headers, timeout=15)
                     r.raise_for_status()
                     context.metadata.setdefault("agent_trigger_state", {})[self.id] = r.json().get("firing_log", [])
             except Exception as e:
@@ -827,6 +857,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_trajectory_object_url=trajectory_url,
             agent_trajectory_object_prefix=trajectory_output_prefix,
             target_agent_per_turn_trajectory_object_urls=per_turn_trajectory_urls or None,
+            target_agent_per_turn_trajectories=per_turn_trajectories or None,
             source_agent_per_turn_prompt_parts=source_agent_per_turn_prompt_parts or None,
             tool_call_count=conversation_tool_call_count,
             model=model,
@@ -838,6 +869,7 @@ class PromptAgentTaskStep(TaskStep):
             agent_name=self.agent_name,
             step_id=self.id,
             structured_output=structured_output,
+            usage=usage.entries(),
         ))
 
         if final_state == TaskState.failed:
@@ -886,29 +918,6 @@ class PromptAgentTaskStep(TaskStep):
             return None
         return endpoint, store, prefix_key
 
-    async def _fetch_trajectory(
-        self, a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str,
-        target_a2a_task_id: str, *, sandbox_type: str | None, card: dict | None = None,
-    ) -> str | None:
-        get_method, get_path = A2AAgent.operation(traj_ext, "get")
-        store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
-        mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
-        if mode is None:
-            raise RuntimeError(
-                "Agent advertises no trajectory get form this object store can serve"
-            )
-        # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
-        # target_a2a_task_id, the client message id persisted on the conversation as
-        # a2a_task_id, so the FE can resolve it.
-        upload = None
-        if mode == "objects":
-            upload = await asyncio.to_thread(
-                TrajectoryUpload.to,
-                store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
-            )
-        fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store)
-        return await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
-
     async def _env_clock(self, envs: list) -> dict:
         """``{"env_clock": [...]}``, each armed env clock for a conversation message, or {} when no clock is armed."""
         if not envs:
@@ -941,12 +950,12 @@ class PromptAgentTaskStep(TaskStep):
         return env_triggers
 
     async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict,
-                      **quiet: bool) -> dict:
+                      *, headers: Mapping[str, str], **quiet: bool) -> dict:
         """Call the usersim's /decide for the triggers that should fire this turn."""
         payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id,
                    "env_triggers": env_triggers, **quiet}
         async with httpx.AsyncClient() as client:
-            resp = await client.post(decide_url, json=payload, timeout=self.user_agent_timeout_seconds)
+            resp = await client.post(decide_url, json=payload, headers=headers, timeout=self.user_agent_timeout_seconds)
             if resp.status_code >= 400:
                 raise RuntimeError(f"agent-trigger /decide failed (HTTP {resp.status_code}): {resp.text}")
             return resp.json()
@@ -1102,15 +1111,20 @@ class PromptAgentTaskStep(TaskStep):
         raise RuntimeError(f"could not read /triggers/state for env '{deployed.env_id}': {last_exc}")
 
 
+# How a post-turn hook's note reaches a peer user sim: one more text part after the agent's reply.
+PEER_NOTE = ("[Only you see this; the assistant doesn't. What you found when you checked its work yourself: {note}]")
+
+
 class _UserSide:
     """Who answers the agent between turns: agent triggers first, then the LLM user simulator or a human peer."""
 
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
                  decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
-                 built_in: Optional[_BuiltInUserSim] = None) -> None:
+                 built_in: Optional[_BuiltInUserSim] = None, usage: Optional[StepUsage] = None) -> None:
         self._step = step
         self._built_in = built_in
+        self._usage = usage
         self._context = context
         self._url = url
         self._user_sim = user_sim
@@ -1121,17 +1135,20 @@ class _UserSide:
         self._shareable = shareable
         self._end_after: Optional[str] = None
 
-    async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
+    async def ask(self, number: int, solver_message: str, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record. A
         user deployed by deploy_user_sim_agent may add ``end_after``: the agent answers the message, then the
-        conversation ends for that reason, and every later ask gets that end without asking anyone."""
+        conversation ends for that reason, and every later ask gets that end without asking anyone. ``note`` (from a
+        post-turn hook) is shown to an LLM user sim with the reply, as something only it sees, and recorded in
+        ``metadata["user_side_notes"]``; a human peer gets none. Nobody sees it either when an agent trigger answers
+        the turn, or once ``end_after`` has ended the conversation."""
         if self._end_after is not None:
             return {"end": self._end_after}
         if self._decide_url is not None:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id,
-                                            env_triggers)
+                                            env_triggers, headers=self._user_sim.control_headers)
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
             logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
             answer = _trigger_answer(resp)
@@ -1139,10 +1156,13 @@ class _UserSide:
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
-            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in)
+            if note is not None:  # where the peer path records it too: one place for what the user sim was told
+                self._record("user_side_notes", {"turn": number, "note": note})
+            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
+                                              note=note)
             self._end_after = answer.get("end_after")
             return answer
-        return await self._ask_peer(number, agent_parts)
+        return await self._ask_peer(number, agent_parts, note)
 
     async def _ask_built_in(self, text: str) -> dict:
         """One turn of the user sim deploy_user_sim_agent deployed, in this conversation's session: ``{"text",
@@ -1150,22 +1170,25 @@ class _UserSide:
         step = self._step
         message_id = uuid.uuid4().hex
         try:
-            task_id, result = await send_and_wait(
+            turn = await send_and_wait(
                 self._url, [{"kind": "text", "text": text}],
                 agent=self._user_sim if self._user_sim.sandbox_id else None,
                 message_id=message_id, context_id=self._conversation_id,
                 timeout_seconds=step.user_agent_timeout_seconds, poll_interval_seconds=step.poll_interval_seconds,
             )
+        except asyncio.CancelledError:
+            self._cut_off()
+            raise
         except TimeoutError as e:
+            self._cut_off()
             return {"text": None, "error": f"timeout: {e}"}
-        status = result.get("status") or {}
-        if status.get("state") != TaskState.completed:
-            return {"text": None, "error": f"state {status.get('state')}"}
-        msg = status.get("message") or {}
-        term = protocol.TerminalResponse.from_message(msg)
-        raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
+        self._record_usage(turn.reply)
+        if turn.state != TaskState.completed:
+            return {"text": None, "error": f"state {turn.state}"}
+        term = turn.reply
+        raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         return {"text": raw, "structured": term.structured_output if isinstance(term.structured_output, dict) else None,
-                "trajectory_url": await self._user_sim_trajectory(task_id, message_id)}
+                "trajectory_url": await self._user_sim_trajectory(turn.task_id, message_id)}
 
     async def _user_sim_trajectory(self, task_id: str, message_id: str) -> Optional[str]:
         """The user sim's trajectory for one turn, stored where always_on stores it; None when its card offers none."""
@@ -1173,12 +1196,13 @@ class _UserSide:
         ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if not ext:
             return None
-        step = self._step
         try:
-            return await asyncio.wait_for(
-                step._fetch_trajectory(self._url, ext, task_id, step._trajectory_prefix() + "user_sim/", message_id,
-                                       card=card, sandbox_type=self._user_sim.sandbox_type),
+            stored = await asyncio.wait_for(
+                fetch_native_trajectory(self._url, ext, task_id, self._step._trajectory_prefix() + "user_sim/",
+                                        message_id, card=card, sandbox_type=self._user_sim.sandbox_type,
+                                        headers=self._user_sim.control_headers),
                 _USER_SIM_TRAJECTORY_FETCH_SECONDS)
+            return stored.url
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
             return None
@@ -1193,7 +1217,7 @@ class _UserSide:
                                "agentenv-framework-protocol whose triggers/v1 decide takes record_unfired")
         env_triggers = await self._step._read_env_triggers(self._context)
         resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id, env_triggers,
-                                        record_unfired=False)
+                                        headers=self._user_sim.control_headers, record_unfired=False)
         logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
         answer = _trigger_answer(resp)
         if answer is not None:
@@ -1201,35 +1225,42 @@ class _UserSide:
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
         return answer
 
-    async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
+    async def _ask_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         step = self._step
+        if note is not None and self._is_user_sim:
+            # after the reply, so the sim reads it as its own check of the work; the agent never sees this message
+            agent_parts = [*agent_parts, {"kind": "text", "text": PEER_NOTE.format(note=note.strip())}]
+            self._record("user_side_notes", {"turn": number, "note": note})
         if self._url is None:
             self._url = get_config().get_default_human_a2a_url()
         user_a2a_task_id = uuid.uuid4().hex
         try:
             # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
             # user_a2a_url, has none and reads the store itself.
-            user_task_id, user_result = await send_and_wait(
+            user_turn = await send_and_wait(
                 self._url, agent_parts,
                 agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
                 shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
                 timeout_seconds=step.user_agent_timeout_seconds,
                 poll_interval_seconds=step.poll_interval_seconds,
             )
+        except asyncio.CancelledError:
+            self._cut_off()
+            raise
         except TimeoutError as e:
             logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
+            self._cut_off()
             return {"end": "user_timeout"}
 
         if self._is_user_sim:
-            await self._save_user_sim_trajectory(number, user_task_id, user_a2a_task_id)
+            await self._save_user_sim_trajectory(number, user_turn.task_id, user_a2a_task_id)
 
-        user_state = (user_result.get("status") or {}).get("state")
-        if user_state != TaskState.completed:
-            logger.info(f"user_a2a_url returned state={user_state}; ending multi-turn")
+        self._record_usage(user_turn.reply)
+        if user_turn.state != TaskState.completed:
+            logger.info(f"user_a2a_url returned state={user_turn.state}; ending multi-turn")
             return {"end": "user_not_completed"}
 
-        user_msg = (user_result.get("status") or {}).get("message") or {}
-        parts = user_msg.get("parts") or []
+        parts = user_turn.message.get("parts") or []
         if not parts:
             logger.warning("user_a2a_url returned no parts; ending multi-turn")
             return {"end": "user_no_parts"}
@@ -1262,23 +1293,33 @@ class _UserSide:
         prefix = self._step._trajectory_prefix().rstrip("/") + "/usersim/"
         try:
             # Bounded like _user_sim_trajectory: the next turn waits on this, and the trace is optional.
-            url = await asyncio.wait_for(
-                self._step._fetch_trajectory(
+            stored = await asyncio.wait_for(
+                fetch_native_trajectory(
                     self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
-                    card=card, sandbox_type=self._user_sim.sandbox_type,
+                    card=card, sandbox_type=self._user_sim.sandbox_type, headers=self._user_sim.control_headers,
                 ),
                 _USER_SIM_TRAJECTORY_FETCH_SECONDS,
             )
         except Exception as e:
             logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")
             return
-        if url is None:
+        if stored.url is None:
             logger.warning(f"user-sim trajectory fetch at turn {number} returned no trajectory; nothing stored")
             return
-        self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": url})
+        self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": stored.url})
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+    def _record_usage(self, reply: protocol.TerminalResponse) -> None:
+        """A user sim's turn, recorded as it ends; a human peer's has no usage to record."""
+        if self._usage is not None:
+            self._usage.turn(ModelRole.USER_SIMULATOR, reply)
+
+    def _cut_off(self) -> None:
+        """A user sim's turn sent but never answered, its usage unknown; a human peer's has none to record."""
+        if self._usage is not None:
+            self._usage.cut_off(ModelRole.USER_SIMULATOR)
 
 
 class _BuiltInUserSim:
@@ -1311,12 +1352,13 @@ class _BuiltInUserSim:
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
 
-    async def ask(self, number: int, reply: str, ask_user_sim) -> dict:
+    async def ask(self, number: int, reply: str, ask_user_sim, note: Optional[str] = None) -> dict:
         """The user's answer to the agent's ``reply``: ``{"message": parts}``, with ``end_after`` when the agent's answer
-        to it ends the conversation, or ``{"end": reason}``."""
+        to it ends the conversation, or ``{"end": reason}``. ``note`` goes in the read as ``user_note``: what the user
+        found checking the work themselves."""
         now = await _clock_now(self._step, self._clock_envs)
         read = {"time": now, "assistant_messages": [{"at": now, "text": reply}], "phone": [],
-                "you_sent": self._you_sent, "done_ends_run": True}
+                "you_sent": self._you_sent, "done_ends_run": True, **({"user_note": note.strip()} if note else {})}
         self._you_sent = []
         calls: list[dict] = []
 
@@ -1372,6 +1414,103 @@ class _BuiltInUserSim:
 
 # How long one user sim trajectory fetch may take, as in always_on.
 _USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
+#: How long an agent may take to answer a trajectory prescription, and how often one that can't be reached is tried,
+#: the wait growing by this many seconds each time.
+_PRESCRIBE_TIMEOUT_SECONDS = 30.0
+_PRESCRIBE_ATTEMPTS = 3
+_PRESCRIBE_RETRY_SECONDS = 1.0
+#: Where each step records the trajectory formats it prescribed and what its agent said it builds.
+TRAJECTORY_FORMATS_KEY = "trajectory_formats"
+
+
+def prescribed_formats(context: TaskStepContext) -> tuple[str, ...]:
+    """The trajectory formats beside native the run prescribes to each agent whose trajectory it reads: its
+    ``user_overrides.trajectory_formats``, else ``[trajectories] formats``; none means native only."""
+    formats = context.metadata.get("user_overrides", {}).get("trajectory_formats")
+    if formats is None:
+        return get_config().get_trajectory_formats()
+    if not isinstance(formats, list) or not all(isinstance(format, str) for format in formats):
+        raise StepContextError(f"user_overrides.trajectory_formats must be a list of format names, got {formats!r}")
+    return tuple(formats)
+
+
+async def prescribe_formats(context: TaskStepContext, step_id: str, agent: DeployedAgent, a2a_url: str) -> None:
+    """Have the agent build the run's trajectory formats (``prescribed_formats``) beside native for the conversations it
+    starts from now on, when its card offers the trajectory extension's ``prescribe``; an agent whose SDK predates it
+    builds what it always has. What was prescribed and what the agent builds go into
+    ``metadata["trajectory_formats"][step_id]``, and a prescribed format the agent can't build is warned of.
+
+    A connection error is retried; after a failure the agent builds what it was last prescribed, native only unless an
+    earlier step prescribed more, and the run goes on: its judges read native either way."""
+    formats = prescribed_formats(context)
+    extension = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_TRAJECTORY)
+    method, path = A2AAgent.operation(extension, "prescribe")
+    offered = TrajectoryFormats.of(extension).formats
+    record: dict[str, Any] = {"agent": agent.agent_name, "prescribed": list(formats), "built": None}
+    context.metadata.setdefault(TRAJECTORY_FORMATS_KEY, {})[step_id] = record
+    unbuildable = [format for format in formats if format not in offered]
+    if unbuildable:
+        logger.warning(f"agent '{agent.agent_name}' can't build {unbuildable}, which the run prescribes: it builds "
+                       f"{list(offered) if offered else 'only its native trajectory'}")
+    if method is None or path is None:
+        return
+    wanted = [format for format in formats if format in offered]
+    for attempt in range(1, _PRESCRIBE_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(a2a_url + path, json={"formats": wanted}, headers=agent.control_headers,
+                                             timeout=_PRESCRIBE_TIMEOUT_SECONDS)
+            protocol.raise_for_extension_status(response, operation="trajectory prescribe")
+            record["built"] = response.json()["formats"]
+            return
+        except httpx.TransportError as e:
+            if attempt < _PRESCRIBE_ATTEMPTS:
+                await asyncio.sleep(_PRESCRIBE_RETRY_SECONDS * attempt)
+                continue
+            failure: Exception = e
+        except (httpx.HTTPError, ValueError, KeyError) as e:
+            failure = e
+        record["error"] = f"{type(failure).__name__}: {failure}"
+        logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed, so it builds what "
+                       f"it was last prescribed (continuing): {failure}")
+        return
+
+
+class StoredTrajectory(NamedTuple):
+    """Where a turn's native trajectory was stored, None when the agent returned none, and the format its answer
+    named, None when it named none."""
+
+    url: str | None = None
+    format: str | None = None
+
+
+async def fetch_native_trajectory(
+    a2a_url: str, traj_ext: dict, a2a_server_task_id: str, trajectory_output_prefix: str, target_a2a_task_id: str,
+    *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
+) -> StoredTrajectory:
+    """A turn's native trajectory, read by ``a2a_server_task_id`` and stored under ``target_a2a_task_id``. A card that
+    offers formats is asked for its native one by name, so the copy judges read stays native whatever the card's
+    default; one that offers none gets the read it always has."""
+    get_method, get_path = A2AAgent.operation(traj_ext, "get")
+    store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
+    mode = trajectory_mode(get_method, store, by="task_id", sandbox_type=sandbox_type)
+    if mode is None:
+        raise RuntimeError(
+            "Agent advertises no trajectory get form this object store can serve"
+        )
+    # Fetched by a2a_server_task_id, the id the A2A server produced; stored under
+    # target_a2a_task_id, the client message id persisted on the conversation as
+    # a2a_task_id, so the FE can resolve it.
+    upload = None
+    if mode == "objects":
+        upload = await asyncio.to_thread(
+            TrajectoryUpload.to,
+            store, trajectory_object_url(trajectory_output_prefix, name=target_a2a_task_id, store=store),
+        )
+    fetched = await fetch_trajectory(a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                                     headers=headers, format=TrajectoryFormats.of(traj_ext).native)
+    url = await asyncio.to_thread(store_trajectory, fetched, trajectory_output_prefix, name=target_a2a_task_id)
+    return StoredTrajectory(url, fetched.format)
 
 
 def _agent_text(solver_message: str, agent_parts: Optional[list[dict]]) -> str:

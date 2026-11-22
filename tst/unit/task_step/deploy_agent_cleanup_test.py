@@ -19,8 +19,11 @@ class _Agent:
     async def deploy(self, **_):
         return SimpleNamespace(
             a2a_url="https://agent.example.test", agent_card={}, sandbox_id="sb-1", sandbox_type="fake",
-            instance_id="i-1", network_policy=None,
+            instance_id="i-1", network_policy=None, control_token=None, control_headers={},
         )
+
+    def model_base_url(self, env_vars, config):
+        return None
 
     async def close(self) -> None:
         self.closed += 1

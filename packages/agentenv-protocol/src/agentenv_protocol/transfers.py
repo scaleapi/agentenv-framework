@@ -406,6 +406,19 @@ async def _retrying(expires_at: datetime, attempt: Callable[[], Awaitable[_T]]) 
         attempts += 1
 
 
+#: How much of a file each read hashes.
+HASH_CHUNK_BYTES = 1 << 20
+
+
+def sha256_file(path: Path) -> str:
+    """The sha256 of a file's bytes, read ``HASH_CHUNK_BYTES`` at a time."""
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _check_source(source: Path | bytes, max_bytes: int) -> int:
     if isinstance(source, bytes):
         size_bytes = len(source)

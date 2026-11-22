@@ -34,13 +34,14 @@ import httpx
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
 
 class VerifyA2ASystemPromptStep(TaskStep):
     type: ClassVar[str] = "verify_a2a_system_prompt"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
 
     def __init__(
@@ -118,7 +119,8 @@ class VerifyA2ASystemPromptStep(TaskStep):
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(config_endpoint, json={"system_prompt": sentinel_prompt})
+                resp = await client.post(config_endpoint, json={"system_prompt": sentinel_prompt},
+                                         headers=deployed.control_headers)
                 resp.raise_for_status()
         except Exception as e:
             self._record(context, {

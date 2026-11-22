@@ -52,7 +52,7 @@ _EVENTS_DRAIN_S = 2
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 
@@ -60,6 +60,29 @@ def _base_url(environ: Mapping[str, str]) -> str:
 def profile_dir(context_id: str) -> Path:
     """The context's Hermes profile home. A stable short hash keeps the path clean whatever the context id holds."""
     return HERMES_ROOT / "profiles" / f"ctx-{hashlib.sha1(context_id.encode()).hexdigest()[:16]}"
+
+
+@dataclass
+class CallCounts:
+    """Model calls' counts as their post_api_request events give them, with ``input_tokens`` counting the cache; a call
+    whose event carried no usage is counted in ``unreported``."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    calls: int = 0
+    unreported: int = 0
+
+    def add(self, usage: object) -> None:
+        self.calls += 1
+        if not isinstance(usage, dict) or not (usage.get("prompt_tokens") or usage.get("output_tokens")):
+            self.unreported += 1
+            return
+        self.input_tokens += int(usage.get("prompt_tokens") or 0)
+        self.output_tokens += int(usage.get("output_tokens") or 0)
+        self.cache_read_tokens += int(usage.get("cache_read_tokens") or 0)
+        self.cache_write_tokens += int(usage.get("cache_write_tokens") or 0)
 
 
 @dataclass
@@ -72,6 +95,10 @@ class HermesResult:
     error_code: str | None = None
     structured_output: object | None = None
     usage: dict = field(default_factory=dict)
+    # The model calls of other turns in the process, a delegate_task child's, which the usage file leaves out.
+    side_calls: CallCounts | None = None
+    # A turn killed before it wrote its usage file: the calls it made, counted from their events.
+    killed_calls: CallCounts | None = None
 
 
 def validate_output_format(output_format: dict) -> dict:
@@ -178,6 +205,9 @@ def build_config(
         "providers": {PROVIDER: provider},
         "skills": {"external_dirs": [str(skills_dir)]},
         "plugins": {"enabled": [_PLUGIN_NAME]},
+        # Hermes' review fork replays the turn on the main model in a thread the turn's exit kills before it reports
+        # its calls, which the proxy bills anyway, as Hermes turns it off for its own one-shot turns.
+        "auxiliary": {"background_review": {"enabled": False}},
     }
     if mcp_servers:
         servers: dict[str, dict] = {}
@@ -360,7 +390,8 @@ async def run_hermes(
             _kill_cli(proc)
             await _reap(proc)
             return HermesResult(response="", tool_call_count=parser.tool_call_count, session_id=parser.session_id,
-                                trajectory=parser.trajectory, error=f"hermes timed out after {timeout_s}s")
+                                trajectory=parser.trajectory, error=f"hermes timed out after {timeout_s}s",
+                                killed_calls=parser.all_calls)
         except Exception:
             # A failure while reading, such as an event_callback that raises, must not leave the turn running.
             _kill_cli(proc)
@@ -422,8 +453,10 @@ class _EventParser:
     """Parse the plugin's JSON event lines one at a time.
 
     Every event carries its hook's name as ``type``. ``pre_tool_call`` events are the turn's tool calls,
-    ``post_llm_call`` carries the final answer, and any event's ``session_id`` is the session. The whole event list is
-    the trajectory, and each event is handed to ``event_callback`` as it is parsed.
+    ``post_llm_call`` carries the final answer, and the turn's events' ``session_id`` is the session: the turn is the
+    one whose ``turn_id`` the first model call carries, as the turn calls the model before it can delegate, and another
+    turn's events are a delegate_task child's, whose model calls are counted apart. The whole event list is the
+    trajectory, and each event is handed to ``event_callback`` as it is parsed.
     """
 
     def __init__(self, event_callback: Callable[[dict], None] | None = None) -> None:
@@ -434,6 +467,9 @@ class _EventParser:
         self.final: str | None = None
         self.errors: list[str] = []
         self.error_code: str | None = None
+        self.turn_id: str | None = None
+        self.all_calls = CallCounts()
+        self.side_calls = CallCounts()
 
     @property
     def tool_call_count(self) -> int:
@@ -451,9 +487,16 @@ class _EventParser:
         if not isinstance(event, dict):
             return
         self.trajectory.append(event)
-        if isinstance(event.get("session_id"), str) and event["session_id"]:
-            self.session_id = event["session_id"]
         kind = event.get("type")
+        if self.turn_id is None and kind in ("post_api_request", "api_request_error") and event.get("turn_id"):
+            self.turn_id = event["turn_id"]
+        theirs = self.turn_id is not None and event.get("turn_id") != self.turn_id
+        if isinstance(event.get("session_id"), str) and event["session_id"] and not theirs:
+            self.session_id = event["session_id"]
+        if kind == "post_api_request":
+            self.all_calls.add(event.get("usage"))
+            if theirs:
+                self.side_calls.add(event.get("usage"))
         if kind == "pre_tool_call":
             self.tool_calls.add(str(event.get("tool_call_id") or f"tool-{len(self.tool_calls)}"))
         elif kind == "post_llm_call" and isinstance(event.get("assistant_response"), str):
@@ -487,4 +530,5 @@ class _EventParser:
             error=err,
             error_code=self.error_code if err else None,
             usage=usage,
+            side_calls=self.side_calls if self.side_calls.calls else None,
         )
