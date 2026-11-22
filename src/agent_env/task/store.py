@@ -28,7 +28,7 @@ from agent_env.task.step_journal import (
     commit_ordered,
     replay_context,
 )
-from agent_env.task.usage_ledger import LEDGER_KEY, TOTAL_KEY, entries_of, ledger_fields, total
+from agent_env.task.usage_ledger import LEDGER_KEY, TOTAL_KEY, completion_usage, entries_of, gathered_usage, total
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps
 from agent_env.task_step.usage import STEP_USAGE_KEY
@@ -391,7 +391,7 @@ class TaskInstanceStore:
             updated = compare_and_swap(
                 store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id),
                 lambda doc: UpdateSpec(
-                    set={**fresh, **ledger_fields(doc, entries_of(_get_path(doc, _STEP_USAGE_PATH)), gathered=True)},
+                    set={**fresh, **gathered_usage(doc, entries_of(_get_path(doc, _STEP_USAGE_PATH)))},
                     inc={_GENERATION: 1, "attempt_epoch": 1}),
                 counter_field=_REV,
             )
@@ -651,7 +651,7 @@ class TaskInstanceStore:
                 "current_step": len(completed),
                 _RERECORDED: rerecords,
             }
-            fields.update(ledger_fields(doc, usage or [], attempt=attempt_epoch, gathered=True))
+            fields.update(gathered_usage(doc, usage or [], attempt_epoch))
             if bump_epoch:
                 fields["attempt_epoch"] = doc.get("attempt_epoch", 0) + 1
             if len(completed) < len(before):
@@ -739,7 +739,7 @@ class TaskInstanceStore:
 
         def _mutate(doc: dict) -> UpdateSpec | None:
             declined.clear()
-            spent = ledger_fields(doc, _step_usage_after(doc, ops, step_id), attempt=attempt_epoch)
+            spent = completion_usage(doc, _step_usage_after(doc, ops, step_id), attempt_epoch)
             if journaled_generation is not None and doc.get(_GENERATION, 0) != journaled_generation:
                 declined.append(f"the run was re-registered (generation {journaled_generation} -> "
                                 f"{doc.get(_GENERATION, 0)}) after the step journaled")
@@ -807,23 +807,17 @@ class TaskInstanceStore:
         mid-cancel isn't overwritten) and, given ``attempt_epoch``, on no later attempt owning the instance. The usage
         of every step the context holds joins the ledger, even when a guard refuses the rest."""
         safe = context.to_safe_dict()
-        entries = entries_of(context.metadata.get(STEP_USAGE_KEY))
         failed = (dataclasses.asdict(TaskStepResult(step_id=failing_step_id, status=TaskStepStatus.FAILURE))
                   if failing_step_id is not None else None)
 
-        def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, entries, attempt=attempt_epoch, gathered=True)
-            if not _owns(doc, attempt_epoch):
-                return UpdateSpec(set=spent) if spent else None
+        def fields(doc: dict) -> dict:
             completed = doc.get("completed_steps", [])
-            return UpdateSpec(set={
-                "status": "failed", "error": str(error), "context": safe, "completed_at_utc": completed_at_utc,
-                **({"completed_steps": completed + [failed]} if failed is not None and failed not in completed else {}),
-                **spent,
-            })
+            return {"status": "failed", "error": str(error), "context": safe, "completed_at_utc": completed_at_utc,
+                    **({"completed_steps": completed + [failed]} if failed is not None and failed not in completed
+                       else {})}
 
-        compare_and_swap(self._doc_store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), _mutate,
-                         counter_field=_REV)
+        self._end_write(instance_id, entries_of(context.metadata.get(STEP_USAGE_KEY)), attempt_epoch, fields,
+                        owns=lambda doc: _owns(doc, attempt_epoch))
 
     def record_task_cancelled_sync(
         self, instance_id: str, reason: str, completed_at_utc: str, attempt_epoch: int | None = None,
@@ -832,15 +826,9 @@ class TaskInstanceStore:
         """Mark a run cancelled, over the ``failed`` its unwinding recorded, but never a completed one, nor one a
         later attempt than ``attempt_epoch`` owns. ``usage``, the entries of the steps that ran, joins the ledger
         either way."""
-        def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, usage or [], attempt=attempt_epoch, gathered=True)
-            if not _owns(doc, attempt_epoch):
-                return UpdateSpec(set=spent) if spent else None
-            return UpdateSpec(set={"status": "cancelled", "error": reason, "completed_at_utc": completed_at_utc,
-                                   **spent})
-
-        compare_and_swap(self._doc_store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), _mutate,
-                         counter_field=_REV)
+        self._end_write(instance_id, usage or [], attempt_epoch,
+                        lambda doc: {"status": "cancelled", "error": reason, "completed_at_utc": completed_at_utc},
+                        owns=lambda doc: _owns(doc, attempt_epoch))
 
     def record_teardown_sync(self, instance_id: str, context: "TaskStepContext", attempt_epoch: int) -> None:
         """Keep the context a run's teardown ended with: what the run deployed, writes of a step a signal cut short
@@ -848,13 +836,18 @@ class TaskInstanceStore:
         instance's as the teardown began, owns the instance by now. The context's usage joins the ledger either
         way."""
         safe = context.to_safe_dict()
-        entries = entries_of(context.metadata.get(STEP_USAGE_KEY))
+        self._end_write(instance_id, entries_of(context.metadata.get(STEP_USAGE_KEY)), attempt_epoch,
+                        lambda doc: {"context": safe}, owns=lambda doc: doc.get("attempt_epoch", 0) <= attempt_epoch)
 
+    def _end_write(self, instance_id: str, usage: list[dict], attempt_epoch: int | None,
+                   fields: Callable[[dict], dict], *, owns: Callable[[dict], bool]) -> None:
+        """A write that ends a run or an attempt, a CAS: ``fields`` of the document when ``owns`` it, and ``usage``, the
+        entries of the attempt the write ends, merged into the ledger either way, since they were spent."""
         def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, entries, attempt=attempt_epoch, gathered=True)
-            if doc.get("attempt_epoch", 0) > attempt_epoch:
+            spent = gathered_usage(doc, usage, attempt_epoch)
+            if not owns(doc):
                 return UpdateSpec(set=spent) if spent else None
-            return UpdateSpec(set={"context": safe, **spent})
+            return UpdateSpec(set={**fields(doc), **spent})
 
         compare_and_swap(self._doc_store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), _mutate,
                          counter_field=_REV)

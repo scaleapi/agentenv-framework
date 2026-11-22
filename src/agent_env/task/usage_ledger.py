@@ -56,32 +56,30 @@ def total(ledger: list[dict]) -> dict[str, Any]:
             "unpriced_entries": sum(1 for e in ledger if e.get("cost_usd") is None)}
 
 
-def ledger_fields(doc: dict, entries: list[dict], *, attempt: Optional[int] = None,
-                  gathered: bool = False) -> dict[str, Any]:
-    """The instance fields that merge ``entries`` into ``doc``'s ledger, to set in the same write; none when there are
-    no entries. ``attempt`` is the epoch the write was made under: a completion's, the epoch its step was dispatched
-    under; a failure's, cancel's, undo's or teardown's, the attempt it ends. An entry with no attempt, from a runner
-    that doesn't set the attempt epoch, takes it (the instance's current epoch when the write has none), so two
-    attempts of a step never share a key. A ``gathered`` write, one that takes a whole context's entries, leaves out
-    such an entry when the ledger already holds it, its counts equal: an earlier write recorded it under its own
-    attempt."""
+def completion_usage(doc: dict, entries: list[dict], attempt: int) -> dict[str, Any]:
+    """The instance fields that merge a completion's ``entries``, its step's, into ``doc``'s ledger, to set in the same
+    write; none when there are none. An entry with no attempt, from a runner that doesn't set the attempt epoch, takes
+    ``attempt``, the epoch the step was dispatched under, so two attempts of a step never share a key."""
+    return _fields(doc, [e if e.get("attempt") is not None else {**e, "attempt": attempt} for e in entries])
+
+
+def gathered_usage(doc: dict, entries: list[dict], attempt: Optional[int] = None) -> dict[str, Any]:
+    """The instance fields that merge a whole context's ``entries`` into ``doc``'s ledger, for a failure, cancel,
+    undo, teardown or re-register; none when there are none. An entry with no attempt is left out when the ledger
+    already holds it, its counts equal (an earlier write recorded it under its own attempt); any other takes
+    ``attempt``, the attempt the write ends, or the instance's current one when the write names none."""
+    epoch = attempt if attempt is not None else doc.get("attempt_epoch", 0)
+    ledger = doc.get(LEDGER_KEY) or []
+    held = [_without_attempt(e) for e in ledger]
+    return _fields(doc, [e if e.get("attempt") is not None else {**e, "attempt": epoch} for e in entries
+                         if e.get("attempt") is not None or _without_attempt(e) not in held])
+
+
+def _fields(doc: dict, entries: list[dict]) -> dict[str, Any]:
     if not entries:
         return {}
-    ledger = doc.get(LEDGER_KEY) or []
-    epoch = attempt if attempt is not None else doc.get("attempt_epoch", 0)
-    placed = [e for e in (_placed(e, ledger, epoch, gathered) for e in entries) if e is not None]
-    if not placed:
-        return {}
-    ledger = merged(ledger, placed)
+    ledger = merged(doc.get(LEDGER_KEY) or [], entries)
     return {LEDGER_KEY: ledger, TOTAL_KEY: total(ledger)}
-
-
-def _placed(entry: dict, ledger: list[dict], epoch: int, gathered: bool) -> Optional[dict]:
-    if entry.get("attempt") is not None:
-        return entry
-    if gathered and any(_without_attempt(e) == _without_attempt(entry) for e in ledger):
-        return None
-    return {**entry, "attempt": epoch}
 
 
 def _without_attempt(entry: dict) -> dict:
