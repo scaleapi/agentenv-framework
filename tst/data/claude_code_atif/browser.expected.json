@@ -1,0 +1,232 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-browser",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-5-5",
+  "tool_definitions": {
+   "shared": "tools/c3e9f1f90a1b4db5.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-22T02:58:44.585695Z",
+   "source": "user",
+   "message": "Use the browser tools to open https://example.com, take a screenshot of the page, and reply with the page's main heading.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-browser",
+     "task_id": "205f21ba-a776-484e-ab91-2a79d0661c2b",
+     "message_id": "768b68654c6749348474bec0d7046ee3",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-22T02:58:46.413Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01LkyPb617L2hYchw2wYeS55",
+     "function_name": "mcp__browser__browser_navigate",
+     "arguments": {
+      "url": "https://example.com"
+     }
+    },
+    {
+     "tool_call_id": "toolu_vrtx_015ogLvt7jXbbKdMNvQvget3",
+     "function_name": "mcp__browser__browser_take_screenshot",
+     "arguments": {
+      "scale": "css"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01LkyPb617L2hYchw2wYeS55",
+      "content": "### Ran Playwright code\n```js\nawait page.goto('https://example.com');\n```\n### Page\n- Page URL: https://example.com/\n- Page Title: Example Domain\n### Snapshot\n- [Snapshot](../tmp/.playwright-mcp/page-2026-11-22T02-58-46-839Z.yml)"
+     },
+     {
+      "source_call_id": "toolu_vrtx_015ogLvt7jXbbKdMNvQvget3",
+      "content": [
+       {
+        "type": "text",
+        "text": "### Result\n- [Screenshot of viewport](../tmp/.playwright-mcp/page-2026-11-22T02-58-46-887Z.png)\n### Ran Playwright code\n```js\n// Screenshot viewport and save it as ../tmp/.playwright-mcp/page-2026-11-22T02-58-46-887Z.png\nawait page.screenshot({\n  path: '../tmp/.playwright-mcp/page-2026-11-22T02-58-46-887Z.png',\n  scale: 'css',\n  type: 'png'\n});\n```"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/png",
+         "path": "media/8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d.png"
+        }
+       },
+       {
+        "type": "text",
+        "text": "[Image: source: /home/agent/.claude/projects/-app/f46849f0-59f8-4820-bf66-32057cf49127/tool-results/mcp-browser-blob-1795316326892-ggo3pp.png]"
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d.png": {
+          "sha256": "8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d",
+          "bytes": 73860,
+          "width": 1280,
+          "height": 720
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 35477,
+    "cached_tokens": 0,
+    "completion_tokens": 119,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 35475
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-22T02:58:48.536Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "The screenshot doesn't show a visible heading, so I'll check the page's DOM for one.",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_017pjY8fuSRHoGPR5kMKcnqS",
+     "function_name": "mcp__browser__browser_find",
+     "arguments": {
+      "regex": "/heading/i"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_017pjY8fuSRHoGPR5kMKcnqS",
+      "content": "### Result\nNo matches found for /heading/i."
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 37258,
+    "cached_tokens": 35475,
+    "completion_tokens": 146,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 1781
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 0,
+       "visibility": "omitted",
+       "signature": "CAQS/AQKEggUEAIYAjgBQgh0aGlua2luZxIMbosGZg0h4pHNHiScGgwZ9lszVUTP7NJfwjEiMLaU4/VoexL3qpfirHPoPTK5pf3ftwntxoiplHh/OwgpdcvBtM8hgvdm5YO4xN+G4iqXBGbE21vk10db5W5e9ul2JU2B4z5bHbosG69V6GIDMhqlR9Hje5tYZ3yrtwFpfC5cJZpcd+9ceYp/zpWY7iyzw9UcSN3Lk8frnYUgD58E6zT2Q1yKo9aYrRCOIQ7eNuZ2BI8Tg+62qeFIMuOg/TnAymiwKsKs7BK6ZwFi3CmnR2s05UcCVYKGqeoPWo6XL/Vy3YhXY/lXPHDLEC9mhWFOMXWoaLAQyN4gkIhhzCQmIp3IUQl6u6IBP7mTOHhqSNY3eBn75I3ctUlTmyVRJHSe/kFJsCtSBBQo3FBICWcbNUlQBtY2i2X5zBiwfZZJEb3QaO5m3PbBeHL9KbpqHF7gHHbSu5EztS63c4RrPdFgSsikFeDh2fIEe9GTz331nhSZfME8yQkxALWk87BAhtLCSJ/i/sL9zPXwST8hQ9Rcp+NTzR1U25Ruh33sGyt4QyPNS1b/OhXbCGHhPPbw6U/slVkTn66K7jHXukyc0c5XapRzR8mOeI5bkywaBzA5VhME/msiDK6NAL0HGhxl6MpXbDPSFqgjMe26cAeJUYG1CHm1cZ76UITltlzGLOuIyCVOT9t4NdWU0OeCZITgbG/RcV8LrBvLBOnE0UcKZ5qQiHUfmlElUEp8zKVDgF5vY+w+s85C0rCnAV1q1YYRj2hzIPWEOqiNTCON6GKLxQKW0MiCUGpt5fDXjCNr45dhMhAqyHqvy0XqnMsYAQ=="
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-22T02:58:50.148Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01R9y96vh2gL99cYHBt9CghX",
+     "function_name": "mcp__browser__browser_evaluate",
+     "arguments": {
+      "function": "() => ({h1: [...document.querySelectorAll('h1,h2')].map(e=>e.textContent), title: document.title})"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01R9y96vh2gL99cYHBt9CghX",
+      "content": "### Result\n{\n  \"h1\": [],\n  \"title\": \"Example Domain\"\n}\n### Ran Playwright code\n```js\nawait page.evaluate('() => ({h1: [...document.querySelectorAll(\\'h1,h2\\')].map(e=>e.textContent), title: document.title})');\n```"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 37424,
+    "cached_tokens": 37256,
+    "completion_tokens": 100,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 166
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-22T02:58:52.728Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "I opened https://example.com and took a screenshot, but the page has no main heading. It has no `<h1>` or `<h2>` element, and the screenshot shows none either.\n\nThe page title is **\"Example Domain\"**, which is the heading you'd normally expect. What the page actually shows is a book icon and a short notice in several languages. The English line reads: \"This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.\"\n\nThe screenshot is saved at `/tmp/.playwright-mcp/page-2026-11-22T02-58-46-887Z.png`.",
+   "metrics": {
+    "prompt_tokens": 37627,
+    "cached_tokens": 37422,
+    "completion_tokens": 203,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 203
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 147786,
+  "total_completion_tokens": 568,
+  "total_cached_tokens": 110153,
+  "total_cost_usd": 0.1107738,
+  "total_steps": 5,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 37625
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   },
+   "unmatched": {
+    "system": 2
+   }
+  }
+ }
+}

@@ -1,0 +1,169 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-retried",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-5-5",
+  "tool_definitions": {
+   "shared": "tools/a2f232fa81dcec06.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-22T02:48:56.442862Z",
+   "source": "user",
+   "message": "Run `echo first` with your Bash tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-retried",
+     "task_id": "34208166-b7ef-4867-95c1-8d8c01976354",
+     "message_id": "fbb1d6b51eac4a83bfe670b500967074",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-22T02:48:57.645Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01TCVJdf21oHBzRXBaHTPtGn",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "echo first"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01TCVJdf21oHBzRXBaHTPtGn",
+      "content": "first"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 28506,
+    "cached_tokens": 25110,
+    "completion_tokens": 49,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 3394
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-22T02:54:40.974Z",
+   "source": "agent",
+   "message": "Request timed out",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "Request timed out",
+      "code": "api_error"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-22T02:54:47.240Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01P9o2MfcZNvtxrNXRzFiim1",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "echo second"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01P9o2MfcZNvtxrNXRzFiim1",
+      "content": "second"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 28625,
+    "cached_tokens": 0,
+    "completion_tokens": 49,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 28621
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "attempt": 2
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-22T02:54:48.079Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "first second",
+   "metrics": {
+    "prompt_tokens": 28680,
+    "cached_tokens": 28621,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 57
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "attempt": 2,
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 85811,
+  "total_completion_tokens": 102,
+  "total_cached_tokens": 53731,
+  "total_cost_usd": 0.0865891,
+  "total_steps": 5,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 32072
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   },
+   "unmatched": {
+    "system": 10
+   }
+  }
+ }
+}

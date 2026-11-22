@@ -121,7 +121,7 @@ class ClaudeCodeAtif(Adapter):
         queued = next((entry for entry in self._queue if entry.uuid == uuid), None)
         if queued is not None:
             self._match(queued)
-        elif record.get("type") == "assistant":
+        elif record.get("type") == "assistant" and _blocks(record):
             agent = self._agent_of_cli.get(cli_agent) if cli_agent is not None else None
             entry = self._enqueue(record, uuid, agent, from_stdout=False)
             entry.ready = cli_agent is None or agent is not None
@@ -211,6 +211,8 @@ class ClaudeCodeAtif(Adapter):
             self._attempt_failed(record["result"], turn)
             return
         if entry.uuid is not None:
+            if entry.uuid in self._written:
+                return
             self._written.add(entry.uuid)
         session = self._session.get(entry.uuid) if entry.uuid is not None else None
         if entry.agent is not None and entry.agent not in self._declared:
@@ -338,7 +340,7 @@ class ClaudeCodeAtif(Adapter):
             key = f"attempt-{max(self._inits, 1)}"
             turn.step(key=key, llm_call_count=0)
         text = result.get("result") if isinstance(result.get("result"), str) else None
-        code = result.get("api_error_status") or result.get("subtype")
+        code = result.get("api_error_status") or result.get("terminal_reason")
         turn.error(message=text or "the CLI's attempt failed", kind="infra_error",
                    code=str(code) if code is not None else None, step=key)
 

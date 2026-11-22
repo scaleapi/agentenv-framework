@@ -212,12 +212,14 @@ def test_a_resumed_attempts_error_lands_on_its_last_step_and_later_steps_carry_t
 
 
 def test_an_attempt_that_wrote_no_step_gets_a_step_for_its_error():
-    failed = {"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "API Error"}
+    failed = {"type": "result", "subtype": "success", "is_error": True, "api_error_status": None,
+              "terminal_reason": "api_error", "result": "Request timed out"}
     answer = assistant("msg-1", "u1", text("done"))
     feed = Feed().out({"type": "system", "subtype": "init"}).aux("attempt", failed)
     feed.out({"type": "system", "subtype": "init"}).out(answer).transcript(answer, "2026-11-22T02:01:30Z")
     steps = agent_steps(run(feed).document)
-    assert steps[0]["llm_call_count"] == 0 and profile_of(steps[0])["error"]["code"] == "error_during_execution"
+    assert steps[0]["llm_call_count"] == 0 and profile_of(steps[0])["error"] == {
+        "kind": "infra_error", "message": "Request timed out", "code": "api_error"}
     assert steps[1]["message"] == "done"
 
 
