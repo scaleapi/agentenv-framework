@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
-from agent_env.config.model_pricing import PriceTable, ReportedBy, Tokens, litellm_prices, price
+from agent_env.config.model_pricing import (
+    Cost, CostStatus, PriceTable, ReportedBy, Tokens, litellm_prices, price,
+)
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
 if TYPE_CHECKING:
@@ -22,8 +24,30 @@ STEP_USAGE_KEY = "step_usage"
 _COUNTERS = ("tool_call_count", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
              "cache_write_tokens")
 _TOKEN_COUNTS = _COUNTERS[1:]
+_MODEL_COUNTS = ("calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 # How many turns' unreadable values an entry keeps; ``unparsed_turns`` counts them all.
 _UNPARSED_TURNS_KEPT = 5
+
+
+class ModelEntry(TypedDict):
+    """One model's share of a usage entry: its counts summed over the role's turns, and its cost at that model's own
+    rate, keyed as an entry's cost is."""
+
+    model: Optional[str]
+    calls: Optional[int]
+    input_tokens: Optional[int]
+    output_tokens: Optional[int]
+    cache_read_tokens: Optional[int]
+    cache_write_tokens: Optional[int]
+    input_includes_cache: Optional[bool]
+    cost_usd: Optional[float]
+    cost_status: str
+    cost_source: Optional[str]
+    reported_cost_usd: Optional[float]
+    uncached_input_tokens: NotRequired[int]
+    unit_prices: NotRequired[dict[str, float]]
+    cost_assumed: NotRequired[list[str]]
+    unpriced_reason: NotRequired[str]
 
 
 class UsageEntry(TypedDict):
@@ -31,7 +55,9 @@ class UsageEntry(TypedDict):
     a cost is None when nothing reported it, never 0. ``cost_usd`` is the cost ``cost_status`` and ``cost_source``
     describe: priced from LiteLLM's price map, the ``uncached_input_tokens`` and the cache and output counts each at
     its ``unit_prices`` rate, the agent's own figure, or None when unpriced, with the agent's figure always in
-    ``reported_cost_usd``."""
+    ``reported_cost_usd``. When a turn's calls used several models (``Usage.models``), ``models`` holds each model's
+    counts and cost at its own rate, ``cost_usd`` is their sum, and the entry has no ``unit_prices`` or
+    ``uncached_input_tokens`` of its own."""
 
     role: str
     model: Optional[str]
@@ -53,6 +79,7 @@ class UsageEntry(TypedDict):
     unit_prices: NotRequired[dict[str, float]]
     cost_assumed: NotRequired[list[str]]
     unpriced_reason: NotRequired[str]
+    models: NotRequired[list[ModelEntry]]
     partial: bool
     unreported_calls: NotRequired[int]
     unparsed: NotRequired[list[dict]]
@@ -89,7 +116,8 @@ class RoleUsage:
         ``input_includes_cache`` is the turns' flag when they agree, else None. ``partial`` says the sum is a lower
         bound: some turns reported a token count and others none, or a turn said some of its calls reported none
         (``unreported_calls``, which the entry sums, or a proxy's ``unreported``), or a turn was cut off
-        (``StepUsage.cut_off``)."""
+        (``StepUsage.cut_off``). When a turn says its counts by model (``Usage.models``), each model is priced at its own
+        rate (``_by_model``)."""
         reported = [usage for usage in self.turns if usage is not None]
 
         def total(name: str) -> Any:
@@ -105,11 +133,17 @@ class RoleUsage:
         includes = flags.pop() if len(flags) == 1 else None
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
-        cost = price(tokens, self._reported(total("cost_usd")), model=self.model,
-                     prices=prices, reported_by=self.reported_by)
+        reported_usd = self._reported(total("cost_usd"))
+        models = self._by_model(counted, prices) if any(usage.models for usage in counted) else None
+        cost = (price(tokens, reported_usd, model=self.model, prices=prices, reported_by=self.reported_by)
+                if models is None else _summed([cost for _, cost in models], reported_usd))
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
+        if models is not None:
+            entry.pop("uncached_input_tokens", None)
+            entry.pop("unit_prices", None)
+            entry["models"] = [row for row, _ in models]
         if unreported:
             entry["unreported_calls"] = sum(unreported)
         if self.unparsed:
@@ -117,12 +151,45 @@ class RoleUsage:
             entry["unparsed_turns"] = len(self.unparsed)
         return entry
 
+    def _by_model(self, counted: list[Usage], prices: PriceTable) -> list[tuple[ModelEntry, Cost]]:
+        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, and a turn without
+        them counted as the role's model's."""
+        shares: dict[Optional[str], list[Any]] = {}
+        for usage in counted:
+            for share in usage.models or (usage,):
+                shares.setdefault(share.model if usage.models else self.model, []).append(share)
+        rows = []
+        for model, of in shares.items():
+            def total(name: str) -> Any:
+                values = [value for share in of if (value := getattr(share, name, None)) is not None]
+                return sum(values) if values else None
+
+            charged = [Tokens.of(share.to_dict()) for share in of]
+            tokens = reduce(operator.add, charged) if charged and None not in charged else None
+            cost = price(tokens, total("cost_usd"), model=model, prices=prices, reported_by=self.reported_by)
+            flags = {share.input_includes_cache for share in of}
+            row = ModelEntry(model=model, **{name: total(name) for name in _MODEL_COUNTS},
+                             input_includes_cache=flags.pop() if len(flags) == 1 else None, **cost.fields())
+            rows.append((row, cost))
+        return rows
+
     def _reported(self, summed: Optional[float]) -> Optional[float]:
         """The turns' summed figure, as ``price`` takes it: an endpoint's bills only when every call carried one, since
         a sum of some calls' bills isn't the role's cost; without, the map prices all of them."""
         if self.reported_by is ReportedBy.PROVIDER and any(u is None or u.cost_usd is None for u in self.turns):
             return None
         return summed
+
+
+def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
+    """An entry's cost from its models' costs: their sum, as sure as the least sure of them. Unpriced when one is, so
+    a sum short of a model is never shown; reported, with its source, when one is the agent's figure; else priced."""
+    unpriced = next((cost for cost in costs if cost.status is CostStatus.UNPRICED), None)
+    if unpriced is not None:
+        return Cost(None, CostStatus.UNPRICED, None, reported_usd, unpriced=unpriced.unpriced)
+    least = next((cost for cost in costs if cost.status is not CostStatus.PRICED), costs[0])
+    assumed = tuple(dict.fromkeys(assumed for cost in costs for assumed in cost.assumed))
+    return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed)
 
 
 def _unreported() -> Usage:
