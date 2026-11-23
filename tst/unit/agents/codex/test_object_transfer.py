@@ -21,6 +21,7 @@ from agentenv_protocol.a2a_agent import (
 )
 from starlette.exceptions import HTTPException
 
+from agent_env.a2a_agent.protocol import raise_for_extension_status
 from tst.unit.agents.codex.agent import a2a_server, codex_bridge
 
 ORIGIN = "https://bucket.s3.amazonaws.com"
@@ -381,6 +382,52 @@ def test_a_save_without_a_workspace_grant_uploads_the_trajectory_only(codex, mon
 
     assert set(saved["objects"]) == {"trajectory"}
     assert set(store.objects) == {"snap/trajectory"}
+
+
+def _archived(store: FakeStore) -> dict[str, tarfile.TarInfo]:
+    with tarfile.open(fileobj=io.BytesIO(store.objects["snap/workspace"]), mode="r:gz") as archive:
+        return {member.name: member for member in archive.getmembers()}
+
+
+def test_a_save_leaves_out_links_that_leave_the_workspace_and_keeps_the_rest(codex, monkeypatch, tmp_path, store):
+    workspace, _, _ = _codex_home(codex, monkeypatch, tmp_path)
+    (tmp_path / "outside-tool").write_text("tool")
+    (workspace / "report" / "tool").symlink_to(tmp_path / "outside-tool")
+    (workspace / "report" / "escape").symlink_to("../../outside-tool")
+    (workspace / "report" / "latest").symlink_to("answer.txt")
+
+    saved = _call(codex, "POST", "/ext/snapshot", _save_body())
+
+    assert saved.status_code == 200
+    archived = _archived(store)
+    assert "report/tool" not in archived and "report/escape" not in archived
+    assert archived["report/answer.txt"].isfile()
+    assert archived["report/latest"].issym() and archived["report/latest"].linkname == "answer.txt"
+
+    for name in ("tool", "escape", "latest"):
+        (workspace / "report" / name).unlink()
+    loaded = _call(codex, "PUT", "/ext/snapshot", _load_body(store, "trajectory", "workspace"))
+
+    assert loaded.status_code == 200
+    assert (workspace / "report" / "latest").read_text() == "done"
+    assert not (workspace / "report" / "tool").is_symlink()
+
+
+def test_a_workspace_over_the_archive_limits_is_refused_with_a_code_the_worker_reports(
+    codex, monkeypatch, tmp_path, store
+):
+    _codex_home(codex, monkeypatch, tmp_path)
+    monkeypatch.setattr(a2a_server, "_MAX_SNAPSHOT_MEMBERS", 1)
+
+    response = _call(codex, "POST", "/ext/snapshot", _save_body())
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "workspace_unarchivable"
+    assert "too many entries" in response.json()["error"]["message"]
+    assert not store.objects
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        raise_for_extension_status(response, operation="snapshot save")
+    assert str(raised.value) == "snapshot save failed with HTTP 422: workspace_unarchivable"
 
 
 def test_a_load_without_a_workspace_object_restores_the_conversation_only(codex, monkeypatch, tmp_path, store):

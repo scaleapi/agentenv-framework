@@ -109,16 +109,18 @@ def test_workspace_archive_preserves_safe_symlink(monkeypatch, tmp_path):
     assert (workspace / "link.txt").readlink() == Path("target.txt")
 
 
-def test_workspace_archive_rejects_unsafe_symlink(monkeypatch, tmp_path):
+def test_workspace_archive_skips_unsafe_symlink(monkeypatch, tmp_path):
     workspace = tmp_path / "app"
     workspace.mkdir()
     (workspace / "link.txt").symlink_to("/etc/passwd")
+    (workspace / "kept.txt").write_text("kept")
+    archive = tmp_path / "workspace.tar.gz"
     monkeypatch.setattr(a2a_server, "WORKSPACE_DIR", workspace)
 
-    with pytest.raises(ValueError, match="unsafe link"):
-        a2a_server._build_workspace_archive(
-            tmp_path / "workspace.tar.gz"
-        )
+    a2a_server._build_workspace_archive(archive)
+
+    with tarfile.open(archive, "r:gz") as tar:
+        assert tar.getnames() == ["kept.txt"]
 
 
 def test_workspace_restore_rolls_back_failed_swap(monkeypatch, tmp_path):

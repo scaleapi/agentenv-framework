@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from a2a.types import AgentSkill
+from agentenv_protocol import AgentEnvError
 from agentenv_protocol.a2a_agent import (
     AGENT_CONFIG_V1,
     ATTRIBUTION_PROBE_V1,
@@ -330,9 +331,13 @@ def _build_workspace_archive(path: Path) -> None:
                     and workspace_root not in link_target.parents
                 )
             ):
-                raise ValueError(
-                    f"workspace contains unsafe link: {member.name}"
+                # A restore refuses such a link, so the snapshot leaves it out.
+                logger.warning(
+                    "workspace snapshot skips a link that leaves the workspace: %s -> %s",
+                    member.name,
+                    member.linkname,
                 )
+                return None
         member_count += 1
         uncompressed_bytes += member.size
         if member_count > _MAX_SNAPSHOT_MEMBERS:
@@ -906,7 +911,11 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             # Without a workspace directory this uploads the empty file: agent-env
             # requires both objects, and a load reads an empty workspace as "conversation only".
             if workspace_target is not None and WORKSPACE_DIR.is_dir():
-                await in_thread_to_its_end(_build_workspace_archive, archive_path)
+                try:
+                    await in_thread_to_its_end(_build_workspace_archive, archive_path)
+                except ValueError as e:
+                    logger.warning("workspace snapshot failed: %s", e)
+                    raise AgentEnvError("workspace_unarchivable", str(e), status=422) from e
         except BaseException:
             if archive_path is not None:
                 archive_path.unlink(missing_ok=True)
