@@ -105,6 +105,7 @@ async def test_usage_is_written_only_when_it_changed_and_stop_waits_for_a_write_
         writes.set()
         await asyncio.sleep(0.1)
         landed.append(usage)
+        return True
 
     monkeypatch.setattr(running_usage.store, "record_usage", slow)
     context = TaskStepContext(metadata={STEP_USAGE_KEY: {"s": [{"role": "solver", "attempt": 0, "turns": 1}]}})
@@ -117,3 +118,35 @@ async def test_usage_is_written_only_when_it_changed_and_stop_waits_for_a_write_
     await asyncio.sleep(0.25)
     await writer.stop()
     assert len(landed) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_that_lands_late_never_takes_the_ledger_back(store):
+    """As a write a cancel left running in its thread, landing after the step's newer entry: a role's turns only grow,
+    so the ledger keeps the entry with more of them."""
+    context = await Task(id="t", version=1, steps=[_Turns("long", [100, 200])]).run(context=TaskStepContext())
+    late = {"attempt": 0, "step_id": "long", "role": "solver", "turns": 1, "input_tokens": 100}
+
+    store.record_usage_sync(context.instance_id, [late])
+    assert _ledger(context.instance_id) == [(0, "long", 2, 300)]
+
+    store.record_usage_sync(context.instance_id, [{**late, "turns": 3, "input_tokens": 450}])
+    assert _ledger(context.instance_id) == [(0, "long", 3, 450)]
+
+
+@pytest.mark.asyncio
+async def test_a_write_that_failed_is_tried_again_though_nothing_changed(monkeypatch):
+    monkeypatch.setattr(running_usage, "INTERVAL_S", 0.01)
+    tries = []
+
+    async def flaky(instance_id, usage):
+        tries.append(usage)
+        return len(tries) > 1
+
+    monkeypatch.setattr(running_usage.store, "record_usage", flaky)
+    context = TaskStepContext(metadata={STEP_USAGE_KEY: {"s": [{"role": "solver", "attempt": 0, "turns": 1}]}})
+    writer = RunningUsage("instance", "s", context).start()
+    await asyncio.sleep(0.2)
+    await writer.stop()
+
+    assert len(tries) == 2 and tries[0] == tries[1]

@@ -17,7 +17,8 @@ INTERVAL_S = 15.0
 
 class RunningUsage:
     """Writes ``step_id``'s entries in ``context.metadata.step_usage`` to ``instance_id``'s ledger from ``start`` until
-    ``stop``, which waits for a write in flight, so none lands after the step's completion."""
+    ``stop``, which waits for a write in flight; one a cancel leaves running can't take counts back (``ahead``). A
+    write that failed is tried again at the next interval."""
 
     def __init__(self, instance_id: str, step_id: str, context: TaskStepContext) -> None:
         self._instance_id, self._step_id, self._context = instance_id, step_id, context
@@ -41,7 +42,7 @@ class RunningUsage:
                 return
             except TimeoutError:
                 pass
-            entries = (self._context.metadata.get(STEP_USAGE_KEY) or {}).get(self._step_id)
-            if entries and entries != written:
-                written = copy.deepcopy(entries)
-                await store.record_usage(self._instance_id, entries_of({self._step_id: written}))
+            entries = copy.deepcopy((self._context.metadata.get(STEP_USAGE_KEY) or {}).get(self._step_id))
+            if entries and entries != written and await store.record_usage(
+                    self._instance_id, entries_of({self._step_id: entries})):
+                written = entries

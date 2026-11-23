@@ -28,7 +28,7 @@ from agent_env.task.step_journal import (
     commit_ordered,
     replay_context,
 )
-from agent_env.task.usage_ledger import LEDGER_KEY, TOTAL_KEY, entries_of, ledger_fields, total
+from agent_env.task.usage_ledger import LEDGER_KEY, TOTAL_KEY, ahead, entries_of, ledger_fields, total
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps
 from agent_env.task_step.usage import STEP_USAGE_KEY
@@ -840,10 +840,11 @@ class TaskInstanceStore:
                         owns=lambda doc: doc.get("attempt_epoch", 0) <= attempt_epoch)
 
     def record_usage_sync(self, instance_id: str, usage: list[dict]) -> None:
-        """Merge ``usage``, the entries of a step still running, into the ledger alone. The step's completion writes the
-        rest, and its final entries replace these, being of the same attempt, step and role."""
+        """Merge ``usage``, the entries of a step still running, into the ledger alone, each only when it is ahead of the
+        ledger's (``ahead``), so a write that lands late, as one a cancel left running, never takes counts back. The
+        step's completion writes the rest, and its final entries replace these."""
         def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, usage)
+            spent = ledger_fields(doc, ahead(doc.get(LEDGER_KEY) or [], usage))
             return UpdateSpec(set=spent) if spent else None
 
         compare_and_swap(self._doc_store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), _mutate,
@@ -1005,13 +1006,15 @@ async def record_step_complete(
         )
 
 
-async def record_usage(instance_id: str, usage: list[dict]) -> None:
-    """Async ``TaskInstanceStore.record_usage_sync``; a store error is logged, not raised, as the step's completion
-    writes its entries again."""
+async def record_usage(instance_id: str, usage: list[dict]) -> bool:
+    """Async ``TaskInstanceStore.record_usage_sync``; whether it was written. A store error is logged, not raised, as
+    the step's completion writes its entries again."""
     try:
         await asyncio.to_thread(get_task_instance_store().record_usage_sync, instance_id, usage)
+        return True
     except Exception:
         logger.warning("Failed to record running usage for instance_id=%s", instance_id, exc_info=True)
+        return False
 
 
 async def undo_steps(

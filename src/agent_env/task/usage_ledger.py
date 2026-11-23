@@ -43,6 +43,13 @@ def merged(ledger: list[dict], entries: list[dict]) -> list[dict]:
     return out
 
 
+def ahead(ledger: list[dict], entries: list[dict]) -> list[dict]:
+    """The entries with more turns than ``ledger``'s entry of their attempt, step and role, or with none there. A
+    role's turns only grow, so a snapshot of a running step written late never takes back a newer entry."""
+    turns = {_key(entry): entry.get("turns") or 0 for entry in ledger}
+    return [entry for entry in entries if (entry.get("turns") or 0) > turns.get(_key(entry), -1)]
+
+
 def total(ledger: list[dict]) -> dict[str, Any]:
     """The ledger summed, as a budget reads it: the cost and the token counts, each None when no entry has one, never
     0; ``partial`` when an entry's counts are a lower bound; ``unpriced_entries`` the entries with no cost, which

@@ -389,7 +389,8 @@ orchestrators call it the same way. What callers rely on:
   rolled-back steps' (`usage=`); `record_task_failure()` and `record_teardown()` the context's; and
   `record_task_cancelled()` the `usage=` it is given. While a step runs, `Task.run` writes its entries so far every
   15 s in which they changed (`task/running_usage.py`, `record_usage()`), so a budget sees a long step's spend and a
-  worker that dies mid-step keeps it; the step's completion replaces them. A re-register keeps it, so it holds every
+  worker that dies mid-step keeps it; such a write never takes an entry back (`usage_ledger.ahead`), and the step's
+  completion replaces them. A re-register keeps it, so it holds every
   attempt and generation. A runner that doesn't set `ATTEMPT_EPOCH` writes entries with no attempt, kept by step and role
   alone: exact for a run without retries, a lower bound for one with. A runner that writes the instance some other
   way loses that spend from the ledger.
