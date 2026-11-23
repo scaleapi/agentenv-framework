@@ -30,11 +30,13 @@ from agent_env.providers.sandbox_providers.shared_box_walls import (
     SLOT_BRIDGE_PREFIX,
 )
 
+from tst.util.capabilities import REMOTE_SANDBOX, missing_capability_reason
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.int_test_slow,
     pytest.mark.asyncio,
-    pytest.mark.skipif(os.environ.get("AGENTENV_LIVE_MODAL") != "1", reason="set AGENTENV_LIVE_MODAL=1 to run on Modal"),
+    pytest.mark.skipif(os.environ.get("AGENTENV_LIVE_MODAL") != "1", reason=missing_capability_reason(REMOTE_SANDBOX)),
 ]
 
 TUNNEL_PORT = 8000

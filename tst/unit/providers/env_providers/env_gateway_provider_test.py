@@ -41,6 +41,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
     EnvironmentGatewayProvider,
     SidecarConfig,
     WebsiteConfig,
+    _environment_line,
     _redact_compose_secrets,
 )
 from agent_env.providers.env_providers.env_provider import DeployRefused
@@ -1229,6 +1230,15 @@ def test_compose_hands_the_control_token_to_the_gateway_alone():
         mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
         state_instance=LocalPostgresStateProvider.default_instance())
+
+
+def test_a_secret_the_generator_quotes_is_masked_in_the_logged_compose():
+    lines = [_environment_line("API_KEY", "abc: def"), _environment_line("DB_PASSWORD", "line one\nline two"),
+             _environment_line("PLAIN", "a: b")]
+    assert all('"' in line for line in lines)
+    redacted = _redact_compose_secrets("\n".join(lines))
+    assert "abc" not in redacted and "line one" not in redacted
+    assert redacted.splitlines() == ['      - "API_KEY=***"', '      - "DB_PASSWORD=***"', '      - "PLAIN=a: b"']
 
 
 def test_redact_compose_secrets_masks_only_secret_env_lines():

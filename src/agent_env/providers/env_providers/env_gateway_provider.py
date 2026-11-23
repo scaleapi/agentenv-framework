@@ -1790,7 +1790,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # Compose `environment:` keys whose values are secrets and must be masked before the
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
-_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*[\"']?)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
 _SETTINGS_LINE_RE = re.compile(rf'^(\s*-\s*["\'])({WEBSITE_SETTINGS_ENV})=.*$')
 
 
@@ -1847,10 +1847,15 @@ def _network_lines(*networks: str) -> list[str]:
     return ["    networks:", *(f"      - {network}" for network in networks)]
 
 
+def _masked(m: re.Match[str]) -> str:
+    quote = m[1][-1] if m[1][-1] in "\"'" else ""
+    return f"{m[1]}{m[2]}=***{quote}"
+
+
 def _redact_compose_secrets(compose_content: str) -> str:
     """Mask secret-valued env lines so the logged compose never carries a live secret, a site's settings among them."""
     return "\n".join(
-        _SETTINGS_LINE_RE.sub(lambda m: f"{m[1]}{m[2]}=***{m[1][-1]}", _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
+        _SETTINGS_LINE_RE.sub(_masked, _SECRET_ENV_KEY_RE.sub(_masked, line))
         for line in compose_content.splitlines()
     )
 

@@ -48,7 +48,14 @@ async def _ws(websocket: WebSocket) -> None:
         await websocket.send_text(f"echo {message}")
 
 
+async def _sign_in(_: Request) -> JSONResponse:
+    response = JSONResponse({})
+    response.set_cookie("session", "first-callers-session")
+    return response
+
+
 _UPSTREAM = Starlette(routes=[Route("/echo", _echo, methods=["GET", "POST"]), Route("/stream", _stream),
+                              Route("/sign-in", _sign_in),
                               WebSocketRoute("/ws", _ws)])
 
 
@@ -110,6 +117,19 @@ async def test_with_the_token_a_request_passes_without_it_and_with_everything_el
     assert seen["headers"]["authorization"] == "Bearer control"
     assert seen["headers"]["host"] == "shop.example.com"
     assert seen["headers"]["x-other"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_a_session_cookie_one_caller_got_never_reaches_the_next_caller(door_port):
+    async with httpx.AsyncClient() as first:
+        signed_in = await first.get(f"http://127.0.0.1:{door_port}/sign-in", headers=_token())
+    assert "first-callers-session" in signed_in.headers["set-cookie"]
+    async with httpx.AsyncClient() as second:
+        fresh = (await second.get(f"http://127.0.0.1:{door_port}/echo", headers=_token())).json()
+        own = (await second.get(f"http://127.0.0.1:{door_port}/echo",
+                                headers={**_token(), "Cookie": "session=second"})).json()
+    assert "cookie" not in fresh["headers"]
+    assert own["headers"]["cookie"] == "session=second"
 
 
 @pytest.mark.asyncio

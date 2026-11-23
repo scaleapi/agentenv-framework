@@ -16,6 +16,7 @@ import contextlib
 import hmac
 import logging
 import os
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 
 import httpx
 import uvicorn
@@ -179,9 +180,11 @@ async def _deny_websocket(scope, send, status: int, body: bytes) -> None:
 
 def door_client() -> httpx.AsyncClient:
     """The client a door forwards with: no timeout once connected, as a stream may stay open, no redirects followed,
-    and no proxy from the environment."""
+    no proxy from the environment, and a cookie jar that keeps nothing, so a caller's session cookie never reaches the
+    next caller."""
     return httpx.AsyncClient(timeout=httpx.Timeout(None, connect=_UPSTREAM_CONNECT_TIMEOUT_S),
-                             follow_redirects=False, trust_env=False)
+                             follow_redirects=False, trust_env=False,
+                             cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])))
 
 
 async def serve(routes: dict[int, str], token: str) -> None:
