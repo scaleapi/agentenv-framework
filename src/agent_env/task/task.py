@@ -26,6 +26,7 @@ from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
 from agent_env.task.outcome import FailedStep
 from agent_env.task.teardown import env_record_ids
+from agent_env.task.running_usage import RunningUsage
 from agent_env.task.usage_ledger import entries_of
 from agent_env.task_step.context import (
     ATTEMPT_EPOCH,
@@ -710,9 +711,14 @@ class Task:
             started_utc = datetime.now(timezone.utc).isoformat()
             # This step's own asyncio task, so a sibling dispatched alongside it doesn't see it.
             ATTEMPT_EPOCH.set(dispatch_epoch)
+            running = RunningUsage(instance_id, step.id, context).start() if instance_id else None
             try:
                 with protocol_v1.authorized({d.environment_url: d.control_headers for d in context.deployed_envs}):
-                    await step.execute(context)
+                    try:
+                        await step.execute(context)
+                    finally:
+                        if running is not None:
+                            await running.stop()
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:

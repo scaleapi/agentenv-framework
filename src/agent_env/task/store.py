@@ -839,6 +839,16 @@ class TaskInstanceStore:
         self._end_write(instance_id, entries_of(context.metadata.get(STEP_USAGE_KEY)), lambda doc: {"context": safe},
                         owns=lambda doc: doc.get("attempt_epoch", 0) <= attempt_epoch)
 
+    def record_usage_sync(self, instance_id: str, usage: list[dict]) -> None:
+        """Merge ``usage``, the entries of a step still running, into the ledger alone. The step's completion writes the
+        rest, and its final entries replace these, being of the same attempt, step and role."""
+        def _mutate(doc: dict) -> UpdateSpec | None:
+            spent = ledger_fields(doc, usage)
+            return UpdateSpec(set=spent) if spent else None
+
+        compare_and_swap(self._doc_store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), _mutate,
+                         counter_field=_REV)
+
     def _end_write(self, instance_id: str, usage: list[dict], fields: Callable[[dict], dict], *,
                    owns: Callable[[dict], bool]) -> None:
         """A write that ends a run or an attempt, a CAS: ``fields`` of the document when ``owns`` it, and ``usage``, the
@@ -993,6 +1003,15 @@ async def record_step_complete(
             "Failed to record step complete for instance_id=%s step_id=%s",
             instance_id, step_id, exc_info=True,
         )
+
+
+async def record_usage(instance_id: str, usage: list[dict]) -> None:
+    """Async ``TaskInstanceStore.record_usage_sync``; a store error is logged, not raised, as the step's completion
+    writes its entries again."""
+    try:
+        await asyncio.to_thread(get_task_instance_store().record_usage_sync, instance_id, usage)
+    except Exception:
+        logger.warning("Failed to record running usage for instance_id=%s", instance_id, exc_info=True)
 
 
 async def undo_steps(
