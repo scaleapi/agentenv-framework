@@ -28,8 +28,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 DAY = 86400
 #: Live sites the browser hasn't visited, each with its page's title, opened in turn with the universe that many days
 #: from now: the last right after the jump back.
-STOPS = [(-182, "https://example.com/", "Example Domain"), (730, "https://example.org/", "Example Domain"),
-         (6 * 365, "https://example.net/", "Example Domain"), (-182, "https://www.wikipedia.org/", "Wikipedia")]
+#: None of them behind a bot challenge, as Cloudflare's "Just a moment..." meets CI's browsers at example.com now.
+STOPS = [(-182, "https://www.python.org/", "Welcome to Python.org"),
+         (730, "https://www.gnu.org/", "The GNU Operating System and the Free Software Movement"),
+         (6 * 365, "https://www.kernel.org/", "The Linux Kernel Archives"), (-182, "https://www.wikipedia.org/", "Wikipedia")]
 #: How long a page may take to load before its tab counts as not loaded.
 LOAD_S = 45
 POLICY = "/etc/opt/chrome_for_testing/policies/managed/agentenv-egress.json"
