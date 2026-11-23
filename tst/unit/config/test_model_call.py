@@ -4,6 +4,7 @@ LiteLLM's own estimate. The real LiteLLM calls a loopback server on the OpenAI a
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -227,3 +228,13 @@ def test_setup_errors_are_the_ones_no_retry_fixes():
 
     assert ConfigError in setup and litellm.AuthenticationError in setup and litellm.BudgetExceededError in setup
     assert not issubclass(litellm.Timeout, setup) and not issubclass(litellm.RateLimitError, setup)
+
+
+def test_a_call_is_cut_off_by_a_cancel_or_a_timeout_even_one_a_retry_gave_up_on():
+    timeout = litellm.Timeout("timed out", model="gpt-4o-mini", llm_provider="openai")
+    gave_up = RuntimeError("judge failed after 3 attempts")
+    gave_up.__cause__ = timeout
+    refused = litellm.RateLimitError("slow down", model="gpt-4o-mini", llm_provider="openai")
+
+    assert all(model_call.cut_off(e) for e in (timeout, gave_up, asyncio.CancelledError()))
+    assert not any(model_call.cut_off(e) for e in (refused, ValueError("bad answer")))
