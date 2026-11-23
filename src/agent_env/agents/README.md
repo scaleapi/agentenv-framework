@@ -48,7 +48,10 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   declares the agent at the gateway as a follower with a read token of its own and calls its `sync_time` with the
   follower's config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is
   armed. From then on the CLI, its own "Today's date is" line included, and every command the model runs read the env's
-  time, and a clock write that waits for followers waits for the agent.
+  time, and a clock write that waits for followers waits for the agent. A resumed Claude Code session keeps its first
+  turn's date line as history; when the date has changed by its next model call, between turns or during one, the CLI
+  adds "The date has changed. Today's date is now ..." (`tst/integration/agent/claude_code_date_test.py` checks the
+  pinned CLI does).
 - **OpenCode's CLI on real time.** OpenCode orders a session's messages by when they were written and takes no time
   before 1970, so on the env's clock a clock set behind its messages broke the session. Where the image follows the
   clock, the bridge starts the CLI on real time; the commands it runs still read the env's time. While the clock is
