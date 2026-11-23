@@ -300,18 +300,16 @@ def prepare_bundle(
     agent: str | None = None,
     solver_endpoint: bool = False,
     skip_lint: bool = False,
-    emulate: bool = True,
 ) -> PreparedBundle:
     """Do what ``run_bundle`` with these arguments does before its first task runs, and stop there. ``played``
     leaves out what each task's only prompted agent would deploy, for a caller that plays that agent itself
     (``EpisodeSpec``), so the agent needn't exist. With ``solver_endpoint`` the caller gives the solver's deploys their
-    model endpoint in each run's ``step_params``, so the config needn't set one. ``emulate`` controls foreign-arch
-    builds as it does for ``run_bundle``.
+    model endpoint in each run's ``step_params``, so the config needn't set one.
 
     It doesn't turn namespace routing on: the caller keeps it on for as long as it runs the tasks
     (``agent_env.store.routing.namespace_routing``), which suits a service that runs nothing else. Raises what
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
-    composing = _composing(sandbox, emulate)
+    composing = _composing(sandbox)
     return _prepare(root, tasks, evals, sandbox, id_root, agent, played, _progress(on_progress), _hint(id_root),
                     composing, solver_endpoint=solver_endpoint, skip_lint=skip_lint)
 
