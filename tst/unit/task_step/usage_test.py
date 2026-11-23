@@ -6,7 +6,7 @@ from agentenv_protocol.a2a_agent import Usage
 from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config.model import ModelRole
 from agent_env.config.model_call import ModelReply
-from agent_env.config.model_pricing import Assumed, Cost, CostStatus, ModelPrice, PriceTable, Unpriced
+from agent_env.config.model_pricing import Assumed, Cost, CostStatus, ModelPrice, PriceTable, ReportedBy, Unpriced
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 from agent_env.task_step import usage as usage_module
 from agent_env.task_step.usage import RoleUsage, StepUsage
@@ -72,7 +72,7 @@ def test_a_judge_call_the_step_made_itself_is_its_own_entry_costed_as_its_endpoi
     billed = Cost(0.002, CostStatus.REPORTED, "provider", 0.002)
 
     for _ in range(2):
-        usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", "gw:443", {"prompt_tokens": 50, "completion_tokens": 5},
+        usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", "gw:443", {"prompt_tokens": 50, "completion_tokens": 5},
                                                billed))
 
     [entry] = context.metadata["step_usage"]["talk"]
@@ -86,9 +86,9 @@ def test_judge_calls_billed_and_priced_sum_as_an_estimate_that_keeps_the_bills_a
     usage = StepUsage(context, "talk")
     tokens = {"prompt_tokens": 50, "completion_tokens": 5}
     rates = {"input": 1.0, "output": 2.0}
-    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(0.002, CostStatus.REPORTED, "provider",
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(0.002, CostStatus.REPORTED, "provider",
                                                                                0.002)))
-    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(
         0.001, CostStatus.PRICED, "litellm@1", None, uncached_input=50, unit_prices=rates,
         assumed=(Assumed.CACHE_READ_RATE,))))
 
@@ -98,7 +98,7 @@ def test_judge_calls_billed_and_priced_sum_as_an_estimate_that_keeps_the_bills_a
     assert (entry["cost_assumed"], entry["uncached_input_tokens"], entry["unit_prices"]) == (["cache_read_rate"], 50,
                                                                                           rates)
 
-    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(None, CostStatus.UNPRICED, None, None)))
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(None, CostStatus.UNPRICED, None, None)))
 
     [entry] = context.metadata["step_usage"]["talk"]
     assert (entry["turns"], entry["cost_usd"], entry["partial"]) == (3, pytest.approx(0.003), True)
@@ -107,7 +107,7 @@ def test_judge_calls_billed_and_priced_sum_as_an_estimate_that_keeps_the_bills_a
 def test_judge_calls_none_of_which_was_costed_leave_the_entry_unpriced():
     context = TaskStepContext()
     usage = StepUsage(context, "talk")
-    usage.call(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, None, Cost(None, CostStatus.UNPRICED, None, None,
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, None, Cost(None, CostStatus.UNPRICED, None, None,
                                                                              unpriced=Unpriced.NO_PRICE)))
 
     [entry] = context.metadata["step_usage"]["talk"]
@@ -231,3 +231,41 @@ def test_a_turn_that_reported_no_tokens_beside_priced_ones_leaves_a_partial_lowe
     [entry] = context.metadata["step_usage"]["solve"]
     assert (entry["cost_status"], entry["partial"], entry["uncached_input_tokens"]) == ("priced", True, 1_000_000)
     assert entry["cost_usd"] == pytest.approx(0.15)
+
+
+def test_a_judges_calls_start_its_role_at_the_first_and_an_endpoints_bill_wins_over_the_map(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "grade")
+    billed = Usage(input_tokens=1_000_000, output_tokens=100_000, input_includes_cache=True, cost_usd=0.5)
+    usage.call(ModelRole.JUDGE, billed, model="gpt-4o-mini", endpoint_host="proxy:4000", reported_by=ReportedBy.PROVIDER)
+    usage.call(ModelRole.JUDGE, billed, model="other-model", endpoint_host="elsewhere")
+    [entry] = context.metadata["step_usage"]["grade"]
+    assert (entry["role"], entry["model"], entry["endpoint_host"], entry["turns"]) == ("judge", "gpt-4o-mini",
+                                                                                     "proxy:4000", 2)
+    assert (entry["cost_status"], entry["cost_source"], entry["cost_usd"]) == ("reported", "provider", 1.0)
+    assert context.metadata["model_endpoints"]["judge"]["grade"] == {"model": "gpt-4o-mini",
+                                                                       "endpoint_host": "proxy:4000"}
+
+
+def test_an_agents_own_cost_still_gives_way_to_the_map(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    StepUsage(context, "grade").call(ModelRole.JUDGE, Usage(input_tokens=1_000_000, output_tokens=100_000,
+                                                            input_includes_cache=True, cost_usd=0.5),
+                                     model="gpt-4o-mini", endpoint_host=None)
+    [entry] = context.metadata["step_usage"]["grade"]
+    assert (entry["cost_status"], entry["cost_usd"], entry["reported_cost_usd"]) == ("priced", pytest.approx(0.21), 0.5)
+
+
+def test_an_endpoint_that_billed_only_some_calls_has_the_map_price_them_all(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "grade")
+    counts = {"input_tokens": 1_000_000, "output_tokens": 100_000, "input_includes_cache": True}
+    usage.call(ModelRole.JUDGE, Usage(**counts, cost_usd=0.5), model="gpt-4o-mini", endpoint_host=None,
+               reported_by=ReportedBy.PROVIDER)
+    usage.call(ModelRole.JUDGE, Usage(**counts), model="gpt-4o-mini", endpoint_host=None)
+    [entry] = context.metadata["step_usage"]["grade"]
+    assert (entry["cost_status"], entry["cost_usd"]) == ("priced", pytest.approx(0.42))
+

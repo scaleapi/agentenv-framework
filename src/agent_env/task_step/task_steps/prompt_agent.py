@@ -1329,7 +1329,7 @@ class _UserSide:
         return {"end": "user_sim_invalid"}
 
     def _judge_call(self, reply) -> None:
-        self._usage.call(ModelRole.JUDGE, reply)
+        self._usage.reply(ModelRole.JUDGE, reply)
 
     async def _send_to_peer(self, number: int, agent_parts: list[dict], note: Optional[str] = None) -> dict:
         step = self._step

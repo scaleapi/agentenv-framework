@@ -64,7 +64,7 @@ class UsageEntry(TypedDict):
 class RoleUsage:
     """One role's turns in one step: the model it ran, the host of the endpoint it called, the attempt epoch the step
     ran under, and each turn's usage, None for a turn that reported none. ``call_costs`` are the costs of calls core
-    made itself (``StepUsage.call``), each costed when it was made; a role with them is costed from them alone."""
+    made itself (``StepUsage.reply``), each costed when it was made; a role with them is costed from them alone."""
 
     role: str
     model: Optional[str] = None
@@ -73,6 +73,9 @@ class RoleUsage:
     turns: list[Optional[Usage]] = field(default_factory=list)
     unparsed: list[dict] = field(default_factory=list)
     call_costs: list[Cost] = field(default_factory=list)
+    # Whose figure a turn's ``cost_usd`` is: an agent's own (the price map wins over it), or an endpoint's bill (it
+    # wins over the map).
+    reported_by: ReportedBy = ReportedBy.HARNESS
 
     def add(self, usage: Optional[Usage], unparsed: Optional[dict] = None) -> None:
         """One finished turn's usage, and what of it couldn't be read."""
@@ -106,7 +109,8 @@ class RoleUsage:
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
         cost = (_combined(self.call_costs) if self.call_costs
-                else price(tokens, total("cost_usd"), model=self.model, prices=prices, reported_by=ReportedBy.HARNESS))
+                else price(tokens, self._reported(total("cost_usd")), model=self.model,
+                           prices=prices, reported_by=self.reported_by))
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
@@ -116,6 +120,13 @@ class RoleUsage:
             entry["unparsed"] = self.unparsed[:_UNPARSED_TURNS_KEPT]
             entry["unparsed_turns"] = len(self.unparsed)
         return entry
+
+    def _reported(self, summed: Optional[float]) -> Optional[float]:
+        """The turns' summed figure, as ``price`` takes it: an endpoint's bills only when every call carried one, since
+        a sum of some calls' bills isn't the role's cost; without, the map prices all of them."""
+        if self.reported_by is ReportedBy.PROVIDER and any(u is None or u.cost_usd is None for u in self.turns):
+            return None
+        return summed
 
 
 def _combined(costs: list[Cost]) -> Cost:
@@ -170,18 +181,33 @@ class StepUsage:
             usage.add(reply.usage, reply.usage_unparsed)
             self.entries()
 
-    def call(self, role: ModelRole, reply: ModelReply) -> None:
-        """One model call the step made itself as ``role`` (a user-sim gate's judge, through ``model_call``), written
+    def call(self, role: ModelRole, usage: Optional[Usage], *, model: Optional[str], endpoint_host: Optional[str],
+             reported_by: ReportedBy = ReportedBy.HARNESS) -> None:
+        """One model call of ``role`` that isn't an agent's turn, as a judge's, written at once. The role starts at its
+        first call, with the model and the endpoint host that call reached; ``reported_by`` says whose figure a call's
+        ``cost_usd`` is, and the role keeps its first call's."""
+        self._role_for_call(role, model, endpoint_host, reported_by).add(usage)
+        self.entries()
+
+    def reply(self, role: ModelRole, reply: ModelReply) -> None:
+        """One model call the step made itself as ``role`` through ``model_call`` (a user-sim gate's judge), written
         at once. Its cost is kept as the call was costed (``_combined`` sums them); one with no cost leaves the entry a
         lower bound, as ``cut_off`` does."""
-        usage = self._roles.get(role)
-        if usage is None:
-            usage = self._roles[role] = RoleUsage(role.value, reply.model, reply.endpoint_host)
+        usage = self._role_for_call(role, reply.model, reply.endpoint_host, ReportedBy.HARNESS)
         counts = Usage.from_model_response(reply.usage) if reply.usage else Usage()
         if reply.cost.usd is None:
             counts = replace(counts, provider_details={**counts.provider_details, "unreported": True})
         usage.call_costs.append(reply.cost)
         usage.add(counts)
+        self.entries()
+
+    def _role_for_call(self, role: ModelRole, model: Optional[str], endpoint_host: Optional[str],
+                       reported_by: ReportedBy) -> RoleUsage:
+        """The role a call is counted under, started at its first call."""
+        if role not in self._roles:
+            self._context.record_model_endpoint(role.value, self._step_id, model, endpoint_host)
+            self._roles[role] = RoleUsage(role.value, model, endpoint_host, reported_by=reported_by)
+        return self._roles[role]
         self.entries()
 
     def cut_off(self, role: ModelRole) -> None:

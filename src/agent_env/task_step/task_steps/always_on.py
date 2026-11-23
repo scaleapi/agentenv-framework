@@ -147,8 +147,7 @@ USER_PHONE = "user_phone"
 IN_FLIGHT = ("firing", "queued")
 POLL_SECONDS = 0.5
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-FINAL_REMINDER = ("(This is the last time you'll be woken for this job. Only what you send with message_user reaches "
-                  "{first}; your normal reply is not shown to them.)")
+FINAL_REMINDER = "(Only what you send with message_user reaches {first}; your normal reply is not shown to them.)"
 NUDGE_TEXT = ("Your closing text was not delivered. If the user should see it, send it with message_user; otherwise "
               "call stay_quiet.")
 WAKE_REMINDER_TEXT = "Reminder: only message_user reaches the user."
@@ -1647,7 +1646,7 @@ class _Run:
 
         outcome = await run_gate(gate, ans["message"], self.gate_history, rewrite, call_config=self.gate_call_config,
                                  instructions=self.user_sim_prompt, on_verdict=on_verdict,
-                                 on_call=lambda reply: self.usage.call(ModelRole.JUDGE, reply))
+                                 on_call=lambda reply: self.usage.reply(ModelRole.JUDGE, reply))
         if latest["dropped"] and gate.on_fail != "send":
             outcome.invalid = True
         record = {"verdicts": verdicts, "rewrites": rewrites, "invalid": outcome.invalid}

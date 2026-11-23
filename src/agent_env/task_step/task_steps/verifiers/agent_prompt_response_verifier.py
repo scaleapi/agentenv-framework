@@ -65,6 +65,9 @@ class AgentPromptResponseVerifierTaskStep(VerifierTaskStep):
         base["verifier_id"] = self.verifier_id
         return base
 
+    def criterion_rows(self) -> Optional[int]:
+        return len(self.criteria)
+
     def config_problems(self) -> list[str]:
         """The criteria a run would refuse when it grades: an unknown type, an empty ``needles`` or ``pattern``, a
         pattern that doesn't compile, or a flag ``re`` doesn't have."""
