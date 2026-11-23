@@ -53,6 +53,7 @@ from agentenv_protocol.a2a_agent import (
     TaskRequest,
     TaskResult,
     TextPart,
+    ModelUsage,
     Usage,
     a2a_agent,
     enable,
@@ -415,6 +416,16 @@ def _turn_tally(result: ClaudeResult) -> dict[str, dict[str, float]] | None:
     return turn
 
 
+def _model_usage(model: str, counts: dict[str, float]) -> ModelUsage:
+    """One model's share of the turn's tally, with ``input_tokens`` counting the cache, and its cost."""
+    return ModelUsage(model=model, input_tokens=int(counts["input_tokens"] + counts["cache_read_input_tokens"]
+                                                    + counts["cache_creation_input_tokens"]),
+                      output_tokens=int(counts["output_tokens"]),
+                      cache_read_tokens=int(counts["cache_read_input_tokens"]),
+                      cache_write_tokens=int(counts["cache_creation_input_tokens"]), input_includes_cache=True,
+                      cost_usd=counts["cost_usd"] or None)
+
+
 def _builds_atif(request: TaskRequest[ClaudeCodeConfig]) -> bool:
     """Whether the task feeds an atif/1 copy; a protocol from before ``builds_atif`` is taken to, and its copy is built
     only when the run prescribed it."""
@@ -424,11 +435,12 @@ def _builds_atif(request: TaskRequest[ClaudeCodeConfig]) -> bool:
 def _usage(result: ClaudeResult) -> Usage:
     """The turn's tool calls and token counts, with ``input_tokens`` counting the cache. The counts are the CLI's own
     tally for the turn (``_turn_tally``), which covers every call, its subagents' too, and its cost; the turn's
-    `result` events count only the main agent's calls, so the tally is used only when it covers at least those. When it
-    can't be (a resumed session this process hasn't run before), the counts are the `result` events', and the
-    subagents' calls are counted in ``unreported_calls``, which makes the turn a lower bound. A run cut off before its
-    `result` counts its model calls there too. The cache writes' 5-minute and 1-hour split, the thinking tokens and
-    each model's own counts are kept in ``provider_details``."""
+    `result` events count only the main agent's calls, so the tally is used only when it covers at least those, and
+    then each model's own counts and cost are the turn's ``models``, so a subagent on another model is priced at its
+    rate. When it can't be (a resumed session this process hasn't run before), the counts are the `result` events',
+    and the subagents' calls are counted in ``unreported_calls``, which makes the turn a lower bound. A run cut off
+    before its `result` counts its model calls there too. The cache writes' 5-minute and 1-hour split and the
+    thinking tokens are kept in ``provider_details``."""
     unreported = result.unreported_calls
     if not result.run_usage and not result.model_usage:
         details = {"unreported_calls": unreported + result.subagent_calls} if unreported + result.subagent_calls else {}
@@ -440,18 +452,12 @@ def _usage(result: ClaudeResult) -> Usage:
     main = {key: total(lambda run, key=key: run.get(key)) for key in _RUN_COUNTS}
     turn = _turn_tally(result)
     tally = {key: sum(model[key] for model in turn.values()) for key in _TALLY} if turn is not None else None
-    cost, models = None, None
+    cost, models = None, ()
     if tally is not None and all(tally[key] >= main[key] for key in _RUN_COUNTS) and min(tally.values()) >= 0:
         counted = {key: int(tally[key]) for key in _RUN_COUNTS}
         counted["cache_creation"] = {key: int(tally[key]) for key in _CACHE_WRITE_SPLIT}
         thinking, cost = int(tally["thinking_tokens"]), tally["cost_usd"] or None
-        models = {model: {"input_tokens": int(counts["input_tokens"] + counts["cache_read_input_tokens"]
-                                              + counts["cache_creation_input_tokens"]),
-                          "output_tokens": int(counts["output_tokens"]),
-                          "cache_read_tokens": int(counts["cache_read_input_tokens"]),
-                          "cache_write_tokens": int(counts["cache_creation_input_tokens"]),
-                          **({"cost_usd": counts["cost_usd"]} if counts["cost_usd"] else {})}
-                  for model, counts in turn.items()}
+        models = tuple(_model_usage(model, counts) for model, counts in turn.items())
     else:
         counted = dict(main)
         counted["cache_creation"] = {key: total(lambda run, key=key: (run.get("cache_creation") or {}).get(key))
@@ -459,9 +465,9 @@ def _usage(result: ClaudeResult) -> Usage:
         thinking = total(lambda run: (run.get("output_tokens_details") or {}).get("thinking_tokens"))
         unreported += result.subagent_calls
     usage = Usage.from_model_response(counted)
-    return replace(usage, tool_call_count=result.tool_call_count, cost_usd=cost, provider_details={
+    return replace(usage, tool_call_count=result.tool_call_count, cost_usd=cost, models=models, provider_details={
         **usage.provider_details, **({"unreported_calls": unreported} if unreported else {}),
-        **({"reasoning_tokens": thinking} if thinking else {}), **({"models": models} if models else {})})
+        **({"reasoning_tokens": thinking} if thinking else {})})
 
 
 @a2a_agent(

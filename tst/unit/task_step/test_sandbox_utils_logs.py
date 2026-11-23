@@ -1,4 +1,5 @@
-"""fetch_container_logs tails the agent's own container, and agent_error_text bounds the agent's report."""
+"""fetch_container_logs tails the agent's own container, agent_error_text bounds the agent's report, and
+ended_turn_error says why a turn ended without completing."""
 
 from __future__ import annotations
 
@@ -10,8 +11,10 @@ import pytest
 from agent_env.task_step.task_steps.sandbox_utils import sandbox_utils
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
+    ended_turn_error,
     fetch_container_logs,
 )
+from agent_env.a2a_agent.protocol import TerminalResponse
 
 
 class FakeSandbox:
@@ -128,3 +131,14 @@ def test_agent_error_text_prefers_the_error_message():
 def test_agent_error_text_is_bounded():
     assert len(agent_error_text("e" * 2000, None)) == 2000
     assert len(agent_error_text("e" * 2001, None)) == 2000
+
+
+@pytest.mark.parametrize("reply,expected", [
+    (TerminalResponse(response_text="", error_type="api_error", error_code="400", error_class="BadRequestError",
+                      error_message="the model was refused"),
+     "state failed: error_type=api_error, error_code=400, exception=BadRequestError: the model was refused"),
+    (TerminalResponse(response_text="it broke"), "state failed: it broke"),
+    (TerminalResponse(response_text=""), "state failed"),
+], ids=["full", "text-only", "nothing"])
+def test_a_turn_that_ended_without_completing_keeps_the_agents_own_error(reply, expected):
+    assert ended_turn_error("failed", reply) == expected
