@@ -41,6 +41,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
     EnvironmentGatewayProvider,
     SidecarConfig,
     WebsiteConfig,
+    _environment_line,
     _redact_compose_secrets,
 )
 from agent_env.providers.env_providers.env_provider import DeployRefused
@@ -1237,6 +1238,55 @@ def test_compose_hands_the_control_token_to_the_gateway_alone():
         state_instance=LocalPostgresStateProvider.default_instance())
 
 
+def test_a_secret_the_generator_quotes_is_masked_in_the_logged_compose():
+    lines = [_environment_line("API_KEY", "abc: def"), _environment_line("DB_PASSWORD", "line one\nline two"),
+             _environment_line("PLAIN", "a: b")]
+    assert all('"' in line for line in lines)
+    redacted = _redact_compose_secrets("\n".join(lines))
+    assert "abc" not in redacted and "line one" not in redacted
+    assert redacted.splitlines() == ['      - "API_KEY=***"', '      - "DB_PASSWORD=***"', '      - "PLAIN=a: b"']
+
+
+def test_a_quoted_or_multiline_secret_in_a_rendered_compose_is_masked_and_the_compose_still_reads_back():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    secrets_in = {"VENDOR_API_KEY": "first: half", "SIGNING_PASSWORD": "-----BEGIN-----\nkey body\n-----END-----"}
+    rendered = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack", extra_env_vars=secrets_in)],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+    env = dict(item.split("=", 1) for item in yaml.safe_load(rendered)["services"]["slack"]["environment"])
+    assert {key: env[key] for key in secrets_in} == secrets_in
+
+    redacted = _redact_compose_secrets(rendered)
+    assert all(fragment not in redacted for fragment in ("first", "half", "BEGIN", "key body"))
+    redacted_env = dict(item.split("=", 1) for item in yaml.safe_load(redacted)["services"]["slack"]["environment"])
+    assert {key: redacted_env[key] for key in secrets_in} == {"VENDOR_API_KEY": "***", "SIGNING_PASSWORD": "***"}
+
+
+def test_a_quoted_or_multiline_secret_in_a_slots_rendered_compose_is_masked_and_still_reads_back():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.providers.env_providers.stack_layout import StackLayout
+
+    secrets_in = {"VENDOR_API_KEY": "first: half", "SIGNING_PASSWORD": "-----BEGIN-----\nkey body\n-----END-----"}
+    rendered = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack", extra_env_vars=secrets_in)],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        stack_layout=StackLayout.for_slot(3), door_token="the-door-token",
+    )
+    env = dict(item.split("=", 1) for item in yaml.safe_load(rendered)["services"]["slack"]["environment"])
+    assert {key: env[key] for key in secrets_in} == secrets_in
+
+    redacted = _redact_compose_secrets(rendered)
+    assert all(fragment not in redacted for fragment in ("first", "half", "BEGIN", "key body", "the-door-token"))
+    redacted_env = dict(item.split("=", 1) for item in yaml.safe_load(redacted)["services"]["slack"]["environment"])
+    assert {key: redacted_env[key] for key in secrets_in} == {"VENDOR_API_KEY": "***", "SIGNING_PASSWORD": "***"}
+
+
 def test_redact_compose_secrets_masks_only_secret_env_lines():
     """The logged compose masks *SECRET/PASSWORD/TOKEN env values but leaves everything else
     (image refs, ports, non-secret env, DATABASE_URL) intact."""
@@ -1659,6 +1709,24 @@ def test_extra_env_vars_overriding_only_service_name_diverges_the_pair():
     assert _env_values(block, "ENVIRONMENT_NAME") == [_ENV_NAME]
 
 
+@pytest.mark.parametrize("value", ["a\nprivileged: true", "x\n  evil:\n    image: busybox", "k: v", "\x07bell", " #x"])
+def test_an_env_value_stays_one_string_and_adds_no_key_or_service(value):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image=_ENV_IMAGE, environment_name=_ENV_NAME, extra_env_vars={"V": value})],
+        sidecars=[SidecarConfig(environment_name="relay", image_artifact=_FakeImageArtifact("ecr/relay:1.0.4"),
+                                container_port=8000, host_port=18768, env={"V": value})],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    ))
+    services = compose["services"]
+    assert set(services) == {"servicedb", _ENV_NAME, "gateway", "relay"}
+    for name in (_ENV_NAME, "relay"):
+        assert "privileged" not in services[name]
+        assert services[name]["environment"][-1] == f"V={value}"
+
+
 def test_service_name_still_emitted_until_fd1730_removes_it():
     """REGRESSION GUARD — the dual-inject is additive-only: SERVICE_NAME must keep being emitted
     for MCP servers AND website backends, because the deployed fleet still reads it. Dropping that
@@ -1903,10 +1971,10 @@ async def test_probe_compares_the_gateway_tools_with_the_stored_card(monkeypatch
     assert record.levelno == (logging.INFO if status == "ok" else logging.WARNING)
     assert f"env_id=crm-suite status={status} tools={len(tools)} " in record.getMessage()
     assert record.getMessage().endswith(f" children=a,b missing={missing}")
-    env_gateway_provider._tool_names.assert_awaited_once_with("https://gw.example/mcp")
+    env_gateway_provider._tool_names.assert_awaited_once_with("https://gw.example/mcp", headers=None)
 
 
-async def _never_answers(_mcp_url: str) -> set[str]:
+async def _never_answers(_mcp_url: str, **_) -> set[str]:
     await asyncio.sleep(60)
     return set()
 
@@ -2101,7 +2169,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
         record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
                                    ttl_seconds=60, env_state_type="remote")
 
-    clashes_checked.assert_awaited_once_with("https://vm.example")
+    clashes_checked.assert_awaited_once_with("https://vm.example", headers={})
 
     acquire.assert_awaited_once_with(env_state_type="remote", ttl_seconds=60, name_hint="crm-env", env_state_instance_id=None)
     [server] = compose.call_args.kwargs["mcp_servers"]
@@ -3284,3 +3352,45 @@ def test_a_gateway_record_keeps_its_slot_layout_through_storage_and_an_older_rec
     assert DeployedEnv.from_dict(dataclasses.asdict(record)).stack_layout == StackLayout.for_slot(4).to_record()
     older = {k: v for k, v in dataclasses.asdict(_multi_record([])).items() if k != "stack_layout"}
     assert DeployedEnv.from_dict(older).stack_layout is None
+
+
+class _ComposeRendered(Exception):
+    pass
+
+
+async def _door_token_of_a_deploy(layout: StackLayout) -> str | None:
+    """The door token a VM deploy in ``layout`` hands its compose file, the deploy stopped right there."""
+    from agent_env.env.gateway import GatewayMode
+
+    gp = EnvironmentGatewayProvider()
+    gp._stack_layout = layout
+    tokens = []
+
+    def compose(**kwargs):
+        tokens.append(kwargs["door_token"])
+        raise _ComposeRendered
+
+    box = MagicMock(sandbox_id="box", ON_THIS_MACHINE=False, load_docker_images=AsyncMock())
+    with patch("agent_env.env.env.Env.get", MagicMock(return_value=MagicMock(docker_image_artifact=_loadable("gw")))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", side_effect=compose), pytest.raises(_ComposeRendered):
+        await gp._deploy_via_vm(_vm_provider(), [], [], 18765, None, None, GatewayMode.PERFORMANCE, 60, 10,
+                                existing_sandbox=box)
+    [token] = tokens
+    return token
+
+
+@pytest.mark.asyncio
+async def test_every_slot_deploy_draws_a_door_token_no_deploy_had_and_the_default_stack_none():
+    tokens = [await _door_token_of_a_deploy(StackLayout.for_slot(2)) for _ in range(3)]
+    assert len(set(tokens)) == 3 and all(len(token) >= 43 for token in tokens)
+    assert await _door_token_of_a_deploy(DEFAULT_STACK_LAYOUT) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("headers", "sent"), [(None, []), ({"X-Agentenv-Slot-Token": "tok"}, ["-H", "X-Agentenv-Slot-Token: tok"])])
+async def test_the_gateway_wait_sends_a_slots_door_header_and_nothing_new_for_the_default_stack(headers, sent):
+    sandbox = MagicMock(exec_with_output=AsyncMock(return_value=(0, "200", "")))
+    assert await EnvironmentGatewayProvider()._wait_for_gateway(sandbox, 19765, headers=headers)
+    argv = sandbox.exec_with_output.await_args.args
+    assert [a for i, a in enumerate(argv) if a == "-H" or argv[i - 1] == "-H"] == sent

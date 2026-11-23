@@ -120,16 +120,18 @@ async def get_data(
     return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify, headers))
 
 
-async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:
+async def get_card(base_url: str, timeout: int = 10, verify: bool = True, *,
+                   headers: dict[str, str] | None = None) -> dict:
+    """The env card at ``base_url``, read with ``headers`` alone: unlike an RPC, a card read takes nothing from a grant."""
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout)
+        response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout, headers=headers)
         response.raise_for_status()
         return response.json()
 
 
-async def supports_v1(base_url: str, verify: bool = True) -> bool:
+async def supports_v1(base_url: str, verify: bool = True, *, headers: dict[str, str] | None = None) -> bool:
     try:
-        await get_card(base_url, verify=verify)
+        await get_card(base_url, verify=verify, headers=headers)
         return True
     except httpx.HTTPStatusError as e:
         if e.response.status_code != 404:

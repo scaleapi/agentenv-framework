@@ -24,6 +24,7 @@ afresh in the same sandbox. ``[sandbox.providers.modal_vm]`` takes ``region``, w
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -34,13 +35,23 @@ from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, ClassVar, 
 import modal
 
 from agent_env.providers.sandbox_providers.modal_sandbox import (
+    _MODAL_TAG_KEY,
+    SHARED_BOX_TAG,
+    UNREAD,
+    WALLS_TAG,
+    WALLS_VERSION,
+    SharedBox,
+    SharedBoxMismatch,
+    SharedBoxTerminateRefused,
     _ModalProcessAdapter,
     _attribution_tags,
     _ended_output,
     _last_lines,
     _log_sandbox_started,
+    _read_tags,
     _resolve_app_base_name,
     _terminate_by_id,
+    _terminate_handle,
     _tunnel_url,
     _modal_network_kwargs,
 )
@@ -51,9 +62,15 @@ from agent_env.env.published_images import LAUNCHER_IMAGE, published_digest
 from agent_env.providers.sandbox_providers.disk_launcher import LAUNCH, RESET, launcher_variables, reset_input
 from agent_env.providers.sandbox_providers.local_docker.disk import exported_disk
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox, VmSandbox, push_object_over_stdin
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    SHARED_BOX_DEFAULT_TIMEOUT_S,
+    SandboxProvider,
+)
+from agent_env.providers.sandbox_providers.shared_box_walls import apply_walls_firewall
 
 if TYPE_CHECKING:
+    from agent_env.providers.sandbox_providers.shared_box_selftest import ProbeResult
     from agent_env.store.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
@@ -78,6 +95,33 @@ _VM_IMAGE = (
         "chmod +x /usr/local/lib/docker/cli-plugins/docker-compose",
     )
 )
+
+# A shared box's image: the VM image, plus gVisor's runsc from a pinned release, its tarball checked against a SHA-512
+# pinned here, the one gVisor publishes beside it, and a dockerd config that runs every container under runsc, in a user namespace,
+# with no-new-privileges. The userland proxy is off, so a published port is reached only by DNAT through FORWARD, where
+# the walls see it. Docker's own address pools include 172.16/12, where Modal's VM resolver is, so its networks come
+# from 10.251/16 instead, outside the slot range.
+_GVISOR_RELEASE = "20261116.0"
+_GVISOR_TARBALL_SHA512 = ("c87d792d5842efb70c38ee822124cfe0821a547715e7abcf3f2b14997cd02784"
+                          "edaa0b91e238ec5c27a25a1b9e00bf98113398eb62a0778d8d20d4e222f8b0e0")
+_SHARED_BOX_DOCKERD_CONFIG = {
+    "default-runtime": "runsc",
+    "runtimes": {"runsc": {"path": "/usr/local/bin/runsc", "runtimeArgs": ["--overlay2=none"]}},
+    "userns-remap": "default",
+    "no-new-privileges": True,
+    "userland-proxy": False,
+    "default-address-pools": [{"base": "10.251.0.0/16", "size": 24}],
+}
+_SHARED_BOX_BUILD = (
+    f"curl -fsSL https://storage.googleapis.com/gvisor/releases/release/{_GVISOR_RELEASE}/x86_64/gvisor.tar.bz2"
+    " -o /tmp/gvisor.tar.bz2"
+    f" && echo '{_GVISOR_TARBALL_SHA512}  /tmp/gvisor.tar.bz2' | sha512sum -c -"
+    " && tar -xjf /tmp/gvisor.tar.bz2 -C /usr/local/bin && rm /tmp/gvisor.tar.bz2"
+    " && /usr/local/bin/runsc --version",
+    f"mkdir -p /etc/docker && printf '%s\\n' {shlex.quote(json.dumps(_SHARED_BOX_DOCKERD_CONFIG))}"
+    " > /etc/docker/daemon.json",
+)
+_SHARED_BOX_IMAGE = _VM_IMAGE.apt_install("bzip2").run_commands(*_SHARED_BOX_BUILD)
 
 # The sandbox MAIN process. Two decoupled parts, both for robustness:
 #  1. A best-effort log forwarder run as a *child* of this process — NOT a separate `exec`.
@@ -144,8 +188,11 @@ class ModalVmSandbox(VmSandbox):
     _WFT_CHUNK_BYTES = 32 * 1024
 
     def __init__(self, sb: modal.Sandbox, tunnel_urls: dict[int, str],
-                 network_policy: NetworkPolicy | None = None):
+                 network_policy: NetworkPolicy | None = None, shared_box_id: SharedBox = UNREAD,
+                 walls: Optional[str] = None):
         self._sb = sb
+        self.shared_box_id = shared_box_id
+        self._walls = walls
         self.sandbox_id = sb.object_id
         self.tunnel_urls = tunnel_urls
         self.vnc_url = None
@@ -154,8 +201,14 @@ class ModalVmSandbox(VmSandbox):
         self._download_slots = asyncio.Semaphore(max(1, _dl_setting("PARALLEL_FILES", _DL_PARALLEL_FILES)))
         self._ended: Optional[tuple[list[str], list[str]]] = None
 
+    @property
+    def walls_verified(self) -> bool:
+        """Whether this is a shared box whose walls passed the self-test of the current WALLS_VERSION, as this handle
+        read it: a handle from ``get_sandbox`` never says so, only one from ``create_shared_box`` or ``get_shared_box``."""
+        return isinstance(self.shared_box_id, str) and self._walls == WALLS_VERSION
+
     async def terminate(self) -> None:
-        await self._sb.terminate.aio()
+        await _terminate_handle(self)
 
     async def exit_status(self) -> Optional[int]:
         return await self._sb.poll.aio()
@@ -194,15 +247,18 @@ class ModalVmSandbox(VmSandbox):
         """Make the VM ready for the gateway deploy.
 
         Unlike a containerdisk image that auto-starts dockerd via systemd, a Modal VM
-        sandbox does not start dockerd on its own, so we start it here. No iptables step:
-        ports are exposed via Modal `encrypted_ports` at create time, and Modal has no
-        host INPUT chain to open (contrast VmSandbox.setup_vm_for_gateway).
+        sandbox does not start dockerd on its own, so we start it here. No iptables step to open
+        ports: they are exposed via Modal `encrypted_ports` at create time, and Modal has no
+        host INPUT chain to open (contrast VmSandbox.setup_vm_for_gateway). A shared box then
+        gets the firewall that walls its slots apart, which needs dockerd's DOCKER-USER chain.
 
         The container-log forwarder is NOT started here — it runs as a child of the
         sandbox main process (see `_MAIN_SCRIPT`) so Modal can't reap it the way it reaps
         a transient `exec`'d process when the exec call returns.
         """
         await self._ensure_dockerd_running()
+        if isinstance(self.shared_box_id, str):
+            await apply_walls_firewall(self)
 
     async def wait_for_vm(self) -> None:
         # For a Modal VM, "ready" means the Docker daemon is reachable.
@@ -399,8 +455,51 @@ class ModalVmSandboxProvider(SandboxProvider):
             experimental_options={"enable_nested_virt": True}, secrets=[modal.Secret.from_dict(variables)],
             idle_timeout=self._idle_timeout or _DISK_IDLE_TIMEOUT_S)
 
+    async def create_shared_box(
+        self,
+        box_id: str,
+        *,
+        cpu: float = 0.5,
+        memory: int = 8192,
+        timeout: int = SHARED_BOX_DEFAULT_TIMEOUT_S,
+        exposed_ports: Optional[list[int]] = None,
+        setup_for_gateway: bool = True,
+        attribution: Optional[Attribution] = None,
+        network_policy: Optional[NetworkPolicy] = None,
+    ) -> ModalVmSandbox:
+        """A VM running Docker with every container under gVisor, tagged as shared box ``box_id`` at create, since a
+        later ``set_tags`` would replace its attribution tags. Set up for a gateway, it has the walls between its slots
+        too, and returns only once ``verify_walls`` has verified them; a box whose walls fail it is ended through
+        ``terminate_shared_box`` and its error raised. Its handle's terminate, and ``terminate_sandbox``, refuse to end
+        it: only ``terminate_shared_box`` does."""
+        if not _MODAL_TAG_KEY.fullmatch(box_id):
+            raise ValueError(f"shared box id {box_id!r} can't be a Modal tag: use 1-63 of a-z A-Z 0-9 . _ -")
+        box = await self._created(_KEEPALIVE_CMD, _SHARED_BOX_IMAGE, cpu=cpu, memory=memory, timeout=timeout,
+                                  ports=list(exposed_ports or []), attribution=attribution,
+                                  network_policy=network_policy, setup_for_gateway=setup_for_gateway,
+                                  idle_timeout=self._idle_timeout, runtime="vm", shared_box_id=box_id)
+        if setup_for_gateway:
+            try:
+                await verify_walls(box)
+            except BaseException:
+                try:
+                    await self.terminate_shared_box(box.sandbox_id, box_id)
+                except Exception as e:
+                    logger.warning(f"Failed to end shared box {box_id} ({box.sandbox_id}) after its walls weren't "
+                                   f"verified: {type(e).__name__}: {e}")
+                raise
+        return box
+
+    async def terminate_shared_box(self, sandbox_id: str, box_id: str) -> None:
+        """End shared box ``box_id``, the sandbox ``sandbox_id``, and every slot on it. A sandbox tagged as another box,
+        or as none, raises SharedBoxTerminateRefused, and one whose tags can't be read raises; neither is terminated."""
+        await _terminate_by_id(await self._get_client(), sandbox_id, ending_box=box_id)
+
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
-        """The launcher in the sandbox booting its disk afresh with ``env``, at the same URLs."""
+        """The launcher in the sandbox booting its disk afresh with ``env``, at the same URLs. Refused for a shared box,
+        whose reboot would end every slot on it."""
+        if isinstance(getattr(sandbox, "shared_box_id", None), str):
+            raise SharedBoxTerminateRefused(sandbox.sandbox_id, sandbox.shared_box_id)
         code, _, stderr = await sandbox._exec_with_stdin(shlex.join(RESET), _chunks(reset_input(env)))
         if code:
             raise RuntimeError(f"the launcher in Modal sandbox {sandbox.sandbox_id} didn't boot its disk afresh "
@@ -408,13 +507,16 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     async def _created(self, command: tuple[str, ...], image: modal.Image, *, cpu: float, memory: int, timeout: int,
                        ports: list[int], attribution: Optional[Attribution], network_policy: Optional[NetworkPolicy],
-                       setup_for_gateway: bool, idle_timeout: Optional[int], **create) -> ModalVmSandbox:
+                       setup_for_gateway: bool, idle_timeout: Optional[int], shared_box_id: Optional[str] = None,
+                       **create) -> ModalVmSandbox:
         """A sandbox of ``image`` running ``command``, in the configured region, its ports' tunnels up, ended once idle
-        ``idle_timeout`` seconds when given, set up for a gateway when ``setup_for_gateway``; one that fails before
-        it's returned is terminated."""
+        ``idle_timeout`` seconds when given, set up for a gateway when ``setup_for_gateway``, tagged as shared box
+        ``shared_box_id`` when given; one that fails before it's returned is terminated."""
         attribution = dict(attribution or {})
         app_tags = _attribution_tags({})
         sandbox_tags = _attribution_tags(attribution)
+        if shared_box_id is not None:
+            sandbox_tags[SHARED_BOX_TAG] = shared_box_id
         app_name = self._app_name
         app = await self._get_app(app_name, app_tags)
         client = await self._get_client()
@@ -449,7 +551,7 @@ class ModalVmSandboxProvider(SandboxProvider):
             for p in ports:
                 if p not in tunnel_urls:
                     raise RuntimeError(f"No Modal tunnel for exposed port {p}; got {sorted(tunnel_urls)}")
-            sandbox = ModalVmSandbox(sb, tunnel_urls, network_policy=effective)
+            sandbox = ModalVmSandbox(sb, tunnel_urls, network_policy=effective, shared_box_id=shared_box_id)
             logger.info(f"Modal VM sandbox created: {sb.object_id} (tunnels={tunnel_urls})")
             await _log_sandbox_started(
                 sb, app_name=app_name, sandbox_tags=sandbox_tags,
@@ -491,13 +593,49 @@ class ModalVmSandboxProvider(SandboxProvider):
     async def get_sandbox(self, sandbox_id: str) -> ModalVmSandbox:
         client = await self._get_client()
         sb = await modal.Sandbox.from_id.aio(sandbox_id, client=client)
-        tunnels = await sb.tunnels.aio()
-        tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
         # dockerd is already running on a live sandbox; do not re-run setup here.
-        return ModalVmSandbox(sb, tunnel_urls)
+        return ModalVmSandbox(sb, await _tunnel_urls(sb))
+
+    async def get_shared_box(self, sandbox_id: str, box_id: str) -> ModalVmSandbox:
+        """The handle of shared box ``box_id``, the sandbox ``sandbox_id``, which knows from one read of its tags that it
+        is that box and whether its walls are verified. One tagged as another box, or as none, raises SharedBoxMismatch;
+        tags that can't be read raise."""
+        sb = await modal.Sandbox.from_id.aio(sandbox_id, client=await self._get_client())
+        tags = await _read_tags(sb)
+        if tags.get(SHARED_BOX_TAG) != box_id:
+            raise SharedBoxMismatch(sandbox_id, tags.get(SHARED_BOX_TAG), box_id)
+        return ModalVmSandbox(sb, await _tunnel_urls(sb), shared_box_id=box_id, walls=tags.get(WALLS_TAG))
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
         await _terminate_by_id(await self._get_client(), sandbox_id)
+
+
+async def _tunnel_urls(sb: modal.Sandbox) -> dict[int, str]:
+    return {p: _tunnel_url(t) for p, t in (await sb.tunnels.aio()).items()}
+
+
+async def verify_walls(box: ModalVmSandbox) -> list[ProbeResult]:
+    """Run every probe of shared box ``box``'s walls, a new box whose dockerd is up and whose walls are applied, and
+    once all have passed and their probe slots are gone, tag the box as verified: the only way the tag is written.
+    Returns each probe's result; raises WallsNotVerified, tagging nothing, at the first probe that fails."""
+    # Imported here: the probes tear their slots down with the gateway provider, which imports this module.
+    from agent_env.providers.sandbox_providers.shared_box_selftest import run_walls_probes
+
+    results = await run_walls_probes(box, dockerd_config=_SHARED_BOX_DOCKERD_CONFIG)
+    await _mark_walls_verified(box)
+    return results
+
+
+async def _mark_walls_verified(box: ModalVmSandbox) -> None:
+    """Tag shared box ``box`` as having walls that passed the current WALLS_VERSION's self-test, keeping its other tags,
+    as ``set_tags`` replaces them all. The one writer of WALLS_TAG, for the self-test to call once its probes pass."""
+    if not isinstance(box.shared_box_id, str):
+        raise ValueError(f"Modal sandbox {box.sandbox_id} is no shared box this handle knows of; its walls aren't marked")
+    tags = await _read_tags(box._sb)
+    if tags.get(SHARED_BOX_TAG) != box.shared_box_id:
+        raise SharedBoxMismatch(box.sandbox_id, tags.get(SHARED_BOX_TAG), box.shared_box_id)
+    await box._sb.set_tags.aio({**tags, WALLS_TAG: WALLS_VERSION})
+    box._walls = WALLS_VERSION
 
 
 async def _launcher() -> modal.Image:

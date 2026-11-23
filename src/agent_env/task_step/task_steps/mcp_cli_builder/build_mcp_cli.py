@@ -17,6 +17,7 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import CliArtifact
 from agent_env.artifact.store import artifact_write_lock
 from agent_env.env import Env
+from agent_env.env.door_headers import granted_door_headers
 from agent_env.env.env import require_gateway_url, website_child
 from agent_env.store.ids import derive_id
 from agent_env.task_step.context import StepContextError, TaskStepContext
@@ -35,7 +36,7 @@ async def _resolve_manifest_endpoint(gateway_url: str, environment_name: str) ->
     having nothing to advertise is the normal case, so these are debug-level.
     """
     try:
-        card = await protocol_v1.get_card(gateway_url)
+        card = await protocol_v1.get_card(gateway_url, headers=granted_door_headers(gateway_url))
     except (httpx.HTTPError, ValueError) as e:
         logger.debug("env card for %r unavailable (%s); constructing the manifest path", environment_name, e)
         return None

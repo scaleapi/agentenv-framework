@@ -8,8 +8,10 @@ Standalone async helpers for the current gateway endpoints: ``POST /api/reset``
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -18,6 +20,9 @@ from agentenv_protocol import METHOD_GET, DataPart, client as protocol_v1
 from mcp import ClientSession
 from mcp.types import CallToolResult
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
+
+from agent_env.env.door_headers import granted_door_headers
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
@@ -119,7 +124,7 @@ async def backing_servers(deployed: Optional[DeployedEnv], gateway_url: Optional
         card, address = deployed.environment_card, deployed.environment_url
     elif deployed is not None and deployed.environment_card_url and gateway:
         try:
-            card, address = await protocol_v1.get_card(gateway, timeout=timeout), gateway
+            card, address = await protocol_v1.get_card(gateway, timeout=timeout, headers=granted_door_headers(gateway)), gateway
         except httpx.HTTPError as e:
             why = f"its card at {gateway} could not be read ({type(e).__name__})"
     elif deployed is not None:
@@ -183,7 +188,7 @@ async def v1_base_url(deployed: Optional[DeployedEnv], gateway_url: Optional[str
         if not mcp:
             _, card = await child_env_card(None, gateway_url, environment_name, mcp=False)
             return base_url if card is not None else None
-        return base_url if await protocol_v1.supports_v1(base_url) else None
+        return base_url if await protocol_v1.supports_v1(base_url, headers=granted_door_headers(base_url)) else None
     child = deployed.child_env(environment_name, mcp=mcp)
     return child.base_url(deployed.environment_url) if child is not None else None
 
@@ -197,7 +202,7 @@ async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[
     if deployed is None or not deployed.environment_card:
         base_url = environment_base_url((gateway_url or "").rstrip("/"), environment_name, mcp=mcp)
         try:
-            return base_url, await protocol_v1.get_card(base_url, timeout=timeout)
+            return base_url, await protocol_v1.get_card(base_url, timeout=timeout, headers=granted_door_headers(base_url))
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return base_url, None
@@ -213,7 +218,8 @@ async def reset_via_rest(
     """POST ``{base_url}/api/reset``. Sends the seed path when given. Raises on non-2xx."""
     body = {"mock_data_path": mock_data_path} if mock_data_path is not None else None
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout)
+        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout,
+                                     headers=granted_door_headers(base_url))
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: REST reset succeeded: {result}")
@@ -223,7 +229,8 @@ async def reset_via_rest(
 async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify: bool = True) -> dict:
     """POST ``{base_url}/api/add`` with a backend file path. Raises on non-2xx."""
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout)
+        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout,
+                                     headers=granted_door_headers(base_url))
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: add response: {result}")
@@ -239,7 +246,7 @@ async def export_state(
 
 async def _export_state_at(base_url: str, timeout: int, verify: bool) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url}/export-state", timeout=timeout)
+        response = await client.get(f"{base_url}/export-state", timeout=timeout, headers=granted_door_headers(base_url))
         response.raise_for_status()
         return response.json()
 
@@ -263,18 +270,27 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
 
 
+@contextlib.asynccontextmanager
+async def _mcp_session(mcp_url: str) -> AsyncIterator[ClientSession]:
+    """An initialized MCP session with ``mcp_url``, on mcp's own client, sending the slot door's header the running
+    step's grant gives it (``granted_door_headers``)."""
+    async with create_mcp_http_client(headers=granted_door_headers(mcp_url) or None) as http_client, \
+            streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _), \
+            ClientSession(read_stream, write_stream) as session:
+        await session.initialize()
+        yield session
+
+
 async def offers_tool(mcp_url: str, name: str) -> bool:
     """Whether the MCP endpoint at ``mcp_url`` lists the tool ``name``, on any page of its tools."""
-    async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            cursor = None
-            while True:
-                page = await session.list_tools(cursor)
-                if any(tool.name == name for tool in page.tools):
-                    return True
-                if not (cursor := page.nextCursor):
-                    return False
+    async with _mcp_session(mcp_url) as session:
+        cursor = None
+        while True:
+            page = await session.list_tools(cursor)
+            if any(tool.name == name for tool in page.tools):
+                return True
+            if not (cursor := page.nextCursor):
+                return False
 
 
 async def reset_via_mcp_tool(
@@ -289,14 +305,12 @@ async def reset_via_mcp_tool(
     for attempt in range(max_retries):
         reset_done = False
         try:
-            async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    reset_tool_name = f"{environment_name}_reset"
-                    result = await session.call_tool(reset_tool_name, arguments)
-                    result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
-                    logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
-                    reset_done = True
+            async with _mcp_session(mcp_url) as session:
+                reset_tool_name = f"{environment_name}_reset"
+                result = await session.call_tool(reset_tool_name, arguments)
+                result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+                logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
+                reset_done = True
         except BaseExceptionGroup as eg:
             if reset_done:
                 logger.info("load_environment_artifact: succeeded (ignoring cleanup ExceptionGroup)")

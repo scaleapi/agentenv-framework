@@ -127,7 +127,7 @@ class VerifyMCPToolSchemaTaskStep(TaskStep):
 
         mcp_url = deployed.mcp_url
         logger.info(f"Connecting to MCP at {mcp_url} to verify tool schemas")
-        http_client = httpx.AsyncClient()
+        http_client = httpx.AsyncClient(headers=deployed.door_headers_for(mcp_url or ""))
         try:
             async with streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:

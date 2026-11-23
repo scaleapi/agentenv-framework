@@ -59,7 +59,8 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
 
         card = None
         try:
-            card = await protocol_v1.get_card(deployed.environment_url)
+            card = await protocol_v1.get_card(deployed.environment_url,
+                                              headers=deployed.door_headers_for(deployed.environment_url))
         except Exception as e:
             logger.warning(f"env card for '{self.env_id}' inaccessible at {deployed.environment_url}: {type(e).__name__}: {e}")
 

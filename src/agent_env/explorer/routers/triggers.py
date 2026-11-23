@@ -11,6 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 
 from agent_env.config import get_config
+from agent_env.env.door_headers import slot_token_headers
 from agent_env.env.store import ENV_INSTANCES_COLLECTION
 from agent_env.explorer.entity_ids import EntityId
 from agent_env.explorer.routers.common import docs
@@ -90,9 +91,10 @@ async def instance_triggers(task_id: EntityId, instance_id: EntityId) -> dict:
     return payload
 
 
-def _live_gateways(deployed_envs: list) -> list[tuple[str, str | None]]:
-    """``(env_id, gateway_url or None)`` per deployed env, from the env-instance records the deploy
-    writes rather than the run context's own copy, which a run request can supply."""
+def _live_gateways(deployed_envs: list) -> list[tuple[str, str | None, dict[str, str]]]:
+    """``(env_id, gateway_url or None, headers)`` per deployed env, from the env-instance records the deploy
+    writes rather than the run context's own copy, which a run request can supply; ``headers`` carry a slot's door
+    token, and are empty for the default stack."""
     pairs = [
         (env["env_id"], env["instance_id"])
         for env in deployed_envs
@@ -102,39 +104,40 @@ def _live_gateways(deployed_envs: list) -> list[tuple[str, str | None]]:
         return []
     records = docs().query(ENV_INSTANCES_COLLECTION, Filter().where("instance_id", In([iid for _, iid in pairs])))
     urls = {record["instance_id"]: (record.get("gateway_url") or "").rstrip("/") or None for record in records}
-    return [(env_id, urls.get(instance_id)) for env_id, instance_id in pairs]
+    doors = {record["instance_id"]: slot_token_headers(record.get("door_token")) for record in records}
+    return [(env_id, urls.get(instance_id), doors.get(instance_id, {})) for env_id, instance_id in pairs]
 
 
 async def _live_trigger_state(deployed_envs: list) -> tuple[dict, dict]:
     """Each env's ``/triggers/state`` and gateway clock, read concurrently. An env with no reachable
     gateway maps to None, so "unreachable" never reads as "no triggers"."""
     targets = await asyncio.to_thread(_live_gateways, deployed_envs)
-    state: dict = {env_id: None for env_id, _ in targets}
+    state: dict = {env_id: None for env_id, _, _ in targets}
     meta: dict = {}
-    reachable = [(env_id, url) for env_id, url in targets if url]
+    reachable = [(env_id, url, headers) for env_id, url, headers in targets if url]
     if not reachable:
         return state, meta
 
     async with httpx.AsyncClient(timeout=TRIGGER_STATE_TIMEOUT_SECONDS) as client:
 
-        async def _get(url: str, env_id: str, what: str):
+        async def _get(url: str, env_id: str, what: str, headers: dict[str, str]):
             try:
-                response = await client.get(url)
+                response = await client.get(url, headers=headers)
                 response.raise_for_status()
                 return response.json()
             except Exception:
                 logger.warning("live %s unavailable for %s", what, env_id, exc_info=True)
                 return None
 
-        async def _one(env_id: str, gateway_url: str):
+        async def _one(env_id: str, gateway_url: str, headers: dict[str, str]):
             triggers, clock = await asyncio.gather(
-                _get(f"{gateway_url}/triggers/state", env_id, "trigger state"),
-                _get(f"{gateway_url}/clock/state", env_id, "clock state"),
+                _get(f"{gateway_url}/triggers/state", env_id, "trigger state", headers),
+                _get(f"{gateway_url}/clock/state", env_id, "clock state", headers),
             )
             # Stamped at the read: at a high clock rate a second of drift is a virtual day.
             return env_id, triggers, {"clock": clock, "clock_read_at_utc": datetime.now(timezone.utc).isoformat()}
 
-        for env_id, triggers, env_meta in await asyncio.gather(*(_one(e, u) for e, u in reachable)):
+        for env_id, triggers, env_meta in await asyncio.gather(*(_one(e, u, h) for e, u, h in reachable)):
             state[env_id] = triggers
             if triggers is not None:
                 meta[env_id] = env_meta

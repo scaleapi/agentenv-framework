@@ -123,7 +123,7 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
         self._container_sandboxes = [server, *(db for db in dbs if not isinstance(db, BaseException)), gateway]
         return server
 
-    async def _wait_for_tunnel(self, url: str, timeout: int = 60) -> dict | None:
+    async def _wait_for_tunnel(self, url: str, timeout: int = 60, *, headers: dict[str, str] | None = None) -> dict | None:
         """Wait until the deployed env serves its card to this process; returns the card.
 
         Probes the well-known document rather than ``/mcp``, whose healthy endpoint holds the
@@ -133,7 +133,7 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
         probe_url = f"{url}{WELL_KNOWN_PATH}"
         logger.info(f"Waiting for tunnel to be ready (timeout={timeout}s) via {probe_url}...")
         last = "no response"
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=headers) as client:
             for i in range(timeout):
                 try:
                     response = await client.get(probe_url, timeout=5)
@@ -211,12 +211,18 @@ def _card_from(response: httpx.Response) -> dict | None:
     return card if isinstance(card, dict) and isinstance(card.get("name"), str) and card["name"] else None
 
 
-async def _tool_names(mcp_url: str) -> list[str]:
-    """The server's tool names as it lists them, duplicates included."""
-    async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            return [tool.name for tool in (await session.list_tools()).tools]
+async def _tool_names(mcp_url: str, *, headers: dict[str, str] | None = None) -> list[str]:
+    """The server's tool names as it lists them, duplicates included; ``headers``, a slot door's, go on every request."""
+    http_client = httpx.AsyncClient(headers=headers) if headers else None
+    try:
+        async with streamable_http_client(mcp_url, **({"http_client": http_client} if http_client else {})) as (
+                read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                return [tool.name for tool in (await session.list_tools()).tools]
+    finally:
+        if http_client is not None:
+            await http_client.aclose()
 
 
 def _builtin_env_providers() -> dict[str, type[_SandboxEnvironmentProvider]]:

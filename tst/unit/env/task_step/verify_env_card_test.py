@@ -57,7 +57,7 @@ def _run(step, ctx, *, card=None, exc=None, env_name="items"):
 class TestExecute:
     def test_available_card(self):
         result_ctx, env, get_card = _run(_make_step(), _make_context(), card=CARD)
-        get_card.assert_awaited_once_with("https://gw")
+        get_card.assert_awaited_once_with("https://gw", headers={})
         update = env.update_metadata.call_args[0][0]
         assert update["environment_card"] == CARD
         v = update["validated_environment_card"]
@@ -75,7 +75,7 @@ class TestExecute:
                                                 environment_card_url=f"https://srv{WELL_KNOWN_PATH}", sandbox_id="srv")]
         leaf = {**{k: v for k, v in CARD.items() if k != "children_environments"}, "name": "items"}
         _, env, get_card = _run(_make_step(), ctx, card=leaf)
-        get_card.assert_awaited_once_with("https://srv")
+        get_card.assert_awaited_once_with("https://srv", headers={})
         update = env.update_metadata.call_args[0][0]
         assert update["environment_card"] == leaf and update["validated_environment_card"]["accessible"] is True
 

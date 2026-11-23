@@ -350,4 +350,4 @@ async def test_a_cli_gets_the_gateway_url_its_agent_reaches(
     await LoadArtifactTaskStep(id="cli", version=None, env_id="env-x", artifact_id=cli.id,
                                artifact_version=cli.version, agent_name="solver").execute(context)
 
-    assert installed == [(expected, {"on_host": True} if on_host else {})]
+    assert installed == [(expected, {"on_host": True, "slot_token": None} if on_host else {"slot_token": None})]

@@ -6,15 +6,20 @@ import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from agent_env.env import snapshot_store
 from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT, ServiceDBConfig
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
+from agent_env.env.gateway.constants import SLOT_TOKEN_HEADER
 from agent_env.providers.env_providers.env_gateway_provider import (
+    TEARDOWN_RETRIES,
     EnvironmentGatewayProvider,
     MCPServerConfig,
     SidecarConfig,
+    tear_down_slot,
 )
+from agent_env.providers.env_providers.slot_compose import DOOR_SERVICE_NAME
 from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 
 SIDECAR_HOST_PORT = 9100
@@ -55,6 +60,8 @@ class _RecordingVm:
         self.calls.append(("exec", args))
         if args[0] == "curl":
             return 0, "200", ""
+        if args == ("cat", "/etc/resolv.conf"):
+            return 0, "nameserver 172.21.0.1\nnameserver fd00::1\n", ""
         if args == ("sudo", "docker", "ps"):
             return 0, "\n".join(f"{p or 'app'}-gateway-1" for p in self.running), ""
         if "--status" in args:
@@ -145,6 +152,19 @@ async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
     assert not any("-p" in e or "--status" in e for e in execs)
     assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT}"
     assert f'"{DB_WEB_PORT}:' not in compose and f'"{DB_MCP_PORT}:' not in compose
+    assert result.door_token is None
+    assert not any("-H" in c[1] for c in vm.calls if c[0] == "exec" and c[1][0] == "curl")
+    assert ("cat", "/etc/resolv.conf") not in execs
+
+
+@pytest.mark.asyncio
+async def test_every_slot_deploy_draws_a_new_door_token():
+    tokens = []
+    for _ in range(2):
+        _, result, _ = await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=_walled_vm({None, "s1"}))
+        tokens.append(result.door_token)
+    assert all(len(token) >= 43 for token in tokens)
+    assert tokens[0] != tokens[1]
 
 
 SLOT_1_PORTS = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT)]
@@ -162,14 +182,21 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
 
     scripts = _scripts(vm)
     assert scripts[0] == "mkdir -p /app/s1"
-    assert _written(scripts[1])[0] == "/app/s1/init-schemas.sql"
-    path, compose = _written(scripts[2])
+    assert _written(scripts[1]) == ("/app/s1/resolv.conf", "nameserver 172.21.0.1")
+    assert _written(scripts[2])[0] == "/app/s1/init-schemas.sql"
+    path, compose = _written(scripts[3])
     assert path == "/app/s1/docker-compose.yml"
-    assert f'"{AGENT_ENV_GATEWAY_MCP_PORT + 2000}:{AGENT_ENV_GATEWAY_MCP_PORT}"' in compose
-    assert f'"{DB_WEB_PORT + 2000}:' not in compose and f'"{DB_MCP_PORT + 2000}:' not in compose
-    assert f'"{SIDECAR_HOST_PORT + 2000}:80"' in compose
+    services = yaml.safe_load(compose)["services"]
+    assert [name for name, service in services.items() if "ports" in service] == [DOOR_SERVICE_NAME]
+    shifted = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT)]
+    assert services[DOOR_SERVICE_NAME]["ports"] == [f"{p}:{p}" for p in shifted]
     assert f"MCP_PORT={AGENT_ENV_GATEWAY_MCP_PORT}" in compose
-    assert scripts[3:] == ["cd /app/s1 && docker compose -p s1 up -d"]
+    assert scripts[4:] == ["cd /app/s1 && docker compose -p s1 up -d"]
+    door = {SLOT_TOKEN_HEADER: result.door_token}
+    curl = next(c[1] for c in vm.calls if c[0] == "exec" and c[1][0] == "curl")
+    assert curl[curl.index("-H") + 1] == f"{SLOT_TOKEN_HEADER}: {result.door_token}"
+    assert gp._wait_for_tunnel.await_args.kwargs["headers"] == door
+    assert gp._refuse_tool_name_clashes.await_args.kwargs["headers"] == door
     compose_ps = ("sudo", "docker", "compose", "-f", "/app/s1/docker-compose.yml", "-p", "s1", "ps")
     assert (*compose_ps, "--status", "running", "-q", "gateway") in _execs(vm)
     assert (*compose_ps, "-a", "-q", "gateway") in _execs(vm)
@@ -192,7 +219,7 @@ async def test_a_slot_is_never_deployed_on_a_vm_whose_walls_are_not_verified():
     assert vm.calls == []
 
 
-def test_no_sandbox_has_verified_walls_today():
+def test_only_a_modal_vm_sandbox_can_have_verified_walls():
     import importlib
     import pkgutil
 
@@ -209,7 +236,8 @@ def test_no_sandbox_has_verified_walls_today():
         subclasses += (children := pending.pop().__subclasses__())
         pending += children
     assert subclasses
-    assert [c.__name__ for c in subclasses if c.walls_verified is not Sandbox.walls_verified] == []
+    ours = [c for c in subclasses if c.__module__.startswith(package.__name__)]
+    assert [c.__name__ for c in ours if "walls_verified" in vars(c)] == ["ModalVmSandbox"]
 
 
 def test_a_provider_subclass_that_skips_init_keeps_the_default_layout():
@@ -392,3 +420,56 @@ def test_the_default_stack_records_nothing_and_a_record_without_a_layout_is_the_
 def test_a_damaged_recorded_layout_is_refused_rather_than_read_as_the_default_stack(data):
     with pytest.raises((ValueError, TypeError)):
         StackLayout.from_record(data)
+
+
+def test_the_default_stack_is_never_torn_down_on_its_own():
+    with pytest.raises(ValueError, match="default stack"):
+        DEFAULT_STACK_LAYOUT.teardown_script
+
+
+@pytest.mark.parametrize("layout", [
+    StackLayout(compose_project="s1"),
+    StackLayout(app_dir="/app/s2", compose_project="s1", scratch_prefix="/tmp/s1-"),
+    StackLayout(app_dir="/app/s1", compose_project="s1", scratch_prefix="/tmp/"),
+    StackLayout(app_dir="/app/s1", compose_project="s1", scratch_prefix="/tmp/s1"),
+    StackLayout(app_dir="/app/s1-x", compose_project="s1-x", scratch_prefix="/tmp/s1-x-", host_port_offset=2000),
+    StackLayout(app_dir="/app/s1", compose_project="s1", scratch_prefix="/tmp/s1-", host_port_offset=5000),
+    StackLayout(app_dir="/app/web", compose_project="web", scratch_prefix="/tmp/web-", host_port_offset=1000),
+    StackLayout(app_dir="/app/s01", compose_project="s01", scratch_prefix="/tmp/s01-", host_port_offset=2000),
+])
+def test_a_slot_layout_not_made_by_for_slot_is_never_torn_down(layout):
+    with pytest.raises(ValueError, match="for_slot"):
+        layout.teardown_script
+
+
+def test_a_slots_teardown_names_only_its_own_project_dir_and_scratch_files():
+    script = StackLayout.for_slot(7).teardown_script
+    assert script.count("label=com.docker.compose.project=s7") == 3
+    assert script.splitlines()[-1] == "rm -rf /app/s7 /tmp/s7-*"
+
+
+@pytest.mark.asyncio
+async def test_tearing_down_a_slot_runs_its_script_on_the_vm_and_may_retry():
+    vm = _RecordingVm([], set())
+    vm.exec_script = AsyncMock(return_value="")
+    await tear_down_slot(vm, StackLayout.for_slot(2))
+    vm.exec_script.assert_awaited_once_with(StackLayout.for_slot(2).teardown_script, max_retries=TEARDOWN_RETRIES)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_slot_teardown_raises_so_the_slot_is_never_counted_gone():
+    vm = _RecordingVm([], set())
+    vm.exec_script = AsyncMock(side_effect=RuntimeError("Script failed (exit 1)"))
+    with pytest.raises(RuntimeError, match="exit 1"):
+        await tear_down_slot(vm, StackLayout.for_slot(2))
+
+
+@pytest.mark.asyncio
+async def test_only_a_slot_on_a_vm_can_be_torn_down():
+    vm = _RecordingVm([], set())
+    with pytest.raises(ValueError, match="default stack"):
+        await tear_down_slot(vm, DEFAULT_STACK_LAYOUT)
+    vm.mode = "container"
+    with pytest.raises(ValueError, match="only be on a VM"):
+        await tear_down_slot(vm, StackLayout.for_slot(2))
+    assert vm.calls == []

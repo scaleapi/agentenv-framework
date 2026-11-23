@@ -404,6 +404,7 @@ async def test_terminate_sandbox_terminates_a_vm_by_id_and_counts_one_modal_no_l
     provider = ModalVmSandboxProvider()
     provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
     sb = MagicMock()
+    sb.get_tags.aio = AsyncMock(return_value={})
     sb.terminate.aio = AsyncMock()
     with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
         from_id.aio = (AsyncMock(return_value=sb) if found

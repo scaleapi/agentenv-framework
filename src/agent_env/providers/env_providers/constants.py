@@ -10,6 +10,10 @@ GATEWAY_SERVICE_NAME = "gateway"
 # websites adds is checked against that deploy's own services, whatever it's named, when its compose is rendered.
 GATEWAY_SERVICE_NAMES = frozenset({GATEWAY_SERVICE_NAME, "servicedb", "pgweb", "db-mcp"})
 GATEWAY_APP_DIR = "/app"
+# The network a gateway stack's services share, and the only one its database is on.
+ENV_NETWORK = "env-network"
+# The network the website browser shares with the gateway and the sites, and with nothing else in the env.
+SITES_NETWORK = "website-network"
 
 AGENT_ENV_WEBSITE_BACKEND_PORT = 8000
 AGENT_ENV_WEBSITE_HEALTH_PATH = "/api/health"

@@ -1133,7 +1133,8 @@ def _record_grant(deployed: Optional[DeployedEnv]):
     name it shares with another keeps from the record (``_hand_record_to_child_envs``), whose calls go to the gateway."""
     if deployed is None:
         return protocol_v1.authorized({})
-    return protocol_v1.authorized({url: deployed.control_headers for url in (deployed.environment_url, gateway_url_of(deployed))})
+    return protocol_v1.authorized({**{url: deployed.control_headers for url in (deployed.environment_url, gateway_url_of(deployed))},
+                                   **deployed.grants})
 
 
 def _hand_record_to_child_envs(env: MultiEnv, deployed: DeployedEnv) -> None:

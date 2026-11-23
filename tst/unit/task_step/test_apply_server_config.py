@@ -600,7 +600,7 @@ def _fake_multi_env(mcp_names, website_names):
 class _KeyedGateway(_MockGateway):
     """A gateway serving each card at /svc/<key>/.well-known/agent-env.json, where a website's key is its bare name."""
 
-    async def get(self, url, *, timeout=None, params=None):
+    async def get(self, url, *, timeout=None, params=None, headers=None):
         self.get_calls.append(url)
         for key, card in self.cards.items():
             if url.endswith(f"/svc/{key}/.well-known/agent-env.json"):

@@ -417,7 +417,7 @@ class VerifySpecConformanceTaskStep(TaskStep):
         spec_url = f"{base_url}/openapi.yaml"
         logger.info(f"Fetching OpenAPI spec for '{environment_name}' at {spec_url}")
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
-            resp = await client.get(spec_url)
+            resp = await client.get(spec_url, headers=deployed.door_headers_for(spec_url))
             if resp.status_code in _SPEC_ABSENT_STATUSES:
                 return self._record(
                     context, env, environment_name,
@@ -437,7 +437,7 @@ class VerifySpecConformanceTaskStep(TaskStep):
         #    slow gateway can't trip httpx's short default and block the gate.
         mcp_url = deployed.mcp_url
         logger.info(f"Connecting to MCP at {mcp_url} to read live tools")
-        http_client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S)
+        http_client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S, headers=deployed.door_headers_for(mcp_url or ""))
         try:
             async with streamable_http_client(mcp_url, http_client=http_client) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:

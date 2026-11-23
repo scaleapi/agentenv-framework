@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+import yaml
 from agentenv_protocol.client import control_headers
 from agentenv_protocol.website import (
     SESSION_SECRET_ENV,
@@ -33,6 +34,7 @@ from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
+from agent_env.env.door_headers import slot_token_headers
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.console_session import frame_ancestor_problem
@@ -64,9 +66,12 @@ from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
     AGENT_ENV_WEBSITE_HEALTH_PATH,
+    ENV_NETWORK as _ENV_NETWORK,
     GATEWAY_SERVICE_NAME,
     GATEWAY_SERVICE_NAMES,
+    SITES_NETWORK as _SITES_NETWORK,
 )
+from agent_env.providers.env_providers.slot_compose import resolv_conf_path, slot_compose, slot_resolv_conf
 from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.providers.env_providers.env_provider import (
     DeployRefused,
@@ -98,10 +103,6 @@ logger = logging.getLogger(__name__)
 
 _TRAJECTORY_READ_ATTEMPTS = 3
 
-# The network the env's services share, and the only one its database is on.
-_ENV_NETWORK = "env-network"
-# The network the website browser shares with the gateway and the sites, and with nothing else in the env.
-_SITES_NETWORK = "website-network"
 # A gateway deploy's website browser when its caller names none: the run's, for one with websites.
 _THE_RUNS = object()
 
@@ -137,6 +138,23 @@ class MCPServerConfig:
         return _ENV_NETWORK in self.networks
 
 
+TEARDOWN_RETRIES = 2
+
+
+async def tear_down_slot(sandbox: Sandbox, layout: StackLayout) -> None:
+    """End one slot's stack on a VM other slots share, leaving the VM and every other slot running. Idempotent, so a
+    retry after a dropped connection is safe. Raises for the default stack, or for a sandbox that is not a VM, since
+    only a VM holds slots; raises too if the script fails, so the caller never counts a slot gone that isn't.
+
+    The caller must first cancel or await the slot's own deploy: a ``compose up`` still running can create containers
+    after the script has listed them, and the slot would be counted gone while it still holds its ports."""
+    if not layout.is_slot:
+        raise ValueError("tear_down_slot ends one slot of a shared VM; the default stack ends with its VM")
+    if sandbox.mode != SANDBOX_MODE_VM:
+        raise ValueError(f"slot {layout.compose_project} can only be on a VM, not a {sandbox.mode} sandbox")
+    await sandbox.exec_script(layout.teardown_script, max_retries=TEARDOWN_RETRIES)
+
+
 @dataclass
 class DeployedGateway:
     """Result of a gateway deployment."""
@@ -155,6 +173,8 @@ class DeployedGateway:
     environment_card_read_at_utc: str | None = None
     # The token the gateway's control routes take, which the record keeps; None for a gateway started without one.
     control_token: str | None = None
+    # The token a slot's door takes on every request to the slot's ports, which the record keeps; None for the default stack.
+    door_token: str | None = None
 
 
 @dataclass
@@ -352,8 +372,13 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         external_children: tuple[ExternalChild, ...] = (),
         control_token: str | None = None,
+        stack_layout: StackLayout = DEFAULT_STACK_LAYOUT,
+        door_token: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
+
+        For a slot's ``stack_layout``, the default stack's file refitted to the slot's walls, its ports behind a door
+        that takes ``door_token`` (``slot_compose``).
 
         Supports MCP servers, websites, or both. Website containers (backend + frontend) are added
         to the same docker network. The gateway receives WEBSITE_URLS env var for discovery. The website
@@ -505,8 +530,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 db_url = state_provider.url_for_environment(server.environment_name, instance=state_instance)
                 lines.append(f"      - DATABASE_URL={db_url}")
             if server.extra_env_vars:
-                for key, value in server.extra_env_vars.items():
-                    lines.append(f"      - {key}={value}")
+                lines.extend(_environment_line(key, value) for key, value in server.extra_env_vars.items())
             lines.extend([
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',
@@ -653,8 +677,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             ])
             if sc.env:
                 lines.append("    environment:")
-                for key, value in sc.env.items():
-                    lines.append(f"      - {key}={value}")
+                lines.extend(_environment_line(key, value) for key, value in sc.env.items())
             lines.extend([
                 "    ports:",
                 *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(sc.host_port), sc.container_port)),
@@ -668,6 +691,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             "networks:",
             *(line for network in (_ENV_NETWORK, *sites_network) for line in (f"  {network}:", "    driver: bridge")),
         ])
+        if stack_layout.is_slot:
+            return slot_compose("\n".join(lines), stack_layout, door_image=gateway_image, door_token=door_token)
         return "\n".join(lines)
 
     async def deploy(
@@ -731,6 +756,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             env_state_instance_ids=deployed.env_state_instance_ids,
             control_token=deployed.control_token,
             stack_layout=self._stack_layout.to_record(),
+            door_token=deployed.door_token,
         )
 
     async def create_gateway(
@@ -846,6 +872,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         website_images = website_images or []
         sidecars = sidecars or []
         layout = self._stack_layout
+        door_token = secrets.token_urlsafe(32) if layout.is_slot else None
+        door = slot_token_headers(door_token)
 
         config = get_config()
         gateway_env = Env.get(gateway_env_id(config))
@@ -939,6 +967,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
             control_token=control_token,
+            stack_layout=layout,
+            door_token=door_token,
         )
         compose_content = compose()
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
@@ -946,6 +976,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         # Write files to VM
         logger.info("Writing files to VM...")
         await sandbox.exec_script(f"mkdir -p {layout.app_dir}", max_retries=2)
+        if layout.is_slot:
+            code, box_resolv_conf, stderr = await sandbox.exec_with_output("cat", "/etc/resolv.conf")
+            if code:
+                raise RuntimeError(f"couldn't read /etc/resolv.conf on {sandbox.sandbox_id} (exit {code}): {stderr.strip()}")
+            await self._write_file(sandbox, resolv_conf_path(layout), slot_resolv_conf(box_resolv_conf).rstrip("\n"))
 
         # Only local postgres needs its init script to be directly run by the gateway's servicedb
         # container; remote/external stores are already initialized upstream.
@@ -993,7 +1028,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         # Wait for gateway to be fully ready (needs time to discover internal servers)
         # Host-side port: exec_with_output runs inside the VM on per-VM backends but on
         # the host for LocalSandbox, where the gateway is published elsewhere.
-        gateway_ready = await self._wait_for_gateway(sandbox, publish(gateway_port))
+        gateway_ready = await self._wait_for_gateway(sandbox, publish(gateway_port), headers=door)
 
         # Print gateway logs for debugging
         logger.info("Gateway logs:")
@@ -1015,17 +1050,18 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_url = tunnel_url(gateway_port)
 
         # Wait for the tunnel to serve the env card, which the deploy records
-        card = await self._wait_for_tunnel(gateway_url, timeout=120)
+        card = await self._wait_for_tunnel(gateway_url, timeout=120, headers=door)
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
         if website_configs:
-            await _wait_for_websites(gateway_url, website_configs, headers=control_headers(control_token))
-            card = await self._wait_for_tunnel(gateway_url, timeout=120) or card
+            await _wait_for_websites(gateway_url, website_configs, headers={**door, **control_headers(control_token)},
+                                     door_headers=door)
+            card = await self._wait_for_tunnel(gateway_url, timeout=120, headers=door) or card
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
-        await self._refuse_tool_name_clashes(gateway_url)
+        await self._refuse_tool_name_clashes(gateway_url, headers=door)
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
-        consoles = await self._served_consoles(gateway_url, sidecar_names, control_token)
+        consoles = await self._served_consoles(gateway_url, sidecar_names, control_token, door=door)
 
         website_frontend_urls = _frontend_urls(gateway_url, website_configs)
         for svc_name, url in (website_frontend_urls or {}).items():
@@ -1037,6 +1073,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
             environment_card=card, environment_card_read_at_utc=card_read_at_utc, control_token=control_token,
+            door_token=door_token,
         )
 
     async def _deploy_via_containers(
@@ -1201,22 +1238,24 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             await self.close()
             raise
 
-    async def _served_consoles(self, gateway_url: str, consoles: Iterable[str],
-                               control_token: str | None) -> dict[str, str]:
+    async def _served_consoles(self, gateway_url: str, consoles: Iterable[str], control_token: str | None, *,
+                               door: dict[str, str] | None = None) -> dict[str, str]:
         """Each of ``consoles`` at the gateway, by key, that the gateway guards and reaches: it refuses a request without
         its control token, and with the token it gets the console's answer rather than a 5xx. An older gateway image
         answers 404, and a console the gateway can't reach (a server bound to an address family the private network
-        lacks) leaves it a 502, so the record names neither."""
+        lacks) leaves it a 502, so the record names neither. In a slot both asks carry the door's header (``door``), so
+        the 401 the first must get is the gateway's, not the door's."""
         keys = list(consoles)
+        door = door or {}
         if not keys or not control_token:
             return {}
 
         async def served(client: httpx.AsyncClient, key: str) -> bool:
             url = f"{gateway_url}/svc/{key}/"
-            if (bare := await _console_answer(client, url, {})) != 401:
+            if (bare := await _console_answer(client, url, door)) != 401:
                 logger.warning(f"the gateway answered {bare}, not 401, at /svc/{key}/: the record names no {key}")
                 return False
-            if not isinstance(answer := await _console_answer(client, url, control_headers(control_token)), int) \
+            if not isinstance(answer := await _console_answer(client, url, {**door, **control_headers(control_token)}), int) \
                     or answer >= 500:
                 logger.warning(f"the gateway answered {answer} with its token at /svc/{key}/: it can't reach {key}, so "
                                f"the record names none")
@@ -1227,12 +1266,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             found = await asyncio.gather(*(served(client, key) for key in keys))
         return {key: f"{gateway_url}/svc/{key}{_CONSOLE_PATHS[key]}" for key, ok in zip(keys, found) if ok}
 
-    async def _refuse_tool_name_clashes(self, gateway_url: str) -> None:
+    async def _refuse_tool_name_clashes(self, gateway_url: str, *, headers: dict[str, str] | None = None) -> None:
         """Refuse the deploy when the gateway reports tool names more than one of its sources serves, which leaves it
         serving none of its servers' tools. A gateway whose /state can't be read, or that doesn't report clashes (an
         image older than the report), is let through as before."""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(headers=headers) as client:
                 response = await client.get(f"{gateway_url}/state", timeout=_STATE_READ_TIMEOUT_S)
             response.raise_for_status()
             clashes = response.json().get(STATE_TOOL_NAME_CLASHES_KEY)
@@ -1245,8 +1284,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"serves none of their tools: {tool_name_clashes_text(clashes)}. Rename the tools, or deploy those "
                 f"servers in separate envs")
 
-    async def _wait_for_gateway(self, sandbox: VmSandbox, port: int, timeout: int = 300) -> bool:
-        """Wait for the gateway to answer on ``port``.
+    async def _wait_for_gateway(self, sandbox: VmSandbox, port: int, timeout: int = 300, *,
+                                headers: dict[str, str] | None = None) -> bool:
+        """Wait for the gateway to answer on ``port``, sending ``headers``: a slot's door answers 401 without its
+        header, which would pass for the gateway being up.
 
         Probes the well-known document, not ``/mcp``: a healthy MCP endpoint replies with
         an open event-stream, which a readiness check has no business holding. Any status
@@ -1257,9 +1298,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         """
         logger.info(f"Waiting for gateway to be ready (timeout={timeout}s)...")
         probe_url = f"http://localhost:{port}{WELL_KNOWN_PATH}"
+        header_args = [arg for name, value in (headers or {}).items() for arg in ("-H", f"{name}: {value}")]
         for i in range(timeout):
             exit_code, stdout, stderr = await sandbox.exec_with_output(
-                "curl", "-s", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", probe_url
+                "curl", "-s", "--max-time", "5", *header_args, "-o", "/dev/null", "-w", "%{http_code}", probe_url
             )
             http_code = stdout.strip()
             if http_code.isdigit() and int(http_code) > 0 and int(http_code) < 500:
@@ -1555,6 +1597,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if stack_layout.is_slot and (existing_sandbox is None or not existing_sandbox.walls_verified):
             raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a slot needs an existing sandbox "
                              f"whose walls between slots are verified")
+        if stack_layout.is_slot and children is not None:
+            raise ValueError(f"Can't deploy into slot {stack_layout.compose_project}: a computer runs on a sandbox of "
+                             "its own, and its clock follower and site routing would need the slot's door token there")
         self._stack_layout = stack_layout
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
         self._state_instance = state_instance
@@ -1791,8 +1836,8 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # Compose `environment:` keys whose values are secrets and must be masked before the
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
-_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
-_SETTINGS_LINE_RE = re.compile(rf'^(\s*-\s*")({WEBSITE_SETTINGS_ENV})=.*$')
+_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*[\"']?)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SETTINGS_LINE_RE = re.compile(rf'^(\s*-\s*["\'])({WEBSITE_SETTINGS_ENV})=.*$')
 
 
 def _compose_ps_rows(text: str) -> list[dict]:
@@ -1852,10 +1897,15 @@ def _network_lines(*networks: str) -> list[str]:
     return ["    networks:", *(f"      - {network}" for network in networks)]
 
 
+def _masked(m: re.Match[str]) -> str:
+    quote = m[1][-1] if m[1][-1] in "\"'" else ""
+    return f"{m[1]}{m[2]}=***{quote}"
+
+
 def _redact_compose_secrets(compose_content: str) -> str:
     """Mask secret-valued env lines so the logged compose never carries a live secret, a site's settings among them."""
     return "\n".join(
-        _SETTINGS_LINE_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
+        _SETTINGS_LINE_RE.sub(_masked, _SECRET_ENV_KEY_RE.sub(_masked, line))
         for line in compose_content.splitlines()
     )
 
@@ -1919,6 +1969,17 @@ def _settings_lines(settings: dict) -> list[str]:
 
 
 
+def _environment_line(key: str, value: object) -> str:
+    """The compose line setting ``key`` to ``value`` in a service's environment list: as written when YAML reads it
+    back as that one string, else quoted, so a newline or a ``: `` in a value can't add a key or a service."""
+    entry = f"{key}={value}"
+    try:
+        plain = "\n" not in entry and "\r" not in entry and yaml.safe_load(f"- {entry}") == [entry]
+    except yaml.YAMLError:
+        plain = False
+    return f"      - {entry}" if plain else f"      - {json.dumps(entry)}"
+
+
 def _seconds(seconds: float) -> str:
     """``seconds`` as a compose duration, in whole seconds rounded up, so a health check never allows less."""
     return f"{math.ceil(seconds)}s"
@@ -1940,15 +2001,16 @@ class WebsiteContractError(RuntimeError):
 
 
 async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
-                             headers: dict[str, str] | None = None, timeout_s: float = WEBSITE_READY_TIMEOUT_S,
-                             poll_s: float = WEBSITE_READY_POLL_S) -> None:
+                             headers: dict[str, str] | None = None, door_headers: dict[str, str] | None = None,
+                             timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
     """Wait until each site is ready, as its card says through ``/svc/<name>/``, asked with the gateway's control
     ``headers``, since its data plane takes them: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
     A site whose answer says how long it may take (``timeout_s``) is waited that long, or its own ``ready_timeout_s``
     if longer, and ``WEBSITE_READY_MARGIN_S``; any other its ``ready_timeout_s`` and the margin, or ``timeout_s`` if
     longer. Raises naming each site still not ready, and why, once one is waited past its time, and at once, with
-    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
+    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card. A slot's
+    ``door_headers`` go on its card and health reads too."""
     started = time.monotonic()
     waiting = {wc.environment_name: wc for wc in website_configs}
     own = {wc.environment_name: wc.ready_timeout_s or 0 for wc in website_configs}
@@ -1957,7 +2019,8 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
     warned: set[str] = set()
     while waiting:
         for name, wc in list(waiting.items()):
-            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path, headers=headers)
+            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path, headers=headers,
+                                                              door_headers=door_headers)
             if declared is not None:
                 limit[name] = max(declared, own[name]) + WEBSITE_READY_MARGIN_S
             if ready is None and name not in warned:
@@ -1975,13 +2038,13 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
         await asyncio.sleep(poll_s)
 
 
-async def _website_ready(base_url: str, health_path: str, *,
-                         headers: dict[str, str] | None = None) -> tuple[Optional[bool], str, Optional[float]]:
+async def _website_ready(base_url: str, health_path: str, *, headers: dict[str, str] | None = None,
+                         door_headers: dict[str, str] | None = None) -> tuple[Optional[bool], str, Optional[float]]:
     """Whether the site at ``base_url`` is ready, why not, and how long it says it may take: True or False by the
     ``WebsiteReadiness`` its card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it,
     an answer that isn't one False; with no card or no ``ready`` on it, None once its health path answers 200 and False
     before."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers=door_headers) as client:
         try:
             card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
             readiness = None if card is None else await website_readiness(base_url, card, timeout=10, headers=headers)
@@ -2030,7 +2093,7 @@ async def _probe_tools(env_id: str | None, gateway: DeployedGateway) -> None:
         cards = (gateway.environment_card or {}).get("children_environments") or []
         children = ",".join(c.get("name") or "" for c in cards)
         async with asyncio.timeout(_TOOLS_PROBE_TIMEOUT_S):
-            tools = set(await _tool_names(gateway.mcp_url))
+            tools = set(await _tool_names(gateway.mcp_url, headers=slot_token_headers(gateway.door_token) or None))
         missing = [c.get("name") or "" for c in cards if not _card_tool_names(c) <= tools]
     except Exception as e:
         logger.warning(f"{head} status=failed duration_s={time.monotonic() - start:.1f} children={children} error_type={type(e).__name__} error={e!r}")
