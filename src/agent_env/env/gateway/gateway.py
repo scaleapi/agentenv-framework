@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 from urllib.parse import parse_qsl, urljoin, urlsplit
 from uuid import uuid4
 
@@ -1664,8 +1664,10 @@ class Gateway:
             return result
 
         # The child validates its own arguments: the model declares none and forwards what the caller sent, as /step
-        # does, so a missing, misnamed, undeclared or wrong-typed argument gets the child's own answer.
+        # does, so a missing, misnamed, undeclared or wrong-typed argument gets the child's own answer. The one repair
+        # kept from the typed model: a JSON string for a parameter the child types array or object is decoded.
         arg_model = create_model(f"{tool_name}Args", __base__=_ForwardingArgModelBase)
+        arg_model.json_container_params = _json_container_params(input_schema)
         return FastMCPTool(
             fn=proxy,
             name=tool_name,
@@ -1842,13 +1844,54 @@ class _ProxyArgModelBase(ArgModelBase):
 
 
 class _ForwardingArgModelBase(ArgModelBase):
-    """A child proxy's arguments: no declared fields, so nothing is required, typed or JSON-pre-parsed, and every key
-    the caller sent (an explicit null included) is forwarded unchanged, exactly as /step forwards them."""
+    """A child proxy's arguments: no declared fields, so nothing is required or typed, and every key the caller sent
+    (an explicit null included) is forwarded as sent. The exception is the JSON-string repair the gateway's typed model
+    used to give through FastMCP's pre-parsing: a string sent for a parameter the child types array or object (and
+    not string) is decoded when it decodes to that type, so a model's '["a"]' still reaches a strict child as a list."""
 
     model_config = ConfigDict(extra="allow")
+    json_container_params: ClassVar[dict[str, tuple[type, ...]]] = {}
 
     def model_dump_one_level(self) -> dict[str, Any]:
-        return dict(self.model_extra or {})
+        kwargs = dict(self.model_extra or {})
+        for name, kinds in self.json_container_params.items():
+            value = kwargs.get(name)
+            if not isinstance(value, str):
+                continue
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(decoded, kinds):
+                kwargs[name] = decoded
+        return kwargs
+
+
+_JSON_CONTAINER_TYPES: dict[str, type] = {"array": list, "object": dict}
+
+
+def _schema_types(schema: Any) -> set[str]:
+    """The JSON types a property schema allows: its `type` (a name or a list) plus those of its anyOf/oneOf branches."""
+    if not isinstance(schema, dict):
+        return set()
+    declared = schema.get("type")
+    types = {declared} if isinstance(declared, str) else {t for t in declared or () if isinstance(t, str)}
+    for key in ("anyOf", "oneOf"):
+        for branch in schema.get(key) or ():
+            types |= _schema_types(branch)
+    return types
+
+
+def _json_container_params(input_schema: dict[str, Any]) -> dict[str, tuple[type, ...]]:
+    """Each property the child types array and/or object but not string, with the Python types a JSON string sent for
+    it may decode to. A property that also accepts a string keeps the string the caller sent."""
+    params: dict[str, tuple[type, ...]] = {}
+    for name, schema in (input_schema.get("properties") or {}).items():
+        types = _schema_types(schema)
+        kinds = tuple(_JSON_CONTAINER_TYPES[t] for t in sorted(types) if t in _JSON_CONTAINER_TYPES)
+        if kinds and "string" not in types:
+            params[name] = kinds
+    return params
 
 
 def _step_source(body: dict) -> dict | None:

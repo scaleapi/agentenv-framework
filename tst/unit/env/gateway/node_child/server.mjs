@@ -1,7 +1,7 @@
 // A child MCP server that is not FastMCP and not Python: plain Node, no dependencies, MCP's streamable HTTP transport
 // answered with JSON bodies (stateless). Its one tool validates strictly, as a hand-written or TypeScript server does:
 // an undeclared key or a wrong type is refused with invalid_arguments naming the keys, and it never re-parses a JSON
-// string. A valid call answers with the arguments exactly as they arrived. Prints its port on stdout once listening.
+// string (as zod-based servers such as @playwright/mcp do not). A valid call answers with the arguments exactly as they arrived. Prints its port on stdout once listening.
 import http from "node:http";
 
 const TOOL = {
@@ -9,7 +9,12 @@ const TOOL = {
   description: "Find messages.",
   inputSchema: {
     type: "object",
-    properties: { q: { type: "string" }, labels: { type: "array", items: { type: "string" } } },
+    properties: {
+      q: { type: "string" },
+      labels: { type: "array", items: { type: "string" } },
+      filters: { type: "object" },
+      ids: { anyOf: [{ type: "array", items: { type: "string" } }, { type: "null" }] },
+    },
     additionalProperties: false,
   },
 };
@@ -20,6 +25,9 @@ function invalidFields(args) {
     if (!(key in TOOL.inputSchema.properties)) bad.push(key);
     else if (key === "q" && typeof value !== "string") bad.push(key);
     else if (key === "labels" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
+    else if (key === "filters" && !(value !== null && typeof value === "object" && !Array.isArray(value))) bad.push(key);
+    else if (key === "ids" && !(value === null || (Array.isArray(value) && value.every((v) => typeof v === "string"))))
+      bad.push(key);
   }
   return bad.sort();
 }
