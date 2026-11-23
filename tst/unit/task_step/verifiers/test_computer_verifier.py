@@ -1,23 +1,20 @@
 """computer_verifier: a computer-use task's rubric as rubrics_verifier's criteria (weights, negative penalties, a
 must-pass one refused for a step of its own that an aggregate gates on), and a run against a computer at its driver's
-boundary (``tst.unit.computer_home``) with the judge faked: the files the agent left read through the driver and
-rendered into the judge's prompt beside the agent's response, a missing one named, the golden files and the state
-commands' output beside them, and the caller's guidance or the default; state output that was cut marked incomplete, a
-Windows computer refused."""
+boundary (``tst.unit.computer_home``) with the judge faked: the files the agent left read in one data/get and rendered
+into the judge's prompt beside the agent's response, a missing one named, the golden files and an environment's export
+as its state beside them, and the caller's guidance or the default; nothing run in the computer, whatever its OS."""
 
 from __future__ import annotations
 
 import io
 import json
 import re
-from types import SimpleNamespace
 
 import openpyxl
 import pytest
 from agentenv_protocol.computer import COMPUTER
 
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
@@ -25,12 +22,10 @@ from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import Aggrega
 from agent_env.task_step.task_steps.verifiers.computer.computer_verifier import (
     DEFAULT_GOLDEN_NOTE,
     DEFAULT_GUIDANCE,
-    MAX_FILE_CHARS,
     RECORDS_KEY,
     ComputerVerifierTaskStep,
     criteria_from_rubric,
 )
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.computer_home import CARD, Computer
 
 RUBRIC = {"criteria": [
@@ -124,9 +119,10 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
     (tmp_path / "golden").mkdir()
     (tmp_path / "golden" / "report.csv").write_text("amount,12\n")
     golden = FileArtifactUniverse.put_bundled("golden-files", files={"report.csv": tmp_path / "golden" / "report.csv"})
-    step = _step(result_files=[f"{computer.home}/Desktop/report.xlsx", "~/notes.txt", "~/missing.pdf"],
-                 expected_artifact_id=golden.id, expected_artifact_version=golden.version,
-                 state_commands=[{"name": "mailbox", "command": "echo '{\"sent\": 1}'"}],
+    (computer.home / "Documents").mkdir()
+    (computer.home / "Documents" / "outbox.json").write_text('{"sent": 1}')
+    step = _step(result_files=["Desktop/report.xlsx", "~/notes.txt", "~/missing.pdf"],
+                 expected_artifact_id=golden.id, expected_artifact_version=golden.version, state_envs=["desk"],
                  guidance="Grade it as the house style says.", golden_note="Golden files are examples.")
     prompts: list[str] = []
     _judge(step, prompts, failing=("note",))
@@ -139,7 +135,7 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
     assert "The report is done." in prompt
     assert "## Files the agent did NOT produce" in prompt and "- ~/missing.pdf" in prompt
     assert "Golden files are examples." in prompt and "amount,12" in prompt
-    assert '<state name="mailbox" exit_code="0">\n{"sent": 1}' in prompt
+    assert '<state env="desk" path="Documents/outbox.json">\n{"sent": 1}' in prompt
     assert "Total the amounts in report.xlsx" in prompt and "Grade it as the house style says." in prompt
     assert DEFAULT_GUIDANCE not in prompt and DEFAULT_GOLDEN_NOTE not in prompt
     assert len(_prompted_ids(prompt)) == 5
@@ -148,10 +144,13 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
     assert {row["id"]: row.get("negative") for row in entry["results"]}["leak"] is True
     record = ctx.metadata[RECORDS_KEY]["grade"]
     assert [(f["path"], f.get("rendered_as"), f.get("missing", False)) for f in record["files"]] == [
-        (f"{computer.home}/Desktop/report.xlsx", "xlsx", False), ("~/notes.txt", "text", False),
-        ("~/missing.pdf", None, True)]
+        ("Desktop/report.xlsx", "xlsx", False), ("~/notes.txt", "text", False), ("~/missing.pdf", None, True)]
     assert record["golden_files"] == [{"name": "report.csv", "bytes": 10, "rendered_as": "text"}]
-    assert record["state"] == [{"name": "mailbox", "exit_code": 0, "timed_out": False, "cut": False, "truncated": False}]
+    assert [(s["env"], [f["path"] for f in s["files"]]) for s in record["state"]] == [
+        ("desk", ["Desktop/report.xlsx", "Documents/outbox.json"])]
+    assert [call for call in computer.calls if call[0] == "data/get"] == [
+        ("data/get", ["Desktop/report.xlsx", "notes.txt", "missing.pdf"]), ("data/get", None)]
+    assert not [call for call in computer.calls if call[0] == "run"]
 
 
 @pytest.mark.asyncio
@@ -173,42 +172,19 @@ async def test_must_pass_criteria_are_a_step_of_their_own_that_an_aggregate_gate
 
 
 @pytest.mark.asyncio
-async def test_a_file_is_read_in_chunks_and_one_too_large_is_named_not_read(computer, monkeypatch):
-    from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
-
-    monkeypatch.setattr(computer_verifier, "READ_CHUNK_BYTES", 10)
+async def test_a_file_over_the_limit_is_named_as_too_large(computer, monkeypatch):
     monkeypatch.setattr(computer_verifier, "MAX_READ_BYTES", 100)
-    (computer.home / "notes.txt").write_text("0123456789abcdefghijklmnopqrstuvwxyz\n")
     (computer.home / "huge.txt").write_text("x" * 101)
-    step = _step(result_files=["~/notes.txt", "~/huge.txt"])
+    step = _step(result_files=["~/huge.txt"])
     prompts: list[str] = []
     _judge(step, prompts)
     ctx = _context(computer)
 
     await step.execute(ctx)
 
-    assert "0123456789abcdefghijklmnopqrstuvwxyz\n" in prompts[0] and "a file of 101 bytes, too large" in prompts[0]
-    assert sum(1 for call in computer.calls if call[0] == "run" and "tail" in call[1]["argv"][2]) == 4
-    assert ctx.metadata[RECORDS_KEY]["grade"]["files"][1] == {"path": "~/huge.txt", "bytes": 101,
-                                                              "rendered_as": "too_large"}
-
-
-@pytest.mark.asyncio
-async def test_a_dash_prefixed_file_is_read_whole_and_a_short_read_is_refused(computer, monkeypatch):
-    from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
-
-    (computer.home / "--report.csv").write_text("total,1500\n")
-    step = _step(result_files=["~/--report.csv"])
-    prompts: list[str] = []
-    _judge(step, prompts)
-
-    await step.execute(_context(computer))
-
-    assert "total,1500" in prompts[0]
-
-    monkeypatch.setattr(computer_verifier, "_SIZE", 'test -f "$1" || exit 3; echo 999')  # a file that shrank since
-    with pytest.raises(RuntimeError, match=r"gave 11 bytes from byte 0 of its 999"):
-        await _step(result_files=["~/--report.csv"]).execute(_context(computer))
+    assert "a file of 101 bytes, too large" in prompts[0]
+    assert ctx.metadata[RECORDS_KEY]["grade"]["files"] == [
+        {"path": "~/huge.txt", "bytes": 101, "rendered_as": "too_large", "cut": False}]
 
 
 @pytest.mark.asyncio
@@ -225,7 +201,7 @@ async def test_the_judge_also_sees_the_agents_response(computer):
 
 
 def test_it_round_trips_through_the_registry():
-    step = _step(computer="desk", guidance="Be strict.", state_commands=[{"name": "s", "command": ["cat", "/tmp/s.json"]}])
+    step = _step(computer="desk", guidance="Be strict.", state_envs=["desk"])
     data = step.to_dict()
     again = get_task_step_registry()["computer_verifier"].from_dict(data)
 
@@ -239,7 +215,9 @@ def test_it_round_trips_through_the_registry():
     ({"guidance": "  "}, "guidance must be text"),
     ({"golden_note": 3}, "golden_note must be text"),
     ({"result_files": "a.txt"}, "result_files must be a list"),
-    ({"state_commands": [{"name": "s"}]}, "each of state_commands"),
+    ({"result_files": ["/etc/passwd"]}, "normalized paths under the computer's home"),
+    ({"result_files": ["~/../x"]}, "normalized paths under the computer's home"),
+    ({"state_envs": ["", "mail"]}, "state_envs must be a list of environment names"),
 ])
 def test_bad_configs_are_refused(fields, problem):
     with pytest.raises(ValueError, match=problem):
@@ -247,49 +225,27 @@ def test_bad_configs_are_refused(fields, problem):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stdout, truncated, why", [
-    ("x" * (MAX_FILE_CHARS + 5), False, f"cut after {MAX_FILE_CHARS} characters"),
-    ("short", True, "cut short by the computer's driver"),
-])
-async def test_state_output_that_was_cut_is_marked_incomplete(computer, stdout, truncated, why):
-    step = _step(result_files=["~/notes.txt"], state_commands=[{"name": "mailbox", "command": "cat /tmp/m.json"}])
-    prompts: list[str] = []
-    _judge(step, prompts)
+async def test_a_state_env_the_env_hasnt_or_that_serves_no_data_get_is_refused(computer):
+    step = _step(result_files=[], state_envs=["mail"])
+    _judge(step, [])
 
-    async def state(deployed, command):
-        return {"exit_code": 0, "timed_out": False, "stdout": stdout, "truncated": truncated}
+    with pytest.raises(RuntimeError, match="env 'desk' has no environment named 'mail'"):
+        await step.execute(_context(computer))
 
-    step._state = state
-    ctx = _context(computer)
-
-    await step.execute(ctx)
-
-    assert f"INCOMPLETE: {why}. What isn't shown can't support a criterion." in prompts[0]
-    [record] = ctx.metadata[RECORDS_KEY]["grade"]["state"]
-    assert record["cut"] == (len(stdout) > MAX_FILE_CHARS) and record["truncated"] == truncated
+    card = {**CARD, "capabilities": {**CARD["capabilities"], "operations": ["data/add"]}}
+    with pytest.raises(RuntimeError, match="environment 'desk' of env 'desk' serves no data/get"):
+        await _step(result_files=[], state_envs=["desk"]).execute(_context(computer, card=card))
 
 
 @pytest.mark.asyncio
-async def test_a_windows_computer_is_refused_before_anything_is_read(computer):
+async def test_a_windows_computer_is_read_like_any_other(computer):
     card = {**CARD, "capabilities": {**CARD["capabilities"], "extensions": [
         *CARD["capabilities"]["extensions"], {"uri": COMPUTER, "params": {"platform": {"os": "windows"}}}]}}
+    (computer.home / "notes.txt").write_text("done\n")
     step = _step(result_files=["~/notes.txt"])
-    _judge(step, [])
+    prompts: list[str] = []
+    _judge(step, prompts)
 
-    with pytest.raises(RuntimeError, match="is a windows computer, which it can't read"):
-        await step.execute(_context(computer, card=card))
-    assert computer.calls == []
+    await step.execute(_context(computer, card=card))
 
-
-def test_preflight_refuses_a_stored_windows_computer(monkeypatch):
-    desk = ComputerEnv.__new__(ComputerEnv)
-    desk.id, desk.environment_name = "desk", "desk"
-    desk.computer = SimpleNamespace(os=SimpleNamespace(type="windows"))
-    monkeypatch.setattr(computer_verifier, "stored_env", lambda env_id: desk)
-    monkeypatch.setattr(RubricsVerifierTaskStep, "preflight", lambda self: [])
-
-    assert _step(result_files=["~/a.txt"]).preflight() == [
-        "step 'grade': env 'desk''s computer is windows, which computer_verifier can't read: it reads files and runs "
-        "state commands through sh and POSIX tools"]
-    desk.computer = SimpleNamespace(os=SimpleNamespace(type="linux"))
-    assert _step(result_files=["~/a.txt"]).preflight() == []
+    assert "done" in prompts[0] and [call[0] for call in computer.calls] == ["data/get"]
