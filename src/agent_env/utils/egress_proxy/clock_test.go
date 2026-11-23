@@ -13,20 +13,21 @@ import (
 
 func page(seq uint64, universe, anchor time.Time, rate float64, armed bool) []byte {
 	b := make([]byte, pageSize)
-	u, a := universe.UnixNano(), anchor.UnixNano()
+	us, unsec, a := universe.Unix(), uint32(universe.Nanosecond()), anchor.UnixNano()
 	var on uint32
 	if armed {
 		on = 1
 	}
 	binary.LittleEndian.PutUint32(b[0:], pageMagic)
-	binary.LittleEndian.PutUint32(b[4:], 2)
+	binary.LittleEndian.PutUint32(b[4:], pageVersion)
 	binary.LittleEndian.PutUint64(b[8:], seq)
-	binary.LittleEndian.PutUint64(b[16:], uint64(u))
+	binary.LittleEndian.PutUint64(b[16:], uint64(us))
 	binary.LittleEndian.PutUint64(b[24:], uint64(a))
 	binary.LittleEndian.PutUint64(b[32:], math.Float64bits(rate))
 	binary.LittleEndian.PutUint32(b[40:], on)
+	binary.LittleEndian.PutUint32(b[44:], unsec)
 	binary.LittleEndian.PutUint64(b[48:], 7)
-	binary.LittleEndian.PutUint64(b[56:], pageCheck(seq, u, a, rate, on, 7, a, a))
+	binary.LittleEndian.PutUint64(b[56:], pageCheck(seq, us, unsec, a, rate, on, 7, a, a))
 	binary.LittleEndian.PutUint64(b[64:], uint64(a))
 	binary.LittleEndian.PutUint64(b[72:], uint64(a))
 	return b
@@ -51,6 +52,27 @@ func TestAPageReadsAsTheUniverseItHoldsAndATornOneNot(t *testing.T) {
 	}
 	if s, ok := readPage(page(2, time.Time{}, time.Time{}, 1, false)); !ok || s.Armed {
 		t.Fatalf("an unarmed page: %+v %v", s, ok)
+	}
+}
+
+func TestAPageReachesPast2262AndBefore1970(t *testing.T) {
+	anchor := time.Unix(time.Now().Unix(), 0)
+	far := time.Date(9999, 6, 1, 12, 0, 0, 500000000, time.UTC)
+	s, ok := readPage(page(4, far, anchor, 3600, true))
+	if !ok || s.V != float64(far.Unix())+0.5 {
+		t.Fatalf("9999: %+v %v", s, ok)
+	}
+	if got := s.at(float64(anchor.Unix()) + 1); got != float64(far.Unix())+3600.5 {
+		t.Fatalf("1 s on at rate 3600: %v", got)
+	}
+	past := time.Date(1949, 12, 31, 23, 59, 59, 750000000, time.UTC)
+	if s, ok := readPage(page(4, past, anchor, 1, true)); !ok || s.V != float64(past.Unix())+0.75 {
+		t.Fatalf("1949: %+v %v", s, ok)
+	}
+	old := page(4, far, anchor, 1, true)
+	binary.LittleEndian.PutUint32(old[4:], 2)
+	if _, ok := readPage(old); ok {
+		t.Fatal("a version 2 page read as one of this version")
 	}
 }
 
@@ -108,5 +130,14 @@ func TestThePagesTheFollowersWriterWritesReadAsTheUniverseTheyHold(t *testing.T)
 	}
 	if s, ok := readPage(golden(t, "unarmed")); !ok || s != unarmed {
 		t.Fatalf("unarmed: %+v %v", s, ok)
+	}
+	if s, ok := readPage(golden(t, "far")); !ok || s.V != 253402214400.5 || s.Rate != 3600 {
+		t.Fatalf("far: %+v %v", s, ok)
+	}
+	if s, ok := readPage(golden(t, "past")); !ok || s.V != -631152000.25 || s.Rate != 1 {
+		t.Fatalf("past: %+v %v", s, ok)
+	}
+	if _, ok := readPage(golden(t, "version2")); ok {
+		t.Fatal("a version 2 page read as one of this version")
 	}
 }

@@ -373,6 +373,19 @@ func TestEveryCertificateOfTheVerifiedChainBoundsPassingThrough(t *testing.T) {
 	}
 }
 
+func TestACertificateEndingPast2262BoundsPassingThroughAsWritten(t *testing.T) {
+	year := func(y int) time.Time { return time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC) }
+	from, until := year(2020), time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	for _, y := range []int{2027, 2300, 9000} {
+		if !inside(from, until, []float64{float64(year(y).Unix())}) {
+			t.Fatalf("a universe in %d, inside a certificate to 9999, didn't pass through", y)
+		}
+	}
+	if inside(from, until, []float64{float64(year(2019).Unix())}) {
+		t.Fatal("a universe before the certificate passed through")
+	}
+}
+
 func TestASiteAskingForTheClientsCertificateIsPassedThroughForTheClientToAnswer(t *testing.T) {
 	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "hello %d certificate", len(r.TLS.PeerCertificates))

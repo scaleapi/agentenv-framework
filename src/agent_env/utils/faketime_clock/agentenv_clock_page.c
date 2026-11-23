@@ -186,8 +186,10 @@ static bool ft_deadline_moved(const struct timespec *fake_abs, struct timespec *
 }
 
 /*
- * the clock page. 64 bytes, little-endian, rewritten in place by the follower: seq odd while it writes,
- * then even; check is the xor of the other words and a constant. A realtime read in a faked process copies it
+ * the clock page (version 3). 80 bytes, little-endian, rewritten in place by the follower: seq odd while it writes,
+ * then even; check is the xor of the other words and a constant. The universe at the anchor is universe_s seconds and
+ * universe_nsec nanoseconds (floored: before 1970 the seconds are negative, the nanoseconds not), so it reaches any date
+ * a 64-bit time_t holds; the anchor is real time. A realtime read in a faked process copies it
  * lock-free and computes universe + (now - anchor) * rate (rate 0: universe), so every process agrees with no shared
  * start; the first thread to see a new generation also hands it to libfaketime's own state (rates of sleeps, the
  * time an absolute spec gives) under the MT lock. The page must be owned by AGENTENV_CLOCK_PAGE_UID (0 by default) and
@@ -197,14 +199,14 @@ struct ft_clock_page
 {
   uint32_t magic, version;
   uint64_t seq;
-  int64_t universe_ns, anchor_ns;
+  int64_t universe_s, anchor_ns;
   double rate;
-  uint32_t armed, reserved;
+  uint32_t armed, universe_nsec;
   uint64_t generation, check;
   int64_t mono_universe_ns, mono_anchor_ns;
 };
 #define FT_PAGE_MAGIC 0x4B434541u
-#define FT_PAGE_VERSION 2u
+#define FT_PAGE_VERSION 3u
 static const volatile struct ft_clock_page *ft_page = NULL;
 static uint64_t ft_page_applied = 0;
 static time_t ft_page_last_try = 0;
@@ -214,8 +216,9 @@ static uint64_t ft_page_check(const struct ft_clock_page *p)
 {
   uint64_t rate_bits;
   memcpy(&rate_bits, &p->rate, sizeof rate_bits);
-  return p->seq ^ (uint64_t) p->universe_ns ^ (uint64_t) p->anchor_ns ^ rate_bits ^ p->armed ^ p->generation
-         ^ (uint64_t) p->mono_universe_ns ^ (uint64_t) p->mono_anchor_ns ^ 0x9E3779B97F4A7C15ull;
+  return p->seq ^ (uint64_t) p->universe_s ^ ((uint64_t) p->universe_nsec << 32) ^ (uint64_t) p->anchor_ns ^ rate_bits
+         ^ p->armed ^ p->generation ^ (uint64_t) p->mono_universe_ns ^ (uint64_t) p->mono_anchor_ns
+         ^ 0x9E3779B97F4A7C15ull;
 }
 
 static bool ft_page_snapshot(struct ft_clock_page *out)
@@ -226,7 +229,8 @@ static bool ft_page_snapshot(struct ft_clock_page *out)
     if (s1 & 1) continue;
     out->magic = ft_page->magic;
     out->seq = s1;
-    out->universe_ns = ft_page->universe_ns;
+    out->universe_s = ft_page->universe_s;
+    out->universe_nsec = ft_page->universe_nsec;
     out->anchor_ns = ft_page->anchor_ns;
     out->rate = ft_page->rate;
     out->armed = ft_page->armed;
@@ -237,7 +241,7 @@ static bool ft_page_snapshot(struct ft_clock_page *out)
     out->mono_anchor_ns = ft_page->mono_anchor_ns;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (__atomic_load_n(&ft_page->seq, __ATOMIC_RELAXED) == s1 && out->magic == FT_PAGE_MAGIC
-        && out->version == FT_PAGE_VERSION
+        && out->version == FT_PAGE_VERSION && out->universe_nsec < 1000000000u
         && ft_page_check(out) == out->check)
       return true;
   }
@@ -272,17 +276,67 @@ static void ft_page_open(void)
   ft_page = map;
 }
 
+/* the universe's realtime at real realtime t (ns): seconds and nanoseconds (0 to 999,999,999); before the anchor, and
+   while frozen, the anchor's. Clock reads and every wait compute it here alike, so a wait never ends before a read
+   shows its deadline. */
+static inline void ft_page_at(const struct ft_clock_page *s, int64_t t, int64_t *sec, int64_t *nsec)
+{
+  int64_t add, q, r;
+  *sec = s->universe_s;
+  *nsec = s->universe_nsec;
+  if (s->rate == 0 || t <= s->anchor_ns) return;
+  if (s->rate == 1.0)
+    add = t - s->anchor_ns;
+  else
+  {
+    double x = (double) (t - s->anchor_ns) * s->rate;
+    if (x >= 9e18 || x <= -9e18)
+    { /* centuries of universe since the anchor: whole seconds */
+      *sec += (int64_t) (x / 1e9);
+      return;
+    }
+    add = (int64_t) x;
+  }
+  q = add / 1000000000LL;
+  r = add % 1000000000LL;
+  if (r < 0)
+  {
+    q -= 1;
+    r += 1000000000LL;
+  }
+  *sec += q;
+  *nsec += r;
+  if (*nsec >= 1000000000LL)
+  {
+    *sec += 1;
+    *nsec -= 1000000000LL;
+  }
+}
+
+/* a time as libfaketime reads one: "seconds.nanoseconds", the sign written once in front. */
+static void ft_spec_time(char *out, size_t size, int64_t s, uint32_t ns)
+{
+  if (s < 0 && ns > 0)
+    snprintf(out, size, "-%llu.%09u", (unsigned long long) -(s + 1), 1000000000u - ns);
+  else
+    snprintf(out, size, "%s%llu.%09u", s < 0 ? "-" : "", (unsigned long long) (s < 0 ? -s : s), ns);
+}
+
 /* libfaketime's own state set to the page's clock; called with the MT lock held. */
 static void ft_page_apply_locked(const struct ft_clock_page *s)
 {
-  char spec[160];
+  char spec[160], universe[48], anchor[48];
   if (s->generation == ft_page_applied) return;
   if (!s->armed)
     snprintf(spec, sizeof spec, "+0 x1");
   else
-    snprintf(spec, sizeof spec, "@%lld.%09lld x%.17g ^%lld.%09lld",
-             (long long) (s->universe_ns / 1000000000LL), (long long) (s->universe_ns % 1000000000LL), s->rate,
-             (long long) (s->anchor_ns / 1000000000LL), (long long) (s->anchor_ns % 1000000000LL));
+  {
+    int64_t anchor_ns = s->anchor_ns;
+    int64_t anchor_s = anchor_ns / 1000000000LL - (anchor_ns % 1000000000LL < 0);
+    ft_spec_time(universe, sizeof universe, s->universe_s, s->universe_nsec);
+    ft_spec_time(anchor, sizeof anchor, anchor_s, (uint32_t) (anchor_ns - anchor_s * 1000000000LL));
+    snprintf(spec, sizeof spec, "@%s x%.17g ^%s", universe, s->rate, anchor);
+  }
   parse_ft_string(spec);
   __atomic_store_n(&ft_page_applied, s->generation, __ATOMIC_RELEASE);
 }

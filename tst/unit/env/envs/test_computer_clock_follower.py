@@ -109,8 +109,7 @@ def follower(tmp_path):
 
         def universe(self) -> float:
             with open(page.PAGE, "rb") as f:
-                fields = page.LAYOUT.unpack(f.read(page.LAYOUT.size))
-            _, _, _, universe_ns, anchor_ns, rate, armed, *_ = fields
+                _, armed, universe_ns, anchor_ns, rate, _ = page.read(f.read(page.LAYOUT.size))
             return page._universe_at(armed, universe_ns, anchor_ns, rate, time.time_ns()) / 1e9
 
         def until(self, check, within: float = 5.0):

@@ -85,11 +85,16 @@ def test_the_pages_the_proxy_is_tested_on_are_the_ones_the_followers_writer_writ
     page = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(page)
     golden = {name: bytes.fromhex((EGRESS / "testdata" / f"page-{name}.hex").read_text().strip())
-              for name in ("armed", "unarmed")}
+              for name in ("armed", "unarmed", "far", "past", "version2")}
+    anchor, mono = 1794000000_000000000, 5_000_000_000
 
-    assert golden == {
-        "armed": page.encode(4, 1577836800_000000000, 1794000000_123456789, 2.0, 1, 7, 5_000_000_000, 5_000_000_000),
-        "unarmed": page.encode(2, 0, 0, 1.0, 0, 3, 0, 0)}
+    assert {name: golden[name] for name in ("armed", "unarmed", "far", "past")} == {
+        "armed": page.encode(4, 1577836800_000000000, 1794000000_123456789, 2.0, 1, 7, mono, mono),
+        "unarmed": page.encode(2, 0, 0, 1.0, 0, 3, 0, 0),
+        # 9999-12-31T00:00:00.5Z at rate 3600, past 2262; and 1949-12-31T23:59:59.75Z, before 1970.
+        "far": page.encode(6, 253402214400_500000000, anchor, 3600.0, 1, 9, mono, mono),
+        "past": page.encode(8, -631152000_250000000, anchor, 1.0, 1, 11, mono, mono)}
+    assert golden["version2"][4:8] == (2).to_bytes(4, "little") and page.read(golden["version2"]) is None
 
 
 def test_every_chromium_build_goes_out_through_the_proxy_by_a_policy_that_bypasses_what_the_session_does():

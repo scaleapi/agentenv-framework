@@ -36,14 +36,10 @@ def log(event: str, **fields) -> None:
 
 def read(fd: int) -> tuple | None:
     """The page's (armed, universe_ns, anchor_ns, rate), None while it's being written or isn't a page."""
-    raw = os.pread(fd, clockpage.LAYOUT.size, 0)
-    if len(raw) < clockpage.LAYOUT.size:
+    state = clockpage.read(os.pread(fd, clockpage.LAYOUT.size, 0))
+    if state is None:
         return None
-    magic, version, seq, universe, anchor, rate, armed, _, generation, check, mono_universe, mono_anchor = (
-        clockpage.LAYOUT.unpack(raw))
-    if (magic, version) != (clockpage.MAGIC, clockpage.VERSION) or seq & 1 or check != clockpage.check(
-            seq, universe, anchor, rate, armed, generation, mono_universe, mono_anchor):
-        return None
+    _, armed, universe, anchor, rate, _ = state
     return armed, universe, anchor, rate
 
 

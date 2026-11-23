@@ -72,11 +72,11 @@ def user_cmd(argv, env=None):
 
 def page():
     with open(clockpage.PAGE, "rb") as f:
-        return clockpage.LAYOUT.unpack(f.read(clockpage.LAYOUT.size))
+        return clockpage.read(f.read(clockpage.LAYOUT.size))
 
 
 def universe_now() -> tuple[float, float]:
-    _, _, _, u, a, rate, armed, _, _, _, _, _ = page()
+    _, armed, u, a, rate, _ = page()
     now = time.time()
     return (now, 1.0) if not armed else (u / 1e9 + (now - a / 1e9) * rate, rate)
 
@@ -95,6 +95,13 @@ def advance(delta: float) -> dict:
 def set_rate(rate: float) -> dict:
     u, _ = universe_now()
     return set_clock(u, rate)
+
+
+def start(days: float = -182) -> float:
+    """The universe a gate starts at: ``days`` from now, or the time CLOCK_BASE names (epoch seconds), which runs the
+    gates far past 2262, or before 1970, as well."""
+    base = os.environ.get("CLOCK_BASE")
+    return float(base) if base else time.time() + days * DAY
 
 
 def fresh_page() -> None:
@@ -182,7 +189,7 @@ def result(p, change=None) -> dict:
 
 
 def scenario(name, start_rate, seconds, change=None, change_at=None, limit=8.0, start_universe=None, apis=APIS):
-    set_clock(start_universe if start_universe is not None else time.time() - 180 * DAY, start_rate)
+    set_clock(start_universe if start_universe is not None else start(-180), start_rate)
     t0 = raw()
     procs = [spawn(a, seconds) for a in apis]
     ran = collect(procs, t0 + limit, [(t0 + change_at, change, "change")] if change else [])
@@ -208,7 +215,7 @@ def ratechange():
     clock = [a for a in APIS if a in CLOCK_TIME]
     out = [scenario("rate 1, rate 60 at 1.0 s", 1, 10.0, lambda: set_rate(60), 1.0, limit=4.0, apis=clock),
            scenario("rate 1, set_time -182 d at 0.5 s", 1, 2.0, lambda: set_clock(universe_now()[0] - 182 * DAY, 1),
-                    0.5, limit=4.0, start_universe=time.time(), apis=clock)]
+                    0.5, limit=4.0, start_universe=start(0), apis=clock)]
     preload(None)
     return out
 
@@ -219,7 +226,7 @@ def jumps(rounds=30, seed=5420):
     rng = random.Random(seed)
     preload()
     fresh_page()
-    set_clock(time.time() - 182 * DAY, 1)
+    set_clock(start(), 1)
     p = subprocess.Popen(user_cmd(["jumpwaits"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
                          cwd="/tmp")
     out = []
@@ -284,7 +291,7 @@ def cancel():
     keeps no waiter for one, and after 600 cancelled condvar waits a condvar wait still ends at a jump past its deadline."""
     preload()
     fresh_page()
-    set_clock(time.time() - 182 * DAY, 1)
+    set_clock(start(), 1)
     r = _jumped(["cancel"], 2 * 3600)
     preload(None)
     return {**r["before"], "rc": r["after"]["rc"], **_after_write(r["after"]["fired_raw"], r)}
@@ -295,7 +302,7 @@ def timerfds():
     ones where a vfork child (Python's subprocess among them, tfdspawn.py) closes it, each jumped 2 h."""
     preload()
     fresh_page()
-    set_clock(time.time() - 182 * DAY, 1)
+    set_clock(start(), 1)
     out = {}
     for how in ("dup", "dup2", "dup3", "fcntl", "close_range", "failed", "vfork_close", "vfork_close_range",
                 "python_subprocess"):
@@ -326,7 +333,7 @@ def condstress(seconds=10.0):
     for gap in (1000, 100000):
         for changes in (False, True):
             fresh_page()
-            set_clock(time.time() - 182 * DAY, 1)
+            set_clock(start(), 1)
             p = subprocess.Popen(user_cmd(["condstress2", "stress", str(seconds), str(gap)]), stdout=subprocess.PIPE,
                                  text=True)
             n = _with_page_changes(p) if changes else 0
@@ -335,7 +342,7 @@ def condstress(seconds=10.0):
 
     def single(wait_s, label, during=None):
         fresh_page()
-        set_clock(time.time() - 182 * DAY, 1)
+        set_clock(start(), 1)
         p = subprocess.Popen(user_cmd(["condstress2", "single", "20", str(wait_s)]), stdout=subprocess.PIPE, text=True)
         writes = during(p) if during else 0
         o, _ = p.communicate(timeout=120)
@@ -366,7 +373,7 @@ def semstress(seconds=10.0):
     for gap in (1000, 100000):
         for changes in (False, True):
             fresh_page()
-            set_clock(time.time() - 182 * DAY, 1)
+            set_clock(start(), 1)
             p = subprocess.Popen(user_cmd(["semstress", str(seconds), str(gap)]), stdout=subprocess.PIPE, text=True)
             n = _with_page_changes(p) if changes else 0
             o, _ = p.communicate(timeout=seconds + 60)
@@ -391,7 +398,7 @@ def stall(writes=2000):
 
     preload()
     fresh_page()
-    set_clock(time.time() - 182 * DAY, 1)
+    set_clock(start(), 1)
     seconds = writes * 0.0055 + 2
     readers = [subprocess.Popen(user_cmd(["rtread", str(seconds), "1", f"/tmp/rtread_{k}.json"]), cwd="/tmp")
                for k in range(4)]
@@ -417,11 +424,13 @@ def stall(writes=2000):
 
 
 def torn(seconds=10.0):
-    """The page rewritten as fast as possible, alternating universes 182 days back and 21 days ahead, while 4 threads
-    read CLOCK_REALTIME as fast as they can: every read must be one of the two (torn.c)."""
+    """The page rewritten as fast as possible, alternating universes 182 days back and 21 days ahead (or the start and
+    203 days after it), while 4 threads read CLOCK_REALTIME as fast as they can: every read must be one of the two
+    (torn.c)."""
     preload()
     fresh_page()
-    off_a, off_b = -182 * DAY, 21 * DAY
+    off_a = start() - time.time()
+    off_b = off_a + 203 * DAY
     set_clock(time.time() + off_a, 1)
     p = subprocess.Popen(user_cmd(["torn", str(seconds), "4", str(off_a), str(off_b)]), stdout=subprocess.PIPE,
                          text=True, cwd="/tmp")
@@ -448,7 +457,7 @@ def deadwriter():
     written = set_clock(time.time() + 21 * DAY, 1)
     after = float(subprocess.run(user_cmd(["date", "+%s.%N"]), capture_output=True, text=True).stdout)
     preload(None)
-    return {"dead_seq": seq, "seq": page()[2], "continued": written["continued"],
+    return {"dead_seq": seq, "seq": page()[0], "continued": written["continued"],
             "read": _classify(after, before, 21 * DAY)}
 
 
@@ -525,7 +534,7 @@ def chromium(variant="agentenv", launches=40, parallel=8, limit=20.0):
         f.write(f"@{int(time.time() - 182 * DAY)}\n")
     os.chmod("/tmp/stockclock", 0o644)
     fresh_page()
-    set_clock(time.time() - 182 * DAY, 1)
+    set_clock(start(), 1)
     preload(LIB if variant == "agentenv" else None)
 
     def launch(k: int) -> dict:

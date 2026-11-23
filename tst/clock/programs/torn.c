@@ -11,16 +11,20 @@
 #include <time.h>
 #include "rawsys.h"
 #define NS 1000000000LL
-static double seconds; static int64_t off_a, off_b, rt0, raw0;
+/* offsets of 128 bits: a universe in 9999 is some 8,000 years from real time, past 64 bits of nanoseconds */
+typedef __int128 off_t128;
+static double seconds; static off_t128 off_a, off_b; static int64_t rt0, raw0;
 static int64_t ns(clockid_t c) { struct timespec t; clock_gettime(c, &t); return (int64_t)t.tv_sec * NS + t.tv_nsec; }
-static int64_t far(int64_t d) { return d < 0 ? -d : d; }
-struct res { long reads, a, b, torn; int64_t worst; };
+static off_t128 ns128(clockid_t c) { struct timespec t; clock_gettime(c, &t); return (off_t128)t.tv_sec * NS + t.tv_nsec; }
+static off_t128 far(off_t128 d) { return d < 0 ? -d : d; }
+struct res { long reads, a, b, torn; off_t128 worst; };
 static struct res R[16];
 static void *reader(void *arg) {
     struct res *r = arg;
     int64_t end = ns(CLOCK_MONOTONIC_RAW) + (int64_t)(seconds * NS);
     for (;;) {
-        int64_t raw = ns(CLOCK_MONOTONIC_RAW), off = ns(CLOCK_REALTIME) - (rt0 + raw - raw0);
+        int64_t raw = ns(CLOCK_MONOTONIC_RAW);
+        off_t128 off = ns128(CLOCK_REALTIME) - (rt0 + raw - raw0);
         r->reads++;
         if (far(off - off_a) <= NS) r->a++;
         else if (far(off - off_b) <= NS) r->b++;
@@ -31,12 +35,12 @@ static void *reader(void *arg) {
 }
 int main(int argc, char **argv) {
     if (argc != 5) { fprintf(stderr, "usage: torn SECONDS THREADS OFF_A_S OFF_B_S\n"); return 2; }
-    seconds = atof(argv[1]); int n = atoi(argv[2]); off_a = (int64_t)(atof(argv[3]) * NS); off_b = (int64_t)(atof(argv[4]) * NS);
+    seconds = atof(argv[1]); int n = atoi(argv[2]); off_a = (off_t128)(atof(argv[3]) * NS); off_b = (off_t128)(atof(argv[4]) * NS);
     if (n < 1 || n > 16) return 2;
     struct timespec t; raw_clock_gettime(CLOCK_REALTIME, &t); raw0 = ns(CLOCK_MONOTONIC_RAW); rt0 = (int64_t)t.tv_sec * NS + t.tv_nsec;
     pthread_t th[16];
     for (int i = 0; i < n; i++) pthread_create(&th[i], NULL, reader, &R[i]);
-    long reads = 0, a = 0, b = 0, torn = 0; int64_t worst = 0;
+    long reads = 0, a = 0, b = 0, torn = 0; off_t128 worst = 0;
     for (int i = 0; i < n; i++) {
         pthread_join(th[i], NULL);
         reads += R[i].reads; a += R[i].a; b += R[i].b; torn += R[i].torn;
