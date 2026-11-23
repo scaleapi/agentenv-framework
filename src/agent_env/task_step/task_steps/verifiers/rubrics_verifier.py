@@ -1657,6 +1657,10 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                                                   settings=params)
                 return {"response": reply.content, "trajectory_object_url": None, "judge_input": judge_input,
                         **reply.fields()}
+            except asyncio.CancelledError as exc:
+                if judge is not None:
+                    _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host, sent=judge_input)
+                raise
             except Exception as exc:
                 last_exc = exc
                 if judge is not None:
@@ -1921,16 +1925,15 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     async def _judge_directly(self, prompt: str, *, model: str, context: TaskStepContext,
                               image_blocks: Optional[list[dict]], usage: StepUsage) -> dict:
         """One direct judge call, its usage in ``usage``: what it answered, or, when a cancel or a time limit stopped
-        it, a call of unknown usage. Under a judge's record (``JudgeUsage``), each request that failed is already in
-        it, from ``_prompt_llm_judge``'s own retries; a cancel, which those don't see, is recorded here."""
+        it, a call of unknown usage. Under a judge's record (``JudgeUsage``), each request that failed or was cancelled
+        is already in it, with what it was sent, from ``_prompt_llm_judge`` itself."""
         try:
             if image_blocks:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context, image_blocks=image_blocks)
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
         except BaseException as exc:
-            recorded = isinstance(exc, Exception) and isinstance(usage, JudgeUsage)
-            if not recorded and model_call.cut_off(exc):
+            if not isinstance(usage, JudgeUsage) and model_call.cut_off(exc):
                 usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=None, reported_by=ReportedBy.PROVIDER)
             raise
         self._record_direct_call(usage, data, model=model)

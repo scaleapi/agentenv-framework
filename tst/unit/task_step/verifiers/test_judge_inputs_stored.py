@@ -5,10 +5,12 @@ trajectory source it read for each turn."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from types import SimpleNamespace
 
+import litellm
 import pytest
 
 from agent_env.a2a_agent import protocol
@@ -71,9 +73,32 @@ async def test_a_direct_calls_record_opens_to_exactly_the_messages_format_and_se
 
 
 @pytest.mark.asyncio
-async def test_a_request_retried_with_the_same_input_shares_one_stored_object(monkeypatch, store):
-    import litellm
+async def test_a_request_cancelled_mid_call_keeps_what_it_was_sent(monkeypatch, store):
+    _llm(monkeypatch)
+    calling = asyncio.Event()
 
+    async def hangs(**kwargs):
+        calling.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(litellm, "acompletion", hangs)
+    context, step = _context(), _step(default_model="gpt-4o-mini")
+    with judge_usage.scope():
+        judge = judge_usage.start(context, step.id)
+        judging = asyncio.create_task(step._judge_directly("grade it", model="gpt-4o-mini", context=context,
+                                                           image_blocks=None, usage=judge))
+        await calling.wait()
+        judging.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await judging
+
+    [call] = judge.calls
+    assert (call["outcome"], call["endpoint_host"]) == ("cut_off", "gw.test")
+    assert _opened(store, call["input"])["messages"] == [{"role": "user", "content": "grade it"}]
+
+
+@pytest.mark.asyncio
+async def test_a_request_retried_with_the_same_input_shares_one_stored_object(monkeypatch, store):
     _llm(monkeypatch, failures=[litellm.RateLimitError("slow down", llm_provider="openai", model="gpt-4o-mini")])
 
     grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
