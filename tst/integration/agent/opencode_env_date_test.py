@@ -21,6 +21,7 @@ pytestmark = [pytest.mark.integration]
 
 VERSION = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["opencode-ai"]
 ENV_TODAY, ENV_YEAR = "Sun Jan 01 1950", 1950
+_DAY_S = 86400
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -65,7 +66,7 @@ def _machine_dates() -> set[str]:
     """This machine's date, as the CLI on real time writes one (``Date.toDateString()``) and as ISO, for yesterday,
     today and tomorrow, so a turn across midnight is still caught."""
     dates = set()
-    for offset in (-86400, 0, 86400):
+    for offset in (-_DAY_S, 0, _DAY_S):
         day = time.localtime(time.time() + offset)
         dates |= {f"{_DAYS[day.tm_wday]} {_MONTHS[day.tm_mon - 1]} {day.tm_mday:02d} {day.tm_year:04d}",
                   time.strftime("%Y-%m-%d", day)}

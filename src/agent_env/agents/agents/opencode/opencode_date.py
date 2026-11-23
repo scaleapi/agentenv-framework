@@ -21,6 +21,8 @@ from model_relay import Refusal
 _ENV_DATE = re.compile(r"(<env>\n(?:  [^\n]*\n)*?  Today's date: )[^\n]*")
 _SEARCH_YEAR = re.compile(r"The current year is -?\d+\.")
 _DATE_TIMEOUT_S = 5
+# How much of what a failing date printed its refusal quotes.
+_SHOWN_CHARS = 200
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -88,12 +90,12 @@ async def _env_today() -> tuple[str, int]:
     except OSError as exc:
         raise unread(f"{type(exc).__name__}: {exc}") from exc
     if code != 0:
-        raise unread(f"date exited {code}: {err.decode(errors='replace').strip()[:200]}")
+        raise unread(f"date exited {code}: {err.decode(errors='replace').strip()[:_SHOWN_CHARS]}")
     try:
         seconds, _ = out.decode().split()
         day = time.localtime(int(seconds))
     except (ValueError, OverflowError, OSError) as exc:
-        raise unread(f"date printed {out.decode(errors='replace')[:100]!r}") from exc
+        raise unread(f"date printed {out.decode(errors='replace')[:_SHOWN_CHARS]!r}") from exc
     return f"{_DAYS[day.tm_wday]} {_MONTHS[day.tm_mon - 1]} {day.tm_mday:02d} {day.tm_year:04d}", day.tm_year
 
 
