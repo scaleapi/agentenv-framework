@@ -80,7 +80,7 @@ def _workbook() -> bytes:
 
 def _step(**fields) -> ComputerVerifierTaskStep:
     params = dict(id="grade", version=None, env_id="desk", rubric=RUBRIC, use_agent_judge=False, prompt_id="p1",
-                  verifier_id="cua", result_files=["/HOME/Desktop/report.xlsx", "~/notes.txt", "~/missing.pdf"],
+                  verifier_id="cua", result_files=["Desktop/report.xlsx", "~/notes.txt", "~/missing.pdf"],
                   instruction="Total the amounts in report.xlsx and leave a note.")
     params.update(fields)
     return ComputerVerifierTaskStep(**params)
