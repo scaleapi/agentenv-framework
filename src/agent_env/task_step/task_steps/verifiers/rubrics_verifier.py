@@ -1367,8 +1367,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     ) -> dict:
         """Direct judge — no agent boot, no tools — through core's one model call (``config.model_call``). Returns
         ``response`` and ``trajectory_object_url`` (None), and the call's record, which the step keeps in its usage
-        (``_record_call``): its ``usage`` as the response carried it, the ``model`` called, the ``endpoint_host`` it
-        reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's price map's figure.
+        (``_record_direct_call``): its ``usage`` as the response carried it, the ``model`` called, the
+        ``endpoint_host`` it reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's
+        price map's figure.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1475,8 +1476,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_a2a_url: str,
         judge_agent_card: dict,
         judge_agent,
-        model: Optional[str] = None,
-        usage: Optional[StepUsage] = None,
+        model: Optional[str],
+        usage: StepUsage,
     ) -> dict:
         """Send one evaluation prompt to an A2A judge and return its response. The turn's reported usage goes into
         ``usage`` as soon as the judge replies, a failed reply's too."""
@@ -1510,9 +1511,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
-        if usage is not None:
-            usage.call(ModelRole.JUDGE, tr.usage, model=model,
-                       endpoint_host=getattr(judge_agent, "model_endpoint_host", None))
+        usage.call(ModelRole.JUDGE, tr.usage, model=model,
+                   endpoint_host=getattr(judge_agent, "model_endpoint_host", None))
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1645,7 +1645,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         return None
 
     @staticmethod
-    def _record_call(usage: StepUsage, data: dict, *, model: str) -> None:
+    def _record_direct_call(usage: StepUsage, data: dict, *, model: str) -> None:
         """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
         bill its cost when it sent one, with or without token counts."""
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
@@ -1667,9 +1667,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_max_thinking_tokens: Optional[int],
         use_agent_judge: bool,
         criteria: list[dict],
+        usage: StepUsage,
         image_blocks: Optional[list[dict]] = None,
         reject_bulk_verdicts: bool = False,
-        usage: Optional[StepUsage] = None,
     ) -> tuple[list[dict], int, list[dict], Optional[str]]:
         """Invoke the judge, retrying with corrective feedback when output ids/count are wrong and, with
         ``reject_bulk_verdicts``, when the rows read as bulk verdicts (kept, and logged, on the last attempt). Each
@@ -1713,8 +1713,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 )
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
-            if usage is not None and not use_agent_judge:
-                self._record_call(usage, data, model=model)
+            if not use_agent_judge:
+                self._record_direct_call(usage, data, model=model)
 
             logger.info(f"Judge response: {data['response'][:200]}...")
             judge_trajectory_url = data.get("trajectory_object_url")

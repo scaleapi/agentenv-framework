@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 
 
@@ -57,6 +58,7 @@ async def test_retries_then_succeeds_on_second_attempt(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=False,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2
@@ -93,6 +95,7 @@ async def test_raises_after_max_retries(monkeypatch):
             judge_effort=None,
             judge_max_thinking_tokens=None,
             use_agent_judge=False,
+            usage=StepUsage(TaskStepContext(), "verify"),
         )
 
     assert verifier._prompt_llm_judge.await_count == verifier.DEFAULT_MAX_RETRIES
@@ -126,6 +129,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=True,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2
@@ -159,6 +163,7 @@ async def test_retries_on_malformed_json(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=False,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2

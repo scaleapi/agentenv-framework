@@ -161,7 +161,7 @@ class StepUsage:
              reported_by: ReportedBy = ReportedBy.HARNESS) -> None:
         """One model call of ``role`` that isn't an agent's turn, as a judge's, written at once. The role starts at its
         first call, with the model and the endpoint host that call reached; ``reported_by`` says whose figure a call's
-        ``cost_usd`` is."""
+        ``cost_usd`` is, and the role keeps its first call's."""
         if role not in self._roles:
             self._context.record_model_endpoint(role.value, self._step_id, model, endpoint_host)
             self._roles[role] = RoleUsage(role.value, model, endpoint_host, reported_by=reported_by)

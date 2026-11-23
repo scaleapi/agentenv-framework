@@ -138,9 +138,9 @@ async def test_an_agent_judges_failed_reply_still_counts_its_usage(monkeypatch):
 def test_a_billed_call_without_counts_keeps_its_bill():
     context = TaskStepContext()
     usage = StepUsage(context, "verify")
-    RubricsVerifierTaskStep._record_call(usage, {"response": "", "model": "m", "endpoint_host": None,
+    RubricsVerifierTaskStep._record_direct_call(usage, {"response": "", "model": "m", "endpoint_host": None,
                                                  "reported_cost_usd": 0.01}, model="m")
-    RubricsVerifierTaskStep._record_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+    RubricsVerifierTaskStep._record_direct_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
                                                  "model": "m", "endpoint_host": None, "reported_cost_usd": 0.02},
                                          model="m")
     [entry] = context.metadata["step_usage"]["verify"]
@@ -165,8 +165,8 @@ async def test_an_agent_judges_reported_usage_is_its_calls(monkeypatch):
 def test_a_call_with_no_usage_is_a_turn_with_no_counts():
     context = TaskStepContext()
     usage = StepUsage(context, "verify")
-    RubricsVerifierTaskStep._record_call(usage, {"response": "", "model": "m", "endpoint_host": None}, model="m")
-    RubricsVerifierTaskStep._record_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+    RubricsVerifierTaskStep._record_direct_call(usage, {"response": "", "model": "m", "endpoint_host": None}, model="m")
+    RubricsVerifierTaskStep._record_direct_call(usage, {"response": "", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
                                                  "model": "m", "endpoint_host": None}, model="m")
     [entry] = context.metadata["step_usage"]["verify"]
     assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 10, True)
