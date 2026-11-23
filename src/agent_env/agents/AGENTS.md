@@ -63,9 +63,10 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   included (Claude Code's `result` events count only the main agent's). A cost the runtime couldn't price is unset,
   never 0. When the runtime knows each call's model, give the turn's counts by model in `Usage.models` on every turn
   (Claude Code from `modelUsage`, Gemini from its proxy's calls, OpenCode and Letta Code from the shared relay, which
-  reads each request's model): one `ModelUsage` per model, covering every call the turn counted, a call it can't name
-  under the configured model, so the host prices a subagent or side call on another model at that model's rate. Code
-  that sets these fields needs a `requirements.txt` protocol floor at the first release that has them.
+  reads each request's model, Codex from each thread's rollout, Hermes from the model its calls named): one `ModelUsage`
+  per model, covering every call the turn counted, a call it can't name under the configured model, so the host prices
+  a subagent or side call on another model at that model's rate. Code that sets these fields needs a
+  `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
   never sent.

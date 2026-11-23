@@ -114,6 +114,16 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
 
 
 @dataclass
+class ThreadCalls:
+    """One thread's share of a turn, the turn's own or a subagent's: the model its rollout last ran on (its
+    ``turn_context``), its counts and its model requests."""
+
+    model: str | None
+    counts: dict[str, int]
+    requests: int | None
+
+
+@dataclass
 class CodexResult:
     response: str
     tool_call_count: int
@@ -128,6 +138,8 @@ class CodexResult:
     usage: dict = field(default_factory=dict)
     token_usage: dict | None = None
     model_requests: int | None = None
+    # The threads `token_usage` sums, the turn's own first.
+    threads: list[ThreadCalls] = field(default_factory=list)
     # A model request the bridge's own stop cut short: the CLI counts a response only once it completes, so the one in
     # flight when the bridge stopped it at its tool-call limit, timeout or stall is in neither count. A stop during a
     # tool call cut none: the response that asked for the tool was counted.
@@ -291,6 +303,27 @@ def read_rollout_usage(thread_id: str | None) -> dict[str, int] | None:
     return None
 
 
+def read_rollout_model(thread_id: str | None) -> str | None:
+    """The model a native rollout's last turn ran on, as its ``turn_context`` names it."""
+    path = find_rollout_path(thread_id) if thread_id else None
+    if path is None:
+        return None
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "turn_context":
+            model = (record.get("payload") or {}).get("model")
+            if isinstance(model, str) and model:
+                return model
+    return None
+
+
 def read_rollout_requests(thread_id: str | None) -> int | None:
     """How many model requests a native rollout records: its token counts that raised the thread's total."""
     path = find_rollout_path(thread_id) if thread_id else None
@@ -353,8 +386,9 @@ def _add_subagent_calls(result: CodexResult, baselines: Mapping[str, tuple[dict[
     """Adds what the turn's subagents used since the turn began to its own counts."""
     for child in subagent_threads(result.session_id):
         usage, requests = baselines.get(child, (None, 0))
+        made = (read_rollout_requests(child) or 0) - requests
         if result.model_requests is not None:
-            result.model_requests += (read_rollout_requests(child) or 0) - requests
+            result.model_requests += made
         current = read_rollout_usage(child)
         if result.token_usage is None or current is None:
             continue
@@ -365,6 +399,7 @@ def _add_subagent_calls(result: CodexResult, baselines: Mapping[str, tuple[dict[
             continue
         result.token_usage = {key: result.token_usage.get(key, 0) + delta.get(key, 0)
                               for key in {**result.token_usage, **delta}}
+        result.threads.append(ThreadCalls(read_rollout_model(child), delta, made))
 
 
 def _usage_delta(
@@ -1049,6 +1084,9 @@ async def run_codex(
                         "incremental usage is unavailable"
                     )
                     result.warnings.append(warning)
+                else:
+                    result.threads = [ThreadCalls(read_rollout_model(result.session_id), dict(result.token_usage),
+                                                  result.model_requests)]
             _add_subagent_calls(result, subagent_baselines)
             return result
 

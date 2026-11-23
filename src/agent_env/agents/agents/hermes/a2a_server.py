@@ -11,6 +11,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import dataclasses
 import functools
 import json
 import logging
@@ -45,6 +46,7 @@ from agentenv_protocol.a2a_agent import (
     DataPart,
     FilePart,
     InlineSkillRequest,
+    ModelUsage,
     ObjectSnapshotLoadRequest,
     ObjectSnapshotSaveRequest,
     SkillAddResponse,
@@ -529,6 +531,25 @@ def _count(report: dict, name: str) -> int | None:
 
 
 def _usage(result) -> Usage:
+    """The turn's usage (``_counts``), its counts given as its model's when every call it made named one: Hermes runs
+    its auxiliary tasks on the main model, and a delegate_task child inherits it, as the bridge's config pins no other
+    for either. A turn whose calls named several models gives none rather than guess how they split."""
+    usage = _counts(result)
+    calls = result.killed_calls if result.killed_calls is not None else result.side_calls
+    named = set(calls.models) if calls is not None else set()
+    if result.killed_calls is None and isinstance(model := result.usage.get("model"), str) and model:
+        named.add(model)
+    if len(named) != 1 or (usage.input_tokens is None and usage.output_tokens is None):
+        return usage
+    (model,) = named
+    return dataclasses.replace(usage, models=(ModelUsage(
+        model=model, calls=usage.provider_details.get("api_calls"), input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens, cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens, input_includes_cache=usage.input_includes_cache,
+        cost_usd=usage.cost_usd),))
+
+
+def _counts(result) -> Usage:
     """The turn's tool calls and token counts, with ``input_tokens`` counting the cache: its main model calls as
     Hermes' usage file counts them, its auxiliary calls (title generation, compression) as the file's ``auxiliary``
     block counts them, and a delegate_task child's calls, which the file leaves out, from their events. Hermes'
