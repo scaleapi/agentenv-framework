@@ -697,14 +697,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> RubricsVerifierTaskStep:
-        return cls(**cls._rubrics_fields(data))
-
-    @classmethod
-    def _rubrics_fields(cls, data: dict) -> dict:
-        """The constructor's arguments a stored step holds, as ``from_dict`` reads them: a subclass reads its own beside
-        them."""
         raw_tf = data.get("trajectory_filter")
-        return dict(
+        return cls(
             **cls._base_from_dict(data),
             criteria=data["criteria"],
             prompt_id=data["prompt_id"],
@@ -750,10 +744,6 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         prompt's stored response. Each is shaped as a judge's row (``id``, ``result`` / ``score``, any ``weight``),
         with an id no criterion has. None here."""
         return []
-
-    def graded_response(self, context: TaskStepContext) -> Optional[PromptResponse]:
-        """The prompt response this step grades: an override point. Here, the run's response to ``prompt_id``."""
-        return next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
 
     def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
         """The judge calls ``criteria`` are graded in, one batch per call: ``size`` at a time in order, or all in one
@@ -852,7 +842,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
     async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
         """What the judge found in this run, written by nothing: an override point, whose result ``verify`` gates."""
-        prompt_response = self.graded_response(context)
+        prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         run = self._run_values(context)

@@ -1,9 +1,9 @@
 """computer_verifier: a computer-use task's rubric as rubrics_verifier's criteria (weights, negative penalties, a
 must-pass one refused for a step of its own that an aggregate gates on), and a run against a computer at its driver's
-boundary (``tst.unit.computer_home``) with the judge faked: the files the agent left read through the driver and rendered into the judge's prompt, a missing
-one named, the golden files and the state commands' output beside them, the caller's guidance or the default, and the
-files graded alone when no prompt step names them; state output that was cut marked incomplete, a Windows computer
-refused."""
+boundary (``tst.unit.computer_home``) with the judge faked: the files the agent left read through the driver and
+rendered into the judge's prompt beside the agent's response, a missing one named, the golden files and the state
+commands' output beside them, and the caller's guidance or the default; state output that was cut marked incomplete, a
+Windows computer refused."""
 
 from __future__ import annotations
 
@@ -84,11 +84,17 @@ def _workbook() -> bytes:
 
 
 def _step(**fields) -> ComputerVerifierTaskStep:
-    params = dict(id="grade", version=None, env_id="desk", rubric=RUBRIC, use_agent_judge=False,
+    params = dict(id="grade", version=None, env_id="desk", rubric=RUBRIC, use_agent_judge=False, prompt_id="p1",
                   verifier_id="cua", result_files=["/HOME/Desktop/report.xlsx", "~/notes.txt", "~/missing.pdf"],
                   instruction="Total the amounts in report.xlsx and leave a note.")
     params.update(fields)
     return ComputerVerifierTaskStep(**params)
+
+
+def _context(computer: Computer, response: str = "Done.", **deployed) -> TaskStepContext:
+    """A run with ``computer`` deployed and the agent's ``response`` to the prompt ``p1``, which the step grades."""
+    return TaskStepContext(deployed_envs=[computer.deployed(**deployed)],
+                           prompt_responses=[PromptResponse(prompt_id="p1", prompt_text="do it", response=response)])
 
 
 def _prompted_ids(prompt: str) -> list[str]:
@@ -124,7 +130,7 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
                  guidance="Grade it as the house style says.", golden_note="Golden files are examples.")
     prompts: list[str] = []
     _judge(step, prompts, failing=("note",))
-    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+    ctx = _context(computer)
 
     await step.execute(ctx)
 
@@ -137,7 +143,6 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
     assert "Total the amounts in report.xlsx" in prompt and "Grade it as the house style says." in prompt
     assert DEFAULT_GUIDANCE not in prompt and DEFAULT_GOLDEN_NOTE not in prompt
     assert len(_prompted_ids(prompt)) == 5
-    assert ctx.prompt_responses == []  # the stand-in the files were graded with is gone
     entry = ctx.metadata["verifications"]["cua"]
     assert entry["score"] == pytest.approx(58 / 83)
     assert {row["id"]: row.get("negative") for row in entry["results"]}["leak"] is True
@@ -156,7 +161,7 @@ async def test_must_pass_criteria_are_a_step_of_their_own_that_an_aggregate_gate
     rest = _step(result_files=["~/notes.txt"])
     _judge(gate, [], failing=("sheet-exists",))
     _judge(rest, [])
-    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+    ctx = _context(computer)
 
     await gate.execute(ctx)
     await rest.execute(ctx)
@@ -178,7 +183,7 @@ async def test_a_file_is_read_in_chunks_and_one_too_large_is_named_not_read(comp
     step = _step(result_files=["~/notes.txt", "~/huge.txt"])
     prompts: list[str] = []
     _judge(step, prompts)
-    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+    ctx = _context(computer)
 
     await step.execute(ctx)
 
@@ -197,40 +202,21 @@ async def test_a_dash_prefixed_file_is_read_whole_and_a_short_read_is_refused(co
     prompts: list[str] = []
     _judge(step, prompts)
 
-    await step.execute(TaskStepContext(deployed_envs=[computer.deployed()]))
+    await step.execute(_context(computer))
 
     assert "total,1500" in prompts[0]
 
     monkeypatch.setattr(computer_verifier, "_SIZE", 'test -f "$1" || exit 3; echo 999')  # a file that shrank since
     with pytest.raises(RuntimeError, match=r"gave 11 bytes from byte 0 of its 999"):
-        await _step(result_files=["~/--report.csv"]).execute(TaskStepContext(deployed_envs=[computer.deployed()]))
+        await _step(result_files=["~/--report.csv"]).execute(_context(computer))
 
 
 @pytest.mark.asyncio
-async def test_the_files_only_stand_in_never_joins_the_context(computer):
+async def test_the_judge_also_sees_the_agents_response(computer):
     step = _step(result_files=[])
-    seen: list[list] = []
-
-    async def judge(prompt: str, *, model: str, context: TaskStepContext) -> dict:
-        seen.append(list(context.prompt_responses))
-        return {"response": json.dumps({"results": [{"id": cid, "score": 1.0, "justification": f"Checked {cid}"}
-                                                    for cid in _prompted_ids(prompt)]})}
-
-    step._prompt_llm_judge = judge
-    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
-
-    await step.execute(ctx)
-
-    assert seen == [[]] and ctx.prompt_responses == []
-
-
-@pytest.mark.asyncio
-async def test_with_a_prompt_id_the_judge_also_sees_that_prompts_response(computer):
-    step = _step(prompt_id="p1", result_files=[])
     prompts: list[str] = []
     _judge(step, prompts)
-    ctx = TaskStepContext(deployed_envs=[computer.deployed()],
-                          prompt_responses=[PromptResponse(prompt_id="p1", prompt_text="do it", response="Done: B3")])
+    ctx = _context(computer, response="Done: B3")
 
     await step.execute(ctx)
 
@@ -238,12 +224,12 @@ async def test_with_a_prompt_id_the_judge_also_sees_that_prompts_response(comput
     assert DEFAULT_GUIDANCE in prompts[0]
 
 
-def test_it_round_trips_through_the_registry_keeping_a_files_only_grade():
+def test_it_round_trips_through_the_registry():
     step = _step(computer="desk", guidance="Be strict.", state_commands=[{"name": "s", "command": ["cat", "/tmp/s.json"]}])
     data = step.to_dict()
     again = get_task_step_registry()["computer_verifier"].from_dict(data)
 
-    assert data["prompt_id"] is None and again.grades_files_alone and again.to_dict() == data
+    assert data["prompt_id"] == "p1" and again.to_dict() == data
     assert again.criteria == step.criteria and again.score_aggregator.value == "weighted_average"
     gate = _step(score_aggregator="all_pass")
     assert get_task_step_registry()["computer_verifier"].from_dict(gate.to_dict()).score_aggregator.value == "all_pass"
@@ -252,7 +238,6 @@ def test_it_round_trips_through_the_registry_keeping_a_files_only_grade():
 @pytest.mark.parametrize("fields, problem", [
     ({"guidance": "  "}, "guidance must be text"),
     ({"golden_note": 3}, "golden_note must be text"),
-    ({"use_trajectory": True}, "use_trajectory needs a prompt_id"),
     ({"result_files": "a.txt"}, "result_files must be a list"),
     ({"state_commands": [{"name": "s"}]}, "each of state_commands"),
 ])
@@ -275,7 +260,7 @@ async def test_state_output_that_was_cut_is_marked_incomplete(computer, stdout, 
         return {"exit_code": 0, "timed_out": False, "stdout": stdout, "truncated": truncated}
 
     step._state = state
-    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+    ctx = _context(computer)
 
     await step.execute(ctx)
 
@@ -292,7 +277,7 @@ async def test_a_windows_computer_is_refused_before_anything_is_read(computer):
     _judge(step, [])
 
     with pytest.raises(RuntimeError, match="is a windows computer, which it can't read"):
-        await step.execute(TaskStepContext(deployed_envs=[computer.deployed(card=card)]))
+        await step.execute(_context(computer, card=card))
     assert computer.calls == []
 
 

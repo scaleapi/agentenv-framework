@@ -12,8 +12,9 @@ What the judge reads is what the agent left in the computer: each of
 and rendered as text (``computer/files.py``), a file that isn't there named as one the agent did not produce; the
 golden files of ``expected_artifact_id``, for reference only; the output of each of ``state_commands`` run in the
 computer, such as a mock website's state, marked incomplete when it was cut; and ``instruction``, the task as the agent
-was given it. With no ``prompt_id`` the judge grades those alone; with one it also sees that prompt's response. Files
-and state are read through ``sh`` and POSIX tools, so a Windows computer is refused, at preflight and before any read.
+was given it. The judge also sees the agent's response to ``prompt_id``, and its trajectory with ``use_trajectory``.
+Files and state are read through ``sh`` and POSIX tools, so a Windows computer is refused, at preflight and before any
+read.
 
 How the judge grades is ``guidance``, and how it treats the golden files ``golden_note``: the caller's own wording, or
 short defaults of the framework's. The score is rubrics_verifier's, ``score_aggregator`` over the rows, a weighted
@@ -50,7 +51,8 @@ where you found the evidence.
 - A criterion marked "negative": true names something that should not happen; score it as the instructions say.
 - A criterion's "applies_to" lists the files it is about; one without it is about the outputs as a whole.
 - A criterion marked "visual": true is about how a file looks, judged from its rendering.
-- A golden file is a reference: what it holds counts only when the result holds it too."""
+- A golden file is a reference: what it holds counts only when the result holds it too.
+- What the agent's response says it did is not evidence on its own: grade on the files and state shown."""
 #: How the judge treats the golden files when the step names no ``golden_note`` of its own.
 DEFAULT_GOLDEN_NOTE = ("Reference files: use one only for a criterion that refers to it or to an expected value, not to "
                        "compare the results with as a whole.")
@@ -143,7 +145,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
     context_paths = RubricsVerifierTaskStep.context_paths
 
     def __init__(self, id: str, version: Optional[int], *, env_id: str, rubric: Any, result_files: list[str],
-                 prompt_id: Optional[str] = None, computer: Optional[str] = None,
+                 prompt_id: str, computer: Optional[str] = None,
                  expected_artifact_id: Optional[str] = None, expected_artifact_version: Optional[int] = None,
                  state_commands: Optional[list[dict]] = None, instruction: Optional[str] = None,
                  guidance: Optional[str] = None, golden_note: Optional[str] = None, use_trajectory: bool = False, criteria: Any = None,
@@ -158,8 +160,6 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         for name, text in (("guidance", guidance), ("golden_note", golden_note)):
             if text is not None and (not isinstance(text, str) or not text.strip()):
                 raise ValueError(f"{where}: {name} must be text, or left out for the default")
-        if prompt_id is None and use_trajectory:
-            raise ValueError(f"{where}: use_trajectory needs a prompt_id, whose run's trajectory the judge reads")
         if not isinstance(result_files, list) or not all(isinstance(p, str) and p for p in result_files):
             raise ValueError(f"{where}: result_files must be a list of paths in the computer")
         for command in state_commands or []:
@@ -176,8 +176,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         self.instruction = instruction
         self.guidance = guidance
         self.golden_note = golden_note
-        self.grades_files_alone = prompt_id is None
-        super().__init__(id, version, criteria=criteria_from_rubric(rubric), prompt_id=prompt_id or f"{id}:files",
+        super().__init__(id, version, criteria=criteria_from_rubric(rubric), prompt_id=prompt_id,
                          use_trajectory=use_trajectory,
                          default_model=default_model, default_model_api_base=default_model_api_base, effort=effort,
                          max_thinking_tokens=max_thinking_tokens, judge_a2a_agent_id=judge_a2a_agent_id,
@@ -193,31 +192,24 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         return problems
 
     def to_dict(self) -> dict:
-        return {**super().to_dict(), "prompt_id": None if self.grades_files_alone else self.prompt_id, "env_id": self.env_id,
-                "rubric": self.rubric, "result_files": self.result_files, "computer": self.computer,
-                "expected_artifact_id": self.expected_artifact_id,
+        return {**super().to_dict(), "env_id": self.env_id, "rubric": self.rubric, "result_files": self.result_files,
+                "computer": self.computer, "expected_artifact_id": self.expected_artifact_id,
                 "expected_artifact_version": self.expected_artifact_version, "state_commands": self.state_commands,
                 "instruction": self.instruction, "guidance": self.guidance, "golden_note": self.golden_note}
 
     @classmethod
     def from_dict(cls, data: dict) -> ComputerVerifierTaskStep:
-        fields = cls._rubrics_fields({**data, "criteria": None, "prompt_id": data.get("prompt_id")})
-        fields.update(use_trajectory=data.get("use_trajectory", False), env_id=data["env_id"], rubric=data["rubric"],
-                      result_files=data.get("result_files") or [], computer=data.get("computer"),
-                      expected_artifact_id=data.get("expected_artifact_id"),
-                      expected_artifact_version=data.get("expected_artifact_version"),
-                      state_commands=data.get("state_commands"), instruction=data.get("instruction"),
-                      guidance=data.get("guidance"), golden_note=data.get("golden_note"))
-        return cls(**fields)
+        """rubrics_verifier's, ``criteria`` left to ``rubric`` and ``use_trajectory`` off unless the step turns it on."""
+        return super().from_dict({**data, "criteria": None, "use_trajectory": data.get("use_trajectory", False)})
 
-    def graded_response(self, context: TaskStepContext) -> Optional[PromptResponse]:
-        """The prompt's response; for a step that grades the files alone, a stand-in of its own, which never joins the
-        context, so no other step reads it as the agent's."""
-        if not self.grades_files_alone:
-            return super().graded_response(context)
-        return PromptResponse(prompt_id=self.prompt_id, prompt_text=self.instruction or "",
-                              response="(Not graded: grade the files and state below, which are what the agent "
-                                       "produced.)")
+    @classmethod
+    def _base_from_dict(cls, data: dict) -> dict:
+        return {**super()._base_from_dict(data), "env_id": data["env_id"], "rubric": data["rubric"],
+                "result_files": data.get("result_files") or [], "computer": data.get("computer"),
+                "expected_artifact_id": data.get("expected_artifact_id"),
+                "expected_artifact_version": data.get("expected_artifact_version"),
+                "state_commands": data.get("state_commands"), "instruction": data.get("instruction"),
+                "guidance": data.get("guidance"), "golden_note": data.get("golden_note")}
 
     async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
         """The files and state the agent left in the computer, the golden files, the instruction and how to grade;
