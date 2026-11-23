@@ -385,7 +385,7 @@ class _Run:
         self.final_sent = False
         self.last_reply_at: Optional[datetime] = None
         self.per_turn_trajectory_urls: list[Optional[str]] = []
-        self.per_turn_trajectories: list[TurnTrajectory] = []  # each turn's record, beside its url
+        self.per_turn_trajectories: list[TurnTrajectory] = []
         self.copies: Optional[AtifCopies] = None
         self.per_turn_parts: list[Optional[list[dict]]] = []
         self.tool_calls: Optional[int] = None

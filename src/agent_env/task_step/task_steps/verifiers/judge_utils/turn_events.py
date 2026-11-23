@@ -1,7 +1,8 @@
 """One agent turn's trajectory as what happened in it: the agent's text and each tool call with its input and result,
 from whichever format the agent stored it in (OTel spans, OpenInference's included; Claude Code's or Gemini's
-stream-json), or from the turn's atif/1 view. What each format repeats on every turn or call (the tool list, the conversation so far, signatures, token
-counts) is dropped, and results are made readable: JSON envelopes unwrapped, email bodies decoded, images left out."""
+stream-json), or from the turn's atif/1 view. What each format repeats on every turn or call (the tool list, the
+conversation so far, signatures, token counts) is dropped, and results are made readable: JSON envelopes unwrapped,
+email bodies decoded, images left out."""
 
 from __future__ import annotations
 
@@ -15,8 +16,12 @@ from typing import Any, Optional
 
 from agentenv_protocol.atif import FORMAT as ATIF, profile_of
 
-from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import _by_call, _SubAgents, _text
-from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import _steps as _atif_steps
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
+    SubAgents,
+    calls_with_results,
+    content_text,
+    steps_of,
+)
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import (
     extract_final_response,
     is_tool_span,
@@ -450,18 +455,18 @@ def atif_turn_events(view: Mapping[str, Any]) -> TurnEvents:
     each naming it as ``subagent`` (the call that started it, as its ``parent_tool_use_id`` is natively); and the final,
     the closing message, an error when the turn's task didn't complete."""
     events: list[dict] = []
-    subagents = _SubAgents(view)
+    subagents = SubAgents(view)
 
     def walk(trajectory: Mapping[str, Any], tag: dict) -> None:
-        for step in _atif_steps(trajectory):
+        for step in steps_of(trajectory):
             if step.get("source") != "agent":
                 continue
             if isinstance(step.get("reasoning_content"), str) and step["reasoning_content"].strip():
                 events.append({"type": "thinking", "text": step["reasoning_content"], **tag})
-            text = _text(step.get("message"))
+            text = content_text(step.get("message"))
             if text.strip():
                 events.append({"type": "text", "text": text, **tag})
-            for call, results in _by_call(step):
+            for call, results in calls_with_results(step):
                 event = None
                 if call is not None:
                     event = {**_call(str(call.get("function_name") or ""), call.get("tool_call_id"),
@@ -474,11 +479,11 @@ def atif_turn_events(view: Mapping[str, Any]) -> TurnEvents:
                         walk(sub, {"subagent": sub.get("trajectory_id")})
 
     walk(view, {})
-    steps = _atif_steps(view)
+    steps = steps_of(view)
     closing = next((step for step in reversed(steps)
-                    if step.get("source") == "agent" and _text(step.get("message")).strip()), None)
+                    if step.get("source") == "agent" and content_text(step.get("message")).strip()), None)
     state = profile_of(steps[-1]).get("state") if steps else None
-    events.append({"type": "final", "text": _text(closing.get("message")) if closing else None,
+    events.append({"type": "final", "text": content_text(closing.get("message")) if closing else None,
                    "error": state not in (None, "completed")})
     return TurnEvents(ATIF, events, len(json.dumps(view)))
 

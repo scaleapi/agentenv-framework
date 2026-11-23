@@ -26,6 +26,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from agentenv_protocol.a2a_agent import TrajectoryState
@@ -46,28 +47,36 @@ _PASSING_WRITE_SECONDS = 5
 _ENDED_AS = {"completed": TrajectoryState.COMPLETED, "canceled": TrajectoryState.CANCELED}
 # A sub-agent's trajectory id names its folder, so only a plain file name does.
 _SUB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-#: Pulls a live atif/1 page's media into the run's folder: the page's steps as a document, and its session.
 LiveMedia = Callable[[Mapping[str, Any], Any], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class LiveAtif:
+    """A turn followed as atif/1, its native format the fallback for a turn the agent refuses atif/1 before its first
+    page: ``media`` pulls the media a page's new steps name (given them as a document, and the session) into
+    ``media_base``, the folder their ``media/`` paths resolve in."""
+
+    media: LiveMedia
+    media_base: str
 
 
 class LiveTrajectoryChunks:
     """The ``follow_trajectory`` sink that stores one turn's pages."""
 
-    def __init__(self, store: ObjectStore, prefix_key: str, turn_id: str, *, media: Optional[LiveMedia] = None,
-                 media_base: Optional[str] = None, stop: Optional[asyncio.Event] = None) -> None:
+    def __init__(self, store: ObjectStore, prefix_key: str, turn_id: str, *, atif: Optional[LiveAtif] = None,
+                 stop: Optional[asyncio.Event] = None) -> None:
         self._store = store
         self._directory = f"{prefix_key}{turn_id}/live/"
         self._format_written = False
         self._stored = 0
         self._storing: asyncio.Future | None = None
         self._ended = False
-        self._media, self._media_base, self._stop = media, media_base, stop
+        self._atif, self._stop = atif, stop
         self._headers: dict[str, tuple[str, int]] = {}  # each trajectory's folder: its header's digest, versions
         self._sub_steps: dict[str, int] = {}  # each sub-agent's folder: the last step id stored
         self._session: Any = None
         self._stopped: Optional[str] = None
-        #: The media pulls this turn's pages started, cancelled once it ends: its copy's own pull takes what's left.
-        self.pulls: list[asyncio.Task] = []
+        self._pulls: list[asyncio.Task] = []
 
     async def __call__(self, batch: TrajectoryBatch) -> None:
         if batch.stopped:
@@ -84,7 +93,7 @@ class LiveTrajectoryChunks:
                 header = batch.header or {}
                 meta.update(schema_version=batch.schema_version, profile_version=batch.profile_version,
                             session_id=header.get("session_id"), trajectory_id=header.get("trajectory_id"),
-                            media_base=self._media_base)
+                            media_base=self._atif.media_base if self._atif else None)
             await self._put("meta.json", json.dumps(meta).encode(), "application/json")
             self._format_written = True
         if batch.last:
@@ -106,15 +115,15 @@ class LiveTrajectoryChunks:
             await self._header("", name, batch.header)
         new_subs = [sub for found in [await self._store_sub(s, "sub/") for s in batch.subagents] for sub in found]
         self._stored = batch.next
-        if self._media is not None and not (self._stop is not None and self._stop.is_set()):
+        if self._atif is not None and not (self._stop is not None and self._stop.is_set()):
             steps = {"steps": list(batch.events), "subagent_trajectories": new_subs}
             if batch.events or new_subs:
-                self.pulls.append(asyncio.ensure_future(self._media(steps, self._session)))
+                self._pulls.append(asyncio.ensure_future(self._atif.media(steps, self._session)))
 
-    async def _store_sub(self, sub: Any, path: str) -> list[dict[str, Any]]:
+    async def _store_sub(self, sub: Mapping[str, Any], path: str) -> list[dict[str, Any]]:
         """A sub-agent's steps not stored yet and its header if it changed, under ``path``; and its embedded sub-agents
         the same way, under its folder. Returns each trajectory with only its new steps, for the media they name."""
-        trajectory_id = sub.get("trajectory_id") if isinstance(sub, Mapping) else None
+        trajectory_id = sub.get("trajectory_id")
         if not isinstance(trajectory_id, str) or not _SUB_ID.fullmatch(trajectory_id):
             return []
         where = f"{path}{trajectory_id}/"
@@ -138,6 +147,13 @@ class LiveTrajectoryChunks:
         if digest != seen:
             await self._put(f"{where}{name}.{versions + 1:04d}.header.json", body, "application/json")
             self._headers[where] = (digest, versions + 1)
+
+    async def cancel_pulls(self) -> None:
+        """Cancel the media pulls this turn's pages started: once the turn ends, its copy's own pull takes what's left."""
+        for pull in self._pulls:
+            pull.cancel()
+        if self._pulls:
+            await asyncio.wait(self._pulls)
 
     async def end(self, state: TrajectoryState) -> None:
         """Mark the turn ended in ``state`` after the events stored so far; the first mark stays."""
@@ -163,18 +179,17 @@ class LiveTurn:
         store: ObjectStore,
         prefix_key: str,
         turn_id: str,
+        *,
         poll_interval_seconds: float,
         previous_turn_id: str | None,
         headers: Mapping[str, str],
         format: str | None = None,
-        fallback_format: str | None = None,
-        media: Optional[LiveMedia] = None,
-        media_base: Optional[str] = None,
+        atif: Optional[LiveAtif] = None,
     ) -> None:
         self._endpoint = endpoint
         self._headers = headers
         self._format = format
-        self._fallback_format, self._media, self._media_base = fallback_format, media, media_base
+        self._atif = atif
         self._store = store
         self._prefix_key = prefix_key
         self._turn_id = turn_id
@@ -192,14 +207,14 @@ class LiveTurn:
             self.links.append(
                 asyncio.create_task(_in_passing(linking, self._previous_turn_id, f"linked to turn {self._turn_id}"))
             )
-        sink = LiveTrajectoryChunks(self._store, self._prefix_key, self._turn_id, media=self._media,
-                                    media_base=self._media_base, stop=self.stop)
+        sink = LiveTrajectoryChunks(self._store, self._prefix_key, self._turn_id, atif=self._atif, stop=self.stop)
         self.sinks.append(sink)
         self.followers.append(
             asyncio.create_task(
                 follow_trajectory(
                     self._endpoint, task_id, sink, poll_interval_seconds=self._poll_interval_seconds, stop=self.stop,
-                    headers=self._headers, format=self._format, fallback_format=self._fallback_format,
+                    headers=self._headers, format=ATIF if self._atif else self._format,
+                    fallback_format=self._format if self._atif else None,
                 )
             )
         )
@@ -220,9 +235,7 @@ async def following_live_trajectory(
     headers: Mapping[str, str],
     previous_turn_id: str | None = None,
     format: str | None = None,
-    fallback_format: str | None = None,
-    media: Optional[LiveMedia] = None,
-    media_base: Optional[str] = None,
+    atif: Optional[LiveAtif] = None,
 ) -> AsyncIterator[LiveTurn]:
     """Yield the turn whose task is followed once its message is sent; then ``previous_turn_id``'s
     ``next.json`` names it.
@@ -233,8 +246,8 @@ async def following_live_trajectory(
     for a cancelled step or ``failed``, so readers do not wait on it. A follower's own failure is
     logged and never fails the turn. The media pulls a turn's atif/1 pages started are cancelled once it ends: the
     turn's copy pulls what's left, off the turn's path."""
-    turn = LiveTurn(endpoint, store, prefix_key, turn_id, poll_interval_seconds, previous_turn_id, headers, format,
-                    fallback_format, media, media_base)
+    turn = LiveTurn(endpoint, store, prefix_key, turn_id, poll_interval_seconds=poll_interval_seconds,
+                    previous_turn_id=previous_turn_id, headers=headers, format=format, atif=atif)
     stopped_as = TrajectoryState.FAILED
 
     try:
@@ -262,11 +275,8 @@ async def following_live_trajectory(
                 logger.warning(
                     "Live trajectory of turn %s stopped (continuing): %r", turn_id, follower.exception()
                 )
-        pulls = [pull for sink in turn.sinks for pull in sink.pulls]
-        for pull in pulls:
-            pull.cancel()
-        if pulls:
-            await asyncio.wait(pulls)
+        for sink in turn.sinks:
+            await sink.cancel_pulls()
         if turn.links:
             await asyncio.wait(turn.links)
         if turn.sinks:
@@ -276,15 +286,15 @@ async def following_live_trajectory(
 
 class LiveTurns:
     """A step's turns, followed one after another: a turn sent after another is named in that one's
-    ``next.json``, and ``end`` marks the last turn sent as the step's last."""
+    ``next.json``, and ``end`` marks the last turn sent as the step's last. Each is read in ``format``, or as atif/1
+    with ``atif``."""
 
     def __init__(self, endpoint: str, store: ObjectStore, prefix_key: str, *, poll_interval_seconds: float,
-                 headers: Mapping[str, str], format: str | None = None, fallback_format: str | None = None,
-                 media: Optional[LiveMedia] = None, media_base: Optional[str] = None) -> None:
+                 headers: Mapping[str, str], format: str | None = None, atif: Optional[LiveAtif] = None) -> None:
         self._endpoint = endpoint
         self._headers = headers
         self._format = format
-        self._fallback_format, self._media, self._media_base = fallback_format, media, media_base
+        self._atif = atif
         self._store = store
         self._prefix_key = prefix_key
         self._poll_interval_seconds = poll_interval_seconds
@@ -302,9 +312,7 @@ class LiveTurns:
             headers=self._headers,
             previous_turn_id=self._last_sent,
             format=self._format,
-            fallback_format=self._fallback_format,
-            media=self._media,
-            media_base=self._media_base,
+            atif=self._atif,
         ) as turn:
             try:
                 yield turn

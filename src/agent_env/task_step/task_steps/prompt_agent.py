@@ -64,7 +64,7 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
     trajectory_prefix_key,
 )
 from agent_env.task_step.snapshot_utils.atif_copies import AtifCopies
-from agent_env.task_step.snapshot_utils.live_trajectory import LiveTurns
+from agent_env.task_step.snapshot_utils.live_trajectory import LiveAtif, LiveTurns
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig, SnapshotSeries
 
 logger = logging.getLogger(__name__)
@@ -656,14 +656,10 @@ class PromptAgentTaskStep(TaskStep):
         atif_copies = AtifCopies(context, agent, target_url, traj_ext_cached,
                                  prescribed=ATIF_FORMAT in prescribed_formats(context))
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
-        # A run whose copy replaces native follows atif/1 live too, its media pulled as its pages come.
-        copied = atif_copies.replaces_native
+        live_atif = LiveAtif(atif_copies.pull_live_media, atif_copies.folder) if atif_copies.replaces_native else None
         live_turns = (
             LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers,
-                      format=ATIF_FORMAT if copied else formats.native,
-                      fallback_format=formats.native if copied else None,
-                      media=atif_copies.pull_live_media if copied else None,
-                      media_base=atif_copies.folder if copied else None)
+                      format=formats.native, atif=live_atif)
             if live is not None else None
         )
         final_state: str = TaskState.completed.value
