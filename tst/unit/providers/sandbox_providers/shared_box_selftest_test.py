@@ -177,6 +177,25 @@ async def test_a_box_not_set_up_for_a_gateway_runs_no_probe_and_stays_unverified
     assert box_api.box.events == []
 
 
+LISTEN_WITHIN_S = 10
+
+
+async def _until_listening(port: int) -> None:
+    """Waits until something accepts connections on loopback ``port``; a server started a moment ago may not yet."""
+    deadline = asyncio.get_running_loop().time() + LISTEN_WITHIN_S
+    while True:
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            if asyncio.get_running_loop().time() > deadline:
+                raise
+            await asyncio.sleep(0.05)
+        else:
+            writer.close()
+            await writer.wait_closed()
+            return
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -203,6 +222,8 @@ async def test_the_door_probe_answers_as_expected_against_a_real_door():
                                              host="127.0.0.1", port=door_port, lifespan="off", log_level="warning"))
         serving = asyncio.ensure_future(door.serve())
         try:
+            await _until_listening(upstream_port)
+            await _until_listening(door_port)
             answer = await _python(shared_box_selftest._DOOR, "127.0.0.1", str(door_port), SLOT_TOKEN_HEADER,
                                    "the-token")
         finally:

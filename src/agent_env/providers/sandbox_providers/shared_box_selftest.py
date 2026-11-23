@@ -48,6 +48,15 @@ WALLS_PROBE_EVENT = "agent_env.shared_box_walls_probe"
 PROBE_MARKER = "# walls probe: "
 #: The whole run's limit, in seconds, past which the probe running is cut off and the walls are not verified.
 TOTAL_BUDGET_S = 300.0
+#: Each probe's own limit, in seconds, by the kind of work it waits on.
+#: One command on the box or in a container that is already running.
+ONE_COMMAND_S = 30
+#: One or a few connections from a running probe container, each with its own short timeout.
+CONNECTIONS_S = 45
+#: Reading or changing the box's own state: the firewall's rules and counters, or removing the probe slots.
+BOX_STATE_S = 60
+#: Building the door image and starting both probe slots' containers.
+SLOTS_UP_S = 180
 
 #: The gateway image's base, by digest: every probe container runs it.
 PROBE_IMAGE = ("public.ecr.aws/docker/library/python:3.11-slim"
@@ -286,18 +295,22 @@ async def _slots_run_under_gvisor(box: VmSandbox, plan: ProbePlan) -> str:
     ]))
 
 
+#: How long a probe script retries a request that fails, in seconds: a service just started may not answer yet.
+_RETRY_WITHIN_S = 30
+
 _GET = """
 import sys, time, urllib.request
+REQUEST_TIMEOUT_S, RETRY_PAUSE_S = 5, 1
 deadline = time.monotonic() + float(sys.argv[2])
 while True:
     try:
-        print(urllib.request.urlopen(sys.argv[1], timeout=5).status)
+        print(urllib.request.urlopen(sys.argv[1], timeout=REQUEST_TIMEOUT_S).status)
         break
     except Exception as e:
         if time.monotonic() > deadline:
             print(type(e).__name__ + ": " + str(e))
             break
-        time.sleep(1)
+        time.sleep(RETRY_PAUSE_S)
 """
 
 
@@ -305,19 +318,20 @@ def _peer_by_name(index: int) -> Callable[[VmSandbox, ProbePlan], Awaitable[str]
     async def run(box: VmSandbox, plan: ProbePlan) -> str:
         slot = plan.slots[index]
         url = f"http://{_PEER}:{_PEER_PORT}/"
-        return await _answer(box, f"slot_{index}_peer_by_name", slot.exec_in_prober("python", "-c", _GET, url, "30"))
+        return await _answer(box, f"slot_{index}_peer_by_name", slot.exec_in_prober("python", "-c", _GET, url, str(_RETRY_WITHIN_S)))
     return run
 
 
 _REACH = """
 import socket, sys
+CONNECT_TIMEOUT_S = 3
 reached = []
 for target in sys.argv[1:]:
     host, _, port = target.rpartition(":")
     host = host.strip("[]")
     try:
         with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
-            s.settimeout(3)
+            s.settimeout(CONNECT_TIMEOUT_S)
             s.connect((host, int(port)))
         reached.append(target + " open")
     except ConnectionRefusedError:
@@ -340,7 +354,7 @@ def _blocked_from_inside(name: str, targets: Callable[[ProbePlan], list[str]]) -
     """A probe that slot 0's prober reaches none of ``targets``: a connection that opens or is refused got there."""
     async def run(box: VmSandbox, plan: ProbePlan) -> str:
         return await _answer(box, name, plan.inside.exec_in_prober("python", "-c", _REACH, *targets(plan)))
-    return Probe(name, _BLOCKED, 45, run)
+    return Probe(name, _BLOCKED, CONNECTIONS_S, run)
 
 
 _DNS = """
@@ -363,22 +377,24 @@ async def _dns_answers_through_the_mounted_resolv_conf(box: VmSandbox, plan: Pro
 
 
 async def _internet_is_reachable(box: VmSandbox, plan: ProbePlan) -> str:
-    return await _answer(box, "internet", plan.inside.exec_in_prober("python", "-c", _GET, _CONNECTIVITY_URL, "30"))
+    return await _answer(box, "internet", plan.inside.exec_in_prober("python", "-c", _GET, _CONNECTIVITY_URL,
+                                                                     str(_RETRY_WITHIN_S)))
 
 
 _DOOR = """
 import http.client, sys, time
 host, port, header, token = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+REQUEST_TIMEOUT_S, UP_WITHIN_S, RETRY_PAUSE_S = 5, 30, 1
 
 def status(target, value):
-    connection = http.client.HTTPConnection(host, port, timeout=5)
+    connection = http.client.HTTPConnection(host, port, timeout=REQUEST_TIMEOUT_S)
     try:
         connection.request("GET", target, headers={} if value is None else {header: value})
         return connection.getresponse().status
     finally:
         connection.close()
 
-deadline = time.monotonic() + 30
+deadline = time.monotonic() + UP_WITHIN_S
 while True:
     try:
         status("/", None)
@@ -386,7 +402,7 @@ while True:
     except OSError:
         if time.monotonic() > deadline:
             raise
-        time.sleep(1)
+        time.sleep(RETRY_PAUSE_S)
 print(status("/", None), status("/", "wrong-" + token), status("/", token), status("//elsewhere/x", token))
 """
 
@@ -404,20 +420,20 @@ async def _probe_slots_tear_down(box: VmSandbox, plan: ProbePlan) -> str:
 
 
 PROBES: tuple[Probe, ...] = (
-    Probe("docker_info", frozenset({"ok"}), 30, _docker_runs_gvisor_in_a_user_namespace),
-    Probe("firewall", frozenset({"ok"}), 60, _firewall_holds_the_walls),
-    Probe("probe_slots_up", frozenset({"up"}), 180, _probe_slots_come_up),
-    Probe("slots_under_gvisor", frozenset({"gvisor"}), 30, _slots_run_under_gvisor),
-    Probe("slot_0_peer_by_name", frozenset({"200"}), 45, _peer_by_name(0)),
-    Probe("slot_1_peer_by_name", frozenset({"200"}), 45, _peer_by_name(1)),
+    Probe("docker_info", frozenset({"ok"}), ONE_COMMAND_S, _docker_runs_gvisor_in_a_user_namespace),
+    Probe("firewall", frozenset({"ok"}), BOX_STATE_S, _firewall_holds_the_walls),
+    Probe("probe_slots_up", frozenset({"up"}), SLOTS_UP_S, _probe_slots_come_up),
+    Probe("slots_under_gvisor", frozenset({"gvisor"}), ONE_COMMAND_S, _slots_run_under_gvisor),
+    Probe("slot_0_peer_by_name", frozenset({"200"}), CONNECTIONS_S, _peer_by_name(0)),
+    Probe("slot_1_peer_by_name", frozenset({"200"}), CONNECTIONS_S, _peer_by_name(1)),
     _blocked_from_inside("a_to_b_container_ip", lambda plan: [
         f"{plan.other.peer_address}:{_PEER_PORT}", f"{plan.other.door_address}:{plan.other.door_port}"]),
     _blocked_from_inside("a_to_b_door_via_box_ip", lambda plan: [f"{plan.facts.address}:{plan.other.door_port}"]),
     _blocked_from_inside("a_to_box_ip", lambda plan: [f"{plan.facts.address}:{port}" for port in (22, 80, 2375)]),
     _blocked_from_inside("a_to_private_ranges", _private_range_targets),
     _blocked_from_inside("a_ipv6", lambda plan: list(_PUBLIC_IPV6)),
-    Probe("dns", frozenset({"answers"}), 30, _dns_answers_through_the_mounted_resolv_conf, needs_open_egress=True),
-    Probe("internet", frozenset({"204"}), 45, _internet_is_reachable, needs_open_egress=True),
-    Probe("door", frozenset({"401 401 200 400"}), 45, _door_takes_only_its_token),
-    Probe("probe_slots_torn_down", frozenset({"torn down"}), 60, _probe_slots_tear_down),
+    Probe("dns", frozenset({"answers"}), ONE_COMMAND_S, _dns_answers_through_the_mounted_resolv_conf, needs_open_egress=True),
+    Probe("internet", frozenset({"204"}), CONNECTIONS_S, _internet_is_reachable, needs_open_egress=True),
+    Probe("door", frozenset({"401 401 200 400"}), CONNECTIONS_S, _door_takes_only_its_token),
+    Probe("probe_slots_torn_down", frozenset({"torn down"}), BOX_STATE_S, _probe_slots_tear_down),
 )

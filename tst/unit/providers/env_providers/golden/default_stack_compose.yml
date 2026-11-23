@@ -24,8 +24,6 @@ services:
     environment:
       - PGWEB_DATABASE_URL=postgres://agentenv:agentenv@servicedb:5432/agentenv?sslmode=disable
       - PGWEB_LOCK_SESSION=true
-    ports:
-      - "10.0.0.5:9081:8081"
     networks:
       - env-network
 
@@ -38,8 +36,6 @@ services:
     environment:
       - DATABASE_URI=postgresql://agentenv:agentenv@servicedb:5432/agentenv
     command: --transport=streamable-http --streamable-http-host=0.0.0.0 --access-mode=unrestricted
-    ports:
-      - "10.0.0.5:19767:8000"
     networks:
       - env-network
 
@@ -130,6 +126,7 @@ services:
       - REST_PROXY_URLS=mcp-slack=http://slack:18765,mcp-calc=http://calc:18765,mcp-browser=http://browser:18765,shop=http://shop-website-backend:8000,blog=http://blog-website-backend:8000,feed=http://feed-website-backend:8000,desk=https://desk.example.com
       - GATEWAY_MODE=performance
       - SERVICE_DB_URL=postgresql://agentenv:agentenv@servicedb:5432/agentenv
+      - CONSOLE_URLS=pgweb=http://pgweb:8081,db-mcp=http://db-mcp:8000
       - AGENTENV_CONTROL_TOKEN=ctl-token
       - CONTROL_TOKEN_CHILDREN=desk
       - COMPUTERS=desk
