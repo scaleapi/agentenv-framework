@@ -286,10 +286,12 @@ def judges_in_solver(steps: Sequence[TaskStep]) -> list[RubricsVerifierTaskStep]
 
 
 def _judge_as_solver(steps: Sequence[TaskStep]) -> Iterator[Finding]:
+    """A warning, not an error: the run still grades, but its grade is the solver's own, which may be the point."""
     for judge in judges_in_solver(steps):
-        yield Finding(Severity.ERROR, "judge-as-solver",
+        yield Finding(Severity.WARNING, "judge-as-solver",
                       f"its judge runs in {judge.agent_name!r}, the agent under test, so the solver grades its own work; "
-                      "leave agent_name unset for a judge agent of its own, or name another agent", judge.id)
+                      "for a judge of its own, deploy a judge agent, load the files it grades into it (load_artifact "
+                      "with artifact_from_step_id) and name it in agent_name", judge.id)
 
 
 def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:

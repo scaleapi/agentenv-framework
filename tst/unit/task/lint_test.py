@@ -333,11 +333,12 @@ def _judging(**fields) -> list[tuple[str, str, str]]:
     return [finding for finding in found if finding[1] == "judge-as-solver"]
 
 
-def test_an_agent_judge_in_the_agent_under_test_is_an_error():
+def test_an_agent_judge_in_the_agent_under_test_is_a_warning_naming_a_judge_of_its_own():
     assert _judging(agent_name="default-agent") == [(
-        "error", "judge-as-solver", "step 'verify': its judge runs in 'default-agent', the agent under test, so the "
-                                    "solver grades its own work; leave agent_name unset for a judge agent of its own, "
-                                    "or name another agent")]
+        "warning", "judge-as-solver", "step 'verify': its judge runs in 'default-agent', the agent under test, so the "
+                                      "solver grades its own work; for a judge of its own, deploy a judge agent, load "
+                                      "the files it grades into it (load_artifact with artifact_from_step_id) and name "
+                                      "it in agent_name")]
 
 
 @pytest.mark.parametrize("fields", [
@@ -613,17 +614,15 @@ def test_a_run_of_a_bundle_with_a_lint_error_is_refused_unless_it_skips_lint_but
     assert "--skip-lint" not in config.output
 
 
-def test_a_run_of_a_bundle_whose_judge_is_its_solver_is_refused_unless_it_skips_lint(bundle_dir):
+def test_a_run_of_a_bundle_whose_judge_is_its_solver_says_so_and_runs(bundle_dir):
     _write(bundle_dir, "j", {"headline_verifiers": ["verify"],
                              "steps": [SOLVER, ASK, {**VERIFY, "agent_name": "default-agent"}]})
 
-    refused = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "j", "--dry-run"])
-    skipped = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "j", "--dry-run", "--skip-lint"])
+    ran = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "j", "--dry-run"])
 
-    assert refused.exit_code != 0
-    assert "tasks/j.json: step 'verify': its judge runs in 'default-agent', the agent under test" in refused.output
-    assert skipped.exit_code == 0, skipped.output
-    assert "Would run:\n  tasks/j.json v1\n" in skipped.output
+    assert ran.exit_code == 0, ran.output
+    assert "warning: step 'verify': its judge runs in 'default-agent', the agent under test" in ran.output
+    assert "Would run:\n  tasks/j.json v1\n" in ran.output
 
 
 def test_bundle_register_with_skip_lint_registers_a_task_lint_refuses_saying_why_once(bundle_dir):
