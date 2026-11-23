@@ -42,7 +42,8 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
+from agent_env.providers.sandbox_providers.host_images import (build_here, built_here, host_platform, named_if_held,
+                                                               present, pull_here)
 from agent_env.providers.sandbox_providers.disk_launcher import RESET, UNRESETTABLE, forward, reset_input, unresettable
 from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed, docker
 from agent_env.providers.sandbox_providers.local_docker.disk import KVM, kvm_platforms, launcher_args, machine_for
@@ -275,9 +276,10 @@ class LocalSandbox(VmSandbox):
                                           and present(image_name))
 
     async def pull_published(self, artifacts: list) -> list:
-        """Pull each published image but one this machine's Docker already holds under its name, so a run after the
-        first needs no registry."""
-        held = await asyncio.gather(*(asyncio.to_thread(present, artifact.image_name) for artifact in artifacts))
+        """Pull each published image but one this machine's Docker already holds as its digest names it
+        (``named_if_held``), so a run after the first needs no registry; one whose name holds another image is pulled
+        over it."""
+        held = await asyncio.gather(*(asyncio.to_thread(named_if_held, artifact) for artifact in artifacts))
         return await super().pull_published([artifact for artifact, here in zip(artifacts, held) if not here])
 
     def host_port(self, port: int) -> int:
