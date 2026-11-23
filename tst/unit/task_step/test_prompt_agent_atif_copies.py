@@ -35,6 +35,8 @@ from tst.util.granting_object_store import GRANT_ORIGIN, GrantingObjectStore
 from tst.util.images import png
 
 NATIVE = "shots/1"
+#: How long the agent holds a gated turn open for its ``gate`` at most, so a test that never sets it still ends.
+_GATE_SECONDS = 30
 _PREFIX = "prompt_agent_trajectories/prompt_id=solve/"
 
 
@@ -51,8 +53,8 @@ class _Shots(Adapter):
 
 def _app(*, atif: bool = True, live: bool = False, gate: asyncio.Event | None = None):
     """An agent that, each turn, appends one shot, a new screenshot each time, and answers; with ``gate``, a second
-    shot, then a third once ``gate`` is set (at most 30 s on), so a live reader sees the first closed while the turn runs
-    (a step closes when the next begins)."""
+    shot, then a third once ``gate`` is set (at most ``_GATE_SECONDS`` on), so a live reader sees the first closed
+    while the turn runs (a step closes when the next begins)."""
     shots = iter(range(1, 1000))
 
     @a2a_agent(
@@ -68,7 +70,7 @@ def _app(*, atif: bool = True, live: bool = False, gate: asyncio.Event | None = 
                 for held in (False, True):
                     if held:
                         with contextlib.suppress(TimeoutError):
-                            await asyncio.wait_for(gate.wait(), 30)
+                            await asyncio.wait_for(gate.wait(), _GATE_SECONDS)
                     n = next(shots)
                     request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
             return TaskResult.text(f"shot {n}")
