@@ -49,6 +49,13 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   follower's config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is
   armed. From then on the CLI, its own "Today's date is" line included, and every command the model runs read the env's
   time, and a clock write that waits for followers waits for the agent.
+- **OpenCode's CLI on real time.** OpenCode orders a session's messages by when they were written and takes no time
+  before 1970, so on the env's clock a clock set behind its messages broke the session. Where the image follows the
+  clock, the bridge starts the CLI on real time; the commands it runs still read the env's time. While the clock is
+  armed, the turn's model relay puts the env's date, read from `date`, in the prompt's "Today's date" line and the
+  websearch tool's year, and the CLI enables no provider but the endpoint, so no call bypasses the relay. A call whose
+  date the relay can't read or place is refused, so the turn fails rather than tell the model the machine's date
+  (`opencode_date.py`).
 - **For the rest of the run.** An agent that follows goes on following: a later `sync_env_clock` without `agent_clock`
   re-arms the clock it follows, and only agents that never followed keep real time.
 - **Through the egress proxy.** While the agent follows an armed clock, the CLI goes out through the egress proxy, which
