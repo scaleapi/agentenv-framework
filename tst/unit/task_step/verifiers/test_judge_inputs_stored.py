@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import litellm
@@ -360,3 +361,53 @@ async def test_a_staged_file_that_wasnt_stored_is_marked_in_the_manifest_and_in_
     assert stored["object_url"] == f"mem://pfx/judge-inputs/{stored['sha256']}"
     [call] = judge.calls
     assert _opened(store, call["input"])["files"] == [failed, stored]
+
+
+@pytest.mark.asyncio
+async def test_a_store_that_cant_be_had_leaves_input_error_and_the_judge_still_grades(monkeypatch):
+    def no_store():
+        raise PermissionError("no credentials for the bucket")
+
+    monkeypatch.setattr(judge_inputs, "get_config", lambda: SimpleNamespace(
+        get_artifact_key_prefix=lambda: "pfx/", get_object_store=no_store))
+    _llm(monkeypatch)
+
+    grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
+
+    [call] = grade["judge_calls"]
+    assert "input" not in call and call["input_error"] == "PermissionError: no credentials for the bucket"
+    assert grade["verifier_status"] == "graded"
+
+
+@pytest.mark.asyncio
+async def test_settling_stops_at_its_deadline_even_when_an_input_is_slow_to_encode(monkeypatch, store):
+    _answering_judge(monkeypatch)
+    monkeypatch.setattr(judge_inputs, "SETTLE_SECONDS", 0.2)
+    encode = judge_inputs._encoded
+    monkeypatch.setattr(judge_inputs, "_encoded", lambda body: (time.sleep(1), encode(body))[1])
+    with judge_usage.scope():
+        judge = judge_usage.start(TaskStepContext(), "verify")
+        verifier = _step(use_agent_judge=True)
+        await verifier._invoke_judge_a2a(eval_prompt="grade it", judge_a2a_url="http://judge.test",
+                                         judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
+                                         model="m", usage=judge)
+        started = time.monotonic()
+        await judge.settle()
+
+    assert time.monotonic() - started < 0.8
+    [call] = judge.calls
+    assert "input" not in call and call["input_error"] == "TimeoutError: not encoded within 0s"
+
+
+@pytest.mark.asyncio
+async def test_uploads_held_up_by_a_slow_store_leave_the_event_loops_threads_free(monkeypatch):
+    released = threading.Event()
+    _using(monkeypatch, _Store(gate=released))
+    uploads = judge_inputs.Uploads()
+    try:
+        for n in range(judge_inputs.UPLOAD_CONCURRENCY + 8):
+            uploads.put(f"file {n}".encode(), "text/plain")
+        assert await asyncio.wait_for(asyncio.gather(*(asyncio.to_thread(lambda: 1) for _ in range(64))), 5) == [1] * 64
+    finally:
+        released.set()
+        await uploads.wait(uploads.deadline())

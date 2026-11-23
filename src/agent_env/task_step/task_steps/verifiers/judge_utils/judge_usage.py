@@ -11,6 +11,7 @@ is recorded nowhere."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
@@ -22,6 +23,7 @@ from agentenv_protocol.a2a_agent import Usage
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import ReportedBy, Tokens, price
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_inputs
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_inputs import StagingRecorder, Uploads
 from agent_env.task_step.usage import StepUsage
 
@@ -96,7 +98,7 @@ class JudgeUsage(StepUsage):
 
     async def settle(self) -> None:
         """Waits, up to ``SETTLE_SECONDS`` all told, for the run's uploads; stores each agent call's input once its
-        staged files are; and marks each staged file and call whose upload failed or hadn't finished ``input_error``."""
+        staged files are; and marks each staged file and call whose input wasn't stored by then ``input_error``."""
         deadline = self.uploads.deadline()
         await self.uploads.wait(deadline)
         for entry in self.staged:
@@ -105,8 +107,11 @@ class JudgeUsage(StepUsage):
                 entry["input_error"] = error
         deferred, self._deferred = self._deferred, []
         for record, sent in deferred:
-            record["input"] = await self.uploads.put_json(
-                {"message": sent.message, "files": sent.files, "loaded": sent.loaded})
+            body = {"message": sent.message, "files": sent.files, "loaded": sent.loaded}
+            try:
+                record["input"] = await asyncio.wait_for(self.uploads.put_json(body), self.uploads.left(deadline))
+            except TimeoutError:
+                record["input_error"] = f"TimeoutError: not encoded within {judge_inputs.SETTLE_SECONDS:.0f}s"
         await self.uploads.wait(deadline)
         for record in self.calls:
             if error := self.uploads.failed((record.get("input") or {}).get("sha256")):
