@@ -365,10 +365,9 @@ def _caches_prompts(model: str) -> bool:
 def _direct_settings(route: model_call.ModelRoute, run: Mapping[str, Any]
                      ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """The LiteLLM params a direct judge call carries for the run's effort and thinking budget, where the route takes
-    them (``model_call.takes``); the settings sent, with any ``temperature`` and ``seed`` the config's
-    ``[model.params]`` give every call; and those the route doesn't take, left out."""
+    them (``model_call.takes``), over the config's ``[model.params]``; the settings the request then sends, read from
+    the two merged, with any ``temperature`` and ``seed``; and the run's settings the route doesn't take, left out."""
     params: dict[str, Any] = {}
-    sent = {key: route.call.params[key] for key in ("temperature", "seed") if key in route.call.params}
     not_sent: dict[str, Any] = {}
     for setting, param, value in (("effort", "reasoning_effort", run["effort"]),
                                   ("max_thinking_tokens", "thinking", run["max_thinking_tokens"])):
@@ -378,10 +377,23 @@ def _direct_settings(route: model_call.ModelRoute, run: Mapping[str, Any]
             not_sent[setting] = value
             continue
         params[param] = value if param == "reasoning_effort" else {"type": "enabled", "budget_tokens": value}
-        sent[setting] = value
     if not_sent:
         logger.warning("%s takes no %s; the judge grades without them", route.model, sorted(not_sent))
-    return params, sent, not_sent
+    request = {**route.call.params, **params}
+    thinking = request.get("thinking")
+    sent = {"effort": request.get("reasoning_effort"),
+            "max_thinking_tokens": thinking.get("budget_tokens") if isinstance(thinking, Mapping) else None,
+            **{key: request[key] for key in ("temperature", "seed") if key in request}}
+    return params, {key: value for key, value in sent.items() if value is not None}, not_sent
+
+
+def _record_failed_call(judge: JudgeUsage, exc: BaseException, *, model: str, endpoint_host: Optional[str]) -> None:
+    """A direct judge request that got no answer, in the run's record: cut off by a time limit (maybe billed, so a call
+    of unknown usage in the step's usage too), or refused, costing nothing."""
+    if model_call.cut_off(exc):
+        judge.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=endpoint_host, reported_by=ReportedBy.PROVIDER)
+    else:
+        judge.refused_call(model=model, endpoint_host=endpoint_host, error=f"{type(exc).__name__}: {exc}")
 
 
 def _image_url_block(frame: ImageFrame) -> dict:
@@ -1672,6 +1684,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             },
         }
         params, sent, not_sent = _direct_settings(route, self._run_values(context))
+        judge = _JUDGE_USAGE.get()
+        if judge is not None:
+            judge.carried(sent, not_sent, route.endpoint_host)
         # Some endpoints reject json_schema with images. Fall back once on that exact
         # error shape; malformed JSON is handled by the outer output-retry loop.
         use_response_format = True
@@ -1682,12 +1697,14 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,
                                                   response_format=response_format if use_response_format else None,
                                                   settings=params)
-                return {"response": reply.content, "trajectory_object_url": None, "sent": sent, "not_sent": not_sent,
-                        **reply.fields()}
+                return {"response": reply.content, "trajectory_object_url": None, **reply.fields()}
             except Exception as exc:
                 last_exc = exc
+                if judge is not None:
+                    _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host)
                 if params and model_call.refused_setting(exc):
-                    raise JudgeSettingRefused(f"{model} refused the judge's {sorted(sent)}: {exc}") from exc
+                    raise JudgeSettingRefused(f"{model} refused the judge's "
+                                              f"{sorted(key for key in _JUDGE_SETTINGS if key in sent)}: {exc}") from exc
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
                     logger.warning(
                         f"Multimodal judge call with json_schema failed for verifier "
@@ -1943,21 +1960,18 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     async def _judge_directly(self, prompt: str, *, model: str, context: TaskStepContext,
                               image_blocks: Optional[list[dict]], usage: StepUsage) -> dict:
         """One direct judge call, its usage in ``usage``: what it answered, or, when a cancel or a time limit stopped
-        it, a call of unknown usage; a judge's record (``JudgeUsage``) also keeps a call that got no answer, and the
-        settings the calls carried."""
+        it, a call of unknown usage. Under a judge's record (``JudgeUsage``), each request that failed is already in
+        it, from ``_prompt_llm_judge``'s own retries; a cancel, which those don't see, is recorded here."""
         try:
             if image_blocks:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context, image_blocks=image_blocks)
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
         except BaseException as exc:
-            if model_call.cut_off(exc):
+            recorded = isinstance(exc, Exception) and _JUDGE_USAGE.get() is not None
+            if not recorded and model_call.cut_off(exc):
                 usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=None, reported_by=ReportedBy.PROVIDER)
-            elif isinstance(usage, JudgeUsage) and isinstance(exc, Exception):
-                usage.refused_call(model=model, endpoint_host=None, error=f"{type(exc).__name__}: {exc}")
             raise
-        if isinstance(usage, JudgeUsage) and "sent" in data:
-            usage.carried(data["sent"], data["not_sent"], data.get("endpoint_host"))
         self._record_direct_call(usage, data, model=model)
         return data
 

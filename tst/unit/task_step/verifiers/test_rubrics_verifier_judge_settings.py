@@ -21,15 +21,19 @@ ENDPOINT = "https://gw.test/v1"
 USAGE = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
 
 
-def _llm(monkeypatch, *, answers=None, refuse_effort=False, **config) -> list[dict]:
+def _llm(monkeypatch, *, answers=None, refuse_effort=False, failures=(), **config) -> list[dict]:
     """LiteLLM faked through the configured endpoint: each request kept, each answer a binary verdict for the ids its
-    prompt asks about (``answers`` overrides them in turn); ``refuse_effort`` raises as LiteLLM refuses a value."""
+    prompt asks about (``answers`` overrides them in turn); ``refuse_effort`` raises as LiteLLM refuses a value, and
+    ``failures`` are raised by the first requests, one each."""
     install_model_config(monkeypatch, base_url=ENDPOINT, api_key="configured-key", **config)
     requests: list[dict] = []
     queued = list(answers or [])
+    failing = list(failures)
 
     async def acompletion(**kwargs):
         requests.append(kwargs)
+        if failing:
+            raise failing.pop(0)
         if refuse_effort and "reasoning_effort" in kwargs:
             raise litellm.UnsupportedParamsError(message="reasoning_effort=xhigh is not supported for gpt-5",
                                                  llm_provider="openai", model="gpt-5")
@@ -122,6 +126,45 @@ async def test_the_configs_temperature_and_seed_are_recorded_as_sent(monkeypatch
     grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
 
     assert (grade["verifier_settings"]["temperature"], grade["verifier_settings"]["seed"]) == (0, 7)
+
+
+@pytest.mark.asyncio
+async def test_the_runs_effort_wins_over_the_configs_and_the_configs_alone_is_recorded_as_sent(monkeypatch):
+    requests = _llm(monkeypatch, params={"reasoning_effort": "low"})
+
+    over = await _grade(_step(default_model="claude-sonnet-4-6", effort="high"), _context())
+    alone = await _grade(_step(default_model="claude-sonnet-4-6"), _context())
+
+    assert [request["reasoning_effort"] for request in requests] == ["high", "low"]
+    assert (over["verifier_settings"]["effort"], alone["verifier_settings"]["effort"]) == ("high", "low")
+
+
+@pytest.mark.asyncio
+async def test_a_request_retried_after_a_timeout_is_a_record_of_its_own(monkeypatch):
+    _llm(monkeypatch, failures=[litellm.Timeout("timed out", model="gpt-4o-mini", llm_provider="openai")])
+    context = _context()
+
+    grade = await _grade(_step(default_model="gpt-4o-mini"), context)
+
+    assert [call["outcome"] for call in grade["judge_calls"]] == ["cut_off", "answered"]
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert entry["turns"] == 2 and entry["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_judge_whose_requests_all_fail_keeps_its_settings_and_each_request_in_its_failed_grade(monkeypatch):
+    _llm(monkeypatch, failures=[litellm.RateLimitError("slow down", llm_provider="openai", model="gpt-4o-mini")] * 3)
+    context = _context()
+
+    with pytest.raises(RuntimeError, match="failed after 3 attempts"):
+        await _step(default_model="gpt-4o-mini", effort="high").execute(context)
+
+    grade = context.metadata["grades"]["verify"]
+    assert grade["verifier_status"] == "failed"
+    assert (grade["verifier_settings"]["not_sent"], grade["verifier_settings"]["judge_endpoint_host"]) == (
+        {"effort": "high"}, "gw.test")
+    assert [call["outcome"] for call in grade["judge_calls"]] == ["refused"] * 3
+    assert all("slow down" in call["error"] for call in grade["judge_calls"])
 
 
 @pytest.mark.asyncio
