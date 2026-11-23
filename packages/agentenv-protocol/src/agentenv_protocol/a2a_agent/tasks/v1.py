@@ -437,7 +437,8 @@ class Usage:
     ``cache_write_tokens`` count the prompt tokens read from and written to the provider's prompt cache;
     ``input_includes_cache`` says whether ``input_tokens`` counts both of them (True), neither (False), or is unknown
     (None), which a price needs to read the counts. ``models`` is the counts by model, for a turn whose calls used
-    more than one: it covers every call the turn counted, so a price can charge each model at its own rate."""
+    more than one: it covers every call the turn counted, so a price can charge each model at its own rate. A count
+    the turn leaves out that every row gives is the rows' sum, and so is the includes-cache flag the rows agree on."""
 
     tool_call_count: int | None = None
     input_tokens: int | None = None
@@ -456,6 +457,13 @@ class Usage:
             raise TypeError("models must be a list of each model's usage")
         object.__setattr__(self, "models", tuple(
             model if isinstance(model, ModelUsage) else ModelUsage.from_dict(model) for model in self.models))
+        for name in _MODEL_COUNTERS[1:]:
+            values = [getattr(model, name) for model in self.models]
+            if getattr(self, name) is None and values and None not in values:
+                object.__setattr__(self, name, sum(values))
+        flags = {model.input_includes_cache for model in self.models}
+        if self.input_includes_cache is None and len(flags) == 1:
+            object.__setattr__(self, "input_includes_cache", flags.pop())
         if not isinstance(self.provider_details, Mapping):
             raise TypeError("provider_details must be a mapping")
         object.__setattr__(
@@ -473,7 +481,7 @@ class Usage:
             for f in fields(cls)
             if f.name not in ("provider_details", "models") and data.get(f.name) is not None
         }
-        if data.get("models"):
+        if data.get("models") is not None:
             known["models"] = data["models"]
         details = data.get("provider_details")
         return cls(**known, provider_details={} if details is None else details)

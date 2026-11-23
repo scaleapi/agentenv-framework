@@ -56,3 +56,16 @@ def test_a_models_own_cost_and_flag_are_checked_as_usages_are():
         ModelUsage(model="m", cost_usd=-1)
     with pytest.raises(ValueError, match="input_includes_cache must be true, false or null"):
         ModelUsage(model="m", input_includes_cache="yes")
+
+
+def test_a_turn_that_gives_only_its_rows_takes_their_sums_as_its_counts():
+    usage = Usage(models=(SONNET, HAIKU))
+    assert (usage.input_tokens, usage.output_tokens, usage.input_includes_cache) == (12000, 490, True)
+    assert (usage.cache_read_tokens, usage.cache_write_tokens) == (None, None)
+    assert Usage(input_tokens=5, models=(HAIKU,)).input_tokens == 5
+
+
+@pytest.mark.parametrize("models", [{}, "", 0, False])
+def test_from_dict_refuses_a_models_value_that_isnt_a_list_even_when_empty(models):
+    with pytest.raises(TypeError, match="models must be a list"):
+        Usage.from_dict({"input_tokens": 1, "models": models})

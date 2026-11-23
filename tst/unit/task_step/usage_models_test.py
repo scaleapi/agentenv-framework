@@ -96,3 +96,35 @@ def test_the_host_reads_a_turns_models_and_keeps_a_bad_one_aside():
 
     usage, unparsed = read_usage({"input_tokens": 3000, "models": [{"input_tokens": 3000}]})
     assert usage.models == () and usage.input_tokens == 3000 and "models" in unparsed
+
+
+def test_a_turn_that_gives_only_its_rows_is_priced_from_them(monkeypatch):
+    entry = _entry(monkeypatch, Usage(models=(SONNET_SHARE, HAIKU_SHARE)))
+
+    assert entry["cost_usd"] == pytest.approx(0.015225) and entry["input_tokens"] == 12000
+
+
+def test_an_agents_figure_for_a_model_the_map_lacks_stands_in_only_when_every_turn_gave_one(monkeypatch):
+    def mystery(cost):
+        return Usage(models=(ModelUsage(model="mystery-1", input_tokens=100, output_tokens=10,
+                                        input_includes_cache=True, cost_usd=cost),))
+
+    entry = _entry(monkeypatch, mystery(0.002), mystery(None))
+    [row] = entry["models"]
+    assert (row["cost_usd"], row["cost_status"]) == (None, "unpriced")
+    assert (entry["cost_usd"], entry["cost_status"]) == (None, "unpriced")
+
+    entry = _entry(monkeypatch, mystery(0.002), mystery(0.003))
+    assert (entry["cost_status"], entry["cost_usd"]) == ("reported", pytest.approx(0.005))
+
+
+def test_a_role_on_one_model_the_map_lacks_takes_the_agents_figure_only_when_every_turn_gave_one(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, "mystery-1", None)
+    for cost in (0.002, None):
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
+            input_tokens=100, output_tokens=10, input_includes_cache=True, cost_usd=cost)))
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["cost_usd"], entry["cost_status"], entry["reported_cost_usd"]) == (None, "unpriced", None)

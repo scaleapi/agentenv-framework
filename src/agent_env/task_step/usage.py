@@ -166,7 +166,8 @@ class RoleUsage:
 
             charged = [Tokens.of(share.to_dict()) for share in of]
             tokens = reduce(operator.add, charged) if charged and None not in charged else None
-            cost = price(tokens, total("cost_usd"), model=model, prices=prices, reported_by=self.reported_by)
+            reported = total("cost_usd") if all(share.cost_usd is not None for share in of) else None
+            cost = price(tokens, reported, model=model, prices=prices, reported_by=self.reported_by)
             flags = {share.input_includes_cache for share in of}
             row = ModelEntry(model=model, **{name: total(name) for name in _MODEL_COUNTS},
                              input_includes_cache=flags.pop() if len(flags) == 1 else None, **cost.fields())
@@ -174,9 +175,10 @@ class RoleUsage:
         return rows
 
     def _reported(self, summed: Optional[float]) -> Optional[float]:
-        """The turns' summed figure, as ``price`` takes it: an endpoint's bills only when every call carried one, since
-        a sum of some calls' bills isn't the role's cost; without, the map prices all of them."""
-        if self.reported_by is ReportedBy.PROVIDER and any(u is None or u.cost_usd is None for u in self.turns):
+        """The turns' summed figure, as ``price`` takes it: the agent's or endpoint's figures only when every turn
+        carried one, since a sum of some turns' isn't the role's cost; without, the map prices all of them, and a
+        model the map lacks is unpriced."""
+        if any(u is None or u.cost_usd is None for u in self.turns):
             return None
         return summed
 
