@@ -10,7 +10,7 @@ import pytest
 from agent_env.config import get_config
 from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import JudgeTimeoutError, RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.user_sim_judge import UserSimJudge
 from tst.unit.task_step.verifiers.test_rubrics_verifier_golden import (
     CASES,
@@ -176,6 +176,35 @@ def test_the_user_sim_judges_settings_leave_out_what_its_judge_never_uses():
         "judge-x", 2, 3)
     assert not {"criteria", "trajectory_filter", "effort"} & set(settings)
     assert settings["overridden"] == ["judge_batch_size", "judge_batch_concurrency", "judge_model"]
+
+
+@pytest.mark.asyncio
+async def test_a_direct_judge_out_of_retries_writes_a_failed_grade():
+    step, context = CASES["a_judge_that_cannot_be_reached"]()
+
+    with pytest.raises(RuntimeError, match="LLM judge failed after 3 attempts"):
+        await step.execute(context)
+
+    grade = context.metadata["grades"][step.id]
+    assert (grade["verifier_status"], grade["score"], grade["passed"]) == ("failed", None, False)
+    assert grade["verifier_error_reasoning"] == "RuntimeError: LLM judge failed after 3 attempts"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judge_out_of_timeout_retries_writes_a_failed_grade():
+    step, context = CASES["an_agent_judge_timing_out_once"]()
+
+    async def times_out(**_):
+        raise JudgeTimeoutError("ran out", "mem://judge/timed-out.json")
+
+    step._invoke_judge_a2a = times_out
+
+    with pytest.raises(JudgeTimeoutError):
+        await step.execute(context)
+
+    grade = context.metadata["grades"][step.id]
+    assert (grade["verifier_status"], grade["score"]) == ("failed", None)
+    assert grade["verifier_error_reasoning"].startswith("JudgeTimeoutError: ran out")
 
 
 @pytest.mark.asyncio

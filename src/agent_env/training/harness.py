@@ -32,13 +32,13 @@ from agent_env.bundle.resolve import build_step
 from agent_env.bundle.run import planned_tasks, prepare_bundle, solver_params
 from agent_env.store.routing import namespace_routing
 from agent_env.openenv.reward import reward_of
+from agent_env.task.lint import judges_in_solver
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_steps.agent.user_sim_common import opening_parts, opening_text
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.training._openenv import on_session_loop
 
 logger = logging.getLogger(__name__)
@@ -210,9 +210,7 @@ def _untrainable(config: list[dict[str, Any]]) -> str | None:
     deploys = [step for step in steps if step.id in solver]
     if not deploys or not all(isinstance(step, DeployAgentTaskStep) for step in deploys):
         return "training needs the agent a step prompts deployed by a deploy_agent step"
-    agents = {step.agent_name for step in deploys}
-    if any(isinstance(step, RubricsVerifierTaskStep) and step.use_agent_judge and step.agent_name in agents
-           for step in steps):
+    if judges_in_solver(steps):
         return "its rubric judge is its solver, whose grading would be trained on"
     return None
 
