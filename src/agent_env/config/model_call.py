@@ -94,8 +94,8 @@ async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional
     takes."""
     import litellm
 
-    request: dict[str, Any] = {"model": route.litellm_model, "messages": messages, "timeout": timeout,
-                               **route.call.client_kwargs(), **(settings or {})}
+    request: dict[str, Any] = {ModelParam.MODEL: route.litellm_model, ModelParam.MESSAGES: messages,
+                               ModelParam.TIMEOUT: timeout, **route.call.client_kwargs(), **(settings or {})}
     if response_format is not None:
         request[ModelParam.RESPONSE_FORMAT] = response_format
     response = await litellm.acompletion(**request)
