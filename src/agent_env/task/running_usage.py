@@ -1,6 +1,7 @@
 """A running step's usage, written to its run's ledger while the step runs, every ``INTERVAL_S`` in which it changed,
-so a budget sees a long step's spend before the step ends and a worker that dies mid-step keeps it. The step's
-completion writes its final entries over these: the ledger keeps an entry by attempt, step and role."""
+so a budget sees a long step's spend before the step ends and a worker that dies mid-step keeps it. Each entry is
+marked ``running``, which makes the run's total a lower bound, as the turn in flight isn't in it. The step's completion
+writes its final entries over these: the ledger keeps an entry by attempt, step and role."""
 
 from __future__ import annotations
 
@@ -44,5 +45,5 @@ class RunningUsage:
                 pass
             entries = copy.deepcopy((self._context.metadata.get(STEP_USAGE_KEY) or {}).get(self._step_id))
             if entries and entries != written and await store.record_usage(
-                    self._instance_id, entries_of({self._step_id: entries})):
+                    self._instance_id, [{**entry, "running": True} for entry in entries_of({self._step_id: entries})]):
                 written = entries
