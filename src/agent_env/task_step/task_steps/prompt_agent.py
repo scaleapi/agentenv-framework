@@ -15,6 +15,7 @@ from typing import Any, ClassVar, NamedTuple, Optional
 import httpx
 from a2a.types import TaskState
 from agentenv_protocol.a2a_agent import card_request_accepts
+from agentenv_protocol.atif import FORMAT as ATIF_FORMAT
 
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent import protocol
@@ -62,6 +63,7 @@ from agent_env.task_step.snapshot_utils.agent_state_capture import (
     trajectory_object_url,
     trajectory_prefix_key,
 )
+from agent_env.task_step.snapshot_utils.atif_copies import AtifCopies
 from agent_env.task_step.snapshot_utils.live_trajectory import LiveTurns
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig, SnapshotSeries
 
@@ -645,6 +647,8 @@ class PromptAgentTaskStep(TaskStep):
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         formats = TrajectoryFormats.of(traj_ext_cached)
+        atif_copies = AtifCopies(context, agent, target_url, traj_ext_cached,
+                                 prescribed=ATIF_FORMAT in prescribed_formats(context))
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
         live_turns = (
             LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers,
@@ -724,17 +728,21 @@ class PromptAgentTaskStep(TaskStep):
                 )
 
                 if traj_ext_cached:
+                    read_native = functools.partial(
+                        fetch_native_trajectory, target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
+                        target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type, headers=agent.control_headers,
+                    )
                     stored = StoredTrajectory()
-                    try:
-                        stored = await fetch_native_trajectory(
-                            target_url, traj_ext_cached, sent_task_id, trajectory_output_prefix,
-                            target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type,
-                            headers=agent.control_headers,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
+                    if not atif_copies.replaces_native:  # the run's copy, read off the turn's path, replaces native
+                        try:
+                            stored = await read_native()
+                        except Exception as e:
+                            logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
                     per_turn_trajectory_urls.append(stored.url)
-                    per_turn_trajectories.append(TurnTrajectory(native_format=stored.format, atif=None))
+                    turn_record = TurnTrajectory(format=stored.format, atif=None)
+                    per_turn_trajectories.append(turn_record)
+                    atif_copies.turn(len(per_turn_trajectory_urls) - 1, sent_task_id, target_a2a_task_id, turn_record,
+                                     native=read_native)
 
                 final_task_id = sent_task_id
                 final_state = target_state
@@ -789,10 +797,15 @@ class PromptAgentTaskStep(TaskStep):
                     logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")
                     conversation_store.mark_closed(conversation_id)
                     break
+        except BaseException:
+            atif_copies.cancel()
+            raise
         finally:
             # On failure too, so a reader of the last turn knows no other follows.
             if live_turns is not None:
                 await live_turns.end()
+        for index, url in (await atif_copies.join()).items():
+            per_turn_trajectory_urls[index] = url
 
         await self._persist_env_trigger_state(context)
 
@@ -1405,15 +1418,17 @@ def prescribed_formats(context: TaskStepContext) -> tuple[str, ...]:
     return tuple(formats)
 
 
-async def prescribe_formats(context: TaskStepContext, step_id: str, agent: DeployedAgent, a2a_url: str) -> None:
-    """Have the agent build the run's trajectory formats (``prescribed_formats``) beside native for the conversations it
-    starts from now on, when its card offers the trajectory extension's ``prescribe``; an agent whose SDK predates it
-    builds what it always has. What was prescribed and what the agent builds go into
+async def prescribe_formats(context: TaskStepContext, step_id: str, agent: DeployedAgent, a2a_url: str, *,
+                            formats: tuple[str, ...] | None = None) -> None:
+    """Have the agent build ``formats``, by default the run's (``prescribed_formats``), beside native for the
+    conversations it starts from now on, when its card offers the trajectory extension's ``prescribe``; an agent whose
+    SDK predates it builds what it always has. What was prescribed and what the agent builds go into
     ``metadata["trajectory_formats"][step_id]``, and a prescribed format the agent can't build is warned of.
 
     A connection error is retried; after a failure the agent builds what it was last prescribed, native only unless an
-    earlier step prescribed more, and the run goes on: its judges read native either way."""
-    formats = prescribed_formats(context)
+    earlier step prescribed more, and the run goes on: a turn whose prescribed copy the agent didn't build has its
+    native trajectory read in its place."""
+    formats = prescribed_formats(context) if formats is None else formats
     extension = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_TRAJECTORY)
     method, path = A2AAgent.operation(extension, "prescribe")
     offered = TrajectoryFormats.of(extension).formats
@@ -1460,7 +1475,7 @@ async def fetch_native_trajectory(
     *, sandbox_type: str | None, headers: Mapping[str, str], card: dict | None = None,
 ) -> StoredTrajectory:
     """A turn's native trajectory, read by ``a2a_server_task_id`` and stored under ``target_a2a_task_id``. A card that
-    offers formats is asked for its native one by name, so the copy judges read stays native whatever the card's
+    offers formats is asked for its native one by name, so a run that prescribes none reads native whatever the card's
     default; one that offers none gets the read it always has."""
     get_method, get_path = A2AAgent.operation(traj_ext, "get")
     store = transfer_store(get_config().get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
