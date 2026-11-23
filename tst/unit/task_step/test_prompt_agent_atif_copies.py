@@ -341,19 +341,41 @@ async def test_a_newer_copys_missing_media_are_in_its_rules(monkeypatch, tmp_pat
 
     [atif] = _atifs(response)
     assert (atif["status"], atif["rules"]) == ("newer", ["atif", "media-bytes"])
+    assert response.target_agent_per_turn_trajectories[0]["format"] == NATIVE
 
 
 @pytest.mark.asyncio
-async def test_media_the_agent_cant_be_asked_for_makes_the_copy_invalid_under_media_bytes(monkeypatch, tmp_path):
+async def test_a_copy_whose_media_didnt_arrive_is_recorded_and_its_turn_reads_native_in_its_place(monkeypatch, tmp_path):
+    """Its judges would read the turn without those files, which the native trajectory holds."""
     run = _Run(monkeypatch, tmp_path)
-    card = run.card
-    trajectory = next(e for e in card["capabilities"]["extensions"] if e["uri"] == TRAJECTORY_V1.uri)
-    del trajectory["params"]["methods"]["media"]
-
-    response = await run.execute(run.context(), card=card)
+    response = await run.execute(run.context(), card=_without_media(run.card))
 
     assert [(atif["status"], atif["rules"]) for atif in _atifs(response)] == [("invalid", ["media-bytes"])] * 2
     assert run.wire.media_requests == []
+    assert [turn["format"] for turn in response.target_agent_per_turn_trajectories] == [NATIVE, NATIVE]
+    assert _natives(run, response) == ["shot", "shot"] and len(run.wire.native_reads) == 2
+    assert all(run.read(atif["url"])["steps"] for atif in _atifs(response))
+
+
+@pytest.mark.asyncio
+async def test_a_copy_whose_media_didnt_arrive_stays_the_trajectory_when_native_cant_be_read(monkeypatch, tmp_path):
+    run = _Run(monkeypatch, tmp_path)
+    run.wire.answer = lambda request, path, sent, response: (
+        httpx.Response(500, request=request) if path == "/ext/trajectory" and sent.get("format") != ATIF else None)
+
+    response = await run.execute(run.context(), card=_without_media(run.card), max_conversation_turns=1)
+
+    [atif] = _atifs(response)
+    assert (atif["status"], atif["rules"]) == ("invalid", ["media-bytes"])
+    assert response.target_agent_per_turn_trajectories[0]["format"] == ATIF
+    assert response.target_agent_per_turn_trajectory_object_urls == [atif["url"]]
+
+
+def _without_media(card: dict) -> dict:
+    """The card with no media method, so the worker can't ask for a copy's media."""
+    trajectory = next(e for e in card["capabilities"]["extensions"] if e["uri"] == TRAJECTORY_V1.uri)
+    del trajectory["params"]["methods"]["media"]
+    return card
 
 
 @pytest.mark.asyncio
@@ -509,6 +531,7 @@ async def test_a_profile_that_misdescribes_a_stored_file_makes_the_copy_invalid(
     [atif] = _atifs(response)
     assert (atif["status"], atif["rules"]) == ("invalid", ["media-bytes"])
     assert ("bytes" if field == "bytes" else "sha256") in atif["reason"]
+    assert _natives(run, response) == ["shot"]
 
 
 @pytest.mark.asyncio

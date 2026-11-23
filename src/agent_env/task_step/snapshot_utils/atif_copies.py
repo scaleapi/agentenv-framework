@@ -3,7 +3,8 @@ conversation is the turn's trajectory. It's read inline from the agent once the 
 ``<trajectory_id>.json`` in the run's folder for that agent, overwritten each turn, with the turn's aux log and turn
 context beside it and the media it names pulled into its ``media/``; it's checked as a producer's document and the turn
 records how it checked. The reads run one after another, off the turn's path, so the next message isn't held for them.
-A copy that can't be had never fails the run: that turn's native trajectory is read in its place."""
+A copy that can't be had never fails the run: that turn's native trajectory is read in its place, as it is for a copy
+whose media didn't all arrive, which its judges would read without them."""
 from __future__ import annotations
 
 import asyncio
@@ -68,6 +69,8 @@ VALID: AtifStatus = "valid"
 INVALID: AtifStatus = "invalid"
 NEWER: AtifStatus = "newer"
 UNAVAILABLE: AtifStatus = "unavailable"
+#: The rule a copy breaks when a media file it names isn't stored as named.
+MEDIA_BYTES = "media-bytes"
 #: A trajectory id the worker stores a document under: the agent mints it, so it must be a plain file name.
 _DOCUMENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -105,8 +108,8 @@ class _Unavailable(Exception):
 class AtifCopies:
     """A step's atif/1 copies of one agent's conversation. When the run prescribes atif/1 to an agent that offers it
     (``replaces_native``), each turn's copy is the turn's trajectory: ``turn`` starts reading it once the turn ends, a
-    turn whose copy can't be had has its native trajectory read at once instead (the requested format is best effort),
-    and ``join`` fills each turn's record and gives each turn's url. Otherwise the step reads native as ever, and a
+    turn whose copy can't be had, or whose copy's media didn't all arrive, has its native trajectory read at once
+    instead (the requested format is best effort), and ``join`` fills each turn's record and gives each turn's url. Otherwise the step reads native as ever, and a
     turn's record has None when the run doesn't prescribe atif/1, or ``unavailable`` with ``format_not_offered`` when
     the agent doesn't offer it."""
 
@@ -150,15 +153,23 @@ class AtifCopies:
         if previous is not None:  # each copy overwrites the one before, so they're stored in turn order
             await asyncio.wait([previous])
         record["atif"] = atif = await self._copy(task_id, name)
-        if atif["status"] != UNAVAILABLE:
+        missing_media = MEDIA_BYTES in atif["rules"]
+        if atif["status"] != UNAVAILABLE and not missing_media:
             record["format"] = ATIF
             return atif["url"]
+        if missing_media:
+            logger.warning(f"agent '{self._agent.agent_name}': the atif/1 copy of task {task_id} lacks media its judges "
+                           f"would read, so its native trajectory is read in its place (continuing)")
         try:  # at once, while the agent still holds it
-            url, record["format"] = await native()
+            url, native_format = await native()
         except Exception as exc:
             logger.warning(f"agent '{self._agent.agent_name}': task {task_id}'s native trajectory, read in place of its "
                            f"atif/1 copy, failed too (continuing): {exc}")
-            return None
+            url, native_format = None, None
+        if url is None and missing_media:  # the copy without some media is more than no trajectory
+            record["format"] = ATIF
+            return atif["url"]
+        record["format"] = native_format
         return url
 
     async def _copy(self, task_id: str, name: str) -> AtifRecord:

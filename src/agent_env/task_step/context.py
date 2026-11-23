@@ -276,7 +276,8 @@ class TurnTrajectory(TypedDict):
     """What a turn's trajectory reads left, beside its url in the per-turn list: the format of the trajectory stored at
     that url, as its answer named it (None from an agent that names none), and its atif/1 copy, None when the run
     doesn't prescribe atif/1. In a run that prescribes atif/1 to an agent that offers it, the url is the copy's
-    document and the format ``atif/1``; a turn whose copy couldn't be had has its native trajectory there instead."""
+    document and the format ``atif/1``; a turn whose copy couldn't be had, or whose copy's media didn't all arrive, has
+    its native trajectory there instead."""
 
     format: Optional[str]
     atif: Optional[AtifRecord]

@@ -129,7 +129,7 @@ or one of them only where it is used.
   earlier document names the next in `continued_trajectory_ref`. Each turn's record says how its copy checked
   (`AtifRecord`: `valid`, `invalid`, `newer`, `unavailable`), and a copy never fails the run. When the agent offers
   atif/1 the copy is the turn's trajectory, labelled `atif/1` in its `TurnTrajectory`, and a turn whose copy can't be
-  had has its native trajectory read in its place. Judges read each turn's trajectory by its label
+  had, or whose copy's media didn't all arrive, has its native trajectory read in its place. Judges read each turn's trajectory by its label
   (`verifiers/judge_utils/atif_turns.py`): an `atif/1` turn as its own A2A task cut out of the document
   (`agentenv_protocol.atif.task_document`), its media read from the document's `media/` and checked against their
   names, any other turn as native. So prescribing atif/1 changes what a run's judges read and can move its scores. Only
