@@ -4,6 +4,7 @@ names none, from the grant it runs under (``authorized``)."""
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from collections.abc import Iterator
 from contextvars import ContextVar
@@ -82,18 +83,38 @@ def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[
                  if base and (url == base.rstrip("/") or url.startswith(f"{base.rstrip('/')}/"))), {})
 
 
+class ResponseTooLarge(Exception):
+    """An answer longer than the ``max_bytes`` its caller allowed, given up on before the rest was read."""
+
+
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,
-               headers: dict[str, str] | None) -> dict:
+               headers: dict[str, str] | None, max_bytes: int | None = None) -> dict:
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
-        response.raise_for_status()
-        body = response.json()
+        if max_bytes is None:
+            response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
+            response.raise_for_status()
+            body = response.json()
+        else:
+            async with client.stream("POST", url, json=request, timeout=timeout,
+                                     headers=request_headers(url, headers)) as response:
+                response.raise_for_status()
+                body = json.loads(await _read_at_most(response, max_bytes, method))
     if "error" in body:
         error = body["error"]
         raise RuntimeError(f"{method} failed: {error.get('message')} ({error.get('data') or error.get('code')})")
     return body["result"]
+
+
+async def _read_at_most(response: httpx.Response, max_bytes: int, method: str) -> bytes:
+    """``response``'s body, read until it passes ``max_bytes``, when ``ResponseTooLarge`` gives up on the rest."""
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > max_bytes:
+            raise ResponseTooLarge(f"{method}'s answer is over the {max_bytes} bytes asked for")
+    return bytes(body)
 
 
 async def reset_data(base_url: str, timeout: int = 30, verify: bool = True, *,
@@ -109,15 +130,16 @@ async def add_data(base_url: str, parts: list[Part], timeout: int = 120, verify:
 
 async def get_data(
     base_url: str, timeout: int = 30, verify: bool = True, *, write_namespace: WriteNamespaceGrant | None = None,
-    paths: list[str] | None = None, headers: dict[str, str] | None = None,
+    paths: list[str] | None = None, headers: dict[str, str] | None = None, max_bytes: int | None = None,
 ) -> GetDataResponse:
     """`data/get`. A server advertising `DATA_OBJECTS_EXTENSION_URI` may be handed `write_namespace` to upload
     its export under; `uploaded_object_path` reads from the answer where it did. `paths` names what a computer
-    returns, relative to its user's home; an env that returns all of its data refuses them."""
+    returns, relative to its user's home; an env that returns all of its data refuses them. With `max_bytes`, an
+    answer longer than that, as an inline export of large files is, raises `ResponseTooLarge` unread."""
     params = {} if write_namespace is None else {"write_namespace": write_namespace.model_dump(mode="json", exclude_none=True)}
     if paths is not None:
         params["paths"] = paths
-    return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify, headers))
+    return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify, headers, max_bytes))
 
 
 async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:

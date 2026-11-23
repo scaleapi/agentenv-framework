@@ -16,7 +16,8 @@ server), as the state the agent left; the golden files of ``expected_artifact_id
 trajectory with ``use_trajectory``. Nothing is run in the computer. An env that takes the data-objects form exports
 under a grant of the step's, within ``EXPORT_LIMITS``, so a file's size is known before it is read and one over
 ``MAX_READ_BYTES`` is only named; the uploads stay in the object store as the grade's evidence, each one's url in the
-record. One that doesn't, or whose network can't reach the object store, answers inline.
+record. One that doesn't, or whose network can't reach the object store, answers inline, read only up to
+``MAX_INLINE_BYTES``.
 
 How the judge grades is ``guidance``, and how it treats the golden files ``golden_note``: the caller's own wording, or
 short defaults of the framework's. The score is rubrics_verifier's, ``score_aggregator`` over the rows, a weighted
@@ -77,6 +78,8 @@ READ_TIMEOUT_S = 120
 MAX_FILE_CHARS = 40_000
 #: The largest file the judge is shown; a larger one is named as too large.
 MAX_READ_BYTES = 32 * 1024 * 1024
+#: The most of an inline export the step reads, base64 and all; past it, the step fails rather than read the rest.
+MAX_INLINE_BYTES = 128 * 1024 * 1024
 #: What one export may upload under the step's grant: a file up to the limit is uploaded and then named as too large,
 #: without being read; a larger one, or an export past the total, fails the step.
 EXPORT_LIMITS = ObjectLimits(max_objects=10_000, max_object_bytes=1024**3, max_total_bytes=4 * 1024**3)
@@ -330,12 +333,13 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
                         paths: Optional[list[str]] = None) -> dict[str, _File]:
         """What the ``data/get`` of ``child`` of ``owner``'s card (``owner``'s own when None) answers, each file by its
         path: under the step's grant when it takes the data-objects form and the store's grants reach it, each file's
-        size read before its bytes; asked again without, inline, when it fails under one, as a computer whose network
-        can't reach the store does."""
+        size read before its bytes; asked again without, inline and read only up to ``MAX_INLINE_BYTES``, when it fails
+        under one, as a computer whose network can't reach the store does."""
         base_url = child.base_url(owner.environment_url) if child is not None else owner.environment_url
         card = child.card if child is not None else owner.environment_card or {}
         upload = await asyncio.to_thread(_upload_grant, card, getattr(owner, "sandbox_type", None))
-        params = {"timeout": READ_TIMEOUT_S, "paths": paths, "headers": owner.control_headers_for(base_url)}
+        params = {"timeout": READ_TIMEOUT_S, "paths": paths, "headers": owner.control_headers_for(base_url),
+                  "max_bytes": MAX_INLINE_BYTES}
         answer = None
         try:
             if upload is not None:
@@ -348,6 +352,11 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         except httpx.TransportError as e:
             raise RuntimeError(f"computer_verifier '{self.id}': data/get of {what} in env {self.env_id!r} failed: "
                                f"{type(e).__name__}: {e}") from e
+        except protocol_v1.ResponseTooLarge as e:
+            raise RuntimeError(f"computer_verifier '{self.id}': data/get of {what} in env {self.env_id!r} answered "
+                               f"inline with over {MAX_INLINE_BYTES} bytes, more than the step reads; an env that takes "
+                               "the data-objects form, on a network that reaches the object store, exports under "
+                               "the step's grant instead") from e
         return await self._files_of(answer, upload, what)
 
     async def _files_of(self, answer: GetDataResponse, upload: Optional[tuple[ObjectStore, Any]],

@@ -201,10 +201,11 @@ async def test_a_result_file_an_app_owns_is_read_through_that_apps_data_get(comp
     (computer.home / "notes.txt").write_text("done\n")
     computers = computer.get_data
 
-    async def get_data(base_url, timeout=30, verify=True, *, write_namespace=None, paths=None, headers=None):
+    async def get_data(base_url, timeout=30, verify=True, *, write_namespace=None, paths=None, headers=None,
+                       max_bytes=None):
         if not base_url.endswith("/apps/notes"):
             return await computers(base_url, timeout, verify, write_namespace=write_namespace, paths=paths,
-                                   headers=headers)
+                                   headers=headers, max_bytes=max_bytes)
         computer.calls.append(("app data/get", paths))
         return GetDataResponse(parts=[FilePart(file=FileWithBytes(bytes=base64.b64encode(b"buy milk").decode()),
                                                metadata={DATA_OBJECTS_EXTENSION_URI: {"path": "Notes/today.md"}})])
@@ -219,6 +220,17 @@ async def test_a_result_file_an_app_owns_is_read_through_that_apps_data_get(comp
     assert "buy milk" in prompts[0] and "did NOT produce" not in prompts[0]
     assert [call for call in computer.calls if call[0].endswith("data/get")] == [
         ("data/get", ["notes.txt"]), ("app data/get", None)]
+
+
+@pytest.mark.asyncio
+async def test_an_inline_export_over_the_cap_fails_the_step_unread(computer, monkeypatch):
+    monkeypatch.setattr(computer_verifier, "MAX_INLINE_BYTES", 16)
+    (computer.home / "notes.txt").write_text("x" * 100)
+    step = _step(result_files=["~/notes.txt"])
+    _judge(step, [])
+
+    with pytest.raises(RuntimeError, match="answered inline with over 16 bytes, more than the step reads"):
+        await step.execute(_context(computer))
 
 
 @pytest.mark.asyncio
