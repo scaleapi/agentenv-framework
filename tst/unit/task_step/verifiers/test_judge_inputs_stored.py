@@ -1,13 +1,15 @@
 """Each judge call's record names exactly what it was sent, stored by its sha256: a direct judge's messages, response
 format and settings (the config's with the run's over them, credentials left out); an agent judge's message, every file
 its step staged in its sandbox and, for a judge the task deployed, what the task's steps loaded there as the run recorded
-it. A judge's settings say which trajectory source it read for each turn."""
+it. The uploads run in the background and the grade waits for them, marking any that failed or hadn't finished. A
+judge's settings say which trajectory source it read for each turn."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import threading
 from types import SimpleNamespace
 
 import litellm
@@ -24,8 +26,11 @@ ANSWER = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "it
 
 
 class _Store:
-    def __init__(self, fail: bool = False):
-        self.fail, self.objects, self.puts = fail, {}, 0
+    """An object store in memory; ``fail`` refuses every put, or only those of bytes holding it; ``gate`` holds each put
+    until it's set."""
+
+    def __init__(self, fail=False, gate: threading.Event | None = None):
+        self.fail, self.gate, self.objects, self.puts = fail, gate, {}, 0
 
     def exists(self, key):
         return key in self.objects
@@ -34,19 +39,24 @@ class _Store:
         return f"mem://{key}"
 
     def put(self, key, data, content_type=None, allow_overwrite=False):
-        if self.fail:
+        if self.gate is not None:
+            assert self.gate.wait(10)
+        if self.fail is True or (isinstance(self.fail, bytes) and self.fail in data):
             raise ConnectionError("store unreachable")
         self.puts += 1
         self.objects[key] = data
         return f"mem://{key}"
 
 
-@pytest.fixture
-def store(monkeypatch):
-    store = _Store()
+def _using(monkeypatch, store: _Store) -> _Store:
     monkeypatch.setattr(judge_usage, "get_config", lambda: SimpleNamespace(
         get_artifact_key_prefix=lambda: "pfx/", get_object_store=lambda: store))
     return store
+
+
+@pytest.fixture
+def store(monkeypatch):
+    return _using(monkeypatch, _Store())
 
 
 def _opened(store: _Store, ref: dict) -> dict:
@@ -95,6 +105,7 @@ async def test_a_request_cancelled_mid_call_keeps_what_it_was_sent(monkeypatch, 
         judging.cancel()
         with pytest.raises(asyncio.CancelledError):
             await judging
+        await judge.settle()
 
     [call] = judge.calls
     assert (call["outcome"], call["endpoint_host"]) == ("cut_off", "gw.test")
@@ -115,8 +126,7 @@ async def test_a_request_retried_with_the_same_input_shares_one_stored_object(mo
 @pytest.mark.asyncio
 async def test_an_input_the_store_refuses_is_recorded_and_the_judge_still_grades(monkeypatch):
     _llm(monkeypatch)
-    monkeypatch.setattr(judge_usage, "get_config", lambda: SimpleNamespace(
-        get_artifact_key_prefix=lambda: "pfx/", get_object_store=lambda: _Store(fail=True)))
+    _using(monkeypatch, _Store(fail=True))
 
     grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
 
@@ -148,6 +158,7 @@ async def test_the_staging_recorder_keeps_each_file_put_in_the_judges_sandbox(st
     await recorder.write_file_from_text("turn one", "/tmp/run/turn_01.json")
     await recorder.write_file_from_object("mem://trajectories/2.json", "/tmp/run/turn_02.json")
     await recorder.terminate()
+    await judge.settle()
 
     text = "turn one".encode()
     assert sandbox.files == {"/tmp/run/turn_01.json": "turn one", "/tmp/run/turn_02.json": "mem://trajectories/2.json"}
@@ -175,6 +186,7 @@ async def test_an_agent_calls_record_opens_to_its_message_and_the_files_staged_f
         await verifier._invoke_judge_a2a(eval_prompt="grade it", judge_a2a_url="http://judge.test",
                                          judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
                                          model="m", usage=judge)
+        await judge.settle()
 
     [call] = judge.calls
     assert _opened(store, call["input"]) == {
@@ -281,3 +293,70 @@ async def test_an_always_on_judge_keeps_each_file_it_staged_and_names_the_format
     assert seen["sources"] and all(source["guessed"] for source in seen["sources"])
     assert grade["verifier_settings"]["trajectory_sources"] == seen["sources"]
     assert {source["format"] for source in seen["sources"]} >= {"claude-code-stream-json"}
+
+
+@pytest.mark.asyncio
+async def test_the_judge_is_sent_its_message_while_its_staged_files_are_still_uploading(monkeypatch):
+    released = threading.Event()
+    store = _using(monkeypatch, _Store(gate=released))
+    sent_while_uploading: list[bool] = []
+
+    async def send(url, **kwargs):
+        sent_while_uploading.append(not store.objects)
+        released.set()
+        return "task-1", None
+
+    async def poll(url, task_id, **kwargs):
+        return {"status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": ANSWER}]}}}
+
+    monkeypatch.setattr(protocol, "send_a2a_message", send)
+    monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+    with judge_usage.scope():
+        judge = judge_usage.start(TaskStepContext(), "verify")
+        await judge_usage.StagingRecorder(_Sandbox(), judge).write_file_from_text("turn one", "/tmp/run/turn_01.json")
+        verifier = _step(use_agent_judge=True, criteria=[{"id": "c1", "title": "asked"}])
+        await verifier._invoke_judge_a2a(eval_prompt="grade it", judge_a2a_url="http://judge.test",
+                                         judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
+                                         model="m", usage=judge)
+        await judge.settle()
+
+    assert sent_while_uploading == [True]
+    [call] = judge.calls
+    assert _opened(store, call["input"])["files"][0]["sha256"] == hashlib.sha256(b"turn one").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_an_upload_still_running_when_the_grade_is_written_is_marked_and_the_grade_goes_on(monkeypatch):
+    released = threading.Event()
+    _using(monkeypatch, _Store(gate=released))
+    monkeypatch.setattr(judge_usage, "SETTLE_SECONDS", 0.2)
+    _llm(monkeypatch)
+
+    grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
+    released.set()
+
+    [call] = grade["judge_calls"]
+    assert "input" not in call and call["input_error"] == "TimeoutError: still uploading after 0s"
+    assert grade["verifier_status"] == "graded"
+
+
+@pytest.mark.asyncio
+async def test_a_staged_file_that_wasnt_stored_is_marked_in_the_manifest_and_in_the_calls_input(monkeypatch):
+    store = _using(monkeypatch, _Store(fail=b"secret turn"))
+    _answering_judge(monkeypatch)
+    with judge_usage.scope():
+        judge = judge_usage.start(TaskStepContext(), "verify")
+        recorder = judge_usage.StagingRecorder(_Sandbox(), judge)
+        await recorder.write_file_from_text("secret turn", "/tmp/run/turn_01.json")
+        await recorder.write_file_from_text("turn two", "/tmp/run/turn_02.json")
+        verifier = _step(use_agent_judge=True)
+        await verifier._invoke_judge_a2a(eval_prompt="grade it", judge_a2a_url="http://judge.test",
+                                         judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
+                                         model="m", usage=judge)
+        await judge.settle()
+
+    failed, stored = judge.staged
+    assert "object_url" not in failed and failed["input_error"] == "ConnectionError: store unreachable"
+    assert stored["object_url"] == f"mem://pfx/judge-inputs/{stored['sha256']}"
+    [call] = judge.calls
+    assert _opened(store, call["input"])["files"] == [failed, stored]

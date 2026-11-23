@@ -131,6 +131,7 @@ class VerifierTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         try:
             verification = await self.verify(context)
+            await self.settle(context)
             score = self._score(verification)
             status = (VerifierStatus.SKIPPED if verification.skipped is not None
                       else VerifierStatus.FAILED if verification.error is not None else VerifierStatus.GRADED)
@@ -139,6 +140,7 @@ class VerifierTaskStep(TaskStep):
                                 skip=verification.skipped)
             grade.update(await self._output(context, verification.output))
         except Exception as exc:
+            await self.settle(context)
             self._write_grade(context, self._grade(context, VerifierStatus.FAILED, None, [],
                                                    error=_capped(f"{type(exc).__name__}: {exc}")))
             raise
@@ -165,6 +167,10 @@ class VerifierTaskStep(TaskStep):
         """Fields of the grade beside the base's, written whether the step graded, skipped or failed, so they say what
         a failed run did too, as a judge's ``judge_calls``. None by default."""
         return {}
+
+    async def settle(self, context: TaskStepContext) -> None:
+        """Work ``verify`` left running that ``grade_fields`` reports, as a judge's uploads, finished before the grade is
+        written, whether the step graded or failed. Nothing by default; it must not raise."""
 
     def criterion_rows(self) -> Optional[int]:
         """How many criterion rows a run of this verifier grades, when its config alone says, for lint to weigh a

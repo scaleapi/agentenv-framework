@@ -904,6 +904,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         with judge_usage.scope():
             return await super().execute(context)
 
+    async def settle(self, context: TaskStepContext) -> None:
+        """The run's judge inputs stored before the grade says what each call was sent (``JudgeUsage.settle``)."""
+        judge = judge_usage.current()
+        if judge is not None:
+            await judge.settle()
+
     async def verify(self, context: TaskStepContext) -> Verification:
         verdict = self._gated(await self._judged(context))
         if verdict.mistakes_entry is not None:
@@ -1649,7 +1655,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         last_exc: Exception | None = None
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             if judge is not None and use_response_format not in inputs:
-                inputs[use_response_format] = await judge_usage.store_input({
+                inputs[use_response_format] = await judge.input({
                     "messages": messages, "response_format": response_format if use_response_format else None,
                     "settings": model_call.sent_params(route, params)})
             judge_input = inputs.get(use_response_format, {})
@@ -1754,9 +1760,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         from agent_env.a2a_agent import protocol
 
         host = getattr(judge_agent, "model_endpoint_host", None)
-        sent = ({"sent": await judge_usage.store_input({"message": eval_prompt, "files": list(usage.staged),
-                                                         "loaded": list(usage.loaded)})}
-                if isinstance(usage, JudgeUsage) else {})
+        sent = {"sent": usage.agent_input(eval_prompt)} if isinstance(usage, JudgeUsage) else {}
         try:
             task_id, _ = await protocol.send_a2a_message(
                 judge_a2a_url,
