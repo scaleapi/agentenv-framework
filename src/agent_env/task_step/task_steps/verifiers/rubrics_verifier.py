@@ -315,7 +315,7 @@ def _direct_settings(route: model_call.ModelRoute, run: Mapping[str, Any]
         params[param] = value if param == "reasoning_effort" else {"type": "enabled", "budget_tokens": value}
     if not_sent:
         logger.warning("%s takes no %s; the judge grades without them", route.model, sorted(not_sent))
-    request = {**route.call.params, **params}
+    request = model_call.sent_params(route, params)
     thinking = request.get("thinking")
     sent = {"effort": request.get("reasoning_effort"),
             "max_thinking_tokens": thinking.get("budget_tokens") if isinstance(thinking, Mapping) else None,
@@ -1649,7 +1649,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             if judge is not None and use_response_format not in inputs:
                 inputs[use_response_format] = await judge_usage.store_input({
                     "messages": messages, "response_format": response_format if use_response_format else None,
-                    "settings": params})
+                    "settings": model_call.sent_params(route, params)})
             judge_input = inputs.get(use_response_format, {})
             try:
                 reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,

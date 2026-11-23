@@ -1,5 +1,6 @@
 """Each judge call's record names exactly what it was sent, stored by its sha256: a direct judge's messages, response
-format and settings, an agent judge's message and every file put in its sandbox. A judge's settings say which
+format and settings (the config's with the run's over them, credentials left out), an agent judge's message and every
+file put in its sandbox. A judge's settings say which
 trajectory source it read for each turn."""
 
 from __future__ import annotations
@@ -54,7 +55,9 @@ def _opened(store: _Store, ref: dict) -> dict:
 
 @pytest.mark.asyncio
 async def test_a_direct_calls_record_opens_to_exactly_the_messages_format_and_settings_it_sent(monkeypatch, store):
-    requests = _llm(monkeypatch)
+    requests = _llm(monkeypatch, params={"temperature": 0, "max_tokens": 512, "aws_secret_access_key": "hush",
+                                         "extra_body": {"top_k": 5, "auth": "hush"}},
+                    headers={"X-Team-Key": "team-secret"})
 
     grade = await _grade(_step(default_model="claude-sonnet-4-6", effort="high"), _context())
 
@@ -62,7 +65,9 @@ async def test_a_direct_calls_record_opens_to_exactly_the_messages_format_and_se
     sent = _opened(store, call["input"])
     assert sent["messages"] == requests[0]["messages"]
     assert sent["response_format"] == requests[0]["response_format"]
-    assert sent["settings"] == {"reasoning_effort": "high"}
+    assert sent["settings"] == {"temperature": 0, "max_tokens": 512, "extra_body": {"top_k": 5},
+                                "reasoning_effort": "high"}
+    assert (requests[0]["extra_headers"], requests[0]["aws_secret_access_key"]) == ({"X-Team-Key": "team-secret"}, "hush")
 
 
 @pytest.mark.asyncio
