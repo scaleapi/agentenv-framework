@@ -183,3 +183,44 @@ async def test_a_sub_agents_new_steps_and_changed_header_are_stored_under_its_fo
         == ["sub/toolu_1/00000000-00000002.0001.header.json"]
     assert "sub/toolu_1/sub/inner/00000000-00000001.jsonl" in names
     assert [n for n in names if n.endswith(".header.json") and "/" not in n] == ["00000000-00000001.0001.header.json"]
+
+
+def _page(after: int, steps: int, state: str = "running") -> httpx.Response:
+    events = [{"step_id": n, "source": "agent", "message": f"m{n}"} for n in range(after + 1, after + steps + 1)]
+    return httpx.Response(200, json={"context_id": "c", "task_id": "t", "state": state, "format": ATIF,
+                                     "schema_version": "ATIF-v1.8", "profile_version": "1.0",
+                                     "header": {"session_id": "c", "trajectory_id": "d"}, "events": events,
+                                     "next": after + steps, "has_more": False})
+
+
+@pytest.mark.asyncio
+async def test_an_atif_follow_read_again_until_its_copy_starts_stores_every_page(tmp_path):
+    """A conversation's first task has no copy for a moment after the agent takes it: its 404 isn't the task gone."""
+    store = GrantingObjectStore(str(tmp_path / "store"), reaches=True)
+    reads = iter([httpx.Response(404), httpx.Response(404), _page(0, 2), _page(2, 1, state="completed")])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: next(reads)))
+    sink = LiveTrajectoryChunks(store, "p/", "turn-1")
+
+    await follow_trajectory("http://agent.test/ext/trajectory", "t", sink, poll_interval_seconds=0,
+                            stop=asyncio.Event(), client=client, format=ATIF, fallback_format=NATIVE)
+
+    assert json.loads(store.read("p/turn-1/live/meta.json"))["format"] == ATIF
+    assert json.loads(store.read("p/turn-1/live/end.json")) == {"state": "completed", "next": 3}
+
+
+@pytest.mark.asyncio
+async def test_an_atif_follow_whose_copy_never_starts_ends_with_its_turn(tmp_path):
+    store = GrantingObjectStore(str(tmp_path / "store"), reaches=True)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    sink = LiveTrajectoryChunks(store, "p/", "turn-1")
+    stop = asyncio.Event()
+    follower = asyncio.create_task(follow_trajectory(
+        "http://agent.test/ext/trajectory", "t", sink, poll_interval_seconds=0.01, stop=stop, client=client,
+        format=ATIF, fallback_format=NATIVE))
+    await asyncio.sleep(0.1)
+    assert not follower.done()
+
+    stop.set()
+
+    await asyncio.wait_for(follower, 5)
+    assert store.list("p/turn-1/live/") == []

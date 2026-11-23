@@ -37,6 +37,10 @@ _STOPPED_INTERVAL_SECONDS = 0.2
 _ATIF_REFUSALS = frozenset({"format_not_prescribed", "atif_unavailable", "format_not_offered"})
 
 
+class _NotStarted(Exception):
+    """An atif/1 read answered 404 before any of the task's pages was stored: its copy may not have started yet."""
+
+
 @dataclass(frozen=True)
 class TrajectoryBatch:
     """Events ``after`` to ``next`` of a task's trajectory, as one read returned them; ``last``
@@ -89,7 +93,8 @@ async def follow_trajectory(
 
     An atif/1 follow the agent refuses before any of its pages was stored goes on in ``fallback_format`` from the
     task's first event; one refused after that hands ``sink`` a batch naming why it ``stopped`` and ends, so a turn's
-    pages never mix formats.
+    pages never mix formats. Before its first page, an atif/1 read answered 404 is a copy not started yet, read again
+    until ``stop`` is set.
 
     Between reads it waits ``poll_interval_seconds``, or less once ``stop`` is set. Transport errors
     and 5xx answers are retried with backoff until ``stop`` is set, and end following after it; a
@@ -107,6 +112,8 @@ async def follow_trajectory(
                     timeout=_READ_TIMEOUT_SECONDS,
                 )
                 if response.status_code == 404:
+                    if reading == ATIF and not stored_atif and not stop.is_set():
+                        raise _NotStarted()
                     logger.warning("Agent no longer knows task %s; stopped following its trajectory", task_id)
                     return
                 raise_for_extension_status(response, operation="trajectory get", include_body=True)
@@ -130,6 +137,8 @@ async def follow_trajectory(
             except httpx.TransportError as exc:
                 failures += 1
                 logger.warning("Live trajectory read failed (consec=%d, will retry): %r", failures, exc)
+            except _NotStarted:
+                logger.info("Task %s's atif/1 copy hasn't started yet; reading it again", task_id)
             else:
                 failures = 0
                 atif = reading == ATIF
