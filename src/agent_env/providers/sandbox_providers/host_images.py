@@ -50,18 +50,11 @@ def holds(image_name: str, image_sources: str | None) -> bool:
     return image_sources is not None and _built_from(image_name) == image_sources
 
 
-def holds_digest(image: DockerImageArtifact) -> bool:
-    """Whether this machine's Docker holds ``image``, one with an ``image_digest``, under its name as the image that
-    digest names: pulled by it, or built here from the image's sources. A tag can name another image than the one a
-    version records, so holding its name isn't enough."""
-    return image.image_digest in _repo_digests(image.image_name) or held(image)
-
-
 def named_if_held(image: DockerImageArtifact) -> bool:
     """Whether this machine's Docker holds ``image``, one with an ``image_digest``, as that digest names it, under its
-    name (``holds_digest``) or by the digest alone, as ``docker pull <repo>@<digest>`` leaves an image, which it then
-    names with ``image_name`` over whatever that name held, so a container started by the name runs it."""
-    if holds_digest(image):
+    name (``_holds_under_name``) or by the digest alone, as ``docker pull <repo>@<digest>`` leaves an image, which it
+    then names with ``image_name`` over whatever that name held, so a container started by the name runs it."""
+    if _holds_under_name(image):
         return True
     if image.image_digest not in _repo_digests(image.pinned_name):
         return False
@@ -176,6 +169,13 @@ def pull(image: DockerImageArtifact) -> None:
         raise RuntimeError(f"Couldn't pull {image.pinned_name}: {why}")
     logger.warning("Couldn't pull %s, so it's built from its build context: %s", image.pinned_name, why)
     build(image)
+
+
+def _holds_under_name(image: DockerImageArtifact) -> bool:
+    """Whether this machine's Docker holds ``image``, one with an ``image_digest``, under its name as the image that
+    digest names: pulled by it, or built here from the image's sources. A tag can name another image than the one a
+    version records, so holding its name isn't enough, and an image held by the digest alone isn't under its name."""
+    return image.image_digest in _repo_digests(image.image_name) or held(image)
 
 
 def _tag(image: DockerImageArtifact) -> None:
