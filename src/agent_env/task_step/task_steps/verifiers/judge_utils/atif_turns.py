@@ -251,13 +251,19 @@ def _name(trajectory_id: Any) -> Any:
     return trajectory_id if isinstance(trajectory_id, Hashable) else None
 
 
+def _sub_name(sub: Mapping[str, Any]) -> Any:
+    return _name(sub.get("trajectory_id"))
+
+
 def compact_atif_trajectory(
     document: Mapping[str, Any], trajectory_filter: TrajectoryFilter, result_file_prefix: str = "",
 ) -> tuple[list[dict], list[tuple[str, str]]]:
     """``compact_otel_trajectory``'s events from an ATIF document, in step order: an agent step's
     ``reasoning_content`` as thinking, each tool call and then its results (one over the inline size or holding an
-    image written out to a file, as the OTel compaction does), a sub-agent's events after the result that started
-    it, and the root's last agent message as the final response; each with its step's timestamp."""
+    image written out to a file, as the OTel compaction does), and the root's last agent message as the final
+    response; each with its step's timestamp. A sub-agent's events follow the result that started it, which names it in
+    ``starts_subagents``, and each names it as ``subagent``, so a judge tells its calls from the main agent's, as a
+    native Claude Code turn's ``parent_tool_use_id`` does."""
     events: list[dict] = []
     files: list[tuple[str, str]] = []
     numbers = itertools.count(1)
@@ -265,19 +271,21 @@ def compact_atif_trajectory(
     calls_on = trajectory_filter.include_tool_calls
     results_on = trajectory_filter.include_tool_call_results
 
-    def walk(trajectory: Mapping[str, Any]) -> None:
+    def walk(trajectory: Mapping[str, Any], tag: Mapping[str, Any]) -> None:
         for step in _steps(trajectory):
             if step.get("source") != "agent":
                 continue
             timestamp = step.get("timestamp") or ""
             if trajectory_filter.include_thinking and step.get("reasoning_content"):
-                events.append({"type": "thinking", "text": step["reasoning_content"], "timestamp": timestamp})
+                events.append({"type": "thinking", "text": step["reasoning_content"], "timestamp": timestamp, **tag})
             for call, results in _by_call(step):
                 tool = (call or {}).get("function_name") or ""
                 if call is not None and calls_on:
                     events.append({"type": "tool_call", "tool": tool, "input": call.get("arguments"),
-                                   "timestamp": timestamp})
+                                   "timestamp": timestamp, **tag})
                 for result in results:
+                    started = subagents.started(trajectory, result)
+                    names = {"starts_subagents": [_sub_name(sub) for sub in started]} if started else {}
                     if results_on:
                         output = result.get("content")
                         output_json = json.dumps(output)
@@ -285,14 +293,14 @@ def compact_atif_trajectory(
                             path = f"{_TOOL_RESULT_FILES_DIR}/{result_file_prefix}tool_call_result_{next(numbers)}.json"
                             files.append((path, output_json))
                             events.append({"type": "tool_result", "tool": tool, "output_file": path,
-                                           "timestamp": timestamp})
+                                           "timestamp": timestamp, **tag, **names})
                         else:
                             events.append({"type": "tool_result", "tool": tool, "output": output,
-                                           "timestamp": timestamp})
-                    for sub in subagents.started(trajectory, result):
-                        walk(sub)
+                                           "timestamp": timestamp, **tag, **names})
+                    for sub in started:
+                        walk(sub, {"subagent": _sub_name(sub)})
 
-    walk(document)
+    walk(document, {})
     if trajectory_filter.include_response:
         final = next((step for step in reversed(_steps(document))
                       if step.get("source") == "agent" and _text(step.get("message")).strip()), None)

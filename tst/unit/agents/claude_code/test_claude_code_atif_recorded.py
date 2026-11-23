@@ -137,6 +137,8 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
         assert len(frames) == len(images)
     if scenario == "browser":
         assert images and frames
+    if scenario == "subagent":
+        assert [event["tool"] for event in events if event["type"] == "tool_call" and event.get("subagent")] == ["Bash"]
 
 
 def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():

@@ -228,6 +228,16 @@ def test_a_sub_agent_resolves_its_references_where_it_sits_not_where_it_was_reac
     assert [action.tool for action in transcript.actions] == walked
 
 
+
+def test_a_sub_agents_compacted_events_name_it_as_does_the_result_that_started_it():
+    """So a judge tells a sub-agent's calls from the main agent's, as a native turn's ``parent_tool_use_id`` does."""
+    document = _agent(None, "root", "A", subs=[_agent("A", "in A", "B", subs=[_agent("B", "in B")])])
+    events, _ = T.compact_atif_trajectory(document, TrajectoryFilter())
+    assert [(e["type"], e["tool"], e.get("subagent"), e.get("starts_subagents")) for e in events] == [
+        ("tool_call", "root", None, None), ("tool_result", "root", None, ["A"]),
+        ("tool_call", "in A", "A", None), ("tool_result", "in A", "A", ["B"]),
+        ("tool_call", "in B", "B", None), ("tool_result", "in B", "B", None)]
+
 def test_an_id_missing_or_held_as_a_list_or_an_object_names_nothing_and_stops_no_walk():
     """A copy graded as stored may hold one anywhere, in a sub-agent nothing references too."""
     missing = _agent("gone", "no id")
