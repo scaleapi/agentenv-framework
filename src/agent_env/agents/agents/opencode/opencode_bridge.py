@@ -45,6 +45,10 @@ ERROR_MESSAGE_LIMIT = 4000
 ROLE_HEADER = "AgentEnv-Role"
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# OpenCode's experimental flag for its output-token cap (32,000 by default), checked against opencode-ai 1.17.18. The
+# CLI caps a step at min(the model's limit.output, this value), so limit.output alone can't raise the cap. A name the
+# CLI doesn't know is ignored without an error, so recheck it on every opencode-ai upgrade.
+OUTPUT_TOKEN_MAX_ENV = "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"
 
 # Root under which each A2A context_id gets its own OpenCode data dir; lives
 # under $HOME so host-mode instances don't share session state.
@@ -282,6 +286,7 @@ def _build_config(
     environ: Mapping[str, str] = os.environ,
     instructions: list[str] | None = None,
     builtin_tools: OpenCodeTools | None = None,
+    max_output_tokens: int | None = None,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
@@ -324,6 +329,8 @@ def _build_config(
                         "additional_drop_params": ["tool_choice"],
                         **({"reasoningEffort": effort} if effort else {}),
                     },
+                    # Output only: a limit.context would turn on OpenCode's auto-compaction.
+                    **({"limit": {"output": max_output_tokens}} if max_output_tokens else {}),
                 }},
             }
         },
@@ -458,6 +465,7 @@ async def _run_opencode(
     workspace: str = "/app",
     max_turns: int | None = None,
     base_url: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``, its provider calling ``base_url``, the endpoint's when None. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
@@ -465,7 +473,10 @@ async def _run_opencode(
 
     ``max_turns`` bounds the turn's steps, OpenCode's model requests, as ``--max-turns`` bounds Claude Code's: once
     the last step it allows asks for another, the CLI is killed and the turn fails. OpenCode v1's own ``steps`` limit
-    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921)."""
+    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921).
+
+    ``max_output_tokens`` raises or lowers the output tokens, reasoning included, one model request may produce; None
+    keeps OpenCode's default of 32,000."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -484,7 +495,8 @@ async def _run_opencode(
 
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
                            environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
-                           instructions=instructions, builtin_tools=builtin_tools)
+                           instructions=instructions, builtin_tools=builtin_tools,
+                           max_output_tokens=max_output_tokens)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn
@@ -507,6 +519,7 @@ async def _run_opencode(
     env = {
         **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
+        **({OUTPUT_TOKEN_MAX_ENV: str(max_output_tokens)} if max_output_tokens else {}),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")
@@ -655,6 +668,8 @@ class _EventParser:
         self.tool_calls: set[str] = set()
         self.steps: set[str] = set()
         self.last_step_continues = False
+        self.last_step_reason: object = None
+        self.last_step_tokens: dict | None = None
         self.session_id: str | None = None
         self.completed = False
         self.event_errors: list[str] = []
@@ -740,6 +755,9 @@ class _EventParser:
             reason = (part or event).get("reason")
             self.steps.add(str((part or event).get("id") or f"step-{len(self.steps)}"))
             self.last_step_continues = reason in _CONTINUING_STEP_REASONS
+            self.last_step_reason = reason
+            tokens = (part or event).get("tokens")
+            self.last_step_tokens = tokens if isinstance(tokens, dict) else None
             if reason == "stop":
                 self.completed = True
 
@@ -758,11 +776,17 @@ class _EventParser:
         # file's modality is unsupported but the model still answered), so we only
         # surface an error when no terminal stop was emitted.
         err: str | None = None
+        error_code = self.error_code
         if not self.completed:
             stderr_text = stderr.decode(errors="replace").strip()
             details = "\n".join(self.event_errors)
+            # Ahead of stderr: a step cut off at the cap exits 0 with no error event, and any stderr is incidental.
+            length = self._output_limit_error() if not details else None
+            if length:
+                error_code = "output_token_limit"
             err = (
                 details
+                or length
                 or stderr_text
                 or f"opencode exited with code {returncode} without completing"
             )[:ERROR_MESSAGE_LIMIT]
@@ -774,8 +798,20 @@ class _EventParser:
             session_id=self.session_id,
             trajectory=self.trajectory,
             error=err,
-            error_code=self.error_code if err else None,
+            error_code=error_code if err else None,
         )
+
+    def _output_limit_error(self) -> str | None:
+        """The error for a turn whose last step stopped at the output-token cap, with the step's token counts when its
+        event has them: opencode-ai 1.17.18's step-finish ``tokens`` counts ``reasoning`` apart from ``output``."""
+        if self.last_step_reason != "length":
+            return None
+        tokens = self.last_step_tokens or {}
+        reasoning, text = tokens.get("reasoning"), tokens.get("output")
+        counts = (f" ({reasoning + text} tokens: {reasoning} reasoning + {text} text)"
+                  if isinstance(reasoning, int) and isinstance(text, int) else "")
+        return (f"model hit the output token cap{counts} before finishing; "
+                "raise max_output_tokens in the opencode agent config")
 
 
 _TAGS_HEADER = "x-litellm-tags"

@@ -181,17 +181,17 @@ async def test_a_turn_gets_the_sdks_peer_tools_with_its_registered_servers(monke
 @pytest.mark.asyncio
 async def test_the_turns_config_and_workspace_reach_the_cli(oc, turns, folders):
     config = {"model": "provider/model", "effort": "high", "system_prompt": "be brief", "project_id": "p-1",
-              "task_id": "t-1", "role": "solver", "timeout_seconds": 42, "max_turns": 45}
+              "task_id": "t-1", "role": "solver", "timeout_seconds": 42, "max_turns": 45, "max_output_tokens": 64000}
     async with oc.client() as client:
         assert (await client.post("/ext/agent-config", json=config)).status_code == 200
         await oc.send(client, "go")
 
     (call,) = turns.calls
     assert {key: call[key] for key in ("prompt", "model", "effort", "system_prompt", "project_id", "task_id", "role",
-                                       "timeout_s", "workspace", "max_turns")} == {
+                                       "timeout_s", "workspace", "max_turns", "max_output_tokens")} == {
         "prompt": "go", "model": "provider/model", "effort": "high", "system_prompt": "be brief",
         "project_id": "p-1", "task_id": "t-1", "role": "solver", "timeout_s": 42, "workspace": str(folders),
-        "max_turns": 45}
+        "max_turns": 45, "max_output_tokens": 64000}
 
 
 @pytest.mark.asyncio
