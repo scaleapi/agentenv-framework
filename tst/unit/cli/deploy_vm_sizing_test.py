@@ -26,7 +26,7 @@ def _deploy_kwargs(extra_args: list[str]) -> dict:
         captured.update(kwargs)
         return DeployedGatewayEnv(
             env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://mcp",
-            db_web_url=None, sandbox_id="s1",
+            sandbox_id="s1",
         )
 
     fake_env = MagicMock(id="e1", version=1, type="multi")

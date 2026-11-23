@@ -64,8 +64,7 @@ _LOGGER = "agent_env.task_step.task_steps.deploy_agent"
 
 def _deployed_env(card: dict | None) -> DeployedEnv:
     return DeployedGatewayEnv(
-        env_id="crm", env_version=1, gateway_url="https://gw.example", mcp_url=_MCP_URL, db_web_url=None,
-        sandbox_id="sb-1", environment_card_url="https://gw.example/.well-known/agent-env.json", environment_card=card,
+        env_id="crm", env_version=1, gateway_url="https://gw.example", mcp_url=_MCP_URL, sandbox_id="sb-1", environment_card_url="https://gw.example/.well-known/agent-env.json", environment_card=card,
     )
 
 

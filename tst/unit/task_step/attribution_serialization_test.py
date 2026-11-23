@@ -87,7 +87,7 @@ async def test_deploying_an_env_passes_the_attribution_dict():
         passed.update(kwargs, attribution=attribution)
         return DeployedGatewayEnv(
             env_id="art-1", env_version=2, gateway_url="http://gw", mcp_url="http://mcp",
-            db_web_url=None, sandbox_id="s1", metadata=None,
+            sandbox_id="s1", metadata=None,
         )
 
     env = MagicMock()
@@ -109,7 +109,7 @@ async def test_deploying_an_env_with_no_attribution_passes_an_empty_dict():
         passed["attribution"] = attribution
         return DeployedGatewayEnv(
             env_id="art-1", env_version=2, gateway_url="http://gw", mcp_url="http://mcp",
-            db_web_url=None, sandbox_id="s1", metadata=None,
+            sandbox_id="s1", metadata=None,
         )
 
     env = MagicMock()
