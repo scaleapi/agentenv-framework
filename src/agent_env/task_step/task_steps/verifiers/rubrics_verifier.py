@@ -1631,16 +1631,23 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         usage: StepUsage,
     ) -> dict:
         """Send one evaluation prompt to an A2A judge and return its response. The turn's reported usage goes into
-        ``usage`` as soon as the judge replies, a failed reply's too."""
+        ``usage`` as soon as the judge replies, a failed reply's too; a turn cut off waiting for the reply (a time
+        limit, a cancel, a judge that stopped answering) goes in as a call of unknown usage."""
         from agent_env.a2a_agent import protocol
 
-        task_id, _ = await protocol.send_a2a_message(
-            judge_a2a_url,
-            parts=[{"kind": "text", "text": eval_prompt}],
-            message_id=uuid.uuid4().hex,
-            context_id=None,
-            timeout_seconds=self.judge_timeout_seconds,
-        )
+        host = getattr(judge_agent, "model_endpoint_host", None)
+        try:
+            task_id, _ = await protocol.send_a2a_message(
+                judge_a2a_url,
+                parts=[{"kind": "text", "text": eval_prompt}],
+                message_id=uuid.uuid4().hex,
+                context_id=None,
+                timeout_seconds=self.judge_timeout_seconds,
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            # The judge may have taken the message before its task id came back; with no id, it can't be cancelled.
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            raise
         try:
             result = await protocol.poll_a2a_task(
                 judge_a2a_url,
@@ -1650,20 +1657,22 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 sandbox_id=getattr(judge_agent, "sandbox_id", None),
             )
         except asyncio.CancelledError:
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
             # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
             await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             raise
         except protocol.AgentUnreachableError:
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
             raise
         except TimeoutError as e:
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
             if self.judge_timeout_retries is None:
                 raise
             raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
-        usage.call(ModelRole.JUDGE, tr.usage, model=model,
-                   endpoint_host=getattr(judge_agent, "model_endpoint_host", None))
+        usage.call(ModelRole.JUDGE, tr.usage, model=model, endpoint_host=host)
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1795,6 +1804,22 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         )
         return None
 
+    async def _judge_directly(self, prompt: str, *, model: str, context: TaskStepContext,
+                              image_blocks: Optional[list[dict]], usage: StepUsage) -> dict:
+        """One direct judge call, its usage in ``usage``: what it answered, or, when a cancel or a time limit stopped
+        it, a call of unknown usage."""
+        try:
+            if image_blocks:
+                data = await self._prompt_llm_judge(prompt, model=model, context=context, image_blocks=image_blocks)
+            else:
+                data = await self._prompt_llm_judge(prompt, model=model, context=context)
+        except BaseException as exc:
+            if model_call.cut_off(exc):
+                usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=None, reported_by=ReportedBy.PROVIDER)
+            raise
+        self._record_direct_call(usage, data, model=model)
+        return data
+
     @staticmethod
     def _record_direct_call(usage: StepUsage, data: dict, *, model: str) -> None:
         """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
@@ -1858,14 +1883,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     model=agent_model,
                     usage=usage,
                 )
-            elif image_blocks:
-                data = await self._prompt_llm_judge(
-                    prompt, model=model, context=context, image_blocks=image_blocks,
-                )
             else:
-                data = await self._prompt_llm_judge(prompt, model=model, context=context)
-            if not use_agent_judge:
-                self._record_direct_call(usage, data, model=model)
+                data = await self._judge_directly(prompt, model=model, context=context, image_blocks=image_blocks,
+                                                  usage=usage)
 
             logger.info(f"Judge response: {data['response'][:200]}...")
             judge_trajectory_url = data.get("trajectory_object_url")

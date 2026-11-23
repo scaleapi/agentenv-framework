@@ -219,3 +219,17 @@ def test_an_endpoint_that_billed_only_some_calls_has_the_map_price_them_all(monk
     [entry] = context.metadata["step_usage"]["grade"]
     assert (entry["cost_status"], entry["cost_usd"]) == ("priced", pytest.approx(0.42))
 
+
+def test_a_judges_call_cut_off_before_any_answered_starts_its_role_as_a_lower_bound(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "grade")
+    usage.cut_off_call(ModelRole.JUDGE, model="gpt-4o-mini", endpoint_host="proxy:4000", reported_by=ReportedBy.PROVIDER)
+    [entry] = context.metadata["step_usage"]["grade"]
+    assert (entry["role"], entry["turns"], entry["input_tokens"], entry["cost_status"]) == ("judge", 1, None, "unpriced")
+    usage.call(ModelRole.JUDGE, Usage(input_tokens=1_000_000, output_tokens=100_000, input_includes_cache=True),
+               model="gpt-4o-mini", endpoint_host="proxy:4000")
+    [entry] = context.metadata["step_usage"]["grade"]
+    assert (entry["turns"], entry["partial"], entry["cost_status"]) == (2, True, "priced")
+    assert entry["cost_usd"] == pytest.approx(0.21)
+
