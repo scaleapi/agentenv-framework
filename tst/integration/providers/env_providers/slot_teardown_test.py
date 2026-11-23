@@ -2,8 +2,10 @@
 scratch files, and leaves a neighbouring slot whole. The script runs in a throwaway Docker CLI container that holds the
 slots' dirs, so it never touches this machine's /app or /tmp. Needs Docker."""
 
+import fcntl
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -42,14 +44,18 @@ def two_slots(tmp_path: Path):
         pytest.skip(missing_capability_reason("docker_daemon"))
     compose_file = tmp_path / "docker-compose.yml"
     compose_file.write_text(COMPOSE)
-    for layout in (GONE, KEPT):
-        _docker("compose", "-p", layout.compose_project, "-f", str(compose_file), "up", "-d", "--quiet-pull")
-    try:
-        yield
-    finally:
-        for layout in (GONE, KEPT):
-            subprocess.run(["docker", "compose", "-p", layout.compose_project, "-f", str(compose_file), "down", "-v"],
-                           capture_output=True)
+    with open(Path(tempfile.gettempdir()) / "agentenv-slot-teardown-test.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            for layout in (GONE, KEPT):
+                _docker("compose", "-p", layout.compose_project, "-f", str(compose_file), "up", "-d", "--quiet-pull")
+            yield
+        finally:
+            for layout in (GONE, KEPT):
+                subprocess.run(
+                    ["docker", "compose", "-p", layout.compose_project, "-f", str(compose_file), "down", "-v"],
+                    capture_output=True,
+                )
 
 
 def _run_teardown_twice_beside_both_slots_files() -> str:

@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 SANDBOX_MODE_VM = "vm"
 SANDBOX_MODE_CONTAINER = "container"
+SHARED_BOX_DEFAULT_TIMEOUT_S = 2 * 3600
 
 
 class SandboxProviderTypeError(ConfigError):
@@ -103,7 +104,7 @@ class SandboxProvider(ABC):
         *,
         cpu: float = 1.0,
         memory: int = 8192,
-        timeout: int = 3600 * 2,
+        timeout: int = SHARED_BOX_DEFAULT_TIMEOUT_S,
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,

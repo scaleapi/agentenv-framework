@@ -62,7 +62,11 @@ from agent_env.env.published_images import LAUNCHER_IMAGE, published_digest
 from agent_env.providers.sandbox_providers.disk_launcher import LAUNCH, RESET, launcher_variables, reset_input
 from agent_env.providers.sandbox_providers.local_docker.disk import exported_disk
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox, VmSandbox, push_object_over_stdin
-from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    SHARED_BOX_DEFAULT_TIMEOUT_S,
+    SandboxProvider,
+)
 from agent_env.providers.sandbox_providers.shared_box_walls import apply_walls_firewall
 
 if TYPE_CHECKING:
@@ -457,7 +461,7 @@ class ModalVmSandboxProvider(SandboxProvider):
         *,
         cpu: float = 0.5,
         memory: int = 8192,
-        timeout: int = 3600 * 2,
+        timeout: int = SHARED_BOX_DEFAULT_TIMEOUT_S,
         exposed_ports: Optional[list[int]] = None,
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
