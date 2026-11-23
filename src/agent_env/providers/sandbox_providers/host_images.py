@@ -65,6 +65,9 @@ def named_if_held(image: DockerImageArtifact) -> bool:
         return True
     if image.image_digest not in _repo_digests(image.pinned_name):
         return False
+    if present(image.image_name):
+        logger.warning("%s named another image than the one it's pinned to, %s; it now names the pinned one",
+                       image.image_name, image.image_digest)
     _tag(image)
     return True
 

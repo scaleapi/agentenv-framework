@@ -227,6 +227,7 @@ def _docker_cli(monkeypatch, *, pulled_by=None, pull_fails=False):
         return subprocess.CompletedProcess(argv, int(failed), "", "Error response from daemon: denied" if failed else "")
 
     monkeypatch.setattr(host_images, "_repo_digests", lambda name: (pulled_by or {}).get(name, set()))
+    monkeypatch.setattr(host_images, "present", lambda name: name in (pulled_by or {}))
     monkeypatch.setattr(host_images.subprocess, "run", run)
     return ran
 
@@ -257,12 +258,17 @@ def test_a_published_image_docker_holds_by_its_digest_isnt_pulled_again(local_st
     ({}, False, False),
 ], ids=["under-its-name", "by-its-digest-alone", "by-its-digest-its-name-on-another", "its-name-on-another", "absent"])
 def test_an_image_is_held_as_its_digest_names_it_and_named_when_held_by_the_digest_alone(local_stores, context, docker,
-                                                                                         monkeypatch, pulled_by, held,
-                                                                                         tagged):
+                                                                                         monkeypatch, caplog, pulled_by,
+                                                                                         held, tagged):
+    """A name moved off another image says so: a container started by it will run something else than before."""
     ran = _docker_cli(monkeypatch, pulled_by=pulled_by)
 
-    assert host_images.named_if_held(_published(context)) is held
+    with caplog.at_level(logging.WARNING):
+        assert host_images.named_if_held(_published(context)) is held
+
     assert ran == ([["tag", _PINNED, _PUBLISHED_REF]] if tagged else [])
+    moved = f"{_PUBLISHED_REF} named another image than the one it's pinned to, {_PUBLISHED_DIGEST}"
+    assert (moved in caplog.text) is (tagged and _PUBLISHED_REF in pulled_by)
 
 
 @pytest.mark.parametrize("named", [False, True], ids=["untagged", "tag-names-another-image"])
