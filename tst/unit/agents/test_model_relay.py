@@ -240,6 +240,51 @@ def test_the_relays_headers_replace_the_clis():
     assert sent["content-type"] == "application/json"
 
 
+def test_a_rewrite_changes_each_model_call_before_it_goes_and_leaves_other_routes_alone():
+    async def rewrite(body):
+        return body.replace(b'"m"', b'"rewritten"')
+
+    async def exercise(client, root, endpoint):
+        await _chat(client, root)
+        await client.post(f"{root}/v1/embeddings", json={"model": "m"})
+
+    _, calls, endpoint = _through_relay([(200, CLAUDE_STREAM, "text/event-stream"), (200, "{}", "application/json")],
+                                        exercise, rewrite=rewrite)
+
+    assert json.loads(endpoint.requests[0]["body"])["model"] == "rewritten"
+    assert json.loads(endpoint.requests[1]["body"])["model"] == "m"
+    assert len(calls.answered) == 1
+
+
+def test_a_refused_call_is_answered_by_the_relay_with_its_reason_and_goes_no_further(caplog):
+    async def rewrite(body):
+        raise model_relay.Refusal("no date for the model")
+
+    async def exercise(client, root, endpoint):
+        answer = await _chat(client, root)
+        return answer.status_code, answer.json()
+
+    (status, answer), calls, endpoint = _through_relay([], exercise, rewrite=rewrite)
+
+    assert status == 400 and answer["error"]["message"] == "no date for the model"
+    assert endpoint.requests == [] and (calls.answered, calls.unreported, calls.refused) == ([], 0, 1)
+    assert "model relay refused a call: no date for the model" in caplog.text
+
+
+def test_a_rewrite_that_fails_is_answered_by_the_relay_with_the_error_rather_than_a_500_a_cli_retries():
+    async def rewrite(body):
+        raise ValueError("bad body")
+
+    async def exercise(client, root, endpoint):
+        answer = await _chat(client, root)
+        return answer.status_code, answer.json()
+
+    (status, answer), calls, endpoint = _through_relay([], exercise, rewrite=rewrite)
+
+    assert status == 400 and answer["error"]["message"] == "model relay: ValueError: bad body"
+    assert endpoint.requests == [] and (calls.answered, calls.unreported, calls.refused) == ([], 0, 1)
+
+
 def test_an_unreachable_endpoint_is_a_502_and_counts_nothing():
     calls = model_relay.Calls()
 
