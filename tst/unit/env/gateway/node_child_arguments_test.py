@@ -71,7 +71,7 @@ async def _via_step(gw: Gateway, arguments: dict) -> tuple[bool, dict]:
 async def test_the_gateway_lists_the_node_childs_schema_verbatim(gateway):
     listed = {tool.name: tool for tool in await gateway._mcp.list_tools()}
     assert listed[TOOL].inputSchema["additionalProperties"] is False
-    assert set(listed[TOOL].inputSchema["properties"]) == {"q", "labels", "filters", "ids"}
+    assert set(listed[TOOL].inputSchema["properties"]) == {"q", "labels", "filters", "ids", "tags"}
 
 
 @pytest.mark.asyncio
@@ -94,6 +94,7 @@ async def test_an_undeclared_argument_reaches_the_node_child_which_refuses_it_by
     ({"labels": '["a", "b c"]'}, {"labels": ["a", "b c"]}),
     ({"filters": '{"from": "x", "n": 2}'}, {"filters": {"from": "x", "n": 2}}),
     ({"ids": '["m1"]'}, {"ids": ["m1"]}),  # anyOf array | null
+    ({"tags": '["t1"]'}, {"tags": ["t1"]}),  # a local $ref to an array definition
     ({"q": '["a"]', "labels": "[]"}, {"q": '["a"]', "labels": []}),  # q is typed string: it stays the string
 ])
 async def test_a_json_string_for_an_array_or_object_parameter_reaches_the_node_child_decoded(gateway, arguments,

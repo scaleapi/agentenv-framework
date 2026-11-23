@@ -14,8 +14,10 @@ const TOOL = {
       labels: { type: "array", items: { type: "string" } },
       filters: { type: "object" },
       ids: { anyOf: [{ type: "array", items: { type: "string" } }, { type: "null" }] },
+      tags: { $ref: "#/$defs/Tags" },
     },
     additionalProperties: false,
+    $defs: { Tags: { type: "array", items: { type: "string" } } },
   },
 };
 
@@ -26,6 +28,7 @@ function invalidFields(args) {
     else if (key === "q" && typeof value !== "string") bad.push(key);
     else if (key === "labels" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
     else if (key === "filters" && !(value !== null && typeof value === "object" && !Array.isArray(value))) bad.push(key);
+    else if (key === "tags" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
     else if (key === "ids" && !(value === null || (Array.isArray(value) && value.every((v) => typeof v === "string"))))
       bad.push(key);
   }

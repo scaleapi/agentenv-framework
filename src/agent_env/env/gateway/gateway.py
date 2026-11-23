@@ -1870,15 +1870,26 @@ class _ForwardingArgModelBase(ArgModelBase):
 _JSON_CONTAINER_TYPES: dict[str, type] = {"array": list, "object": dict}
 
 
-def _schema_types(schema: Any) -> set[str]:
-    """The JSON types a property schema allows: its `type` (a name or a list) plus those of its anyOf/oneOf branches."""
-    if not isinstance(schema, dict):
+_SCHEMA_REF_DEPTH = 8  # local $ref hops followed when typing a property; deeper (or cyclic) refs add no type
+
+
+def _schema_types(schema: Any, root: Any = None, depth: int = 0) -> set[str]:
+    """The JSON types a property schema allows: its `type` (a name or a list), those of its anyOf/oneOf branches, and
+    those of a local `$ref` (``#/$defs/...``, ``#/definitions/...``) into ``root``, the tool's input schema."""
+    if not isinstance(schema, dict) or depth > _SCHEMA_REF_DEPTH:
         return set()
     declared = schema.get("type")
     types = {declared} if isinstance(declared, str) else {t for t in declared or () if isinstance(t, str)}
     for key in ("anyOf", "oneOf"):
         for branch in schema.get(key) or ():
-            types |= _schema_types(branch)
+            types |= _schema_types(branch, root, depth + 1)
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/"):
+        target: Any = root
+        for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(part) if isinstance(target, dict) else None
+        types |= _schema_types(target, root, depth + 1)
     return types
 
 
@@ -1887,7 +1898,7 @@ def _json_container_params(input_schema: dict[str, Any]) -> dict[str, tuple[type
     it may decode to. A property that also accepts a string keeps the string the caller sent."""
     params: dict[str, tuple[type, ...]] = {}
     for name, schema in (input_schema.get("properties") or {}).items():
-        types = _schema_types(schema)
+        types = _schema_types(schema, input_schema)
         kinds = tuple(_JSON_CONTAINER_TYPES[t] for t in sorted(types) if t in _JSON_CONTAINER_TYPES)
         if kinds and "string" not in types:
             params[name] = kinds
