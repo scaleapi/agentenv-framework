@@ -214,7 +214,8 @@ name)` raises `AmbiguousChildError` for a shared name, and `client.find_child` r
 
 The client enables TCP keepalive on direct `data/add`, `data/get`, and `data/reset` connections so
 they can stay open while the environment prepares a reply. Where supported, probes start after
-30 seconds of inactivity. These calls use HTTPX's usual proxy and TLS settings.
+30 seconds of inactivity. Each socket uses the keepalive settings its kernel accepts. These calls use
+HTTPX's usual proxy and TLS settings.
 
 Extensions are invoked from what the card advertises. `client.find_extension_method(card, uri,
 method)` returns one advertised method, whose `endpoint` is the method's own or else the
