@@ -161,10 +161,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -361,10 +362,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -543,10 +545,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -757,10 +760,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -958,10 +962,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007,
     "flag": "user sim judge undecided"
@@ -1138,10 +1143,11 @@
     },
     "calls": 6,
     "usage": {
-     "prompt_tokens": 600,
-     "completion_tokens": 120,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 600,
+     "output_tokens": 120,
+     "total_tokens": 720,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.006,
     "flag": "user sim judge undecided"
@@ -1323,10 +1329,11 @@
     },
     "calls": 0,
     "usage": {
-     "prompt_tokens": 0,
-     "completion_tokens": 0,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 0,
+     "output_tokens": 0,
+     "total_tokens": 0,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.0,
     "flag": "the judge couldn't decide any check \u2014 check its setup"
@@ -1521,10 +1528,11 @@
     },
     "calls": 8,
     "usage": {
-     "prompt_tokens": 800,
-     "completion_tokens": 160,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 800,
+     "output_tokens": 160,
+     "total_tokens": 960,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.008
    }
@@ -1722,10 +1730,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -1900,10 +1909,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -2138,10 +2148,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }
@@ -2326,10 +2337,11 @@
     },
     "calls": 7,
     "usage": {
-     "prompt_tokens": 700,
-     "completion_tokens": 140,
-     "cache_read_input_tokens": 0,
-     "cache_creation_input_tokens": 0
+     "input_tokens": 700,
+     "output_tokens": 140,
+     "total_tokens": 840,
+     "cache_read_tokens": 0,
+     "cache_write_tokens": 0
     },
     "cost": 0.007
    }

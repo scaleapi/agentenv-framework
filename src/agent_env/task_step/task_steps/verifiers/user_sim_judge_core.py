@@ -722,22 +722,3 @@ def user_sim_error(rows: list[dict]) -> dict:
 
 
 NOT_JUDGED = {"value": "no", "because": [], "unknown": []}
-
-
-def usage_total(usages: list[Any]) -> dict[str, int]:
-    """The token counts of several calls, summed; a cache read reported as ``prompt_tokens_details.cached_tokens``
-    counts as one."""
-    keys = ("prompt_tokens", "completion_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-    total = dict.fromkeys(keys, 0)
-    for u in usages:
-        if not isinstance(u, dict):
-            continue
-        for k in keys:
-            v = u.get(k)
-            if isinstance(v, (int, float)):
-                total[k] += int(v)
-        details = u.get("prompt_tokens_details")
-        cached = details.get("cached_tokens") if isinstance(details, dict) else None
-        if isinstance(cached, int) and not u.get("cache_read_input_tokens"):
-            total["cache_read_input_tokens"] += cached
-    return total
