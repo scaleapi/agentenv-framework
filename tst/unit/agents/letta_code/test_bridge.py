@@ -381,7 +381,10 @@ async def test_a_turn_runs_through_a_relay_with_the_endpoints_key_and_reports_wh
     # The proxy's own usage for the turn: 45,853 in (22,784 cached) and 74 out.
     assert result.usage.to_dict() == {
         "tool_call_count": 0, "input_tokens": 45853, "output_tokens": 74, "total_tokens": 45927,
-        "cache_read_tokens": 22784, "input_includes_cache": True, "provider_details": {"model_calls": 2}}
+        "cache_read_tokens": 22784, "input_includes_cache": True,
+        "models": [{"model": "gpt-4.1-mini", "calls": 2, "input_tokens": 45853, "output_tokens": 74,
+                    "cache_read_tokens": 22784, "input_includes_cache": True}],
+        "provider_details": {"model_calls": 2}}
 
 
 def test_a_turns_leftover_letta_processes_are_stopped_and_nothing_else(monkeypatch, tmp_path):

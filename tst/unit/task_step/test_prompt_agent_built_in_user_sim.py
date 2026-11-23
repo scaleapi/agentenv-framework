@@ -34,6 +34,11 @@ def said(outcome: str, message: str = "", used: str = "none") -> list[dict]:
     return text(json.dumps({"outcome": outcome, "message": message, "used": used}))
 
 
+# A user sim task that failed as an agent reports it: its error in a data part.
+FAILED = ("failed", [{"kind": "data", "data": {"error_type": "api_error", "error_message": "the model was refused"}}])
+FAILED_ERROR = "state failed: error_type=api_error: the model was refused"
+
+
 async def _context(monkeypatch, **deployed) -> TaskStepContext:
     """A run where the real deploy_user_sim_agent step recorded hannah, who answers at USER."""
     record = await _published(monkeypatch, _deploy_step(**{"multi_day": False, "opening_prompt": PROMPT, **deployed}))
@@ -151,18 +156,18 @@ async def test_a_malformed_answer_is_retried_once_in_the_same_session(monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_user_sim_turn_that_does_not_complete_ends_the_run_and_is_recorded(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", said("reply", "ignored"))]})
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [FAILED]})
     ctx = await _context(monkeypatch)
 
     await _step().execute(ctx)
 
     assert len(peers.requests(ctx)) == 4
-    assert _reads(ctx)[0]["user_sim_error"] == "state failed"
+    assert _reads(ctx)[0]["user_sim_error"] == FAILED_ERROR
     assert _stored(ctx, peers)["status"] == "closed"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("user,timeout,error", [(("failed", said("reply", "ignored")), 600, "state failed"),
+@pytest.mark.parametrize("user,timeout,error", [(FAILED, 600, FAILED_ERROR),
                                                 (HANG, 0, "timeout: ")], ids=["failed", "timeout"])
 async def test_a_user_sim_failure_marks_the_run_as_an_error_so_verifiers_skip_it(monkeypatch, user, timeout, error):
     Peers(monkeypatch, {AGENT: [text("draft one")], USER: [user]})

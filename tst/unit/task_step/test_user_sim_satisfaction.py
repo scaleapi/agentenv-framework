@@ -536,13 +536,13 @@ async def test_after_a_prompt_agent_chat_a_malformed_answer_gets_one_retry(monke
 
 @pytest.mark.asyncio
 async def test_a_prompt_agent_chat_the_user_sim_broke_is_not_rated(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", said("reply", "x"))]})
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", [{"kind": "data", "data": {"error_message": "the model was refused"}}])]})
     ctx = await _context(monkeypatch)
     await _step().execute(ctx)
     await _hannah_rater().execute(ctx)
     assert len(_user_asks(peers)) == 1
     rating = ctx.metadata[SATISFACTION_KEY]["talk"]
-    assert rating["skipped"] == "the user sim failed: state failed" and rating["score"] is None
+    assert rating["skipped"] == "the user sim failed: state failed: the model was refused" and rating["score"] is None
 
 
 @pytest.mark.asyncio

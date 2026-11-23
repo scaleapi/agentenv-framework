@@ -1437,10 +1437,11 @@ _HOST_IPS = ls._host_ips
 
 @pytest.mark.asyncio
 async def test_the_local_provider_pulls_only_the_published_images_its_docker_doesnt_hold(monkeypatch, tmp_path):
-    """So a run after the first needs no registry."""
+    """So a run after the first needs no registry; held means as the image's digest names it, not under its name."""
     images = [DockerImageArtifact(id=name, description="d", image_name=f"ghcr.io/team/{name}:src-1",
                                   image_digest="sha256:" + "9" * 64) for name in ("held", "new")]
-    monkeypatch.setattr(ls, "present", lambda image_name: image_name.startswith("ghcr.io/team/held:"))
+    monkeypatch.setattr(ls, "named_if_held", lambda image: image.id == "held")
+    monkeypatch.setattr(ls, "present", lambda image_name: True)
     asked = []
 
     async def pull_published(self, artifacts):

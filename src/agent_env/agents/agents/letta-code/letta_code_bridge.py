@@ -432,7 +432,7 @@ async def run_letta_code(
     finally:
         if calls.answered or calls.unreported or calls.refused:
             _record_attribution(project_id, task_id)
-    result.usage = calls.usage(result.tool_call_count)
+    result.usage = calls.usage(result.tool_call_count, model)
     return result
 
 

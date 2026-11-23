@@ -270,8 +270,7 @@ class StepUsage:
         """One model call of ``role`` that isn't an agent's turn, as a judge's, written at once. The role starts at its
         first call, with the model and the endpoint host that call reached; ``reported_by`` says whose figure a call's
         ``cost_usd`` is, and the role keeps its first call's."""
-        self._role_for_call(role, model, endpoint_host, reported_by).add(usage)
-        self.entries()
+        self._add_call(role, usage, model, endpoint_host, reported_by)
 
     def reply(self, role: ModelRole, reply: ModelReply) -> None:
         """One model call the step made itself as ``role`` through ``model_call`` (a user-sim gate's judge), written
@@ -292,7 +291,6 @@ class StepUsage:
             self._context.record_model_endpoint(role.value, self._step_id, model, endpoint_host)
             self._roles[role] = RoleUsage(role.value, model, endpoint_host, reported_by=reported_by)
         return self._roles[role]
-        self.entries()
 
     def cut_off(self, role: ModelRole) -> None:
         """A turn of ``role`` that was sent but never replied: cut off by a time limit, by a cancel, or by its agent no
@@ -309,7 +307,12 @@ class StepUsage:
         """A model call of ``role`` that was sent but never answered, cut off by a time limit or a cancel: a call of
         unknown usage, marking the role's entry a lower bound as ``cut_off`` marks a turn's, recorded as ``call``
         records one, so it starts the role when it's the first."""
-        self.call(role, _unreported(), model=model, endpoint_host=endpoint_host, reported_by=reported_by)
+        self._add_call(role, _unreported(), model, endpoint_host, reported_by)
+
+    def _add_call(self, role: ModelRole, usage: Optional[Usage], model: Optional[str], endpoint_host: Optional[str],
+                  reported_by: ReportedBy) -> None:
+        self._role_for_call(role, model, endpoint_host, reported_by).add(usage)
+        self.entries()
 
     def entries(self) -> Optional[list[UsageEntry]]:
         """The entries of the roles that ran turns, written to ``metadata["step_usage"]``; None, and nothing written,
