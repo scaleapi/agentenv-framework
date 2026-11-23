@@ -242,23 +242,18 @@ async def _settled(calls: _Calls) -> None:
         await asyncio.sleep(_IN_FLIGHT_POLL_S)
 
 
-def _total(name: str, counts: list[dict]) -> int | None:
-    values = [of[name] for of in counts if of.get(name) is not None]
-    return sum(values) if values else None
-
-
 def _by_model(calls: _Calls, model: str | None) -> tuple[ModelUsage, ...]:
     """The answered calls' counts by the model each named, one that named none counted as ``model``'s; none when a
     call named none and no model is configured."""
-    by_model: dict[str, list[dict]] = {}
+    by_model: dict[str, list[Usage]] = {}
     for record in calls.records:
         if record["outcome"] != "answered":
             continue
         if not (name := record["model"] or model):
             return ()
-        by_model.setdefault(name, []).append(record["usage"])
-    return tuple(ModelUsage(model=name, calls=len(of), **{count: _total(count, of) for count in _COUNTS[:4]},
-                            input_includes_cache=True) for name, of in by_model.items())
+        by_model.setdefault(name, []).append(Usage(**{count: record["usage"].get(count) for count in _COUNTS[:4]},
+                                                   input_includes_cache=True))
+    return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
 
 
 def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict], model: str | None = None) -> Usage:
@@ -284,7 +279,8 @@ def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict], model: s
         return Usage(tool_call_count=tool_calls, provider_details=details)
 
     def total(name: str) -> int | None:
-        return _total(name, answered)
+        values = [counts[name] for counts in answered if counts.get(name) is not None]
+        return sum(values) if values else None
 
     if total("reasoning_tokens"):
         details["reasoning_tokens"] = total("reasoning_tokens")

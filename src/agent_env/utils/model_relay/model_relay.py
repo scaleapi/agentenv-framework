@@ -28,7 +28,6 @@ _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 # How long the relay, once its turn is done, lets the calls it is still forwarding finish.
 _SHUTDOWN_S = 5.0
 _COUNTS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
-_ROW_COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 
 
 class Refusal(Exception):
@@ -85,17 +84,7 @@ class Calls:
             if (name := named or configured) is None:
                 return ()
             by_model.setdefault(name, []).append(usage)
-
-        def total(of: list[Usage], name: str) -> int | None:
-            values = [getattr(usage, name) for usage in of if getattr(usage, name) is not None]
-            return sum(values) if values else None
-
-        rows = []
-        for name, of in by_model.items():
-            flags = {usage.input_includes_cache for usage in of}
-            rows.append(ModelUsage(model=name, calls=len(of), **{count: total(of, count) for count in _ROW_COUNTS},
-                                   input_includes_cache=flags.pop() if len(flags) == 1 else None))
-        return tuple(rows)
+        return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
 
 
 class AnswerReader:
