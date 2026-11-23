@@ -436,8 +436,8 @@ class Usage:
     """Common execution metrics plus runtime-specific, JSON-shaped details. ``cache_read_tokens`` and
     ``cache_write_tokens`` count the prompt tokens read from and written to the provider's prompt cache;
     ``input_includes_cache`` says whether ``input_tokens`` counts both of them (True), neither (False), or is unknown
-    (None), which a price needs to read the counts. ``models`` is the counts by model, for a turn whose calls used
-    more than one: it covers every call the turn counted, so a price can charge each model at its own rate. A count
+    (None), which a price needs to read the counts. ``models`` is the counts by model, from an agent that knows each
+    call's model: it covers every call the turn counted, so a price can charge each model at its own rate. A count
     the turn leaves out that every row gives is the rows' sum, and so is the includes-cache flag the rows agree on."""
 
     tool_call_count: int | None = None

@@ -452,7 +452,7 @@ async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult
     calls = Calls()
     async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, rewrite=env_date_rewrite) as relay:
         result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
-    result.usage = calls.usage(result.tool_call_count)
+    result.usage = calls.usage(result.tool_call_count, kwargs.get("model"))
     return result
 
 
