@@ -249,6 +249,36 @@ def test_a_published_image_docker_holds_by_its_digest_isnt_pulled_again(local_st
     assert ran == [] and docker[0] == []
 
 
+@pytest.mark.parametrize("pulled_by, held, tagged", [
+    ({_PUBLISHED_REF: {_PUBLISHED_DIGEST}}, True, False),
+    ({_PINNED: {_PUBLISHED_DIGEST}}, True, True),
+    ({_PINNED: {_PUBLISHED_DIGEST}, _PUBLISHED_REF: {"sha256:" + "d" * 64}}, True, True),
+    ({_PUBLISHED_REF: {"sha256:" + "d" * 64}}, False, False),
+    ({}, False, False),
+], ids=["under-its-name", "by-its-digest-alone", "by-its-digest-its-name-on-another", "its-name-on-another", "absent"])
+def test_an_image_is_held_as_its_digest_names_it_and_named_when_held_by_the_digest_alone(local_stores, context, docker,
+                                                                                         monkeypatch, pulled_by, held,
+                                                                                         tagged):
+    ran = _docker_cli(monkeypatch, pulled_by=pulled_by)
+
+    assert host_images.named_if_held(_published(context)) is held
+    assert ran == ([["tag", _PINNED, _PUBLISHED_REF]] if tagged else [])
+
+
+@pytest.mark.parametrize("named", [False, True], ids=["untagged", "tag-names-another-image"])
+def test_a_published_image_docker_holds_by_its_digest_alone_is_named_not_pulled_or_built(local_stores, context, docker,
+                                                                                        monkeypatch, named):
+    """``docker pull <repo>@<digest>`` leaves the image with no tag: it's still the one the digest names, so a registry
+    this machine can't log in to isn't asked for it, nor is it built in its place."""
+    pulled_by = {_PINNED: {_PUBLISHED_DIGEST}} | ({_PUBLISHED_REF: {"sha256:" + "d" * 64}} if named else {})
+    ran = _docker_cli(monkeypatch, pulled_by=pulled_by, pull_fails=True)
+
+    host_images.pull(_published(context))
+
+    assert ran == [["tag", _PINNED, _PUBLISHED_REF]]
+    assert docker[0] == []
+
+
 def test_a_published_image_built_here_from_its_sources_isnt_pulled(local_stores, context, docker, monkeypatch):
     ran = _docker_cli(monkeypatch)
     image = _published(context)
