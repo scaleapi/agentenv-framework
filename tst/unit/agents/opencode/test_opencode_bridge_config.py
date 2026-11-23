@@ -225,6 +225,8 @@ def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_
     assert result.usage.to_dict() == {
         "tool_call_count": 0, "input_tokens": 19489, "output_tokens": 105, "total_tokens": 19594,
         "cache_read_tokens": 9342, "cache_write_tokens": 9539, "input_includes_cache": True,
+        "models": [{"model": "m", "calls": 3, "input_tokens": 19489, "output_tokens": 105, "cache_read_tokens": 9342,
+                    "cache_write_tokens": 9539, "input_includes_cache": True}],
         "provider_details": {"model_calls": 3}}
 
 

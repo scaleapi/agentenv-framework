@@ -1431,14 +1431,14 @@ reads what `to_dict` wrote under any protocol version, a field it leaves out
 being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
 usage=...)` carries usage on a failure as `success` does.
 
-A turn whose calls used more than one model, such as a subagent on a smaller
-model or a side call for a title, gives its counts by model in `Usage.models`:
-one `ModelUsage` per model, with the model's name as called, its `calls`, its
-token and cache counts read as `Usage`'s are, and the agent's own `cost_usd`
-for them when it has one. The rows cover every call the turn counted; a call
-the agent can't name goes under the model it was configured with. The host
-prices each row at its own model's rate. A turn on one model leaves `models`
-empty, and is priced at its role's model.
+An agent that knows each call's model gives a turn's counts by model in
+`Usage.models`, on every turn: one `ModelUsage` per model, with the model's
+name as called, its `calls`, its token and cache counts read as `Usage`'s are,
+and the agent's own `cost_usd` for them when it has one. That prices a
+subagent on a smaller model, a side call for a title, or a whole turn a CLI
+ran on another model at that model's own rate. The rows cover every call the
+turn counted; a call the agent can't name goes under the model it was
+configured with. A turn without rows is priced at its role's model.
 
 Whoever makes a model call knows what its counts hold, so an agent builds its own
 `Usage`. `Usage.from_model_response(usage)` is the default reader for a model
