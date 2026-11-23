@@ -87,6 +87,10 @@ JUDGE_FORMAT = {"type": "json_schema", "json_schema": {"name": "gate", "strict":
 
 async def post_turn(turn, params):
     spec = _spec(params)
+    if not spec["enabled"]:  # configured but switched off: the conversation runs as if no hook were listed
+        if not turn.records():
+            turn.record({"decision": "disabled"})
+        return None
     state = _state(turn.records())
     milestones = spec["milestones"]
     if state["finished"]:  # the wrap-up was sent and the agent has answered it
@@ -624,6 +628,8 @@ def _env(turn, spec):
 
 
 def _spec(params: dict) -> dict:
+    if not isinstance(params.get("enabled", True), bool):
+        raise ValueError("milestone-gates enabled must be true or false")
     if not isinstance(params.get("role"), str) or not params["role"]:
         raise ValueError("milestone-gates needs role: the env role its gates read as")
     milestones = params.get("milestones")
@@ -655,7 +661,7 @@ def _spec(params: dict) -> dict:
     for key, kind in (("judge_model", "judge"), ("trajectory_judge_model", "trajectory_judge")):
         if any(kind in c for c in checks) and not (isinstance(params.get(key), str) and params[key].strip()):
             raise ValueError(f"milestone-gates needs {key}: a gate uses {kind}")
-    return {"role": params["role"], "env": params.get("env"), "milestones": out,
+    return {"enabled": params.get("enabled", True), "role": params["role"], "env": params.get("env"), "milestones": out,
             "judge_model": params.get("judge_model"),
             "trajectory_judge_model": params.get("trajectory_judge_model"),
             "trajectory_max_chars": int(params.get("trajectory_max_chars", 600_000)),

@@ -40,8 +40,14 @@ that can't answer after one retry leaves its gate unknown, which neither fails n
          "check": {"trajectory_judge": "During this step the assistant adds one comment to the cut-list card."}}]}]}}]}
 ```
 
+The gates are opt-in: a task runs them only when a `prompt_agent` step lists the hook in `post_turn_hooks`, and no
+other step or task is affected. `"enabled": false` switches them off while keeping the milestones in the task, for a
+run with and without gates: the hook still checks its params, but runs no gate and sends the user sim no note, so
+the conversation goes as if no hook were listed. It records `disabled` once.
+
 Params:
 
+- `enabled`: `true` by default; `false` switches the gates off, as above.
 - `milestones`: `[{id, line?, type?, blocking?, max_nudges?, skip_if_done?, show?, artifacts, gates}]`, in order. `line`
   is what the user sim sends to open the milestone (the first one's is the step's prompt). `show` names an artifact
   whose start goes in a nudge's note, so the user sim can react to what it "opened". `type: "correct"` is never

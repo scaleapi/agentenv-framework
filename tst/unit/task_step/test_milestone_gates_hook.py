@@ -106,6 +106,16 @@ async def test_a_failing_gate_sends_its_nudge_and_counts_it():
 
 
 @pytest.mark.asyncio
+async def test_switched_off_it_checks_nothing_and_tells_the_sim_nothing_and_says_so_once():
+    env, records = Env(world()), []
+    for n in (1, 2):
+        t = Turn(env, records, n)
+        assert await post_turn(t, {**PARAMS, "enabled": False}) is None
+        assert t.notes == []
+    assert env.calls == [] and records == [{"decision": "disabled", "turn": 1}]
+
+
+@pytest.mark.asyncio
 async def test_every_failing_turn_counts_even_when_the_sim_did_not_press_on_it():
     env, records = Env(world()), []
     await post_turn(Turn(env, records, 1, sim_fields={"nudged": False}), PARAMS)
@@ -214,6 +224,7 @@ async def test_on_the_last_turn_it_records_where_it_stood_and_asks_nothing():
     ({"role": "a", "milestones": [{"id": "M1", "gates": [{"id": "g", "nudge": "n",
                                                            "check": {"trajectory_judge": "it did"}}]}]},
      "needs trajectory_judge_model"),
+    ({**PARAMS, "enabled": "no"}, "enabled must be true or false"),
 ])
 def test_a_bad_spec_is_refused(bad, fragment):
     with pytest.raises(ValueError, match=fragment):
