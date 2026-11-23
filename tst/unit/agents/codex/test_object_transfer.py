@@ -413,6 +413,34 @@ def test_a_save_leaves_out_links_that_leave_the_workspace_and_keeps_the_rest(cod
     assert not (workspace / "report" / "tool").is_symlink()
 
 
+def test_a_link_that_climbs_out_of_another_link_is_left_out_so_the_snapshot_loads(
+    codex, monkeypatch, tmp_path, store
+):
+    workspace, _, _ = _codex_home(codex, monkeypatch, tmp_path)
+    (workspace / "deep" / "nest").mkdir(parents=True)
+    (workspace / "deep" / "nest" / "tool").write_text("tool")
+    (workspace / "target").write_text("target")
+    (workspace / "alias").symlink_to(workspace / "deep" / "nest")
+    (workspace / "kept").symlink_to("alias/../../target")
+    (workspace / "pkg").symlink_to("deep/nest")
+    (workspace / "bin").symlink_to("pkg/tool")
+    (workspace / "loop-a").symlink_to("loop-b")
+    (workspace / "loop-b").symlink_to("loop-a")
+
+    saved = _call(codex, "POST", "/ext/snapshot", _save_body())
+
+    assert saved.status_code == 200
+    archived = _archived(store)
+    assert not {"alias", "kept", "loop-a", "loop-b"} & set(archived)
+    assert archived["pkg"].issym() and archived["bin"].issym()
+
+    loaded = _call(codex, "PUT", "/ext/snapshot", _load_body(store, "trajectory", "workspace"))
+
+    assert loaded.status_code == 200
+    assert not (workspace / "kept").is_symlink()
+    assert (workspace / "bin").read_text() == "tool"
+
+
 def test_a_workspace_over_the_archive_limits_is_refused_with_a_code_the_worker_reports(
     codex, monkeypatch, tmp_path, store
 ):
