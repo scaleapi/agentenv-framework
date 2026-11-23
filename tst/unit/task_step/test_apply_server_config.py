@@ -99,19 +99,16 @@ class _MockGateway:
         self.post_calls.append((url, json))
         return _resp(200, url, {"ok": True, "echo": json})
 
-    # invoke_extension uses client.get for GET verbs and client.request otherwise;
-    # our extensions are POST, so request() handles them.
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
 
 def _patch_httpx(gateway: _MockGateway):
-    """Patch httpx.AsyncClient(...) so both get_card and invoke_extension talk to
-    our in-memory gateway. AsyncClient is a context manager, so return the mock."""
-    return patch("httpx.AsyncClient", return_value=gateway)
+    async def handle(request):
+        url = str(request.url)
+        if request.method == "GET":
+            return await gateway.get(url)
+        return await gateway.request(request.method, url, json=json.loads(request.content))
+
+    real = httpx.AsyncClient
+    return patch("httpx.AsyncClient", lambda **kwargs: real(transport=httpx.MockTransport(handle), **kwargs))
 
 
 @pytest.mark.asyncio
@@ -857,20 +854,13 @@ async def test_a_multi_envs_computer_is_configured_at_its_own_address_with_its_o
                                 child_envs={"desktop": dataclasses.asdict(computer)})
     sent = []
 
-    class Client:
-        async def request(self, method, url, *, json=None, timeout=None, headers=None):
-            sent.append((url, headers))
-            return _resp(200, url, {"ok": True})
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
+    def handle(request):
+        sent.append((str(request.url), request.headers.get("Authorization")))
+        return httpx.Response(200, json={"ok": True})
 
     step = _step(directives=[{"service": service, "uri": _SET_ERRORS_URI, "args": {"tool_name": "t", "error_rate": 0.5}}])
-    with patch("httpx.AsyncClient", return_value=Client()), \
+    with patch("httpx.AsyncClient", return_value=httpx.AsyncClient(transport=httpx.MockTransport(handle))), \
          patch("agent_env.env.env.Env.get", return_value=SimpleNamespace(mcp_server_envs=[], website_envs=[])):
         await step.execute(TaskStepContext(deployed_envs=[record]))
 
-    assert sent == [("https://desk.example/agentenv/ext/set_errors", computer.control_headers)]
+    assert sent == [("https://desk.example/agentenv/ext/set_errors", computer.control_headers["Authorization"])]

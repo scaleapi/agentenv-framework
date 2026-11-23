@@ -438,9 +438,11 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     call, and a stateless server has no session to lose, so neither restart raises anything.
   - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
     (600 s by default, the gateway's own limit on a tool call).
-  - `ToolSession` retries nothing. A call that raised may still have run on the server, or may yet run: a request
-    stalled on a bad link can arrive after the client has given up. So after any failed call the env's state is
-    unknown; read it back (`data/get`) or end the episode.
+  - MCP POSTs, data-plane RPCs, card and manifest lookups, and extension calls make up to three attempts to
+    connect, waiting 0.5 and 1 second after a connection failure. The request timeout covers all attempts,
+    waits and the reply. A data-plane call that exhausts this total budget raises `httpx.TimeoutException`.
+    After sending, a failed call may still have run on the server. The client propagates read and write errors
+    and HTTP error responses. Read the state back with `data/get` or end the episode before trying again.
 - **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
   `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
 

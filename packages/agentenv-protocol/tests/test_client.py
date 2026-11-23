@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -13,108 +15,88 @@ from agentenv_protocol import DataPart, ExtensionCallError, client as protocol_v
 _BASE = "http://gw/svc/mcp-items"
 
 
-def _resp(json_value, status: int = 200) -> MagicMock:
-    r = MagicMock()
-    r.status_code = status
-    r.json = MagicMock(return_value=json_value)
-    if status >= 400:
-        err = httpx.HTTPStatusError("err", request=MagicMock(), response=MagicMock(status_code=status))
-        r.raise_for_status = MagicMock(side_effect=err)
-    else:
-        r.raise_for_status = MagicMock()
-    return r
+@contextmanager
+def _serve(response: httpx.Response | httpx.ConnectError):
+    requests = []
 
+    def handle(request):
+        requests.append(request)
+        if isinstance(response, httpx.ConnectError):
+            raise response
+        return response
 
-def _client(resp: MagicMock) -> MagicMock:
-    client = MagicMock()
-    client.post = AsyncMock(return_value=resp)
-    client.get = AsyncMock(return_value=resp)
-    client.request = AsyncMock(return_value=resp)
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    return client
-
-
-def _patch(client: MagicMock):
-    return patch("agentenv_protocol.client.httpx.AsyncClient", return_value=client)
+    transport = httpx.MockTransport(handle)
+    client = httpx.AsyncClient(transport=transport)
+    with patch("agentenv_protocol.client.httpx.AsyncClient", return_value=client):
+        yield requests
 
 
 @pytest.mark.asyncio
 async def test_reset_data_posts_rpc():
-    client = _client(_resp({"jsonrpc": "2.0", "id": 1, "result": {}}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})) as requests:
         assert (await protocol_v1.reset_data(_BASE)).model_dump() == {}
-    assert client.post.call_args.args[0] == f"{_BASE}/agentenv"
-    assert client.post.call_args.kwargs["json"]["method"] == "data/reset"
+    assert [(r.method, str(r.url)) for r in requests] == [("POST", f"{_BASE}/agentenv")]
+    assert json.loads(requests[0].content)["method"] == "data/reset"
 
 
 @pytest.mark.asyncio
 async def test_add_data_posts_parts():
-    client = _client(_resp({"jsonrpc": "2.0", "id": 1, "result": {}}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})) as requests:
         assert (await protocol_v1.add_data(_BASE, [DataPart(data={"items": ["a"]})])).model_dump() == {}
-    sent = client.post.call_args.kwargs["json"]
-    assert client.post.call_args.args[0] == f"{_BASE}/agentenv"
+    sent = json.loads(requests[0].content)
+    assert [(r.method, str(r.url)) for r in requests] == [("POST", f"{_BASE}/agentenv")]
     assert sent["method"] == "data/add"
     assert sent["params"] == {"parts": [{"kind": "data", "data": {"items": ["a"]}}]}
 
 
 @pytest.mark.asyncio
 async def test_get_data_posts_rpc():
-    client = _client(_resp({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "data", "data": {"items": []}}]}}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "data", "data": {"items": []}}]}})) as requests:
         assert (await protocol_v1.get_data(_BASE)).parts[0].data == {"items": []}
-    assert client.post.call_args.args[0] == f"{_BASE}/agentenv"
-    assert client.post.call_args.kwargs["json"]["method"] == "data/get"
+    assert [(r.method, str(r.url)) for r in requests] == [("POST", f"{_BASE}/agentenv")]
+    assert json.loads(requests[0].content)["method"] == "data/get"
 
 
 @pytest.mark.asyncio
 async def test_get_card_gets_well_known():
-    client = _client(_resp({"name": "items"}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"name": "items"})) as requests:
         assert await protocol_v1.get_card(_BASE) == {"name": "items"}
-    assert client.get.call_args.args[0] == f"{_BASE}/.well-known/agent-env.json"
+    assert [(r.method, str(r.url)) for r in requests] == [("GET", f"{_BASE}/.well-known/agent-env.json")]
 
 
 @pytest.mark.asyncio
 async def test_rpc_and_card_strip_trailing_slashes_from_base_url():
     base_with_slash = f"{_BASE}/"
-    client = _client(_resp({"jsonrpc": "2.0", "id": 1, "result": {}}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})) as requests:
         await protocol_v1.reset_data(base_with_slash)
-    assert client.post.call_args.args[0] == f"{_BASE}/agentenv"
+    assert [(r.method, str(r.url)) for r in requests] == [("POST", f"{_BASE}/agentenv")]
 
-    client = _client(_resp({"name": "items"}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"name": "items"})) as requests:
         await protocol_v1.get_card(base_with_slash)
-    assert client.get.call_args.args[0] == f"{_BASE}/.well-known/agent-env.json"
+    assert [(r.method, str(r.url)) for r in requests] == [("GET", f"{_BASE}/.well-known/agent-env.json")]
 
 
 @pytest.mark.asyncio
 async def test_supports_v1_true_on_card():
-    with _patch(_client(_resp({"name": "items"}))):
+    with _serve(httpx.Response(200, json={"name": "items"})):
         assert await protocol_v1.supports_v1(_BASE) is True
 
 
 @pytest.mark.asyncio
 async def test_supports_v1_false_on_404():
-    with _patch(_client(_resp(None, status=404))):
+    with _serve(httpx.Response(404)):
         assert await protocol_v1.supports_v1(_BASE) is False
 
 
 @pytest.mark.asyncio
 async def test_supports_v1_false_on_500():
-    with _patch(_client(_resp(None, status=500))):
+    with _serve(httpx.Response(500)):
         assert await protocol_v1.supports_v1(_BASE) is False
 
 
 @pytest.mark.asyncio
 async def test_supports_v1_false_on_connect_error():
-    client = MagicMock()
-    client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    with _patch(client):
+    with _serve(httpx.ConnectError("boom")):
         assert await protocol_v1.supports_v1(_BASE) is False
 
 
@@ -288,29 +270,26 @@ _CARD_SET_ERRORS = {"capabilities": {"extensions": [{
 
 @pytest.mark.asyncio
 async def test_invoke_extension_posts_to_advertised_endpoint():
-    client = _client(_resp({"tool_name": "list_items", "error_rate": 0.75}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"tool_name": "list_items", "error_rate": 0.75})) as requests:
         result = await protocol_v1.invoke_extension(
             _BASE, _CARD_SET_ERRORS, "urn:agentenv:set-errors/v1",
             {"tool_name": "list_items", "error_rate": 0.75},
         )
     assert result == {"tool_name": "list_items", "error_rate": 0.75}
-    args, kwargs = client.request.call_args
-    assert args[0] == "POST" and args[1] == f"{_BASE}/agentenv/ext/set_errors"
-    assert kwargs["json"] == {"tool_name": "list_items", "error_rate": 0.75}
+    request, = requests
+    assert (request.method, str(request.url)) == ("POST", f"{_BASE}/agentenv/ext/set_errors")
+    assert json.loads(request.content) == {"tool_name": "list_items", "error_rate": 0.75}
 
 
 @pytest.mark.asyncio
 async def test_invoke_extension_strips_trailing_slashes_from_base_url():
     base_with_slash = f"{_BASE}/"
-    client = _client(_resp({"tool_name": "list_items", "error_rate": 0.75}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"tool_name": "list_items", "error_rate": 0.75})) as requests:
         await protocol_v1.invoke_extension(
             base_with_slash, _CARD_SET_ERRORS, "urn:agentenv:set-errors/v1",
             {"tool_name": "list_items", "error_rate": 0.75},
         )
-    args, _ = client.request.call_args
-    assert args[1] == f"{_BASE}/agentenv/ext/set_errors"
+    assert [str(r.url) for r in requests] == [f"{_BASE}/agentenv/ext/set_errors"]
 
 
 @pytest.mark.asyncio
@@ -319,11 +298,10 @@ async def test_invoke_extension_get_uses_query_params():
         "uri": "urn:agentenv:ping/v1",
         "params": {"endpoint": "/agentenv/ext/ping", "methods": {"ping": {"method": "GET", "request": {}}}},
     }]}}
-    client = _client(_resp({"pong": True}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"pong": True})) as requests:
         result = await protocol_v1.invoke_extension(_BASE, card, "urn:agentenv:ping/v1")
     assert result == {"pong": True}
-    assert client.get.call_args.args[0] == f"{_BASE}/agentenv/ext/ping"
+    assert [(r.method, str(r.url)) for r in requests] == [("GET", f"{_BASE}/agentenv/ext/ping")]
 
 
 def _error_response(status: int, **kwargs) -> httpx.Response:
@@ -343,7 +321,7 @@ def _error_response(status: int, **kwargs) -> httpx.Response:
     (_error_response(404, json=["not", "an", "object"]), (None, "Not Found", False, "unknown", None)),
 ])
 async def test_invoke_extension_raises_the_error_fields_it_was_sent(response, fields):
-    with _patch(_client(response)), pytest.raises(ExtensionCallError) as raised:
+    with _serve(response), pytest.raises(ExtensionCallError) as raised:
         await protocol_v1.invoke_extension(_BASE, _CARD_SET_ERRORS, "urn:agentenv:set-errors/v1", {})
     error = raised.value
     assert (error.code, error.detail, error.retryable, error.applied, error.hint) == fields
@@ -398,41 +376,35 @@ def test_find_extension_method_unknown_method_or_uri_returns_none():
 
 @pytest.mark.asyncio
 async def test_invoke_extension_calls_the_named_method():
-    client = _client(_resp({"virtual_time": "2026-01-01T00:00:00Z"}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"virtual_time": "2026-01-01T00:00:00Z"})) as requests:
         await protocol_v1.invoke_extension(
             _BASE, _CARD_CLOCK, "urn:agentenv:clock/v1", {"time": "2026-01-01T00:00:00Z"}, method="set_time",
         )
-    args, kwargs = client.request.call_args
-    assert args[0] == "PUT" and args[1] == f"{_BASE}/clock/set-time"
-    assert kwargs["json"] == {"time": "2026-01-01T00:00:00Z"}
+    request, = requests
+    assert (request.method, str(request.url)) == ("PUT", f"{_BASE}/clock/set-time")
+    assert json.loads(request.content) == {"time": "2026-01-01T00:00:00Z"}
 
 
 @pytest.mark.asyncio
 async def test_invoke_extension_named_get_method_uses_query_params():
-    client = _client(_resp({"frozen": False}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={"frozen": False})) as requests:
         assert await protocol_v1.invoke_extension(_BASE, _CARD_CLOCK, "urn:agentenv:clock/v1", method="state") == {"frozen": False}
-    assert client.get.call_args.args[0] == f"{_BASE}/clock/state"
+    assert [(r.method, str(r.url)) for r in requests] == [("GET", f"{_BASE}/clock/state")]
 
 
 @pytest.mark.asyncio
 async def test_invoke_extension_without_a_method_calls_the_first_listed():
-    client = _client(_resp({}))
-    with _patch(client):
+    with _serve(httpx.Response(200, json={})) as requests:
         await protocol_v1.invoke_extension(_BASE, _CARD_CLOCK, "urn:agentenv:clock/v1")
-    assert client.get.call_args.args[0] == f"{_BASE}/clock/time"
-    client.request.assert_not_called()
+    assert [(r.method, str(r.url)) for r in requests] == [("GET", f"{_BASE}/clock/time")]
 
 
 @pytest.mark.asyncio
 async def test_invoke_extension_unknown_method_raises_without_calling():
-    client = _client(_resp({}))
     offered = "does not advertise method 'sync_time' (advertises: get_time, set_time, state)"
-    with _patch(client), pytest.raises(ValueError, match=re.escape(offered)):
+    with _serve(httpx.Response(200, json={})) as requests, pytest.raises(ValueError, match=re.escape(offered)):
         await protocol_v1.invoke_extension(_BASE, _CARD_CLOCK, "urn:agentenv:clock/v1", method="sync_time")
-    client.get.assert_not_called()
-    client.request.assert_not_called()
+    assert not requests
 
 
 @pytest.mark.asyncio

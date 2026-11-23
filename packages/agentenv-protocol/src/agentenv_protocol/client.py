@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from . import _connect
 from .manifest import INTERFACE_MANIFEST_PATH
 from .transfers import WriteNamespaceGrant
 from .types import CONTROL_TOKEN_HEADER, INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
@@ -87,7 +88,7 @@ async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: b
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
+        response = await _connect.request(client, "POST", url, json=request, timeout=timeout, headers=request_headers(url, headers))
         response.raise_for_status()
         body = response.json()
     if "error" in body:
@@ -122,7 +123,7 @@ async def get_data(
 
 async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout)
+        response = await _connect.request(client, "GET", f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout)
         response.raise_for_status()
         return response.json()
 
@@ -333,7 +334,7 @@ async def get_interface_manifest(base_url: str, interface: str, endpoint: str = 
     """
     url = f"{base_url.rstrip('/')}{endpoint}/{interface}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(url, timeout=timeout, headers=request_headers(url, headers))
+        response = await _connect.request(client, "GET", url, timeout=timeout, headers=request_headers(url, headers))
         response.raise_for_status()
         return response.json()
 
@@ -360,10 +361,8 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
     url = f"{base_url.rstrip('/')}{op['endpoint']}"
     sent = request_headers(url, headers)
     async with httpx.AsyncClient(verify=verify) as client:
-        if op["method"] == "GET":
-            response = await client.get(url, params=params or {}, timeout=timeout, headers=sent)
-        else:
-            response = await client.request(op["method"], url, json=params or {}, timeout=timeout, headers=sent)
+        arguments = {"params": params or {}} if op["method"] == "GET" else {"json": params or {}}
+        response = await _connect.request(client, op["method"], url, timeout=timeout, headers=sent, **arguments)
         if response.status_code >= 400:
             raise ExtensionCallError(response)
         return response.json()

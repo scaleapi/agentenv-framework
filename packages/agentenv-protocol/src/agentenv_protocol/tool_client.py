@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
+from ._connect import open_response
 from .tool_context import ROLE_HEADER
 from .types import PROTOCOL_VERSION, EnvironmentTool
 
@@ -46,7 +47,7 @@ class ToolResult(BaseModel):
 
 class ToolSession:
     """One MCP session on an env's ``mcp_url``. Use it on the event loop that opened it, and after any failed call treat
-    the env's state as unknown: nothing is retried, and a call that raised may still run on the server."""
+    the env's state as unknown. A connection can be retried before sending. A call that reached the server may still run."""
 
     def __init__(self, *, mcp_url: str, role: str | None = None, headers: dict[str, str] | None = None,
                  timeout: float = 600.0) -> None:
@@ -132,8 +133,9 @@ class ToolSession:
             raise TimeoutError(f"{method} did not finish within {self.timeout}s") from e
 
     async def _exchange(self, message: dict) -> dict:
-        async with self._open_client().stream("POST", self.mcp_url, json=message,
-                                              headers=self._session_headers()) as response:
+        client = self._open_client()
+        request = client.build_request("POST", self.mcp_url, json=message, headers=self._session_headers())
+        async with open_response(client, request) as response:
             await self._raise_for_status(response, message["method"])
             if "id" not in message:
                 return {}
