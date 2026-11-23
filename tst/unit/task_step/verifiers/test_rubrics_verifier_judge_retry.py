@@ -4,10 +4,12 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import litellm
 import pytest
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 
 def _criteria(ids: list[str]) -> list[dict]:
@@ -96,6 +98,21 @@ async def test_raises_after_max_retries(monkeypatch):
         )
 
     assert verifier._prompt_llm_judge.await_count == verifier.DEFAULT_MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_a_judge_its_endpoint_refuses_names_the_model_and_the_endpoints_reason(monkeypatch):
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="k")
+    refusal = "Invalid model name passed in model=claude-sonnet-5-5"
+
+    async def acompletion(**kwargs):
+        raise Exception(refusal)
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    with pytest.raises(RuntimeError) as raised:
+        await _verifier()._prompt_llm_judge("Evaluate the agent.", model="claude-sonnet-5-5", context=TaskStepContext())
+
+    assert str(raised.value) == f"LLM judge on claude-sonnet-5-5 failed after 3 attempts (Exception: {refusal})"
 
 
 @pytest.mark.asyncio
