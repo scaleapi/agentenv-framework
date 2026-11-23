@@ -118,6 +118,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import ended_turn_error
 from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     fetch_native_trajectory,
@@ -1577,7 +1578,7 @@ class _Run:
         user_task_id, term = turn.task_id, turn.reply
         self.usage.turn(ModelRole.USER_SIMULATOR, term)
         if turn.state != TaskState.completed and str(turn.state) != "completed":
-            return {"text": None, "structured": None, "error": f"state {turn.state}"}
+            return {"text": None, "structured": None, "error": ended_turn_error(turn.state, term)}
         raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output
         if structured is None:

@@ -56,6 +56,7 @@ from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of,
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
+    ended_turn_error,
     fetch_container_logs,
 )
 from agent_env.task_step.snapshot_utils.agent_state_capture import (
@@ -1196,7 +1197,7 @@ class _UserSide:
             return {"text": None, "error": f"timeout: {e}"}
         self._record_usage(turn.reply)
         if turn.state != TaskState.completed:
-            return {"text": None, "error": f"state {turn.state}"}
+            return {"text": None, "error": ended_turn_error(turn.state, turn.reply)}
         term = turn.reply
         raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         return {"text": raw, "structured": term.structured_output if isinstance(term.structured_output, dict) else None,
