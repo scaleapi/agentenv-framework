@@ -28,6 +28,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (  #
     transcript_from_atif,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter  # noqa: E402
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import atif_turn_events, turn_events  # noqa: E402
 from tst.unit.agents.claude_code.agent import claude_code_atif  # noqa: E402
 
 FIXTURES = REPO / "tst" / "data" / "claude_code_atif"
@@ -139,6 +140,23 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
         assert images and frames
     if scenario == "subagent":
         assert [event["tool"] for event in events if event["type"] == "tool_call" and event.get("subagent")] == ["Bash"]
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_a_recorded_turns_copy_gives_a_judge_the_events_its_native_trajectory_does(scenario):
+    """always_on's judge stages each wake from its events. A copy gives the native turn's, but for a sub-agent's prompt,
+    which only native stdout carries (as a note), and its closing text, which only its transcript, so the copy, has."""
+    data = json.loads((FIXTURES / f"{scenario}.json").read_text())
+    document = replay(scenario).document
+    for turn in data["turns"]:
+        native = turn_events(json.dumps(turn["native"])).events
+        copied = atif_turn_events(task_document(document, [turn["turn"]["task_id"]])).events
+        if scenario == "subagent":
+            assert [e["type"] for e in native if e.get("subagent")] == ["note", "tool_call"]
+            assert [e["type"] for e in copied if e.get("subagent")] == ["tool_call", "text"]
+            native = [e for e in native if not (e["type"] == "note" and e.get("subagent"))]
+            copied = [e for e in copied if not (e["type"] == "text" and e.get("subagent"))]
+        assert copied == native
 
 
 def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():

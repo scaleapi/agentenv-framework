@@ -135,6 +135,25 @@ class AtifCopies:
             previous = self._pending[-1][1] if self._pending else None
             self._pending.append((index, asyncio.create_task(self._turn(task_id, name, record, native, previous))))
 
+    async def read(self, index: int, task_id: str, name: str, record: TurnTrajectory, *, native: NativeRead,
+                   timeout: float) -> Optional[str]:
+        """``turn`` on the caller's path, for a step that reads each turn's trajectory before it goes on (always_on):
+        the turn's url once ``record`` is filled, all within ``timeout``. A copy that takes longer is recorded
+        ``unavailable``, ``timeout``, with no time left to read native in its place; without a copy, native is read as
+        ever, its error raised."""
+        self.turn(index, task_id, name, record, native=native)
+        if not self.replaces_native:
+            url, record["format"] = await asyncio.wait_for(native(), timeout)
+            return url
+        try:
+            return await asyncio.wait_for(self._pending[-1][1], timeout)
+        except TimeoutError:
+            if record.get("atif") is None:
+                record["atif"] = _unavailable("timeout", task_id)
+            logger.warning(f"agent '{self._agent.agent_name}': task {task_id}'s trajectory wasn't read within "
+                           f"{timeout:.0f}s (continuing)")
+            return None
+
     async def join(self) -> dict[int, str | None]:
         """Each copied turn's url, by its index, once every copy has been stored and its record filled; cancelled while
         waiting, it cancels the copies left."""
