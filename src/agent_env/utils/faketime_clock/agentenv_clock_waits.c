@@ -134,11 +134,13 @@ static bool ft_snap_at(clockid_t clock, struct ft_clock_page *s, struct timespec
   return true;
 }
 
+/* a time in ns, exact anywhere in the clock's range, which is what 64 bits hold, and saturated beyond it */
 static inline int64_t ft_ns(const struct timespec *t)
 {
-  if (t->tv_sec > 9000000000LL) return FT_NEVER / 2;
-  if (t->tv_sec < -9000000000LL) return -(FT_NEVER / 2);
-  return (int64_t) t->tv_sec * FT_NS + t->tv_nsec;
+  int64_t ns;
+  if (__builtin_mul_overflow((int64_t) t->tv_sec, FT_NS, &ns) || __builtin_add_overflow(ns, (int64_t) t->tv_nsec, &ns))
+    return t->tv_sec < 0 ? INT64_MIN : INT64_MAX;
+  return ns;
 }
 static inline struct timespec ft_ts(int64_t ns)
 {
@@ -185,10 +187,7 @@ static inline bool ft_universe_clock(clockid_t c)
 /* the universe's realtime at real realtime t; before the anchor, the anchor's. */
 static int64_t ft_page_rt(const struct ft_clock_page *s, int64_t t)
 {
-  if (!s->armed) return t;
-  if (s->rate == 0 || t <= s->anchor_ns) return s->universe_ns;
-  if (s->rate == 1.0) return s->universe_ns + (t - s->anchor_ns);
-  return s->universe_ns + (int64_t) ((double) (t - s->anchor_ns) * s->rate);
+  return s->armed ? ft_universe_at(s, t) : t;
 }
 /* the real realtime at which the universe reaches ``due``; 0 (the past) once it has, FT_NEVER while frozen
    short of it. */
@@ -198,7 +197,7 @@ static int64_t ft_real_of(const struct ft_clock_page *s, int64_t due)
   if (!s->armed) return due < 1 ? 1 : due;
   if (due <= s->universe_ns) return 1;
   if (s->rate <= 0) return FT_NEVER;
-  r = (double) (due - s->universe_ns) / s->rate;
+  r = (double) ((__int128) due - s->universe_ns) / s->rate;
   if (r > 4e18) return FT_NEVER;
   return s->anchor_ns + (int64_t) r + 1;
 }
@@ -285,12 +284,13 @@ static int ft_timer_real_get(struct ft_timer *t, struct itimerspec *cur)
 {
   return t->kind == 1 ? (*real_timerfd_gettime)(t->fds[0], cur) : (*real_timer_gettime_new)(t->id, cur);
 }
-/* the next expiration at or after ``after``. */
-static int64_t ft_timer_next(const struct ft_timer *t, int64_t after)
+/* the next expiration at or after ``after``, in 128 bits, since a deadline and the universe may be at either end of the
+   range. */
+static int64_t ft_timer_next(const struct ft_timer *t, __int128 after)
 {
-  int64_t next = t->due;
+  __int128 next = t->due;
   if (t->interval > 0 && next < after) next += ((after - next + t->interval - 1) / t->interval) * t->interval;
-  return next;
+  return next > INT64_MAX ? INT64_MAX : (int64_t) next;
 }
 /* the kernel timer set from page ``s``. A periodic timer goes on from its first expiration past the
    universe's time on the page it was armed from, so a jump delivers what it passed at once. Lock held. */
@@ -307,7 +307,7 @@ static int ft_timer_arm(struct ft_timer *t, const struct ft_clock_page *s, bool 
     t->tracked = 0;   /* fired: the expiration is the kernel's to hand over */
     return 0;
   }
-  if (!first && t->interval > 0) next = ft_timer_next(t, ft_page_rt(&t->pg, ft_real_rt()) + 1);
+  if (!first && t->interval > 0) next = ft_timer_next(t, (__int128) ft_page_rt(&t->pg, ft_real_rt()) + 1);
   at = ft_real_of(s, next);
   if (at != FT_NEVER)
   {
@@ -345,8 +345,9 @@ static void ft_timer_value(struct ft_timer *t, struct itimerspec *out)
   out->it_interval = ft_ts(t->interval);
   if (ft_snap(&s))
   {
-    int64_t now = ft_page_rt(&s, ft_real_rt()), next = ft_timer_next(t, now);
-    out->it_value = ft_ts(next - now < 1 ? 1 : next - now);
+    int64_t now = ft_page_rt(&s, ft_real_rt());
+    __int128 left = (__int128) ft_timer_next(t, now) - now;
+    out->it_value = ft_ts(left < 1 ? 1 : left > INT64_MAX ? INT64_MAX : (int64_t) left);
   }
 }
 

@@ -461,6 +461,21 @@ def deadwriter():
             "read": _classify(after, before, 21 * DAY)}
 
 
+def end():
+    """The clock a second short of the end of 64 bits of nanoseconds at rate 1, as a gateway that outlives its range
+    leaves it: two seconds on, reads in C, Python and Node show the end rather than wrap to 1677."""
+    preload()
+    fresh_page()
+    set_clock(9223372035.0, 1)
+    time.sleep(2.5)
+    reads = {name: subprocess.run(user_cmd(argv), capture_output=True, text=True).stdout.strip() for name, argv in (
+        ("date", ["date", "-u", "+%s.%N"]),
+        ("python", ["python3", "-c", "import time; print(time.time_ns())"]),
+        ("node", ["node", "-e", "console.log(Date.now())"]))}
+    preload(None)
+    return reads
+
+
 def _classify(value: float, before: float, universe_offset: float) -> object:
     if abs(value - before) < 30:
         return "real"
@@ -684,7 +699,7 @@ def probe():
 
 
 GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, condstress, semstress, stall, torn,
-                                 deadwriter, marker, identity, envrace, forklock, chromium, tls, probe)}
+                                 deadwriter, end, marker, identity, envrace, forklock, chromium, tls, probe)}
 
 if __name__ == "__main__":
     gate = GATES[sys.argv[1]]

@@ -104,3 +104,7 @@ def test_a_read_near_either_end_is_never_torn_between_two_pages(at):
 def test_chrome_runs_every_launch_near_either_end(gate, when):
     r = gate("chromium", "agentenv", 16, 8, 20.0, docker_args=_base(when))
     assert (r["launches"], r["failed"]) == (16, 0), r
+
+
+def test_a_clock_that_outlives_its_range_stops_at_the_end_rather_than_wrapping(gate):
+    assert gate("end") == {"date": "9223372036.854775807", "python": "9223372036854775807", "node": "9223372036854"}

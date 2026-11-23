@@ -272,6 +272,19 @@ static void ft_page_open(void)
   ft_page = map;
 }
 
+/* the universe in ns at real realtime t on armed page s, saturated at the end of 64 bits: the gateway keeps the clock
+   inside them, and one that outlives its range stops at the end rather than wrapping. Reads and waits share it, so a wait
+   never ends before a read shows its deadline. */
+static inline int64_t ft_universe_at(const struct ft_clock_page *s, int64_t t)
+{
+  int64_t fake;
+  double ran;
+  if (s->rate == 0 || t <= s->anchor_ns) return s->universe_ns;
+  if (s->rate == 1.0) return __builtin_add_overflow(s->universe_ns, t - s->anchor_ns, &fake) ? INT64_MAX : fake;
+  ran = (double) (t - s->anchor_ns) * s->rate;
+  return ran >= 9.2e18 || __builtin_add_overflow(s->universe_ns, (int64_t) ran, &fake) ? INT64_MAX : fake;
+}
+
 /* a time in ns as libfaketime's spec reads it (ft_parse_epoch): its sign once, before the whole value, so a time before
    1970 isn't written "-1.-5". */
 static void ft_spec_time(char *out, size_t size, int64_t ns)
