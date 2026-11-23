@@ -164,10 +164,10 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    ftpl_init();
 +  if (real_clock_nanosleep != NULL && (!(flags & TIMER_ABSTIME) || !ft_rt_clock(clock_id) || !ft_faked()))
 +    return (*real_clock_nanosleep)(clock_id, flags, req, rem);
-+  if (ft_uw_active() && ft_valid_ts(req))
++  if (ft_uw_active())
 +  {
 +    struct ft_clock_page s;
-+    if (ft_snap(&s)) return ft_rt_sleep(&s, ft_uns(req));
++    if (ft_snap(&s) && ft_valid_due(req, &s)) return ft_rt_sleep(&s, ft_uns(req));
 +  }
    if (real_clock_nanosleep == NULL)
    {

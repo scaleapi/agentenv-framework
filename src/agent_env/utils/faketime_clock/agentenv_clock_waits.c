@@ -182,6 +182,12 @@ static inline bool ft_valid_ts(const struct timespec *t)
 {
   return t != NULL && t->tv_nsec >= 0 && t->tv_nsec < FT_NS && t->tv_sec >= 0;
 }
+/* an absolute deadline on the universe's realtime, which is before 1970 only while the universe is set: on a real clock
+   the kernel refuses a negative time, so an unarmed page leaves such a deadline to it. */
+static inline bool ft_valid_due(const struct timespec *t, const struct ft_clock_page *s)
+{
+  return t != NULL && t->tv_nsec >= 0 && t->tv_nsec < FT_NS && (t->tv_sec >= 0 || s->armed);
+}
 static inline bool ft_rt_clock(clockid_t c)
 {
   return c == CLOCK_REALTIME || c == CLOCK_REALTIME_ALARM;
@@ -597,7 +603,7 @@ static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct ti
   struct ft_clock_page s;
   ft_uns_t due = ft_uns(abs);
   *handled = false;
-  if (!ft_snap(&s)) return 0;
+  if (!ft_snap(&s) || !ft_valid_due(abs, &s)) return 0;
   *handled = true;
   for (;;)
   {
@@ -807,7 +813,7 @@ long syscall(long number, ...)
   {
     int op = (int) a[1];
     const struct timespec *ts = (const struct timespec *) a[3];
-    if ((op & FUTEX_CMD_MASK) == FUTEX_WAIT_BITSET && (op & FUTEX_CLOCK_REALTIME) && ft_valid_ts(ts)
+    if ((op & FUTEX_CMD_MASK) == FUTEX_WAIT_BITSET && (op & FUTEX_CLOCK_REALTIME) && ts != NULL
         && (uint32_t) a[5] == FUTEX_BITSET_MATCH_ANY)
     {
       bool handled;
@@ -845,8 +851,8 @@ static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, 
     }
     ft_tab_unlock(&old);
   }
-  if (!ft_rt_clock(clock) || !(flags & TFD_TIMER_ABSTIME) || !ft_valid_ts(&nv->it_value)
-      || !ft_valid_ts(&nv->it_interval) || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s))
+  if (!ft_rt_clock(clock) || !(flags & TFD_TIMER_ABSTIME) || !ft_valid_ts(&nv->it_interval)
+      || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s) || !ft_valid_due(&nv->it_value, &s))
   {
     r = (*real_timerfd_settime)(fd, flags, nv, ov);
     if (r == 0 && ov != NULL && was) *ov = prev;
@@ -1150,8 +1156,8 @@ int timer_settime(timer_t id, int flags, const struct itimerspec *nv, struct iti
     t->tracked = 0;
   }
   ft_tab_unlock(&old);
-  if (t == NULL || !ft_uw_active() || !(flags & TIMER_ABSTIME) || !ft_valid_ts(&nv->it_value)
-      || !ft_valid_ts(&nv->it_interval) || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s))
+  if (t == NULL || !ft_uw_active() || !(flags & TIMER_ABSTIME) || !ft_valid_ts(&nv->it_interval)
+      || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s) || !ft_valid_due(&nv->it_value, &s))
   {
     r = (*real_timer_settime_new)(id, flags, nv, ov);
     if (r == 0 && ov != NULL && was) *ov = prev;
