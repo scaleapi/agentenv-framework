@@ -128,6 +128,10 @@ class CodexResult:
     usage: dict = field(default_factory=dict)
     token_usage: dict | None = None
     model_requests: int | None = None
+    # A model request the bridge's own stop cut short: the CLI counts a response only once it completes, so the one in
+    # flight when the bridge stopped it at its tool-call limit, timeout or stall is in neither count. A stop during a
+    # tool call cut none: the response that asked for the tool was counted.
+    unreported_calls: int = 0
 
 
 # Inactivity watchdog: if the CLI emits no output for this many seconds (e.g. a
@@ -311,6 +315,56 @@ def read_rollout_requests(thread_id: str | None) -> int | None:
         if isinstance(total, int) and total > last:
             requests, last = requests + 1, total
     return requests
+
+
+def subagent_threads(thread_id: str | None) -> list[str]:
+    """The threads a thread's subagents ran in, theirs included. Codex records a subagent's calls only in its own
+    rollout, which names its parent in the ``session_meta`` that opens it, never in its parent's counts."""
+    if not thread_id or not SESSIONS_DIR.exists():
+        return []
+    parents: dict[str, str] = {}
+    for path in SESSIONS_DIR.rglob("rollout-*.jsonl"):
+        try:
+            with path.open(errors="replace") as rollout:
+                record = json.loads(rollout.readline())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload") or {}
+        if payload.get("parent_thread_id"):
+            parents[payload["id"]] = payload["parent_thread_id"]
+    found: list[str] = []
+    spawners = [thread_id]
+    while spawners:
+        spawner = spawners.pop()
+        children = [child for child, parent in parents.items() if parent == spawner and child not in found]
+        found += children
+        spawners += children
+    return found
+
+
+def _subagent_baselines(thread_id: str | None) -> dict[str, tuple[dict[str, int] | None, int]]:
+    return {child: (read_rollout_usage(child), read_rollout_requests(child) or 0)
+            for child in subagent_threads(thread_id)}
+
+
+def _add_subagent_calls(result: CodexResult, baselines: Mapping[str, tuple[dict[str, int] | None, int]]) -> None:
+    """Adds what the turn's subagents used since the turn began to its own counts."""
+    for child in subagent_threads(result.session_id):
+        usage, requests = baselines.get(child, (None, 0))
+        if result.model_requests is not None:
+            result.model_requests += (read_rollout_requests(child) or 0) - requests
+        current = read_rollout_usage(child)
+        if result.token_usage is None or current is None:
+            continue
+        delta = _usage_delta(current, usage)
+        if delta is None:
+            result.token_usage = None
+            result.warnings.append(f"codex subagent {child}'s token counters regressed; incremental usage is unavailable")
+            continue
+        result.token_usage = {key: result.token_usage.get(key, 0) + delta.get(key, 0)
+                              for key in {**result.token_usage, **delta}}
 
 
 def _usage_delta(
@@ -806,6 +860,7 @@ async def _run_codex_once(
         turn_completed = False
         usage: dict = {}
         captured_thread_id: str | None = thread_id
+        running_tools: set = set()
 
         for event in trajectory:
             etype = event.get("type")
@@ -815,9 +870,12 @@ async def _run_codex_once(
                 turn_completed = True
                 if isinstance(event.get("usage"), dict):
                     usage = dict(event["usage"])
+            elif etype == "item.started" and (event.get("item") or {}).get("type") in _TOOL_ITEM_TYPES:
+                running_tools.add(event["item"].get("id"))
             elif etype == "item.completed":
                 item = event.get("item") or {}
                 item_type = item.get("type")
+                running_tools.discard(item.get("id"))
                 if item_type == "agent_message":
                     # Last message wins.
                     final_message = item.get("text", "")
@@ -832,8 +890,10 @@ async def _run_codex_once(
 
         err: str | None = None
         used = prior_tool_calls + tool_count
+        limit = max_turns is not None and (used > max_turns or (used == max_turns and not turn_completed))
+        stopped = not turn_completed and (limit or timed_out or stalled)
         # Over the limit, or stopped at it. A turn can complete past it when its events arrive in one read.
-        if max_turns is not None and (used > max_turns or (used == max_turns and not turn_completed)):
+        if limit:
             # Claude Code's words, which callers already read as the turn limit.
             err = f"Reached maximum number of turns ({max_turns})"
         elif timed_out or stalled:
@@ -877,6 +937,7 @@ async def _run_codex_once(
             error_detail=detail,
             warnings=warnings,
             usage=usage,
+            unreported_calls=1 if stopped and not running_tools else 0,
         )
     finally:
         _RUNNING.discard(proc)
@@ -904,11 +965,13 @@ async def run_codex(
     """Run one logical turn with bounded transient recovery.
 
     `max_turns` bounds the turn's tool calls, each of which is one model request when the CLI sends no parallel calls,
-    as for a model its catalog has no entry for; `model_requests` counts the requests from the rollout.
+    as for a model its catalog has no entry for; `model_requests` counts the requests from the rollout. The turn's
+    counts include its subagents' calls, read from their own rollouts.
     """
     deadline = time.monotonic() + timeout_s
     usage_baseline = read_rollout_usage(thread_id)
     requests_baseline = read_rollout_requests(thread_id) or 0
+    subagent_baselines = _subagent_baselines(thread_id)
     retries_left = _configured_api_error_retries()
     attempt_prompt = prompt
     attempt_thread = thread_id
@@ -986,6 +1049,7 @@ async def run_codex(
                         "incremental usage is unavailable"
                     )
                     result.warnings.append(warning)
+            _add_subagent_calls(result, subagent_baselines)
             return result
 
         first_failure = first_failure or result.error_detail

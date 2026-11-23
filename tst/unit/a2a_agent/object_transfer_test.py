@@ -374,3 +374,29 @@ async def test_fetch_trajectory_reads_an_answer_that_is_not_an_object_as_none(mo
     fetched = await fetch_trajectory("https://agent.test/ext/trajectory", {"task_id": "t"})
 
     assert fetched == FetchedTrajectory()
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_returns_the_turn_with_its_reply_and_the_replys_usage(monkeypatch):
+    sent = {}
+
+    async def send(url, parts, message_id, context_id, timeout):
+        sent.update(url=url, parts=parts, message_id=message_id)
+        return "task-7", context_id
+
+    async def poll(url, task_id, timeout, interval, **_):
+        return {"id": task_id, "status": {"state": "completed", "message": {"parts": [
+            {"kind": "text", "text": "done"},
+            {"kind": "data", "data": {"usage": {"input_tokens": 120, "output_tokens": 9, "input_includes_cache": True}}},
+        ]}}}
+
+    monkeypatch.setattr(object_transfer.protocol, "send_a2a_message", send)
+    monkeypatch.setattr(object_transfer.protocol, "poll_a2a_task", poll)
+
+    turn = await object_transfer.send_and_wait(
+        "http://agent", [{"kind": "text", "text": "hi"}], agent=None, message_id="m-1", context_id="c-1",
+        timeout_seconds=30, poll_interval_seconds=1)
+
+    assert (turn.task_id, turn.state, turn.reply.response_text) == ("task-7", "completed", "done")
+    assert (turn.reply.usage.input_tokens, turn.reply.usage.output_tokens) == (120, 9)
+    assert turn.message["parts"][0]["text"] == "done" and sent["message_id"] == "m-1"

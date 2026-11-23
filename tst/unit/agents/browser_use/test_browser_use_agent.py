@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from agentenv_protocol.a2a_agent import Usage
 from starlette.testclient import TestClient
 
 import agent_env
+from agent_env.config.model_pricing import litellm_prices
+from agent_env.task_step.usage import RoleUsage
 
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "browser-use"
 # By its path: another agent's a2a_server, imported by the same name, may be loaded already.
@@ -123,6 +126,40 @@ def test_a_run_that_stops_early_fails_with_its_reason(client: TestClient, monkey
     task = _send(client, "too long")
     assert task["status"]["state"] == "failed"
     assert _reply(task)[1]["error_code"] == "browser_use.max_steps"
+
+
+def _usage_of(client: TestClient, monkeypatch: pytest.MonkeyPatch, scenario: str) -> dict[str, Any]:
+    monkeypatch.setenv("FAKE_SCENARIO", scenario)
+    return _reply(_send(client, scenario))[1]["usage"]
+
+
+def test_a_request_cut_before_its_response_is_unknown_not_zero(client: TestClient,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """browser-use-cut-request, recorded on 2026-11-20: the run's budget cut its only request, which the proxy still
+    answered (2,739 in, 6 out), and browser-use counted no response; the turn's usage is unknown, not $0."""
+    usage = _usage_of(client, monkeypatch, "cut")
+    role = RoleUsage("solver", "claude-haiku-4-5-20251001")
+    role.add(Usage.from_dict(usage))
+    entry = role.entry(litellm_prices())
+
+    assert "input_tokens" not in usage and "cost_usd" not in usage
+    assert usage["provider_details"]["unreported_calls"] == 1
+    assert entry["partial"] is True and entry["cost_usd"] is None and entry["unreported_calls"] == 1
+
+
+def test_requests_without_a_counted_response_mark_the_turn_and_refused_ones_dont(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    mixed = _usage_of(client, monkeypatch, "mixed")
+    refused = _usage_of(client, monkeypatch, "refused")
+
+    assert mixed["input_tokens"] == 100 and mixed["provider_details"]["unreported_calls"] == 1
+    assert refused["input_tokens"] == 100 and "unreported_calls" not in refused["provider_details"]
+
+
+def test_a_turn_counts_its_own_tool_calls_not_the_conversations(client: TestClient,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """browser-use's run returns the whole conversation's messages; the turn's are those after the earlier turns'."""
+    assert _usage_of(client, monkeypatch, "follow_up")["tool_call_count"] == 2
 
 
 def test_effort_outside_browser_uses_is_refused_with_the_config(client: TestClient) -> None:

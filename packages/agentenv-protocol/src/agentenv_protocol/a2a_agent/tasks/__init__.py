@@ -16,6 +16,7 @@ from .v1 import (
     TaskStreamItem,
     TextPart,
     TrajectoryLog,
+    ModelUsage,
     Usage,
     WriteOnly,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "TaskStreamItem",
     "TextPart",
     "TrajectoryLog",
+    "ModelUsage",
     "Usage",
     "WriteOnly",
 ]

@@ -782,7 +782,11 @@ class MyDriver(ComputerDriverEnvironment):
   of a double or triple), a trail for a drag, an
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
   each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
-  main argument. Where the frames can't show the pointer themselves, as frames polled from captures that
+  main argument, unless the driver draws what the call did itself: a tool named in its
+  `marks_own_inputs` hands `mark_inputs` the inputs it made, computer/v1 operations with their arguments
+  as `act` takes them at points of the display (`("click", (x, y, button, count, modifiers))`), drawn as
+  a `computer_*` input is, in the colour of the role that called it (cua-driver's input tools, as each
+  reply says it acted; `draws_inputs()` says whether a recording draws any). Where the frames can't show the pointer themselves, as frames polled from captures that
   leave it out do (cua-driver's), a pointer is drawn for each role and pointer that has acted, where its
   last input left it, along a drag's path as it moves, after a fading line from where it jumped: the one
   that moved last at full strength, the others fainter, each named once there are several. Every `computer_*` input is marked
@@ -1307,14 +1311,20 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
 
   The builder closes a step when the next one starts, puts every result in its call's step, writes `prompt_tokens`
   with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
-  record no method takes is counted in the root profile.
+  record no method takes is counted in the root profile. `turn.tool_definitions([...], agent=None)` writes the tools
+  the model was offered, in OpenAI's function form, to a trajectory's `agent.tool_definitions`; a later call adds
+  tools and replaces those of the same name.
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
   reader's earlier page is always a prefix of a later one. A step is rendered once a page serves it and kept, so a
   read costs one parse of the document, not a render of every step.
-- **Readers** (`load`, `tasks`, `media_paths`, `strip_profile`, `is_prefix`) take any valid ATIF document, with or
-  without the profile, such as a Harbor task's trajectory.json.
+- **Readers** (`load`, `tasks`, `task_document`, `media_paths`, `media_refs`, `strip_profile`, `is_prefix`) take any
+  valid ATIF document, with or without the profile, such as a Harbor task's trajectory.json. `task_document` cuts A2A
+  tasks out of a conversation's document as a document of their own (`tasks_document` for tasks found without ids), as a
+  reader showing one turn shows it. `media_refs` names each place a media
+  file is named, with the profile's details for it; `validate(document, media=StoredMedia(sizes))` checks those
+  details against files stored beside the document without reading their bytes.
 
 ## A2A agent framework
 
@@ -1420,6 +1430,15 @@ in `provider_details`, but cache counts go in their own fields. `Usage.from_dict
 reads what `to_dict` wrote under any protocol version, a field it leaves out
 being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
 usage=...)` carries usage on a failure as `success` does.
+
+A turn whose calls used more than one model, such as a subagent on a smaller
+model or a side call for a title, gives its counts by model in `Usage.models`:
+one `ModelUsage` per model, with the model's name as called, its `calls`, its
+token and cache counts read as `Usage`'s are, and the agent's own `cost_usd`
+for them when it has one. The rows cover every call the turn counted; a call
+the agent can't name goes under the model it was configured with. The host
+prices each row at its own model's rate. A turn on one model leaves `models`
+empty, and is priced at its role's model.
 
 Whoever makes a model call knows what its counts hold, so an agent builds its own
 `Usage`. `Usage.from_model_response(usage)` is the default reader for a model
@@ -1653,7 +1672,9 @@ one adapter instance, and feeds it every event the agent appends, as it appends 
 trajectory returned at task end runs through the adapter then. The agent's own
 code feeds the adapter's aux files, records that aren't in the native log such
 as a hook's notes, with `request.trajectory.aux(name, record)`, where they
-happened among the events. An agent with an adapter that both appends events and
+happened among the events. `request.trajectory.builds_atif` says whether the task
+feeds a copy, so an agent gathers what only its aux files take, such as a log it
+tails, only then. An agent with an adapter that both appends events and
 returns a native trajectory fails the turn with code
 `framework.trajectory_appended_and_returned`, since its ATIF copy would come
 from one of them and its native record from the other.

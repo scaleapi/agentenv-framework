@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     JUDGE_OUTPUT_FORMAT_REGISTRY,
     JudgeOutputFormat,
@@ -343,7 +344,7 @@ async def _run_judge(verifier: RubricsVerifierTaskStep):
     return await verifier._run_judge_with_output_retries(
         eval_prompt="EVAL", criteria=verifier.criteria, context=TaskStepContext(), model="claude-sonnet-4-6",
         judge_a2a_url=None, judge_agent_card={}, judge_agent=None, judge_effort=None,
-        judge_max_thinking_tokens=None, use_agent_judge=False)
+        judge_max_thinking_tokens=None, use_agent_judge=False, usage=StepUsage(TaskStepContext(), "verify"))
 
 
 @pytest.mark.asyncio

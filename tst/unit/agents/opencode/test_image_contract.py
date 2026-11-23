@@ -70,11 +70,11 @@ def test_the_image_and_an_install_carry_every_module_the_server_imports():
     assert needed <= set(_copied()) and needed <= installed, (needed, installed)
 
 
-def test_the_requirements_are_the_protocol_floor_and_the_output_format_validator():
+def test_the_requirements_are_the_protocol_floor_the_output_format_validator_and_the_relays_http():
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.588", "jsonschema>=4.18,<5"]
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.597", "jsonschema>=4.18,<5", "aiohttp>=3.9,<4"]
 
 
 def test_node_is_pinned_by_version_and_checksum_for_the_image_and_an_install():

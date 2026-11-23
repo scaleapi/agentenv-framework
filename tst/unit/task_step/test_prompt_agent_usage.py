@@ -23,7 +23,8 @@ def _turn(input_tokens, output_tokens, **more):
 
 def _wire(monkeypatch, solver_usage: list, user_usage=None):
     """The conversation's HTTP and store boundary. The solver's n-th reply reports ``solver_usage[n]`` (no usage when
-    None; a TimeoutError raised instead when it is one); the user sim reports ``user_usage`` and never says done."""
+    None; a TimeoutError raised instead when it is one); the user sim reports ``user_usage`` (raised when it is an
+    exception) and never says done."""
     cfg = MagicMock()
     cfg.get_model_params.return_value = {}
     monkeypatch.setattr(pa_mod, "get_config", lambda: cfg)
@@ -39,6 +40,8 @@ def _wire(monkeypatch, solver_usage: list, user_usage=None):
 
     async def poll(url, task_id, timeout, interval, **_):
         if "user-sim" in url:
+            if isinstance(user_usage, Exception):
+                raise user_usage
             parts = [{"kind": "text", "text": '{"message": "keep going", "done": false}'}]
             usage = user_usage
         else:
@@ -127,7 +130,32 @@ async def test_a_step_that_times_out_keeps_the_turns_before_it(monkeypatch):
 
     assert not ctx.prompt_responses
     solver, user = ctx.metadata["step_usage"]["solve"]
-    assert (solver["turns"], solver["input_tokens"], user["turns"]) == (2, 300, 2)
+    # The turn that timed out made calls whose usage never came back: the sum is a lower bound.
+    assert (solver["turns"], solver["input_tokens"], solver["partial"]) == (3, 300, True)
+    assert (user["turns"], user["input_tokens"], user["partial"]) == (2, 60, False)
+
+
+@pytest.mark.asyncio
+async def test_a_solver_whose_sandbox_stops_answering_mid_turn_leaves_its_entry_a_lower_bound(monkeypatch):
+    _wire(monkeypatch, [_turn(100, 10), pa_mod.protocol.AgentUnreachableError("the agent's sandbox stopped answering")])
+    ctx = _context()
+
+    with pytest.raises(pa_mod.protocol.AgentUnreachableError):
+        await _step(2).execute(ctx)
+
+    solver = ctx.metadata["step_usage"]["solve"][0]
+    assert (solver["turns"], solver["input_tokens"], solver["partial"]) == (2, 100, True)
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_turn_that_times_out_leaves_its_entry_a_lower_bound(monkeypatch):
+    _wire(monkeypatch, [_turn(100, 10), _turn(200, 20)], user_usage=TimeoutError("no answer"))
+
+    ctx = await _step(2).execute(_context())
+
+    solver, user = ctx.prompt_responses[-1].usage
+    assert (solver["turns"], solver["partial"]) == (1, False)
+    assert (user["role"], user["turns"], user["input_tokens"], user["partial"]) == ("user_simulator", 1, None, True)
 
 
 @pytest.mark.asyncio

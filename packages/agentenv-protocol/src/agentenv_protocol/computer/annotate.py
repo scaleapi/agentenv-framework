@@ -1,7 +1,8 @@
 """What an annotated recording (computer-recording/v1 ``start`` with ``annotate``) draws over its frames: where each
 input landed and what it typed or pressed, in the colour of the role that sent it, on the frames captured while its
 mark shows. ``ComputerRuntime.act`` marks every ``computer_*`` input as it is delivered; a call to one of the
-driver's own or forwarded tools, which acts without it, shows as a chip naming the tool and its main argument. Where
+driver's own or forwarded tools, which acts without it, shows as a chip naming the tool and its main argument, unless
+the driver marks what the call did itself (``ComputerDriverEnvironment.mark_inputs``). Where
 the frames can't show the pointer themselves, as frames from screenshots that leave it out, the agent's pointer is
 drawn where its inputs left it."""
 from __future__ import annotations
@@ -54,7 +55,8 @@ CHIPS_ABOVE = 0.1
 #: A frame's longer edge that marks are sized for; on a larger or smaller frame they scale with it.
 UNIT_EDGE = 1280
 #: Arguments a tool's chip shows, the first one a call has.
-MAIN_ARGUMENTS = ("text", "keys", "key", "url", "query", "label", "name", "element", "title", "code", "script")
+MAIN_ARGUMENTS = ("text", "keys", "key", "url", "query", "label", "name", "element", "title", "code", "script",
+                  "value")
 #: Key names as chips show them.
 KEY_NAMES = {"Control": "Ctrl", "Escape": "Esc", "ArrowLeft": "Left", "ArrowRight": "Right", "ArrowUp": "Up",
              "ArrowDown": "Down", " ": "Space"}

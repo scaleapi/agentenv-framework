@@ -35,7 +35,7 @@ from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.context import ENV_KEYED_METADATA, context_path, context_path_segments
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_base_fields, dependencies
-from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
+from agent_env.task_step.task_steps.prompt_agent import agent_name_of, solver_agents
 
 from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
@@ -133,16 +133,15 @@ def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
 
 
 def played_deploys(entry: ResolvedEntry) -> frozenset[str]:
-    """The ``deploy_agent`` steps of a task's only agent under test, the one a step prompts as it and no step talks to
-    as its user (``user_sim_agents``), which a caller playing that agent itself (``EpisodeSpec``) stands in for; none
-    when the entry isn't a task, or prompts no agent or several."""
+    """The ``deploy_agent`` steps of a task's only agent under test (``solver_agents``), which a caller playing that
+    agent itself (``EpisodeSpec``) stands in for; none when the entry isn't a task, or prompts no agent or several."""
     if entry.entry.kind is not BundleKind.TASK:
         return frozenset()
-    prompted = {_agent_name(step) for step in entry.config if is_prompt_step(step)} - user_sim_agents(entry.config)
-    if len(prompted) != 1:
+    solver = solver_agents(entry.config)
+    if len(solver) != 1:
         return frozenset()
     return frozenset(step.get("id") for step in entry.config
-                     if step.get("type") == "deploy_agent" and _agent_name(step) in prompted)
+                     if step.get("type") == "deploy_agent" and agent_name_of(step) in solver)
 
 
 def without_played_agents(resolved: ResolvedBundle) -> ResolvedBundle:
@@ -156,10 +155,6 @@ def without_played_agents(resolved: ResolvedBundle) -> ResolvedBundle:
             if ref.kind is EntityKind.ENV or not any(ref.where.startswith(f"step {step!r}: ") for step in played)))
 
     return replace(resolved, entries=tuple(kept(entry) for entry in resolved.entries))
-
-
-def _agent_name(step: dict) -> str:
-    return step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME
 
 
 class _Skip(Exception):

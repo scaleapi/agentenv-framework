@@ -372,20 +372,45 @@ def test_a_turn_limit_stops_the_cli_once_that_many_tool_calls_complete_in_claude
         codex_bridge.run_codex(prompt="p", thread_id=None, timeout_s=60, max_turns=2), 10))
 
     assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (2)", 2)
+    # The CLI counts a response once it completes; the one asking for the next tool was in flight when it stopped.
+    assert result.unreported_calls == 1
+
+
+def test_a_turn_stopped_during_a_tool_call_cut_no_model_request_short(monkeypatch):
+    """Stopped while a command ran, the turn's last response, the one that asked for it, was counted; stopped after
+    the command finished, the next request was in flight."""
+    command = {"id": "item_1", "type": "command_execution"}
+    started, done = {"type": "item.started", "item": command}, {"type": "item.completed", "item": command}
+
+    def stop(*events):
+        proc = _FakeProc(b"", returncode=-9)
+        proc.stdout = _OpenStream(ndjson(THREAD_STARTED, TURN_STARTED, *events))
+
+        async def fake_exec(*cmd, **kwargs):
+            return proc
+
+        monkeypatch.setattr(codex_bridge.asyncio, "create_subprocess_exec", fake_exec)
+        return asyncio.run(asyncio.wait_for(codex_bridge.run_codex(prompt="p", thread_id=None, timeout_s=0.2), 10))
+
+    during, after = stop(started), stop(started, done)
+
+    assert (during.error, during.unreported_calls) == ("codex CLI timed out after 0s", 0)
+    assert (after.error, after.unreported_calls) == ("codex CLI timed out after 0s", 1)
 
 
 def test_a_turn_that_completes_past_its_limit_in_one_read_fails(spawn):
     result = run(spawn, [THREAD_STARTED, TURN_STARTED, tool_item("mcp_tool_call"), tool_item("mcp_tool_call"),
                          agent_message("done"), TURN_COMPLETED], max_turns=1)
 
-    assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (1)", 2)
+    assert (result.error, result.tool_call_count, result.unreported_calls) == (
+        "Reached maximum number of turns (1)", 2, 0)
 
 
 def test_a_turn_that_ends_within_its_limit_completes(spawn):
     result = run(spawn, [THREAD_STARTED, TURN_STARTED, tool_item("mcp_tool_call"), tool_item("mcp_tool_call"),
                          agent_message("done"), TURN_COMPLETED], max_turns=2)
 
-    assert (result.error, result.response) == (None, "done")
+    assert (result.error, result.response, result.unreported_calls) == (None, "done", 0)
 
 
 def test_system_prompt_is_per_invocation_config_not_agents_md(spawn, tmp_path):

@@ -370,6 +370,9 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
         out += [f"  [{_stamp(at(s), now)}] {s['text']}{attached_note(s.get('files'))}" for s in own]
     out.append("\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):")
     out += [_message(m, _stamp(at(m), now)) for m in messages]
+    if read.get("user_note"):  # from a post-turn hook: what the user saw checking the work, never sent to the assistant
+        out.append("\nWHAT YOU FOUND WHEN YOU CHECKED ITS WORK YOURSELF (the assistant doesn't see this):")
+        out += ["  " + line for line in read["user_note"].strip().splitlines()]
     out.append("\n" + CLOSING.format(first=_first(person)))
     out.append("Answer in JSON: " + ANSWER_LINE)
     return "\n".join(out)

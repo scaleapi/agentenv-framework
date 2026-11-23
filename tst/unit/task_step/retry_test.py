@@ -73,8 +73,7 @@ class _FakeDeployEnv:
         self.deploy_calls.append(self.id)
         context.deployed_envs.append(
             DeployedGatewayEnv(
-                env_id=self.id, env_version=1, gateway_url="g", mcp_url="m", db_web_url=None,
-                sandbox_id=f"sb-{self.id}-{len(self.deploy_calls)}", sandbox_type="fake",
+                env_id=self.id, env_version=1, gateway_url="g", mcp_url="m", sandbox_id=f"sb-{self.id}-{len(self.deploy_calls)}", sandbox_type="fake",
             )
         )
         return context
@@ -551,7 +550,7 @@ async def test_cancelled_sibling_is_rolled_back_and_redispatched(store):
             self.runs += 1
             context.deployed_envs.append(
                 DeployedGatewayEnv(env_id=self.id, env_version=1, gateway_url="g", mcp_url="m",
-                            db_web_url=None, sandbox_id="")
+                            sandbox_id="")
             )
             await release.wait()
             return context

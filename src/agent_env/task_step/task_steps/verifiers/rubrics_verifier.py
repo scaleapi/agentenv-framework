@@ -11,6 +11,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
+from agentenv_protocol.a2a_agent import Usage
+
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
     fetch_trajectory,
@@ -22,6 +24,7 @@ from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.config import model_call
 from agent_env.config.model import ModelRole, no_key_for
+from agent_env.config.model_pricing import ReportedBy
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -50,12 +53,20 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context, render_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.verifiers.verifier import VERIFICATIONS_KEY, Verification, VerifierTaskStep
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
+)
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
+    AtifDocuments,
+    TurnSource,
+    atif_turns,
+    compact_atif_trajectory,
+    transcript_from_atif,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.frame_selection import (
     LabeledFrame,
@@ -419,10 +430,13 @@ def _override_or(overrides: dict, key: str, stored: Optional[int]) -> Optional[i
 def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptResponse:
     """A copy of a multi-turn PromptResponse cut off after ``turn``, or the original when there is
     nothing to cut. The stored response is the conversation's last reply, so a cut copy points the
-    judge at the end of the turn's own trajectory instead of leaking later turns. A failed turn
+    judge at the end of the turn's own trajectory instead of leaking later turns; the per-turn records are cut with the
+    urls, since an atif/1 turn's url is a document its later turns overwrite and only its record's task is the turn's
+    own. A failed turn
     ends the conversation, so every turn before the last completed: the stored error is the last
     turn's and is dropped from a cut copy."""
     turn_urls = prompt_response.target_agent_per_turn_trajectory_object_urls or []
+    records = prompt_response.target_agent_per_turn_trajectories
     prompt_parts = prompt_response.source_agent_per_turn_prompt_parts
     # Per-turn prompt parts are recorded every turn; per-turn trajectories only when the agent
     # exposes them, so the turn count comes from whichever is longer.
@@ -437,6 +451,7 @@ def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptR
     return replace(
         prompt_response,
         target_agent_per_turn_trajectory_object_urls=turn_urls[:turn],
+        target_agent_per_turn_trajectories=records[:turn] if records is not None else None,
         agent_trajectory_object_url=turn_urls[turn - 1],
         source_agent_per_turn_prompt_parts=prompt_parts[:turn] if prompt_parts is not None else None,
         structured_output=None,
@@ -481,6 +496,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         "conversation turn, in chronological order. Read every file, in order, to judge the "
         "full conversation; actions the agent took in earlier turns count."
     )
+    _ATIF_FILES_NOTE: ClassVar[str] = "\n\nNOTE: The trajectory path above is a DIRECTORY holding {held}. {atif}{media}"
     _CONTEXT_FACTS_LEAD: ClassVar[str] = (
         "These values were measured from the run's record. Rely on them over what the screenshots or "
         "trajectory text appear to show."
@@ -607,7 +623,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         return get_judge_output_format_spec(self.output_format)
 
     @property
-    def _writes_mistakes_entry(self) -> bool:
+    def writes_mistakes_entry(self) -> bool:
         """rubric_evidence_with_mistakes: the same judge call also detects trajectory mistakes and a second entry,
         shaped and scored as a standalone trajectory_mistakes step's, is written under
         ``trajectory_mistakes_key(self.verifier_id)`` (see ``_entries``)."""
@@ -631,14 +647,17 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         def rows() -> list[dict]:
             return [{"id": row_id, "score": 0, "result": False, "message": message}]
         mistakes = ({**self._mistakes_entry_fields(), "results": rows(), "score": 0}
-                    if self._writes_mistakes_entry else None)
+                    if self.writes_mistakes_entry else None)
         return RubricsVerdict(criteria=rows(), score=0, output=self._entry_format_fields(), mistakes_entry=mistakes)
 
     def _judge_model(self, context: TaskStepContext) -> str:
         """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
-        role and default, and claude-sonnet-4-6 last."""
+        role and default, and claude-sonnet-5-5 last."""
         overrides = context.metadata.get("user_overrides") or {}
         return get_config().resolve_model(ModelRole.JUDGE, run=overrides.get("judge_model"), step=self.default_model).model
+
+    def criterion_rows(self) -> Optional[int]:
+        return len(self.criteria) if isinstance(self.criteria, list) else None
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -851,6 +870,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
         if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
+        # A run whose turns are atif/1 copies reads each turn by its label; one with none keeps the native path.
+        atif = atif_turns(prompt_response) if self.use_trajectory else None
+        documents = AtifDocuments()
 
         overrides = context.metadata.get("user_overrides", {})
         use_agent_judge = run["use_agent_judge"]
@@ -880,14 +902,22 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             )
 
         # Per-run dir so per-turn files can't collide with a prior run's on a reused (agent_name)
-        # judge sandbox — a shorter run would otherwise leave stale later-turn files behind.
-        multiturn_dir = f"{self.TRAJECTORY_CONTAINER_DIR}/{uuid.uuid4().hex[:12]}" if multiturn else None
+        # judge sandbox — a shorter run would otherwise leave stale later-turn files behind. An atif/1 run's
+        # media sit beside its turns, so it gets one even for a single turn.
+        multiturn_dir = (f"{self.TRAJECTORY_CONTAINER_DIR}/{uuid.uuid4().hex[:12]}"
+                         if multiturn or atif is not None else None)
 
         # Single-file compaction is only needed off the multi-turn path. It reads the trajectory,
         # and for the DEFAULT filter writes a compacted copy back, so it runs on a thread.
-        compacted = _CompactedTrajectory.empty() if multiturn else await asyncio.to_thread(
-            self._compact_trajectory, prompt_response, filter_to_apply, criteria=criteria,
-            label_ids={real: short for short, real in real_by_short.items()})
+        label_ids = {real: short for short, real in real_by_short.items()}
+        if multiturn:
+            compacted = _CompactedTrajectory.empty()
+        elif atif is not None:
+            compacted = await asyncio.to_thread(self._compact_atif_turn, atif[0], documents, filter_to_apply,
+                                                criteria=criteria, label_ids=label_ids)
+        else:
+            compacted = await asyncio.to_thread(self._compact_trajectory, prompt_response, filter_to_apply,
+                                                criteria=criteria, label_ids=label_ids)
         if not use_agent_judge:
             compacted.tool_result_files = []  # only an agent judge's container reads them; they can be large
         if self._spec().cites_evidence and not compacted.per_criterion:
@@ -920,6 +950,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
         auto_deployed_judge = None
         staged: Optional[StagedTrajectory] = None
+        atif_note = ""
         judge_agent = None
         judge_a2a_url: Optional[str] = None
         judge_sandbox_id: Optional[str] = None
@@ -980,7 +1011,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
                     sandbox = await provider.get_sandbox(judge_sandbox_id)
                     staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
-                    if staged is None and multiturn:
+                    if staged is None and atif is not None:
+                        media = await self._stage_atif_turns(
+                            sandbox, atif, multiturn_dir, filter_to_apply, judge_container, documents)
+                        atif_note = self._atif_note(atif, filter_to_apply, media=media)
+                    elif staged is None and multiturn:
                         await self._load_per_turn_trajectories(
                             sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
                     elif staged is None:
@@ -1024,11 +1059,13 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 if staged is not None:
                     trajectory_path = staged.path
                 elif self.use_trajectory:
-                    trajectory_path = multiturn_dir if multiturn else self.TRAJECTORY_CONTAINER_PATH
+                    trajectory_path = multiturn_dir if multiturn or atif is not None else self.TRAJECTORY_CONTAINER_PATH
             else:
                 image_blocks = compacted.image_blocks
                 # Direct judge embeds the trajectory inline; DEFAULT has no pre-rendered text.
-                if multiturn:
+                if multiturn and atif is not None:
+                    trajectory_inline = await asyncio.to_thread(self._atif_turns_text, atif, filter_to_apply, documents)
+                elif multiturn:
                     trajectory_inline = await asyncio.to_thread(self._merge_per_turn_text, per_turn_uris, filter_to_apply)
                 else:
                     trajectory_inline = compacted.inline_text
@@ -1056,6 +1093,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     )
                     if staged is not None:
                         prompt += staged.prompt_note
+                    elif atif_note:
+                        prompt += atif_note
                     elif self.use_trajectory and multiturn:
                         prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
                 else:
@@ -1091,6 +1130,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
                                    f"output_format={self.output_format.value} is graded in one judge call.")
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
+            usage = StepUsage(context, self.id)
 
             async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
                 prompt = eval_prompt_for(batch)
@@ -1112,6 +1152,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         criteria=batch,
                         image_blocks=image_blocks,
                         reject_bulk_verdicts=batch_size is not None and self._spec().checks_bulk_verdicts,
+                        usage=usage,
                     )
 
             if len(batches) == 1:
@@ -1166,7 +1207,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         be derived from leaves neither. ``unjudged`` rows (``unjudged_rows``) join the rubric verdict's, after the
         judge's, and its score; the mistakes entry is the judge's alone."""
         mistake_rows: Optional[list[dict]] = None
-        if self._writes_mistakes_entry:
+        if self.writes_mistakes_entry:
             if not isinstance(verification_results, ResultRows):
                 raise RuntimeError(
                     f"Verifier '{self.verifier_id}': the judge response carries no mistake findings "
@@ -1349,6 +1390,121 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         )
         return json.dumps(filtered), tool_result_files
 
+    def _atif_turn_content(self, source: TurnSource, documents: AtifDocuments,
+                           trajectory_filter: Optional[TrajectoryFilter],
+                           result_file_prefix: str = "") -> tuple[str, list[tuple[str, str]]]:
+        """An atif/1 turn's text for a judge: its view, or under the DEFAULT filter its compaction, with the tool-result
+        files that writes out. A SCREENSHOT filter leaves it as it is, as it leaves a native turn for an agent judge."""
+        if trajectory_filter is None or trajectory_filter.compaction_type != CompactionType.DEFAULT:
+            return documents.text(source), []
+        events, files = compact_atif_trajectory(documents.view(source), trajectory_filter,
+                                                result_file_prefix=result_file_prefix)
+        return json.dumps(events), files
+
+    def _compact_atif_turn(self, source: TurnSource, documents: AtifDocuments,
+                           filter_to_apply: Optional[TrajectoryFilter], criteria: list[dict],
+                           label_ids: dict[str, str]) -> _CompactedTrajectory:
+        """``_compact_trajectory`` for a run of one atif/1 turn: its view's text, its DEFAULT compaction (written back
+        as the native one is, for the entry to record), or its SCREENSHOT frames from the media its results name."""
+        if filter_to_apply is not None and filter_to_apply.compaction_type == CompactionType.SCREENSHOT:
+            return self._compact_atif_screenshot(source, documents, filter_to_apply, criteria, label_ids)
+        text, files = self._atif_turn_content(source, documents, filter_to_apply)
+        if filter_to_apply is None:
+            return _CompactedTrajectory(inline_text=text)
+        config = get_config()
+        compact_key = f"{config.get_artifact_key_prefix()}compacted-trajectories/{uuid.uuid4().hex}.json"
+        compact_url = config.get_object_store().put(compact_key, text.encode(), content_type="application/json")
+        return _CompactedTrajectory(inline_text=text, tool_result_files=files, compact_object_url=compact_url)
+
+    def _compact_atif_screenshot(self, source: TurnSource, documents: AtifDocuments, tf: TrajectoryFilter,
+                                 criteria: list[dict], label_ids: dict[str, str]) -> _CompactedTrajectory:
+        """``_compact_screenshot`` for an atif/1 turn: the actions from its tool calls and the frames from its results'
+        image parts, each read from the document's media."""
+        view = documents.view(source)
+        transcript, frames = transcript_from_atif(view, lambda path: documents.media(source.url, path))
+        per_criterion = tf.frame_strategy == FrameStrategy.PER_CRITERION
+        if per_criterion:
+            exclude = re.compile(tf.evidence_exclude_pattern, re.I) if tf.evidence_exclude_pattern else None
+            always_show = {label: re.compile(pattern, re.I) for label, pattern in (tf.always_show_actions or {}).items()}
+            labeled = select_frames_per_criterion(transcript.actions, criteria, max_frames=tf.frame_budget,
+                                                  exclude_pattern=exclude, always_show=always_show, label_ids=label_ids)
+            image_blocks = _labeled_image_blocks(labeled)
+        else:
+            image_blocks = [_image_url_block(f) for f in frames[-tf.screenshot_last_n:]]
+        if tf.trajectory_text == TrajectoryText.ACTION_LOG:
+            inline_text = action_log(transcript.actions, messages=transcript.messages, max_lines=tf.action_log_max_lines)
+        else:
+            inline_text = strip_trajectory_images(json.dumps(view, ensure_ascii=False))
+        return _CompactedTrajectory.for_screenshot(inline_text, image_blocks,
+                                                   per_criterion=per_criterion and bool(image_blocks))
+
+    async def _stage_atif_turns(self, sandbox, sources: list[TurnSource], container_dir: str,
+                                trajectory_filter: Optional[TrajectoryFilter], container: Optional[str],
+                                documents: AtifDocuments) -> bool:
+        """Each turn into ``container_dir`` as turn_NN.json by its label: an atif/1 turn's view (or its DEFAULT
+        compaction) with the media it names in the folder's ``media/``, a native one as the multi-turn path loads it.
+        Whether any media was staged."""
+        tool_result_files: list[tuple[str, str]] = []
+        media: dict[str, str] = {}
+        for i, source in enumerate(sources, start=1):
+            dest = f"{container_dir}/turn_{i:02d}.json"
+            prefix = f"turn_{i:02d}_" if len(sources) > 1 else ""
+            if source.atif:
+                text, files = await asyncio.to_thread(self._atif_turn_content, source, documents, trajectory_filter,
+                                                      prefix)
+                media.update(await asyncio.to_thread(documents.staged_media, source))
+            elif trajectory_filter is not None:
+                text, files = await asyncio.to_thread(self._filter_trajectory_content, source.url, trajectory_filter,
+                                                      prefix)
+            else:
+                await sandbox.write_file_from_object(source.url, dest, **into_container(container))
+                continue
+            await sandbox.write_file_from_text(text, dest, **into_container(container))
+            tool_result_files.extend(files)
+        for path, url in media.items():
+            await sandbox.write_file_from_object(url, f"{container_dir}/{path}", **into_container(container))
+        if tool_result_files:
+            await self._load_tool_result_files(sandbox, tool_result_files, container)
+        logger.info(f"Loaded {len(sources)} turns ({sum(s.atif for s in sources)} atif/1) into {container_dir}, "
+                    f"{len(media)} media files, {len(tool_result_files)} tool-result files")
+        return bool(media)
+
+    def _atif_note(self, sources: list[TurnSource], trajectory_filter: Optional[TrajectoryFilter], *,
+                   media: bool) -> str:
+        """What the agent judge is told of the turn files ``_stage_atif_turns`` wrote: which are ATIF and how media
+        paths in them resolve."""
+        names = [f"turn_{i:02d}.json" for i in range(1, len(sources) + 1)]
+        if len(names) == 1:
+            held = f"one file, {names[0]}, the turn being graded"
+        else:
+            held = (f"{len(names)} files named {names[0]} … {names[-1]}, one per conversation turn, in chronological "
+                    "order; read every file, in order, to judge the full conversation, since actions the agent took in "
+                    "earlier turns count")
+        atif = [name for name, source in zip(names, sources) if source.atif]
+        subject = (f"{atif[0]} is" if len(atif) == 1 else "Each file is" if len(atif) == len(names)
+                   else f"Each of {', '.join(atif)} is")
+        compacted = trajectory_filter is not None and trajectory_filter.compaction_type == CompactionType.DEFAULT
+        what = ("a compacted event list made from its turn's ATIF (Agent Trajectory Interchange Format) document."
+                if compacted else "an ATIF (Agent Trajectory Interchange Format, v1.8) document holding its turn "
+                "alone, its steps numbered from 1.")
+        where = (" A media path in a turn file, or in a tool-result file it names (media/<sha256>.<ext>), is relative "
+                 "to this directory." if media else "")
+        return self._ATIF_FILES_NOTE.format(held=held, atif=f"{subject} {what}", media=where)
+
+    def _atif_turns_text(self, sources: list[TurnSource], trajectory_filter: Optional[TrajectoryFilter],
+                         documents: AtifDocuments) -> str:
+        """``_merge_per_turn_text`` by each turn's label: an atif/1 turn's view, or its DEFAULT compaction."""
+        parts = []
+        for i, source in enumerate(sources, start=1):
+            if source.atif:
+                text, _ = self._atif_turn_content(source, documents, trajectory_filter, f"turn_{i:02d}_")
+            elif trajectory_filter is not None:
+                text, _ = self._filter_trajectory_content(source.url, trajectory_filter, f"turn_{i:02d}_")
+            else:
+                text = self._read_trajectory_text(source.url)
+            parts.append(f"===== Turn {i} =====\n{text}")
+        return "\n\n".join(parts)
+
     async def _prompt_llm_judge(
         self,
         eval_prompt: str,
@@ -1360,9 +1516,10 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         cached_prefix: Optional[str] = None,
     ) -> dict:
         """Direct judge — no agent boot, no tools — through core's one model call (``config.model_call``). Returns
-        ``response`` and ``trajectory_object_url`` (None), and the call's record for a caller that keeps it (this step
-        doesn't): its ``usage`` as the response carried it, the ``model`` called, the ``endpoint_host`` it reached, and
-        its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's price map's figure.
+        ``response`` and ``trajectory_object_url`` (None), and the call's record, which the step keeps in its usage
+        (``_record_direct_call``): its ``usage`` as the response carried it, the ``model`` called, the
+        ``endpoint_host`` it reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's
+        price map's figure.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1416,7 +1573,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     logger.warning(f"LLM judge attempt {attempt}/{self.DEFAULT_MAX_RETRIES} failed ({type(exc).__name__}: {exc}), retrying...")
                 else:
                     logger.error(f"LLM judge failed after {self.DEFAULT_MAX_RETRIES} attempts ({type(exc).__name__}: {exc})")
-        raise RuntimeError(f"LLM judge failed after {self.DEFAULT_MAX_RETRIES} attempts") from last_exc
+        raise RuntimeError(f"LLM judge on {model} failed after {self.DEFAULT_MAX_RETRIES} attempts "
+                           f"({type(last_exc).__name__}: {last_exc})") from last_exc
 
     async def _configure_judge_a2a(
         self,
@@ -1428,7 +1586,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_max_thinking_tokens: Optional[int],
         context: TaskStepContext,
         headers: Mapping[str, str],
-    ) -> None:
+    ) -> Optional[str]:
+        """Configure the judge agent through its agent-config extension; the model it took, None for one that runs its
+        own."""
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent import protocol
 
@@ -1458,6 +1618,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
         # What the judge agent took; one that doesn't accept a model grades on its own.
         context.record_model(ModelRole.JUDGE.record_key, self.id, config_payload.get("model"))
+        return config_payload.get("model")
 
     async def _invoke_judge_a2a(
         self,
@@ -1466,17 +1627,27 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_a2a_url: str,
         judge_agent_card: dict,
         judge_agent,
+        model: Optional[str],
+        usage: StepUsage,
     ) -> dict:
-        """Send one evaluation prompt to an A2A judge and return its response."""
+        """Send one evaluation prompt to an A2A judge and return its response. The turn's reported usage goes into
+        ``usage`` as soon as the judge replies, a failed reply's too; a turn cut off waiting for the reply (a time
+        limit, a cancel, a judge that stopped answering) goes in as a call of unknown usage."""
         from agent_env.a2a_agent import protocol
 
-        task_id, _ = await protocol.send_a2a_message(
-            judge_a2a_url,
-            parts=[{"kind": "text", "text": eval_prompt}],
-            message_id=uuid.uuid4().hex,
-            context_id=None,
-            timeout_seconds=self.judge_timeout_seconds,
-        )
+        host = getattr(judge_agent, "model_endpoint_host", None)
+        try:
+            task_id, _ = await protocol.send_a2a_message(
+                judge_a2a_url,
+                parts=[{"kind": "text", "text": eval_prompt}],
+                message_id=uuid.uuid4().hex,
+                context_id=None,
+                timeout_seconds=self.judge_timeout_seconds,
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            # The judge may have taken the message before its task id came back; with no id, it can't be cancelled.
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            raise
         try:
             result = await protocol.poll_a2a_task(
                 judge_a2a_url,
@@ -1486,18 +1657,22 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 sandbox_id=getattr(judge_agent, "sandbox_id", None),
             )
         except asyncio.CancelledError:
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
             # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
             await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             raise
         except protocol.AgentUnreachableError:
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
             raise
         except TimeoutError as e:
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
             if self.judge_timeout_retries is None:
                 raise
             raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
+        usage.call(ModelRole.JUDGE, tr.usage, model=model, endpoint_host=host)
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1629,6 +1804,32 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         )
         return None
 
+    async def _judge_directly(self, prompt: str, *, model: str, context: TaskStepContext,
+                              image_blocks: Optional[list[dict]], usage: StepUsage) -> dict:
+        """One direct judge call, its usage in ``usage``: what it answered, or, when a cancel or a time limit stopped
+        it, a call of unknown usage."""
+        try:
+            if image_blocks:
+                data = await self._prompt_llm_judge(prompt, model=model, context=context, image_blocks=image_blocks)
+            else:
+                data = await self._prompt_llm_judge(prompt, model=model, context=context)
+        except BaseException as exc:
+            if model_call.cut_off(exc):
+                usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=None, reported_by=ReportedBy.PROVIDER)
+            raise
+        self._record_direct_call(usage, data, model=model)
+        return data
+
+    @staticmethod
+    def _record_direct_call(usage: StepUsage, data: dict, *, model: str) -> None:
+        """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
+        bill its cost when it sent one, with or without token counts."""
+        read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
+        if data.get("reported_cost_usd") is not None:
+            read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])
+        usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
+                   reported_by=ReportedBy.PROVIDER)
+
     async def _run_judge_with_output_retries(
         self,
         *,
@@ -1642,11 +1843,13 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_max_thinking_tokens: Optional[int],
         use_agent_judge: bool,
         criteria: list[dict],
+        usage: StepUsage,
         image_blocks: Optional[list[dict]] = None,
         reject_bulk_verdicts: bool = False,
     ) -> tuple[list[dict], int, list[dict], Optional[str]]:
         """Invoke the judge, retrying with corrective feedback when output ids/count are wrong and, with
-        ``reject_bulk_verdicts``, when the rows read as bulk verdicts (kept, and logged, on the last attempt).
+        ``reject_bulk_verdicts``, when the rows read as bulk verdicts (kept, and logged, on the last attempt). Each
+        call's usage goes into ``usage``, the step's.
 
         ``use_agent_judge`` is the run-resolved value (passed in, not read off self — see execute()).
         """
@@ -1654,11 +1857,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         prompt = eval_prompt
         discrepancy_log: list[dict] = []
         judge_trajectory_url: Optional[str] = None
+        agent_model: Optional[str] = None
 
         if use_agent_judge:
             if not judge_a2a_url:
                 raise RuntimeError("Judge A2A URL is required when use_agent_judge=True")
-            await self._configure_judge_a2a(
+            agent_model = await self._configure_judge_a2a(
                 judge_a2a_url=judge_a2a_url,
                 judge_agent_card=judge_agent_card,
                 model=model,
@@ -1676,13 +1880,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     judge_a2a_url=judge_a2a_url,
                     judge_agent_card=judge_agent_card,
                     judge_agent=judge_agent,
-                )
-            elif image_blocks:
-                data = await self._prompt_llm_judge(
-                    prompt, model=model, context=context, image_blocks=image_blocks,
+                    model=agent_model,
+                    usage=usage,
                 )
             else:
-                data = await self._prompt_llm_judge(prompt, model=model, context=context)
+                data = await self._judge_directly(prompt, model=model, context=context, image_blocks=image_blocks,
+                                                  usage=usage)
 
             logger.info(f"Judge response: {data['response'][:200]}...")
             judge_trajectory_url = data.get("trajectory_object_url")

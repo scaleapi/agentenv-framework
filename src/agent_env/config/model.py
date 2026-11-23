@@ -57,7 +57,7 @@ class ModelRole(StrEnum):
 
 
 ROLE_SYNONYMS: dict[str, ModelRole] = {"agent": ModelRole.SOLVER, "user": ModelRole.USER_SIMULATOR}
-JUDGE_FALLBACK_MODEL = "claude-sonnet-4-6"
+JUDGE_FALLBACK_MODEL = "claude-sonnet-5-5"
 
 
 class ModelSource(StrEnum):
@@ -264,7 +264,7 @@ def named_model(
 
 def config_model(role: ModelRole, config: Optional[ModelConfig]) -> ResolvedModel:
     """``role``'s model when no layer names one: ``[model.roles]``, then for the solver and the judge ``[model]
-    default``; a judge always has one, claude-sonnet-4-6 last."""
+    default``; a judge always has one, claude-sonnet-5-5 last."""
     if config is not None:
         if model := config.role_model(role):
             return ResolvedModel(role, model, ModelSource.CONFIG_ROLE)
