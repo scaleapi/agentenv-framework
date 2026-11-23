@@ -110,7 +110,7 @@ def test_a_turn_cut_off_at_the_output_cap_fails_with_its_token_counts():
 
     assert result.error_code == "output_token_limit"
     assert result.error == ("model hit the output token cap (32000 tokens: 31998 reasoning + 2 text) before "
-                            "finishing; raise max_output_tokens in the opencode agent config")
+                            "finishing; raise max_output_tokens on the prompt_agent step")
 
 
 def test_the_output_cap_error_wins_over_stderr_and_does_without_token_counts():

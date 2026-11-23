@@ -811,7 +811,7 @@ class _EventParser:
         counts = (f" ({reasoning + text} tokens: {reasoning} reasoning + {text} text)"
                   if isinstance(reasoning, int) and isinstance(text, int) else "")
         return (f"model hit the output token cap{counts} before finishing; "
-                "raise max_output_tokens in the opencode agent config")
+                "raise max_output_tokens on the prompt_agent step")
 
 
 _TAGS_HEADER = "x-litellm-tags"

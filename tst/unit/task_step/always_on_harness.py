@@ -33,7 +33,8 @@ Turn = Callable[[int, list[str], "Rig"], Optional[str]]
 # An agent card whose agent-config extension takes the settings the step sends.
 CONFIG_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {
     "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": [
-        "model", "system_prompt", "effort", "output_format", "timeout_seconds", "max_turns"]}}}}}]}}
+        "model", "system_prompt", "effort", "output_format", "timeout_seconds", "max_turns",
+        "max_output_tokens"]}}}}}]}}
 
 
 
