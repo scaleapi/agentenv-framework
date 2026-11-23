@@ -50,6 +50,9 @@ class Turn:
     def record(self, entry):
         self._records.append({**entry, "turn": self.number})
 
+    def summarize(self, summary):
+        self.summary = json.loads(json.dumps(summary))  # what a run's metadata could hold
+
     async def ask_user(self, note=None):
         self.notes.append(note)
         text = self.reply or f"sim says ({self.number}.{len(self.notes)})"
@@ -89,6 +92,11 @@ PARAMS = {
 }
 
 
+def _status(t) -> list[tuple]:
+    """Each milestone's status, opened and closed turn, and nudges, from turn ``t``'s summary."""
+    return [(m["id"], m["status"], m["opened_turn"], m["closed_turn"], m["nudges"]) for m in t.summary["milestones"]]
+
+
 def world():
     return {"drive_list": {"files": []}, "sheet_read": "vendor,status,monthly\nVaultly,active,19.99",
             "gmail_sent": {"messages": []}, "trello_comments": {"comments": []}}
@@ -113,6 +121,7 @@ async def test_switched_off_it_checks_nothing_and_tells_the_sim_nothing_and_says
         assert await post_turn(t, {**PARAMS, "enabled": False}) is None
         assert t.notes == []
     assert env.calls == [] and records == [{"decision": "disabled", "turn": 1}]
+    assert t.summary == {"enabled": False}
 
 
 @pytest.mark.asyncio
@@ -146,6 +155,13 @@ async def test_all_gates_passing_opens_the_next_milestone_and_takes_its_baseline
     t3 = Turn(env, records, 3)
     await post_turn(t3, PARAMS)
     assert t3.notes == ["Don't email yet."]
+    assert _status(t3) == [("M1", "passed", 1, 2, 1), ("M2", "open", 3, None, 1)]
+    assert {k: t3.summary[k] for k in ("enabled", "reached", "done", "total", "end")} == {
+        "enabled": True, "reached": "M2", "done": 1, "total": 2, "end": None}
+    assert t3.summary["milestones"][0]["gates"] == {"m1-sheet": {"passed": True, "type": "action"},
+                                                    "m1-cols": {"passed": True, "type": "format"},
+                                                    "m1-quiet": {"passed": True, "type": "action"}}
+    assert t3.summary["milestones"][1]["gates"]["m2-quiet"] == {"passed": False, "type": "action"}
 
 
 @pytest.mark.asyncio
@@ -153,9 +169,12 @@ async def test_a_blocking_milestone_that_never_passes_ends_the_conversation():
     env, records = Env(world()), []
     for n in (1, 2):
         await post_turn(Turn(env, records, n), PARAMS)
-    answer = await post_turn(Turn(env, records, 3), PARAMS)
+    t3 = Turn(env, records, 3)
+    answer = await post_turn(t3, PARAMS)
     assert answer == {"end": "gate_never_passed:M1"}
     assert [r["decision"] for r in records] == ["nudge", "nudge", "end"]
+    assert _status(t3) == [("M1", "derailed", 1, 3, 2), ("M2", "not_reached", None, None, 0)]
+    assert (t3.summary["reached"], t3.summary["done"], t3.summary["end"]) == ("M1", 0, "gate_never_passed:M1")
 
 
 @pytest.mark.asyncio
@@ -171,7 +190,10 @@ async def test_a_non_blocking_milestone_is_let_go_and_the_last_one_wraps_up_then
     await post_turn(t3, PARAMS)  # still failing, not blocking: let go, and it was the last
     assert t3.notes == ["M2 isn't done, but let it go. " + mg.DEFAULT_FINAL]
     assert records[-1]["decision"] == "gave_up" and records[-1]["wrap_up"] is True
-    assert await post_turn(Turn(env, records, 4), PARAMS) == {"end": "milestones_done"}
+    t4 = Turn(env, records, 4)
+    assert await post_turn(t4, PARAMS) == {"end": "milestones_done"}
+    assert _status(t4) == [("M1", "passed", 1, 1, 0), ("M2", "gave_up", 2, 3, 1)]
+    assert (t4.summary["done"], t4.summary["end"]) == (1, "milestones_done")
 
 
 @pytest.mark.asyncio
@@ -276,6 +298,7 @@ async def test_when_the_sim_sends_a_later_line_the_hook_follows_it_before_the_ag
     await post_turn(t2, LINED)  # M2 is checked now, against its own baseline: no comment yet
     assert records[-1]["milestone"] == "M2" and t2.notes == ["Did the comment go on the card?"]
     assert records[-1]["nudges"] == 1
+    assert _status(t2) == [("M1", "passed_over", 1, 1, 1), ("M2", "open", 2, None, 1)]
 
 
 @pytest.mark.asyncio
@@ -404,6 +427,8 @@ async def test_a_next_milestone_the_agent_already_did_is_skipped():
     assert t.notes == ["M1 is done. M2 is already done too, so skip its line. Open M3 now: send its line."]
     assert records[-1]["next_index"] == 2 and records[-1]["skipped"][0]["milestone"] == "M2"
     assert mg._state(records)["index"] == 2
+    assert _status(t) == [("M1", "passed", 1, 1, 0), ("M2", "skipped", 1, 1, 0), ("M3", "open", 2, None, 0)]
+    assert (t.summary["reached"], t.summary["done"]) == ("M3", 2)
 
 
 @pytest.mark.asyncio

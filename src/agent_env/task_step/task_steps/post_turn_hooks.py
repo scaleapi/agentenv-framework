@@ -34,6 +34,8 @@ from agent_env.task_step.context import TaskStepContext, _strip_redacted_keys
 
 _SPEC_KEYS = ("file_artifact_id", "file_artifact_version", "params")
 _RECORD_TAGS = ("hook", "turn")
+# Where each hook's summary of a step's conversation is kept (Turn.summarize).
+SUMMARIES_KEY = "post_turn_hook_summaries"
 _INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_NOTIFICATIONS_URI)
 _TOOL_CALL_TIMEOUT_S = 600
 
@@ -252,6 +254,16 @@ class Turn:
             raise ValueError(f"a hook records an object, without the keys {list(_RECORD_TAGS)} it is tagged with")
         (self._context.metadata.setdefault("post_turn_hooks", {}).setdefault(self._step_id, [])
             .append({"hook": self._hook.artifact_id, "turn": self.number, **copy.deepcopy(entry)}))
+
+    def summarize(self, summary: dict) -> None:
+        """Set this hook's summary of the conversation so far, replacing the last one:
+        ``metadata["post_turn_hook_summaries"][step_id][hook]``, one object per hook per step that a verifier or the
+        hub reads without going through the hook's records. Set it every turn to keep it right however the
+        conversation ends; ``{}`` leaves an empty one."""
+        if not isinstance(summary, dict):
+            raise ValueError("a hook's summary is an object")
+        (self._context.metadata.setdefault(SUMMARIES_KEY, {}).setdefault(self._step_id, {})
+            [self._hook.artifact_id]) = copy.deepcopy(summary)
 
     def records(self) -> list[dict]:
         """This hook's own records in this conversation, oldest first: what ``record`` appended for this step, as

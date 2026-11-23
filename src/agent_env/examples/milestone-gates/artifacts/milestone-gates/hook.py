@@ -87,6 +87,13 @@ JUDGE_FORMAT = {"type": "json_schema", "json_schema": {"name": "gate", "strict":
 
 async def post_turn(turn, params):
     spec = _spec(params)
+    answer = await _post_turn(turn, spec)
+    if hasattr(turn, "summarize"):  # a framework older than Turn.summarize keeps only the records
+        turn.summarize(_summary(spec, turn.records()))
+    return answer
+
+
+async def _post_turn(turn, spec):
     if not spec["enabled"]:  # configured but switched off: the conversation runs as if no hook were listed
         if not turn.records():
             turn.record({"decision": "disabled"})
@@ -112,8 +119,9 @@ async def post_turn(turn, params):
         return await _advance(turn, spec, env, state, entry, "passed")
     if state["nudges"] >= m["max_nudges"]:
         if m["blocking"]:
-            turn.record({**entry, "decision": "end", "nudges": state["nudges"]})
-            return {"end": f"gate_never_passed:{m['id']}"}
+            end = f"gate_never_passed:{m['id']}"
+            turn.record({**entry, "decision": "end", "end": end, "nudges": state["nudges"]})
+            return {"end": end}
         return await _advance(turn, spec, env, state, entry, "gave_up")
     if failed:
         note = failed[0]["nudge"] + await _excerpt(turn, spec, env, m, state)
@@ -160,6 +168,65 @@ def _state(records: list[dict]) -> dict:
             nudges = r["nudges"]
     return {"index": index, "nudges": nudges, "baselines": baselines, "finished": finished, "idle": idle,
             "since": since}
+
+
+def _gate_type(check: dict) -> str:
+    """A gate's type, as a multiturn task names them: format (code over text), action (tool state), content (a
+    judge)."""
+    if "judge" in check or "trajectory_judge" in check:
+        return "content"
+    return "format" if "format" in check else "action"
+
+
+def _summary(spec: dict, records: list[dict]) -> dict:
+    """Where the conversation got to, from this hook's records, for whoever grades it (Turn.summarize): each
+    milestone's status (not_reached, open, passed, skipped (done before it opened), gave_up (let go after max_nudges),
+    passed_over (the user sim moved past it), derailed (a blocking one that never passed, which ended the run)), the
+    turn it opened and closed, nudges spent, and each gate's last verdict and type; then the furthest milestone
+    reached, how many were done, and the end reason once the hook ended the conversation."""
+    if not spec["enabled"]:
+        return {"enabled": False}
+    milestones = spec["milestones"]
+    types = {g["id"]: _gate_type(g["check"]) for m in milestones for g in m["gates"]}
+    rows = [{"id": m["id"], "status": "not_reached", "opened_turn": None, "closed_turn": None, "nudges": 0,
+             "gates": {}} for m in milestones]
+    rows[0].update(status="open", opened_turn=1)
+    by_id = {r["id"]: r for r in rows}
+    end = None
+
+    def verdicts(row, gates):
+        row["gates"].update({g["id"]: {"passed": g["passed"], "type": types.get(g["id"])} for g in gates})
+
+    for r in records:
+        turn, row = r.get("turn"), by_id.get(r.get("milestone"))
+        if row is not None:
+            verdicts(row, r.get("gates") or [])
+            decision = r.get("decision")
+            if decision in ("nudge", "hold"):
+                row["nudges"] = r.get("nudges", row["nudges"])
+            elif decision in ("passed", "gave_up"):
+                row.update(status=decision, closed_turn=turn)
+            elif decision == "end" and r.get("end", "").startswith("gate_never_passed"):
+                row.update(status="derailed", closed_turn=turn, nudges=r.get("nudges", row["nudges"]))
+        for s in r.get("skipped") or []:
+            verdicts(by_id[s["milestone"]], s["gates"])
+            by_id[s["milestone"]].update(status="skipped", opened_turn=turn, closed_turn=turn)
+        nxt = r.get("next_index")
+        if nxt is not None and not r.get("wrap_up"):
+            if r.get("followed_sim"):  # the sim opened a later milestone itself: those before it are passed over
+                for skipped_over in rows[:nxt]:
+                    if skipped_over["status"] in ("open", "not_reached"):
+                        skipped_over.update(status="passed_over", closed_turn=turn)
+            if rows[nxt]["status"] == "not_reached":
+                rows[nxt].update(status="open", opened_turn=turn + 1)
+        if r.get("decision") == "done":
+            end = "milestones_done"
+        elif r.get("decision") == "end":
+            end = r.get("end")
+    reached = [row["id"] for row in rows if row["status"] != "not_reached"]
+    return {"enabled": True, "reached": reached[-1] if reached else None,
+            "done": sum(row["status"] in ("passed", "skipped") for row in rows), "total": len(rows),
+            "end": end, "milestones": rows}
 
 
 async def _skips(turn, spec, env, state, nxt) -> tuple[int, list[dict]]:

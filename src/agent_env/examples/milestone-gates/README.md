@@ -76,6 +76,22 @@ list items whose fields contain the given text, `number` reads a count the tool 
 `{find: call + {pick?: "first" | "last"}, read?: {tool, args, extract?}}`: `read` args may use `"{field}"` from the
 item `find` picked, and `extract: "gmail"` turns a Gmail API message into its headers and plain-text body.
 
+After every turn the hook also sets its summary of where the conversation got to, for a verifier or the hub to read
+without going through its records (`turn.summarize`), at
+`metadata["post_turn_hook_summaries"][step_id]["<this hook's artifact id>"]`:
+
+```json
+{"enabled": true, "reached": "M2", "done": 2, "total": 2, "end": "milestones_done",
+ "milestones": [{"id": "M1", "status": "passed", "opened_turn": 1, "closed_turn": 1, "nudges": 0,
+                 "gates": {"m1-draft": {"passed": true, "type": "action"}, "m1-short": {"passed": true, "type": "format"}}}]}
+```
+
+A milestone's `status` is `not_reached`, `open`, `passed`, `skipped` (done before it opened), `gave_up` (let go after
+`max_nudges`), `passed_over` (the user sim moved past it) or `derailed` (a blocking one that never passed, which ended
+the conversation: `end` is then `gate_never_passed:<id>`). A gate's `type` follows its check, as in the table above.
+`end` stays null when the conversation ended some other way, such as running out of turns. Switched off, the summary
+is `{"enabled": false}`.
+
 The hook keeps its state in its own records (`metadata["post_turn_hooks"]`): each turn's milestone, every gate's
 verdict and reason, the decision (passed, nudge, hold, gave_up, end) and the user sim's answer. `trajectory_judge`
 gates need the agent to offer per-turn trajectories (`turn.trajectory_urls`); without them those gates are unknown.

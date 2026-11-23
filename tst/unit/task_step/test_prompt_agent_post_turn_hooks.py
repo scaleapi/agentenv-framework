@@ -194,6 +194,41 @@ async def test_a_hook_message_is_the_agents_next_prompt_and_no_user_side_is_aske
 
 
 @pytest.mark.asyncio
+async def test_a_hooks_summary_is_one_object_per_hook_the_latest_kept(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one"), text("two"), text("three")]})
+    ctx = _context()
+    counts = _hook("counts", """
+        async def post_turn(turn, params):
+            turn.summarize({"turns": turn.number, "last": turn.last})
+            return {"message": "go on"}
+        """)
+    quiet = _hook("quiet", """
+        async def post_turn(turn, params):
+            if turn.number == 1:
+                turn.summarize({})
+            return None
+        """)
+
+    await _step(quiet, counts, turns=3).execute(ctx)  # quiet first: a hook that answers ends the turn's hooks
+
+    assert ctx.metadata["post_turn_hook_summaries"] == {"talk": {"counts": {"turns": 3, "last": True}, "quiet": {}}}
+    assert "post_turn_hooks" not in ctx.metadata  # a summary is not a record
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_is_not_an_object_fails_the_turn(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("bad", """
+        async def post_turn(turn, params):
+            turn.summarize(["M1"])
+        """)
+
+    with pytest.raises(Exception, match="a hook's summary is an object"):
+        await _step(hook, turns=1).execute(ctx)
+
+
+@pytest.mark.asyncio
 async def test_an_end_closes_the_conversation_recording_its_closing_message(monkeypatch):
     peers = EnvPeers(monkeypatch, {AGENT: [text("one")]})
     ctx = _context()
