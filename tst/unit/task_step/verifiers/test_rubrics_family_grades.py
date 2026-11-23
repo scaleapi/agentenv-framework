@@ -44,8 +44,8 @@ async def test_the_settings_are_what_the_run_graded_with_and_say_what_its_overri
     settings = grade["verifier_settings"]
     assert (settings["criteria"], settings["judge_model"], settings["judge_batch_size"]) == (OVERRIDE, "judge-x", 1)
     assert settings["trajectory_filter"] is None and settings["default_model"] == "judge-model"
-    assert settings["effort"] is None
-    assert settings["overridden"] == ["criteria", "judge_batch_size", "judge_model"]
+    assert settings["effort"] == "high"
+    assert settings["overridden"] == ["criteria", "effort", "judge_batch_size", "judge_model"]
     assert "sk-run-key" not in json.dumps(grade) and "llm.example.test" not in json.dumps(grade)
 
 
@@ -174,8 +174,8 @@ def test_the_user_sim_judges_settings_leave_out_what_its_judge_never_uses():
 
     assert (settings["judge_model"], settings["judge_batch_size"], settings["judge_batch_concurrency"]) == (
         "judge-x", 2, 3)
-    assert not {"criteria", "trajectory_filter", "effort"} & set(settings)
-    assert settings["overridden"] == ["judge_batch_size", "judge_batch_concurrency", "judge_model"]
+    assert not {"criteria", "trajectory_filter"} & set(settings) and settings["effort"] == "high"
+    assert settings["overridden"] == ["effort", "judge_batch_size", "judge_batch_concurrency", "judge_model"]
 
 
 @pytest.mark.asyncio
