@@ -127,9 +127,10 @@ or one of them only where it is used.
   they prompt before its conversation starts); a run's `user_overrides.trajectory_formats` beats it. None by default,
   so an agent builds native only, and an `atif/1` read of a conversation not prescribed it is refused
   (`format_not_prescribed`). A prompt step or always_on step of a run that prescribes `atif/1` reads each turn's copy
-  inline once the turn ends (a prompt step off the turn's path, always_on within its one trajectory fetch cap), and
-  stores it as `<trajectory_id>.json` under `{prefix}atif/instance_id=<id>/<agent>/`
-  (`metadata["atif_copies"]`, `task_step/snapshot_utils/atif_copies.py`), overwritten each turn, with the turn's aux
+  off the turn's path once the turn ends (always_on fills in each turn's url, record and timeline fields when its run
+  ends, the copies still going given one trajectory fetch cap more), and stores it as `<trajectory_id>.json` under
+  `{prefix}atif/instance_id=<id>/<agent>/` (`metadata["atif_copies"]`, `task_step/snapshot_utils/atif_copies.py`),
+  overwritten each turn, with the turn's aux
   log and turn context under `turns/` and the media it names pulled into `media/`; after a restart the session's
   earlier document names the next in `continued_trajectory_ref`. Each turn's record says how its copy checked
   (`AtifRecord`: `valid`, `invalid`, `newer`, `unavailable`), and a copy never fails the run. When the agent offers

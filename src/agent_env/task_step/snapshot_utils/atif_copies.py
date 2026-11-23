@@ -119,7 +119,7 @@ class AtifCopies:
         self._prescribed = prescribed
         self._offered = ATIF in TrajectoryFormats.of(extension).formats
         self.replaces_native = prescribed and self._offered
-        self._pending: list[tuple[int, asyncio.Task[str | None]]] = []
+        self._pending: list[tuple[int, asyncio.Task[str | None], str, TurnTrajectory]] = []
         #: The media files the folder holds and their sizes (None until read), listed once and kept as this step pulls
         #: more.
         self._held: dict[str, int | None] | None = None
@@ -133,26 +133,8 @@ class AtifCopies:
             record["atif"] = _unavailable("format_not_offered", task_id)
         else:
             previous = self._pending[-1][1] if self._pending else None
-            self._pending.append((index, asyncio.create_task(self._turn(task_id, name, record, native, previous))))
-
-    async def read(self, index: int, task_id: str, name: str, record: TurnTrajectory, *, native: NativeRead,
-                   timeout: float) -> Optional[str]:
-        """``turn`` on the caller's path, for a step that reads each turn's trajectory before it goes on (always_on):
-        the turn's url once ``record`` is filled, all within ``timeout``. A copy that takes longer is recorded
-        ``unavailable``, ``timeout``, with no time left to read native in its place; without a copy, native is read as
-        ever, its error raised."""
-        self.turn(index, task_id, name, record, native=native)
-        if not self.replaces_native:
-            url, record["format"] = await asyncio.wait_for(native(), timeout)
-            return url
-        try:
-            return await asyncio.wait_for(self._pending[-1][1], timeout)
-        except TimeoutError:
-            if record.get("atif") is None:
-                record["atif"] = _unavailable("timeout", task_id)
-            logger.warning(f"agent '{self._agent.agent_name}': task {task_id}'s trajectory wasn't read within "
-                           f"{timeout:.0f}s (continuing)")
-            return None
+            job = asyncio.create_task(self._turn(task_id, name, record, native, previous))
+            self._pending.append((index, job, task_id, record))
 
     @property
     def folder(self) -> str:
@@ -171,17 +153,35 @@ class AtifCopies:
         except Exception as exc:
             logger.warning(f"agent '{self._agent.agent_name}': a live page's media pull failed (continuing): {exc}")
 
-    async def join(self) -> dict[int, str | None]:
+    async def join(self, timeout: Optional[float] = None) -> dict[int, str | None]:
         """Each copied turn's url, by its index, once every copy has been stored and its record filled; cancelled while
-        waiting, it cancels the copies left."""
+        waiting, it cancels the copies left. With ``timeout``, a copy still going then is cancelled, its turn left with
+        no url and, when it has no record yet, recorded ``unavailable``, ``timeout``."""
         try:
-            return {index: await job for index, job in self._pending}
+            if self._pending:
+                await asyncio.wait([job for _, job, _, _ in self._pending], timeout=timeout)
+            urls: dict[int, str | None] = {}
+            late = []
+            for index, job, task_id, record in self._pending:
+                if job.done():
+                    urls[index] = job.result()
+                    continue
+                job.cancel()
+                late.append(job)
+                urls[index] = None
+                if record.get("atif") is None:
+                    record["atif"] = _unavailable("timeout", task_id)
+                logger.warning(f"agent '{self._agent.agent_name}': task {task_id}'s trajectory wasn't read within "
+                               f"{timeout:.0f}s of the step's end (continuing)")
+            if late:
+                await asyncio.wait(late)
+            return urls
         except BaseException:
             self.cancel()
             raise
 
     def cancel(self) -> None:
-        for _, job in self._pending:
+        for _, job, _, _ in self._pending:
             job.cancel()
 
     async def _turn(self, task_id: str, name: str, record: TurnTrajectory, native: NativeRead,

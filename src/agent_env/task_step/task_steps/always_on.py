@@ -1461,10 +1461,11 @@ class _Run:
         await self._schedule_read()
 
     async def _trajectory(self, task_id: str, msg_id: str, turn: str) -> tuple[Optional[str], dict]:
-        """The agent turn's trajectory, read within one fetch cap (TRAJECTORY_FETCH_SECONDS): its atif/1 copy when the
-        run prescribes atif/1 and the agent offers it, else, or when the copy can't be had, its native one. Its url and
-        record join the run's per-turn lists. Returns the url and, in a run that prescribes atif/1, whose turns share
-        one url, the timeline fields that say which turn it is and what its url holds."""
+        """The agent turn's trajectory, its url and record joining the run's per-turn lists. When the run prescribes
+        atif/1 and the agent offers it, the turn's copy is read off the turn's path, and its url and record are filled
+        in when the run ends (``_settle_copies``); otherwise its native one is read within one fetch cap
+        (TRAJECTORY_FETCH_SECONDS). Returns the url read, and for a copied turn, whose url the run's turns share, the
+        timeline field that says which turn it is."""
         step, card = self.step, self.agent.a2a_card or {}
         extension = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         record = TurnTrajectory(format=None, atif=None)
@@ -1472,15 +1473,38 @@ class _Run:
                                    step._trajectory_prefix(), msg_id, card=card, sandbox_type=self.agent.sandbox_type,
                                    headers=self.agent.control_headers) if extension else _no_trajectory
         index = len(self.per_turn_trajectory_urls)
+        self.per_turn_trajectories.append(record)
+        self.copies.turn(index, task_id, msg_id, record, native=native)
+        if self.copies.replaces_native:
+            self.per_turn_trajectory_urls.append(None)
+            return None, {"turn": index}
         url = None
         try:
-            url = await self.copies.read(index, task_id, msg_id, record, native=native,
-                                         timeout=TRAJECTORY_FETCH_SECONDS)
+            url, record["format"] = await asyncio.wait_for(native(), TRAJECTORY_FETCH_SECONDS)
         except Exception as e:
             logger.warning(f"{turn}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(url)
-        self.per_turn_trajectories.append(record)
-        return url, ({"turn": index, "trajectory_format": record["format"]} if record["atif"] is not None else {})
+        return url, {}
+
+    async def _settle_copies(self) -> None:
+        """Each copied turn's url and record, and its timeline events' too, once its copy is stored: the copies still
+        going get one fetch cap more (TRAJECTORY_FETCH_SECONDS), none when the step is being cancelled, and one still
+        going then has no url."""
+        if self.copies is None:
+            return
+        task = asyncio.current_task()
+        try:
+            urls = await self.copies.join(timeout=0 if task is not None and task.cancelling()
+                                          else TRAJECTORY_FETCH_SECONDS)
+        except Exception as e:  # the record matters more than this part of it
+            logger.warning(f"always_on: the agent's atif/1 copies could not be joined: {type(e).__name__}: {e}")
+            urls = {}
+        for index, url in urls.items():
+            self.per_turn_trajectory_urls[index] = url
+        for event in self.timeline:
+            if event.get("event") in ("agent_turn_end", "nudge") and "turn" in event:
+                event["trajectory_url"] = self.per_turn_trajectory_urls[event["turn"]]
+                event["trajectory_format"] = self.per_turn_trajectories[event["turn"]]["format"]
 
     def _kept_parts(self, parts: list[dict]) -> list[dict]:
         """What the prompt response keeps of one wake's parts: TURN_TEXT_CHARS of each text, until
@@ -1813,6 +1837,7 @@ class _Run:
         except Exception as e:  # the record matters more than this part of it
             logger.warning(f"always_on: could not read what was pending at the end: {e}")
             self.pending = {"error": [{"error": f"{type(e).__name__}: {str(e)[:200]}"}]}
+        await self._settle_copies()
         if self.end_reason == NOTHING_CAN_WAKE:
             # Scheduled checks would have woken the agent, so they aren't what makes a run stuck.
             stuck = any(items for kind, items in self.pending.items() if kind != "scheduled_checks_not_due")
