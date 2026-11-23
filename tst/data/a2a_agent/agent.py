@@ -57,6 +57,7 @@ from agentenv_protocol.a2a_agent import (
     ObjectSnapshotSaveResponse,
     SnapshotUploadedObjects,
     TaskRequest,
+    ModelUsage,
     TaskResult,
     TextPart,
     Usage,
@@ -74,6 +75,8 @@ SEND_FILE = "send-file "
 LIST_SKILLS = "list-skills"
 RUN = "run "
 CDP = "cdp "
+# "usage-models <json list>": the turn reports those counts by model, as an agent whose calls used several models does.
+USAGE_MODELS = "usage-models "
 CDP_LOAD_SECONDS = 30
 RUN_TIMEOUT_SECONDS = 60
 SKILLS_DIR = Path.home() / "skills"
@@ -92,6 +95,16 @@ class EchoAgentConfig(AgentConfig):
     system_prompt: str | None = None
     task_id: str | None = None
     model_params: WriteOnly[dict[str, Any] | None] = None
+
+
+def _usage(prompt: str, reply: str) -> Usage:
+    """The prompt's and reply's lengths as the turn's tokens, or the counts by model a ``usage-models`` line gives."""
+    given = [line.removeprefix(USAGE_MODELS) for line in prompt.splitlines() if line.startswith(USAGE_MODELS)]
+    if not given:
+        return Usage(tool_call_count=0, input_tokens=len(prompt), output_tokens=len(reply))
+    models = [ModelUsage.from_dict(row) for row in json.loads(given[0])]
+    return Usage(tool_call_count=0, input_tokens=sum(row.input_tokens or 0 for row in models),
+                 output_tokens=sum(row.output_tokens or 0 for row in models), input_includes_cache=True, models=models)
 
 
 async def _read(part: FilePart) -> str:
@@ -226,7 +239,7 @@ class EchoAgent(AgentEnvAgent):
             TaskResult.builder()
             .succeeded()
             .parts([TextPart(text=reply), *files])
-            .usage(Usage(tool_call_count=0, input_tokens=len(prompt), output_tokens=len(reply)))
+            .usage(_usage(prompt, reply))
             .build()
         )
 

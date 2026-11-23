@@ -89,7 +89,9 @@ or one of them only where it is used.
   name as called or without its routing prefix, wherever its calls went. A prompt step prices each role's usage entry as
   it records it: `cost_usd` with its `cost_status` (`priced`, `reported`, `unpriced`) and `cost_source`
   (`litellm@<version>`, `harness` or `provider`), the `uncached_input_tokens` and `unit_prices` it was charged at, any
-  `cost_assumed` that makes it an upper bound, and the agent's own figure, always, in `reported_cost_usd`.
+  `cost_assumed` that makes it an upper bound, and the agent's own figure, always, in `reported_cost_usd`. A turn
+  that gives its counts by model (`Usage.models`) is priced model by model, each at its own rate, and its entry keeps
+  a row per model (`models`), its `cost_usd` their sum.
 - Core's own model calls, the judges', go through `config/model_call.py` (`resolve_route`, `complete`), the only
   module in core that imports LiteLLM (`tst/unit/config/test_one_model_call_path.py`). Each call returns the model it
   called, the host it reached and its cost: what the endpoint billed, a LiteLLM proxy's `x-litellm-response-cost`, as
