@@ -108,7 +108,8 @@ async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional
 
 def cut_off(exc: BaseException) -> bool:
     """Whether ``exc`` stopped a call that may have reached the model, so it may be billed with no answer: a cancel, or
-    LiteLLM's ``Timeout``, raised itself or as the cause of a failure after retries."""
+    LiteLLM's ``Timeout``, raised itself or as the cause of a failure after retries. A timeout LiteLLM's client retried
+    on its own and then answered (the OpenAI SDK's ``max_retries``) never reaches the caller, so it isn't seen."""
     import litellm
 
     return isinstance(exc, asyncio.CancelledError) or any(
