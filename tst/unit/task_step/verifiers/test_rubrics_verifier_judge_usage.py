@@ -5,17 +5,22 @@ one; an agent judge's from the usage its turn reported."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
+import litellm
 import pytest
 
 from agent_env.a2a_agent import A2AAgent, protocol
+from agent_env.config import model_call
 from agent_env.config.model import ModelRole
+from agent_env.config.model_pricing import PriceTable, ReportedBy, price
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers import rubrics_verifier
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.usage import StepUsage
+from tst.util.config import install_model_config
 
 CRITERIA = [{"id": f"c{i}", "title": f"Criterion {i}"} for i in range(1, 8)]
 
@@ -171,3 +176,149 @@ def test_a_call_with_no_usage_is_a_turn_with_no_counts():
     [entry] = context.metadata["step_usage"]["verify"]
     assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 10, True)
     assert entry["role"] == ModelRole.JUDGE.value
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judge_turn_that_runs_out_of_time_is_a_call_of_unknown_usage(monkeypatch):
+    verifier = _agent_judge(monkeypatch, "completed", "", {})
+
+    async def times_out(url, task_id, **kwargs):
+        raise TimeoutError("the judge ran out of time")
+
+    monkeypatch.setattr(protocol, "poll_a2a_task", times_out)
+    context = TaskStepContext()
+
+    with pytest.raises(TimeoutError):
+        await _judge_once(verifier, context)
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["model"], entry["turns"], entry["input_tokens"], entry["partial"]) == (
+        "claude-haiku-4-5", 1, None, True)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_agent_judge_turn_is_a_call_of_unknown_usage(monkeypatch):
+    verifier = _agent_judge(monkeypatch, "completed", "", {})
+    polling = asyncio.Event()
+
+    async def waits(url, task_id, **kwargs):
+        polling.set()
+        await asyncio.sleep(3600)
+
+    async def cancel(url, task_id):
+        return None
+
+    monkeypatch.setattr(protocol, "poll_a2a_task", waits)
+    monkeypatch.setattr(protocol, "cancel_a2a_task", cancel)
+    context = TaskStepContext()
+    judging = asyncio.create_task(_judge_once(verifier, context))
+    await polling.wait()
+
+    judging.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await judging
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["turns"], entry["partial"]) == (1, True)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_judge_cancelled_while_its_message_is_sent_is_a_call_of_unknown_usage(monkeypatch):
+    verifier = _agent_judge(monkeypatch, "completed", "", {})
+    sending = asyncio.Event()
+
+    async def waits(url, **kwargs):
+        sending.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(protocol, "send_a2a_message", waits)
+    context = TaskStepContext()
+    judging = asyncio.create_task(_judge_once(verifier, context))
+    await sending.wait()
+
+    judging.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await judging
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["turns"], entry["partial"]) == (1, True)
+
+
+_ANSWER = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "Checked record c1 with the sheet tool"}]})
+
+
+def _timeout() -> litellm.Timeout:
+    return litellm.Timeout("timed out", model="gpt-4o-mini", llm_provider="openai")
+
+
+def _completes(monkeypatch, outcomes: list) -> None:
+    """The direct judge's model calls answered, one by one, by ``outcomes``: an exception raises, a string answers
+    with 100 prompt and 5 completion tokens."""
+    install_model_config(monkeypatch, base_url="http://proxy.example:4000", api_key="configured-key")
+
+    async def complete(route, messages, **kwargs):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return model_call.ModelReply(outcome, "gpt-4o-mini", "proxy.example:4000",
+                                     {"prompt_tokens": 100, "completion_tokens": 5},
+                                     price(None, None, model=None, prices=PriceTable(), reported_by=ReportedBy.PROVIDER))
+
+    monkeypatch.setattr(model_call, "complete", complete)
+
+
+async def _direct_once(verifier: RubricsVerifierTaskStep, context: TaskStepContext) -> None:
+    await verifier._run_judge_with_output_retries(
+        eval_prompt="grade it", criteria=CRITERIA[:1], context=context, model="gpt-4o-mini", judge_a2a_url=None,
+        judge_agent_card={}, judge_agent=None, judge_effort=None, judge_max_thinking_tokens=None,
+        use_agent_judge=False, usage=StepUsage(context, "verify"))
+
+
+@pytest.mark.asyncio
+async def test_a_direct_judge_that_ran_out_of_time_on_every_attempt_leaves_a_call_of_unknown_usage(monkeypatch):
+    verifier = _verifier()
+    _completes(monkeypatch, [_timeout() for _ in range(verifier.DEFAULT_MAX_RETRIES)])
+    context = TaskStepContext()
+
+    with pytest.raises(RuntimeError, match="failed after"):
+        await _direct_once(verifier, context)
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (1, None, True)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_direct_judge_call_is_a_call_of_unknown_usage():
+    verifier = _verifier()
+    calling = asyncio.Event()
+
+    async def waits(prompt, *, model, context):
+        calling.set()
+        await asyncio.sleep(3600)
+
+    verifier._prompt_llm_judge = waits
+    context = TaskStepContext()
+    judging = asyncio.create_task(_direct_once(verifier, context))
+    await calling.wait()
+
+    judging.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await judging
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["turns"], entry["partial"], entry["cost_status"]) == (1, True, "unpriced")
+
+
+@pytest.mark.asyncio
+async def test_a_judge_refused_on_every_attempt_records_nothing(monkeypatch):
+    verifier = _verifier()
+    refused = [litellm.RateLimitError("slow down", model="gpt-4o-mini", llm_provider="openai")
+               for _ in range(verifier.DEFAULT_MAX_RETRIES)]
+    _completes(monkeypatch, refused)
+    context = TaskStepContext()
+
+    with pytest.raises(RuntimeError, match="failed after"):
+        await _direct_once(verifier, context)
+
+    assert "verify" not in context.metadata.get("step_usage", {})
+

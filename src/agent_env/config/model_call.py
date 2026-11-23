@@ -4,6 +4,7 @@ this module imports it only where it's used, since its import takes seconds."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import math
@@ -103,6 +104,16 @@ async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional
     cost = price(tokens, _billed(getattr(response, "_hidden_params", None)), model=route.model,
                  prices=litellm_prices(), reported_by=ReportedBy.PROVIDER)
     return ModelReply(response.choices[0].message.content or "", route.model, route.endpoint_host, usage, cost)
+
+
+def cut_off(exc: BaseException) -> bool:
+    """Whether ``exc`` stopped a call that may have reached the model, so it may be billed with no answer: a cancel, or
+    LiteLLM's ``Timeout``, raised itself or as the cause of a failure after retries. A timeout LiteLLM's client retried
+    on its own and then answered (the OpenAI SDK's ``max_retries``) never reaches the caller, so it isn't seen."""
+    import litellm
+
+    return isinstance(exc, asyncio.CancelledError) or any(
+        isinstance(e, litellm.Timeout) for e in (exc, exc.__cause__))
 
 
 def setup_errors() -> tuple[type[BaseException], ...]:

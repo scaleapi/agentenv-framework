@@ -149,6 +149,11 @@ def _combined(costs: list[Cost]) -> Cost:
                 unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed)
 
 
+def _unreported() -> Usage:
+    """A turn or call whose usage never came back."""
+    return Usage(provider_details={"unreported": True})
+
+
 def _unreported_calls(usage: Usage) -> int:
     """The calls a turn's usage says reported none, as the shipped agents put it in ``provider_details``."""
     value = usage.provider_details.get("unreported_calls")
@@ -217,8 +222,15 @@ class StepUsage:
         started, a human peer's, is skipped."""
         usage = self._roles.get(role)
         if usage is not None:
-            usage.add(Usage(provider_details={"unreported": True}))
+            usage.add(_unreported())
             self.entries()
+
+    def cut_off_call(self, role: ModelRole, *, model: Optional[str], endpoint_host: Optional[str],
+                     reported_by: ReportedBy = ReportedBy.HARNESS) -> None:
+        """A model call of ``role`` that was sent but never answered, cut off by a time limit or a cancel: a call of
+        unknown usage, marking the role's entry a lower bound as ``cut_off`` marks a turn's, recorded as ``call``
+        records one, so it starts the role when it's the first."""
+        self.call(role, _unreported(), model=model, endpoint_host=endpoint_host, reported_by=reported_by)
 
     def entries(self) -> Optional[list[UsageEntry]]:
         """The entries of the roles that ran turns, written to ``metadata["step_usage"]``; None, and nothing written,
