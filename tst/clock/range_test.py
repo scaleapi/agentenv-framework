@@ -122,6 +122,7 @@ def test_a_page_before_1970_left_to_run_for_a_day_reads_where_it_ran_to(gate):
     assert r["from"] - 1 <= r["read"] <= r["to"] + 1, r
 
 
-def test_a_frozen_clocks_timers_expire_once_and_tell_all_the_time_left(gate):
+def test_a_frozen_clocks_timers_expire_once_tell_all_the_time_left_and_tick_again_once_it_runs(gate):
     r = gate("frozen_timers")
     assert r["periodic_count"] == 1 and abs(r["far_left_s"] - (9223368436 + 9223286400)) < 1, r
+    assert 2 <= r["resumed_count"] <= 3, r

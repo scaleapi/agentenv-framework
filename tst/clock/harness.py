@@ -317,15 +317,18 @@ def timerfds():
 
 def frozen_timers():
     """On a clock frozen a day into its range: a periodic timerfd armed at its now, every second, has expired once 1.5 s
-    later, since a frozen clock brings no other; and one armed for an hour short of the end of the range has all of the
-    584 years between left (tfdfrozen.py)."""
+    later, since a frozen clock brings no other, and ticks every second once the clock runs again; and one armed for an
+    hour short of the end of the range has all of the 584 years between left (tfdfrozen.py)."""
     preload()
     fresh_page()
     set_clock(-9223286400.0, 0)
-    r = subprocess.run(user_cmd(["python3", f"{PROGRAMS}/tfdfrozen.py", "9223368436"]), capture_output=True, text=True,
-                       cwd="/tmp", timeout=30)
+    p = subprocess.Popen(user_cmd(["python3", f"{PROGRAMS}/tfdfrozen.py", "9223368436"]), stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True, cwd="/tmp")
+    frozen = json.loads(p.stdout.readline())
+    set_rate(1)
+    resumed, _ = p.communicate("go\n", timeout=30)
     preload(None)
-    return json.loads(r.stdout)
+    return {**frozen, **json.loads(resumed)}
 
 
 def _with_page_changes(p) -> int:
