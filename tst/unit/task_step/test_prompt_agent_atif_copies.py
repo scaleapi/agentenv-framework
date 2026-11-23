@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -48,10 +49,10 @@ class _Shots(Adapter):
         turn.step(key=f"s{record['n']}", llm_call_count=1)
 
 
-def _app(*, atif: bool = True, live: bool = False, pause: float = 0.0):
-    """An agent that, each turn, appends one shot, a new screenshot each time, and answers; with ``pause``, a second
-    shot, then a third after that long, so a live reader sees the first closed while the turn runs (a step closes when
-    the next begins)."""
+def _app(*, atif: bool = True, live: bool = False, gate: asyncio.Event | None = None):
+    """An agent that, each turn, appends one shot, a new screenshot each time, and answers; with ``gate``, a second
+    shot, then a third once ``gate`` is set (at most 30 s on), so a live reader sees the first closed while the turn runs
+    (a step closes when the next begins)."""
     shots = iter(range(1, 1000))
 
     @a2a_agent(
@@ -63,9 +64,11 @@ def _app(*, atif: bool = True, live: bool = False, pause: float = 0.0):
             request.trajectory.set_format(NATIVE)
             n = next(shots)
             request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
-            if pause:
-                for wait in (0, pause):
-                    await asyncio.sleep(wait)
+            if gate is not None:
+                for held in (False, True):
+                    if held:
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(gate.wait(), 30)
                     n = next(shots)
                     request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
             return TaskResult.text(f"shot {n}")
@@ -77,9 +80,10 @@ class _Wire(httpx.AsyncBaseTransport):
     """The agent at ``http://agent.test``, served in-process, and the store's grant URLs, which write into the store.
     A test can hold the agent's atif/1 reads until it lets them go, rewrite their answers, or rewrite any answer."""
 
-    def __init__(self, store: GrantingObjectStore, *, atif: bool, live: bool = False, pause: float = 0.0) -> None:
+    def __init__(self, store: GrantingObjectStore, *, atif: bool, live: bool = False,
+                 gate: asyncio.Event | None = None) -> None:
         self.store = store
-        self._atif, self._live, self._pause = atif, live, pause
+        self._atif, self._live, self._gate = atif, live, gate
         self.restart()
         self.atif_reads: list[dict] = []
         self.native_reads: list[dict] = []
@@ -95,7 +99,7 @@ class _Wire(httpx.AsyncBaseTransport):
         self.unreachable: set[str] = set()
 
     def restart(self) -> None:
-        self.app = _app(atif=self._atif, live=self._live, pause=self._pause)
+        self.app = _app(atif=self._atif, live=self._live, gate=self._gate)
         self._agent = httpx.ASGITransport(app=self.app)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -133,13 +137,13 @@ class _Wire(httpx.AsyncBaseTransport):
 
 class _Run:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, atif: bool = True, live: bool = False,
-                 pause: float = 0.0) -> None:
+                 gate: asyncio.Event | None = None) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
         self.root = tmp_path / "store"
         self.store = GrantingObjectStore(str(self.root), reaches=True)
         configure(object_store=self.store)
         quiet_conversations(monkeypatch)
-        self.wire = _Wire(self.store, atif=atif, live=live, pause=pause)
+        self.wire = _Wire(self.store, atif=atif, live=live, gate=gate)
         self.asked: list[int] = []
         route_clients(monkeypatch, self.wire)
 

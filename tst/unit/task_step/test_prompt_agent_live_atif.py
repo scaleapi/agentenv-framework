@@ -69,7 +69,16 @@ async def test_a_prescribed_turn_is_followed_as_atif_and_its_pages_are_a_prefix_
 
 @pytest.mark.asyncio
 async def test_a_turns_header_is_stored_once_per_change_not_once_a_page(monkeypatch, tmp_path):
-    run = _Run(monkeypatch, tmp_path, live=True, pause=0.3)
+    stored = asyncio.Event()
+    store_atif = LiveTrajectoryChunks._store_atif
+
+    async def storing(self, batch):
+        await store_atif(self, batch)
+        if batch.events:
+            stored.set()
+
+    monkeypatch.setattr(LiveTrajectoryChunks, "_store_atif", storing)
+    run = _Run(monkeypatch, tmp_path, live=True, gate=stored)
 
     await run.execute(run.context(), live_trajectory=True, max_conversation_turns=1)
 
@@ -95,13 +104,17 @@ async def test_a_turn_whose_atif_read_is_refused_is_followed_natively(monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_live_pages_media_are_pulled_while_the_turn_runs(monkeypatch, tmp_path):
-    run = _Run(monkeypatch, tmp_path, live=True, pause=0.5)
+    """The agent holds its turn open until a page's media were pulled, so the pull can only have come mid-turn."""
+    held = asyncio.Event()
+    run = _Run(monkeypatch, tmp_path, live=True, gate=held)
     pulled: list[list[str]] = []
     pull = atif_copies.AtifCopies.pull_live_media
 
     async def spy(self, document, session_id):
         pulled.append(sorted(media_paths(document)))
         await pull(self, document, session_id)
+        if media_paths(document):
+            held.set()
 
     monkeypatch.setattr(atif_copies.AtifCopies, "pull_live_media", spy)
     context = run.context()
