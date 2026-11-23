@@ -64,7 +64,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
-from agent_env.task_step.task_steps.prompt_agent import solver_agents
+from agent_env.task_step.task_steps.prompt_agent import agent_name_of, solver_agents
 
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
@@ -1270,7 +1270,7 @@ def solver_steps(steps: Any) -> tuple[str, ...]:
     solver = solver_agents([step for step in steps if isinstance(step, dict)])
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
-                 and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in solver)
+                 and agent_name_of(step) in solver)
 
 
 def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:
