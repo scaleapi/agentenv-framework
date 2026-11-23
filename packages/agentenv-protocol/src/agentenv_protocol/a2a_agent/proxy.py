@@ -112,8 +112,8 @@ class _Turn:
     pending: list[tuple[str, str]] = field(default_factory=list)  # (tool, its canonical arguments) not yet run
     last_event: str = field(default_factory=lambda: _now())
     model: str | None = None
-    model_usage: list[Usage] = field(default_factory=list)  # each recorded model call's, its input counting the cache
-    call_models: list[str | None] = field(default_factory=list)  # the model each recorded call named
+    # Each recorded model call's model, as it named it, and usage, its input counting the cache.
+    model_calls: list[tuple[str | None, Usage]] = field(default_factory=list)
 
 
 @contextlib.asynccontextmanager
@@ -251,8 +251,7 @@ class ProxyAgent(AgentEnvAgent):
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
-        turn.model_usage.append(usage)
-        turn.call_models.append(request.model)
+        turn.model_calls.append((request.model, usage))
         for key in ("input_tokens", "output_tokens"):
             if (count := getattr(usage, key)) is not None:
                 span["attributes"][f"gen_ai.usage.{key}"] = count
@@ -562,7 +561,7 @@ def _turn_usage(turn: _Turn) -> Usage:
     (``cache_unsettled``), which leaves the turn's flag unknown; how many usages were in a shape none of the readers
     know (``unrecognized``); and each provider's split of the cache writes, summed, a reported ``Usage``'s split
     counted only where it holds counts, as its ``provider_details`` may hold anything."""
-    calls = turn.model_usage
+    calls = [usage for _, usage in turn.model_calls]
     sums, unreported = {}, {}
     for name in _USAGE_SUMS:
         values = [value for call in calls if (value := getattr(call, name)) is not None]
@@ -586,28 +585,15 @@ def _turn_usage(turn: _Turn) -> Usage:
                  models=_by_model(turn), provider_details=details if calls else {})
 
 
-_MODEL_COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")
-
-
 def _by_model(turn: _Turn) -> tuple[ModelUsage, ...]:
-    """The turn's recorded calls by the model each named; none when a call named none, since the proxy has no
-    configured model to count it under. A model's cost is its calls' only when every one of them reported one, and
-    its includes-cache flag is the one its calls with input counts agree on."""
+    """The turn's recorded calls by the model each named (``ModelUsage.of``); none when a call named none, since the
+    proxy has no configured model to count it under."""
     by_model: dict[str, list[Usage]] = {}
-    for named, usage in zip(turn.call_models, turn.model_usage):
+    for named, usage in turn.model_calls:
         if named is None:
             return ()
         by_model.setdefault(named, []).append(usage)
-    rows = []
-    for name, of in by_model.items():
-        sums = {}
-        for count in _MODEL_COUNTS:
-            values = [value for usage in of if (value := getattr(usage, count)) is not None]
-            sums[count] = sum(values) if values and (count != "cost_usd" or len(values) == len(of)) else None
-        flags = {usage.input_includes_cache for usage in of if usage.input_tokens is not None}
-        rows.append(ModelUsage(model=name, calls=len(of), **sums,
-                               input_includes_cache=flags.pop() if len(flags) == 1 else None))
-    return tuple(rows)
+    return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,

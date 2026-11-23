@@ -114,7 +114,7 @@ def test_a_streamed_answer_is_forwarded_as_sent_and_counted_from_its_usage():
     assert endpoint.requests[0]["path"] == "/v1/chat/completions"
     assert endpoint.requests[0]["headers"]["authorization"] == "Bearer sk-cli"
     assert endpoint.requests[0]["headers"]["accept-encoding"] == "identity"
-    (usage,) = calls.answered
+    ((_, usage),) = calls.answered
     assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens,
             usage.input_includes_cache) == (20948, 43, 10363, 199, True)
 
@@ -135,7 +135,7 @@ def test_each_shape_of_answer_is_read():
     _, calls, _ = _through_relay([(200, responses, "text/event-stream"), (200, messages, "text/event-stream"),
                                   (200, body, "application/json")], exercise)
 
-    assert [(usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) for usage in calls.answered] == [
+    assert [(usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) for _, usage in calls.answered] == [
         (900, 7, 512), (803, 12, 800), (50, 5, None)]
 
 
@@ -166,7 +166,7 @@ def test_a_call_whose_cli_hung_up_is_read_to_its_end_and_counted():
 
     _, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
 
-    assert [usage.input_tokens for usage in calls.answered] == [20948]
+    assert [usage.input_tokens for _, usage in calls.answered] == [20948]
 
 
 def test_a_call_whose_cli_hung_up_before_the_answer_began_is_still_counted():
@@ -179,7 +179,7 @@ def test_a_call_whose_cli_hung_up_before_the_answer_began_is_still_counted():
 
     _, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
 
-    assert [usage.input_tokens for usage in calls.answered] == [20948]
+    assert [usage.input_tokens for _, usage in calls.answered] == [20948]
 
 
 def test_a_long_streams_usage_is_read_however_long_it_ran():
@@ -213,7 +213,7 @@ def test_a_relayed_stream_written_a_byte_at_a_time_is_counted():
     text, calls, _ = _through_relay([(200, CLAUDE_STREAM, "text/event-stream")], exercise)
 
     assert text == CLAUDE_STREAM
-    assert [usage.input_tokens for usage in calls.answered] == [20948]
+    assert [usage.input_tokens for _, usage in calls.answered] == [20948]
 
 
 def test_another_turns_path_reaches_nothing_and_other_routes_are_not_calls():

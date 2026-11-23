@@ -421,6 +421,23 @@ class ModelUsage:
         _check_counts(self, _MODEL_COUNTERS)
 
     @classmethod
+    def of(cls, model: str, usages: Iterable["Usage"]) -> "ModelUsage":
+        """``model``'s row from the usages of its calls, one each: each count summed over the calls that gave it, None
+        when none did; their cost only when every call reported one, since a sum of some isn't the model's cost; and
+        the includes-cache flag the calls that gave input counts agree on, else None."""
+        usages = list(usages)
+
+        def total(name: str) -> Any:
+            values = [value for usage in usages if (value := getattr(usage, name)) is not None]
+            return sum(values) if values else None
+
+        costs = [usage.cost_usd for usage in usages]
+        flags = {usage.input_includes_cache for usage in usages if usage.input_tokens is not None}
+        return cls(model=model, calls=len(usages), **{name: total(name) for name in _MODEL_COUNTERS[1:]},
+                   input_includes_cache=flags.pop() if len(flags) == 1 else None,
+                   cost_usd=sum(costs) if costs and None not in costs else None)
+
+    @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ModelUsage":
         """The model's usage ``to_dict`` wrote; a key this version doesn't know is ignored."""
         if not isinstance(data, Mapping):

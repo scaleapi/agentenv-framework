@@ -37,14 +37,13 @@ class Refusal(Exception):
 
 @dataclass
 class Calls:
-    """The model calls a relay forwarded: each answered call's usage, read as ``Usage.from_model_response`` reads one,
-    with the model its request named, and how many were answered without usage or refused. A refused call (an error
-    status, or none at all) counts nothing."""
+    """The model calls a relay forwarded: each answered call's model, as its request named it, and usage, read as
+    ``Usage.from_model_response`` reads one, and how many were answered without usage or refused. A refused call (an
+    error status, or none at all) counts nothing."""
 
-    answered: list[Usage] = field(default_factory=list)
+    answered: list[tuple[str | None, Usage]] = field(default_factory=list)
     unreported: int = 0
     refused: int = 0
-    models: list[str | None] = field(default_factory=list)  # each answered call's model, as its request named it
 
     def add(self, status: int | None, usage: Usage | None, model: str | None = None) -> None:
         """A call that ended with ``status`` (None when it had none), the usage its answer carried and the model its
@@ -55,8 +54,7 @@ class Calls:
         if usage is None:
             self.unreported += 1
         else:
-            self.answered.append(usage)
-            self.models.append(model)
+            self.answered.append((model, usage))
 
     def usage(self, tool_call_count: int, model: str | None = None) -> Usage:
         """The calls' usage summed, with ``input_tokens`` counting the cache, and the calls without usage counted in
@@ -69,12 +67,13 @@ class Calls:
             details["unreported_calls"] = self.unreported
         if not self.answered:
             return Usage(tool_call_count=tool_call_count, provider_details=details)
+        usages = [usage for _, usage in self.answered]
 
         def total(name: str) -> int | None:
-            values = [getattr(usage, name) for usage in self.answered if getattr(usage, name) is not None]
+            values = [getattr(usage, name) for usage in usages if getattr(usage, name) is not None]
             return sum(values) if values else None
 
-        flags = {usage.input_includes_cache for usage in self.answered}
+        flags = {usage.input_includes_cache for usage in usages}
         return Usage(tool_call_count=tool_call_count, **{name: total(name) for name in _COUNTS},
                      input_includes_cache=flags.pop() if len(flags) == 1 else None, models=self._by_model(model),
                      provider_details=details)
@@ -82,7 +81,7 @@ class Calls:
     def _by_model(self, configured: str | None) -> tuple[ModelUsage, ...]:
         """The answered calls' counts by model; none when a call named no model and the turn has none configured."""
         by_model: dict[str, list[Usage]] = {}
-        for named, usage in zip(self.models, self.answered):
+        for named, usage in self.answered:
             if (name := named or configured) is None:
                 return ()
             by_model.setdefault(name, []).append(usage)
