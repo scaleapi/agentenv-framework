@@ -51,16 +51,20 @@ def _offering(rig: Rig, prescribed: bool, extension: dict = TRAJECTORY):
 def _reads(monkeypatch, *, copy_seconds: float = 0.0, gate: asyncio.Event | None = None) -> dict[str, list]:
     """Native reads and atif/1 copies, by task: each native read stored under its task, each copy a valid record of
     the one conversation document, taking ``copy_seconds`` once ``gate`` is set."""
-    seen: dict[str, list] = {"native": [], "copies": []}
+    seen: dict[str, list] = {"native": [], "copies": [], "cancelled": []}
 
     async def native(a2a_url, extension, task_id, prefix, name, **kwargs):
         seen["native"].append(task_id)
         return StoredTrajectory(f"file:///store/native-{task_id}.json", "shots/1")
 
     async def stored(self, task_id, name):
-        if gate is not None:
-            await gate.wait()
-        await asyncio.sleep(copy_seconds)
+        try:
+            if gate is not None:
+                await gate.wait()
+            await asyncio.sleep(copy_seconds)
+        except asyncio.CancelledError:
+            seen["cancelled"].append(task_id)
+            raise
         seen["copies"].append(task_id)
         return AtifRecord(url=DOCUMENT, task_id=task_id, through_step=len(seen["copies"]) * 3, status="valid", rules=[],
                           reason=None, validator_version="v", adapter_version="a", aux_url=None, turn_context_url=None)
@@ -143,6 +147,28 @@ async def test_a_wake_goes_on_while_its_copy_is_read_and_each_copy_fills_its_tur
     ends = [e for e in rig.stored(context)["timeline"] if e["event"] in ("agent_turn_end", "nudge") and "state" in e]
     assert [(e["turn"], e["trajectory_format"], e["trajectory_url"]) for e in ends] == [
         (0, "atif/1", DOCUMENT), (1, "atif/1", DOCUMENT)]
+
+
+@pytest.mark.asyncio
+async def test_a_step_whose_end_fails_before_it_joins_its_copies_cancels_them(monkeypatch, tmp_path):
+    seen = _reads(monkeypatch, gate=asyncio.Event())
+    finish = ao._Run.finish
+
+    async def failing(run):
+        """The run's end, once its copy is held reading, failing at its first clock read."""
+        async def clock_read_fails():
+            raise RuntimeError("the clock read failed")
+        await asyncio.sleep(0.05)
+        run.now = clock_read_fails
+        await finish(run)
+
+    monkeypatch.setattr(ao._Run, "finish", failing)
+    rig = Rig(monkeypatch, tmp_path, agent=_quiet)
+    await rig.arm()
+    with pytest.raises(RuntimeError, match="clock read failed"):
+        await rig.run(rig.step(max_wakes=1), _offering(rig, prescribed=True))
+    await asyncio.sleep(0)
+    assert len(seen["cancelled"]) == 1 and seen["copies"] == []
 
 
 @pytest.mark.asyncio

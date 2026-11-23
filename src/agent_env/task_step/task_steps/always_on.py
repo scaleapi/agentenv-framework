@@ -485,6 +485,8 @@ class _Run:
         self.undo.append((f"{what} on {env.env_id}", put_back))
 
     def close(self) -> None:
+        if self.copies is not None:
+            self.copies.cancel()
         for p in self._plugin_paths:
             if os.path.exists(p):
                 os.unlink(p)
