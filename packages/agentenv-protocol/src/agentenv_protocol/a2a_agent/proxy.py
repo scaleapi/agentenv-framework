@@ -590,20 +590,21 @@ _MODEL_COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_wr
 
 
 def _by_model(turn: _Turn) -> tuple[ModelUsage, ...]:
-    """The turn's recorded calls by the model each named, a call that named none counted as the turn's last named
-    model's; none when no call named one. A model's cost is its calls' only when every one of them reported one."""
+    """The turn's recorded calls by the model each named; none when a call named none, since the proxy has no
+    configured model to count it under. A model's cost is its calls' only when every one of them reported one, and
+    its includes-cache flag is the one its calls with input counts agree on."""
     by_model: dict[str, list[Usage]] = {}
     for named, usage in zip(turn.call_models, turn.model_usage):
-        if (name := named or turn.model) is None:
+        if named is None:
             return ()
-        by_model.setdefault(name, []).append(usage)
+        by_model.setdefault(named, []).append(usage)
     rows = []
     for name, of in by_model.items():
         sums = {}
         for count in _MODEL_COUNTS:
             values = [value for usage in of if (value := getattr(usage, count)) is not None]
             sums[count] = sum(values) if values and (count != "cost_usd" or len(values) == len(of)) else None
-        flags = {usage.input_includes_cache for usage in of}
+        flags = {usage.input_includes_cache for usage in of if usage.input_tokens is not None}
         rows.append(ModelUsage(model=name, calls=len(of), **sums,
                                input_includes_cache=flags.pop() if len(flags) == 1 else None))
     return tuple(rows)

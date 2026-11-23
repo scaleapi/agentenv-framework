@@ -603,18 +603,31 @@ def test_a_turns_usage_sums_its_recorded_calls_with_input_counting_the_cache(cli
             "input_tokens": 1, "output_tokens": 1, "total_tokens": 1, "cache_read_tokens": 1, "cache_write_tokens": 2}}}
 
 
-def test_a_turns_recorded_calls_are_given_by_the_model_each_named(client):
+def _recorded_turn(client, calls) -> dict:
+    """The usage of a turn whose recorded calls are ``calls``, each a model name (or None) and its usage."""
     task_id = _send(client, "go")
-    for model, usage in (("gpt-4.1-mini", {"prompt_tokens": 1000, "completion_tokens": 10}),
-                         ("gpt-4o-mini", {"prompt_tokens": 300, "completion_tokens": 5}),
-                         (None, {"prompt_tokens": 200, "completion_tokens": 2})):
+    for model, usage in calls:
         assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage,
                       **({"model": model} if model else {})).status_code == 200
     _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+    return _usage(_settled(client, task_id))
 
-    assert _usage(_settled(client, task_id))["models"] == [
+
+def test_a_turns_recorded_calls_are_given_by_the_model_each_named(client):
+    usage = _recorded_turn(client, [("gpt-4.1-mini", {"prompt_tokens": 1000, "completion_tokens": 10}),
+                                    ("gpt-4o-mini", {"prompt_tokens": 300, "completion_tokens": 5}),
+                                    ("gpt-4o-mini", None)])
+
+    assert usage["models"] == [
         {"model": "gpt-4.1-mini", "calls": 1, "input_tokens": 1000, "output_tokens": 10, "input_includes_cache": True},
-        {"model": "gpt-4o-mini", "calls": 2, "input_tokens": 500, "output_tokens": 7, "input_includes_cache": True}]
+        {"model": "gpt-4o-mini", "calls": 2, "input_tokens": 300, "output_tokens": 5, "input_includes_cache": True}]
+
+
+def test_a_turn_with_a_call_that_named_no_model_gives_no_rows(client):
+    usage = _recorded_turn(client, [("gpt-4.1-mini", {"prompt_tokens": 1000, "completion_tokens": 10}),
+                                    (None, {"prompt_tokens": 200, "completion_tokens": 2})])
+
+    assert "models" not in usage and usage["input_tokens"] == 1200
 
 
 def test_counts_a_recorded_call_doesnt_give_or_cant_be_read_are_left_out(client):
