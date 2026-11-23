@@ -1,0 +1,170 @@
+"""Each judge call's record names exactly what it was sent, stored by its sha256: a direct judge's messages, response
+format and settings, an agent judge's message and every file put in its sandbox. A judge's settings say which
+trajectory source it read for each turn."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from agent_env.a2a_agent import protocol
+from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from tst.unit.task_step.verifiers.test_rubrics_verifier_golden import _binary, _context, _direct_judge, _step
+from tst.unit.task_step.verifiers.test_rubrics_verifier_judge_settings import _grade, _llm
+
+ANSWER = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "it asked"}]})
+
+
+class _Store:
+    def __init__(self, fail: bool = False):
+        self.fail, self.objects, self.puts = fail, {}, 0
+
+    def exists(self, key):
+        return key in self.objects
+
+    def object_url(self, key):
+        return f"mem://{key}"
+
+    def put(self, key, data, content_type=None, allow_overwrite=False):
+        if self.fail:
+            raise ConnectionError("store unreachable")
+        self.puts += 1
+        self.objects[key] = data
+        return f"mem://{key}"
+
+
+@pytest.fixture
+def store(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(judge_usage, "get_config", lambda: SimpleNamespace(
+        get_artifact_key_prefix=lambda: "pfx/", get_object_store=lambda: store))
+    return store
+
+
+def _opened(store: _Store, ref: dict) -> dict:
+    data = store.objects[ref["object_url"].removeprefix("mem://")]
+    assert (hashlib.sha256(data).hexdigest(), len(data)) == (ref["sha256"], ref["bytes"])
+    assert ref["object_url"] == f"mem://pfx/judge-inputs/{ref['sha256']}"
+    return json.loads(data)
+
+
+@pytest.mark.asyncio
+async def test_a_direct_calls_record_opens_to_exactly_the_messages_format_and_settings_it_sent(monkeypatch, store):
+    requests = _llm(monkeypatch)
+
+    grade = await _grade(_step(default_model="claude-sonnet-4-6", effort="high"), _context())
+
+    [call] = grade["judge_calls"]
+    sent = _opened(store, call["input"])
+    assert sent["messages"] == requests[0]["messages"]
+    assert sent["response_format"] == requests[0]["response_format"]
+    assert sent["settings"] == {"reasoning_effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_a_request_retried_with_the_same_input_shares_one_stored_object(monkeypatch, store):
+    import litellm
+
+    _llm(monkeypatch, failures=[litellm.RateLimitError("slow down", llm_provider="openai", model="gpt-4o-mini")])
+
+    grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
+
+    refused, answered = grade["judge_calls"]
+    assert (refused["outcome"], answered["outcome"]) == ("refused", "answered")
+    assert refused["input"] == answered["input"] and store.puts == 1
+
+
+@pytest.mark.asyncio
+async def test_an_input_the_store_refuses_is_recorded_and_the_judge_still_grades(monkeypatch):
+    _llm(monkeypatch)
+    monkeypatch.setattr(judge_usage, "get_config", lambda: SimpleNamespace(
+        get_artifact_key_prefix=lambda: "pfx/", get_object_store=lambda: _Store(fail=True)))
+
+    grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
+
+    [call] = grade["judge_calls"]
+    assert "input" not in call and call["input_error"] == "ConnectionError: store unreachable"
+    assert grade["verifier_status"] == "graded"
+
+
+class _Sandbox:
+    def __init__(self):
+        self.files = {}
+
+    async def write_file_from_text(self, text, path, **kwargs):
+        self.files[path] = text
+
+    async def write_file_from_object(self, object_url, path, **kwargs):
+        self.files[path] = object_url
+
+    async def terminate(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_the_staging_recorder_keeps_each_file_put_in_the_judges_sandbox(store):
+    judge = judge_usage.JudgeUsage(TaskStepContext(), "verify")
+    sandbox = _Sandbox()
+    recorder = judge_usage.StagingRecorder(sandbox, judge)
+
+    await recorder.write_file_from_text("turn one", "/tmp/run/turn_01.json")
+    await recorder.write_file_from_object("mem://trajectories/2.json", "/tmp/run/turn_02.json")
+    await recorder.terminate()
+
+    text = "turn one".encode()
+    assert sandbox.files == {"/tmp/run/turn_01.json": "turn one", "/tmp/run/turn_02.json": "mem://trajectories/2.json"}
+    assert judge.staged == [
+        {"path": "/tmp/run/turn_01.json", "object_url": f"mem://pfx/judge-inputs/{hashlib.sha256(text).hexdigest()}",
+         "bytes": len(text), "sha256": hashlib.sha256(text).hexdigest()},
+        {"path": "/tmp/run/turn_02.json", "object_url": "mem://trajectories/2.json"}]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_calls_record_opens_to_its_message_and_the_files_staged_for_it(monkeypatch, store):
+    async def send(url, **kwargs):
+        return "task-1", None
+
+    async def poll(url, task_id, **kwargs):
+        return {"status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": ANSWER}]}}}
+
+    monkeypatch.setattr(protocol, "send_a2a_message", send)
+    monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+    context = TaskStepContext()
+    with judge_usage.scope():
+        judge = judge_usage.start(context, "verify")
+        judge.staged.append({"path": "/tmp/run/turn_01.json", "object_url": "mem://trajectories/1.json"})
+        verifier = _step(use_agent_judge=True, criteria=[{"id": "c1", "title": "asked"}])
+        await verifier._invoke_judge_a2a(eval_prompt="grade it", judge_a2a_url="http://judge.test",
+                                         judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
+                                         model="m", usage=judge)
+
+    [call] = judge.calls
+    assert _opened(store, call["input"]) == {
+        "message": "grade it", "files": [{"path": "/tmp/run/turn_01.json", "object_url": "mem://trajectories/1.json"}]}
+
+
+def test_the_trajectory_sources_name_each_turns_format_and_an_atif_copys_adapter_version():
+    from agent_env.task_step.task_steps.verifiers.rubrics_verifier import _trajectory_sources
+
+    response = PromptResponse(prompt_id="p1", response="done", target_agent_per_turn_trajectories=[
+        {"format": "claude-code-stream-json", "atif": None},
+        {"format": "atif/1", "atif": {"adapter_version": "claude-code@0.3", "status": "ok"}}])
+
+    assert _trajectory_sources(response) == [
+        {"turn": 1, "format": "claude-code-stream-json"},
+        {"turn": 2, "format": "atif/1", "adapter_version": "claude-code@0.3"}]
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_reads_the_trajectory_records_its_sources_in_its_settings(store):
+    context = _context(target_agent_per_turn_trajectories=[{"format": "claude-code-stream-json", "atif": None}],
+                       target_agent_per_turn_trajectory_object_urls=["mem://traj/1.json"])
+    step = _direct_judge(_step(use_trajectory=True), lambda ids, n: _binary(ids))
+
+    grade = await _grade(step, context)
+
+    assert grade["verifier_settings"]["trajectory_sources"] == [{"turn": 1, "format": "claude-code-stream-json"}]

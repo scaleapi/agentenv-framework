@@ -1,15 +1,17 @@
-"""A direct judge's settings on the wire: through LiteLLM's real client to a fake OpenAI-compatible endpoint, the run's
+"""A direct judge's settings and stored input on the wire: through LiteLLM's real client to a fake OpenAI-compatible endpoint, the run's
 effort goes out as ``reasoning_effort`` where LiteLLM takes it, a thinking budget the route doesn't take stays out and
 the grade says so, a value LiteLLM refuses never reaches the endpoint, and the grade keeps each call with the usage the
 endpoint reported."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
 import pytest
 
+from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import JudgeSettingRefused, RubricsVerifierTaskStep
 from tst.util.config import install_model_config
@@ -66,6 +68,9 @@ async def test_gpt_5_gets_the_effort_on_the_wire_and_the_thinking_budget_is_reco
     assert (call["outcome"], call["model"], call["usage"]["input_tokens"], call["usage"]["output_tokens"]) == (
         "answered", "gpt-5", USAGE["prompt_tokens"], USAGE["completion_tokens"])
     assert grade["verifier_status"] == "graded" and grade["score"] == 1.0
+    stored = get_config().get_object_store().get(call["input"]["object_url"])
+    assert hashlib.sha256(stored).hexdigest() == call["input"]["sha256"]
+    assert json.loads(stored)["messages"] == request.body["messages"]
 
 
 @pytest.mark.asyncio

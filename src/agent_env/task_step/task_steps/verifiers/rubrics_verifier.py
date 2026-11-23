@@ -64,6 +64,7 @@ from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_usage import JudgeUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
+    ATIF,
     AtifDocuments,
     TurnSource,
     atif_turns,
@@ -322,13 +323,28 @@ def _direct_settings(route: model_call.ModelRoute, run: Mapping[str, Any]
     return params, {key: value for key, value in sent.items() if value is not None}, not_sent
 
 
-def _record_failed_call(judge: JudgeUsage, exc: BaseException, *, model: str, endpoint_host: Optional[str]) -> None:
-    """A direct judge request that got no answer, in the run's record: cut off by a time limit (maybe billed, so a call
-    of unknown usage in the step's usage too), or refused, costing nothing."""
+def _record_failed_call(judge: JudgeUsage, exc: BaseException, *, model: str, endpoint_host: Optional[str],
+                        sent: Mapping[str, Any]) -> None:
+    """A direct judge request that got no answer, in the run's record with what it was sent: cut off by a time limit
+    (maybe billed, so a call of unknown usage in the step's usage too), or refused, costing nothing."""
     if model_call.cut_off(exc):
-        judge.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=endpoint_host, reported_by=ReportedBy.PROVIDER)
+        judge.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=endpoint_host, reported_by=ReportedBy.PROVIDER,
+                           sent=sent)
     else:
-        judge.refused_call(model=model, endpoint_host=endpoint_host, error=f"{type(exc).__name__}: {exc}")
+        judge.refused_call(model=model, endpoint_host=endpoint_host, error=f"{type(exc).__name__}: {exc}", sent=sent)
+
+
+def _trajectory_sources(prompt_response: PromptResponse) -> list[dict[str, Any]]:
+    """Each turn of ``prompt_response`` the judge reads, by its stored label: the turn, its format, and an ATIF copy's
+    adapter version."""
+    sources = []
+    for turn, record in enumerate(prompt_response.target_agent_per_turn_trajectories or [], 1):
+        record = record or {}
+        fmt = record.get("format")
+        atif = (record.get("atif") or {}) if fmt == ATIF else None
+        sources.append({"turn": turn, "format": fmt,
+                        **({"adapter_version": atif.get("adapter_version")} if atif is not None else {})})
+    return sources
 
 
 def _image_url_block(frame: ImageFrame) -> dict:
@@ -874,6 +890,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 settings["not_sent"] = dict(judge.not_sent)
             if judge.endpoint_host:
                 settings["judge_endpoint_host"] = judge.endpoint_host
+        if judge is not None and judge.sources:
+            settings["trajectory_sources"] = list(judge.sources)
         return {**settings, "overridden": overridden}
 
     def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
@@ -909,6 +927,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         run = self._run_values(context)
+        judge = judge_usage.start(context, self.id)
         grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
@@ -935,6 +954,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
         # A run whose turns are atif/1 copies reads each turn by its label; one with none keeps the native path.
         atif = atif_turns(prompt_response) if self.use_trajectory else None
+        if self.use_trajectory:
+            judge.read(_trajectory_sources(prompt_response))
         documents = AtifDocuments()
 
         overrides = context.metadata.get("user_overrides", {})
@@ -1072,7 +1093,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
                     judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
                     provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
-                    sandbox = await provider.get_sandbox(judge_sandbox_id)
+                    sandbox = judge_usage.StagingRecorder(await provider.get_sandbox(judge_sandbox_id), judge)
                     staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
                     if staged is None and atif is not None:
                         media = await self._stage_atif_turns(
@@ -1193,7 +1214,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
                                    f"output_format={self.output_format.value} is graded in one judge call.")
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
-            usage = judge_usage.start(context, self.id)
+            usage = judge
 
             async def grade(batch: list[dict], number: Optional[int] = None
                             ) -> tuple[list[dict], int, list[dict], Optional[str]]:
@@ -1618,21 +1639,28 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge = judge_usage.current()
         if judge is not None:
             judge.carried(sent, not_sent, route.endpoint_host)
+        inputs: dict[bool, dict[str, Any]] = {}
         # Some endpoints reject json_schema with images. Fall back once on that exact
         # error shape; malformed JSON is handled by the outer output-retry loop.
         use_response_format = True
 
         last_exc: Exception | None = None
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
+            if judge is not None and use_response_format not in inputs:
+                inputs[use_response_format] = await judge_usage.store_input({
+                    "messages": messages, "response_format": response_format if use_response_format else None,
+                    "settings": params})
+            judge_input = inputs.get(use_response_format, {})
             try:
                 reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,
                                                   response_format=response_format if use_response_format else None,
                                                   settings=params)
-                return {"response": reply.content, "trajectory_object_url": None, **reply.fields()}
+                return {"response": reply.content, "trajectory_object_url": None, "judge_input": judge_input,
+                        **reply.fields()}
             except Exception as exc:
                 last_exc = exc
                 if judge is not None:
-                    _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host)
+                    _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host, sent=judge_input)
                 if params and model_call.refused_setting(exc):
                     raise JudgeSettingRefused(f"{model} refused the judge's "
                                               f"{sorted(key for key in _JUDGE_SETTINGS if key in sent)}: {exc}") from exc
@@ -1720,6 +1748,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         from agent_env.a2a_agent import protocol
 
         host = getattr(judge_agent, "model_endpoint_host", None)
+        sent = ({"sent": await judge_usage.store_input({"message": eval_prompt, "files": list(usage.staged)})}
+                if isinstance(usage, JudgeUsage) else {})
         try:
             task_id, _ = await protocol.send_a2a_message(
                 judge_a2a_url,
@@ -1730,7 +1760,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             )
         except (TimeoutError, asyncio.CancelledError):
             # The judge may have taken the message before its task id came back; with no id, it can't be cancelled.
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             raise
         try:
             result = await protocol.poll_a2a_task(
@@ -1741,22 +1771,22 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 sandbox_id=getattr(judge_agent, "sandbox_id", None),
             )
         except asyncio.CancelledError:
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
             await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             raise
         except protocol.AgentUnreachableError:
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             raise
         except TimeoutError as e:
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             if self.judge_timeout_retries is None:
                 raise
             raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
-        usage.call(ModelRole.JUDGE, tr.usage, model=model, endpoint_host=host)
+        usage.call(ModelRole.JUDGE, tr.usage, model=model, endpoint_host=host, **sent)
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1913,7 +1943,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
         if data.get("reported_cost_usd") is not None:
             read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])
-        extra = ({"cost": {key: data[key] for key in Cost.KEYS if key in data}}
+        extra = ({"cost": {key: data[key] for key in Cost.KEYS if key in data}, "sent": data.get("judge_input")}
                  if isinstance(usage, JudgeUsage) else {})
         usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
                    reported_by=ReportedBy.PROVIDER, **extra)
