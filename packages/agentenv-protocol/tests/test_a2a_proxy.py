@@ -851,3 +851,15 @@ def test_what_a_turn_still_runs_is_stopped_when_the_app_stops(monkeypatch, tmp_p
             time.sleep(0.02)
 
     _stopped(int((tmp_path / "child").read_text()))
+
+
+def test_a_models_cost_is_its_calls_only_when_every_one_reported_one(client):
+    task_id = _send(client, "go")
+    for usage in ({"agentenv_usage": {"input_tokens": 10, "output_tokens": 1, "cost_usd": 0.01}},
+                  {"prompt_tokens": 20, "completion_tokens": 2}):
+        assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage,
+                      model="policy-model").status_code == 200
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    [row] = _usage(_settled(client, task_id))["models"]
+    assert (row["calls"], row["input_tokens"], "cost_usd" in row) == (2, 30, False)
