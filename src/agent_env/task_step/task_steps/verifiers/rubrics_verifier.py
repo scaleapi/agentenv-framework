@@ -928,6 +928,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         run = self._run_values(context)
         judge = judge_usage.start(context, self.id)
+        if run["use_agent_judge"] and self.agent_name:
+            judge.loaded = judge_usage.loads_into(context, self.agent_name)
         grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
@@ -1752,7 +1754,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         from agent_env.a2a_agent import protocol
 
         host = getattr(judge_agent, "model_endpoint_host", None)
-        sent = ({"sent": await judge_usage.store_input({"message": eval_prompt, "files": list(usage.staged)})}
+        sent = ({"sent": await judge_usage.store_input({"message": eval_prompt, "files": list(usage.staged),
+                                                         "loaded": list(usage.loaded)})}
                 if isinstance(usage, JudgeUsage) else {})
         try:
             task_id, _ = await protocol.send_a2a_message(

@@ -4,7 +4,10 @@ it was sent, and the settings and trajectory sources those calls carried, for it
 task: a judge step's ``execute`` scopes it (``scope``) and its judging starts it (``start``).
 
 What a call was sent is stored by its sha256 under ``judge-inputs/`` in the object store (``store_input``), so a retried
-request's input or a file another run staged is stored once, and a reader checks it against the key it's stored under."""
+request's input or a file another run staged is stored once, and a reader checks it against the key it's stored under.
+An agent call's input names the files the judge step staged in the judge's sandbox and, for a judge the task deployed,
+what the task's own steps loaded there as the run recorded them (``loads_into``): best effort, since a file a step wrote
+by running a command there is recorded nowhere."""
 
 from __future__ import annotations
 
@@ -29,6 +32,8 @@ from agent_env.task_step.usage import StepUsage
 logger = logging.getLogger(__name__)
 
 INPUTS_PREFIX = "judge-inputs"
+#: The run's records of what its steps loaded into an agent's sandbox (``load_artifact``), each entry naming the agent.
+LOAD_RECORDS = ("loaded_file_artifact_universes", "loaded_environment_artifacts", "loaded_urls")
 
 
 class JudgeUsage(StepUsage):
@@ -43,6 +48,7 @@ class JudgeUsage(StepUsage):
         self.not_sent: dict[str, Any] = {}
         self.endpoint_host: Optional[str] = None
         self.staged: list[dict[str, Any]] = []
+        self.loaded: list[dict[str, Any]] = []
         self.sources: Optional[list[dict[str, Any]]] = None
 
     def call(self, role: ModelRole, usage: Optional[Usage], *, model: Optional[str], endpoint_host: Optional[str],
@@ -86,6 +92,13 @@ class JudgeUsage(StepUsage):
                            "usage": usage.to_dict() if usage is not None else None, **cost,
                            "batch": _BATCH.get(), "attempt": _ATTEMPT.get(), **(sent or {}),
                            **({"error": error} if error is not None else {})})
+
+
+def loads_into(context: TaskStepContext, agent_name: str) -> list[dict[str, Any]]:
+    """What the run's own steps loaded into ``agent_name``'s sandbox, each entry as its load recorded it, under the key
+    it's recorded under (``record``)."""
+    return [{"record": key, **entry} for key in LOAD_RECORDS for entry in context.metadata.get(key) or []
+            if isinstance(entry, Mapping) and entry.get("agent_name") == agent_name]
 
 
 async def store_input(body: Any) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 """Each judge call's record names exactly what it was sent, stored by its sha256: a direct judge's messages, response
-format and settings (the config's with the run's over them, credentials left out), an agent judge's message and every
-file put in its sandbox. A judge's settings say which
-trajectory source it read for each turn."""
+format and settings (the config's with the run's over them, credentials left out); an agent judge's message, every file
+its step staged in its sandbox and, for a judge the task deployed, what the task's steps loaded there as the run recorded
+it. A judge's settings say which trajectory source it read for each turn."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ import litellm
 import pytest
 
 from agent_env.a2a_agent import protocol
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from tst.unit.task_step import test_always_on_agent_verifier as A
 from tst.unit.task_step.verifiers.test_rubrics_verifier_golden import _binary, _context, _direct_judge, _step
 from tst.unit.task_step.verifiers.test_rubrics_verifier_judge_settings import _grade, _llm
 
@@ -177,7 +178,8 @@ async def test_an_agent_calls_record_opens_to_its_message_and_the_files_staged_f
 
     [call] = judge.calls
     assert _opened(store, call["input"]) == {
-        "message": "grade it", "files": [{"path": "/tmp/run/turn_01.json", "object_url": "mem://trajectories/1.json"}]}
+        "message": "grade it", "files": [{"path": "/tmp/run/turn_01.json", "object_url": "mem://trajectories/1.json"}],
+        "loaded": []}
 
 
 def test_the_trajectory_sources_name_each_turns_format_and_an_atif_copys_adapter_version():
@@ -201,3 +203,81 @@ async def test_a_judge_that_reads_the_trajectory_records_its_sources_in_its_sett
     grade = await _grade(step, context)
 
     assert grade["verifier_settings"]["trajectory_sources"] == [{"turn": 1, "format": "claude-code-stream-json"}]
+
+
+def _answering_judge(monkeypatch) -> list[str]:
+    """The judge agent's A2A calls answered passing for every criterion asked about; each message it was sent kept."""
+    sent: list[str] = []
+
+    async def send(url, **kwargs):
+        sent.append(kwargs["message"] if "message" in kwargs else str(kwargs))
+        return "task-1", None
+
+    async def poll(url, task_id, **kwargs):
+        return {"status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": _binary(["c1", "c2"])}]}}}
+
+    monkeypatch.setattr(protocol, "send_a2a_message", send)
+    monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_a_judge_the_task_deployed_lists_what_the_runs_steps_loaded_into_it(monkeypatch, store):
+    _answering_judge(monkeypatch)
+    context = _context()
+    context.deployed_agents.append(DeployedAgent(agent_name="judge", api_url="http://judge.test",
+                                                 a2a_url="http://judge.test", sandbox_id="sb-judge"))
+    outputs = {"id": "outputs", "version": 3, "artifact_type": "file_artifact_universe", "agent_name": "judge",
+               "destination_path": "/tmp/outputs", "files": {"report.md": "/tmp/outputs/report.md"}}
+    context.metadata.update(
+        loaded_file_artifact_universes=[outputs, {**outputs, "agent_name": "default-agent", "destination_path": "/app"}],
+        loaded_environment_artifacts=[{"id": "inbox", "version": 1, "agent_name": "judge",
+                                       "destination_path": "/data/env_after", "files": ["mail/inbox.json"]}],
+        loaded_urls=[{"step_id": "load-sheet", "agent_name": "judge", "destination_path": "/tmp/inputs",
+                      "files": ["sheet.xlsx"]}])
+    step = _step(use_agent_judge=True, agent_name="judge")
+
+    async def configured(**kwargs):
+        return None
+
+    step._configure_judge_a2a = configured
+    grade = await _grade(step, context)
+
+    [call] = grade["judge_calls"]
+    sent = _opened(store, call["input"])
+    assert sent["files"] == []
+    assert sent["loaded"] == [
+        {"record": "loaded_file_artifact_universes", **outputs},
+        {"record": "loaded_environment_artifacts", "id": "inbox", "version": 1, "agent_name": "judge",
+         "destination_path": "/data/env_after", "files": ["mail/inbox.json"]},
+        {"record": "loaded_urls", "step_id": "load-sheet", "agent_name": "judge", "destination_path": "/tmp/inputs",
+         "files": ["sheet.xlsx"]}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("local_stores")
+async def test_an_always_on_judge_keeps_each_file_it_staged_and_names_the_formats_it_guessed(monkeypatch, store):
+    run, sandbox, sources = A._staged_run(monkeypatch)
+    verifier = A._verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    seen: dict = {}
+
+    async def judge(*, eval_prompt, **kwargs):
+        record = judge_usage.current()
+        seen.update(staged=list(record.staged), sources=list(record.sources or []))
+        return ([{**verifier.criteria[0], "score": 1.0, "result": True}], 0, [], None)
+
+    def read(url):
+        if url not in sources:
+            raise FileNotFoundError(url)
+        return sources[url]
+
+    monkeypatch.setattr(verifier, "_run_judge_with_output_retries", judge)
+    monkeypatch.setattr(verifier, "_read_trajectory_text", read)
+    grade = await _grade(verifier, run)
+
+    assert sandbox.files and {entry["path"] for entry in seen["staged"]} == set(sandbox.files)
+    for entry in seen["staged"]:
+        assert store.objects[f"pfx/judge-inputs/{entry['sha256']}"] == sandbox.files[entry["path"]].encode()
+    assert seen["sources"] and all(source["guessed"] for source in seen["sources"])
+    assert grade["verifier_settings"]["trajectory_sources"] == seen["sources"]
+    assert {source["format"] for source in seen["sources"]} >= {"claude-code-stream-json"}
