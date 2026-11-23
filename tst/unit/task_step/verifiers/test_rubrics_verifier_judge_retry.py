@@ -8,6 +8,7 @@ import litellm
 import pytest
 
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.util.config import install_model_config
 
@@ -59,6 +60,7 @@ async def test_retries_then_succeeds_on_second_attempt(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=False,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2
@@ -95,6 +97,7 @@ async def test_raises_after_max_retries(monkeypatch):
             judge_effort=None,
             judge_max_thinking_tokens=None,
             use_agent_judge=False,
+            usage=StepUsage(TaskStepContext(), "verify"),
         )
 
     assert verifier._prompt_llm_judge.await_count == verifier.DEFAULT_MAX_RETRIES
@@ -124,7 +127,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
     monkeypatch.setattr(verifier, "_configure_judge_a2a", AsyncMock())
     monkeypatch.setattr(verifier, "DEFAULT_MAX_RETRIES", 2)
 
-    async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent) -> dict:
+    async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent, **_) -> dict:
         prompts.append(eval_prompt)
         if len(prompts) == 1:
             return {"response": bad, "trajectory_object_url": None}
@@ -143,6 +146,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=True,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2
@@ -176,6 +180,7 @@ async def test_retries_on_malformed_json(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=False,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2

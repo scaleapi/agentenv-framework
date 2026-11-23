@@ -70,6 +70,9 @@ class RoleUsage:
     attempt: Optional[int] = field(default_factory=ATTEMPT_EPOCH.get)
     turns: list[Optional[Usage]] = field(default_factory=list)
     unparsed: list[dict] = field(default_factory=list)
+    # Whose figure a turn's ``cost_usd`` is: an agent's own (the price map wins over it), or an endpoint's bill (it
+    # wins over the map).
+    reported_by: ReportedBy = ReportedBy.HARNESS
 
     def add(self, usage: Optional[Usage], unparsed: Optional[dict] = None) -> None:
         """One finished turn's usage, and what of it couldn't be read."""
@@ -102,8 +105,8 @@ class RoleUsage:
         includes = flags.pop() if len(flags) == 1 else None
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
-        cost = price(tokens, total("cost_usd"), model=self.model,
-                     prices=prices, reported_by=ReportedBy.HARNESS)
+        cost = price(tokens, self._reported(total("cost_usd")), model=self.model,
+                     prices=prices, reported_by=self.reported_by)
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
@@ -113,6 +116,13 @@ class RoleUsage:
             entry["unparsed"] = self.unparsed[:_UNPARSED_TURNS_KEPT]
             entry["unparsed_turns"] = len(self.unparsed)
         return entry
+
+    def _reported(self, summed: Optional[float]) -> Optional[float]:
+        """The turns' summed figure, as ``price`` takes it: an endpoint's bills only when every call carried one, since
+        a sum of some calls' bills isn't the role's cost; without, the map prices all of them."""
+        if self.reported_by is ReportedBy.PROVIDER and any(u is None or u.cost_usd is None for u in self.turns):
+            return None
+        return summed
 
 
 def _unreported_calls(usage: Usage) -> int:
@@ -146,6 +156,17 @@ class StepUsage:
         if usage is not None:
             usage.add(reply.usage, reply.usage_unparsed)
             self.entries()
+
+    def call(self, role: ModelRole, usage: Optional[Usage], *, model: Optional[str], endpoint_host: Optional[str],
+             reported_by: ReportedBy = ReportedBy.HARNESS) -> None:
+        """One model call of ``role`` that isn't an agent's turn, as a judge's, written at once. The role starts at its
+        first call, with the model and the endpoint host that call reached; ``reported_by`` says whose figure a call's
+        ``cost_usd`` is, and the role keeps its first call's."""
+        if role not in self._roles:
+            self._context.record_model_endpoint(role.value, self._step_id, model, endpoint_host)
+            self._roles[role] = RoleUsage(role.value, model, endpoint_host, reported_by=reported_by)
+        self._roles[role].add(usage)
+        self.entries()
 
     def cut_off(self, role: ModelRole) -> None:
         """A turn of ``role`` that was sent but never replied: cut off by a time limit, by a cancel, or by its agent no

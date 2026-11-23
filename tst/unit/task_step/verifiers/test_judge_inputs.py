@@ -137,7 +137,7 @@ class _Judge:
                            "cached_prefix": cached_prefix})
         return {"response": self.answer(G._ids(eval_prompt)), "trajectory_object_url": None}
 
-    async def agent(self, *, eval_prompt, judge_a2a_url, judge_agent_card, judge_agent):
+    async def agent(self, *, eval_prompt, judge_a2a_url, judge_agent_card, judge_agent, **_):
         self.calls.append({"prompt": eval_prompt})
         return {"response": self.answer(G._ids(eval_prompt)), "trajectory_object_url": None}
 
