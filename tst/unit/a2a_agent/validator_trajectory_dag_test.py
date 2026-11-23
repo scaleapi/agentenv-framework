@@ -92,7 +92,7 @@ class _StubAsyncClient:
     async def __aexit__(self, *_exc_info) -> None:
         return None
 
-    async def post(self, _url: str, json: dict, timeout: int) -> _StubResponse:  # noqa: A002
+    async def post(self, _url: str, json: dict, timeout: int, headers=None) -> _StubResponse:  # noqa: A002
         type(self).posts.append(json)
         if "objects" in json:
             return _StubResponse(

@@ -20,11 +20,14 @@ def _write_jsonl(path: Path, records: list[dict], trailing: bytes = b"") -> None
     path.write_bytes(body + trailing)
 
 
-def test_agent_card_advertises_one_get_trajectory_method(app):
-    assert extension_methods(app, a2a_server.TRAJECTORY_V1.uri) == {
+def test_agent_card_advertises_one_get_trajectory_method_beside_the_sdks_atif_methods(app):
+    methods = extension_methods(app, a2a_server.TRAJECTORY_V1.uri)
+    assert set(methods) == {"get", "prescribe", "media"}
+    assert {"get": methods["get"]} == {
         "get": {
             "method": "POST",
             "request": {
+                "optional": ["format"],
                 "oneOf": [
                     {"required": ["task_id"]},
                     {"required": ["task_id", "objects"]},
@@ -174,6 +177,7 @@ def test_context_trajectory_endpoint_reports_complete_live_session(monkeypatch, 
                 "session_id": "session-1",
             }
         ],
+        "format": a2a_server.SESSION_TRAJECTORY_FORMAT,
         "session_lines": 2,
         "is_live": True,
         "session_id": "session-1",
@@ -195,7 +199,7 @@ def test_completed_task_returns_finalized_stream_trajectory(monkeypatch, client)
     result = client.post(TRAJECTORY_PATH, json={"task_id": task["id"]}).json()
     live = client.post(TRAJECTORY_PATH, json={"task_id": task["id"], "after": 0}).json()
 
-    assert result == {"trajectory": trajectory}
+    assert result == {"trajectory": trajectory, "format": a2a_server.TRAJECTORY_FORMAT}
     assert (live["format"], live["state"], live["events"]) == (
         a2a_server.TRAJECTORY_FORMAT, "completed", trajectory,
     )
@@ -292,4 +296,4 @@ def test_a_turn_is_readable_while_the_cli_runs_and_its_log_is_its_trajectory(app
         "running", a2a_server.TRAJECTORY_FORMAT, [_INIT],
     )
     assert (ended["events"], ended["next"], ended["has_more"]) == ([_TOOL, _DONE], 3, False)
-    assert final == {"trajectory": [_INIT, _TOOL, _DONE]}
+    assert final == {"trajectory": [_INIT, _TOOL, _DONE], "format": a2a_server.TRAJECTORY_FORMAT}

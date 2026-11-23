@@ -41,16 +41,22 @@ class _Agent:
     def __init__(self, *answers: httpx.Response) -> None:
         self.answers = list(answers)
         self.afters: list[int] = []
+        self.tokens: list[str | None] = []
+        self.formats: list[str | None] = []
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self._answer))
 
     def _answer(self, request: httpx.Request) -> httpx.Response:
-        self.afters.append(json.loads(request.content)["after"])
+        body = json.loads(request.content)
+        self.afters.append(body["after"])
+        self.formats.append(body.get("format"))
+        self.tokens.append(request.headers.get("agentenv-control-token"))
         return self.answers.pop(0)
 
 
-async def _follow(agent: _Agent) -> list[TrajectoryBatch]:
+async def _follow(agent: _Agent, headers: dict[str, str] | None = None, format: str | None = None
+                  ) -> list[TrajectoryBatch]:
     batches: list[TrajectoryBatch] = []
 
     async def sink(batch: TrajectoryBatch) -> None:
@@ -58,7 +64,8 @@ async def _follow(agent: _Agent) -> list[TrajectoryBatch]:
 
     async with agent.client() as client:
         await follow_trajectory(
-            _ENDPOINT, "task-1", sink, poll_interval_seconds=0, stop=asyncio.Event(), client=client
+            _ENDPOINT, "task-1", sink, poll_interval_seconds=0, stop=asyncio.Event(), client=client, headers=headers,
+            format=format,
         )
     return batches
 
@@ -100,6 +107,30 @@ async def test_pages_are_followed_until_the_task_ends_and_every_event_is_read():
         (2, 3, [{"i": 2}], True),
     ]
     assert batches[-1].state is TrajectoryState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_every_read_carries_the_headers_it_was_given():
+    agent = _Agent(
+        httpx.Response(200, json=_page(0, [{"i": 0}], "running")),
+        httpx.Response(200, json=_page(1, [], "completed")),
+    )
+
+    await _follow(agent, headers={"AgentEnv-Control-Token": "tok"})
+
+    assert agent.tokens == ["tok", "tok"]
+
+
+@pytest.mark.asyncio
+async def test_every_read_names_the_format_it_was_given_and_none_without_one():
+    pages = [_page(0, [{"i": 0}], "running"), _page(1, [], "completed")]
+    named, unnamed = _Agent(*(httpx.Response(200, json=page) for page in pages)), _Agent(
+        *(httpx.Response(200, json=page) for page in pages))
+
+    await _follow(named, format="echo/1")
+    await _follow(unnamed)
+
+    assert named.formats == ["echo/1", "echo/1"] and unnamed.formats == [None, None]
 
 
 @pytest.mark.asyncio
@@ -271,7 +302,7 @@ async def test_a_failed_turn_stops_its_follower_without_draining_and_marks_it_en
 
     with pytest.raises(type(error)):
         async with following_live_trajectory(
-            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0
+            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}
         ) as turn:
             turn.follow("task-1")
             await asyncio.sleep(0.05)
@@ -298,7 +329,7 @@ async def test_a_cancelled_turn_is_marked_ended_after_the_events_it_stored(monke
 
     with pytest.raises(asyncio.CancelledError):
         async with following_live_trajectory(
-            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0
+            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}
         ) as turn:
             turn.follow("task-1")
             async with asyncio.timeout(5):
@@ -316,7 +347,7 @@ async def test_a_turn_the_follower_saw_end_keeps_its_state(monkeypatch, tmp_path
 
     with pytest.raises(RuntimeError):
         async with following_live_trajectory(
-            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0
+            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}
         ) as turn:
             turn.follow("task-1")
             async with asyncio.timeout(5):
@@ -349,7 +380,7 @@ async def test_a_turn_the_follower_stopped_before_its_end_is_marked_ended_in_the
     _agent_answering(monkeypatch, _page(0, [{"i": 0}, {"i": 1}], "running"), stops_with)
     store = LocalFilesystemObjectStore(str(tmp_path))
 
-    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0) as turn:
+    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}) as turn:
         turn.follow("task-1")
         await _until_stored(store, "prefix/turn/live/00000000-00000002.jsonl")
         turn.ended("completed")
@@ -363,7 +394,7 @@ async def test_a_reported_task_state_ends_the_turn_as_its_trajectory_state(monke
     _agent_answering(monkeypatch, httpx.Response(404, json={"detail": "Unknown task"}))
     store = LocalFilesystemObjectStore(str(tmp_path))
 
-    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0) as turn:
+    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}) as turn:
         turn.follow("task-1")
         turn.ended(task_state)
 
@@ -378,7 +409,7 @@ def _next(store: LocalFilesystemObjectStore, turn: str) -> dict:
 async def test_each_turn_names_the_next_and_the_last_is_marked_last(monkeypatch, tmp_path):
     _agent_answering(monkeypatch, _page(0, [{"i": 0}], "completed"))
     store = LocalFilesystemObjectStore(str(tmp_path))
-    turns = LiveTurns(_ENDPOINT, store, "prefix/", poll_interval_seconds=0)
+    turns = LiveTurns(_ENDPOINT, store, "prefix/", poll_interval_seconds=0, headers={})
 
     for turn_id in ("turn-1", "turn-2"):
         async with turns.following(turn_id) as turn:
@@ -396,7 +427,7 @@ async def test_each_turn_names_the_next_and_the_last_is_marked_last(monkeypatch,
 async def test_a_turn_never_sent_is_not_linked_and_the_last_sent_is_marked_last(monkeypatch, tmp_path):
     _agent_answering(monkeypatch, _page(0, [{"i": 0}], "completed"))
     store = LocalFilesystemObjectStore(str(tmp_path))
-    turns = LiveTurns(_ENDPOINT, store, "prefix/", poll_interval_seconds=0)
+    turns = LiveTurns(_ENDPOINT, store, "prefix/", poll_interval_seconds=0, headers={})
     async with turns.following("turn-1") as turn:
         turn.follow("task-1")
         turn.ended("completed")
@@ -414,6 +445,6 @@ async def test_a_turn_never_sent_is_not_linked_and_the_last_sent_is_marked_last(
 async def test_a_step_that_sent_no_turn_marks_none(tmp_path):
     store = LocalFilesystemObjectStore(str(tmp_path))
 
-    await LiveTurns(_ENDPOINT, store, "prefix/", poll_interval_seconds=0).end()
+    await LiveTurns(_ENDPOINT, store, "prefix/", poll_interval_seconds=0, headers={}).end()
 
     assert store.list("prefix/") == []

@@ -26,7 +26,7 @@ def posted(monkeypatch):
         monkeypatch.setattr(pa_mod.conversation_store, fn, lambda *a, **kw: None)
     configs = []
 
-    async def post_agent_config(url, fields):
+    async def post_agent_config(url, fields, headers=None):
         configs.append(fields)
 
     async def send(url, parts, message_id, context_id, timeout):
@@ -65,3 +65,19 @@ async def test_an_agent_deployed_without_a_selection_is_sent_none(posted):
     await PromptAgentTaskStep(id="one", version=None, prompt="one", agent_name="solver").execute(_context())
 
     assert all("builtin_tools" not in fields for fields in posted)
+
+
+@pytest.mark.asyncio
+async def test_each_turns_config_carries_the_agents_control_token(posted, monkeypatch):
+    sent = []
+
+    async def post_agent_config(url, fields, headers=None):
+        sent.append(headers)
+
+    monkeypatch.setattr(pa_mod.protocol, "post_agent_config", post_agent_config)
+    context = _context(builtin_tools={"disable": "*"})
+    context.deployed_agents[0].control_token = "tok"
+
+    await PromptAgentTaskStep(id="one", version=None, prompt="one", agent_name="solver").execute(context)
+
+    assert sent == [{"AgentEnv-Control-Token": "tok"}]

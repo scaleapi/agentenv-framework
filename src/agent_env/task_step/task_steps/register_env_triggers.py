@@ -26,6 +26,7 @@ from agent_env.env.gateway.constants import (
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.deploy_agent import bound_deployment
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class RegisterEnvTriggersStep(TaskStep):
         executor_hours: Optional[dict[str, dict]] = None,
         await_fired: Optional[list[str]] = None,
         await_timeout_seconds: float = 120,
+        env_step_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -81,6 +83,7 @@ class RegisterEnvTriggersStep(TaskStep):
                 or await_timeout_seconds <= 0):
             raise ValueError("await_timeout_seconds must be a positive number")
         self.env_id = env_id
+        self.env_step_id = env_step_id
         self.triggers = triggers
         self.watch_roles = watch_roles
         self.executor_agent_name = executor_agent_name
@@ -92,6 +95,7 @@ class RegisterEnvTriggersStep(TaskStep):
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["env_id"] = self.env_id
+        base["env_step_id"] = self.env_step_id
         base["triggers"] = self.triggers
         base["watch_roles"] = self.watch_roles
         base["executor_agent_name"] = self.executor_agent_name
@@ -106,6 +110,7 @@ class RegisterEnvTriggersStep(TaskStep):
         return cls(
             **cls._base_from_dict(data),
             env_id=data["env_id"],
+            env_step_id=data.get("env_step_id"),
             triggers=data["triggers"],
             watch_roles=data.get("watch_roles"),
             executor_agent_name=data.get("executor_agent_name"),
@@ -129,7 +134,7 @@ class RegisterEnvTriggersStep(TaskStep):
         problems = self.preflight()
         if problems:
             raise RuntimeError("; ".join(problems))
-        deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
+        deployed = bound_deployment(context, self.env_id, env_step_id=self.env_step_id, step_id=self.id)
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         body: dict = {"triggers": self.triggers}

@@ -13,6 +13,7 @@ from agent_env.bundle.register import describe_target, register_bundle
 from agent_env.bundle.requires import Declaring, UnmetRequirements, declaring_for
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.utils import interruptible
+from agent_env.task.lint import said
 from agent_env.entity.scopes import FieldScope
 
 
@@ -87,13 +88,17 @@ def _report(imported: BundleImport, folder: Path) -> None:
 @click.option("--dry-run", is_flag=True, help="Check everything and say what would be written; write nothing.")
 @click.option("--yes", is_flag=True, help="Write to a store other than this machine's own without asking.")
 @click.option("--sandbox", default=None,
-              help="The sandbox provider the bundle's computer envs compose on, by default the env's; comma-separated "
-                   "for a chain, each arch going to the first link that runs it natively.")
+              help="The sandbox provider the registered tasks deploy on, comma-separated for a chain, as agent-env "
+                   "run's: each computer env composes only the forms its deploys there boot, and without it every form "
+                   "its base declares, on this machine either way. A deploy that boots a form not composed composes it "
+                   "first.")
 @click.option("--no-emulate", is_flag=True,
-              help="Skip, rather than emulate, an arch no link of the sandbox provider runs natively; a later register "
-                   "or env build builds it.")
+              help="Skip, rather than emulate, a computer env's arch the provider it composes on doesn't run "
+                   "natively; a later register or env build builds it.")
+@click.option("--skip-lint", is_flag=True,
+              help="Register tasks agent-env task lint refuses for its own rules (a field no step reads, a headline or aggregate source that grades nothing), saying them; a step's own config problems still refuse it.")
 def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefix: str | None,
-             dry_run: bool, yes: bool, sandbox: str | None, no_emulate: bool):
+             dry_run: bool, yes: bool, sandbox: str | None, no_emulate: bool, skip_lint: bool):
     """Write the bundle at FOLDER into the configured stores under registry ids, so whatever runs the stores' tasks
     runs what the folder runs.
 
@@ -109,8 +114,10 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     registration. The plugin packages the bundle's bundle.toml requires must be installed, as for a run; a folder
     with no bundle.toml that uses plugin packages is given one. An id the store holds already takes a new version,
     whoever wrote it. A store other than this machine's is written only after you confirm, or with --yes. Registering
-    again writes only what changed since."""
-    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "sandbox": sandbox, "emulate": not no_emulate}
+    again writes only what changed since. A computer env whose compose leaves no build a deploy can boot fails the
+    registration once every entity is written, before any task: registering again composes it again."""
+    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "sandbox": sandbox, "emulate": not no_emulate,
+               "skip_lint": skip_lint}
     click.echo(f"Registering {folder} into:")
     for line in describe_target():
         click.echo(f"  {line}")
@@ -123,6 +130,8 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
             if not dry_run:
                 offer_to_install(e)
             raise
+    for line in said(planned.plan.lint_findings):
+        click.echo(f"  {line}")
     for line in planned.floating:
         click.echo(f"  floating, since its field takes no version: {line}")
     for line in planned.requires:

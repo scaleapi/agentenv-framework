@@ -110,7 +110,7 @@ async def test_a_tool_error_is_an_error_result_with_structured_fields_on_mcps_fa
             env.refuse_hook = True
             hooked = await session.call_tool("click", {"x": 4})
     assert refused.isError is True
-    assert refused.content[0].text == "out_of_bounds: (140, 0) is outside frame f1 (100×100)"
+    assert refused.content[0].text == "out_of_bounds: (140, 0) is outside frame f1 (100×100) (x < 100)"
     assert refused.structuredContent == {"code": "out_of_bounds", "message": "(140, 0) is outside frame f1 (100×100)",
                                          "retryable": False, "applied": "no", "hint": "x < 100"}
     assert served.isError is False and served.content[0].text == "ok"
@@ -131,7 +131,7 @@ async def test_a_tool_error_is_an_error_result_with_structured_fields_on_fastmcp
             env.refuse_hook = True
             hooked = await session.call_tool("click", {"x": 4}, raise_on_error=False)
     assert refused.is_error is True
-    assert refused.content[0].text == "out_of_bounds: (140, 0) is outside frame f1 (100×100)"
+    assert refused.content[0].text == "out_of_bounds: (140, 0) is outside frame f1 (100×100) (x < 100)"
     assert refused.structured_content["code"] == "out_of_bounds" and refused.structured_content["hint"] == "x < 100"
     assert crashed.is_error is True and "kaboom" in crashed.content[0].text and not crashed.structured_content
     assert hooked.is_error is True and hooked.structured_content["code"] == "device_unavailable"

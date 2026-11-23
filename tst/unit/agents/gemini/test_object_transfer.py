@@ -55,6 +55,7 @@ def test_card_offers_every_object_form_and_no_s3_form(app):
         "oneOf": [{"required": ["skill_md"]}, {"required": ["skill_bundle"]}],
     }
     assert extension_methods(app, a2a_server.TRAJECTORY_V1.uri)["get"]["request"] == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
@@ -145,7 +146,7 @@ def test_the_validator_reads_one_task_inline_then_through_its_grant(monkeypatch,
     monkeypatch.setattr(a2a_server, "run_gemini", _run_gemini)
     task_id = send(client, "go")["id"]
 
-    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": trajectory}
+    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": trajectory, "format": a2a_server.TRAJECTORY_FORMAT}
 
     granted = client.post(
         TRAJECTORY_PATH,
@@ -153,10 +154,10 @@ def test_the_validator_reads_one_task_inline_then_through_its_grant(monkeypatch,
     ).json()
     body = store.objects["traj/trajectory-t-1.json"]
     assert body == json.dumps(trajectory, separators=(",", ":")).encode()
-    assert granted == {"objects": {"trajectory": {"size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}}}
+    assert granted == {"objects": {"trajectory": {"size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}}, "format": a2a_server.TRAJECTORY_FORMAT}
     assert store.requests[-1].headers["content-type"] == "application/json"
     # The object form does not consume the trajectory: a later read of the same task still answers.
-    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": trajectory}
+    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": trajectory, "format": a2a_server.TRAJECTORY_FORMAT}
 
 
 # ── snapshot ─────────────────────────────────────────────────────────────────────
@@ -484,4 +485,4 @@ def test_a_refused_upload_answers_without_the_grant(monkeypatch, client, store):
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "transfer_rejected"
     assert "sig=" not in response.text and "trajectory-t-1" not in response.text
-    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": [{"type": "message"}]}
+    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": [{"type": "message"}], "format": a2a_server.TRAJECTORY_FORMAT}

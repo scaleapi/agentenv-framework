@@ -25,6 +25,7 @@ from agent_env.env.env import (
     _GATEWAY_ONLY_FIELDS, DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, Env, EnvCapabilityUnsupported, EnvNeedsGateway,
     EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox, website_child,
 )
+from agent_env.env.gateway.console_session import ConsoleSession
 from agent_env.env.gateway.constants import (
     EXT_CHANGES_URI, EXT_CLOCK_URI, EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI, EXT_STATE_URI, EXT_STEP_URI, EXT_TRAJECTORY_URI, EXT_TRIGGERS_URI,
     WELL_KNOWN_PATH,
@@ -274,10 +275,13 @@ def test_a_card_without_a_name_leaves_the_server_name_unset():
     ({"env_provider_type": "newer", "sandbox_id": "sb"}, DeployedSandboxEnv, "newer"),
     ({"sandbox_id": "sb"}, DeployedSandboxEnv, None),
     ({"gateway_url": None, "db_web_url": "https://pg/", "sandbox_id": "sb"}, DeployedGatewayEnv, "gateway"),
+    ({"gateway_url": None, "db_web_gateway_url": "https://gw/svc/pgweb/", "sandbox_id": "sb"}, DeployedGatewayEnv,
+     "gateway"),
     ({}, DeployedSandboxEnv, None),
     ({"env_provider_type": "newer"}, DeployedEnv, "newer"),
 ], ids=["gateway", "gateway-type-without-its-url", "before-the-type", "null-type", "newer-type-with-a-gateway", "newer-type-with-a-sandbox",
-        "sandbox-shape", "gateway-data-without-its-url", "untyped-without-a-sandbox", "newer-type-without-a-sandbox"])
+        "sandbox-shape", "gateway-data-without-its-url", "gateway-console-without-its-url",
+        "untyped-without-a-sandbox", "newer-type-without-a-sandbox"])
 def test_a_stored_record_loads_as_its_type_or_else_its_shape_keeping_every_field(doc, cls, provider_type):
     record = DeployedEnv.from_dict({"env_id": "e", "env_version": 1, "mcp_url": "https://m/mcp", "unknown_key": 1, **doc})
     assert (type(record), record.env_provider_type, record.mcp_url) == (cls, provider_type, "https://m/mcp")
@@ -296,6 +300,8 @@ def test_a_gateway_record_is_filled_the_way_it_always_was():
                        sandbox_ids={"mcp_server": {"slack": "srv"}}, environment_card_url=_CARD_URL, environment_card=_CARD),
     DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="https://gw.example/sb/x", gateway_mode="consistent", sandbox_id="gw",
                        sandbox_type="modal_vm", sandbox_ids={"gateway_server": "gw"}, db_web_url="https://pg/", db_mcp_url="https://dm/mcp",
+                       db_web_gateway_url="https://gw.example/sb/x/svc/pgweb/",
+                       db_mcp_gateway_url="https://gw.example/sb/x/svc/db-mcp/mcp",
                        website_frontend_urls={"shop": "https://gw/shop/"}, vnc_url="https://vnc", env_state_instance_ids=["st-1"],
                        environment_card_url=_CARD_URL, environment_card=_CARD, environment_card_read_at_utc="2026-09-28T00:00:00+00:00",
                        metadata={"k": "v"}, instance_id="i1", created_at_utc="c", expires_at_utc="x"),
@@ -409,3 +415,19 @@ async def test_readiness_of_a_record_with_no_card_url_cannot_be_asked(sent, site
     with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'ready' on urn:agentenv:website/v1"):
         await dataclasses.replace(_record(sites), environment_card_url=None).readiness()
     assert sent == []
+
+
+def test_a_pgweb_link_opens_the_gateways_pgweb_once_and_carries_no_token():
+    record = dataclasses.replace(_record(None), db_web_gateway_url="https://gw.example/svc/pgweb/", control_token="t0k")
+    url = record.pgweb_link(60)
+    base, _, link = url.partition("?pgweb_link=")
+    assert base == "https://gw.example/svc/pgweb/" and "t0k" not in url
+    session = ConsoleSession("t0k")
+    assert session.opens(link) and not session.opens(link)
+
+
+@pytest.mark.parametrize("changes", [{"db_web_gateway_url": None, "control_token": "t0k"},
+                                     {"db_web_gateway_url": "https://gw.example/svc/pgweb/", "control_token": None}],
+                         ids=["no-pgweb", "no-token"])
+def test_a_record_without_pgweb_at_its_gateway_or_a_token_has_no_pgweb_link(changes):
+    assert dataclasses.replace(_record(None), **changes).pgweb_link() is None

@@ -19,7 +19,7 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--gateway-mode", type=click.Choice([m.value for m in GatewayMode], case_sensitive=False),
               default=GatewayMode.PERFORMANCE.value, help="Gateway mode (performance or consistent)")
 @click.option("--sandbox", default=None,
-              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, tensorlake, tenki, boxd, coreweave, daytona, boat, agent37, local) "
+              help="Sandbox backend(s): a built-in (modal, modal_vm, e2b, tensorlake, tenki, boxd, coreweave, daytona, boat, agent37, kosa8, local) "
                    "or a name from [sandbox.providers] in .agentenv/config.toml; comma-separated for a "
                    "fallback chain. Defaults to [sandbox].default (else local) when omitted.")
 @click.option("--service-db", "service_db_env_id", default=None,
@@ -103,10 +103,11 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
     # A record without a gateway has none of the gateway's URLs.
     if isinstance(deployed_env, DeployedGatewayEnv):
         click.echo("Env Gateway Url: " + click.style(deployed_env.gateway_url, fg="yellow"))
-        if deployed_env.db_web_url:
-            click.echo("Env DB Web Url: " + click.style(deployed_env.db_web_url, fg="yellow"))
-        if deployed_env.db_mcp_url:
-            click.echo("Env DB MCP Url: " + click.style(deployed_env.db_mcp_url, fg="yellow"))
+        # The SQL consoles take the env's control token, as an Authorization: Bearer header.
+        if deployed_env.db_web_gateway_url:
+            click.echo("Env DB Web Url: " + click.style(deployed_env.db_web_gateway_url, fg="yellow"))
+        if deployed_env.db_mcp_gateway_url:
+            click.echo("Env DB MCP Url: " + click.style(deployed_env.db_mcp_gateway_url, fg="yellow"))
         if deployed_env.vnc_url:
             click.echo("VNC Url: " + click.style(deployed_env.vnc_url, fg="yellow"))
         for svc_name, url in (deployed_env.website_frontend_urls or {}).items():

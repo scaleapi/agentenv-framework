@@ -30,13 +30,13 @@ from urllib.parse import urlsplit
 
 from agent_env.config import get_config
 from agent_env.entity.refs import RefRole, ref_sites
-from agent_env.plugins._bundles import AGENT_ALIASES
+from agent_env.plugins._bundles import AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host
-from agent_env.store.routing import configured_store, namespace_routing
+from agent_env.store.routing import configured_store, namespace_routing, shared_store
 from agent_env.task_step.context import context_path_segments, renamed_context_path
 from agent_env.task_step.registry import get_task_step_registry
 
@@ -82,22 +82,28 @@ def register_bundle(
     on_progress: Callable[[str], None] | None = None,
     sandbox: str | None = None,
     emulate: bool = True,
+    skip_lint: bool = False,
 ) -> Registration:
     """Register the bundle at ``root``: ``tasks`` and ``evals`` by name, or with neither every task and eval it has,
     or every entity when it has none, with what they reference. ``prefix`` opens each entry's registry id, the folder's
     name and a dash unless given. An id the store holds already takes a new version, whoever wrote it. ``on_progress``
     is given a line for each write, as it's checked or written, and before each image is built. A folder with no
     bundle.toml that uses plugin packages is given one, or told what to declare, as ``declaring`` says: by default as a
-    run of the folder would (``declaring_for``). ``sandbox`` is the provider its computer envs compose on, by default
-    the env's, emulating an arch no link runs natively unless ``emulate`` is False, which leaves it skipped.
+    run of the folder would (``declaring_for``). ``sandbox`` is the provider its tasks deploy on, as a run's is: each
+    computer env composes only the forms its deploys there boot, and without it every form its base declares. Either
+    way it composes on the env's provider, emulating an arch no link of that one runs natively unless ``emulate`` is
+    False, which leaves it skipped. ``skip_lint`` registers tasks task lint's own rules
+    refuse (``Registration.plan.lint_findings``).
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
-    written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
-    composing = Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
+    written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse. So does
+    a computer env whose compose left no build a deploy can boot, once every entity is written and before any task:
+    registering again composes what it has left."""
+    composing = Composing.for_run(build_sandbox_provider(sandbox), emulate) if sandbox else Composing(None, emulate)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
         resolved = resolve_bundle(bundle)
-        plan = _plan(resolved, tasks, evals)
+        plan = _plan(resolved, tasks, evals, skip_lint)
         ids, problems = registry_ids(plan, _prefix(bundle, prefix))
         if problems:
             raise BundleError(problems)
@@ -106,7 +112,7 @@ def register_bundle(
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
         ledger = RegistrationLedger(target, registered, identity, commit, dirty)
-        problems = list(_unregistrable(registered, shared))
+        problems = [*_aliased_envs_refused(plan, ids, shared), *_unregistrable(registered, shared)]
         if problems:
             raise BundleError(problems)
         requires = tuple(declare(resolved, declaring or declaring_for(bundle.root, installed=False, dry_run=dry_run)))
@@ -116,13 +122,8 @@ def register_bundle(
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
             on_write=lambda done: say(f"  {registered_line(registered, done)}"), composing=composing,
-            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"))
+            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"), bootable=True)
     return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
-
-
-def shared_store(store: DocumentStore) -> bool:
-    """Whether ``store`` is other than this machine's own, so others read what's written to it."""
-    return not isinstance(store, LocalSqliteDocumentStore)
 
 
 def registered_line(plan: Plan, done: Materialized) -> str:
@@ -131,7 +132,7 @@ def registered_line(plan: Plan, done: Materialized) -> str:
     return f"{_label(plan, done.write)} -> {done.write.kind.store} {done.write.id} v{done.version} ({why})"
 
 
-def _plan(resolved: ResolvedBundle, tasks: Sequence[str], evals: Sequence[str]) -> Plan:
+def _plan(resolved: ResolvedBundle, tasks: Sequence[str], evals: Sequence[str], skip_lint: bool = False) -> Plan:
     """The plan of ``tasks`` and ``evals``, or of every task and eval, or of every entity of a bundle with none."""
     entries = resolved.bundle.entries
     if not tasks and not evals:
@@ -139,7 +140,8 @@ def _plan(resolved: ResolvedBundle, tasks: Sequence[str], evals: Sequence[str]) 
         evals = [entry.name for entry in entries if entry.kind is BundleKind.EVAL]
         if not tasks and not evals:
             return plan_entities(resolved, [entry.id for entry in entries], installed=installed_bundles)
-    return plan_bundle(resolved, tasks=tasks, evals=evals, installed=installed_bundles, default_agents=False)
+    return plan_bundle(resolved, tasks=tasks, evals=evals, installed=installed_bundles, default_agents=False,
+                       skip_lint=skip_lint)
 
 
 def _prefix(bundle: Bundle, prefix: str | None) -> str:
@@ -159,10 +161,10 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
     """The registry id each ``@local`` id the plan writes takes, and each problem giving them.
 
     The bundle's own entry is ``<prefix><name>``, its name lowercased with each run of what an id can't hold made
-    ``-``. An installed bundle's agent pulled in by a reference takes the first alias its bundle gives it, which the
-    reference named it by; any other entity of an installed bundle has no registry id, and an env's alias can't be
-    one, since no store env may start on an installed env alias's id. An id derived from another (``<id>__env_image``) keeps its suffix after the
-    other's registry id, and a task's output is ``<task id>-<name>``."""
+    ``-``. An installed bundle's agent, env or artifact pulled in by a reference takes the first alias its bundle gives
+    it, which the reference named it by; any other entity of an installed bundle has no registry id. An id derived
+    from another (``<id>__env_image``) keeps its suffix after the other's registry id, and a task's output is
+    ``<task id>-<name>``."""
     ids: dict[str, str] = {}
     problems: list[str] = []
     for write in plan.writes:
@@ -172,8 +174,8 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
         if entry in plan.origins:
             alias = _alias(plan.origins[entry], entry)
             if alias is None:
-                problems.append(f"{plan.path(entry)}: comes with an installed bundle, and only an agent with an alias "
-                                "is registered from one; name an entity the store holds instead")
+                problems.append(f"{plan.path(entry)}: comes with an installed bundle, and only an agent, env or "
+                                "artifact with an alias is registered from one; name an entity the store holds instead")
                 continue
             ids[entry.id] = alias
         elif name := _slug(entry.name):
@@ -207,8 +209,25 @@ def registry_ids(plan: Plan, prefix: str) -> tuple[dict[str, str], list[str]]:
 
 
 def _alias(bundle: Bundle, entry: BundleEntry) -> str | None:
-    aliases = bundle.aliases.get(AGENT_ALIASES, {}).get(entry.name, ()) if entry.kind is BundleKind.AGENT else ()
+    table = _ALIAS_TABLES.get(entry.kind)
+    aliases = bundle.aliases.get(table, {}).get(entry.name, ()) if table else ()
     return aliases[0] if aliases else None
+
+
+def _aliased_envs_refused(plan: Plan, ids: Mapping[str, str], shared: bool) -> Iterator[str]:
+    """For a store that isn't ``shared``, a problem for each installed bundle's env registered under its alias, which
+    this machine's own env store refuses (``EnvStore.put_document``), found before anything is written."""
+    if shared:
+        return
+    for entry in plan.origins:
+        if entry.kind is BundleKind.ENV and entry.id in ids:
+            yield (f"{plan.path(entry)}: comes with an installed bundle, so it registers under its alias "
+                   f"{ids[entry.id]!r}, and this machine's own store holds no env under an alias's id; register it "
+                   "into a shared store")
+
+
+# The aliases.toml table an installed bundle's entity of each kind takes its registry id from.
+_ALIAS_TABLES = {BundleKind.AGENT: AGENT_ALIASES, BundleKind.ENV: ENV_ALIASES, BundleKind.ARTIFACT: ARTIFACT_ALIASES}
 
 
 def _derived(entity_id: str, ids: Mapping[str, str]) -> str | None:
@@ -225,8 +244,9 @@ def _slug(name: str) -> str:
 
 
 # The fields of a Plan that hold no ``@local`` id, so a translated plan keeps them: the store's latest versions, by store
-# id, and the agent ``--agent`` names, which a registration plans without.
-_KEPT = frozenset({"store_latest", "agent", "variant"})
+# id, the agent ``--agent`` names, which a registration plans without, and task lint's warnings, which name the bundle's
+# files.
+_KEPT = frozenset({"store_latest", "agent", "variant", "lint_findings"})
 
 
 def translated(plan: Plan, ids: Mapping[str, str]) -> Plan:

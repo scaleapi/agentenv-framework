@@ -13,7 +13,8 @@ from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps import prompt_agent as pa
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, StoredTrajectory
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, text
@@ -236,11 +237,11 @@ async def test_each_user_sim_turn_records_its_trajectory_as_always_on_does(monke
                                                      {"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
     fetched = []
 
-    async def fetch(self, url, ext, task_id, prefix, name, *, sandbox_type, card=None):
+    async def fetch(url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
         fetched.append((url, task_id, prefix, sandbox_type))
-        return f"{prefix}{name}.json"
+        return StoredTrajectory(f"{prefix}{name}.json")
 
-    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", fetch)
+    monkeypatch.setattr(pa, "fetch_native_trajectory", fetch)
     step = _step()
 
     await step.execute(ctx)
@@ -411,3 +412,28 @@ async def test_agent_triggers_registered_for_the_built_in_user_are_refused_befor
                                          "user sim aren't supported yet"):
         await _step().execute(ctx)
     assert "user_sim_reads" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_hook_note_is_in_the_users_read_after_the_reply_and_never_reaches_the_agent(monkeypatch):
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    hook = _hook("notes", """
+        async def post_turn(turn, params):
+            return None if turn.last else await turn.ask_user(note="The sheet has no total.")
+        """)
+    peers = Peers(monkeypatch, {AGENT: [text("Sheet's in the folder."), text("Added it.")],
+                                USER: [said("reply", "can it have a total?")]})
+    ctx = await _context(monkeypatch)
+
+    await _step(turns=2, post_turn_hooks=[{"file_artifact_id": hook, "params": {}}]).execute(ctx)
+
+    stored = _full(_reads(ctx)[0])
+    assert stored["read"]["user_note"] == "The sheet has no total."
+    # recorded where the peer path records it, so there's one place to look for what the user sim was told
+    assert [n["note"] for n in ctx.metadata["user_side_notes"]["talk"]] == ["The sheet has no total."]
+    rendered = stored["input"]
+    assert rendered.index("Sheet's in the folder.") < rendered.index(
+        "WHAT YOU FOUND WHEN YOU CHECKED ITS WORK YOURSELF (the assistant doesn't see this):\n  The sheet has no total.")
+    sent_to_agent = [r[2]["params"]["message"]["parts"] for r in peers.requests(ctx) if r[1] == f"{AGENT}/a2a"
+                     and r[2].get("method") == "message/send"]
+    assert all("no total" not in json.dumps(parts) for parts in sent_to_agent)

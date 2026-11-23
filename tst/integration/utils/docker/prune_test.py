@@ -5,6 +5,7 @@ import io
 import shutil
 import subprocess
 import tarfile
+import time
 import uuid
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from tst.util.capabilities import missing_capability_reason
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 BASE = "mirror.gcr.io/library/python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
+#: How long to wait before pulling the base again, after each failed pull.
+PULL_WAITS_S = (10, 20)
 DOCKERFILE = f"""FROM {BASE} AS build
 COPY tools/gen.sh /gen.sh
 RUN sh /gen.sh > /built.txt
@@ -93,8 +96,14 @@ def _image_files(tag: str) -> dict[str, tuple[int, str]]:
 
 @pytest.fixture
 def docker():
+    """The tags the test builds, removed after it; its base pulled first, tried again after a failed pull, so the build
+    takes it from here rather than ask the registry for it again mid-build, which failed a build on main."""
     if shutil.which("docker") is None or subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
         pytest.skip(missing_capability_reason("docker_daemon"))
+    for wait in (*PULL_WAITS_S, None):
+        if subprocess.run(["docker", "pull", "--quiet", BASE], capture_output=True).returncode == 0 or wait is None:
+            break
+        time.sleep(wait)
     tags = []
     yield tags
     for tag in tags:

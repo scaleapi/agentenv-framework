@@ -76,6 +76,25 @@ def test_a_missing_docker_raises_rather_than_crashing(monkeypatch):
         build_image(Path("Dockerfile"), Path("."), "my-image", platform=None)
 
 
+def test_a_folder_with_a_shared_sources_toml_is_built_from_a_context_holding_what_it_takes(monkeypatch, tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\nCOPY clock/ /clock/\n")
+    (tmp_path / "shared_sources.toml").write_text('clock = "utils/faketime_clock"\n')
+    built = []
+
+    def run(argv, **kwargs):
+        context = Path(argv[-1])
+        built.append((argv[argv.index("-f") + 1], context, {p.relative_to(context).as_posix() for p in context.rglob("*")}))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(docker_build.subprocess, "run", run)
+
+    build_image(tmp_path / "Dockerfile", tmp_path, "base", platform=None)
+
+    [(dockerfile, context, files)] = built
+    assert context != tmp_path and dockerfile == str(context / "Dockerfile")
+    assert {"clock/build.sh", "clock/clock-follower"} <= files and "shared_sources.toml" not in files
+
+
 def test_importing_it_pulls_neither_cli_nor_providers():
     code = (
         "import sys; import agent_env.utils.docker.build; "

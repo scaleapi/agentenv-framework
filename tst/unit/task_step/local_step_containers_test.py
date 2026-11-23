@@ -200,7 +200,7 @@ async def test_an_installed_agent_uses_the_sandboxs_container_and_published_port
               ["container", "a2a_port"] if container_name else ["a2a_port"]}
     monkeypatch.setattr(InstallAgentTaskStep, "_extract_install_extension", AsyncMock(return_value={"params": params}))
     monkeypatch.setattr(InstallAgentTaskStep, "_wait_for_agent_card", AsyncMock(return_value={}))
-    monkeypatch.setattr(InstallAgentTaskStep, "_register_instance", lambda *a: types.SimpleNamespace(instance_id="i"))
+    monkeypatch.setattr(InstallAgentTaskStep, "_register_instance", lambda *a: types.SimpleNamespace(instance_id="i", control_token=None))
 
     await InstallAgentTaskStep(id="install", version=None, sandbox_name="h", container_name=container_name,
                                a2a_agent_id="agent").execute(context)

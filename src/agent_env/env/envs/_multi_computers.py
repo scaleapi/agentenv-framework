@@ -15,6 +15,7 @@ from agentenv_protocol.computer import tool_prefix_problem
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env, gateway_url_of
 from agent_env.env.envs.computer.utils import clock as computer_clock, sites
+from agent_env.env.envs.service_db import CONSOLE_SERVICE_NAMES
 from agent_env.env.gateway import ExternalChild
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
@@ -29,8 +30,8 @@ logger = logging.getLogger(__name__)
 def name_problems(computers: Iterable[str], *, mcp_servers: Iterable[str] = (), websites: Iterable[str] = ()) -> list[str]:
     """What's wrong with ``computers``, the environment names of a multi env's computers, beside the names of its
     ``mcp_servers`` and ``websites``: a computer serves its tools under its name and ``_``, which must make a tool prefix,
-    and the gateway knows a computer by its name alone, which no other child env and no route of the gateway's to an
-    MCP server (``mcp-<server>``) may have."""
+    and the gateway knows a computer by its name alone, which no other child env, no route of the gateway's to an MCP
+    server (``mcp-<server>``) and no SQL console's /svc key may have."""
     computers, mcp_servers = list(computers), list(dict.fromkeys(mcp_servers))
     problems = [f"computer {name!r} serves its tools under its name and '_': {problem}"
                 for name in dict.fromkeys(computers) if (problem := tool_prefix_problem(f"{name}_"))]
@@ -40,6 +41,8 @@ def name_problems(computers: Iterable[str], *, mcp_servers: Iterable[str] = (), 
                  for name in dict.fromkeys(computers) if counts[name] > 1]
     problems += [f"{name!r} is the gateway's route to MCP server {routes[name]!r}, and the gateway knows a computer by its "
                  "name alone" for name in dict.fromkeys(computers) if name in routes]
+    problems += [f"{name!r} is the gateway's route to a SQL console, and the gateway knows a computer by its name alone"
+                 for name in dict.fromkeys(computers) if name in CONSOLE_SERVICE_NAMES]
     return problems
 
 

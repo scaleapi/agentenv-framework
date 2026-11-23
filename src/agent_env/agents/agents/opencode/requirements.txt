@@ -1,5 +1,7 @@
 # The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
-# image is built again only when this folder changes. The floor is the first that serves peer-agents/v1's tools, which
-# the agent advertises without handlers of its own; raise it when the agent needs a newer protocol.
-agentenv-framework-protocol[agent]>=0.1.351
+# image is built again only when this folder changes. The floor is the first whose Usage takes the prompt cache's
+# counts (cache_read_tokens, cache_write_tokens, input_includes_cache); raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.597
 jsonschema>=4.18,<5
+# The model relay's server and client (model_relay.py).
+aiohttp>=3.9,<4

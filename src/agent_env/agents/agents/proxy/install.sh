@@ -67,7 +67,7 @@ case $mode in
       python=$root/venv/bin/python
     fi
     docker cp "$here/a2a_server.py" "$target:$root/a2a_server.py" >/dev/null
-    docker exec -d -u 0 -e A2A_PORT="$port" "$target" \
+    docker exec -d -u 0 -e A2A_PORT="$port" ${AGENTENV_CONTROL_TOKEN:+-e AGENTENV_CONTROL_TOKEN} "$target" \
       sh -c "echo \$\$ > $root/proxy.pid; exec $python $root/a2a_server.py > $root/proxy.log 2>&1"
     ;;
   *) echo "usage: install.sh host NAME PORT WORKDIR USER | install.sh container NAME PORT" >&2; exit 2 ;;

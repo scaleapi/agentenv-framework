@@ -9,7 +9,7 @@ from agent_env.bundle.installed import write_installed
 from agent_env.task.episode.run import _episode_of
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_step import TaskStep, attach_base_fields
 from agent_env.task_step.task_steps.deploy_agent import bound_deployment, live_mcp_url
 from agent_env.task_step.task_steps.install_agent import PROXY_PARAM
 
@@ -38,7 +38,7 @@ class _EpisodeAgentStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> _EpisodeAgentStep:
-        step = get_task_step_registry()[data["step"]["type"]].from_dict(data["step"])
+        step = attach_base_fields(get_task_step_registry()[data["step"]["type"]].from_dict(data["step"]), data["step"])
         return cls(**cls._base_from_dict(data), step=step, sandboxed=data["sandboxed"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -53,7 +53,8 @@ class _EpisodeAgentStep(TaskStep):
             context.deployed_agents.append(deployed)
             if system_prompt := getattr(self.step, "system_prompt", None):
                 config = A2AAgent.negotiate_agent_config(deployed.a2a_card, {"system_prompt": system_prompt})
-                await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields)
+                await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields,
+                                                 headers=deployed.control_headers)
             return context
         await asyncio.to_thread(write_installed, PROXY_AGENT_ID)
         override = {"a2a_agent_id": PROXY_AGENT_ID} if self.step.type == "deploy_agent" else {PROXY_PARAM: PROXY_AGENT_ID}

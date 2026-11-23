@@ -102,7 +102,7 @@ class BrowserConnectCdpTaskStep(BrowserStep):
         async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
             added = await client.post(agent.a2a_url + cdp_config["params"]["endpoint"], json={
                 "name": self.name, "http_url": http_url, "ws_url": ws_url,
-                "metadata": {"browser": browser or deployed.environment_card.get("name")}})
+                "metadata": {"browser": browser or deployed.environment_card.get("name")}}, headers=agent.control_headers)
         added.raise_for_status()
         role = agent.role or DEFAULT_ROLE
         hidden = None if self.keep_tools else WILDCARD

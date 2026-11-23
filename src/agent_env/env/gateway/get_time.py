@@ -18,7 +18,7 @@ from .clock import Clock, ClockError, _iso, _zone
 GET_TIME_TOOL_NAME = "get_time"
 GET_TIME_TOOL_DESCRIPTION = (
     "Returns the current date and time for this environment. The clock on the machine you are "
-    "running on is not synchronized with this environment, so do not use it and do not rely on "
+    "running on may not be synchronized with this environment, so do not rely on it or on "
     "your own assumption about today's date. Call this tool and derive from its value every "
     "absolute date, time or timestamp you pass to another tool, and every relative phrase you "
     'resolve ("today", "this week", "overdue", "the last 30 days"). current_time is in UTC, as '

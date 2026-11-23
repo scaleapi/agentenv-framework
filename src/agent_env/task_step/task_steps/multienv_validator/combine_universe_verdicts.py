@@ -14,13 +14,14 @@ from typing import ClassVar, Optional
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
 
 class CombineUniverseVerdictsStep(TaskStep):
     type: ClassVar[str] = "combine_universe_verdicts"
+    step_role = StepRole.GRADER
     entity_refs = (
         EntityRef.env("env_id"),
         EntityRef.artifact("universe_artifact_id", version_field="universe_artifact_version"),

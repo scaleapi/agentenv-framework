@@ -1,0 +1,30 @@
+#!/bin/sh
+# The image's start. As root, it makes what the agent's user must not touch, the clock page and file (the
+# clock user's from their first byte) and the egress proxy's CA (its key the egress user's alone, trusted in the
+# system store, agent-env's trust files and every certifi bundle), then starts root's supervisord (root.conf), which
+# runs the clock follower and the egress proxy, each as its own user on real time, and the A2A server as the agent's
+# user on real time, everything it starts reading the env's time from the page. Until sync_env_clock has the agent
+# follow a clock, the page holds real time and the proxy relays TLS untouched. Started as another user, the image runs
+# the A2A server alone, as before, on real time.
+set -eu
+if [ "$(id -u)" != 0 ]; then
+    exec /opt/agent/entrypoint.sh
+fi
+install -d -o root -g root -m 0700 /var/log/agentenv-root /run/agentenv-root
+install -d -o agentenv-clock -g agentenv-clock -m 0755 /run/agentenv-clock
+python3 -I /usr/local/lib/agentenv-clock/clockpage.py create agentenv-clock
+AGENTENV_SESSION_USER=agent AGENTENV_EGRESS_NSS=off \
+    /usr/local/lib/agentenv-egress/egress boot > /var/log/agentenv-root/egress-boot.log 2>&1 \
+    || { cat /var/log/agentenv-root/egress-boot.log >&2; echo "the egress proxy's boot failed" >&2; exit 2; }
+# A provider's own CA bundle stays trusted: Sail, for one, points SSL_CERT_FILE and the like at the bundle it signs
+# model requests under, and root.conf points the server's trust at agent-env's bundles instead, so the provider's goes
+# into them, and into the egress proxy's roots, which carry those requests once the clock is armed.
+for bundle in "${SSL_CERT_FILE:-}" "${REQUESTS_CA_BUNDLE:-}" "${NODE_EXTRA_CA_CERTS:-}" "${CURL_CA_BUNDLE:-}"; do
+    case "$bundle" in ""|/etc/agentenv/*) continue ;; esac
+    [ -r "$bundle" ] || continue
+    for target in /etc/agentenv/ca-bundle.pem /etc/agentenv/ca.pem /usr/local/lib/agentenv-egress/roots.pem; do
+        grep -qxF "# agentenv: $bundle" "$target" 2>/dev/null && continue
+        { printf '\n# agentenv: %s\n' "$bundle"; cat "$bundle"; } >> "$target"
+    done
+done
+exec supervisord -c /etc/agentenv/root.conf

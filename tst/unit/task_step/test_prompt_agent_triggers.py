@@ -137,14 +137,14 @@ async def test_triggers_state_is_read_at_the_stored_cards_address():
 async def test_decide_request_body_and_parse():
     captured = {}
 
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         captured["url"] = url
         captured["json"] = json
         return _resp(200, {"parts": [{"kind": "text", "text": "[Julia]: re-sweep"}], "done": False, "fired": ["re-sweep"]}, "POST")
 
     with patch.object(httpx.AsyncClient, "post", fake_post):
         out = await _step()._decide("http://sk/ext/triggers/decide", 3, "solver said X",
-                                    "conv-1", {"env-a": {"v6-rate": "fired"}})
+                                    "conv-1", {"env-a": {"v6-rate": "fired"}}, headers={})
 
     assert captured["url"] == "http://sk/ext/triggers/decide"
     assert captured["json"] == {"turn": 3, "solver_message": "solver said X",
@@ -154,12 +154,12 @@ async def test_decide_request_body_and_parse():
 
 @pytest.mark.asyncio
 async def test_decide_4xx_raises():
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         return _resp(400, {"error": "bad turn"}, "POST")
 
     with patch.object(httpx.AsyncClient, "post", fake_post):
         with pytest.raises(RuntimeError, match="agent-trigger /decide failed"):
-            await _step()._decide("http://sk/ext/triggers/decide", 1, "", "c", {})
+            await _step()._decide("http://sk/ext/triggers/decide", 1, "", "c", {}, headers={})
 
 
 # ---- _persist_env_trigger_state ---------------------------------------------

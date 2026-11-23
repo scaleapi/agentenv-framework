@@ -31,10 +31,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.a2a_agent.a2a_agent import AGENT_KEY_HOW, TAKES_CREDENTIALS
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
-from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
+from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL, no_key_for
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.bootstrap import (
     GATEWAY,
@@ -77,6 +78,9 @@ from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
+    RunContainerUnitTestsVerifierTaskStep,
+)
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
@@ -170,6 +174,9 @@ class _Walk:
                     self._sandbox(where, step)
                 elif isinstance(step, RubricsVerifierTaskStep):
                     self._judge(where, step)
+                elif isinstance(step, RunContainerUnitTestsVerifierTaskStep):
+                    if problem := step.model_key_problem():
+                        self._problem(where, problem)
                 elif isinstance(step, InstallAgentTaskStep) and step.a2a_agent_id is None and override is None:
                     self.default_agent_users.append((where, "names no agent"))
             except ValueError as e:  # a provider that names no backend, or can't be built from its config
@@ -311,7 +318,8 @@ class _Walk:
                            *(_MODEL_VARS if endpoint_given else ())})
         agent_id, version = ((override.agent_id, override.version) if override is not None
                              else (step.a2a_agent_id, step.a2a_agent_version))
-        self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given)
+        self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given,
+                           url=step.litellm_base_url or step.env_vars.get(ENV_BASE_URL))
 
     def _judge(self, where: str, step: RubricsVerifierTaskStep) -> None:
         if not step.use_agent_judge or step.agent_name is not None:
@@ -322,13 +330,21 @@ class _Walk:
 
     def _agent_deploy(self, where: str, provider: SandboxProvider, agent_id: str | None, version: int | None,
                       unnamed: str, accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts, *,
-                      given: frozenset[str] = frozenset(), needs: frozenset[str] | None = None) -> None:
-        """Check an agent deploy, ``given`` the model variables its step sets, or ``needs`` those the config must."""
+                      given: frozenset[str] = frozenset(), needs: frozenset[str] | None = None,
+                      url: str | None = None) -> None:
+        """Check an agent deploy, ``given`` the model variables its step sets and ``url`` the endpoint it names, or
+        ``needs`` those the config must."""
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = self._default_agent_id()
-        if needed := needs if needs is not None else _MODEL_VARS - given - self._agent_env_vars(agent_id, version):
-            self.model_users.append((where, needed))
+        if needs is not None:
+            self.model_users.append((where, needs))
+        elif (own := self._agent_model_vars(agent_id, version)) is not None:
+            url = url or own.get(ENV_BASE_URL)
+            if url and ENV_API_KEY not in given and ENV_API_KEY not in own and not get_config().is_model_endpoint(url):
+                self._problem(where, f"deploys agent {agent_id!r}, but {no_key_for(url, AGENT_KEY_HOW)}")
+            elif needed := _MODEL_VARS - given - own.keys():
+                self.model_users.append((where, needed))
         image = self._agent_image(agent_id, version)
         taking = self._check(where, provider, accepts, [image] if image else [], vms_load=True)
         if any(link.ON_THIS_MACHINE for link in taking):
@@ -352,14 +368,20 @@ class _Walk:
 
     # What a deploy runs
 
-    def _agent_env_vars(self, agent_id: str, version: int | None) -> frozenset[str]:
-        """The variables the agent ``agent_id`` declares for itself, which a deploy doesn't take from the config."""
+    def _agent_model_vars(self, agent_id: str, version: int | None) -> dict[str, str] | None:
+        """The model variables the agent ``agent_id`` declares for itself, which a deploy doesn't take from the config;
+        None for an agent that takes no model credentials, which a deploy hands none."""
         if (agent := self.agents.get(agent_id)) is not None:
-            return frozenset(agent.config.get("default_env_vars") or {})
-        try:
-            return frozenset(A2AAgent.get(agent_id, version).default_env_vars or {})
-        except (NotFoundError, ValueError, KeyError, TypeError):
-            return frozenset()
+            env_vars, metadata = agent.config.get("default_env_vars"), agent.config.get("metadata")
+        else:
+            try:
+                stored = A2AAgent.get(agent_id, version)
+            except (NotFoundError, ValueError, KeyError, TypeError):
+                return {}
+            env_vars, metadata = stored.default_env_vars, stored.metadata
+        if not (metadata or {}).get(TAKES_CREDENTIALS, True):
+            return None
+        return {name: value for name, value in (env_vars or {}).items() if name in _MODEL_VARS}
 
     def _agent_image(self, agent_id: str, version: int | None) -> _Image | None:
         """The image the agent ``agent_id`` runs, or None when the store doesn't hold the agent or can't read it, which
@@ -588,8 +610,10 @@ def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> Sandb
 
 
 def model_endpoint_missing(needed: frozenset[str]) -> tuple[str, str] | None:
-    """The first of the ``needed`` model variables the config can't give, and why; None when it gives them all."""
+    """The first of the ``needed`` model variables the config can't give, and why; None when it gives them all. A
+    ``[model]`` table that doesn't parse raises its own error, which would otherwise read as a missing endpoint."""
     config = get_config()
+    config.get_default_model()
     if ENV_BASE_URL in needed:
         try:
             config.get_litellm_base_url()

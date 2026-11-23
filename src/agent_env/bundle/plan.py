@@ -57,6 +57,7 @@ from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.routing import namespace_routing_enabled
+from agent_env.task.lint import Finding, lint, refuses
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
@@ -198,6 +199,9 @@ class Plan:
     alias_uses: Mapping[EntityKind, Mapping[str, AliasUse]] = field(default_factory=dict)
     agent: AgentOverride | None = None  # the agent --agent names for the solver
     variant: Varied | None = None  # what --set changes, written under its variant's ids
+    # Each selected task's task lint findings that didn't refuse it, with its path: its warnings, and its errors too
+    # when the plan skipped lint.
+    lint_findings: tuple[tuple[str, Finding], ...] = ()
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
@@ -210,14 +214,18 @@ class Plan:
 
 
 def plan_bundle(resolved: ResolvedBundle, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                installed: Installed | None = None, agent: str | None = None, default_agents: bool = True) -> Plan:
+                installed: Installed | None = None, agent: str | None = None, default_agents: bool = True,
+                skip_lint: bool = False, lint: bool = True) -> Plan:
     """Plan a run of ``tasks`` and ``evals``, each a name or id in this bundle. With neither, the
     run is every eval or, in a bundle without evals, every task. ``installed`` lists the installed bundles whose
     entities a reference pulls in (``installed_bundles``); without it, an id under one is a store id. ``agent`` names
     the agent the solver runs as, as a task's reference would, leaving the tasks as written (``Plan.agent``). Without
     ``default_agents``, a step that leaves its agent unset pulls in no configured default, as for a task written to
-    run wherever another's default applies. Raises BundleError listing every problem found."""
-    return _Planner(resolved, installed, default_agents).plan(tasks, evals, agent)
+    run wherever another's default applies. With ``skip_lint``, the errors of task lint's own rules are findings it
+    keeps (``Plan.lint_findings``), not problems; a step's config problems stay problems. Without ``lint``, task lint
+    doesn't run, for a caller that only selects tasks and checks those it keeps. Raises BundleError listing every
+    problem found."""
+    return _Planner(resolved, installed, default_agents, skip_lint, lint).plan(tasks, evals, agent)
 
 
 def plan_entities(resolved: ResolvedBundle, ids: Sequence[str], *, installed: Installed | None = None) -> Plan:
@@ -244,10 +252,14 @@ class _Pullable:
 
 
 class _Planner:
-    def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None, default_agents: bool = True):
+    def __init__(self, resolved: ResolvedBundle, installed: Installed | None = None, default_agents: bool = True,
+                 skip_lint: bool = False, lint: bool = True):
         self.resolved = resolved
         self.default_agents = default_agents
+        self.skip_lint, self.lint = skip_lint, lint
         self.problems: list[str] = []
+        self.lint_findings: list[tuple[str, Finding]] = []
+        self.lint_refused = 0
         self.nodes: dict[_Key, ResolvedEntry | BundleImage] = {}
         self.rank: dict[_Key, int] = {}
         self.edges: dict[_Key, list[_Key]] = {}
@@ -355,16 +367,34 @@ class _Planner:
 
     def _pointed(self, entry: ResolvedEntry) -> ResolvedEntry:
         """``entry`` with each store reference naming an installed alias pointed at what the alias names, pulled in, and
-        each field naming the alias naming its id; none is pointed until ``_resolve_aliases`` reads the aliases."""
+        each field naming the alias naming its id; none is pointed until ``_resolve_aliases`` reads the aliases. An
+        entity pulled in from an installed bundle has its references pointed so even where the store has an entity of
+        the alias's id (``_installed_alias``): it comes with what its aliases name."""
+        installed = entry.entry in self.origins
         references, aliased = [], {}
         for ref in entry.references:
-            if ref.local is None and (use := self._alias_of(ref)) is not None:
-                aliased[ref.kind, ref.id] = use.target_id
-                ref = self._pulled(replace(ref, id=use.target_id))
+            target = None
+            if ref.local is None:
+                target = self._installed_alias(ref) if installed else None
+                if target is None and (use := self._alias_of(ref)) is not None:
+                    target = use.target_id
+            if target is not None:
+                aliased[ref.kind, ref.id] = target
+                ref = self._pulled(replace(ref, id=target))
             references.append(ref)
         if not aliased:
             return entry
         return replace(entry, config=_renamed(entry, aliased), references=tuple(references))
+
+    def _installed_alias(self, ref: Reference) -> str | None:
+        """The id of what the installed alias ``ref``, an installed bundle's entity's store reference, names, whatever
+        the store has of the alias's id; None when it names none, pins a version, as an alias has none, or names a
+        refused alias, left to ``_alias_of`` as any other reference is."""
+        table = self.alias_tables.get(ref.kind)
+        if table is None or is_local_id(ref.id) or ref.version is not None or table.refusal(ref.id) is not None:
+            return None
+        named = table.target(ref.id)
+        return None if named is None else named.target_id
 
     def _alias_of(self, ref: Reference) -> AliasUse | None:
         """The installed alias ``ref``, a store reference, names, to point it at: None when it names none, or the store's
@@ -557,7 +587,7 @@ class _Planner:
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
             override = replace(override, version=store_latest.get((EntityKind.AGENT, override.agent_id)))
-        self._build_tasks(closure)
+        self._build_tasks(closure, linted=self.lint)
         self._check_files(closure)
         self._check_cli_loads(closure)
         self._check_env_types(closure)
@@ -565,11 +595,15 @@ class _Planner:
         self._check_environment_names(closure, store_latest)
         self._check_loaded_environments(closure, store_latest)
         if self.problems:
-            raise NotInStore(self.problems, self.missing) if self.missing else BundleError(self.problems)
+            refused = NotInStore(self.problems, self.missing) if self.missing else BundleError(self.problems)
+            if self.lint_refused:
+                refused.add_note(f"task lint found {self.lint_refused} of these; --skip-lint runs the tasks anyway")
+            raise refused
         writes = self._ordered(closure)
         return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
                     dict(self.origins), self._published(writes),
-                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override)
+                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override,
+                    lint_findings=tuple(self.lint_findings))
 
     def check(self) -> None:
         """The checks a run makes before it reads a store. A bundle with nothing to run passes only when its
@@ -1104,8 +1138,12 @@ class _Planner:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
 
-    def _build_tasks(self, closure: set[_Key]) -> None:
-        """Build each task's steps the way a write will, so a bad step fails before anything is written."""
+    def _build_tasks(self, closure: set[_Key], *, linted: bool = False) -> None:
+        """Build each task's steps the way a write will, so a bad step fails before anything is written. ``linted``,
+        for a run or registration, adds task lint: its errors are problems, unless the plan skips lint, and the rest
+        ``lint_findings``. The
+        store-free check leaves it out, since a folder ``bundle init`` writes leaves user-scoped fields for its runner
+        to fill in."""
         registry = get_task_step_registry()
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
@@ -1122,9 +1160,17 @@ class _Planner:
             self.steps[key] = steps
             if not failed:
                 try:
-                    Task(id=source.entry.id, version=None, steps=steps)
+                    task = Task(id=source.entry.id, version=None, steps=steps,
+                                headline_verifiers=source.entry.headline_verifiers)
                 except ValueError as e:
                     self.problems.append(f"{self._path(source.entry)}: {e}")
+                    continue
+                for finding in lint(task, source.config, unpinned=False) if linted else ():
+                    if refuses(finding, skip_lint=self.skip_lint):
+                        self.problems.append(f"{self._path(source.entry)}: {finding.text}")
+                        self.lint_refused += not refuses(finding, skip_lint=True)
+                    else:
+                        self.lint_findings.append((self._path(source.entry), finding))
 
     # Order
 
@@ -1239,8 +1285,9 @@ def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:
 
 
 def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) -> Any:
-    """A copy of ``entry``'s config with each field naming an alias in ``ids``, by kind, naming what it names instead:
-    a task's steps by their types' refs, any other entry's toml by its class's ``toml_refs``."""
+    """A copy of ``entry``'s config with each unpinned field naming an alias in ``ids``, by kind, naming what it names
+    instead: a task's steps by their types' refs, any other entry's toml by its class's ``toml_refs``. A pinned field
+    is left as it is, since only an unpinned reference is ever pointed at an alias's entity."""
     if not ids:
         return entry.config
     config = copy.deepcopy(entry.config)
@@ -1252,7 +1299,7 @@ def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) ->
     else:
         sites = list(ref_sites(getattr(entity_class(entry.entry), "toml_refs", ()), config, inline_pins=True))
     for site in sites:
-        if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
+        if site.ref.role is RefRole.INPUT and site.version is None and (site.ref.kind, site.value) in ids:
             site.rewrite(ids[site.ref.kind, site.value])
     if entry.entry.kind is BundleKind.TASK:
         sync_context_paths(entry.entry.config, config)

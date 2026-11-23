@@ -125,3 +125,35 @@ def test_an_env_the_store_held_under_an_aliass_id_before_keeps_taking_versions(a
     _put_before_the_alias(monkeypatch, "mail")
 
     assert _put("mail").version == 2
+
+
+@pytest.fixture
+def shared(monkeypatch):
+    """The env store is a shared one, such as the hub's, rather than this machine's own."""
+    monkeypatch.setattr(env_store_module, "shared_store", lambda store: True)
+
+
+def test_a_shared_store_holds_an_env_under_an_installed_aliass_id_and_a_task_naming_it_there_deploys_it(
+        bundles, shared):
+    """The hub runs with namespace routing off and resolves no alias, so it holds the env a task names by it."""
+    held = _put("mail")
+
+    env = Env.get("mail")
+
+    assert (env.id, env.stored_id, env.version) == ("mail", "mail", held.version)
+
+
+def test_where_aliases_resolve_the_env_a_shared_store_holds_under_an_aliass_id_is_the_one_it_names(bundles, shared):
+    """The store's env of an id wins over an alias, so a CLI run against the hub's store deploys the same env."""
+    with namespace_routing():
+        held = _put("mail")
+        _put(SHIPPED)
+
+        env = Env.get("mail")
+
+    assert (env.stored_id, env.version) == ("mail", held.version)
+
+
+def test_this_machines_own_store_refuses_an_aliass_id_with_namespace_routing_off_too(bundles):
+    with pytest.raises(ValueError, match="env id 'mail' is an alias of"):
+        _put("mail")

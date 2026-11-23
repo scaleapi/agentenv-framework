@@ -54,7 +54,7 @@ def test_a_task_is_readable_while_it_runs_and_its_log_is_its_trajectory(codex, m
         "running", a2a_server.TRAJECTORY_FORMAT, EVENTS[:1],
     )
     assert (ended["events"], ended["next"], ended["has_more"]) == (EVENTS[1:], 3, False)
-    assert final == {"trajectory": EVENTS}
+    assert final == {"trajectory": EVENTS, "format": a2a_server.TRAJECTORY_FORMAT}
 
 
 def test_a_turn_ends_its_trajectory_with_the_usage_and_model_requests_the_events_omit(codex, monkeypatch):
@@ -113,4 +113,4 @@ def test_a_canceled_task_keeps_the_events_it_emitted(codex, monkeypatch):
     canceled, final = asyncio.run(exercise())
 
     assert canceled["events"] == EVENTS[:1]
-    assert final == {"trajectory": EVENTS[:1]}
+    assert final == {"trajectory": EVENTS[:1], "format": a2a_server.TRAJECTORY_FORMAT}

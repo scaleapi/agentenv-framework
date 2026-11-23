@@ -43,7 +43,7 @@ from agent_env.env.env import DeployedEnv, Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
+    plugin_provider_like_a_builtin, provider_or_class, reset_server_data, stack_layout_of,
 )
 from agent_env.env import store as env_store
 from agent_env.env.envs import _multi_computers
@@ -52,7 +52,7 @@ from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME
-from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT
 from agent_env.providers.env_state.local_postgres import INIT_SCRIPT_MOUNT_PATH
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import derive_id
@@ -117,14 +117,14 @@ def browser_problems(envs: list[Env]) -> list[str]:
 _SERVICE_DB_IMAGE = re.compile(rf"^(  {re.escape(DATABASE_SERVICE_NAME)}:\n    image: ).*$", re.MULTILINE)
 
 
-def snapshot_compose(compose: str, db_image: str) -> str:
-    """``compose``, the file a deploy wrote, with its servicedb started from ``db_image`` and without the schema init
-    script, whose work a snapshot already holds. Every other service stays as the deploy wrote it."""
+def snapshot_compose(compose: str, db_image: str, *, compose_file: str = DEFAULT_STACK_LAYOUT.compose_file) -> str:
+    """``compose``, the file a deploy wrote at ``compose_file``, with its servicedb started from ``db_image`` and without
+    the schema init script, whose work a snapshot already holds. Every other service stays as the deploy wrote it."""
     if problem := image_reference_problem(db_image):
         raise ValueError(problem)
     swapped, count = _SERVICE_DB_IMAGE.subn(lambda match: match.group(1) + db_image, compose)
     if count != 1:
-        raise RuntimeError(f"{DOCKER_COMPOSE_PATH} names a {DATABASE_SERVICE_NAME} image {count} times, not once, so "
+        raise RuntimeError(f"{compose_file} names a {DATABASE_SERVICE_NAME} image {count} times, not once, so "
                            "the snapshot can't replace it")
     return swapped.replace(f"    volumes:\n      - ./init-schemas.sql:{INIT_SCRIPT_MOUNT_PATH}\n", "")
 
@@ -711,7 +711,7 @@ class MultiEnv(Env):
             ))
             if not recorded:
                 return set()
-            if not await _check_changelog_empty(self._sandbox):
+            if not await _check_changelog_empty(self._sandbox, layout=stack_layout_of(self._env_provider)):
                 logger.info(
                     "Not resuming: the changelog is non-empty, so this env's data has been "
                     "modified since it was loaded and every service must be re-seeded"
@@ -880,7 +880,6 @@ class MultiEnv(Env):
         from agent_env.env.envs.service_db import DB_USER
         from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
         from agent_env.providers import EnvironmentGatewayProvider
-        from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
         from agent_env.providers.env_state import LocalPostgresStateProvider
         from agent_env.config import get_config, service_db_env_id
 
@@ -888,6 +887,7 @@ class MultiEnv(Env):
             raise RuntimeError("Environment not deployed - call deploy() first")
         if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
             raise NotImplementedError("Snapshot loading not supported on container mode")
+        layout = stack_layout_of(self._env_provider)
         db_image = Artifact.get(snapshot.db_image_artifact_id, snapshot.db_image_artifact_version)
         if not isinstance(db_image, DockerImageArtifact):
             raise RuntimeError(f"Snapshot artifact {snapshot.db_image_artifact_id} is not a DockerImageArtifact")
@@ -896,19 +896,21 @@ class MultiEnv(Env):
 
         logger.info("Pointing docker-compose.yml's servicedb at the snapshot image...")
         # The write adds back the newline cat returns, so the file doesn't grow a blank line each reload.
-        deployed = (await self._sandbox.exec_script(f"cat {DOCKER_COMPOSE_PATH}")).removesuffix("\n")
-        compose = snapshot_compose(deployed, db_image.image_name)
+        deployed = (await self._sandbox.exec_script(f"cat {layout.compose_file}")).removesuffix("\n")
+        compose = snapshot_compose(deployed, db_image.image_name, compose_file=layout.compose_file)
         gw = EnvironmentGatewayProvider()
         gw._sandbox = self._sandbox
+        gw._stack_layout = layout
         # The state store is the deploy's local Postgres; the changelog triggers below run through it.
         gw._state_provider = LocalPostgresStateProvider(service_db_config=Env.get(service_db_env_id(get_config())).to_config())
         gw._state_instance = LocalPostgresStateProvider.default_instance()
-        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose)
+        await gw._write_file(self._sandbox, layout.compose_file, compose)
 
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")
         await self._sandbox.exec_script(
-            f"cd {GATEWAY_APP_DIR} && docker compose rm -sf -v {DATABASE_SERVICE_NAME} && docker compose up -d {DATABASE_SERVICE_NAME} 2>&1"
+            f"cd {layout.app_dir} && {layout.compose_command_from_app_dir} rm -sf -v {DATABASE_SERVICE_NAME} && "
+            f"{layout.compose_command_from_app_dir} up -d {DATABASE_SERVICE_NAME} 2>&1"
         )
 
         # Wait for servicedb to be healthy
@@ -916,7 +918,7 @@ class MultiEnv(Env):
         for i in range(60):
             try:
                 await self._sandbox.exec_script(
-                    f"docker compose -f {DOCKER_COMPOSE_PATH} exec -T {DATABASE_SERVICE_NAME} pg_isready -U {DB_USER}",
+                    f"{layout.compose_command} exec -T {DATABASE_SERVICE_NAME} pg_isready -U {DB_USER}",
                 )
                 logger.info(f"servicedb healthy after {i + 1}s")
                 break
@@ -938,7 +940,7 @@ class MultiEnv(Env):
                                               if name != DATABASE_SERVICE_NAME)))
         logger.info(f"Recreating services: {svc_list}")
         await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")
-        await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))
+        await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(layout.host_port(AGENT_ENV_GATEWAY_MCP_PORT)))
 
         # Install changelog triggers for each service
         for name in environment_names:

@@ -13,7 +13,7 @@ import subprocess
 import time
 
 import pytest
-from tst.unit.agents.claude_code.agent import AGENT_DIR, claude_bridge
+from tst.unit.agents.claude_code.agent import PYTHONPATH, claude_bridge
 
 
 
@@ -184,7 +184,7 @@ def test_stopping_the_agents_server_kills_the_clis_of_turns_still_running_and_th
     (bin_dir / "claude").write_text(f'#!/bin/sh\n{tool} > /dev/null 2>&1 < /dev/null & echo "$$ $!" > {pids}\nwait\n')
     (bin_dir / "claude").chmod(0o755)
     (tmp_path / "app").mkdir()
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": str(AGENT_DIR),
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHONPATH": PYTHONPATH,
            "CLAUDE_CONFIG_DIR": str(tmp_path / "state"), "AGENT_WORKSPACE_DIR": str(tmp_path / "app")}
     with log.open("w") as out:
         server = subprocess.Popen([sys.executable, "-m", "uvicorn", "a2a_server:app", "--host", "127.0.0.1",

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import functools
 import shlex
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, distribution, version
 from typing import Any, Optional
 
@@ -28,6 +28,16 @@ def installed(name: str) -> Optional[str]:
         return version(name)
     except PackageNotFoundError:
         return None
+
+
+def distribution_holding(module: str, packages: Mapping[str, Sequence[str]]) -> Optional[str]:
+    """The one installed distribution whose files hold ``module``, given ``packages`` (``packages_distributions()``);
+    None when none or several do, as for a module on the path or an editable install."""
+    names = list(dict.fromkeys(packages.get(module.partition(".")[0], ())))
+    if len(names) > 1:  # a namespace package: the one whose files hold the module
+        files = {f"{module.replace('.', '/')}.py", f"{module.replace('.', '/')}/__init__.py"}
+        names = [name for name in names if files & {str(file) for file in distribution(name).files or ()}]
+    return names[0] if len(names) == 1 else None
 
 
 def incompatibility(dist: Any) -> Optional[str]:

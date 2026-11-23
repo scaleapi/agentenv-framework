@@ -494,6 +494,29 @@ def test_a_built_image_is_made_from_every_file_of_its_folder_the_toml_too(bundle
     assert not rebuilt[agent].unchanged
 
 
+def test_a_built_image_is_made_from_what_its_shared_sources_toml_takes_too(bundle_dir, tmp_path, monkeypatch):
+    sources = tmp_path / "sources"
+    (sources / "utils/clock").mkdir(parents=True)
+    library = sources / "utils/clock/clock.c"
+    library.write_text("int now;\n")
+    for module in ("agent_env.utils.paths", "agent_env.utils.docker.context"):
+        monkeypatch.setattr(f"{module}.SOURCES", str(sources.resolve()))
+    monkeypatch.setattr(plan_module, "published_bundle_image", lambda _: None)
+    (bundle_dir / "agents/solver").mkdir(parents=True)
+    (bundle_dir / "agents/solver/Dockerfile").write_text("FROM scratch\nCOPY clock/ /clock/\n")
+    (bundle_dir / "agents/solver/shared_sources.toml").write_text('clock = "utils/clock"\n')
+    (bundle_dir / "tasks/t.json").write_text(
+        _steps({"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"}))
+    image = f"{ROOT}/solver__agent_image"
+    assert _run(bundle_dir)[image].reasons == ("new",)
+
+    library.write_text("int later;\n")
+    changed = _run(bundle_dir)
+
+    assert changed[image].reasons == ("files changed: clock/clock.c",)
+    assert _run(bundle_dir)[image].unchanged
+
+
 def test_a_built_images_permission_bits_are_inputs_and_a_file_artifacts_arent(bundle_dir):
     (bundle_dir / "agents/solver").mkdir(parents=True)
     (bundle_dir / "agents/solver/Dockerfile").write_text("FROM scratch\nCOPY run.sh /\n")

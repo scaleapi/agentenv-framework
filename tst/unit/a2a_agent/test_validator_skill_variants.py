@@ -35,14 +35,14 @@ class _Client:
     async def __aexit__(self, *args):
         return None
 
-    async def get(self, url, *, timeout):
+    async def get(self, url, *, timeout, headers=None):
         return httpx.Response(
             200,
             json={"skills": {"validator-test": {"description": "test"}}},
             request=httpx.Request("GET", url),
         )
 
-    async def post(self, url, *, json, timeout):
+    async def post(self, url, *, json, timeout, headers=None):
         variant = "bundle" if "skill_bundle" in json else "other"
         self.posts.append({"variant": variant, "json": json})
         status_code = 422 if variant in self.rejected_variants else 200

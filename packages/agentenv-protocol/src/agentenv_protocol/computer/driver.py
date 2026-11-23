@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -16,10 +18,10 @@ from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
                                      AgentEnvError, _error_response, _marked_members, add_websocket_route,
-                                     control_check, environment_card)
+                                     control_check, environment_card, read_only_tools)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import _linux, apps, card, svc
+from . import _linux, annotate, apps, card, svc
 from .checks import check_features, check_names
 from .dataplane import DataPlane
 from .errors import TargetUnavailable
@@ -32,6 +34,7 @@ from .prefix import ToolPrefix
 from .settings import TOOL_PREFIX_ENV, ComputerSettings, load_settings, tool_prefix_problem
 from .tools import COMPUTER_TOOLS, Tools
 
+_log = logging.getLogger(__name__)
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
 
@@ -63,7 +66,9 @@ class DriverDeclaration(BaseModel):
 
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):
     """Subclass it and mark the methods that capture and send input (see ``operations``); the class is checked when
-    it is defined. Features are class attributes, on the card. A subclass's ``__init__`` calls ``super().__init__()``.
+    it is defined. Features are class attributes, on the card; ``screenshot_delay_ms``, how long an input's screenshot
+    waits, and ``marks_own_inputs`` are class attributes that aren't. A subclass's ``__init__`` calls
+    ``super().__init__()``.
     """
 
     buttons: ClassVar[tuple[str, ...]] = ("left",)
@@ -76,6 +81,14 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     max_duration_ms: ClassVar[int] = 10_000
     max_key_repeat: ClassVar[int] = 100
     max_scroll_amount: ClassVar[int] = 100
+    #: How long after an input ``screenshot: true`` captures, in ms: about the longest this driver's screens take to
+    #: show what an input did, as a smooth scroll or the page a key opens; a deploy's ``screenshot_delay_ms`` setting
+    #: replaces it.
+    screenshot_delay_ms: ClassVar[int] = 500
+    #: The driver's own or forwarded tools, by the names it serves them under, that draw their inputs on the
+    #: recordings that draw inputs themselves, through ``mark_inputs``; any other that may act is drawn as a chip
+    #: naming it.
+    marks_own_inputs: ClassVar[frozenset[str]] = frozenset()
     #: The (width, height) modes computer-display/v1 set takes; with ``@set_display`` only.
     display_modes: ClassVar[tuple] = ()
     layouts: ClassVar[tuple[str, ...]] = ("us",)
@@ -127,10 +140,55 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return AgentEnvFastMCPApplication(card, driver).environment_card
 
     def on_tool_call(self, context: ToolContext) -> Any:
-        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has: a
-        subclass that has its own calls this one too."""
+        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has, and
+        draw a call to one of the driver's own or forwarded tools that may act on the recordings that draw inputs,
+        since it acts without ``act``, which marks the SDK's: a subclass that has its own calls this one too."""
         apps.note_agent_acted(self._computer.apps)
+        if self._computer.recordings.annotating():
+            try:
+                name = self._computer_prefix.own(context.tool)
+                if (name not in COMPUTER_TOOLS and name not in self.marks_own_inputs
+                        and self._computer_tool_acts(name)):
+                    self._computer.recordings.note([annotate.tool_mark(name, context.arguments, role=context.role,
+                                                                       at=datetime.now(timezone.utc))])
+            except Exception as e:  # a mark is best effort: the call goes ahead without one
+                _log.warning("couldn't mark %s on an annotated recording: %s: %s", context.tool, type(e).__name__, e)
         return None
+
+    def draws_inputs(self) -> bool:
+        """Whether a recording now draws inputs: until one does, a tool in ``marks_own_inputs`` has nothing to mark."""
+        return self._computer.recordings.annotating()
+
+    async def mark_inputs(self, inputs: Sequence[tuple[str, tuple]]) -> None:
+        """Draw what a call to a tool in ``marks_own_inputs`` did on the recordings that draw inputs, in the colour of
+        the role that made the call: each input a computer/v1 operation and its arguments as ``act`` takes them, at
+        points of the display in its units (``("click", (x, y, button, count, modifiers))``, ``("type_text",
+        (text,))``), or ``("tool", (name, arguments))``, a chip naming a tool and its main argument. Best effort, as an
+        SDK input's marks are: a mark that can't be made is logged."""
+        if not inputs or not self.draws_inputs():
+            return
+        try:
+            role, at = ToolContext.current().role, datetime.now(timezone.utc)
+            size = (1, 1)
+            if any(operation in annotate.POINTED for operation, _args in inputs):
+                display = await self._computer.display_now()
+                size = (display.width, display.height)
+            marks = []
+            for operation, args in inputs:
+                marks += ([annotate.tool_mark(*args, role=role, at=at)] if operation == "tool" else
+                          annotate.input_marks(operation, args, role=role, at=at, size=size))
+            self._computer.recordings.note(marks)
+        except Exception as e:
+            _log.warning("couldn't mark %s on an annotated recording: %s: %s", [operation for operation, _args in inputs],
+                         type(e).__name__, e)
+
+    def _computer_tool_acts(self, name: str) -> bool:
+        """Whether the driver's own or forwarded tool ``name``, by the name it is mounted under, may act: its
+        annotations don't say it only reads."""
+        reading = self.__dict__.get("_computer_reading")
+        if reading is None:
+            reading = self._computer_reading = read_only_tools(self, self.mounted_card().name)
+        return name not in reading
 
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
@@ -151,17 +209,20 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     def create_app(self) -> Any:
         self._computer_require_init()
-        return self._computer_front_apps(super().create_app())
+        return self._computer_finish_app(super().create_app())
 
     def mount(self, app: Any) -> Any:
         self._computer_require_init()
-        return self._computer_front_apps(super().mount(app))
+        return self._computer_finish_app(super().mount(app))
 
     async def children_environments(self) -> list[EnvironmentCard] | None:
         """The computer's apps, from the folders it composed them into."""
         return await apps.children(self._computer.apps) if self._computer.apps else None
 
-    def _computer_front_apps(self, app: Any) -> Any:
+    def _computer_finish_app(self, app: Any) -> Any:
+        """The app with the computer's apps' routes in front of them; it also logs the screenshot delay, once FastMCP has
+        set logging up."""
+        _log.info("an input's screenshot is taken %d ms after it", self._computer.effective_screenshot_delay_ms())
         app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(self._computer_forward)
         add_websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
         for logger in svc.SERVER_LOGGERS:

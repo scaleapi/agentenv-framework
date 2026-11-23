@@ -1,0 +1,84 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-redacted",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-4-5-20250929",
+  "tool_definitions": {
+   "shared": "tools/5673db6253df51dc.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-22T02:48:44.452619Z",
+   "source": "user",
+   "message": "ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432ECCCE4C1253D5E2D82641AC0E52CC2876CB\n\nThink about it, then reply with the word ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-redacted",
+     "task_id": "c5c2271e-df4a-4dde-b5c5-0aca6b9ac8f7",
+     "message_id": "b3aa8ff0ec694e31ba84fd8ebf42b415",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-22T02:48:48.302Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-4-5-20250929",
+   "message": "ok",
+   "metrics": {
+    "prompt_tokens": 33861,
+    "cached_tokens": 0,
+    "completion_tokens": 170,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 33851
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed",
+     "reasoning": [
+      {
+       "chars": 0,
+       "visibility": "omitted",
+       "signature": "Eq8GCroBCBQYAipAXpqni0E1CMdigk3sFVis9rHCe4XhBHguIHdxQQiY6DwnoET9dKiaGHODIevTvvCeLvxfHF+RwQv5RbHEAVUw3jIaY2xhdWRlLXNvbm5ldC00LTUtMjAyNTA5Mjk4AEIIdGhpbmtpbmdaJDk1MWJlYzE5LWU3ZjItNGY1NC04NjkwLTRkMjFhYmE0NmMxYZoBHAoaY2xhdWRlLXNvbm5ldC00LTUtMjAyNTA5MjmoAZCwidgGEgxrhOky+eud+ZqMUEcaDMi70zlwqMN4DMEpXyIwy6+ZX7qZMjvWkqiwpXjLfUFyBxyksK4/nAFg53AINJ/IC/qj8S0W9VX0M1ZxtFY2KqEEMSXoIqAiKTMgEz4zHXNFMzcG4omHGOVN+9h/U3HCwz3yK3iJH2gAQpXjXDDDr+2ocLJqYFDLeXOWr0KzPfClVEJnw0FXUIDCsIL1LRdRbtH0oHJ+b7isWGoD+h5Q02KgliseHFMfx1Ff85A8DrYX/HyI1BVRwu6ZFv3FXTR9ne3kplwgZE9DjNszrsVkarSheE7vYslPXpISp97shcC6/nWcHX4jTHxaOf5rvaK0o55WnebBn5ne8WvVIRr6aCrg9t4CrNx4bQWCfXXLM1C0jN2FuiYKWZyxHDHD7XV3tbJFEqOFAWNUCpl0AF+vO/MjbgR9ubddzREVgmaYvJf5jUrDyNv+gW7SZ41L0jsnJ2WRyx+ngnhhiYmUQLvT+zmT+T6bX17x9lqUssfvf8unElEIko0SgdWTqnjiT8SjsFHhxnquS54GHzk5P7cEgw3N0FWGJh3e0E9/fiDRh0OlNj/ONORU0UBWfaHmyR8jkVmPiEOt3n0AVzuawxcgUJtVBdWiR95KYZK5e83snOur4nSKJpxhtXXUSZqTw/BSA7Umu5z2NOOvQY03mXIJ+xSgunyniFzBZmAUBbcYnaQtIRMsinWfw3RiXPi1GHcOgcZid0dnnJaj9Xx3s0r/Alj9+Kg7VUpLcQNzb2gVoJB1F13xErZRed+vsyqnroxl2M14RFGUbmwzOsG5pbg53R9WLVxWHqur+jRbWzNsxSlZZxIYAQ=="
+      }
+     ]
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 33861,
+  "total_completion_tokens": 170,
+  "total_cached_tokens": 0,
+  "total_cost_usd": 0.12952125,
+  "total_steps": 2,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 33851
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   },
+   "unmatched": {
+    "system": 3
+   }
+  }
+ }
+}

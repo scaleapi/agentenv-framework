@@ -12,7 +12,7 @@ import httpx
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ TEST_PROMPT = (
 
 class VerifyA2AAgentMCPStep(TaskStep):
     type: ClassVar[str] = "verify_a2a_agent_mcp"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id"),)
 
     def __init__(

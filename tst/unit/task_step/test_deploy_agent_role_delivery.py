@@ -12,7 +12,7 @@ import httpx
 import pytest
 from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
 
-from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.a2a_agent.a2a_agent import A2AAgent, DeployedA2AAgent
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.task_step.context import TaskStepContext
@@ -55,6 +55,16 @@ class _ToolConfig(AgentConfig):
 
 TOOLS_CONFIG = _agent_config(["name", "description", "builtin_tools"])
 TOOLS_CONFIG["params"]["methods"]["set"]["request"]["schema"] = _ToolConfig.model_json_schema()
+
+
+@pytest.mark.asyncio
+async def test_every_request_to_the_agent_carries_its_control_token_and_the_record_keeps_it(wiring):
+    context = await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role="executor")
+
+    assert {r.url.path for r in wiring.requests} == {"/ext/mcp-config", "/ext/agent-config"}
+    assert {r.headers.get("agentenv-control-token") for r in wiring.requests} == {"tok"}
+    assert not any("authorization" in r.headers for r in wiring.requests)
+    assert context.deployed_agents[0].control_token == "tok"
 
 
 @pytest.mark.asyncio
@@ -245,9 +255,10 @@ class _Wiring:
         return httpx.Response(200, json={"ok": True})
 
     async def deploy(self, card: dict, *, role: str | None, env_ids=("crm",), **step_kwargs) -> TaskStepContext:
-        self.agent.deploy = AsyncMock(
-            return_value=MagicMock(a2a_url="https://agent.example", agent_card=card, sandbox_type=None)
-        )
+        self.agent.deploy = AsyncMock(return_value=DeployedA2AAgent(
+            agent_id="solver", agent_version=1, a2a_url="https://agent.example", sandbox_id="sb", agent_card=card,
+            control_token="tok",
+        ))
         step = DeployAgentTaskStep(
             id="ag", version=None, env_ids=list(env_ids), agent_name="solver", role=role, **step_kwargs
         )

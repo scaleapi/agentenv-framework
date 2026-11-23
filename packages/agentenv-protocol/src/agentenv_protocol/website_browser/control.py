@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import hashlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -16,6 +15,7 @@ from urllib.parse import urlsplit
 
 from .log import ACTOR, KEY_FIELDS, TYPING_METHODS, BrowserLog, Causes, caused, log_time, redact_url
 from ..computer.errors import DeviceUnavailable, InvalidArgument, TargetUnavailable
+from ..transfers import sha256_file
 from .devtools import DevToolsError, DevToolsPipe
 from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StartTab, StorageItem,
                      origin_of)
@@ -37,8 +37,6 @@ LIVE_START_TAB_TIMEOUT_S = 30.0
 MOVE_WITHIN_S = 5.0
 #: How a start tab settled.
 LOADED, FAILED, TIMED_OUT = "loaded", "failed", "timed_out"
-#: How much of a download each read hashes.
-HASH_CHUNK_BYTES = 1 << 20
 #: Who answered a dialog when agentenv didn't.
 AGENT = "agent"
 #: The targets agentenv's connection follows.
@@ -1358,11 +1356,8 @@ def _cause() -> dict:
 
 
 def _size_and_sha256(path: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while chunk := file.read(HASH_CHUNK_BYTES):
-            digest.update(chunk)
-    return path.stat().st_size, digest.hexdigest()
+    sha256 = sha256_file(path)
+    return path.stat().st_size, sha256
 
 
 def _now() -> str:

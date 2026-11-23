@@ -18,9 +18,10 @@ from urllib.parse import urlsplit
 import agent_env
 from agent_env.env.envs.computer.utils import site_proxy, sites
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
+from tst.util.build_context import sent
 
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
-EGRESS = BASE / "egress"
+EGRESS = sent(BASE, "egress/main.go").parent
 
 
 def _go_date(name: str) -> datetime:
@@ -80,7 +81,7 @@ def test_the_session_goes_out_through_the_address_the_proxy_listens_on():
 
 
 def test_the_pages_the_proxy_is_tested_on_are_the_ones_the_followers_writer_writes():
-    spec = importlib.util.spec_from_file_location("clockpage_written", BASE / "clock" / "clockpage.py")
+    spec = importlib.util.spec_from_file_location("clockpage_written", sent(BASE, "clock/clockpage.py"))
     page = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(page)
     golden = {name: bytes.fromhex((EGRESS / "testdata" / f"page-{name}.hex").read_text().strip())

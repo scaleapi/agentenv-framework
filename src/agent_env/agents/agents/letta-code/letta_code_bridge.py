@@ -1,4 +1,5 @@
-"""Letta Code local-backend bridge, with isolated context state and a per-turn model relay."""
+"""Letta Code local-backend bridge, with isolated context state and a per-turn model relay that counts the turn's model
+calls."""
 from __future__ import annotations
 
 import asyncio
@@ -14,14 +15,17 @@ import subprocess
 import tarfile
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
-from contextlib import asynccontextmanager
+import uuid
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, web
+from agentenv_protocol.a2a_agent import Usage
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
+
+from agent_egress import clock_armed, egress_env
+from model_relay import Calls, model_relay
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,15 @@ SESSIONS_ROOT = os.path.join(os.environ.get("HOME", "/data"), "sessions")
 # contexts on one host.
 _CONTEXT_DIR_HASH_CHARS = 16
 _CLI_TIMEOUT_S = 120
-# Largest model request body the relay accepts from the CLI.
-_RELAY_MAX_REQUEST_BYTES = 100 * 1024**2
+# What every command of a turn carries in its environment, set to the turn's own id, so the Letta processes the turn
+# left running can be found and stopped when it ends.
+_TURN_MARKER = "AGENTENV_LETTA_TURN"
+# Where the processes are listed, each with its environment and command line.
+_PROC = Path("/proc")
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 
@@ -57,11 +64,14 @@ def context_data_dir(context_id: str) -> Path:
     return Path(SESSIONS_ROOT) / ctx_hash
 
 
-def _context_env(context_id: str) -> dict[str, str]:
+def _context_env(context_id: str, urls: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for a context: its own data dir as HOME, and on an armed clock (``armed``) the egress
+    proxy (``egress_env``) for what the CLI and what it starts reach: the model relay, on loopback, which stays direct,
+    and the env's MCP servers (``urls``), which the CLI connects to itself."""
     home = context_data_dir(context_id)
     home.mkdir(parents=True, exist_ok=True)
     return {**os.environ, "HOME": str(home), "LETTA_LOCAL_BACKEND_DIR": str(home / ".letta/lc-local-backend"),
-            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1"}
+            "LETTA_LOCAL_BACKEND_EXPERIMENTAL": "1", **egress_env(os.environ, urls, armed=armed)}
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
@@ -171,6 +181,8 @@ class LettaCodeResult:
     error: str | None = None
     error_code: str | None = None
     structured_output: object | None = None
+    # What the turn's model calls used, as its model relay counted them.
+    usage: Usage | None = None
 
 
 def validate_output_format(output_format: dict) -> dict:
@@ -323,45 +335,31 @@ def _descendants(pid: int) -> list[int]:
 
 
 
-@asynccontextmanager
-async def model_relay(headers: dict[str, str], model: str, on_forward=None):
-    """Keep endpoint credentials and task attribution on requests to the configured model endpoint only. The model
-    list is the turn's model alone: the CLI merges a listed model into its own with a scan of them all, which costs
-    minutes of CPU per command over an endpoint that lists thousands."""
-    base = _base_url(os.environ)
-    async with ClientSession(timeout=ClientTimeout(total=None), auto_decompress=False) as client:
-        async def forward(request):
-            if request.method == "GET" and request.path.rstrip("/") == "/v1/models":
-                return web.json_response({"object": "list", "data": [{"id": model, "object": "model"}]})
-            if on_forward is not None:
-                on_forward()
-            outgoing = {"authorization": "Bearer " + os.environ.get("LITELLM_API_KEY", ""), **headers}
-            if request.content_type:
-                outgoing["content-type"] = request.headers.get("Content-Type", "application/json")
-            async with client.request(request.method, base + request.path_qs.removeprefix("/v1"),
-                                      data=await request.read(), headers=outgoing) as upstream:
-                response = web.StreamResponse(status=upstream.status, headers={
-                    name: value for name, value in upstream.headers.items()
-                    if name.lower() not in {"content-length", "transfer-encoding", "connection"}
-                })
-                await response.prepare(request)
-                # SSE consumers commonly close immediately after the terminal event.
-                with contextlib.suppress(ConnectionResetError):
-                    async for chunk in upstream.content.iter_any():
-                        await response.write(chunk)
-                    await response.write_eof()
-                return response
-        app = web.Application(client_max_size=_RELAY_MAX_REQUEST_BYTES)
-        app.router.add_route("*", "/{path:.*}", forward)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
+def _is_letta(cmdline: bytes) -> bool:
+    """A Letta Code process: the CLI run as itself, or by node as its script, whatever its other arguments name."""
+    return any(Path(arg.decode(errors="replace")).name in ("letta", "letta.js") for arg in cmdline.split(b"\0")[:2])
+
+
+def _stop_leftovers(turn: str) -> list[int]:
+    """Kill the Letta Code processes a turn left running, found by its marker in their environment: a background
+    Workflow's server and a subagent stuck in a tool outlive the CLI, and read the provider again on each step, so
+    their later model calls would go to the next turn's relay. In headless mode no result of theirs can reach anyone.
+    The model's own background jobs, which aren't Letta's, keep running. Where there is no /proc, none is found."""
+    marker = f"{_TURN_MARKER}={turn}".encode()
+    stopped = []
+    for entry in _PROC.iterdir() if _PROC.is_dir() else ():
+        if not entry.name.isdigit():
+            continue
         try:
-            yield f"http://127.0.0.1:{port}/v1"
-        finally:
-            await runner.cleanup()
+            found = (marker in (entry / "environ").read_bytes().split(b"\0")
+                     and _is_letta((entry / "cmdline").read_bytes()))
+        except OSError:
+            continue
+        if found:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(int(entry.name), signal.SIGKILL)
+                stopped.append(int(entry.name))
+    return stopped
 
 
 async def _command(env: dict[str, str], *args: str) -> bytes:
@@ -421,76 +419,92 @@ async def run_letta_code(
     task_id: str | None = None, role: str | None = None, attachment_paths: list[str] | None = None,
     effort: str | None = None, event_callback: Callable[[dict], None] | None = None, workspace: str = "/app",
 ) -> LettaCodeResult:
-    """A bounded CLI turn, including provider setup; cancellation kills the process tree."""
+    """A bounded CLI turn, including provider setup; cancellation kills the process tree. Its usage is what its model
+    relay counted: every model call the CLI and the processes it started made, its subagents' and summaries' too."""
+    calls = Calls()
     try:
         async with asyncio.timeout(timeout_s):
-            return await _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,
-                               project_id, task_id, role, attachment_paths, effort, event_callback, workspace)
+            result = await _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,
+                                 project_id, task_id, role, attachment_paths, effort, event_callback, workspace, calls)
     except TimeoutError:
-        return LettaCodeResult(response="", tool_call_count=0, session_id=session_id,
-                               error=f"Letta Code timed out after {timeout_s}s")
+        result = LettaCodeResult(response="", tool_call_count=0, session_id=session_id,
+                                 error=f"Letta Code timed out after {timeout_s}s")
+    finally:
+        if calls.answered or calls.unreported or calls.refused:
+            _record_attribution(project_id, task_id)
+    result.usage = calls.usage(result.tool_call_count)
+    return result
 
 
 async def _turn(prompt, context_id, session_id, model, mcp_servers, system_prompt, output_format,
-                project_id, task_id, role, attachment_paths, effort, event_callback, workspace):
+                project_id, task_id, role, attachment_paths, effort, event_callback, workspace, calls):
     model = model or DEFAULT_MODEL
     handle = "openai-compatible/" + model
-    env = _context_env(context_id)
+    env = _context_env(context_id, [info["url"] for info in (mcp_servers or {}).values()], armed=clock_armed())
+    env[_TURN_MARKER] = uuid.uuid4().hex
     home = Path(env["HOME"])
     (home / "context.json").write_text(json.dumps({"home": str(home)}))
-    attribution = _attribution_headers(project_id, task_id)
-    async with model_relay(provider_headers(os.environ, attribution), model,
-                           on_forward=lambda: _record_attribution(project_id, task_id)) as relay:
-        await _command(env, "connect", "openai-compatible", "--base-url", relay, "--api-key", "relay")
-        agent_file = home / "agent-id.json"
-        if agent_file.exists():
-            agent_id = json.loads(agent_file.read_text())["id"]
-        else:
-            agent = json.loads(await _command(env, "agents", "create", "--model", handle))
-            agent_id = agent["id"]
-            agent_file.write_text(json.dumps({"id": agent_id}))
-        _configure_agent(home, agent_id, mcp_servers or {}, role, system_prompt)
-        tools = json.loads(await _command(env, "mcp", "tools", "--full", "--agent", agent_id)) if mcp_servers else []
-        _install_mcp_tools(home, agent_id, tools)
-        skills = Path(os.environ.get("HOME", "/data")) / ".letta/skills"
-        if skills.exists():
-            shutil.copytree(skills, home / ".letta/skills", dirs_exist_ok=True)
-        # The shell tools inherit these, so nested `letta mcp` calls select the same backend and agent.
-        env["LETTA_AGENT_ID"] = agent_id
-        if output_format is not None:
-            schema = validate_output_format(output_format)
-            prompt += "\nReturn only JSON matching this schema: " + json.dumps(schema)
-        for path in attachment_paths or []:
-            prompt += "\nRead the attached file at " + path
-        cmd = ["letta", "--backend", "local", "-p", prompt, "--output-format", "stream-json", "--yolo",
-               "--model", handle, "--toolset", "default"]
-        cmd += ["--conversation", session_id] if session_id else ["--agent", agent_id, "--new"]
-        if effort:
-            target = ["--conversation", session_id] if session_id else ["--agent", agent_id]
-            await _command(env, "model", "set", handle, "--reasoning", effort, *target)
-        proc = await _started(asyncio.create_subprocess_exec(
-            *cmd, cwd=workspace, env=env, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
-        ))
-        _RUNNING.add(proc)
-        parser = _EventParser(event_callback)
+    # The relay sends the endpoint's key and the run's headers; the CLI is connected with a placeholder. Its model
+    # list is the turn's model alone: the CLI merges a listed model into its own with a scan of them all, which costs
+    # minutes of CPU per command over an endpoint that lists thousands.
+    headers = {"authorization": "Bearer " + os.environ.get("LITELLM_API_KEY", ""),
+               **provider_headers(os.environ, _attribution_headers(project_id, task_id))}
+    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, headers=headers, models=[model]) as relay:
         try:
-            stderr = await _stream_cli(proc, parser.on_line)
-        except BaseException:
-            _kill_cli(proc)
-            await _reap(proc)
-            raise
-        finally:
-            _RUNNING.discard(proc)
-        result = parser.result(stderr, proc.returncode)
-        if output_format is not None and result.error is None:
+            await _command(env, "connect", "openai-compatible", "--base-url", relay + "/v1", "--api-key", "relay")
+            agent_file = home / "agent-id.json"
+            if agent_file.exists():
+                agent_id = json.loads(agent_file.read_text())["id"]
+            else:
+                agent = json.loads(await _command(env, "agents", "create", "--model", handle))
+                agent_id = agent["id"]
+                agent_file.write_text(json.dumps({"id": agent_id}))
+            _configure_agent(home, agent_id, mcp_servers or {}, role, system_prompt)
+            tools = (json.loads(await _command(env, "mcp", "tools", "--full", "--agent", agent_id))
+                     if mcp_servers else [])
+            _install_mcp_tools(home, agent_id, tools)
+            skills = Path(os.environ.get("HOME", "/data")) / ".letta/skills"
+            if skills.exists():
+                shutil.copytree(skills, home / ".letta/skills", dirs_exist_ok=True)
+            # The shell tools inherit these, so nested `letta mcp` calls select the same backend and agent.
+            env["LETTA_AGENT_ID"] = agent_id
+            if output_format is not None:
+                schema = validate_output_format(output_format)
+                prompt += "\nReturn only JSON matching this schema: " + json.dumps(schema)
+            for path in attachment_paths or []:
+                prompt += "\nRead the attached file at " + path
+            cmd = ["letta", "--backend", "local", "-p", prompt, "--output-format", "stream-json", "--yolo",
+                   "--model", handle, "--toolset", "default"]
+            cmd += ["--conversation", session_id] if session_id else ["--agent", agent_id, "--new"]
+            if effort:
+                target = ["--conversation", session_id] if session_id else ["--agent", agent_id]
+                await _command(env, "model", "set", handle, "--reasoning", effort, *target)
+            proc = await _started(asyncio.create_subprocess_exec(
+                *cmd, cwd=workspace, env=env, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
+            ))
+            _RUNNING.add(proc)
+            parser = _EventParser(event_callback)
             try:
-                result.structured_output = json.loads(result.response)
-                Draft202012Validator(schema).validate(result.structured_output)
-            except (ValueError, ValidationError) as exc:
-                result.error = f"Letta Code response does not match output_format: {exc}"
-                result.error_code = "invalid_output_format"
-        return result
+                stderr = await _stream_cli(proc, parser.on_line)
+            except BaseException:
+                _kill_cli(proc)
+                await _reap(proc)
+                raise
+            finally:
+                _RUNNING.discard(proc)
+            result = parser.result(stderr, proc.returncode)
+            if output_format is not None and result.error is None:
+                try:
+                    result.structured_output = json.loads(result.response)
+                    Draft202012Validator(schema).validate(result.structured_output)
+                except (ValueError, ValidationError) as exc:
+                    result.error = f"Letta Code response does not match output_format: {exc}"
+                    result.error_code = "invalid_output_format"
+            return result
+        finally:
+            if stopped := _stop_leftovers(env[_TURN_MARKER]):
+                logger.info(f"stopped {len(stopped)} Letta Code processes the turn left running")
 
 
 # How much of the CLI's stdout one read takes; a line may span several reads.

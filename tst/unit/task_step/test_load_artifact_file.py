@@ -31,6 +31,8 @@ TOOL = SimpleNamespace(id="tool", version=1, command_name="tool", entrypoint="bi
 class _Sandbox:
     """Records every command and S3 pull a loader sends to a sandbox."""
 
+    mode = "vm"
+
     def scoped_name(self, name):
         return name
 

@@ -27,6 +27,9 @@ from tst.integration.computer.conftest import (BASE, FOLLOWER_BACK_S, PAGE_WRITE
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 SUPERVISOR = ["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "status"]
+#: How long the window manager may take to claim the screen once supervisord has the desktop RUNNING, and how often the
+#: root window is read meanwhile, in seconds.
+WINDOW_MANAGER_S, WINDOW_MANAGER_POLL_S = 60, 0.5
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 
 
@@ -53,14 +56,14 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         zone = _exec(name, "readlink", "/etc/localtime").strip()
         uid = _exec(name, "id", "-u", "user").strip()
         screen = _exec(name, "xdpyinfo")
-        wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
+        wm = _window_manager(name)
         # As the session user, whose process it is: root here lacks the ptrace capability to read another's.
         environment = _exec_as(name, "user", "sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -x xfwm4)/environ')
         accessibility = _exec(name, "pgrep", "-c", "at-spi2-registr")
         folders = set(_exec(name, "ls", "/home/user").split())
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    assert {line.split()[0] for line in running.splitlines()} == {"dbus", "desktop", "xvfb"}
+    assert {line.split()[0] for line in running.splitlines()} == {"clock-panel", "dbus", "desktop", "xvfb"}
     assert all(" RUNNING " in line for line in running.splitlines()), running
     assert uid == "1000" and only_session_clock_and_egress(owners)
     assert zone == "/usr/share/zoneinfo/Europe/Paris"
@@ -86,7 +89,7 @@ def test_the_desktop_comes_back_however_often_x_dies(base):
             time.sleep(1.2)
         time.sleep(5)
         running = _all_running(name)
-        wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
+        wm = _window_manager(name)
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     assert all(" RUNNING " in line for line in running.splitlines()), running
@@ -225,6 +228,18 @@ def _all_running(name: str) -> str:
             break
         time.sleep(1)
     return running
+
+
+def _window_manager(name: str) -> str:
+    """The root window's WM check once xfwm4 sets it: supervisord has the desktop RUNNING as its process starts
+    (startsecs=0), which then waits for X and starts the XFCE session, which starts xfwm4."""
+    deadline = time.monotonic() + WINDOW_MANAGER_S
+    while True:
+        wm = subprocess.run(["docker", "exec", name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], capture_output=True,
+                            text=True).stdout
+        if "window id #" in wm or time.monotonic() > deadline:
+            return wm
+        time.sleep(WINDOW_MANAGER_POLL_S)
 
 
 def _exec(name: str, *argv: str) -> str:

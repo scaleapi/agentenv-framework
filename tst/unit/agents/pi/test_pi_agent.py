@@ -69,8 +69,8 @@ def test_run_returns_final_text_usage_and_trajectory(client: TestClient, record:
     assert task["status"]["state"] == "completed"
     assert text == "Done."
     assert data["usage"] == {
-        "tool_call_count": 1, "input_tokens": 200, "output_tokens": 40, "total_tokens": 252, "cost_usd": 0.5,
-        "provider_details": {"cache_read_tokens": 10, "cache_write_tokens": 2},
+        "tool_call_count": 1, "input_tokens": 212, "output_tokens": 40, "total_tokens": 252, "cache_read_tokens": 10,
+        "cache_write_tokens": 2, "input_includes_cache": True, "cost_usd": 0.5,
     }
     invocation = json.loads(record.read_text())
     assert invocation["stdin"] == 'fix the bug\n\n{\n  "k": 1\n}'
@@ -90,6 +90,91 @@ def test_run_returns_final_text_usage_and_trajectory(client: TestClient, record:
     kinds = [event["type"] for event in trajectory]
     assert kinds[0] == "session" and "tool_execution_end" in kinds
     assert "message_update" not in kinds
+
+
+def _message(input: int, output: int, read: int, total: int) -> dict[str, Any]:
+    return {"role": "assistant", "usage": {"input": input, "output": output, "cacheRead": read, "cacheWrite": 0,
+                                           "totalTokens": total, "cost": {"total": 0}}}
+
+
+def test_usage_adds_the_cache_back_to_the_input() -> None:
+    """GPT's two calls of a smoke run through a LiteLLM proxy, as pi recorded them: the second read 1,024 cached tokens
+    of its 1,139-token prompt, which pi's ``input`` leaves out."""
+    run = pi_agent._Run(assistant_messages=[_message(1109, 21, 0, 1130), _message(115, 2, 1024, 1141)], tool_calls=1)
+
+    assert pi_agent._usage(run).to_dict() == {
+        "tool_call_count": 1, "input_tokens": 2248, "output_tokens": 23, "total_tokens": 2271,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0, "input_includes_cache": True,
+    }
+
+
+def _compacted_run(summary: dict[str, Any] | None) -> pi_agent._Run:
+    """pi-compaction-gpt as pi reported it on 2026-11-20 through Scale's LiteLLM proxy: a call that ran 18 tools, an
+    auto-compaction whose summary call (329 in, 156 out) pi reports only in its compaction_end, then the answer."""
+    run = pi_agent._Run()
+    events = [{"type": "session", "id": "s"},
+              {"type": "message_end", "message": {"role": "assistant", "usage": {
+                  "input": 195, "output": 1150, "cacheRead": 1024, "cacheWrite": 0, "totalTokens": 2369,
+                  "cost": {"total": 0}}}},
+              *({"type": "tool_execution_end"} for _ in range(18)),
+              {"type": "compaction_start", "reason": "threshold"},
+              {"type": "compaction_end", "result": summary and {"summary": "...", "usage": summary}},
+              {"type": "message_end", "message": {"role": "assistant", "usage": {
+                  "input": 326471, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 326472}}}]
+    for event in events:
+        pi_agent._record(run, event)
+    return run
+
+
+def test_usage_counts_a_compactions_summary_call() -> None:
+    """The proxy answered three calls: 328,019 input (1,024 cached) and 1,307 output in all."""
+    run = _compacted_run({"input": 329, "output": 156, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 485,
+                          "cost": {"total": 0}})
+
+    assert pi_agent._usage(run).to_dict() == {
+        "tool_call_count": 18, "input_tokens": 328019, "output_tokens": 1307, "total_tokens": 329326,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0, "input_includes_cache": True}
+
+
+def test_a_compaction_that_ended_without_usage_is_unreported() -> None:
+    assert pi_agent._usage(_compacted_run(None)).provider_details == {"unreported_calls": 1}
+
+
+def test_usage_follows_what_each_messages_total_says_its_input_holds() -> None:
+    """A total of the input and output alone says pi counted the cache in the input already; one that is neither sum
+    keeps pi's rule, unconfirmed."""
+    held = pi_agent._Run(assistant_messages=[_message(1139, 2, 1024, 1141)])
+    neither = pi_agent._Run(assistant_messages=[_message(1109, 21, 0, 1130), _message(115, 2, 1024, 0)])
+
+    assert pi_agent._usage(held).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 1139, "output_tokens": 2, "total_tokens": 1141,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0, "input_includes_cache": True}
+    assert pi_agent._usage(neither).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 2248, "output_tokens": 23, "total_tokens": 1130,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0}
+
+
+def test_a_call_that_reported_no_usage_is_unknown_not_zero() -> None:
+    """Claude's streamed answers through a LiteLLM proxy carry no usage, so pi records zeros for them."""
+    unreported = pi_agent._Run(assistant_messages=[_message(0, 0, 0, 0), _message(0, 0, 0, 0)], tool_calls=1)
+    partly = pi_agent._Run(assistant_messages=[_message(0, 0, 0, 0), _message(115, 2, 1024, 1141)])
+
+    assert pi_agent._usage(unreported).to_dict() == {
+        "tool_call_count": 1, "provider_details": {"unreported_calls": 2}}
+    assert pi_agent._usage(partly).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 1139, "output_tokens": 2, "total_tokens": 1141, "cache_read_tokens": 1024,
+        "cache_write_tokens": 0, "input_includes_cache": True, "provider_details": {"unreported_calls": 1}}
+
+
+def test_a_request_the_endpoint_refused_counts_nothing() -> None:
+    """As in pi-retry-faults on 2026-11-20: pi ends a request the proxy refused with a 500 as an error message with no
+    usage, then retries it. The refused request wasn't billed; the retry was answered."""
+    refused = {**_message(0, 0, 0, 0), "stopReason": "error", "errorMessage": "500 Internal Server Error"}
+    run = pi_agent._Run(assistant_messages=[refused, _message(1109, 21, 0, 1130)])
+
+    assert pi_agent._usage(run).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 1109, "output_tokens": 21, "total_tokens": 1130, "cache_read_tokens": 0,
+        "cache_write_tokens": 0, "input_includes_cache": True}
 
 
 def test_a_context_keeps_one_pi_session(client: TestClient, record: Path) -> None:
@@ -740,7 +825,10 @@ def test_install_extension_is_declared_on_the_card(client: TestClient) -> None:
                                 litellm_base_url="u") for command in install["install_commands"]]
     assert formatted[-1].endswith("c sh /opt/pi-a2a/start.sh")
     assert all("sk-secret" not in command.splitlines()[0] for command in formatted)
-    assert "LITELLM_API_KEY='sk-secret'" in formatted[-2].splitlines()
+    [env_file] = [command for command in formatted if "LITELLM_API_KEY" in command]
+    assert "LITELLM_API_KEY='sk-secret'" in env_file.splitlines()
+    assert install["optional_params"] == ["control_token"]
+    assert formatted[-2].splitlines()[1] == "AGENTENV_CONTROL_TOKEN=${AGENTENV_CONTROL_TOKEN:-}"
     assert all(command.startswith("$(sudo -n true 2>/dev/null && echo sudo) docker ") for command in formatted)
 
 

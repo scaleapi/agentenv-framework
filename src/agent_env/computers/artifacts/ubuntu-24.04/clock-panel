@@ -1,0 +1,127 @@
+#!/usr/bin/python3 -I
+"""The desktop panel's clock on the universe's clock. XFCE's clock plugin redraws on a timer of its own, a minute of
+real time, so when the universe clock is armed or jumps it shows the old time until that timer fires, up to a minute
+later, and the timer keeps its old phase, so the universe's next minute shows late too. This session program reads the
+clock page the follower writes (``clockpage.py``) and, when the universe moves by a second or more or its rate changes,
+has each clock on the panel redraw at once and again at the universe's next minute; while the clock runs at a rate
+other than 1, at every universe minute, at most once a second. A clock whose time zone is unset or the local zone's name
+shows local time either way, so a redraw moves it to the other and back: two changes the plugin redraws on, which leave
+the panel's config as it was, and a redraw cut short between them leaves it in one of the two, which the next redraws.
+A clock given another zone is left alone. It runs on real time (the clock's real-time marker), against which the page
+anchors the universe."""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import clockpage  # noqa: E402
+
+ZONE = os.environ.get("AGENTENV_CLOCK_ZONE", "/etc/timezone")
+POLL_S = 0.25
+#: A write that moves the universe by less (the follower re-anchoring on a new offset) isn't a jump.
+MOVED_NS = 1_000_000_000
+#: The least time between two redraws.
+GAP_NS = 1_000_000_000
+MINUTE_NS = 60_000_000_000
+PLUGIN = re.compile(r"/plugins/plugin-\d+")
+
+
+def log(event: str, **fields) -> None:
+    sys.stdout.write(json.dumps({"event": event, "real": time.time(), **fields}) + "\n")
+    sys.stdout.flush()
+
+
+def read(fd: int) -> tuple | None:
+    """The page's (armed, universe_ns, anchor_ns, rate), None while it's being written or isn't a page."""
+    raw = os.pread(fd, clockpage.LAYOUT.size, 0)
+    if len(raw) < clockpage.LAYOUT.size:
+        return None
+    magic, version, seq, universe, anchor, rate, armed, _, generation, check, mono_universe, mono_anchor = (
+        clockpage.LAYOUT.unpack(raw))
+    if (magic, version) != (clockpage.MAGIC, clockpage.VERSION) or seq & 1 or check != clockpage.check(
+            seq, universe, anchor, rate, armed, generation, mono_universe, mono_anchor):
+        return None
+    return armed, universe, anchor, rate
+
+
+def universe_at(state: tuple, now_ns: int) -> int:
+    armed, universe, anchor, rate = state
+    if not armed:
+        return now_ns
+    if rate == 0 or now_ns <= anchor:
+        return universe
+    return universe + int((now_ns - anchor) * rate)
+
+
+def moved(old: tuple | None, new: tuple, now_ns: int) -> bool:
+    """Whether the panel shows the wrong time after ``new`` replaced ``old``: at first sight, when it's armed."""
+    if old is None:
+        return bool(new[0])
+    return ((old[0], old[3]) != (new[0], new[3])
+            or abs(universe_at(new, now_ns) - universe_at(old, now_ns)) >= MOVED_NS)
+
+
+def next_minute(state: tuple, now_ns: int) -> int | None:
+    """The real time of the universe's next minute, None while it's frozen."""
+    rate = state[3] if state[0] else 1.0
+    if rate <= 0:
+        return None
+    return now_ns + int((MINUTE_NS - universe_at(state, now_ns) % MINUTE_NS) / rate)
+
+
+def xfconf(*args: str) -> str:
+    ran = subprocess.run(["xfconf-query", "-c", "xfce4-panel", *args], capture_output=True, text=True, timeout=10)
+    if ran.returncode:
+        raise RuntimeError(f"xfconf-query {' '.join(args)}: {ran.stderr.strip()[:200]}")
+    return ran.stdout
+
+
+def redraw(why: str) -> None:
+    try:
+        listed = dict((path, value.strip()) for path, _, value in
+                      (line.partition(" ") for line in xfconf("-p", "/plugins", "-l", "-v").splitlines()))
+        with open(ZONE) as f:
+            zone = f.read().strip()
+        clocks = [path for path, value in listed.items() if PLUGIN.fullmatch(path) and value == "clock"
+                  and listed.get(f"{path}/timezone", zone) == zone]
+        for path in clocks:
+            if f"{path}/timezone" in listed:
+                xfconf("-p", f"{path}/timezone", "-r")
+                xfconf("-p", f"{path}/timezone", "-n", "-t", "string", "-s", zone)
+            else:
+                xfconf("-p", f"{path}/timezone", "-n", "-t", "string", "-s", zone)
+                xfconf("-p", f"{path}/timezone", "-r")
+        log("redrawn", why=why, clocks=clocks)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:  # no panel or bus yet: the next change tries again
+        log("error", why=why, error=f"{type(e).__name__}: {e}"[:300])
+
+
+def main() -> None:
+    log("start", pid=os.getpid())
+    fd, state, due, redrawn = None, None, None, 0
+    while True:
+        if fd is None:
+            try:
+                fd = os.open(clockpage.PAGE, os.O_RDONLY)
+            except OSError:
+                time.sleep(POLL_S)
+                continue
+        page, now = read(fd), time.time_ns()
+        if page is not None and page != state:
+            jumped, state = moved(state, page, now), page
+            if jumped:
+                redraw("jump")
+                redrawn, due = now, next_minute(state, now)
+        if due is not None and now >= max(due, redrawn + GAP_NS):
+            redraw("minute")
+            redrawn = now
+            due = next_minute(state, now) if state[0] and state[3] != 1 else None
+        wake = POLL_S if due is None else min(POLL_S, max(0.0, (max(due, redrawn + GAP_NS) - now) / 1e9))
+        time.sleep(wake)
+
+
+if __name__ == "__main__":
+    main()

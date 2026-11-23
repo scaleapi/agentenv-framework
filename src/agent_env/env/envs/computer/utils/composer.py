@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from agentenv_protocol.computer.apps import apps_folder
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 from agentenv_protocol.computer.platform import PLATFORM_ENV, applies, entry_for
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX, ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -253,11 +255,18 @@ def _with_containers(env: ComputerEnv, pairs: list[tuple[str, str]]) -> list[tup
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
               builds: builder.Builds, progress: _Progress) -> dict:
-    """``form`` and ``arch`` built or reused, then probed when it built (gate 3)."""
-    result = _built(env, base, driver, form, arch, builds, progress)
+    """``form`` and ``arch`` built or reused, then probed when it built (gate 3). An image a release published that the
+    record holds unprobed is probed as it is, never built again: no other release's composer makes it."""
+    result = _unprobed_published(env, form, arch) or _built(env, base, driver, form, arch, builds, progress)
     if result["status"] != "unverified":
         return result
     return _probed(env, driver, form, arch, result, builds.provider, progress)
+
+
+def _unprobed_published(env: ComputerEnv, form: str, arch: str) -> dict | None:
+    """The pair's record, when it's an image a release published that's built but not probed yet."""
+    record = env.metadata.get("composed", {}).get(form, {}).get(arch) or {}
+    return dict(record) if record.get("published") and record.get("status") == "unverified" else None
 
 
 def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
@@ -317,12 +326,12 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         protocol = _stage_protocol(context)
         layer = _stage_driver(context, driver, base, {})
         apps = [(app, _stage_app(context, app, base, {})) for app in env.composed_apps()]
-        parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
-                       {"MCP_PORT": driver.port}, protocol, False)]
+        parts = [_part(layer, _services(f"driver-{gate.driver_folder(driver)}", layer.install),
+                       {"MCP_PORT": driver.port}, protocol, False, context)]
         parts += [_part(staged, dict(zip(gate.programs(app, platform_of(base.os)), [
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
             *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
-            protocol, True) for app, staged in apps]
+            protocol, True, context) for app, staged in apps]
         if (lock := _vm_bundle_lock(env, base, link, parts, context, arch, progress)) is not None:
             packages.stage_wheels(lock, build, env.stored_id)
             parts = [replace(part, wheels=tuple(wheel.file for wheel in lock.wheels.get(part.folder, [])))
@@ -378,12 +387,12 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         driver_prefix = windows_disk.DRIVERS / name
         parts = [_windows_part(layer, driver_prefix, {
             program: windows_disk.argv(command, driver_prefix)
             for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
-            protocol)]
+            protocol, context)]
         for app in env.composed_apps():
             staged = _stage_app(context, app, base, {})
             prefix = PureWindowsPath(staged.prefix)
@@ -391,7 +400,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
                       staged.served]
             commands = [server, *(windows_disk.argv(service.command, prefix) for service in staged.install.services)]
             parts.append(_windows_part(staged, prefix, dict(zip(gate.programs(app, platform_of(base.os)), commands)),
-                                       {"ENVIRONMENT_NAME": app.environment_name}, protocol))
+                                       {"ENVIRONMENT_NAME": app.environment_name}, protocol, context))
         values = env.computer_values()
         settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
                     if setting.phase == "build"}
@@ -494,14 +503,11 @@ async def _provisioned(link: SandboxProvider, source: str, name: str, build: Pat
 
 
 def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], protocol: bool,
-          app: bool) -> macos_vm_bundle.Part:
+          app: bool, context: Path) -> macos_vm_bundle.Part:
     """``layer`` as a VM bundle installs it: its programs, each run directly with its own variables when its service
-    says so, and a venv's protocol as on Linux: this checkout's source, else an app's pinned to this release, which a
-    driver's requirements name themselves."""
+    says so, and a venv's protocol as on Linux (``_protocol_spec``)."""
     direct = {service.command: service.environment or {} for service in layer.install.services if service.direct}
-    extra = "[app]" if app else ""
-    spec = (f'"$build/context/protocol{extra}"' if protocol else
-            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if app else None)
+    spec = _protocol_spec(layer, context, '"$build/context/protocol{extra}"' if protocol else None, app)
     return macos_vm_bundle.Part(layer.folder, layer.prefix, layer.install,
                           {name: (command, direct.get(command)) for name, command in programs.items()},
                           environment, _venv(layer), spec if _venv(layer) else None, layer.served, layer.steps)
@@ -525,12 +531,12 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         prefix = omarchy_disk.DRIVERS / name
         parts = [_omarchy_part(layer, prefix, {
             program: omarchy_disk.argv(command, prefix)
             for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
-            protocol)]
+            protocol, context)]
         for app in env.composed_apps():
             staged = _stage_app(context, app, base, {})
             prefix = PurePosixPath(staged.prefix)
@@ -540,7 +546,7 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             environment = {"ENVIRONMENT_NAME": app.environment_name,
                            **({PLATFORM_ENV: staged.platform} if staged.platform else {})}
             parts.append(_omarchy_part(staged, prefix, dict(zip(gate.programs(app, platform_of(base.os)), commands)),
-                                       environment, protocol))
+                                       environment, protocol, context))
         values = env.computer_values()
         settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
                     if setting.phase == "build"}
@@ -575,24 +581,21 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
 
 
 def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, list[str]],
-                  environment: dict[str, Any], protocol: bool) -> windows_disk.Part:
+                  environment: dict[str, Any], protocol: bool, context: Path) -> windows_disk.Part:
     """``layer`` as a Windows disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
-    and a venv's protocol as on Linux: this checkout's source, else an app's pinned to this release, which a driver's
-    requirements name themselves."""
-    extra = "[app]" if layer.app else ""
-    spec = (f"{windows_disk.BUILD}\\context\\protocol{extra}" if protocol else
-            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
+    and a venv's protocol as on Linux (``_protocol_spec``)."""
+    spec = _protocol_spec(layer, context, f"{windows_disk.BUILD}\\context\\protocol{{extra}}" if protocol else None,
+                          layer.app)
     return windows_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
                              layer.served, tuple(step for step, _ in layer.steps))
 
 
 def _omarchy_part(layer: _Layer, prefix: PurePosixPath, services: dict[str, list[str]], environment: dict[str, Any],
-                  protocol: bool) -> omarchy_disk.Part:
+                  protocol: bool, context: Path) -> omarchy_disk.Part:
     """``layer`` as an Omarchy disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
-    an app's own server, install steps and platform, and a venv's protocol as on Windows (``_windows_part``)."""
-    extra = "[app]" if layer.app else ""
-    spec = (f"{omarchy_disk.BUILD}/context/protocol{extra}" if protocol else
-            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
+    an app's own server, install steps and platform, and a venv's protocol as on Linux (``_protocol_spec``)."""
+    spec = _protocol_spec(layer, context, f"{omarchy_disk.BUILD}/context/protocol{{extra}}" if protocol else None,
+                          layer.app)
     return omarchy_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
                              layer.served, layer.steps, layer.platform)
 
@@ -622,7 +625,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         layer = _stage_driver(context, driver, base, from_store)
         apps = [_stage_app(context, app, base, from_store) for app in env.composed_apps()]
         layers = [layer, *apps]
-        wants = _wants(layers, _stage_protocol(context))
+        wants = _wants(layers, _stage_protocol(context), context)
         platform, held = f"linux/{arch}", []
 
         def on() -> builder.Builder:
@@ -689,10 +692,11 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
                 progress: _Progress) -> dict:
     """The status of the disk form of ``arch`` once built from ``container``, its container's result, and pushed, or
     reused, or the stage that failed and why. Its key is of the container's key, the base disk and the disk recipe;
-    the base disk is the base's own, the one published for it, or else one made on the builder from the base's
-    container and the boot recipe. Its build runs no program of ``arch``'s but that recipe's. Two composes of one disk
-    on this machine take turns, so the second reuses the first's: built again, its tag would move off the image the
-    first pinned, which a boot mounts by that name and Docker doesn't pull for a mount."""
+    the base disk is the base's own or the one published for it, whose EFI system partition and size the disk keeps,
+    or else the base's container and size, the disk then taking the recipe's own partition at that size, all a base
+    disk made from them would give it. Its build runs no program of ``arch``'s but that recipe's. Two composes of one
+    disk on this machine take turns, so the second reuses the first's: built again, its tag would move off the image
+    the first pinned, which a boot mounts by that name and Docker doesn't pull for a mount."""
     pair, platform = f"disk/{arch}", f"linux/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened):
@@ -718,33 +722,18 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
                 tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
                 on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
                          context=f"{builder.CONTEXT}/tools")
-            dockerfile = (context / "Dockerfile").read_text()
-            if base_disk is None:
-                progress.at(pair, "making the base's disk")
-                base_disk = _made_base_disk(on, base, arch, f"{base_identity} {recipe}", tools, dockerfile)
             progress.at(pair, "making the disk")
             local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
-            on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
+            on.build((context / "Dockerfile").read_text(), local, platform, {KEY_LABEL: key}, build_args={
                 "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
-                "ESP": base_disk, "TOOLS": tools})
+                "TOOLS": tools, **({"ESP": base_disk} if base_disk is not None
+                                   else {"SIZE_GB": str(base.forms.disk.min_disk_gb)})})
             attempt.stage = "push"
             progress.at(pair, "pushing the disk")
             on.push(local, ref, store)
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
                     "builder": on.name, "built_at": now()}
     return attempt.result
-
-
-def _made_base_disk(on: builder.Builder, base: ComputerArtifact, arch: str, made_from: str, tools: str,
-                    dockerfile: str) -> str:
-    """The base's disk for ``arch``, made on ``on`` from the base's container with the boot recipe's ``dockerfile`` at
-    the base's size, under a tag of ``made_from``, what it's made from."""
-    source, _ = _base(base, arch)
-    tag = f"agentenv-computer:{hashlib.sha256(made_from.encode()).hexdigest()[:16]}-base-disk-{arch}"
-    on.build(dockerfile, tag, f"linux/{arch}", {}, build_args={
-        "ROOTFS": source, "ROOTFS_CONFIG": _encoded(_config(on, source, arch)), "TOOLS": tools,
-        "SIZE_GB": str(base.forms.disk.min_disk_gb)})
-    return tag
 
 
 @dataclass
@@ -916,9 +905,9 @@ class _Layer:
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
-    its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
+    its port, its folder under ``DRIVERS`` named for the name its class declares (``gate.driver_folder``), its programs and their file under ``driver-``
     as an app's are under ``app-``, so neither ever takes the other's."""
-    install, name = for_os(driver.install, base.os), gate.folder_name(driver.id, "driver")
+    install, name = for_os(driver.install, base.os), gate.driver_folder(driver)
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
            {"MCP_PORT": driver.port}, from_store)
@@ -1109,16 +1098,48 @@ def _venv(layer: _Layer) -> bool:
     return layer.install.python is not None or layer.app
 
 
-def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
-    """What each layer asks a lock for; a venv adds the protocol, for an app with its ``app`` extra: from this checkout's
-    source when ``protocol``, else an app's pinned to this release, which a driver's requirements name themselves."""
+def _wants(layers: list[_Layer], protocol: bool, context: Path) -> list[packages.Want]:
+    """What each layer asks a lock for; a venv adds the protocol as ``_protocol_spec`` says, from this checkout's
+    source when ``protocol``."""
     wants = []
     for layer in layers:
-        extra = "[app]" if layer.app else ""
-        adds = ((f"/ctx/protocol{extra}",) if protocol else
-                (f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}",) if layer.app else ())
-        wants.append(packages.Want(layer.folder, layer.install, _venv(layer), adds if _venv(layer) else ()))
+        spec = _protocol_spec(layer, context, "/ctx/protocol{extra}" if protocol else None, layer.app)
+        wants.append(packages.Want(layer.folder, layer.install, _venv(layer), (spec,) if spec and _venv(layer) else ()))
     return wants
+
+
+def _protocol_spec(layer: _Layer, context: Path, source: str | None, app: bool) -> str | None:
+    """What ``layer``'s venv, staged in ``context``, adds for the protocol, an app's with its ``app`` extra: the version
+    its requirements pin exactly, as each env a release ships pins its release's, so an env one release shipped
+    composes under another; else this checkout's ``source`` (``{extra}`` where the extra goes), when it runs from one;
+    else, for an app, this release's. A driver's requirements name the protocol themselves."""
+    extra = "[app]" if app else ""
+    if (pinned := _pinned_protocol(context / layer.folder, layer.install)) is not None:
+        return f"{_PROTOCOL}{extra}=={pinned}" if app else None
+    if source is not None:
+        return source.format(extra=extra)
+    return f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if app else None
+
+
+def _pinned_protocol(folder: Path, install: Install) -> str | None:
+    """The one version the requirements ``install`` names in ``folder`` pin the protocol to (``==`` or ``===``, no
+    wildcard), on no condition: a requirement with a marker may not apply where the venv is built, so it pins nothing."""
+    if install.python is None or not (requirements := folder / install.python).is_file():
+        return None
+    for line in requirements.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement:
+            continue
+        if canonicalize_name(requirement.name) != _PROTOCOL or requirement.marker is not None:
+            continue
+        for spec in requirement.specifier:
+            if spec.operator in ("==", "===") and "*" not in spec.version:
+                return spec.version
+    return None
 
 
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str],

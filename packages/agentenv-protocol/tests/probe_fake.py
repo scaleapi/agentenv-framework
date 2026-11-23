@@ -40,6 +40,8 @@ from agentenv_protocol.computer import (
 )
 from agentenv_protocol.computer import _linux as linux
 from agentenv_protocol.computer.conformance.checks import OWNER, STAGE
+from agentenv_protocol.computer.conformance.desk import CELL
+from agentenv_protocol.computer.conformance.desk import COLOURS as CELL_COLOURS
 from agentenv_protocol.computer.conformance.page_fixture import QUESTION, TITLE, TWO, TWO_TITLE
 
 CLIPBOARD = "agentenv-probe clipboard"
@@ -94,8 +96,10 @@ class FakeDesk:
         if not self.started:
             return
         if (at := self._in("grid", x, y)) is not None:
-            key = f"{int(at[1] // 50)},{int(at[0] // 50)}"
+            row, col = int(at[1] // CELL), int(at[0] // CELL)
+            key = f"{row},{col}"
             self.state["cells"][key] = (self.state["cells"].get(key, 0) + count) % 4
+            self._fill_cell(row, col, CELL_COLOURS[self.state["cells"][key]])
             self.state["right_clicks"] += button == "right"
             self.state["double_clicks"] += count >= 2
         elif self._in("save", x, y) is not None:
@@ -105,6 +109,16 @@ class FakeDesk:
         for box in ("name", "notes"):
             if self._in(box, x, y) is not None:
                 self.focus = box
+
+    def _fill_cell(self, row: int, col: int, colour: str) -> None:
+        """Repaint a grid cell its new colour, as the Fixture Desk does, but for the pixel the click painted."""
+        x0, y0 = self.layout["grid"][0] + col * CELL, self.layout["grid"][1] + row * CELL
+        rgb = (int(colour[1:3], 16), int(colour[3:5], 16), int(colour[5:7], 16))
+        pointer = self.driver.screen.pointer
+        for x in range(x0 + 1, x0 + CELL - 1):
+            for y in range(y0 + 1, y0 + CELL - 1):
+                if (x, y) != tuple(pointer):
+                    self.driver.screen.paint(x, y, rgb)
 
     def type(self, text: str) -> None:
         if self.focus is None:

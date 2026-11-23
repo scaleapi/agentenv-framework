@@ -35,6 +35,7 @@ from agent_env.store.image_store.image_contents import UnreadableLayerError, dis
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 FORMS = ("container", "disk", "vm_bundle")
 #: A VM bundle's image that is already on the host that boots it, by its name there, as composing leaves one.
@@ -364,6 +365,22 @@ class ComputerArtifact(Artifact):
             ctx.refuse([ctx.config_problem(f"{'.'.join(map(str, error['loc']))}: {error['msg']}") for error in e.errors()])
         except ValueError as e:
             ctx.refuse([str(e)])
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder each form's image is built from, or names from a registry, which ``from_toml``
+        reads back as it."""
+        forms = self.forms.model_dump(mode="json", exclude_none=True)
+        if self.forms.container is not None:
+            forms["container"]["image"] = out.image(self.image(), "forms.container.image")
+        if (disk := self.disk_image()) is not None:
+            forms["disk"]["image"] = out.image(disk, "forms.disk.image")
+        toml = {"type": self.type, **({"description": self.description} if self.description else {}),
+                "arch": list(self.arch), "os": self.os.model_dump(mode="json", exclude_none=True),
+                "session": self.session.model_dump(mode="json"), "forms": forms}
+        if self.config:
+            toml["config"] = {name: setting.model_dump(mode="json", exclude_defaults=True)
+                              for name, setting in self.config.items()}
+        return toml
 
     def image(self) -> DockerImageArtifact:
         """The container form's image artifact, refused when the store has no docker_image artifact of that id and

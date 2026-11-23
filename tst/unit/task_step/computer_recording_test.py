@@ -39,6 +39,7 @@ class _Computer:
         self.store, self.forgets, self.garbles, self.drop_last = store, forgets, garbles, drop_last
         self.calls: list[tuple[str, dict]] = []
         self.started: set[str] = set()
+        self.manifest: dict = {}  # what else its manifest says, as a driver's own does
 
     async def invoke(self, uri, method, params=None, **_):
         assert uri == COMPUTER_RECORDING
@@ -60,7 +61,7 @@ class _Computer:
                     {"index": 1, "path": "rec-1/0001.mp4", "uploaded": not self.drop_last}]
         if not self.drop_last:
             self.store.put(f"{root}/rec-1/0001.mp4", b"mp4-1", content_type="video/mp4")
-        manifest = {"recording_id": "rec-1", "ended_by": params["reason"], "segments": segments}
+        manifest = {"recording_id": "rec-1", "ended_by": params["reason"], "segments": segments, **self.manifest}
         self.store.put(f"{root}/rec-1/manifest.json", json.dumps(manifest).encode(), content_type="application/json")
         return {"manifests": [manifest]} if method == "end_all" else manifest
 
@@ -341,3 +342,61 @@ async def test_a_start_without_a_child_env_reads_the_envs_own_card_as_before(sto
     assert entry["error"].startswith("EnvCapabilityUnsupported: env 'shop' does not offer 'start' on ")
     context = await _start().execute(_context(_Computer(store)))
     assert "environment_name" not in context.metadata[RECORDINGS_KEY]["desk"]
+
+
+_ANNOTATING = {**_CARD, "capabilities": {"extensions": [{**_CARD["capabilities"]["extensions"][0], "params": {
+    **_CARD["capabilities"]["extensions"][0]["params"], "annotate": {"options": []}}}]}}
+
+
+@pytest.mark.asyncio
+async def test_a_recording_draws_its_inputs_unless_its_annotation_settings_turn_it_off(store):
+    on, off = _Computer(store), _Computer(store)
+    on.environment_card = off.environment_card = _ANNOTATING
+    started = (await _start().execute(_context(on))).metadata[RECORDINGS_KEY]["desk"]
+    plain = (await _start("plain", annotation_settings={"is_enabled": False}).execute(_context(off))).metadata[
+        RECORDINGS_KEY]["plain"]
+
+    [(_, annotated)], [(_, unannotated)] = on.calls, off.calls
+    assert annotated["annotate"] == {} and started["annotated"] is True
+    assert "annotate" not in unannotated and plain["annotated"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_driver_that_cant_draw_inputs_is_recorded_plain_with_a_warning_even_when_its_failures_are_fatal(
+        store, caplog):
+    """A computer composed before agent-env drew inputs lists no annotate on its card."""
+    computer = _Computer(store)
+    with caplog.at_level("WARNING"):
+        context = await _start(fail_task_on_error=True).execute(_context(computer))
+    entry = context.metadata[RECORDINGS_KEY]["desk"]
+
+    [(_, started)] = computer.calls
+    assert entry["state"] == "open" and entry["annotated"] is False and "annotate" not in started
+    assert "can't draw inputs" in caplog.text and "recording it plain" in caplog.text
+
+
+def test_annotation_settings_round_trip_only_when_set_and_take_a_boolean_is_enabled():
+    off = _start(annotation_settings={"is_enabled": False})
+    assert StartComputerRecordingTaskStep.from_dict(off.to_dict()).annotation_settings == {"is_enabled": False}
+    assert not off.annotates and _start().annotates and _start(annotation_settings={}).annotates
+    assert "annotation_settings" not in _start().to_dict()
+    for settings, problem in (({"is_enabled": "no"}, "is_enabled: input should be a valid boolean"),
+                              ({"marks": []}, "it takes is_enabled, not 'marks'"), (True, "is an object of options"),
+                              (False, "is an object of options"), ("", "is an object of options")):
+        with pytest.raises(ValueError, match=problem):
+            _start(annotation_settings=settings)
+
+
+@pytest.mark.parametrize("manifest, annotated", [({"source": "stream", "annotate": {}}, True),
+                                                 ({"source": "stream"}, False), ({}, True)],
+                         ids=["drawn", "a-native-recorders-segments", "rebuilt-from-segments"])
+@pytest.mark.asyncio
+async def test_a_recordings_entry_says_whether_its_video_was_drawn_on_as_its_drivers_own_manifest_says(
+        store, manifest, annotated):
+    """A driver that annotates can still hand over finished segments, which aren't drawn on and whose manifest names
+    no annotate; a manifest rebuilt from the segments alone can't say, so the start's answer stands."""
+    computer = _Computer(store)
+    computer.environment_card, computer.manifest = _ANNOTATING, manifest
+    context = await _end().execute(await _start().execute(_context(computer)))
+
+    assert context.metadata[RECORDINGS_KEY]["desk"]["annotated"] is annotated

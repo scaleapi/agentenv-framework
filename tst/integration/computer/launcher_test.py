@@ -25,6 +25,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_k
 BURST = 64
 
 
+@pytest.fixture(scope="module")
+def desktop(desktop_with_disk):
+    """The shipped desktop, its disk composed with it: these tests boot its disk image themselves."""
+    return desktop_with_disk
+
+
 @pytest.mark.asyncio
 async def test_the_launcher_takes_a_burst_of_new_connections_and_a_reset_boots_its_disk_afresh_at_its_url(desktop):
     image = _disk(desktop)

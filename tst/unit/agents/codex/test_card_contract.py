@@ -111,6 +111,7 @@ def test_request_and_response_contracts(codex):
     assert set(config["set"]["request"]["schema"]["properties"]) == set(config["set"]["request"]["supported"])
     assert config["get"] == {"method": "GET", "response": {"required": ["config"]}}
     assert methods["urn:agentenv:trajectory/v1"]["get"]["request"] == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
@@ -169,9 +170,10 @@ def test_request_and_response_contracts(codex):
 def test_install_params(codex):
     params = _extensions(codex)["urn:agentenv:install/v1"]["params"]
     assert list(params) == [
-        "install_commands", "a2a_port", "required_params", "install_commands_host", "required_params_host",
-        "workdir_host", "user_host",
+        "install_commands", "a2a_port", "optional_params", "required_params", "install_commands_host",
+        "optional_params_host", "required_params_host", "workdir_host", "user_host",
     ]
+    assert params["optional_params"] == params["optional_params_host"] == ["control_token"]
     assert params["a2a_port"] == 8000
     endpoint = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
     assert params["required_params"] == ["container", "work_dir", "agent_ctx_tar", "a2a_port", *endpoint]

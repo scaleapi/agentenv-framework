@@ -34,7 +34,7 @@ from agent_env.store.ids import HF_PREFIX, derive_id, is_local_id, validate_loca
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.context import ENV_KEYED_METADATA, context_path, context_path_segments
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
+from agent_env.task_step.task_step import TaskStep, attach_base_fields, dependencies
 from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 
 from ._fs import fold, relative, show
@@ -562,7 +562,7 @@ def build_step(step: dict) -> TaskStep:
     """The step a task's write puts, built from a copy of ``step``, so the resolved config the ledger hashes
     never changes."""
     step = copy.deepcopy(step)
-    return attach_retry_config(get_task_step_registry()[step["type"]].from_dict(step), step)
+    return attach_base_fields(get_task_step_registry()[step["type"]].from_dict(step), step)
 
 
 def _nfc(name: str) -> str:

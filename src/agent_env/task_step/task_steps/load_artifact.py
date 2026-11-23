@@ -24,6 +24,7 @@ from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.deploy_agent import bound_deployment
 from agent_env.utils.paths import validate_relative_filename
 
 logger = logging.getLogger(__name__)
@@ -328,30 +329,6 @@ class LoadArtifactTaskStep(TaskStep):
             f"this load step."
         )
 
-    @staticmethod
-    def _deploy_step_of(deployed_env) -> Optional[str]:
-        return (deployed_env.metadata or {}).get("deploy_step_id")
-
-    def _deployed_env(self, context: TaskStepContext):
-        """The deployment of `env_id` this step loads into, or None if it isn't deployed."""
-        matches = [d for d in context.deployed_envs if d.env_id == self.env_id]
-        if self.env_step_id is not None:
-            # A filter, not a hint: an unmatched id is an error, never a substitute.
-            named = [d for d in matches if self._deploy_step_of(d) == self.env_step_id]
-            if matches and not named:
-                raise RuntimeError(
-                    f"load_artifact '{self.id}': env_step_id '{self.env_step_id}' names no deployment of "
-                    f"env '{self.env_id}' (deployed by: {[self._deploy_step_of(d) for d in matches]})"
-                )
-            matches = named
-        if len(matches) > 1:
-            raise RuntimeError(
-                f"load_artifact '{self.id}': {len(matches)} deployments of env '{self.env_id}' "
-                f"(deployed by: {[self._deploy_step_of(d) for d in matches]}). Set env_step_id "
-                "to the deploy_env step this load should target."
-            )
-        return matches[0] if matches else None
-
     def _resolve_inputs(self, context: TaskStepContext) -> _LoadInputs:
         """Resolve ``(artifacts, downloads, destination_path)``, honoring per-run
         ``step_overrides``. An override wins over the stored value; an explicit
@@ -445,7 +422,7 @@ class LoadArtifactTaskStep(TaskStep):
 
         deployed = None
         if self.env_id is not None:
-            deployed = self._deployed_env(context)
+            deployed = bound_deployment(context, self.env_id, env_step_id=self.env_step_id, step_id=self.id)
             if deployed is None:
                 raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
 

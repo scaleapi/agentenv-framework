@@ -12,12 +12,16 @@ from pytest_socket import enable_socket, socket_allow_hosts
 
 import agent_env.providers.sandbox_providers.sandbox_provider as sandbox_provider
 import agent_env.task.episode.run as episode_run
+from agentenv_protocol.a2a_agent import Usage
+
+from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.artifact import EnvironmentUniverseArtifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import Outcome, RunInterrupted, run_bundle
 from agent_env.bundle.installed import find_bundle
 from agent_env.config import configure, get_config
+from agent_env.config.model import ModelRole
 from agent_env.config.paths import state_root
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.store import Filter, LocalSqliteDocumentStore
@@ -35,6 +39,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
+from agent_env.task_step.usage import StepUsage
 from tst.unit.store.fakes import CollectingVm
 
 LOCAL_TASK = "@local/~/bundle/tasks/t"
@@ -115,6 +120,23 @@ async def test_an_local_run_reads_the_registry_and_writes_only_locally(sentinels
     assert {name: fa.load() for name, fa in universe.get_file_artifacts().items()} == {"out.txt": b"produced by the run"}
     trajectories = state_root() / "object_store" / "prompt_agent_trajectories" / "p" / "trajectory.json"
     assert trajectories.read_bytes() == b"{}"
+    assert documents.count("task_instances", Filter()) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_local_runs_usage_ledger_is_on_its_local_instance(sentinels):
+    documents, _, _, _ = sentinels
+
+    def spend(context):
+        usage = StepUsage(context, "spend")
+        usage.start(ModelRole.SOLVER, "gpt-4.1-mini", None)
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(input_tokens=100, output_tokens=10)))
+
+    await Task(id=LOCAL_TASK, version=1, steps=[_Step("spend", spend)]).run(context=TaskStepContext())
+
+    local = get_config().get_document_store().local.find_one("task_instances", Filter.of(task_id=LOCAL_TASK))
+    assert [(e["step_id"], e["input_tokens"]) for e in local["usage"]] == [("spend", 100)]
+    assert local["usage_total"]["entries"] == 1
     assert documents.count("task_instances", Filter()) == 0
 
 

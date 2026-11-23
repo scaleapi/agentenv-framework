@@ -6,13 +6,15 @@ Python reach a live site, its certificate checked against real time by the TLS s
 the driver read universe time through 30 forward jumps of 8 h, a day or a week, a rate change and a freeze; Chrome,
 Xvfb and the desktop's panel run on through them; and the driver's input reaches Chrome after every jump and, frozen,
 is drawn. Routing a site, a fresh Chrome loads it over HTTPS with the clock six years back, six years on and past
-2099, its certificate checked against the universe's time. Needs Docker and the local registry on localhost:5000."""
+2099, its certificate checked against the universe's time. The panel's clock shows the universe's date at once after
+each jump and turns with its midnight, as AT-SPI reads it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import platform
 import random
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 import pytest
@@ -56,13 +58,41 @@ LIBRARY = str(PurePosixPath(FOLLOWER).parent / "libfaketimeMT.so.1")
 FRESH_CHROME = ('profile=$(mktemp -d) && /opt/agentenv/apps/chromium/chromium/chrome/chrome --headless=new '
                 '--no-sandbox --user-data-dir="$profile" --dump-dom "$0"; rm -rf "$profile"')
 ROUTED = "https://shop.test/landed"
+#: The date the panel's clock shows, read through AT-SPI as an assistive technology reads it: its button is named by
+#: its date. The system Python's, which has AT-SPI's bindings (the atspi test app's).
+PANEL_DATE = r"""
+import re
+import gi
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+
+def find(node, depth=0):
+    for n in range(node.get_child_count()):
+        child = node.get_child_at_index(n)
+        if child is None:
+            continue
+        if child.get_role_name() == "toggle button" and re.fullmatch(r"\d{4}-\d\d-\d\d", child.get_name() or ""):
+            return child.get_name()
+        if depth < 16 and (found := find(child, depth + 1)):
+            return found
+
+desktop = Atspi.get_desktop(0)
+for n in range(desktop.get_child_count()):
+    app = desktop.get_child_at_index(n)
+    if app is not None and app.get_name() == "xfce4-panel" and (found := find(app)):
+        print(found)
+        break
+"""
+#: How late the panel's clock may show a jump or a universe midnight, AT-SPI's read through the driver included; up to a
+#: minute without the base's clock-panel.
+PANEL_LATE_S = 3.0
 
 
 def test_composed_with_the_library_in_every_process_the_computer_passes_the_probe_at_full(clock_desktop):
     results = clock_desktop.metadata["composed"]["container"]
 
     assert results[ARCH]["status"] == "ready" and results[ARCH]["probe"]["passed"], results[ARCH]
-    assert [app.environment_name for app in clock_desktop.composed_apps()] == ["chromium", "curl"]
+    assert [app.environment_name for app in clock_desktop.composed_apps()] == ["chromium", "curl", "atspi"]
 
 
 @pytest.mark.asyncio
@@ -150,8 +180,49 @@ async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now_a
     assert not report.failed
 
 
+@pytest.mark.asyncio
+async def test_the_panels_clock_shows_the_universes_date_at_once_after_each_jump_and_turns_at_its_midnight(
+        clock_desktop):
+    with namespace_routing():
+        deployed = await Env.get(clock_desktop.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            clock = UniverseClock(deployed)
+            today = await _panel_shows(deployed, _date(time.time()), since=time.time(), within=90)
+            jumps = {}
+            for days in (400, -2000, 9):
+                noon = (time.time() // DAY + days) * DAY + DAY / 2
+                jumps[days] = await _panel_shows(deployed, _date(noon), since=clock.set(noon, 1)["started"])
+            midnight = (time.time() // DAY + 30) * DAY
+            started = clock.set(midnight - 6, 1)["started"]
+            before = await _panel_shows(deployed, _date(midnight - 6), since=started)
+            turned = await _panel_shows(deployed, _date(midnight), since=started + 6, within=20)
+        finally:
+            report = await teardown_run(context)
+
+    assert today is not None, "the panel's clock never showed today's date"
+    assert all(late is not None and late <= PANEL_LATE_S for late in jumps.values()), jumps
+    assert before is not None and before <= PANEL_LATE_S, before
+    assert turned is not None and turned <= PANEL_LATE_S, turned
+    assert not report.failed
+
+
 async def _pids(deployed) -> list[str]:
     return (await session_run(deployed, PIDS)).split()
+
+
+def _date(universe: float) -> str:
+    return datetime.fromtimestamp(universe, timezone.utc).strftime("%Y-%m-%d")
+
+
+async def _panel_shows(deployed, date: str, since: float, within: float = 10) -> float | None:
+    """How long after ``since`` the panel's clock shows ``date``, or None if it doesn't within ``within``."""
+    while time.time() - since < within:
+        ran = await inside.run(deployed, ["/usr/bin/python3", "-c", PANEL_DATE], timeout_s=30)
+        if ran["exit_code"] == 0 and ran["stdout"].strip() == date:
+            return time.time() - since
+        await asyncio.sleep(0.1)
+    return None
 
 
 async def _title(deployed) -> tuple[int, str] | None:

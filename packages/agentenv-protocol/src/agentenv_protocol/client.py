@@ -13,7 +13,7 @@ import httpx
 
 from .manifest import INTERFACE_MANIFEST_PATH
 from .transfers import WriteNamespaceGrant
-from .types import INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
+from .types import CONTROL_TOKEN_HEADER, INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,11 @@ def _error_fields(response: httpx.Response) -> dict:
 def control_headers(token: str | None) -> dict[str, str]:
     """The headers that carry an env's control token to its framework-only routes; none without one."""
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def control_token_headers(token: str | None) -> dict[str, str]:
+    """The header that carries an agent's control token to its extension routes; none without one."""
+    return {CONTROL_TOKEN_HEADER: token} if token else {}
 
 
 @contextlib.contextmanager

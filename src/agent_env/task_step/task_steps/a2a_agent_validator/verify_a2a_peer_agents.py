@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import ClassVar, Optional
 
 import httpx
@@ -9,7 +10,7 @@ import httpx
 from agent_env.a2a_agent import A2AAgent
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class VerifyA2APeerAgentsStep(TaskStep):
     to use peer_send_message to relay an `expected_token` from the peer."""
 
     type: ClassVar[str] = "verify_a2a_peer_agents"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
 
     def __init__(self, id: str, version: Optional[int], a2a_agent_id: str, a2a_agent_version: Optional[int], peer_prompt_id: str, expected_token: str, depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
@@ -49,8 +51,8 @@ class VerifyA2APeerAgentsStep(TaskStep):
         extension = A2AAgent.find_extension(deployed.a2a_card or {}, A2AAgent.EXT_PEER_AGENTS)
         extension_advertised = extension is not None
         endpoint = (extension.get("params") or {}).get("endpoint", "/ext/peer-agents") if extension else "/ext/peer-agents"
-        post_ok, list_ok = await self._check_round_trip(a2a_url, endpoint)
-        sidecar_registered = await self._check_sidecar_registered(a2a_url)
+        post_ok, list_ok = await self._check_round_trip(a2a_url, endpoint, deployed.control_headers)
+        sidecar_registered = await self._check_sidecar_registered(a2a_url, deployed.control_headers)
         peer_call_ok, response_excerpt = self._check_peer_call(context)
 
         peer_entry = {
@@ -72,10 +74,10 @@ class VerifyA2APeerAgentsStep(TaskStep):
         return context
 
     @staticmethod
-    async def _check_round_trip(a2a_url: str, endpoint: str) -> tuple[bool, bool]:
+    async def _check_round_trip(a2a_url: str, endpoint: str, headers: Mapping[str, str]) -> tuple[bool, bool]:
         probe = {"peers": [{"name": "probe", "url": "http://example.invalid"}]}
         post_ok = list_ok = False
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=headers) as client:
             try:
                 post_resp = await client.post(f"{a2a_url}{endpoint}", json=probe, timeout=30)
                 post_ok = post_resp.status_code < 400
@@ -86,8 +88,8 @@ class VerifyA2APeerAgentsStep(TaskStep):
         return post_ok, list_ok
 
     @staticmethod
-    async def _check_sidecar_registered(a2a_url: str) -> bool:
-        async with httpx.AsyncClient() as client:
+    async def _check_sidecar_registered(a2a_url: str, headers: Mapping[str, str]) -> bool:
+        async with httpx.AsyncClient(headers=headers) as client:
             resp = await client.get(f"{a2a_url}/ext/mcp-config", timeout=30)
         if resp.status_code >= 400:
             return False

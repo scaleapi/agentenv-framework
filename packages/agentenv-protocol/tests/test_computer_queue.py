@@ -157,6 +157,8 @@ async def test_a_refused_key_says_what_was_meant(keys, repeat, code, hint):
     async with mcp_session(FakeDriver()) as session:
         refused = await session.call_tool("computer_key", {"keys": keys, "repeat": repeat})
     assert refused.structuredContent["code"] == code and refused.structuredContent.get("hint") == hint
+    message = refused.structuredContent["message"]
+    assert refused.content[0].text == f"{code}: {message}" + (f" ({hint})" if hint else "")
 
 
 @pytest.mark.asyncio

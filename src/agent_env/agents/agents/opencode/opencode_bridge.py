@@ -32,6 +32,10 @@ from typing import Literal
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
+from agentenv_protocol.a2a_agent import Usage
+from model_relay import Calls, model_relay
+
 logger = logging.getLogger(__name__)
 
 # The model a run uses when neither the task nor the agent-config names one; the
@@ -75,7 +79,7 @@ class OpenCodeTools(BaseModel):
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 
@@ -96,6 +100,15 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
+def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
+    armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
+    connects to itself."""
+    urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed)}
+
+
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +126,7 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
     """`opencode export <session_id>` for the given context: the transcript JSON bytes."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "export", session_id, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode export failed: {err.decode(errors='replace')[:300]}")
@@ -123,7 +136,7 @@ async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI
 async def import_session(context_id: str, json_path: str, timeout_s: int = _CLI_TIMEOUT_S) -> str | None:
     """`opencode import <json_path>` into the given context's data dir: the imported session id, from
     'Imported session: <id>'."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "import", json_path, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode import failed: {err.decode(errors='replace')[:300]}")
@@ -142,6 +155,8 @@ class OpencodeResult:
     error: str | None = None
     error_code: str | None = None
     structured_output: object | None = None
+    # What the turn's model calls used, as its model relay counted them.
+    usage: Usage | None = None
 
 
 def validate_output_format(output_format: dict) -> dict:
@@ -413,7 +428,18 @@ def _descendants(pid: int) -> list[int]:
     return found
 
 
-async def run_opencode(
+async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult:
+    """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
+    counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
+    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported."""
+    calls = Calls()
+    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls) as relay:
+        result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
+    result.usage = calls.usage(result.tool_call_count)
+    return result
+
+
+async def _run_opencode(
     prompt: str,
     context_id: str,
     session_id: str | None = None,
@@ -431,8 +457,9 @@ async def run_opencode(
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
     max_turns: int | None = None,
+    base_url: str | None = None,
 ) -> OpencodeResult:
-    """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
+    """Run one `opencode run` turn in ``workspace``, its provider calling ``base_url``, the endpoint's when None. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
     ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
 
@@ -456,6 +483,7 @@ async def run_opencode(
         )
 
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
+                           environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
                            instructions=instructions, builtin_tools=builtin_tools)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
@@ -477,9 +505,8 @@ async def run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **os.environ,
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-        **_context_xdg(context_id),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")

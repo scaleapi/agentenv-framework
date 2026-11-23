@@ -22,7 +22,7 @@ class _Deploys:
     """Records a sandbox on the fake backend, then naps."""
 
     def __init__(self, id, nap):
-        self.id, self.version, self.steps, self.nap = id, 1, [], nap
+        self.id, self.version, self.steps, self.nap, self.headline_verifiers = id, 1, [], nap, None
 
     async def run(self, context, **_):
         context.deployed_sandboxes.append(DeployedSandbox(

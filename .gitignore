@@ -168,6 +168,8 @@ cython_debug/
 
 # Generated local-store state (stores default local; see runtime._ensure_agentenv_gitignore)
 /.agentenv/
+# ...and what the protocol package's tests write when run from its own folder (launches, browser tab events)
+/packages/agentenv-protocol/.agentenv/
 
 # Written by the release workflow into the wheels it publishes
 src/agent_env/env/published_images.json

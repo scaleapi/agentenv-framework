@@ -81,7 +81,8 @@ class PeerAgentsTaskStep(TaskStep):
         endpoint = (ext.get("params") or {}).get("endpoint", "/ext/peer-agents")
         peers = [self._record(deployed_by_name[n], src) for n in peering.peer_agent_names]
         async with httpx.AsyncClient() as client:
-            resp = await client.post(a2a_url + endpoint, json={"peers": peers}, timeout=_POST_TIMEOUT_SECONDS)
+            resp = await client.post(a2a_url + endpoint, json={"peers": peers}, headers=src.control_headers,
+                                     timeout=_POST_TIMEOUT_SECONDS)
         if resp.status_code >= 400:
             raise RuntimeError(f"PeerAgentsTaskStep: POST {a2a_url + endpoint} failed for '{peering.source_agent_name}': {resp.status_code} {resp.text}")
         logger.info("PeerAgentsTaskStep: peered '%s' with %s", peering.source_agent_name, peering.peer_agent_names)

@@ -10,7 +10,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef, RefRole
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.snapshot_utils import agent_state_capture
 from agent_env.task_step.snapshot_utils.snapshot_series import rollout_base
 
@@ -49,6 +49,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
     """
 
     type: ClassVar[str] = "snapshot_agent_state"
+    step_role = StepRole.EVIDENCE
     entity_refs = (
         EntityRef.artifact("artifact_id", role=RefRole.OUTPUT, artifact_type="file_artifact_universe"),
         EntityRef.env("env_id"),
@@ -154,6 +155,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             artifact_id=self._resolve_artifact_id(context),
             timeout_seconds=self.timeout_seconds,
             sandbox_type=deployed.sandbox_type,
+            headers=deployed.control_headers,
         )
 
         snapshots = context.metadata.setdefault("agent_snapshots", [])

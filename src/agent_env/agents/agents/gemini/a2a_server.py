@@ -13,12 +13,13 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from a2a.types import AgentSkill
@@ -63,6 +64,7 @@ from gemini_bridge import (
     GEMINI_TMP,
     MODEL_HEADERS_ENV,
     build_attribution_headers,
+    call_model,
     chats_dir_for_cwd,
     cli_env,
     cli_model,
@@ -74,6 +76,7 @@ from gemini_bridge import (
     is_generate_path,
     kill_running_clis,
     model_headers,
+    native_call_usage,
     needs_openai_route,
     openai_response_to_gemini,
     record_attribution,
@@ -144,6 +147,14 @@ _PROXY_DROP_RESP_HEADERS = {"content-length", "transfer-encoding", "content-enco
 _LITELLM_ROUTE_HEADERS = ("x-litellm-model-id", "x-litellm-model-api-base", "x-litellm-model-group")
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the proxy appends LiteLLM's ``/gemini/...`` and ``/v1/chat/completions`` routes to it. Core's ``api_root``,
+    copied since this image can't import core; a unit test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
+
+
 def _describe_transport_error(exc: Exception) -> str:
     """Name the exception class: many httpx errors (ReadTimeout, RemoteProtocolError) stringify to ''."""
     text = str(exc)
@@ -186,13 +197,87 @@ class GeminiConfig(AgentConfig):
     task_id: str | None = None
 
 
+@dataclass
+class _Calls:
+    """The generate calls one run's route forwarded, each recorded as it ended (and handed to ``sink``, the turn's
+    trajectory, so a turn cancelled midway keeps them), and how many are still running."""
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    running: int = 0
+    sink: Callable[[dict[str, Any]], None] | None = None
+
+    def record(self, *, via: str, model: str | None, status: int | None, counts: dict[str, int] | None) -> None:
+        """An answer the endpoint refused (an error status, or no status at all) counts nothing; one it gave without
+        counts we could read counts as a call whose usage is unknown."""
+        outcome = "refused" if status is None or status >= 400 else "answered" if counts is not None else "unreported"
+        record = {"type": "agentenv.model_call", "via": via, "model": model, "status": status, "outcome": outcome,
+                  **({"usage": counts} if outcome == "answered" else {})}
+        self.records.append(record)
+        if self.sink is not None:
+            self.sink(record)
+
+
 @dataclass(frozen=True)
 class _Route:
-    """What the proxy forwards one run's model calls with."""
+    """What the proxy forwards one run's model calls with, and the calls it forwarded."""
 
     model: str | None
     project_id: str | None
     task_id: str | None
+    calls: _Calls = field(default_factory=_Calls, compare=False)
+
+
+# How long a turn waits, once its CLI is done, for the model calls its proxy is still forwarding, checking this often.
+_IN_FLIGHT_GRACE_S = 5.0
+_IN_FLIGHT_POLL_S = 0.05
+_COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
+
+
+async def _settled(calls: _Calls) -> None:
+    """Waits a while for the calls the proxy is still forwarding: a CLI that was stopped leaves its call running."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _IN_FLIGHT_GRACE_S
+    while calls.running and loop.time() < deadline:
+        await asyncio.sleep(_IN_FLIGHT_POLL_S)
+
+
+def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage:
+    """The turn's usage from the model calls its proxy forwarded, which are every call the CLI made through its base
+    URL: the main loop's, its subagents', routing, loop and next-speaker checks, compression, web tools and answered
+    retries. A call answered without counts, or still running when the turn ended, is counted in
+    ``unreported_calls``. When the proxy saw no call but the CLI's own stats name tokens, the CLI went around the
+    proxy, and those stats, short of the thoughts, are the turn's, marked a lower bound."""
+    answered = [record["usage"] for record in calls.records if record["outcome"] == "answered"]
+    unreported = sum(record["outcome"] == "unreported" for record in calls.records) + calls.running
+    if not answered and not unreported:
+        stats = next((event.get("stats") for event in reversed(trajectory) if event.get("type") == "result"), None)
+        if isinstance(stats, dict) and isinstance(stats.get("input_tokens"), int) and stats["input_tokens"] > 0:
+            inputs, output = stats["input_tokens"], stats.get("output_tokens") or 0
+            return Usage(tool_call_count=tool_calls, input_tokens=inputs, output_tokens=output,
+                         total_tokens=inputs + output, cache_read_tokens=stats.get("cached") or 0,
+                         input_includes_cache=True, provider_details={"source": "cli_stats", "unreported": True})
+    details: dict[str, Any] = {"model_calls": len(answered) + unreported} if answered or unreported else {}
+    if unreported:
+        details["unreported_calls"] = unreported
+    if not answered:
+        return Usage(tool_call_count=tool_calls, provider_details=details)
+
+    def total(name: str, of: list[dict] = answered) -> int | None:
+        values = [counts[name] for counts in of if counts.get(name) is not None]
+        return sum(values) if values else None
+
+    if total("reasoning_tokens"):
+        details["reasoning_tokens"] = total("reasoning_tokens")
+    models: dict[str, list[dict]] = {}
+    for record in calls.records:
+        if record["outcome"] == "answered":
+            models.setdefault(record["model"] or "unknown", []).append(record["usage"])
+    details["models"] = {model: {"calls": len(of), **{name: total(name, of) for name in _COUNTS[:3]}}
+                         for model, of in models.items()}
+    inputs, output = total("input_tokens"), total("output_tokens")
+    return Usage(tool_call_count=tool_calls, input_tokens=inputs, output_tokens=output,
+                 total_tokens=(inputs or 0) + (output or 0), cache_read_tokens=total("cache_read_tokens"),
+                 cache_write_tokens=total("cache_write_tokens"), input_includes_cache=True, provider_details=details)
 
 
 # install.sh, from the build context install_agent unpacks, brings Node, the Gemini CLI and a Python of the agent's
@@ -347,6 +432,21 @@ def _upstream_headers(headers: dict[str, str], project_id: str | None, task_id: 
     return {name.lower(): value for layer in (headers, configured, attribution) for name, value in layer.items()}
 
 
+def _chat_call_usage(response: Any) -> dict[str, int] | None:
+    """A chat completion's counts, read as ``Usage.from_model_response`` reads one, with its reasoning; None without
+    any."""
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict) or not usage:
+        return None
+    read = Usage.from_model_response(usage)
+    if read.input_tokens is None and read.output_tokens is None:
+        return None
+    reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    return {"input_tokens": read.input_tokens, "output_tokens": read.output_tokens,
+            "cache_read_tokens": read.cache_read_tokens, "cache_write_tokens": read.cache_write_tokens,
+            "reasoning_tokens": reasoning if isinstance(reasoning, int) else None}
+
+
 def _answer(uploaded: Uploaded) -> dict[str, Any]:
     """An upload, as agent-env reads it back."""
     return uploaded.model_dump(mode="json")
@@ -354,6 +454,7 @@ def _answer(uploaded: Uploaded) -> dict[str, Any]:
 
 async def _vertex_openai_bridge(
     rest: str, request: Request, base: str, route_model: str, project_id: str | None, task_id: str | None,
+    calls: _Calls,
 ) -> Response:
     """Translate the CLI's native-Gemini generate call into an OpenAI
     /v1/chat/completions call whose `model` is the provider-prefixed route
@@ -361,7 +462,8 @@ async def _vertex_openai_bridge(
     that reaches Vertex — then translate the response back to a single native
     Gemini GenerateContentResponse (SSE-framed when the CLI asked for
     streamGenerateContent). Attribution headers are injected identically to the
-    passthrough path so cost tagging is preserved."""
+    passthrough path so cost tagging is preserved. The call is recorded in ``calls``, with the counts its chat
+    completion carried, read before the translation drops the cache and the reasoning."""
     body = await request.body()
     try:
         greq = json.loads(body) if body else {}
@@ -372,15 +474,18 @@ async def _vertex_openai_bridge(
         "Authorization": f"Bearer {os.environ.get('LITELLM_API_KEY', '')}",
         "Content-Type": "application/json",
     }, project_id, task_id)
+    status = None
     try:
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT_S) as client:
-            upstream = await client.post(
-                f"{base}/v1/chat/completions",
-                headers=headers, content=json.dumps(oai_req).encode(),
-            )
+            async with client.stream("POST", f"{base}/v1/chat/completions",
+                                     headers=headers, content=json.dumps(oai_req).encode()) as upstream:
+                status = upstream.status_code
+                await upstream.aread()
     except httpx.HTTPError as e:
+        calls.record(via="bridge", model=route_model, status=status, counts=None)
         raise HTTPException(status_code=502, detail=f"vertex bridge upstream failed: {_log_transport_error('vertex bridge', e)}")
     if upstream.status_code >= 400:
+        calls.record(via="bridge", model=route_model, status=status, counts=None)
         _log_upstream_error("vertex bridge", upstream)
         return Response(
             content=upstream.content, status_code=upstream.status_code,
@@ -389,7 +494,9 @@ async def _vertex_openai_bridge(
     try:
         oai_resp = upstream.json()
     except json.JSONDecodeError:
+        calls.record(via="bridge", model=route_model, status=status, counts=None)
         raise HTTPException(status_code=502, detail="vertex bridge: non-JSON upstream response")
+    calls.record(via="bridge", model=route_model, status=status, counts=_chat_call_usage(oai_resp))
     gresp = openai_response_to_gemini(oai_resp)
     if wants_sse(rest, request.query_params.get("alt")):
         payload = f"data: {json.dumps(gresp)}\n\n".encode()
@@ -433,9 +540,11 @@ async def _vertex_openai_bridge(
                 "or directly onto a task VM (host mode)."
             ),
             install_commands=_INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             a2a_port=8000,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",
@@ -450,6 +559,7 @@ async def _vertex_openai_bridge(
         enable(
             TRAJECTORY_V1,
             live=True,
+            native=TRAJECTORY_FORMAT,
             description="Retrieve a task's Gemini stream-json trajectory, also while it runs.",
         ),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Gemini CLI should connect to."),
@@ -532,7 +642,8 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
             async with self._context_locks_guard:
                 self._active_contexts.add(context_id)
             token = uuid.uuid4().hex
-            self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id)
+            route = self._routes[token] = _Route(cfg.model, cfg.project_id, cfg.task_id,
+                                                 _Calls(sink=request.trajectory.append))
             own = self.session_ref_for_context(context_id)
             try:
                 with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt) as settings:
@@ -560,15 +671,18 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                     )
             except Exception as e:
                 logger.error(f"gemini CLI invocation raised: {e}", exc_info=True)
-                return (
-                    TaskResult.builder()
-                    .failed("infra_error", str(e)[:_ERROR_MESSAGE_LIMIT], error_type="infra_error")
-                    .add_text(str(e))
-                    .build()
-                )
+                self._routes.pop(token, None)
+                failed = (TaskResult.builder()
+                          .failed("infra_error", str(e)[:_ERROR_MESSAGE_LIMIT], error_type="infra_error")
+                          .add_text(str(e)))
+                if route.calls.records or route.calls.running:
+                    failed.usage(await self._calls_usage(route.calls, 0, []))
+                return failed.build()
             finally:
                 self._routes.pop(token, None)
                 self._active_contexts.discard(context_id)
+
+        usage = await self._calls_usage(route.calls, result.tool_call_count, result.trajectory)
 
         if result.session_id:
             self.set_session_ref_for_context(context_id, result.session_id)
@@ -584,9 +698,15 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
             .add_text(result.response or (result.error or ""))
             .add_data({"tool_call_count": result.tool_call_count})
             .session_ref(result.session_id or None)
-            .usage(Usage(tool_call_count=result.tool_call_count))
+            .usage(usage)
             .build()
         )
+
+    @staticmethod
+    async def _calls_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage:
+        """The turn's usage, once its calls have settled."""
+        await _settled(calls)
+        return _turn_usage(calls, tool_calls, trajectory)
 
     def _on_event(self, event: dict, request: TaskRequest[GeminiConfig]) -> None:
         if event.get("type") == "init" and event.get("session_id"):
@@ -744,7 +864,7 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         if route is None:
             raise HTTPException(status_code=404, detail="no running turn has this proxy route")
         rest = request.path_params["rest"]
-        base = (os.environ.get("LITELLM_BASE_URL") or "").rstrip("/")
+        base = _api_root(os.environ.get("LITELLM_BASE_URL") or "")
         if not base:
             raise HTTPException(status_code=503, detail="LITELLM_BASE_URL not set; cannot forward gemini model calls")
         # Provider-prefixed route models (vertex_ai/...) can't traverse the /gemini
@@ -752,23 +872,41 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         # OpenAI-compat endpoint instead. Everything else (countTokens, the native
         # AI-Studio models) keeps the verbatim passthrough below.
         route_model = (route.model or "").strip()
-        if needs_openai_route(route_model) and is_generate_path(rest):
-            return await _vertex_openai_bridge(rest, request, base, route_model, route.project_id, route.task_id)
+        if not is_generate_path(rest):
+            return await self._passthrough(request, rest, base, route, None)
+        route.calls.running += 1
+        try:
+            if needs_openai_route(route_model):
+                return await _vertex_openai_bridge(rest, request, base, route_model, route.project_id,
+                                                   route.task_id, route.calls)
+            return await self._passthrough(request, rest, base, route, route.calls)
+        finally:
+            route.calls.running -= 1
+
+    @staticmethod
+    async def _passthrough(request: Request, rest: str, base: str, route: _Route, calls: _Calls | None) -> Response:
+        """Forward a call verbatim to LiteLLM's /gemini route; a generate call is recorded in ``calls``."""
         fwd_headers = _upstream_headers(
             {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_DROP_REQ_HEADERS},
             route.project_id, route.task_id,
         )
         body = await request.body()
+        status = None
         try:
             async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT_S) as client:
-                upstream = await client.request(
-                    request.method, f"{base}/gemini/{rest}",
-                    params=request.query_params, headers=fwd_headers, content=body,
-                )
+                async with client.stream(request.method, f"{base}/gemini/{rest}", params=request.query_params,
+                                         headers=fwd_headers, content=body) as upstream:
+                    status = upstream.status_code
+                    await upstream.aread()
         except httpx.HTTPError as e:
+            if calls is not None:
+                calls.record(via="passthrough", model=call_model(rest), status=status, counts=None)
             raise HTTPException(status_code=502, detail=f"gemini upstream request failed: {_log_transport_error('gemini', e)}")
         if upstream.status_code >= 400:
             _log_upstream_error("gemini", upstream)
+        if calls is not None:
+            calls.record(via="passthrough", model=call_model(rest), status=status,
+                         counts=native_call_usage(upstream.content) if status < 400 else None)
         resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _PROXY_DROP_RESP_HEADERS}
         return Response(content=upstream.content, status_code=upstream.status_code, headers=resp_headers)
 

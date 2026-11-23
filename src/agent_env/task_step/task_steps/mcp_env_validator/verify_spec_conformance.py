@@ -29,7 +29,7 @@ from mcp.client.streamable_http import streamable_http_client
 from agent_env.env import legacy_protocol
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.mcp_env_validator.verify_mcp_tool_schema import (
     resolve_defs_ref,
 )
@@ -378,6 +378,7 @@ def _summarize(findings: list[dict], limit: int = 10) -> str:
 
 class VerifySpecConformanceTaskStep(TaskStep):
     type: ClassVar[str] = "verify_spec_conformance"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(

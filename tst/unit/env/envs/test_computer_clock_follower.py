@@ -21,7 +21,7 @@ import pytest
 import agent_env
 from agentenv_protocol.computer import clock as protocol_clock
 
-CLOCK = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04" / "clock"
+CLOCK = Path(agent_env.__file__).parent / "utils" / "faketime_clock"
 FOLLOWER = CLOCK / "clock-follower"
 
 
@@ -131,6 +131,21 @@ def test_the_followers_paths_are_the_ones_core_and_the_driver_use():
     assert f'"{protocol_clock.CONFIG}"' in source and f'"{protocol_clock.STATUS}"' in source
 
 
+def test_the_clock_file_the_follower_writes_reads_as_its_universe_to_a_server_on_real_time(tmp_path, monkeypatch):
+    assert f'"{protocol_clock.CLOCK_FILE}"' in (CLOCK / "clockpage.py").read_text()
+    assert f"FAKETIME_TIMESTAMP_FILE={protocol_clock.CLOCK_FILE}" in (CLOCK / "clock.conf").read_text()
+    clockpage = _clockpage(tmp_path / "page")
+    clockpage.FILE = str(tmp_path / "clock")
+    monkeypatch.setattr(protocol_clock, "CLOCK_FILE", clockpage.FILE)
+    assert protocol_clock.session_time() == pytest.approx(time.time(), abs=1)
+    anchor = time.time() - 10
+    clockpage.write(1, 1748768400.0, 2.0, anchor)
+    assert protocol_clock.session_time() == pytest.approx(
+        clockpage._universe_at(1, 1748768400 * 10**9, int(anchor * 10**9), 2.0, time.time_ns()) / 1e9, abs=0.5)
+    clockpage.write(0, 0.0, 1.0, time.time())
+    assert protocol_clock.session_time() == pytest.approx(time.time(), abs=1)
+
+
 def test_it_follows_the_gateway_its_config_names_and_acknowledges_each_version_with_its_next_watch(follower):
     gateway = Gateway()
     try:
@@ -179,6 +194,19 @@ def test_a_gateway_it_cant_reach_is_named_in_its_status_and_it_keeps_trying(foll
     assert status["connected"] is False and status["url"] == "http://127.0.0.1:9/clock/watch"
     assert "Connection refused" in status["error"] or "URLError" in status["error"]
     follower.until(lambda: follower.status().get("errors", 0) >= 2)
+
+
+def test_a_changed_config_is_followed_while_the_gateway_it_follows_refuses_at_once(follower):
+    gateway = Gateway()
+    try:
+        follower.configure({"watch_url": "http://127.0.0.1:9/clock/watch", "name": "desktop", "token": "t"})
+        follower.until(lambda: follower.status().get("errors", 0) >= 3)
+
+        gateway.set("boot:1", datetime(2020, 1, 1, tzinfo=timezone.utc), 1.0)
+        follower.configure({"watch_url": gateway.url, "name": "desktop", "token": "t"})
+        follower.until(lambda: follower.status().get("version") == "boot:1", within=3)
+    finally:
+        gateway.close()
 
 
 def test_a_config_that_isnt_one_is_named_and_a_good_one_then_followed(follower):

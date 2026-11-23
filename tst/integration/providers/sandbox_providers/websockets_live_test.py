@@ -29,7 +29,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, pytest.mark.as
 
 #: The remote providers, each of which declares whether it carries WebSockets.
 REMOTE = ("e2b", "tensorlake", "vercel", "coreweave", "daytona", "boat", "modal", "modal_vm", "boxd", "sail_vm", "tenki",
-          "agent37")
+          "agent37", "kosa8")
 PORT = 8765
 FRAME_BYTES = 10 * 1024 * 1024
 IDLE_S = 300

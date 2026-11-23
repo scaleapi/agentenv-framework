@@ -28,13 +28,14 @@ import httpx
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
 
 class VerifyA2ARoleStep(TaskStep):
     type: ClassVar[str] = "verify_a2a_role"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
 
     def __init__(
@@ -101,7 +102,7 @@ class VerifyA2ARoleStep(TaskStep):
         logger.info("Round-tripping role=%r through %s", test_role, url)
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=deployed.control_headers) as client:
                 post_resp = await client.post(url, json={"role": test_role})
                 post_resp.raise_for_status()
                 get_resp = await client.get(url)

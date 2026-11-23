@@ -17,8 +17,10 @@ _INSTALL_COMMANDS = [_UNPACK, "bash {work_dir}/agent/install.sh container {conta
     extensions=(
         *EXTENSIONS,
         enable(INSTALL_V1, install_commands=_INSTALL_COMMANDS,
+               optional_params=["control_token"],
                required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port"],
                install_commands_host=_INSTALL_COMMANDS_HOST,
+               optional_params_host=["control_token"],
                required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", "host_workdir", "host_user"],
                a2a_port=8000),
     ),

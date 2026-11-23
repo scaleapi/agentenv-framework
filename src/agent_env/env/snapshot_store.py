@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.config import get_config
@@ -87,6 +88,7 @@ class EnvSnapshot:
         """
         from agent_env.artifact import DockerImageArtifact
         from agent_env.env.env import DeployedSandboxEnv, Env
+        from agent_env.env.envs._deployment import stack_layout_of
         from agent_env.env.envs.multi_env import MultiEnv, _gateway_state_provider
         from agent_env.env.store import get_env_instance_store
 
@@ -135,16 +137,17 @@ class EnvSnapshot:
             )
 
         log("check_changelog", "Checking changelog...", 20)
-        is_clean = await _check_changelog_empty(multi_env._sandbox)
+        layout = stack_layout_of(multi_env._env_provider)
+        is_clean = await _check_changelog_empty(multi_env._sandbox, layout=layout)
         logger.info(f"Changelog empty: {is_clean} ({'clean' if is_clean else 'dirty'} snapshot)")
         log("check_changelog", f"Changelog: {'clean' if is_clean else 'dirty'}", 30)
 
         log("snapshot_db", "Exporting servicedb data...", 40)
-        tar_gz_object_url = await _snapshot_servicedb(multi_env._sandbox, env_id, universe_id, log)
+        tar_gz_object_url = await _snapshot_servicedb(multi_env._sandbox, env_id, universe_id, log, layout=layout)
 
         log("store_artifact", "Storing Docker image artifact...", 70)
         logger.info("Storing snapshot as DockerImageArtifact...")
-        image_tag = _image_tag(env_id, universe_id)
+        image_tag = _snapshot_image_tag(env_id, universe_id, layout)
         artifact = DockerImageArtifact.put_tar(
             id=derive_id(env_id, "env-snapshot"),
             description=(
@@ -174,14 +177,19 @@ class EnvSnapshot:
         return snapshot
 
 
-async def _check_changelog_empty(sandbox) -> bool:
+def _snapshot_image_tag(env_id: str, environment_universe_id: str, layout: StackLayout) -> str:
+    """The image a snapshot builds on the VM, named for the slot too so two slots snapshotting one env and universe don't collide."""
+    tag = _image_tag(env_id, environment_universe_id)
+    return f"{tag}-{layout.compose_project}" if layout.is_slot else tag
+
+
+async def _check_changelog_empty(sandbox, *, layout: StackLayout = DEFAULT_STACK_LAYOUT) -> bool:
     """Return True if the _changelog table is empty (no modifications since data load)."""
     from agent_env.env.envs.service_db import DB_NAME, DB_USER
     from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME
-    from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
 
     cmd = (
-        f"docker compose -f {DOCKER_COMPOSE_PATH} exec -T {DATABASE_SERVICE_NAME} "
+        f"{layout.compose_command} exec -T {DATABASE_SERVICE_NAME} "
         f'psql -U {DB_USER} -d {DB_NAME} -tAc "SELECT count(*) FROM public._changelog"'
     )
     output = await sandbox.exec_script(cmd)
@@ -189,16 +197,20 @@ async def _check_changelog_empty(sandbox) -> bool:
     return count == 0
 
 
-async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str, log: ProgressCallback) -> str:
+async def _snapshot_servicedb(
+    sandbox, env_id: str, environment_universe_id: str, log: ProgressCallback, *, layout: StackLayout = DEFAULT_STACK_LAYOUT,
+) -> str:
     """Export pgdata from sandbox servicedb, build Docker image on sandbox, upload it to the object store.
 
     Returns the object URL of the uploaded tar.gz.
     """
     from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME
-    from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
 
+    pgdata = layout.scratch_path("pgdata")
+    build_dir = layout.scratch_path("snapshot-build")
+    tarball = layout.scratch_path("snapshot-image.tar.gz")
     container_id_output = await sandbox.exec_script(
-        f"docker compose -f {DOCKER_COMPOSE_PATH} ps -a -q {DATABASE_SERVICE_NAME}"
+        f"{layout.compose_command} ps -a -q {DATABASE_SERVICE_NAME}"
     )
     container_id = container_id_output.strip()
     if not container_id:
@@ -206,34 +218,34 @@ async def _snapshot_servicedb(sandbox, env_id: str, environment_universe_id: str
 
     log("snapshot_db", "Copying pgdata from container...", 45)
     logger.info("Exporting pgdata from servicedb container...")
-    await sandbox.exec_script(f"docker cp {container_id}:/var/lib/postgresql/data /tmp/pgdata")
+    await sandbox.exec_script(f"docker cp {container_id}:/var/lib/postgresql/data {pgdata}")
 
-    image_tag = _image_tag(env_id, environment_universe_id)
+    image_tag = _snapshot_image_tag(env_id, environment_universe_id, layout)
     log("snapshot_db", f"Building Docker image on sandbox: {image_tag}...", 50)
     logger.info(f"Building Docker image on sandbox: {image_tag}...")
     await sandbox.exec_script(
-        "mkdir -p /tmp/snapshot-build && "
-        "mv /tmp/pgdata /tmp/snapshot-build/pgdata && "
-        "cat > /tmp/snapshot-build/Dockerfile << 'DEOF'\n"
+        f"mkdir -p {build_dir} && "
+        f"mv {pgdata} {build_dir}/pgdata && "
+        f"cat > {build_dir}/Dockerfile << 'DEOF'\n"
         "FROM public.ecr.aws/docker/library/postgres:16-alpine\n"
         "COPY pgdata /var/lib/postgresql/data\n"
         "RUN chown -R postgres:postgres /var/lib/postgresql/data\n"
         "DEOF"
     )
     await sandbox.exec_script(
-        f"docker build --platform linux/amd64 -t {image_tag} /tmp/snapshot-build"
+        f"docker build --platform linux/amd64 -t {image_tag} {build_dir}"
     )
 
     log("snapshot_db", "Saving Docker image...", 55)
     logger.info("Saving Docker image to tar.gz on sandbox...")
-    await sandbox.exec_script(f"docker save {image_tag} | gzip > /tmp/snapshot-image.tar.gz")
+    await sandbox.exec_script(f"docker save {image_tag} | gzip > {tarball}")
 
     object_store, object_url = _tarball_destination(env_id, environment_universe_id)
     log("snapshot_db", "Uploading Docker image...", 60)
     logger.info(f"Uploading Docker image to {object_url}...")
-    await upload_vm_file(sandbox, "/tmp/snapshot-image.tar.gz", object_store, object_url)
+    await upload_vm_file(sandbox, tarball, object_store, object_url)
 
-    await sandbox.exec_script(f"rm -rf /tmp/snapshot-build /tmp/snapshot-image.tar.gz && docker rmi {image_tag}")
+    await sandbox.exec_script(f"rm -rf {build_dir} {tarball} && docker rmi {image_tag}")
 
     return object_url
 

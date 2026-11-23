@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from agentenv_protocol.atif import FORMAT as ATIF_FORMAT
+
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.snapshot_utils import agent_state_capture as capture
@@ -428,6 +430,7 @@ class SnapshotSeries:
             artifact_id=self.workspace_artifact_id,
             timeout_seconds=remaining(),
             sandbox_type=agent.sandbox_type,
+            headers=agent.control_headers,
         )
         row["id"] = workspace.universe_id
         row["version"] = workspace.universe_version
@@ -445,6 +448,7 @@ class SnapshotSeries:
             timeout_seconds=remaining(),
             trajectory_output_prefix=self.trajectory_output_prefix,
             sandbox_type=agent.sandbox_type,
+            headers=agent.control_headers,
         )
         if traj.reason and is_final:
             recorded = self._recorded_trajectory_uri(context)
@@ -528,14 +532,16 @@ class SnapshotSeries:
         Matched on ``a2a_context_id``, newest-first: a retry can restore a context
         snapshot taken during an earlier attempt, so that attempt's response for the
         same ``prompt_id`` can still be present and would otherwise attach a
-        previous conversation's trajectory to this capture.
+        previous conversation's trajectory to this capture. A response whose last turn
+        is its atif/1 copy gives none: the series' other rows are native reads.
         """
         for prompt in reversed(context.prompt_responses):
             if (
                 prompt.prompt_id == self.prompt_id
                 and prompt.a2a_context_id == self.a2a_context_id
             ):
-                return prompt.agent_trajectory_object_url
+                turns = prompt.target_agent_per_turn_trajectories or []
+                return None if turns and turns[-1]["format"] == ATIF_FORMAT else prompt.agent_trajectory_object_url
         # None is legitimate: the response is recorded only after the turn loop, so
         # a capture during an in-flight or failed run has no entry yet.
         return None

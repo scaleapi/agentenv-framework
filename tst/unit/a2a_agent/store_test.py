@@ -20,6 +20,7 @@ def test_deployed_a2a_agent_roundtrip_preserves_all_fields():
         instance_id=None,
         created_at_utc=None,
         expires_at_utc=None,
+        control_token="tok",
     )
     persisted = store.create_instance(original, ttl_seconds=60)
     rehydrated = store.get(persisted.instance_id)

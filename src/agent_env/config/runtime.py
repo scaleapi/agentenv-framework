@@ -103,6 +103,15 @@ def _validated_a2a_agent_id(value: object, source: str) -> str:
     return value
 
 
+_TRAJECTORIES_CONFIG_SECTION = "trajectories"
+
+
+def _validated_trajectory_formats(value: object, source: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(format, str) and format.strip() for format in value):
+        raise ConfigError(f"{source} must be a list of trajectory format names, such as [\"atif/1\"], got {value!r}")
+    return tuple(value)
+
+
 def _validated_env_id(value: object, source: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{source} must be a non-empty string env id, got {value!r}")
@@ -163,6 +172,8 @@ RESOLVED_KEYS: tuple[ResolvedKey, ...] = (
     *(ResolvedKey((_ENVS_CONFIG_SECTION, name), field=name, default=env_id,
                   default_label="built-in default in config.runtime")
       for name, env_id in _DEFAULT_ENV_IDS.items()),
+    ResolvedKey((_TRAJECTORIES_CONFIG_SECTION, "formats"), default=(),
+                default_label="built-in default in config.runtime: none, native only"),
 )
 _KEY_BY_NAME = {key.name: key for key in RESOLVED_KEYS}
 
@@ -426,6 +437,18 @@ class Config:
             return _validated_human_a2a_url(resolved, key.file_label)
         raise ConfigError(f"No human-A2A URL configured: set [{_HUMAN_A2A_CONFIG_SECTION}] {_HUMAN_A2A_CONFIG_KEY} or AGENT_ENV_HUMAN_A2A_URL")
 
+    def get_trajectory_formats(self) -> tuple[str, ...]:
+        """The trajectory formats beside native a run prescribes to each agent whose trajectory it reads:
+        ``[trajectories] formats`` in config.toml, else none, so agents build native only."""
+        key = _KEY_BY_NAME[f"{_TRAJECTORIES_CONFIG_SECTION}.formats"]
+        for layer in self.key_candidates(key):
+            if layer.kind == KIND_DEFAULT:
+                return tuple(layer.raw)
+            self.section(_TRAJECTORIES_CONFIG_SECTION)
+            resolved = config_loader.interpolate(layer.raw, secret_resolver=self._resolve_secret)
+            return _validated_trajectory_formats(resolved, key.file_label)
+        return ()
+
     def get_default_env_id(self, name: str) -> str:
         """The default infra env id ``name`` (``default_gateway_env_id``, ``default_service_db_env_id`` or
         ``default_website_browser_env_id``): one set in code > ``[envs] <name>`` in config.toml > the built-in id."""
@@ -464,6 +487,21 @@ class Config:
     def get_model_for_role(self, role: str, *, or_default: bool = True) -> str | None:
         return self._model_config().model_for_role(role, or_default=or_default)
 
+    def resolve_model(
+        self,
+        role: model_config.ModelRole,
+        *,
+        step_params: str | None = None,
+        run: str | None = None,
+        step: str | None = None,
+        agent: str | None = None,
+    ) -> model_config.ResolvedModel:
+        """``role``'s model for one step, falling back to this config's ``[model.roles]`` and default. ``[model]`` is
+        read only when no layer names a model, so a fallback the step doesn't use, such as an unset ``env:``
+        reference, can't fail it."""
+        return (model_config.named_model(role, step_params=step_params, run=run, step=step, agent=agent)
+                or model_config.config_model(role, self._model_config()))
+
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)
         if overrides:
@@ -473,19 +511,20 @@ class Config:
     def get_model_headers(self, base_url: str | None) -> dict[str, str]:
         return self._model_config().headers_for(base_url, secret_resolver=self._resolve_secret)
 
+    def is_model_endpoint(self, url: str | None) -> bool:
+        return self._model_config().is_endpoint(url)
+
     def resolve_model_call(
         self,
         model: str,
         *,
         default_api_key: str | None = None,
         base_override: str | None = None,
-        model_overrides: dict[str, dict[str, str]] | None = None,
     ) -> model_config.ModelCallConfig:
         return self._model_config().resolve_call(
             model,
             default_api_key=default_api_key,
             base_override=base_override,
-            model_overrides=model_overrides,
             secret_resolver=self._resolve_secret,
         )
 

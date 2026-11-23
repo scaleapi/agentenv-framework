@@ -74,7 +74,7 @@ def test_bad_triggers_rejected_at_construction():
 async def test_registers_and_audits_with_card_endpoint():
     captured = {}
 
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         captured["url"] = url
         captured["body"] = json
         return _resp(200, url, {"ok": True, "added": ["open", "re-sweep"], "all": ["open", "re-sweep"]})
@@ -95,7 +95,7 @@ async def test_registers_and_audits_with_card_endpoint():
 async def test_custom_endpoint_from_card_is_honored():
     captured = {}
 
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         captured["url"] = url
         return _resp(200, url, {"ok": True, "added": []})
 
@@ -137,7 +137,7 @@ async def test_env_trigger_id_not_registered_raises():
 
 @pytest.mark.asyncio
 async def test_agent_4xx_raises():
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         return _resp(400, url, {"ok": False, "error": "trigger 'open': bad when"})
 
     ctx = _context()

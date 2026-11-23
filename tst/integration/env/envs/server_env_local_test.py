@@ -4,8 +4,8 @@ The env deploys, a later process restores its record and loads data into the ser
 rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
 the deploy's own handle and a restored one; an environment of several files is staged file by file at their paths, in a
 folder of the load's own that an earlier load's file can't be in the way of, and handed to the server's data/add
-together, timed by their total size; and the server's state reads as JSON whether ``data/get`` answers with
-data or with a file bundle. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``,
+together, timed by their total size; the server's state reads as JSON whether ``data/get`` answers with
+data or with a file bundle; and a file and a file universe a task loads onto the env land in the server's container. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``,
 and plays a task's agent as an episode, around the echo agent. Requires a docker daemon; spins up a throwaway
 ``registry:2`` and skips if it can't start.
 """
@@ -26,7 +26,7 @@ import pytest
 from agentenv_protocol import ToolSession, ToolSessionError
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact
+from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact, FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, reset_config, set_image_store
 from agent_env.env import legacy_protocol
@@ -38,6 +38,7 @@ from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task.teardown import TORN_DOWN_KEY
+from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.integration.utils.registry import REGISTRY_IMAGE
@@ -186,6 +187,41 @@ async def test_an_environment_of_several_files_loads_each_from_its_path_in_one_a
 
     assert await legacy_protocol.service_state(deployed, None, "items") == {"items": ["in-a", "in-b", "top"]}
     assert staged_sizes[-1] == sum(map(len, contents.values()))
+
+
+@pytest.mark.asyncio
+async def test_files_a_task_loads_onto_a_server_env_land_in_its_container(local_stack):
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    expected = {"note.txt": "a single file\n", "a.txt": "a universe member\n", "sub/b.txt": "a nested member\n"}
+
+    def put_file(name):
+        return FileArtifact.put_bytes(id=f"server-items-files-{name.replace('/', '-')}-{uid}", description=name,
+                                      filename=name.rsplit("/", 1)[-1], content=expected[name].encode(),
+                                      content_type="text/plain")
+
+    note = put_file("note.txt")
+    universe = FileArtifactUniverse.put(id=f"server-items-universe-{uid}",
+                                        file_artifacts={name: put_file(name) for name in ("a.txt", "sub/b.txt")})
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    container = f"agent-{deployed.sandbox_id}"
+    local_stack.append(container)
+    context = TaskStepContext(deployed_envs=[deployed])
+
+    await LoadArtifactTaskStep(
+        id="load-docs", version=None, env_id=env.id, destination_path="/tmp/docs",
+        artifacts=[{"id": artifact.id, "version": artifact.version} for artifact in (note, universe)],
+    ).execute(context)
+
+    for name, text in expected.items():
+        read = _docker("exec", container, "cat", f"/tmp/docs/{name}")
+        assert (read.returncode, read.stdout) == (0, text), read.stderr
+    assert [(e["artifact_type"], e["env_id"], e["destination_path"], e["files"])
+            for e in context.metadata["loaded_file_artifact_universes"]] == [
+        ("file", env.id, "/tmp/docs", {"note.txt": "/tmp/docs/note.txt"}),
+        ("file_artifact_universe", env.id, "/tmp/docs", {"a.txt": "/tmp/docs/a.txt", "sub/b.txt": "/tmp/docs/sub/b.txt"}),
+    ]
 
 
 @pytest.mark.asyncio

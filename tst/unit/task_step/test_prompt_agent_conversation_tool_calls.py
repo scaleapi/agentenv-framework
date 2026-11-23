@@ -25,7 +25,7 @@ def _wire(monkeypatch, solver_tool_calls: list):
         monkeypatch.setattr(pa_mod.conversation_store, fn, lambda *a, **kw: None)
     solver_turns = iter(solver_tool_calls)
 
-    async def post_agent_config(url, fields):
+    async def post_agent_config(url, fields, headers=None):
         return None
 
     async def send(url, parts, message_id, context_id, timeout):

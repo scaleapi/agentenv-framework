@@ -26,6 +26,14 @@ def test_the_configured_endpoint_is_the_clis_with_its_key_as_a_bearer_token():
     assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
 
 
+@pytest.mark.parametrize("base", ["https://gateway.example.com/v1", "https://gateway.example.com/v1/",
+                                  "https://gateway.example.com/"])
+def test_the_endpoint_may_end_in_v1_since_the_cli_appends_its_own(base):
+    env = claude_bridge.cli_env({**GATEWAY, "LITELLM_BASE_URL": base})
+
+    assert (env["ANTHROPIC_BASE_URL"], env["LITELLM_BASE_URL"]) == ("https://gateway.example.com", base)
+
+
 def test_a_script_the_model_runs_can_call_the_endpoint_with_the_litellm_variables():
     headers = json.dumps({"X-Bill-To": "team-a"})
 

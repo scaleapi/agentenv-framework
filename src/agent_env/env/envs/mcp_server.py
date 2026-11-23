@@ -22,7 +22,7 @@ from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
     data_plane_headers, file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
-    reset_server_data,
+    reset_server_data, stack_layout_of,
     staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
@@ -260,8 +260,7 @@ class MCPServerEnv(Env):
             # Stage on the disk-backed app dir, not /tmp (tmpfs/RAM): a large
             # artifact (github ~8GB) OOM-kills the copy under concurrent loads.
             # Random suffix avoids collisions between concurrent loads.
-            from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
-            stage_dir = f"{GATEWAY_APP_DIR}/_artifact_staging"
+            stage_dir = stack_layout_of(self._env_provider).artifact_staging_dir
             vm_temp_path = f"{stage_dir}/{self.environment_name}-{uuid.uuid4().hex[:8]}-{posixpath.basename(path)}"
             await self._sandbox.exec_script(f"mkdir -p {shlex.quote(stage_dir)}")
             await self._sandbox.load_object_file(file_artifact.object_url, vm_temp_path)

@@ -15,7 +15,7 @@ pytest.importorskip("av")
 
 from probe_fake import FixtureDriver, served  # noqa: E402
 
-from agentenv_protocol.computer import RecordedFrame, Recording, capture, record  # noqa: E402
+from agentenv_protocol.computer import COMPUTER_RECORDING, RecordedFrame, Recording, capture, record  # noqa: E402
 from agentenv_protocol.computer import recording as recording_module  # noqa: E402
 from agentenv_protocol.computer.conformance import checks, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
@@ -45,6 +45,12 @@ async def _recording_checks(driver) -> dict[str, tuple[str, str]]:
     return {r.name: (r.status, r.detail) for r in probe.results}
 
 
+def _advertising(monkeypatch, most: int) -> None:
+    advertised = recording_module.recording_params
+    monkeypatch.setattr("agentenv_protocol.computer.card.recording_params",
+                        lambda features, streams: {**advertised(features, streams), "max_concurrent": most})
+
+
 @pytest.mark.asyncio
 async def test_a_driver_that_records_passes_the_recording_checks_at_full_and_leaves_nothing(home):
     with served(Recorder()) as url:
@@ -68,14 +74,84 @@ async def test_a_manifest_whose_hash_or_size_isnt_the_files_fails(home, monkeypa
 
 @pytest.mark.asyncio
 async def test_a_limit_the_driver_doesnt_keep_fails_and_its_recordings_are_still_ended(home, monkeypatch):
-    advertised = recording_module.recording_params
-    monkeypatch.setattr("agentenv_protocol.computer.card.recording_params",
-                        lambda features, streams: {**advertised(features, streams), "max_concurrent": 1})
+    _advertising(monkeypatch, 1)
     driver = Recorder()
     found = await _recording_checks(driver)
     assert found[NAMES[2]][0] == "failed" and "recording 2 of at most 1 started" in found[NAMES[2]][1]
     assert found[NAMES[0]][0] == found[NAMES[1]][0] == "passed"
     assert not driver._computer.recordings.running and not (home / ".agentenv-recordings").exists()
+
+
+async def _checks_while_recording(driver) -> tuple[dict[str, tuple[str, str]], str, list[str]]:
+    """The recording checks on a computer recording already, as a task's that records while it probes: what they
+    found, the task's recording, and what was still recording once they were done."""
+    with served(driver) as url:
+        connected = await Driver.connect(url, 10)
+        async with connected.session() as session:
+            theirs = (await connected.invoke(COMPUTER_RECORDING, "start", {"request_id": "task"}))["recording_id"]
+            probe = checks.Probe(connected, session, 10)
+            await probe._recording()
+            listed = await connected.invoke(COMPUTER_RECORDING, "list")
+            await connected.invoke(COMPUTER_RECORDING, "end", {"recording_id": theirs})
+    return {r.name: (r.status, r.detail) for r in probe.results}, theirs, [r["recording_id"] for r in listed["recordings"]]
+
+
+@pytest.mark.asyncio
+async def test_a_computer_already_recording_passes_the_recording_checks_and_keeps_its_recording(home):
+    """The probe counts the recording it didn't start against max_concurrent, and ends only its own."""
+    found, theirs, still = await _checks_while_recording(Recorder())
+    assert {name: status for name, (status, _) in found.items()} == dict.fromkeys(NAMES, "passed")
+    assert still == [theirs]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recording_already", [False, True], ids=["idle", "recording"])
+async def test_a_driver_that_refuses_short_of_the_limit_its_card_declares_fails(home, monkeypatch, recording_already):
+    class Short(FixtureDriver):
+        recording = Recording(max_concurrent=2)
+
+    _advertising(monkeypatch, 3)
+    found = (await _checks_while_recording(Short()))[0] if recording_already else await _recording_checks(Short())
+    assert found[NAMES[2]][0] == "failed" and "limit_exceeded" in found[NAMES[2]][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("meanwhile", ["ends", "starts"])
+async def test_a_recording_that_ends_or_starts_between_the_probes_count_and_its_start_doesnt_fail_it(home, monkeypatch,
+                                                                                                    meanwhile):
+    """The task's recording ending just before the probe's second limit start, or another starting just before its
+    first: a listing after the start says the limit held."""
+    real, limit_starts = recording_module.Recordings.start, []
+
+    async def start(self, request_id, *args):
+        if "-limit-" in request_id:
+            limit_starts.append(request_id)
+            if meanwhile == "ends" and len(limit_starts) == 2:
+                await self.end(self.started["task"]["recording_id"], None, "end")
+            if meanwhile == "starts" and len(limit_starts) == 1:
+                await real(self, "late", *args)
+        return await real(self, request_id, *args)
+
+    monkeypatch.setattr(recording_module.Recordings, "start", start)
+    driver = Recorder()
+    found, theirs, still = await _checks_while_recording(driver)
+    late = driver._computer.recordings.started.get("late")
+    if late:
+        await driver._computer.recordings.end(late["recording_id"], None, "end")
+    assert found[NAMES[2]] == ("passed", ""), found[NAMES[2]]
+    assert still == ([] if meanwhile == "ends" else [theirs, late["recording_id"]])
+
+
+@pytest.mark.asyncio
+async def test_from_a_driver_that_doesnt_list_its_recordings_the_probe_starts_the_whole_limit_as_before(home, monkeypatch):
+    """So a computer that's recording already fails the limit check, as it did before drivers listed them."""
+    params = Driver.params
+    monkeypatch.setattr(Driver, "params", lambda self, uri: {**params(self, uri), "methods": {
+        op: m for op, m in (params(self, uri).get("methods") or {}).items() if op != "list"}})
+    idle = await _recording_checks(Recorder())
+    recording, _, _ = await _checks_while_recording(Recorder())
+    assert idle[NAMES[2]][0] == "passed"
+    assert recording[NAMES[2]][0] == "failed" and "limit_exceeded" in recording[NAMES[2]][1]
 
 
 @pytest.mark.asyncio

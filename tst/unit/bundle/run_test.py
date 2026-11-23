@@ -553,6 +553,7 @@ def test_the_cli_dry_run_prints_what_the_run_would_write_and_run_and_exits_0(bun
     assert result.output == (
         DRY_RUN
         + f"{CONFIGURED}\n"
+        "tasks/code.json: warning: no step grades this task, so a run has no score\n"
         "artifacts/script: v1 (new)\n"
         "tasks/a.json: v1 (new)\n"
         "tasks/b.json: v1 (new)\n"
@@ -596,6 +597,7 @@ def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinn
     assert result.output.startswith(
         DRY_RUN
         + f"{CONFIGURED}\n"
+        "tasks/agent.json: warning: no step grades this task, so a run has no score\n"
         f"agents/solver: v2 (artifact {image} has a new version in the store (v1 → v2))\n"
         "tasks/agent.json: v1, unchanged\n"
         "\n"

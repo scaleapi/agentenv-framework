@@ -20,6 +20,7 @@ CONTROL = {
     "/tools/disable": "POST", "/tools/enable": "POST",
     "/triggers/register": "POST", "/triggers/remove": "POST", "/triggers/clear": "POST",
     "/notifications/config": "POST", "/notifications/take": "POST", "/notifications/clear": "POST",
+    "/clock/followers": "PUT",
 }
 OPEN = {"/state": "GET", "/step": "POST", "/clock/time": "GET", "/clock/state": "GET", "/triggers/state": "GET",
         "/notifications/state": "GET", "/trajectory": "GET", "/changes": "GET", "/.well-known/agent-env.json": "GET",

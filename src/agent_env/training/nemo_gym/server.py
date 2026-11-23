@@ -62,7 +62,8 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     as NeMo RL's GDPO takes them, and makes the reward their sum, as NeMo RL requires of a reward with components; it
     takes no ``reward``. ``masked_as_error`` answers verify for a masked rollout with HTTP 503 and why, rather than with
     ``mask_sample``, for a client that doesn't read ``mask_sample``: verifiers' NeMo Gym taskset then fails the
-    rollout, which prime-rl leaves out of the loss and its group's baseline. It runs with one worker, since a rollout's
+    rollout, which prime-rl leaves out of the loss and its group's baseline. ``skip_lint`` serves a bundle's tasks task
+    lint's own rules refuse, as ``build_app``'s. It runs with one worker, since a rollout's
     session lives in its process."""
 
     url: str | None = None
@@ -75,6 +76,7 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     idle_timeout: float = Field(600.0, gt=0, allow_inf_nan=False)
     reward_components: bool = False
     masked_as_error: bool = False
+    skip_lint: bool = False
 
     @model_validator(mode="after")
     def _checked(self) -> "AgentEnvResourcesServerConfig":
@@ -198,7 +200,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
     def _serve(self) -> Server:
         reward = summed if self.config.reward_components else self.config.reward
         return Server(build_app(self.config.bundle, reward=reward, sandbox=self.config.sandbox,
-                                max_concurrent_envs=self.config.max_concurrent_envs))
+                                max_concurrent_envs=self.config.max_concurrent_envs, skip_lint=self.config.skip_lint))
 
     async def _shut_down(self) -> None:
         """Ends the episodes left running, then stops the server this one served the bundle on, which tears down its
