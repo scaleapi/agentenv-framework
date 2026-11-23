@@ -990,7 +990,7 @@ def test_by_default_it_fails_the_task_on_a_slip_and_judges_with_the_verifiers_de
     monkeypatch.setattr("agent_env.task_step.task_steps.verifiers.rubrics_verifier.get_config", lambda: fake)
     judge = usj.UserSimJudge("s", None, run_step_id="week")
     assert judge.default_model is None
-    assert judge._judge_model(TaskStepContext()) == "claude-sonnet-4-6"
+    assert judge._judge_model(TaskStepContext()) == "claude-sonnet-5-5"
     fake.roles = {"judge": "anthropic/claude-opus-4-8"}
     assert judge._judge_model(TaskStepContext()) == "anthropic/claude-opus-4-8"
 

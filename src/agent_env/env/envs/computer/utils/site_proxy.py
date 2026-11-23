@@ -1036,12 +1036,15 @@ class Resolver(asyncio.DatagramProtocol):
     def __init__(self, config: Config):
         self.config = config
         self.transport: Optional[asyncio.DatagramTransport] = None
+        self._answering: set[asyncio.Task] = set()
 
     def connection_made(self, transport) -> None:
         self.transport = transport
 
     def datagram_received(self, data: bytes, addr) -> None:
-        asyncio.ensure_future(self._answer(data, addr))
+        task = asyncio.ensure_future(self._answer(data, addr))
+        self._answering.add(task)
+        task.add_done_callback(self._answering.discard)
 
     async def _answer(self, data: bytes, addr) -> None:
         reply = await self.answer(data, stream=False)

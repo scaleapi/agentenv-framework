@@ -145,6 +145,10 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
             raise ValueError(f"run_container_unit_tests_verifier '{id}': result paths in env '{env_id}' are relative "
                              f"to its session user's home, not {absolute}")
 
+    def criterion_rows(self) -> Optional[int]:
+        """One: the test command's pass or fail, or its reward."""
+        return 1
+
     def config_problems(self) -> list[str]:
         """A ``command`` or ``timeout_sec`` a run can't use, and a negative ``timeout_sec``, which ``timeout``
         refuses, so the tests never run."""

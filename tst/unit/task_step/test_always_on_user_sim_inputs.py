@@ -199,7 +199,7 @@ async def test_b1_b2_b4_nothing_meant_for_the_agent_reaches_her_at_any_depth(mon
     assert rig.reads and rig.events(ctx, "nudge")
     seen = json.dumps(rig.reads)
     for meant_for_the_agent in ("SECRET ALERT", "noor 30", ao.NUDGE_TEXT, ao.WAKE_REMINDER_TEXT, ao.MESSAGE_RULES,
-                                ao.QUIET_RULE, "last time you'll be woken", "your scheduled check",
+                                ao.QUIET_RULE, "your normal reply is not shown", "your scheduled check",
                                 "chase the host", "PRIVATE", "stay_quiet", "Any other date you see"):
         assert meant_for_the_agent not in seen, meant_for_the_agent
 

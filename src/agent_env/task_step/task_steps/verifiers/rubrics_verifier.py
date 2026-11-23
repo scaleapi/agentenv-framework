@@ -607,7 +607,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         return get_judge_output_format_spec(self.output_format)
 
     @property
-    def _writes_mistakes_entry(self) -> bool:
+    def writes_mistakes_entry(self) -> bool:
         """rubric_evidence_with_mistakes: the same judge call also detects trajectory mistakes and a second entry,
         shaped and scored as a standalone trajectory_mistakes step's, is written under
         ``trajectory_mistakes_key(self.verifier_id)`` (see ``_entries``)."""
@@ -631,14 +631,17 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         def rows() -> list[dict]:
             return [{"id": row_id, "score": 0, "result": False, "message": message}]
         mistakes = ({**self._mistakes_entry_fields(), "results": rows(), "score": 0}
-                    if self._writes_mistakes_entry else None)
+                    if self.writes_mistakes_entry else None)
         return RubricsVerdict(criteria=rows(), score=0, output=self._entry_format_fields(), mistakes_entry=mistakes)
 
     def _judge_model(self, context: TaskStepContext) -> str:
         """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
-        role and default, and claude-sonnet-4-6 last."""
+        role and default, and claude-sonnet-5-5 last."""
         overrides = context.metadata.get("user_overrides") or {}
         return get_config().resolve_model(ModelRole.JUDGE, run=overrides.get("judge_model"), step=self.default_model).model
+
+    def criterion_rows(self) -> Optional[int]:
+        return len(self.criteria) if isinstance(self.criteria, list) else None
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -1166,7 +1169,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         be derived from leaves neither. ``unjudged`` rows (``unjudged_rows``) join the rubric verdict's, after the
         judge's, and its score; the mistakes entry is the judge's alone."""
         mistake_rows: Optional[list[dict]] = None
-        if self._writes_mistakes_entry:
+        if self.writes_mistakes_entry:
             if not isinstance(verification_results, ResultRows):
                 raise RuntimeError(
                     f"Verifier '{self.verifier_id}': the judge response carries no mistake findings "
@@ -1416,7 +1419,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     logger.warning(f"LLM judge attempt {attempt}/{self.DEFAULT_MAX_RETRIES} failed ({type(exc).__name__}: {exc}), retrying...")
                 else:
                     logger.error(f"LLM judge failed after {self.DEFAULT_MAX_RETRIES} attempts ({type(exc).__name__}: {exc})")
-        raise RuntimeError(f"LLM judge failed after {self.DEFAULT_MAX_RETRIES} attempts") from last_exc
+        raise RuntimeError(f"LLM judge on {model} failed after {self.DEFAULT_MAX_RETRIES} attempts "
+                           f"({type(last_exc).__name__}: {last_exc})") from last_exc
 
     async def _configure_judge_a2a(
         self,

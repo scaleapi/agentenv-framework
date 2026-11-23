@@ -4,6 +4,8 @@ and for any other failure, the run ends as an error, as it always has."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_env.a2a_agent.protocol import AgentUnreachableError
@@ -110,6 +112,16 @@ async def test_what_a_canceled_turn_still_does_in_the_grace_counts_in_the_cut_of
     changes = [c for e in rig.events(ctx, "app_changes") for c in e["changes"]]
     assert [(c["table"], c["by"], c["wake"], c["phase"]) for c in changes] == [("public.bookings", "agent", 1, "turn")]
     assert rig.record(ctx)["cut_off_wakes"][0]["stopped"] == "canceled"
+
+    # Staged for the judge with each change in full, the late change is the cut-off wake's, beside its cut-off.
+    [change] = changes
+    held = {"status": [None, "held"], "nightly_usd": [None, 855]}
+    staged = stage_run(rig.timeline(ctx), {}, change_values={(change["env_id"], change["id"]): held})
+    lines = [json.loads(line) for line in staged.files[wake_file(1)].splitlines()]
+    assert [line["changed_fields"] for line in lines if line["event"] == "app_change"] == [held]
+    assert [line["cut_off"] for line in lines if line["event"] == "turn_end"] == ["time_limit"]
+    assert [line["limit"] for line in lines if line["event"] == "wake_cut_off"] == ["time_limit"]
+    assert staged.record["app_change_values"] == {"found": 1, "missing": 0}
 
 
 @pytest.mark.asyncio
