@@ -159,8 +159,15 @@ class VerifierTaskStep(TaskStep):
         fields = {k: v for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
         return {**fields, "score_aggregator": self.score_aggregator.value}
 
+    def criterion_rows(self) -> Optional[int]:
+        """How many criterion rows a run of this verifier grades, when its config alone says, for lint to weigh a
+        pooled aggregate's sources; None when only a run can tell, as for a script's or a test run's rows."""
+        return None
+
     def config_problems(self) -> list[str]:
         problems = super().config_problems()
+        if not isinstance(self.verifier_id, str):
+            problems.append(f"verifier_id must be a string, not {type(self.verifier_id).__name__}")
         if not 0.0 < self.min_passing_score <= 1.0:
             problems.append(f"min_passing_score must be above 0 and at most 1, not {self.min_passing_score}")
         return problems

@@ -286,6 +286,9 @@ default_human_a2a_url = "https://example.invalid/a2a"
 [agents]
 default_a2a_agent_id = "an-agent"
 
+[trajectories]
+formats = ["atif/1"]
+
 [sandbox]
 default = "local"
 
@@ -319,7 +322,7 @@ timeout = 30
 
 _ALIASED = ("document", "object", "image", "secret", "runner")
 _EVERY_TABLE = ("document", "object", "image", "secret", "runner", "model", "conversations",
-                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "gateway", "explorer")
+                "agents", "trajectories", "sandbox", "state", "envs", "artifacts", "task_steps", "gateway", "explorer")
 
 
 @pytest.mark.parametrize("toml", [None, MONGO_TOML, FULL_SURFACE_TOML])

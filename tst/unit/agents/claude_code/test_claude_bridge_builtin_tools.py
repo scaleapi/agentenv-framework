@@ -58,4 +58,5 @@ def test_the_tool_names_are_those_of_the_cli_version_the_dockerfile_pins():
     pinned = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", (AGENT_DIR / "Dockerfile").read_text(), re.M).group(1)
 
     assert claude_bridge.TOOLS_CLI_VERSION == pinned, (
-        "the CLI version changed: record the tools the new CLI offers in ClaudeCodeTool, then TOOLS_CLI_VERSION")
+        "the CLI version changed: record the tools the new CLI offers in ClaudeCodeTool, then TOOLS_CLI_VERSION; "
+        "tst/integration/agent/claude_code_date_test.py checks it still tells the model when the date changes")

@@ -110,11 +110,12 @@ class ComputerRuntime:
                   hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None,
                   wrap: Callable[[InputResult, Any], InputResult] | None = None) -> CallToolResult:
         """One input call: its turn in the queue, the operation (after a move, repeated or held), then the result
-        with others' input since ``frame`` and, when asked, a fresh frame. Whatever the call's turn can change is read
-        once it has the turn: a point ``mapped`` from ``frame`` is checked again, since the display may have changed
-        while it waited, and ``at_pointer`` reads the pointer and puts it before ``args``; input a page's open dialog
-        blocks is refused. ``then`` runs as soon as the input is delivered, and ``wrap`` makes the result from the
-        operation's own."""
+        with others' input since ``frame`` and, when asked, a fresh frame, ``effective_screenshot_delay_ms()`` after the
+        input so it shows what the input did: a smooth scroll or the page a key opens renders a couple of hundred milliseconds
+        after the input returns. Whatever the call's turn can change is read once it has the turn: a point ``mapped``
+        from ``frame`` is checked again, since the display may have changed while it waited, and ``at_pointer`` reads
+        the pointer and puts it before ``args``; input a page's open dialog blocks is refused. ``then`` runs as soon as
+        the input is delivered, and ``wrap`` makes the result from the operation's own."""
         identity = self.driver.caller_identity(ctx)
         sent = False
         async with self.queue.turn(self.driver.settings.queue_wait_s):
@@ -156,6 +157,7 @@ class ComputerRuntime:
             result = wrap(result, effect)
         if not screenshot:
             return send(result)
+        await asyncio.sleep(self.effective_screenshot_delay_ms() / 1000)
         try:
             new = await self.capture(identity)
         except AgentEnvError as e:
@@ -163,6 +165,12 @@ class ComputerRuntime:
             return send(result)
         result.summary, result.frame = f"{result.summary}, then captured {new.id}{new.note()}", new.result()
         return send(result, new.encode(), new.captured_at)
+
+    def effective_screenshot_delay_ms(self) -> int:
+        """How long after an input its screenshot is taken: the deploy's ``screenshot_delay_ms`` setting, else the
+        driver class's."""
+        setting = self.driver.settings.screenshot_delay_ms
+        return self.driver.screenshot_delay_ms if setting is None else setting
 
     async def _annotate(self, ctx: ToolContext, operation: str, args: tuple, move_to: tuple | None, repeat: int,
                         hold: tuple | None, display: Display | None) -> None:

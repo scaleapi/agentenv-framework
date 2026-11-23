@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, Optional, TypedDict
 
 from agentenv_protocol import client as protocol_v1
 
@@ -235,6 +235,62 @@ _PROMPT_RESPONSE_LEGACY_KEYS = (
 )
 
 
+AtifStatus = Literal["valid", "invalid", "newer", "unavailable"]
+
+
+class AtifRecord(TypedDict):
+    """A turn's atif/1 copy: the stored document, the turn's A2A task in it and the step it reached at that turn (each
+    turn's copy is a prefix of the next), how it checked (``valid``, ``invalid`` with the rules it broke, ``newer`` than
+    this worker reads as a producer's, or ``unavailable`` with why in ``reason``), the versions that made and checked
+    it, and the turn's aux log and turn context."""
+
+    url: Optional[str]
+    task_id: Optional[str]
+    through_step: Optional[int]
+    status: AtifStatus
+    rules: list[str]
+    reason: Optional[str]
+    validator_version: Optional[str]
+    adapter_version: Optional[str]
+    aux_url: Optional[str]
+    turn_context_url: Optional[str]
+
+
+class AtifAgentCopies(TypedDict):
+    """One agent's atif/1 copies in a run: the folder they're stored in, and the trajectory id of each session's (A2A
+    context's) latest document, which a restart's next document is linked from."""
+
+    folder: str
+    sessions: dict[str, str]
+
+
+class AtifCopiesMetadata(TypedDict):
+    """``metadata["atif_copies"]``: the id a run's atif/1 folders are named by (its instance id, else one made for
+    it), and each agent's copies."""
+
+    run: str
+    agents: dict[str, AtifAgentCopies]
+
+
+class TurnTrajectory(TypedDict):
+    """What a turn's trajectory reads left, beside its url in the per-turn list: the format of the trajectory stored at
+    that url, as its answer named it (None from an agent that names none), and its atif/1 copy, None when the run
+    doesn't prescribe atif/1. In a run that prescribes atif/1 to an agent that offers it, the url is the copy's
+    document and the format ``atif/1``; a turn whose copy couldn't be had, or whose copy's media didn't all arrive, has
+    its native trajectory there instead."""
+
+    format: Optional[str]
+    atif: Optional[AtifRecord]
+
+
+def turn_trajectories(records: Optional[list[dict[str, Any]]]) -> Optional[list[TurnTrajectory]]:
+    """Stored per-turn records as TurnTrajectory, an older record's ``native_format`` read as its format."""
+    if records is None:
+        return None
+    return [TurnTrajectory(format=record.get("format", record.get("native_format")), atif=record.get("atif"))
+            for record in records]
+
+
 @dataclass
 class PromptResponse:
     prompt_id: str
@@ -259,6 +315,8 @@ class PromptResponse:
     target_agent_per_turn_trajectory_object_urls: list[str | None] | None = None
     # The step's usage, one entry per role that ran turns in it (``task_step.usage``); None before it was recorded.
     usage: list[dict] | None = None
+    # Each turn's ``TurnTrajectory``, beside ``target_agent_per_turn_trajectory_object_urls``.
+    target_agent_per_turn_trajectories: list[TurnTrajectory] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The stored form: every field, plus the legacy key of each renamed one."""
@@ -294,6 +352,7 @@ class PromptResponse:
             step_id=data.get("step_id"),
             structured_output=data.get("structured_output"),
             usage=data.get("usage"),
+            target_agent_per_turn_trajectories=turn_trajectories(data.get("target_agent_per_turn_trajectories")),
         )
 
 

@@ -396,17 +396,17 @@ def test_the_with_mistakes_format_round_trips_through_to_dict_and_from_dict():
     assert d["output_format"] == "rubric_evidence_with_mistakes"
     back = RubricsVerifierTaskStep.from_dict({**d, "default_model": "m"})
     assert back.output_format is WITH_MISTAKES
-    assert back._spec().output_format["schema"]["required"][-1] == "summary" and back._writes_mistakes_entry
+    assert back._spec().output_format["schema"]["required"][-1] == "summary" and back.writes_mistakes_entry
     # ...and the plain format string on a stored step selects it too
     stored = RubricsVerifierTaskStep.from_dict({
         "id": "x", "version": 1, "criteria": CRITERIA, "prompt_id": "p", "default_model": "m", "verifier_id": "r",
         "use_agent_judge": False, "trajectory_filter": _filter().to_dict(), "output_format": "rubric_evidence_with_mistakes"})
     assert stored.output_format is WITH_MISTAKES and stored._spec() is back._spec()
     plain = RubricsVerifierTaskStep.from_dict({**d, "default_model": "m", "output_format": "rubric_evidence"})
-    assert plain.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE and not plain._writes_mistakes_entry
+    assert plain.output_format is JudgeOutputFormat.RUBRIC_EVIDENCE and not plain.writes_mistakes_entry
     legacy = RubricsVerifierTaskStep.from_dict({"id": "x", "version": 1, "criteria": CRITERIA, "prompt_id": "p",
                                                 "default_model": "m"})
-    assert legacy.output_format is JudgeOutputFormat.RUBRIC_BINARY and not legacy._writes_mistakes_entry
+    assert legacy.output_format is JudgeOutputFormat.RUBRIC_BINARY and not legacy.writes_mistakes_entry
 
 
 # --------------------------------------------------------------------------- parser + correction prompt

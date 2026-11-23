@@ -25,6 +25,15 @@ The CLI's model calls go to a proxy in the agent, `/litellm-gemini/<run>/...`, w
 and forwards to `$LITELLM_BASE_URL/gemini/...`, with TLS checks on. A model named with a provider prefix, such as `vertex_ai/global/gemini-3.1-pro-preview`, is handed to the
 CLI by its last segment, and the proxy translates its generate calls to `/v1/chat/completions` and back.
 
+A task's usage is what that proxy forwarded: every generate call the CLI made through its base URL (the main loop's,
+its subagents', its router, loop and next-speaker checks, compression, web tools and answered retries), each recorded in
+the trajectory as an `agentenv.model_call` event with its model and counts, and the task's `Usage` their sum, with each
+model's counts in `provider_details.models`. A call the endpoint refused counts nothing; one answered without counts,
+or still running when the CLI stopped, is counted in `unreported_calls`. The proxy can't see a call a tool makes to the
+endpoint itself, or one a CLI pointed elsewhere makes (a host `GOOGLE_GEMINI_BASE_URL`, Vertex auth): when the proxy
+saw none but the CLI's own stats name tokens, those stats are the task's, short of the thoughts and marked a lower
+bound. Through a LiteLLM proxy, a provider-prefixed model's chat completions don't count the thinking tokens.
+
 | Extension | Implementation |
 |---|---|
 | `agent-config/v1` | `GeminiConfig`: `model`, `system_prompt`, `allowed_tools` (read back, but the CLI has no per-run tool allowlist), `project_id`, `task_id`, `timeout_seconds` (600 by default) |

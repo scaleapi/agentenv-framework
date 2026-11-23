@@ -144,10 +144,10 @@ class BrowserUseAgent(AgentEnvAgent):
             error = (await stderr).decode(errors="replace")[-4000:] or f"agent.py exited {process.returncode}"
             return TaskResult.failure("browser_use.crashed", error, error_type="infra_error")
         tool_calls = 0
-        for message in result["messages"]:
+        for index, message in enumerate(result["messages"]):
             request.trajectory.append(message)
-            tool_calls += sum(part.get("part_kind") == "tool-call" for part in message.get("parts") or [])
-        usage = result["usage"]
+            if index >= result.get("prior", 0):  # the context's earlier turns counted theirs
+                tool_calls += sum(part.get("part_kind") == "tool-call" for part in message.get("parts") or [])
         builder = TaskResult.builder()
         if result["status"] == "completed":
             builder.succeeded()
@@ -156,22 +156,26 @@ class BrowserUseAgent(AgentEnvAgent):
         return (
             builder.add_text(result["text"] or result.get("error") or result["status"])
             .session_ref(session)
-            .usage(Usage(
-                tool_call_count=tool_calls,
-                input_tokens=usage["input"],
-                output_tokens=usage["output"],
-                total_tokens=usage["input"] + usage["output"],
-                # browser-use counts the cache in its input on both of its routes: Anthropic's Messages, whose cache
-                # it adds in, and OpenAI's Chat Completions, whose prompt already holds it.
-                cache_read_tokens=usage["cache_read"],
-                cache_write_tokens=usage["cache_write"],
-                input_includes_cache=True,
-                cost_usd=result.get("cost_usd"),
-                provider_details={"steps": result["steps"], "model": result["model"], "requests": usage["requests"],
-                                  "success": result.get("success")},
-            ))
+            .usage(_usage(result, tool_calls))
             .build()
         )
+
+
+def _usage(result: dict, tool_calls: int) -> Usage:
+    """The turn's usage as browser-use counts it, over the responses it got. browser-use counts the cache in its input
+    on both of its routes: Anthropic's Messages, whose cache it adds in, and OpenAI's Chat Completions, whose prompt
+    already holds it. A request sent and not refused that got no response it counts, cut off by the run's timeout or
+    retried, is counted in ``unreported_calls``; when no request got one, the counts are unknown, not zero."""
+    usage, calls = result["usage"], result.get("calls") or {}
+    unreported = max(calls.get("sent", 0) - calls.get("refused", 0) - usage["requests"], 0)
+    details = {"steps": result["steps"], "model": result["model"], "requests": usage["requests"],
+               "success": result.get("success"), **({"unreported_calls": unreported} if unreported else {})}
+    if unreported and not usage["requests"]:
+        return Usage(tool_call_count=tool_calls, provider_details=details)
+    return Usage(tool_call_count=tool_calls, input_tokens=usage["input"], output_tokens=usage["output"],
+                 total_tokens=usage["input"] + usage["output"], cache_read_tokens=usage["cache_read"],
+                 cache_write_tokens=usage["cache_write"], input_includes_cache=True, cost_usd=result.get("cost_usd"),
+                 provider_details=details)
 
 
 agent = BrowserUseAgent()

@@ -1,5 +1,5 @@
 """A rubrics judge resolves its model when it runs: the run's ``judge_model``, the model its author named, then the
-config's ``judge`` role and default, and claude-sonnet-4-6. A verifier built in code, as the A2A validator builds its
+config's ``judge`` role and default, and claude-sonnet-5-5. A verifier built in code, as the A2A validator builds its
 own, judges like one read from a task, and a stored task keeps only its author's model, never its writer's config."""
 
 import pytest
@@ -66,7 +66,7 @@ def test_without_a_judge_role_the_judge_is_the_configured_default_model(model_co
 def test_with_no_model_configured_the_judge_is_claude_sonnet(model_config):
     model_config("")
 
-    assert _built()._judge_model(_run()) == "claude-sonnet-4-6"
+    assert _built()._judge_model(_run()) == "claude-sonnet-5-5"
 
 
 def test_a_stored_task_carries_no_model_from_its_writer_s_config(model_config, judge_role):

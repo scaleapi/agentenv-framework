@@ -96,7 +96,7 @@ from zoneinfo import ZoneInfo
 from a2a.types import TaskState
 
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
-from agent_env.a2a_agent.object_transfer import send_and_wait
+from agent_env.a2a_agent.object_transfer import AgentTurn, send_and_wait
 from agent_env.artifact import FileArtifact
 from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE
@@ -118,7 +118,11 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import (
+    PromptAgentTaskStep,
+    fetch_native_trajectory,
+    prescribe_formats,
+)
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
@@ -130,8 +134,7 @@ USER_PHONE = "user_phone"
 IN_FLIGHT = ("firing", "queued")
 POLL_SECONDS = 0.5
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-FINAL_REMINDER = ("(This is the last time you'll be woken for this job. Only what you send with message_user reaches "
-                  "{first}; your normal reply is not shown to them.)")
+FINAL_REMINDER = "(Only what you send with message_user reaches {first}; your normal reply is not shown to them.)"
 NUDGE_TEXT = ("Your closing text was not delivered. If the user should see it, send it with message_user; otherwise "
               "call stay_quiet.")
 WAKE_REMINDER_TEXT = "Reminder: only message_user reaches the user."
@@ -220,8 +223,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
                  contact_replies_in_parallel: bool = True, time_budget_seconds: Optional[float] = None,
                  model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
-                 max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
-                 trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
+                 max_thinking_tokens: Optional[int] = None, max_output_tokens: Optional[int] = None,
+                 harness: Optional[str] = None, trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
             prompt_fields.pop(unsupported, None)
@@ -234,7 +237,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         prompt_fields["prompt"] = ""  # for prompt_agent's check; unset again below
         super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), model=model,
                          model_params=model_params, effort=effort, max_thinking_tokens=max_thinking_tokens,
-                         harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
+                         max_output_tokens=max_output_tokens, harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
         self.prompt = None
         if not user_sim:
             raise ValueError("always_on needs user_sim, the agent_name of a deploy_user_sim_agent step")
@@ -263,7 +266,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
             "scheduled_checks", "scheduled_check_min_interval", "contact_replies_in_parallel", "time_budget_seconds")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
-                      "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
+                      "max_output_tokens", "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
 
     def settle_cap_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one settle waits, whatever is still at work (queued fires, nl actions in a row): the longest
@@ -586,6 +589,7 @@ class _Run:
                    "harness": ctx.agent_harness or step.harness,
                    "max_turns": overrides.get("agent_max_turns") or step.max_turns,
                    "max_thinking_tokens": overrides.get("agent_max_thinking_tokens") or step.max_thinking_tokens,
+                   "max_output_tokens": overrides.get("agent_max_output_tokens") or step.max_output_tokens,
                    "output_format": step.output_format, "timeout_seconds": step.timeout_seconds,
                    "task_id": ctx.metadata.get("task_id"), "agentenv_tools": step.agentenv_tools,
                    "builtin_tools": card.get("builtin_tools")}
@@ -597,6 +601,7 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.agent.control_headers)
+        await prescribe_formats(ctx, step.id, self.agent, self.target_url, formats=())  # native until it reads atif/1
         solver_model = negotiated.fields.get("model") if negotiated else None
         ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
         self.usage.start(ModelRole.SOLVER, solver_model, self.agent)
@@ -661,18 +666,24 @@ class _Run:
             await _call(env, EXT_CLOCK_URI, "set_rate", {"virtual_seconds_per_real_second": rate if running else 0},
                         attempts=3)
 
-    async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> tuple[str, dict]:
+    async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> AgentTurn:
         """One turn of the agent on ``parts``: the task's clock runs at its rate while the agent works, and is frozen
-        again after."""
+        again after. The turn's usage is recorded as its reply arrives, before the clock is frozen."""
         step = self.step
         await self._clock_runs(True)
         try:
             # Cut off past its limit and grace, whatever send_and_wait's own retries do: a TimeoutError, as its own.
-            return await asyncio.wait_for(
+            turn = await asyncio.wait_for(
                 send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
                               context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
                               poll_interval_seconds=step.poll_interval_seconds, before_send=record),
                 step.timeout_seconds + TURN_GRACE_SECONDS)
+        except (TimeoutError, asyncio.CancelledError):
+            self.usage.cut_off(ModelRole.SOLVER)
+            raise
+        else:
+            self.usage.turn(ModelRole.SOLVER, turn.reply)
+            return turn
         finally:
             await self._clock_runs(False)
 
@@ -1269,17 +1280,14 @@ class _Run:
                  **({"files": files} if files else {}))
         t = time.time()
         try:
-            task_id, result = await self._agent_turn(parts, msg_id, record)
+            turn = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
             self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
             return
-        state = result["status"]["state"]
-        status_msg = (result.get("status") or {}).get("message") or {}
-        term = protocol.TerminalResponse.from_message(status_msg)
+        task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
         traj = None
@@ -1287,10 +1295,10 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await asyncio.wait_for(
-                    step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type,
-                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
+                traj = (await asyncio.wait_for(
+                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
+                                            card=card, sandbox_type=self.agent.sandbox_type,
+                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
             except Exception as e:
                 logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1349,18 +1357,15 @@ class _Run:
 
         t = time.time()
         try:
-            task_id, result = await self._agent_turn(parts, msg_id, record)
+            turn = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
             self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
                      state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1))
             return
-        state = result["status"]["state"]
-        status_msg = (result.get("status") or {}).get("message") or {}
-        term = protocol.TerminalResponse.from_message(status_msg)
+        task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        self.usage.turn(ModelRole.SOLVER, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
         traj = None
@@ -1368,10 +1373,10 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await asyncio.wait_for(
-                    step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type,
-                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
+                traj = (await asyncio.wait_for(
+                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
+                                            card=card, sandbox_type=self.agent.sandbox_type,
+                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
             except Exception as e:
                 logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1559,20 +1564,22 @@ class _Run:
         if limit <= 0:
             return {"text": None, "structured": None, "error": "the read's time limit passed"}
         try:
-            user_task_id, result = await asyncio.wait_for(send_and_wait(
+            turn = await asyncio.wait_for(send_and_wait(
                 self.user_url, [{"kind": "text", "text": text}],
                 agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
                 context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
                 poll_interval_seconds=self.step.poll_interval_seconds), limit)
+        except asyncio.CancelledError:
+            self.usage.cut_off(ModelRole.USER_SIMULATOR)
+            raise
         except TimeoutError as e:
+            self.usage.cut_off(ModelRole.USER_SIMULATOR)
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
-        status = (result.get("status") or {})
-        msg = status.get("message") or {}
-        term = protocol.TerminalResponse.from_message(msg)
+        user_task_id, term = turn.task_id, turn.reply
         self.usage.turn(ModelRole.USER_SIMULATOR, term)
-        if status.get("state") != TaskState.completed and str(status.get("state")) != "completed":
-            return {"text": None, "structured": None, "error": f"state {status.get('state')}"}
-        raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
+        if turn.state != TaskState.completed and str(turn.state) != "completed":
+            return {"text": None, "structured": None, "error": f"state {turn.state}"}
+        raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output
         if structured is None:
             try:
@@ -1584,12 +1591,12 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await asyncio.wait_for(
-                    self.step._fetch_trajectory(self.user_url, traj_ext, user_task_id,
-                                                self.step._trajectory_prefix() + "user_sim/", msg_id,
-                                                card=card, sandbox_type=self.user_agent.sandbox_type,
-                                                headers=self.user_agent.control_headers),
-                    max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
+                traj = (await asyncio.wait_for(
+                    fetch_native_trajectory(self.user_url, traj_ext, user_task_id,
+                                            self.step._trajectory_prefix() + "user_sim/", msg_id,
+                                            card=card, sandbox_type=self.user_agent.sandbox_type,
+                                            headers=self.user_agent.control_headers),
+                    max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))).url
             except Exception as e:
                 logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
         return {"text": raw, "structured": structured if isinstance(structured, dict) else None,

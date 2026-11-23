@@ -233,6 +233,19 @@ class TrajectoryMediaResponse(ExtensionResponse):
     failed: dict[str, str] = Field(default_factory=dict)
 
 
+class TrajectoryPrescribeRequest(ExtensionRequest):
+    """The trajectory formats beside native the agent builds for each conversation it starts from now on, each one
+    its card's ``formats`` lists; none for native only, which it always builds."""
+
+    formats: list[str] = Field(default_factory=list)
+
+
+class TrajectoryPrescribeResponse(ExtensionResponse):
+    """Every format the agent builds for a conversation it starts from now on: native first."""
+
+    formats: list[str]
+
+
 class AtifUploadedObjects(ExtensionResponse):
     trajectory: Uploaded
     aux: Uploaded | None = None
@@ -1227,8 +1240,8 @@ def _configure_trajectory(
     return ExtensionConfiguration(
         wire_params={"formats": formats, "native": native, "default": native} if native else {},
         options={"native": native, **({"atif": atif} if atif is not None else {})} if native else {},
-        # An agent that serves atif/1 hands over its copies' media files, which the worker pulls at each turn's end.
-        features={"media"} if atif is not None else frozenset(),
+        # An agent that can build atif/1 builds it only when prescribed, and hands over its copies' media files.
+        features={"media", "prescribe"} if atif is not None else frozenset(),
         variants=(
             {"get": {"task_events", "context_events", "context", "context_objects"}} if live else {}
         ),
@@ -1389,7 +1402,20 @@ TRAJECTORY_V1 = ExtensionDefinition(
                     sdk_only=True,
                 ),
             }
-        )
+        ),
+        "prescribe": OperationGroup(
+            operations={
+                "prescribe": _op(
+                    "prescribe",
+                    "POST",
+                    "/ext/trajectory/prescribe",
+                    SDK,
+                    request_model=TrajectoryPrescribeRequest,
+                    response_model=TrajectoryPrescribeResponse,
+                    sdk_only=True,
+                ),
+            }
+        ),
     },
     configuration_validator=_configure_trajectory,
 )

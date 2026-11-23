@@ -174,7 +174,7 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
 
 
 @pytest.mark.asyncio
-async def test_a_failed_must_pass_gate_zeroes_the_score_is_named_and_cant_be_pooled(computer):
+async def test_a_failed_must_pass_gate_zeroes_the_score_is_named_and_no_aggregate_drops_it(computer):
     step = _step(result_files=["~/notes.txt"])
     _judge(step, [], failing=("sheet-exists",))
     ctx = TaskStepContext(deployed_envs=[computer.deployed()])
@@ -185,7 +185,13 @@ async def test_a_failed_must_pass_gate_zeroes_the_score_is_named_and_cant_be_poo
     assert entry["score"] == 0.0 and not entry["gate_passed"] and entry["gates_failed"] == ["sheet-exists"]
     with pytest.raises(RuntimeError, match=r"\['cua'\] scored with must-pass gates"):
         await AggregateVerifiersTaskStep(id="final", version=None, verifier_ids=["cua"]).execute(ctx)
-    assert ctx.metadata["grades"]["final"]["verifier_status"] == "failed"
+    with pytest.raises(RuntimeError, match=r"\['grade'\] scored with must-pass gates"):
+        await AggregateVerifiersTaskStep(id="pooled", version=None, sources=["grade"]).execute(ctx)
+    await AggregateVerifiersTaskStep(id="mean", version=None, sources=["grade"], combine="weighted_mean").execute(ctx)
+    await AggregateVerifiersTaskStep(id="gated", version=None, gates=["grade"]).execute(ctx)
+    grades = ctx.metadata["grades"]
+    assert grades["final"]["verifier_status"] == grades["pooled"]["verifier_status"] == "failed"
+    assert grades["mean"]["score"] == 0.0 and grades["gated"]["score"] == 0.0
 
 
 @pytest.mark.asyncio

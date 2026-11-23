@@ -19,6 +19,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -72,9 +73,11 @@ from tar_changelog import (
     outermost,
     remove_settings_hooks,
 )
+from claude_code_atif import ClaudeCodeAtif
 from claude_bridge import (
     CLAUDE_STATE_DIR,
     ClaudeCodeTools,
+    ClaudeResult,
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     kill_running_clis,
@@ -383,6 +386,84 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
             logger.info(f"Killed {stopped} claude CLI(s) still running a turn as the agent shut down")
 
 
+_RUN_COUNTS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+_CACHE_WRITE_SPLIT = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+# `modelUsage`'s names for _RUN_COUNTS, the cache writes' split, the thinking tokens and the cost.
+_TALLY = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+          "cache_read_input_tokens": "cacheReadInputTokens", "cache_creation_input_tokens": "cacheCreationInputTokens",
+          "ephemeral_5m_input_tokens": "cacheCreationEphemeral5mInputTokens",
+          "ephemeral_1h_input_tokens": "cacheCreationEphemeral1hInputTokens", "thinking_tokens": "thinkingTokens",
+          "cost_usd": "costUSD"}
+
+
+def _number(value: Any) -> float | None:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _turn_tally(result: ClaudeResult) -> dict[str, dict[str, float]] | None:
+    """The turn's own tally by model: the CLI's ``modelUsage`` at its last `result` less the session's before the turn,
+    which a resume restores into it. None when either is missing."""
+    if result.model_usage is None or result.session_base is None:
+        return None
+    turn = {}
+    for model, now in result.model_usage.items():
+        before = result.session_base.get(model) or {}
+        counts = {ours: (_number(now.get(theirs)) or 0) - (_number(before.get(theirs)) or 0)
+                  for ours, theirs in _TALLY.items()}
+        if any(counts.values()):
+            turn[model] = counts
+    return turn
+
+
+def _builds_atif(request: TaskRequest[ClaudeCodeConfig]) -> bool:
+    """Whether the task feeds an atif/1 copy; a protocol from before ``builds_atif`` is taken to, and its copy is built
+    only when the run prescribed it."""
+    return getattr(request.trajectory, "builds_atif", True)
+
+
+def _usage(result: ClaudeResult) -> Usage:
+    """The turn's tool calls and token counts, with ``input_tokens`` counting the cache. The counts are the CLI's own
+    tally for the turn (``_turn_tally``), which covers every call, its subagents' too, and its cost; the turn's
+    `result` events count only the main agent's calls, so the tally is used only when it covers at least those. When it
+    can't be (a resumed session this process hasn't run before), the counts are the `result` events', and the
+    subagents' calls are counted in ``unreported_calls``, which makes the turn a lower bound. A run cut off before its
+    `result` counts its model calls there too. The cache writes' 5-minute and 1-hour split, the thinking tokens and
+    each model's own counts are kept in ``provider_details``."""
+    unreported = result.unreported_calls
+    if not result.run_usage and not result.model_usage:
+        details = {"unreported_calls": unreported + result.subagent_calls} if unreported + result.subagent_calls else {}
+        return Usage(tool_call_count=result.tool_call_count, provider_details=details)
+
+    def total(read: Any) -> int:
+        return sum(value for run in result.run_usage if isinstance(value := read(run), int) and not isinstance(value, bool))
+
+    main = {key: total(lambda run, key=key: run.get(key)) for key in _RUN_COUNTS}
+    turn = _turn_tally(result)
+    tally = {key: sum(model[key] for model in turn.values()) for key in _TALLY} if turn is not None else None
+    cost, models = None, None
+    if tally is not None and all(tally[key] >= main[key] for key in _RUN_COUNTS) and min(tally.values()) >= 0:
+        counted = {key: int(tally[key]) for key in _RUN_COUNTS}
+        counted["cache_creation"] = {key: int(tally[key]) for key in _CACHE_WRITE_SPLIT}
+        thinking, cost = int(tally["thinking_tokens"]), tally["cost_usd"] or None
+        models = {model: {"input_tokens": int(counts["input_tokens"] + counts["cache_read_input_tokens"]
+                                              + counts["cache_creation_input_tokens"]),
+                          "output_tokens": int(counts["output_tokens"]),
+                          "cache_read_tokens": int(counts["cache_read_input_tokens"]),
+                          "cache_write_tokens": int(counts["cache_creation_input_tokens"]),
+                          **({"cost_usd": counts["cost_usd"]} if counts["cost_usd"] else {})}
+                  for model, counts in turn.items()}
+    else:
+        counted = dict(main)
+        counted["cache_creation"] = {key: total(lambda run, key=key: (run.get("cache_creation") or {}).get(key))
+                                     for key in _CACHE_WRITE_SPLIT}
+        thinking = total(lambda run: (run.get("output_tokens_details") or {}).get("thinking_tokens"))
+        unreported += result.subagent_calls
+    usage = Usage.from_model_response(counted)
+    return replace(usage, tool_call_count=result.tool_call_count, cost_usd=cost, provider_details={
+        **usage.provider_details, **({"unreported_calls": unreported} if unreported else {}),
+        **({"reasoning_tokens": thinking} if thinking else {}), **({"models": models} if models else {})})
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="Claude Code",
@@ -403,9 +484,9 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
     config_description="Set or read agent configuration such as model, role, and allowed tools.",
     lifespan=_turns_stop_with_the_server,
     extensions=(
-        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, description=(
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT, atif=ClaudeCodeAtif, description=(
             "Retrieve a task's Claude Code stream-json trajectory, also while it runs, "
-            "or a context's cumulative trajectory including a live run.")),
+            "or a context's cumulative trajectory including a live run; atif/1 when the run prescribes it.")),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Claude Code CLI should connect to."),
         enable(PEER_AGENTS_V1, description=(
             "Delegate to the task's other agents: the CLI reaches them through the SDK's peer_agents MCP tools.")),
@@ -440,6 +521,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
         # without waiting on the turn; a snapshot load holds the lock across its restore.
         self._active_contexts: set[str] = set()
         self._contexts_lock = asyncio.Lock()
+        # Each conversation's request shapes its ATIF document has the tools of, so a shape is fed to a document once.
+        self._tool_shapes: dict[str, set[tuple[str | None, str]]] = {}
 
     async def run(self, request: TaskRequest[ClaudeCodeConfig]) -> TaskResult:
         # The CLI's stdout events, appended as it prints them, are the turn's trajectory.
@@ -501,6 +584,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
                 event_callback=request.trajectory.append,
+                **self._atif_feed(request),
             )
         except Exception as e:
             logger.error(f"claude CLI invocation raised: {e}", exc_info=True)
@@ -511,6 +595,9 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             session_id = result.session_id
             self.set_session_ref_for_context(context_id, session_id)
 
+        usage = _usage(result)
+        if usage.cost_usd is not None and _builds_atif(request):
+            request.trajectory.aux("turn", {"type": "turn", "cost_usd": usage.cost_usd})
         data: dict[str, Any] = {"tool_call_count": result.tool_call_count}
         if result.attempts > 1:
             data["cli_attempts"] = result.attempts
@@ -525,9 +612,19 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             .add_text(result.response or (result.error or ""))
             .add_data(data)
             .session_ref(session_id)
-            .usage(Usage(tool_call_count=result.tool_call_count))
+            .usage(usage)
             .build()
         )
+
+    def _atif_feed(self, request: TaskRequest[ClaudeCodeConfig]) -> dict[str, Any]:
+        """What run_claude feeds the ATIF adapter beside stdout, when the task builds an atif/1 copy."""
+        if not _builds_atif(request):
+            return {}
+        new_document = getattr(request.trajectory, "starts_document", False)
+        shapes = self._tool_shapes.setdefault(request.context_id, set())
+        if new_document:
+            shapes.clear()
+        return {"aux_callback": request.trajectory.aux, "tool_shapes": shapes, "new_document": new_document}
 
     async def _context_trajectory(self, context_id: str) -> dict[str, Any]:
         session_id = self.session_ref_for_context(context_id)

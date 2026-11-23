@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
-from test_a2a_atif_serving import _atif, _ended, _send
+from test_a2a_atif_serving import _atif, _ended, _send, _serving
 
 from agentenv_protocol.a2a_agent import (
     TRAJECTORY_V1,
@@ -36,7 +36,17 @@ from agentenv_protocol.a2a_agent import _media_spool
 from agentenv_protocol.a2a_agent._media_spool import MediaSpool
 from agentenv_protocol.a2a_agent._atif_copy import TurnStart
 from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
-from agentenv_protocol.atif import Adapter, AtifError, atif_adapter, check_media, errors_in, media_file, native, validate
+from agentenv_protocol.atif import (
+    FORMAT,
+    Adapter,
+    AtifError,
+    atif_adapter,
+    check_media,
+    errors_in,
+    media_file,
+    native,
+    validate,
+)
 from agentenv_protocol.atif._image_size import image_size
 from agentenv_protocol.transfers import TransferError, WriteObject
 
@@ -119,7 +129,7 @@ def _media(client: TestClient, paths: dict[str, str], context_id: str = "ctx-1")
 
 
 def test_a_copys_images_are_spooled_by_sha256_with_their_size_and_pushed_once_asked(store: dict[str, bytes]) -> None:
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png", "inbound.png")])
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
@@ -144,7 +154,7 @@ def test_a_copys_images_are_spooled_by_sha256_with_their_size_and_pushed_once_as
 def test_a_media_calls_grants_leave_the_copys_media_paths_as_they_are(store: dict[str, bytes]) -> None:
     """A grant's URL may name the file it writes, ``media/<sha256>.<ext>``: the scrub takes a URL's credential from it,
     never the file's name, which every read of the copy keeps."""
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")])
         _ended(client, task_id)
         assert _media(client, {_path(SHOT, ".png"): "image/png"}).status_code == 200
@@ -155,7 +165,7 @@ def test_a_media_calls_grants_leave_the_copys_media_paths_as_they_are(store: dic
 
 
 def test_the_same_bytes_added_twice_are_spooled_and_pushed_once(store: dict[str, bytes]) -> None:
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png"), _file(SHOT, "image/png")])
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
@@ -177,7 +187,7 @@ def test_a_path_the_context_doesnt_hold_and_a_failed_upload_dont_stop_the_rest(
             raise TransferError("grant_expired", "The transfer grant expired.")
         return await stored(target, source)
 
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png"), _file(other, "image/png")])
         _ended(client, task_id)
         monkeypatch.setattr(_media_spool, "upload", upload)
@@ -204,7 +214,7 @@ def test_an_agent_that_serves_its_own_trajectory_reads_still_has_the_sdks_media_
         async def trajectory(self, request: TaskTrajectoryRequest | TaskObjectTrajectoryRequest) -> dict[str, Any]:
             return {"trajectory": []}
 
-    with TestClient(OwnReads().create_app()) as client:
+    with _serving(OwnReads()) as client:
         _ended(client, _send(client, "look", "m-1", extra_parts=[_file(SHOT, "image/png")]))
         assert list(_media(client, {_path(SHOT, ".png"): "image/png"}).json()["objects"]) == [_path(SHOT, ".png")]
 
@@ -241,7 +251,7 @@ def test_an_upload_that_outlives_its_copy_releases_only_the_hold_it_began_with(
 
 
 def test_a_spooled_file_that_no_longer_matches_its_name_never_reaches_the_store(store: dict[str, bytes]) -> None:
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
         _spool(client).held("ctx-1", _path(SHOT, ".png")).write_bytes(b"changed on disk")
         pushed = _media(client, {_path(SHOT, ".png"): "image/png"}).json()
@@ -253,7 +263,7 @@ def test_an_upload_whose_bytes_changed_in_transit_fails_and_its_file_stays_held(
     async def upload(target, source) -> Uploaded:
         return Uploaded(size_bytes=len(SHOT), sha256="0" * 64)
 
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
         monkeypatch.setattr(_media_spool, "upload", upload)
         pushed = _media(client, {_path(SHOT, ".png"): "image/png"}).json()
@@ -264,7 +274,7 @@ def test_an_upload_whose_bytes_changed_in_transit_fails_and_its_file_stays_held(
 def test_a_file_the_spool_cant_write_is_reported_missing_and_the_copy_goes_on(
         store: dict[str, bytes], tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     other = _png(2, 2)
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         spool = _spool(client)
         spool._folder = tmp_path / "removed"
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
@@ -283,26 +293,26 @@ def test_a_file_the_spool_cant_write_is_reported_missing_and_the_copy_goes_on(
 
 
 def test_a_media_call_takes_only_media_paths() -> None:
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         for path in ("../../etc/passwd", "media/abc.png", "https://elsewhere.example.test/x.png",
                      f"media/{'a' * 64}/x.png"):
             refused = _media(client, {path: "image/png"})
             assert refused.status_code == 400, (path, refused.text)
 
 
-def test_only_an_agent_that_serves_atif_offers_media() -> None:
+def test_only_an_agent_that_can_build_atif_offers_media_and_prescribe() -> None:
     def methods(agent: AgentEnvAgent) -> set[str]:
         card = TestClient(agent.create_app()).get("/.well-known/agent-card.json").json()
         [trajectory] = [ext for ext in card["capabilities"]["extensions"] if ext["uri"] == TRAJECTORY_V1.uri]
         return set(trajectory["params"]["methods"])
 
-    assert methods(_shooting()) == {"get", "media"}
+    assert methods(_shooting()) == {"get", "media", "prescribe"}
     assert methods(_shooting(atif=False)) == {"get"}
 
 
 def test_a_video_and_a_heic_image_are_spooled_and_pushed_like_any_file(store: dict[str, bytes]) -> None:
     video, heic = b"\x00\x00\x00\x18ftypmp42" + b"v" * 64, b"\x00\x00\x00\x18ftypheic" + b"h" * 64
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(video, "video/mp4"), _file(heic, "image/heic")])
         _ended(client, task_id)
         document = _atif(client, task_id=task_id)["trajectory"]
@@ -318,6 +328,7 @@ def test_a_video_and_a_heic_image_are_spooled_and_pushed_like_any_file(store: di
 
 def test_a_context_evicted_or_restored_over_drops_its_media_but_what_another_holds() -> None:
     trajectories = TaskTrajectories(max_contexts=1, native=NATIVE, atif=Shots)
+    trajectories.prescribe([FORMAT])
 
     def play(task_id: str, context_id: str, data: bytes) -> None:
         log = trajectories.register(task_id, context_id)
@@ -338,7 +349,7 @@ def test_a_context_evicted_or_restored_over_drops_its_media_but_what_another_hol
 
 
 def test_the_spool_goes_with_the_server(store: dict[str, bytes]) -> None:
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         _ended(client, _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")]))
         folder = _spool(client).folder
         assert folder.is_dir()
@@ -346,7 +357,7 @@ def test_the_spool_goes_with_the_server(store: dict[str, bytes]) -> None:
 
 
 def test_the_native_trajectory_is_unchanged_by_media(store: dict[str, bytes]) -> None:
-    with TestClient(_shooting().create_app()) as client:
+    with _serving(_shooting()) as client:
         task_id = _send(client, "shoot", "m-1", extra_parts=[_file(SHOT, "image/png")])
         _ended(client, task_id)
         served = client.post("/ext/trajectory", json={"task_id": task_id}).json()["trajectory"]
@@ -386,6 +397,7 @@ def test_an_images_size_is_read_from_its_header(data: bytes, media_type: str, si
 
 def test_dimensions_an_adapter_passes_win_over_the_header() -> None:
     trajectories = TaskTrajectories(native=NATIVE, atif=Shots)
+    trajectories.prescribe([FORMAT])
     log = trajectories.register("t1", "ctx")
     trajectories.start("t1", TurnStart(message_id=None, parts=(TextPart(text="hi"),), agent_name="toy",
                                        agent_version="1", agent_model=None))

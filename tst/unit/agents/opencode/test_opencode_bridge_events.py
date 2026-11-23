@@ -95,3 +95,46 @@ async def test_formatted_turn_requires_valid_json_schema_output(monkeypatch, ans
     else:
         assert result.structured_output is None
         assert len(result.trajectory) == 2
+
+
+def _step_finish(reason: str, **part) -> dict:
+    return {"type": "step_finish", "part": {"type": "step-finish", "reason": reason, **part}}
+
+
+# A prod turn's last step at opencode-ai 1.17.18's default cap of 32,000: `output` counts the text alone.
+_CAPPED_TOKENS = {"total": 128270, "input": 13981, "output": 2, "reasoning": 31998, "cache": {"write": 0, "read": 82289}}
+
+
+def test_a_turn_cut_off_at_the_output_cap_fails_with_its_token_counts():
+    result = _parse_events(_jsonl(_step_finish("tool-calls"), _step_finish("length", tokens=_CAPPED_TOKENS)), b"", 0)
+
+    assert result.error_code == "output_token_limit"
+    assert result.error == ("model hit the output token cap (32000 tokens: 31998 reasoning + 2 text) before "
+                            "finishing; raise max_output_tokens on the prompt_agent step")
+
+
+def test_the_output_cap_error_wins_over_stderr_and_does_without_token_counts():
+    result = _parse_events(_jsonl(_step_finish("length")), b"some log line\n", 0)
+
+    assert result.error_code == "output_token_limit"
+    assert result.error.startswith("model hit the output token cap before finishing;")
+
+
+def test_an_error_event_wins_over_the_output_cap():
+    error = {"type": "error", "error": {"name": "APIError", "data": {"message": "boom", "statusCode": 500}}}
+
+    result = _parse_events(_jsonl(_step_finish("length", tokens=_CAPPED_TOKENS), error), b"", 0)
+
+    assert (result.error, result.error_code) == ("APIError: boom", "500")
+
+
+def test_a_stopped_turn_is_unaffected_by_an_earlier_cut_off_step():
+    result = _parse_events(_jsonl(_step_finish("length", tokens=_CAPPED_TOKENS), _step_finish("stop")), b"", 0)
+
+    assert (result.error, result.error_code) == (None, None)
+
+
+def test_a_turn_ending_on_another_reason_keeps_the_generic_error():
+    result = _parse_events(_jsonl(_step_finish("content-filter")), b"", 0)
+
+    assert (result.error, result.error_code) == ("opencode exited with code 0 without completing", None)

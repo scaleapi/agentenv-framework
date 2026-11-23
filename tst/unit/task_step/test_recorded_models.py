@@ -1,18 +1,22 @@
 """A solver, user simulator or agent judge records the model its agent took: the one asked for when the agent's
-card accepts a model, and None, the agent's own, when it doesn't."""
+card accepts a model, and None, the agent's own, when it doesn't. A direct judge records the model it called."""
 
+import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import litellm
 import pytest
 from a2a.types import TaskState
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent import protocol
 from agent_env.config.model import resolve_model
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps import prompt_agent as pa_mod
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 
 def _card(*supported: str) -> dict:
@@ -100,3 +104,26 @@ async def test_an_agent_judge_records_the_model_it_took(monkeypatch, card, recor
                                         judge_effort=None, judge_max_thinking_tokens=None, context=context, headers={})
 
     assert context.metadata["models"] == {"judge": {"judge": recorded}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("asked", "sent"), [("gpt-4.1-mini", "gpt-4.1-mini"), ("qwen3:8b", "openai/qwen3:8b")])
+async def test_a_direct_judge_records_the_model_it_called(monkeypatch, asked, sent):
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="k")
+    called = []
+
+    async def acompletion(**kwargs):
+        called.append(kwargs["model"])
+        answer = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "it said hi"}]})
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=answer))])
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    judge = RubricsVerifierTaskStep.from_dict({"id": "judge", "type": "rubrics_verifier", "prompt_id": "p",
+                                               "use_agent_judge": False, "use_trajectory": False,
+                                               "criteria": [{"id": "c1", "description": "says hi"}]})
+    context = TaskStepContext(prompt_responses=[PromptResponse(prompt_id="p", response="hi", prompt_text="greet")],
+                              metadata={"user_overrides": {"judge_model": asked}})
+
+    await judge.execute(context)
+
+    assert called == [sent] and context.metadata["models"] == {"judge": {"judge": asked}}

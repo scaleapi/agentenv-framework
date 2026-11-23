@@ -612,6 +612,7 @@ from agentenv_protocol.computer import (
 class MyDriver(ComputerDriverEnvironment):
     buttons = ("left", "right")       # features, on the card
     max_click_count = 2
+    screenshot_delay_ms = 300         # how long after an input its screenshot is taken
 
     @display
     async def size(self) -> Display: ...                    # width, height, scale
@@ -668,7 +669,11 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
-  after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
+  taken `screenshot_delay_ms` after the input, so a smooth scroll or the page a key opens, which renders a couple
+  of hundred milliseconds after the input returns, shows: the driver class's `screenshot_delay_ms` (500 unless it
+  sets its own), or the deploy's setting of that name, 0 capturing at once. A driver's own tools don't wait: they keep
+  their own timing. Click and scroll leave out `x` and `y`
+  to act at the pointer on a computer with
   `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
   group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
   or `reload`s, `computer_tabs` lists, opens, switches and closes tabs by the browser's own ids and
@@ -719,8 +724,9 @@ other exception from an input operation is reported `delivery_failed` with `appl
 
 **Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
 (`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
-`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
-and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
+`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`,
+`exec_timeout_s` and `screenshot_delay_ms`, which replaces the driver's own. A driver reads them as `self.settings`,
+for example its tap hold in `@press`.
 
 Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
 names the caller whose latest frame and others' input a call uses.
@@ -776,7 +782,11 @@ class MyDriver(ComputerDriverEnvironment):
   of a double or triple), a trail for a drag, an
   arrow for a scroll, a cross for a move, and a chip for a key chord, typed text as it was typed, and
   each of the driver's own or forwarded tools whose annotations don't say it only reads, by name and
-  main argument. Where the frames can't show the pointer themselves, as frames polled from captures that
+  main argument, unless the driver draws what the call did itself: a tool named in its
+  `marks_own_inputs` hands `mark_inputs` the inputs it made, computer/v1 operations with their arguments
+  as `act` takes them at points of the display (`("click", (x, y, button, count, modifiers))`), drawn as
+  a `computer_*` input is, in the colour of the role that called it (cua-driver's input tools, as each
+  reply says it acted; `draws_inputs()` says whether a recording draws any). Where the frames can't show the pointer themselves, as frames polled from captures that
   leave it out do (cua-driver's), a pointer is drawn for each role and pointer that has acted, where its
   last input left it, along a drag's path as it moves, after a fading line from where it jumped: the one
   that moved last at full strength, the others fainter, each named once there are several. Every `computer_*` input is marked
@@ -1301,14 +1311,20 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
 
   The builder closes a step when the next one starts, puts every result in its call's step, writes `prompt_tokens`
   with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
-  record no method takes is counted in the root profile.
+  record no method takes is counted in the root profile. `turn.tool_definitions([...], agent=None)` writes the tools
+  the model was offered, in OpenAI's function form, to a trajectory's `agent.tool_definitions`; a later call adds
+  tools and replaces those of the same name.
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
   reader's earlier page is always a prefix of a later one. A step is rendered once a page serves it and kept, so a
   read costs one parse of the document, not a render of every step.
-- **Readers** (`load`, `tasks`, `media_paths`, `strip_profile`, `is_prefix`) take any valid ATIF document, with or
-  without the profile, such as a Harbor task's trajectory.json.
+- **Readers** (`load`, `tasks`, `task_document`, `media_paths`, `media_refs`, `strip_profile`, `is_prefix`) take any
+  valid ATIF document, with or without the profile, such as a Harbor task's trajectory.json. `task_document` cuts A2A
+  tasks out of a conversation's document as a document of their own (`tasks_document` for tasks found without ids), as a
+  reader showing one turn shows it. `media_refs` names each place a media
+  file is named, with the profile's details for it; `validate(document, media=StoredMedia(sizes))` checks those
+  details against files stored beside the document without reading their bytes.
 
 ## A2A agent framework
 
@@ -1623,13 +1639,33 @@ responses, the format it serves.
 enable(TRAJECTORY_V1, live=True, native="my-cli-events/1", atif=MyCliAtif)
 ```
 
-The card then lists `atif/1` in `formats` too; `default` stays `native`. The
-SDK keeps one ATIF document per A2A context, run through one adapter instance,
-and feeds it every event the agent appends, as it appends it. A native
+The card then lists `atif/1` in `formats` too; `default` stays `native`.
+
+The agent builds `atif/1` only when prescribed: a run that reads its copies
+says so first with the trajectory extension's `prescribe`
+(`POST /ext/trajectory/prescribe`, `{formats: ["atif/1"]}`, each a format the
+card offers; it answers every format the agent now builds, native first).
+
+- A prescription holds for each A2A context started after it. A context keeps the
+  formats it started with, so no copy misses its first turns, and a later call
+  sets them for the contexts after it.
+- It's one setting for the whole agent. An agent that serves several runs builds,
+  for each new context, what the last call prescribed, whichever run made it.
+- With no call the agent builds native only: no ATIF document, no media spool,
+  and no turn count of its own. A snapshot restored into it still records the
+  count the snapshot carries, so a context prescribed `atif/1` later numbers its
+  turns on from there.
+- An `atif/1` read of a context that wasn't prescribed it is refused with `409
+  format_not_prescribed`. A read that names no format always gets native.
+
+For a context prescribed `atif/1`, the SDK keeps one ATIF document, run through
+one adapter instance, and feeds it every event the agent appends, as it appends it. A native
 trajectory returned at task end runs through the adapter then. The agent's own
 code feeds the adapter's aux files, records that aren't in the native log such
 as a hook's notes, with `request.trajectory.aux(name, record)`, where they
-happened among the events. An agent with an adapter that both appends events and
+happened among the events. `request.trajectory.builds_atif` says whether the task
+feeds a copy, so an agent gathers what only its aux files take, such as a log it
+tails, only then. An agent with an adapter that both appends events and
 returns a native trajectory fails the turn with code
 `framework.trajectory_appended_and_returned`, since its ATIF copy would come
 from one of them and its native record from the other.

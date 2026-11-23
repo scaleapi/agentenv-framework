@@ -82,6 +82,11 @@ def task_file_parts(data: Any) -> tuple[list[dict], list[str] | None]:
             headlines is None or isinstance(headlines, list) and all(isinstance(h, str) for h in headlines)):
         raise ValueError("a task file must be a JSON array of step objects, or an object whose steps is one and whose "
                          "headline_verifiers lists step ids")
+    for index, step in enumerate(steps):
+        for key in ("id", "type"):
+            if isinstance(step.get(key), (list, dict)):
+                raise ValueError(f"step #{index}'s {key} is a JSON {'array' if isinstance(step[key], list) else 'object'}"
+                                 f"; it must be a string")
     return steps, headlines
 
 

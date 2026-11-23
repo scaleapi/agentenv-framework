@@ -271,6 +271,11 @@ class RoutingDocumentStore(DocumentStore):
         return self.namespaces[LOCAL_NAMESPACE]
 
     def find_one(self, collection: str, filter: Filter, sort: Optional[Sort] = None) -> Optional[dict]:
+        if not sort or not sort.keys:
+            for store in self._readers(collection, filter):
+                if (doc := self._read(store, lambda: store.find_one(collection, filter, sort))) is not None:
+                    return doc
+            return None
         found = [
             doc for store in self._readers(collection, filter)
             if (doc := self._read(store, lambda: store.find_one(collection, filter, sort))) is not None

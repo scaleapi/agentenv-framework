@@ -10,7 +10,9 @@ from agentenv_protocol.transfers import HttpPutGrant
 from agent_env.a2a_agent import A2AAgent
 from agent_env.store import GrantUnavailableError
 from agent_env.a2a_agent.object_transfer import DEFAULT_TRAJECTORY_MAX_BYTES
+from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.usage import StepUsage
 
 RV = "agent_env.task_step.task_steps.verifiers.rubrics_verifier"
 
@@ -420,6 +422,8 @@ async def test_invoke_judge_a2a_wires_the_captured_trajectory_onto_the_result(mo
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         judge_agent=SimpleNamespace(sandbox_id=None, sandbox_type=None, control_headers={"AgentEnv-Control-Token": "tok"}),
+        model=None,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert result == {

@@ -32,13 +32,13 @@ from agent_env.bundle.resolve import build_step
 from agent_env.bundle.run import planned_tasks, prepare_bundle, solver_params
 from agent_env.store.routing import namespace_routing
 from agent_env.openenv.reward import reward_of
+from agent_env.task.lint import judges_in_solver
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_steps.agent.user_sim_common import opening_parts, opening_text
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
-from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.prompt_agent import agent_name_of, is_prompt_step, solver_agents
 from agent_env.training._openenv import on_session_loop
 
 logger = logging.getLogger(__name__)
@@ -50,13 +50,13 @@ _SANDBOX = "local"
 
 
 def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                agent: str | None = None) -> list[dict[str, Any]]:
-    """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments: a system line
-    naming the task, which is how the factory finds it, then the task's first prompt, for TRL's logs. The model never
-    sees this prompt: the task's own agent builds its own."""
+                agent: str | None = None, skip_lint: bool = False) -> list[dict[str, Any]]:
+    """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments, ``skip_lint``
+    among them: a system line naming the task, which is how the factory finds it, then the task's first prompt, for
+    TRL's logs. The model never sees this prompt: the task's own agent builds its own."""
     return [{"prompt": [{"role": "system", "content": f"AgentEnv task {index}: {task.id}"},
                         {"role": "user", "content": _first_prompt(task)}], "task_id": task.id}
-            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, agent))]
+            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, agent, skip_lint))]
 
 
 class AgentEnvSessionFactory(ResourceSessionFactory):
@@ -64,14 +64,16 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
     bundle to run on local Docker, checks that ``llm_url``'s engine returns token ids, and serves OpenEnv's capture
     proxy in front of it, where the task's solver reaches it: the agent a step prompts, which it deploys, its other
     agents and judges keeping the configured endpoint. TRL sets ``model`` to the policy it publishes; ``reward`` is as
-    ``build_app``'s, and ``agent`` the agent the solver deploys, as ``agent-env run --agent``'s."""
+    ``build_app``'s, ``agent`` the agent the solver deploys, as ``agent-env run --agent``'s, and ``skip_lint`` as
+    ``agent-env run --skip-lint``'s."""
 
     def __init__(self, bundle: str | Path, *, llm_url: str, model: str, sampling: dict[str, Any] | None = None,
                  tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                 reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None):
+                 reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None,
+                 skip_lint: bool = False):
         self.model = model
         self._llm_url, self._sampling = llm_url, sampling
-        self._trained = _trained(bundle, tasks, evals, agent)
+        self._trained = _trained(bundle, tasks, evals, agent, skip_lint)
         self._rewards = [_reward(task, reward) for task, _ in self._trained]
         require_llm(llm_url, model, require_tokens=True)
         self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(),
@@ -178,11 +180,11 @@ class AgentEnvSession(ResourceSession):
             self._done.set()
 
 
-def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str],
-             agent: str | None) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
+def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str], agent: str | None,
+             skip_lint: bool = False) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
     """The selected tasks that can train their solver, prepared as ``agent-env run`` prepares them, each with its
     solver's deploys and their step params, ``agent``'s if it swaps the solver. The others are left out before they're
-    checked, so what they alone need can't stop the rest."""
+    checked, task lint included, so what they alone need can't stop the rest."""
     with namespace_routing():
         kept = []
         for entry in planned_tasks(bundle, tasks=tasks, evals=evals, agent=agent):
@@ -193,7 +195,8 @@ def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str],
         if not kept:
             raise ValueError("no task of the bundle has a solver to train: an agent a step prompts, deployed by a "
                              "deploy_agent step, that isn't also its judge")
-        prepared = prepare_bundle(bundle, tasks=kept, sandbox=_SANDBOX, agent=agent, solver_endpoint=True)
+        prepared = prepare_bundle(bundle, tasks=kept, sandbox=_SANDBOX, agent=agent, solver_endpoint=True,
+                                  skip_lint=skip_lint)
     swapped = solver_params(prepared.plan, prepared.materialization)
     return [(task, {step: swapped.get(entry.id, {}).get(step, {})
                     for step in solver_steps([step.to_dict() for step in task.steps])})
@@ -207,9 +210,7 @@ def _untrainable(config: list[dict[str, Any]]) -> str | None:
     deploys = [step for step in steps if step.id in solver]
     if not deploys or not all(isinstance(step, DeployAgentTaskStep) for step in deploys):
         return "training needs the agent a step prompts deployed by a deploy_agent step"
-    agents = {step.agent_name for step in deploys}
-    if any(isinstance(step, RubricsVerifierTaskStep) and step.use_agent_judge and step.agent_name in agents
-           for step in steps):
+    if judges_in_solver(steps):
         return "its rubric judge is its solver, whose grading would be trained on"
     return None
 
@@ -237,9 +238,9 @@ def _first_prompt(task: Task) -> str:
     names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written (its
     text, for an opening with files). A step that prompts an agent another step talks to as its user (the user sim,
     say a briefing) isn't the agent under test's."""
-    users = user_sim_agents(task.steps)
+    solver = solver_agents(task.steps)
     step = next((each for each in task.steps
-                 if is_prompt_step(each) and getattr(each, "agent_name", None) not in users), None)
+                 if is_prompt_step(each) and agent_name_of(each) in solver), None)
     if step is None:
         return ""
     if getattr(step, "prompt", None):

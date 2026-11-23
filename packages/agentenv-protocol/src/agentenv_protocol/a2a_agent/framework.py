@@ -36,7 +36,7 @@ from ..atif import SCHEMA_VERSION as ATIF_SCHEMA_VERSION
 from ._atif_copy import TurnStart
 from ._secrets import Secrets
 from ._snapshot_state import SnapshotStates
-from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
+from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, NotPrescribed, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
     AGENT_CONFIG_V1,
@@ -69,6 +69,8 @@ from .extensions import (
     AtifUploadedObjects,
     TrajectoryEventsResponse,
     TrajectoryMediaRequest,
+    TrajectoryPrescribeRequest,
+    TrajectoryPrescribeResponse,
     TrajectoryObjectsResponse,
     TrajectoryState,
     TrajectoryUploadedObjects,
@@ -145,6 +147,16 @@ def _config_wire_names(config: type[AgentConfig]) -> dict[str, str]:
             raise TypeError(f"AgentConfig fields have duplicate alias {wire_name!r}")
         result[field_name] = wire_name
     return result
+
+
+
+def _not_prescribed(exc: NotPrescribed) -> AgentEnvError:
+    return AgentEnvError(
+        "format_not_prescribed",
+        f"{exc.format} was not prescribed for context {exc.context_id!r} when it started, so the agent built none; "
+        "prescribe it before a conversation's first message (the trajectory extension's prescribe)",
+        status=409,
+    )
 
 
 def _config_write_only_wire_names(config: type[AgentConfig]) -> set[str]:
@@ -684,6 +696,7 @@ class _SdkServices:
             (SKILL_CONFIG_V1.uri, "list"): self.skill_list,
             (TRAJECTORY_V1.uri, "get"): self.trajectory_get,
             (TRAJECTORY_V1.uri, "media"): self.trajectory_media,
+            (TRAJECTORY_V1.uri, "prescribe"): self.trajectory_prescribe,
             (TRIGGERS_V1.uri, "register"): self.triggers_register,
             (TRIGGERS_V1.uri, "decide"): self.triggers_decide,
             (TRIGGERS_V1.uri, "state"): self.triggers_state,
@@ -905,6 +918,8 @@ class _SdkServices:
                     request.context_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
                 )
                 unknown = f"Unknown context '{request.context_id}'"
+        except NotPrescribed as exc:
+            raise _not_prescribed(exc) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if cursor is None:
@@ -934,7 +949,10 @@ class _SdkServices:
         through the request's grants, as the copy serves it, its secrets scrubbed."""
         served: dict[str, Any] = {}
         if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
-            read = self.task_trajectories.atif_task(request.task_id)
+            try:
+                read = self.task_trajectories.atif_task(request.task_id)
+            except NotPrescribed as exc:
+                raise _not_prescribed(exc) from exc
             if read is None:
                 raise HTTPException(
                     status_code=404,
@@ -945,7 +963,10 @@ class _SdkServices:
         else:
             if isinstance(request, ContextObjectTrajectoryRequest):
                 _refuse_turn_objects(request)
-            document = self.task_trajectories.atif_context(request.context_id)
+            try:
+                document = self.task_trajectories.atif_context(request.context_id)
+            except NotPrescribed as exc:
+                raise _not_prescribed(exc) from exc
             if document is None:
                 raise HTTPException(
                     status_code=404,
@@ -965,6 +986,17 @@ class _SdkServices:
             ),
         )
         return AtifObjectsResponse(objects=uploaded, **versions).model_dump(mode="json", exclude_none=True)
+
+    async def trajectory_prescribe(self, request: TrajectoryPrescribeRequest) -> dict[str, Any]:
+        """Build ``request.formats`` beside native for each conversation the agent starts from now on; each must be
+        one the card offers."""
+        for format in request.formats:
+            self.check_trajectory_format(format)
+        built = self.task_trajectories.prescribe(request.formats)
+        native = self.trajectory_formats[0]
+        return TrajectoryPrescribeResponse(
+            formats=[native, *(format for format in self.trajectory_formats if format in built)]
+        ).model_dump(mode="json")
 
     async def trajectory_media(self, request: TrajectoryMediaRequest) -> dict[str, Any]:
         """Upload the media files of a context's atif/1 copy the worker asks for, from the spool (``MediaSpool.push``)."""
