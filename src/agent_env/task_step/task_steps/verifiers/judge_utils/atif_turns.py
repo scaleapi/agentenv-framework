@@ -180,7 +180,7 @@ class AtifDocuments:
         return url if self._stored[url] else None
 
 
-def _text(content: Any) -> str:
+def content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     return "\n".join(part["text"] for part in content or []
@@ -192,7 +192,7 @@ def _has_image(content: Any) -> bool:
                                              for part in content)
 
 
-def _steps(trajectory: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+def steps_of(trajectory: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """A trajectory's steps a reader can walk: a stored copy may be invalid, and is still graded as stored."""
     steps = trajectory.get("steps")
     return [step for step in steps if isinstance(step, Mapping)] if isinstance(steps, list) else []
@@ -204,7 +204,7 @@ def _results(step: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [result for result in results if isinstance(result, Mapping)] if isinstance(results, list) else []
 
 
-def _by_call(step: Mapping[str, Any]) -> list[tuple[Optional[Mapping[str, Any]], list[Mapping[str, Any]]]]:
+def calls_with_results(step: Mapping[str, Any]) -> list[tuple[Optional[Mapping[str, Any]], list[Mapping[str, Any]]]]:
     """Each tool call of the step with its results by ``source_call_id``, then the results no call names."""
     calls = step.get("tool_calls")
     calls = [call for call in calls if isinstance(call, Mapping)] if isinstance(calls, list) else []
@@ -215,7 +215,7 @@ def _by_call(step: Mapping[str, Any]) -> list[tuple[Optional[Mapping[str, Any]],
     return paired + ([(None, unpaired)] if unpaired else [])
 
 
-class _SubAgents:
+class SubAgents:
     """The embedded sub-agents a trajectory's results start, each walked once. A reference names one among its
     trajectory's own, else the nearest around where that trajectory sits, whoever reached it, as ATIF makes an id unique
     only within its parent's array (the builder embeds them all in the root). A copy graded as stored may lack an id, or
@@ -267,18 +267,18 @@ def compact_atif_trajectory(
     events: list[dict] = []
     files: list[tuple[str, str]] = []
     numbers = itertools.count(1)
-    subagents = _SubAgents(document)
+    subagents = SubAgents(document)
     calls_on = trajectory_filter.include_tool_calls
     results_on = trajectory_filter.include_tool_call_results
 
     def walk(trajectory: Mapping[str, Any], tag: Mapping[str, Any]) -> None:
-        for step in _steps(trajectory):
+        for step in steps_of(trajectory):
             if step.get("source") != "agent":
                 continue
             timestamp = step.get("timestamp") or ""
             if trajectory_filter.include_thinking and step.get("reasoning_content"):
                 events.append({"type": "thinking", "text": step["reasoning_content"], "timestamp": timestamp, **tag})
-            for call, results in _by_call(step):
+            for call, results in calls_with_results(step):
                 tool = (call or {}).get("function_name") or ""
                 if call is not None and calls_on:
                     events.append({"type": "tool_call", "tool": tool, "input": call.get("arguments"),
@@ -302,10 +302,10 @@ def compact_atif_trajectory(
 
     walk(document, {})
     if trajectory_filter.include_response:
-        final = next((step for step in reversed(_steps(document))
-                      if step.get("source") == "agent" and _text(step.get("message")).strip()), None)
+        final = next((step for step in reversed(steps_of(document))
+                      if step.get("source") == "agent" and content_text(step.get("message")).strip()), None)
         if final is not None:
-            events.append({"type": "final_response", "text": _text(final.get("message")),
+            events.append({"type": "final_response", "text": content_text(final.get("message")),
                            "timestamp": final.get("timestamp") or ""})
     return events, files
 
@@ -321,16 +321,16 @@ def transcript_from_atif(
     actions: list[TrajectoryAction] = []
     messages: list[AgentMessage] = []
     frames: list[ImageFrame] = []
-    subagents = _SubAgents(document)
+    subagents = SubAgents(document)
 
     def walk(trajectory: Mapping[str, Any]) -> None:
-        for step in _steps(trajectory):
+        for step in steps_of(trajectory):
             if step.get("source") != "agent":
                 continue
-            text = _text(step.get("message"))
+            text = content_text(step.get("message"))
             if text.strip():
                 messages.append(AgentMessage(len(actions), text))
-            for call, results in _by_call(step):
+            for call, results in calls_with_results(step):
                 shots: list[ImageFrame] = []
                 for result in results:
                     content = result.get("content")
@@ -343,7 +343,7 @@ def transcript_from_atif(
                 frames.extend(shots)
                 if call is not None:
                     arguments = call.get("arguments")
-                    result_text = "\n".join(t for t in (_text(r.get("content")) for r in results) if t)
+                    result_text = "\n".join(t for t in (content_text(r.get("content")) for r in results) if t)
                     actions.append(TrajectoryAction(
                         index=len(actions) + 1, tool=str(call.get("function_name") or ""),
                         args=arguments if isinstance(arguments, dict) else {},

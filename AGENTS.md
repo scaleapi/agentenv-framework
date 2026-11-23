@@ -126,9 +126,11 @@ or one of them only where it is used.
   agent whose trajectory it reads (prompt_agent and always_on call the trajectory extension's `prescribe` on the agent
   they prompt before its conversation starts); a run's `user_overrides.trajectory_formats` beats it. None by default,
   so an agent builds native only, and an `atif/1` read of a conversation not prescribed it is refused
-  (`format_not_prescribed`). A prompt step of a run that prescribes `atif/1` reads each turn's copy inline once the
-  turn ends, off the turn's path, and stores it as `<trajectory_id>.json` under `{prefix}atif/instance_id=<id>/<agent>/`
-  (`metadata["atif_copies"]`, `task_step/snapshot_utils/atif_copies.py`), overwritten each turn, with the turn's aux
+  (`format_not_prescribed`). A prompt step or always_on step of a run that prescribes `atif/1` reads each turn's copy
+  off the turn's path once the turn ends (always_on fills in each turn's url, record and timeline fields when its run
+  ends, the copies still going given one trajectory fetch cap more), and stores it as `<trajectory_id>.json` under
+  `{prefix}atif/instance_id=<id>/<agent>/` (`metadata["atif_copies"]`, `task_step/snapshot_utils/atif_copies.py`),
+  overwritten each turn, with the turn's aux
   log and turn context under `turns/` and the media it names pulled into `media/`; after a restart the session's
   earlier document names the next in `continued_trajectory_ref`. Each turn's record says how its copy checked
   (`AtifRecord`: `valid`, `invalid`, `newer`, `unavailable`), and a copy never fails the run. When the agent offers
@@ -136,8 +138,13 @@ or one of them only where it is used.
   had, or whose copy's media didn't all arrive, has its native trajectory read in its place. Judges read each turn's trajectory by its label
   (`verifiers/judge_utils/atif_turns.py`): an `atif/1` turn as its own A2A task cut out of the document
   (`agentenv_protocol.atif.task_document`), its media read from the document's `media/` and checked against their
-  names, any other turn as native. So prescribing atif/1 changes what a run's judges read and can move its scores. Only
-  prompt steps switch for now: always_on prescribes native only until it reads atif/1 copies.
+  names, any other turn as native; always_on's judge stages an `atif/1` wake from that task's events
+  (`turn_events.atif_turn_events`), each such wake's end naming its turn in the step's timeline, since the turns share
+  one url. A prompt step that follows its turns live (`live_trajectory`) follows the copy too
+  (`snapshot_utils/live_trajectory.py`): each poll's new closed steps a page under `<turn>/live/`, the header beside the
+  page where it changed, each sub-agent's under `sub/<id>/`, and the media its steps name pulled between polls; a turn
+  the agent won't serve atif/1 is followed natively, and one it stops serving partway ends naming why (`end.json`
+  `stopped`). So prescribing atif/1 changes what a run's judges read and can move its scores.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A

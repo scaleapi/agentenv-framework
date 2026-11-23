@@ -90,6 +90,7 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.util
 import json
 import logging
@@ -105,6 +106,7 @@ from typing import Any, ClassVar, Optional
 from zoneinfo import ZoneInfo
 
 from a2a.types import TaskState
+from agentenv_protocol.atif import FORMAT as ATIF_FORMAT
 
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
 from agent_env.a2a_agent.object_transfer import AgentTurn, send_and_wait
@@ -123,7 +125,8 @@ from agent_env.env.gateway.constants import (
 )
 from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
-from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, TurnTrajectory
+from agent_env.task_step.snapshot_utils.atif_copies import AtifCopies
 from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
@@ -134,6 +137,7 @@ from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     fetch_native_trajectory,
     prescribe_formats,
+    prescribed_formats,
 )
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
@@ -420,6 +424,8 @@ class _Run:
         self.final_sent = False
         self.last_reply_at: Optional[datetime] = None
         self.per_turn_trajectory_urls: list[Optional[str]] = []
+        self.per_turn_trajectories: list[TurnTrajectory] = []
+        self.copies: Optional[AtifCopies] = None
         self.per_turn_parts: list[Optional[list[dict]]] = []
         self.tool_calls: Optional[int] = None
         # Each role's turns' usage, recorded as each turn ends.
@@ -479,6 +485,8 @@ class _Run:
         self.undo.append((f"{what} on {env.env_id}", put_back))
 
     def close(self) -> None:
+        if self.copies is not None:
+            self.copies.cancel()
         for p in self._plugin_paths:
             if os.path.exists(p):
                 os.unlink(p)
@@ -645,7 +653,10 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.agent.control_headers)
-        await prescribe_formats(ctx, step.id, self.agent, self.target_url, formats=())  # native until it reads atif/1
+        await prescribe_formats(ctx, step.id, self.agent, self.target_url)
+        self.copies = AtifCopies(ctx, self.agent, self.target_url,
+                                 A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY),
+                                 prescribed=ATIF_FORMAT in prescribed_formats(ctx))
         solver_model = negotiated.fields.get("model") if negotiated else None
         ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
         self.usage.start(ModelRole.SOLVER, solver_model, self.agent)
@@ -1426,18 +1437,7 @@ class _Run:
         cut_off = TIME_LIMIT if stopped is not None else self._limit_reached(state, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
-        traj = None
-        card = self.agent.a2a_card or {}
-        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
-        if traj_ext:
-            try:
-                traj = (await asyncio.wait_for(
-                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                            card=card, sandbox_type=self.agent.sandbox_type,
-                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
-            except Exception as e:
-                logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
-        self.per_turn_trajectory_urls.append(traj)
+        traj, which = await self._trajectory(task_id, msg_id, f"wake {self.wakes}")
         self.final_task_id = task_id
         ended = await self.now()
         plain = term.response_text or ""
@@ -1445,7 +1445,7 @@ class _Run:
         self.log("agent_turn_end", n=self.wakes, state=str(state), virtual_time=_iso(ended),
                  virtual_seconds=round((ended - sent_at).total_seconds()), real_seconds=round(time.time() - t, 1),
                  tool_calls=term.tool_call_count, plain_reply=plain, messages_to_user=len(messages),
-                 trajectory_url=traj, **extra, **({"cut_off": cut_off} if cut_off else {}))
+                 trajectory_url=traj, **which, **extra, **({"cut_off": cut_off} if cut_off else {}))
         self._sent(messages)
         if cut_off:  # the wake ends here; the run goes on
             self._cut_off(cut_off, "wake", term.error_message or term.response_text, stopped)
@@ -1461,6 +1461,52 @@ class _Run:
             self.log("settle_timeout", wake=self.wakes, still_at_work=stuck, settle=self.last_settle)
         await self._read_changes("after_turn")
         await self._schedule_read()
+
+    async def _trajectory(self, task_id: str, msg_id: str, turn: str) -> tuple[Optional[str], dict]:
+        """The agent turn's trajectory, its url and record joining the run's per-turn lists. When the run prescribes
+        atif/1 and the agent offers it, the turn's copy is read off the turn's path, and its url and record are filled
+        in when the run ends (``_settle_copies``); otherwise its native one is read within one fetch cap
+        (TRAJECTORY_FETCH_SECONDS). Returns the url read, and for a copied turn, whose url the run's turns share, the
+        timeline field that says which turn it is."""
+        step, card = self.step, self.agent.a2a_card or {}
+        extension = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        record = TurnTrajectory(format=None, atif=None)
+        native = functools.partial(fetch_native_trajectory, self.target_url, extension, task_id,
+                                   step._trajectory_prefix(), msg_id, card=card, sandbox_type=self.agent.sandbox_type,
+                                   headers=self.agent.control_headers) if extension else _no_trajectory
+        index = len(self.per_turn_trajectory_urls)
+        self.per_turn_trajectories.append(record)
+        self.copies.turn(index, task_id, msg_id, record, native=native)
+        if self.copies.replaces_native:
+            self.per_turn_trajectory_urls.append(None)
+            return None, {"turn": index}
+        url = None
+        try:
+            url, record["format"] = await asyncio.wait_for(native(), TRAJECTORY_FETCH_SECONDS)
+        except Exception as e:
+            logger.warning(f"{turn}: trajectory fetch failed (continuing): {e}")
+        self.per_turn_trajectory_urls.append(url)
+        return url, {}
+
+    async def _settle_copies(self) -> None:
+        """Each copied turn's url and record, and its timeline events' too, once its copy is stored: the copies still
+        going get one fetch cap more (TRAJECTORY_FETCH_SECONDS), none when the step is being cancelled, and one still
+        going then has no url."""
+        if self.copies is None:
+            return
+        task = asyncio.current_task()
+        try:
+            urls = await self.copies.join(timeout=0 if task is not None and task.cancelling()
+                                          else TRAJECTORY_FETCH_SECONDS)
+        except Exception as e:  # the record matters more than this part of it
+            logger.warning(f"always_on: the agent's atif/1 copies could not be joined: {type(e).__name__}: {e}")
+            urls = {}
+        for index, url in urls.items():
+            self.per_turn_trajectory_urls[index] = url
+        for event in self.timeline:
+            if event.get("event") in ("agent_turn_end", "nudge") and "turn" in event:
+                event["trajectory_url"] = self.per_turn_trajectory_urls[event["turn"]]
+                event["trajectory_format"] = self.per_turn_trajectories[event["turn"]]["format"]
 
     def _kept_parts(self, parts: list[dict]) -> list[dict]:
         """What the prompt response keeps of one wake's parts: TURN_TEXT_CHARS of each text, until
@@ -1512,25 +1558,14 @@ class _Run:
         cut_off = TIME_LIMIT if stopped is not None else self._limit_reached(state, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
-        traj = None
-        card = self.agent.a2a_card or {}
-        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
-        if traj_ext:
-            try:
-                traj = (await asyncio.wait_for(
-                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                            card=card, sandbox_type=self.agent.sandbox_type,
-                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
-            except Exception as e:
-                logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
-        self.per_turn_trajectory_urls.append(traj)
+        traj, which = await self._trajectory(task_id, msg_id, f"nudge after wake {self.wakes}")
         self.final_task_id = task_id
         plain = term.response_text or ""
         outcome = "message_user" if messages else "stay_quiet" if quiet else "neither"
         self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
                  state=str(state), outcome=outcome, messages_to_user=len(messages), stay_quiet_calls=len(quiet),
                  plain_reply_after=plain, tool_calls=term.tool_call_count, real_seconds=round(time.time() - t, 1),
-                 trajectory_url=traj, **({"cut_off": cut_off} if cut_off else {}))
+                 trajectory_url=traj, **which, **({"cut_off": cut_off} if cut_off else {}))
         self._sent(messages, after_nudge=True)
         if cut_off:  # the wake ends here; the run goes on
             self._cut_off(cut_off, "nudge", term.error_message or term.response_text, stopped)
@@ -1804,6 +1839,7 @@ class _Run:
         except Exception as e:  # the record matters more than this part of it
             logger.warning(f"always_on: could not read what was pending at the end: {e}")
             self.pending = {"error": [{"error": f"{type(e).__name__}: {str(e)[:200]}"}]}
+        await self._settle_copies()
         if self.end_reason == NOTHING_CAN_WAKE:
             # Scheduled checks would have woken the agent, so they aren't what makes a run stuck.
             stuck = any(items for kind, items in self.pending.items() if kind != "scheduled_checks_not_due")
@@ -1904,6 +1940,7 @@ class _Run:
             prompt_id=step.prompt_id, response=final_text, prompt_text=self._effective_prompt(),
             agent_trajectory_object_url=traj, agent_trajectory_object_prefix=step._trajectory_prefix(),
             target_agent_per_turn_trajectory_object_urls=self.per_turn_trajectory_urls or None,
+            target_agent_per_turn_trajectories=self.per_turn_trajectories or None,
             source_agent_per_turn_prompt_parts=self.per_turn_parts or None, tool_call_count=self.tool_calls,
             model=self.model, error_type=self.error_type, error_code=self.error_code, error_message=self.error,
             agent_session_id=self.final_task_id,
@@ -2038,6 +2075,11 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
 
 def _task_zone(us: dict, clocks: list[dict]) -> str:
     return task_zone(us, clocks, "always_on")
+
+
+async def _no_trajectory() -> tuple[None, None]:
+    """The native read of an agent whose card has no trajectory extension: nothing to read."""
+    return None, None
 
 
 def _step_part(text: str, source: str) -> dict:
