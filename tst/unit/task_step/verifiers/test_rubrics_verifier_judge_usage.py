@@ -275,18 +275,6 @@ async def _direct_once(verifier: RubricsVerifierTaskStep, context: TaskStepConte
 
 
 @pytest.mark.asyncio
-async def test_a_direct_judge_call_that_ran_out_of_time_before_one_answered_counts_as_unknown(monkeypatch):
-    _completes(monkeypatch, [_timeout(), _ANSWER])
-    context = TaskStepContext()
-
-    await _direct_once(_verifier(), context)
-
-    [entry] = context.metadata["step_usage"]["verify"]
-    assert (entry["turns"], entry["input_tokens"], entry["partial"]) == (2, 100, True)
-    assert context.metadata["model_endpoints"]["judge"]["verify"]["endpoint_host"] == "proxy.example:4000"
-
-
-@pytest.mark.asyncio
 async def test_a_direct_judge_that_ran_out_of_time_on_every_attempt_leaves_a_call_of_unknown_usage(monkeypatch):
     verifier = _verifier()
     _completes(monkeypatch, [_timeout() for _ in range(verifier.DEFAULT_MAX_RETRIES)])

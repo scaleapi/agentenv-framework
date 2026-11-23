@@ -1372,7 +1372,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         ``response`` and ``trajectory_object_url`` (None), and the call's record, which the step keeps in its usage
         (``_record_direct_call``): its ``usage`` as the response carried it, the ``model`` called, the
         ``endpoint_host`` it reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's
-        price map's figure. ``cut_off_calls`` counts the attempts before the answer that ran out of time, when any did.
+        price map's figure.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1407,16 +1407,13 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         use_response_format = True
 
         last_exc: Exception | None = None
-        cut_off = 0
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
                 reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,
                                                   response_format=response_format if use_response_format else None)
-                return {"response": reply.content, "trajectory_object_url": None, **reply.fields(),
-                        **({"cut_off_calls": cut_off} if cut_off else {})}
+                return {"response": reply.content, "trajectory_object_url": None, **reply.fields()}
             except Exception as exc:
                 last_exc = exc
-                cut_off += model_call.cut_off(exc)
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
                     logger.warning(
                         f"Multimodal judge call with json_schema failed for verifier "
@@ -1679,16 +1676,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     @staticmethod
     def _record_direct_call(usage: StepUsage, data: dict, *, model: str) -> None:
         """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
-        bill its cost when it sent one, with or without token counts; and each attempt before it that ran out of time,
-        as a call of unknown usage."""
+        bill its cost when it sent one, with or without token counts."""
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
         if data.get("reported_cost_usd") is not None:
             read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])
         usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
                    reported_by=ReportedBy.PROVIDER)
-        for _ in range(data.get("cut_off_calls", 0)):
-            usage.cut_off_call(ModelRole.JUDGE, model=data.get("model") or model,
-                               endpoint_host=data.get("endpoint_host"), reported_by=ReportedBy.PROVIDER)
 
     async def _run_judge_with_output_retries(
         self,
