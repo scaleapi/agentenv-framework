@@ -6,15 +6,22 @@ as its state beside them, and the caller's guidance or the default; nothing run 
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import re
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER
+from agentenv_protocol.computer.app import COMPUTER_APP
+from agentenv_protocol.types import FileWithBytes, GetDataResponse, uploaded_file_part
 
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.verifiers.computer import computer_verifier
@@ -185,6 +192,46 @@ async def test_a_file_over_the_limit_is_named_as_too_large(computer, monkeypatch
     assert "a file of 101 bytes, too large" in prompts[0]
     assert ctx.metadata[RECORDS_KEY]["grade"]["files"] == [
         {"path": "~/huge.txt", "bytes": 101, "rendered_as": "too_large", "cut": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_result_file_an_app_owns_is_read_through_that_apps_data_get(computer, monkeypatch):
+    app = {"name": "notes", "url": "/apps/notes/agentenv", "capabilities": {
+        "operations": ["data/get"], "extensions": [{"uri": COMPUTER_APP, "params": {"paths": ["Notes"]}}]}}
+    (computer.home / "notes.txt").write_text("done\n")
+    computers = computer.get_data
+
+    async def get_data(base_url, timeout=30, verify=True, *, write_namespace=None, paths=None, headers=None):
+        if not base_url.endswith("/apps/notes"):
+            return await computers(base_url, timeout, verify, write_namespace=write_namespace, paths=paths,
+                                   headers=headers)
+        computer.calls.append(("app data/get", paths))
+        return GetDataResponse(parts=[FilePart(file=FileWithBytes(bytes=base64.b64encode(b"buy milk").decode()),
+                                               metadata={DATA_OBJECTS_EXTENSION_URI: {"path": "Notes/today.md"}})])
+
+    monkeypatch.setattr(protocol_v1, "get_data", get_data)
+    step = _step(result_files=["~/notes.txt", "Notes/today.md"])
+    prompts: list[str] = []
+    _judge(step, prompts)
+
+    await step.execute(_context(computer, card={**CARD, "children_environments": [app]}))
+
+    assert "buy milk" in prompts[0] and "did NOT produce" not in prompts[0]
+    assert [call for call in computer.calls if call[0].endswith("data/get")] == [
+        ("data/get", ["notes.txt"]), ("app data/get", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_file_uploaded_under_the_grant_is_read_only_under_the_limit(local_stores, monkeypatch):
+    monkeypatch.setattr(computer_verifier, "MAX_READ_BYTES", 4)
+    store = get_config().get_object_store()
+    store.put("exports/x/small.txt", b"tiny")
+    store.put("exports/x/big.txt", b"too big")
+    answer = GetDataResponse(parts=[uploaded_file_part("small.txt"), uploaded_file_part("big.txt")])
+
+    files = await _step(result_files=[])._files_of(answer, (store, SimpleNamespace(root_path="exports/x")), "it")
+
+    assert files == {"small.txt": b"tiny", "big.txt": 7}
 
 
 @pytest.mark.asyncio
