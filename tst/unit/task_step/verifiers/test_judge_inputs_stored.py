@@ -58,7 +58,9 @@ def _opened(store: _Store, ref: dict) -> dict:
 @pytest.mark.asyncio
 async def test_a_direct_calls_record_opens_to_exactly_the_messages_format_and_settings_it_sent(monkeypatch, store):
     requests = _llm(monkeypatch, params={"temperature": 0, "max_tokens": 512, "aws_secret_access_key": "hush",
-                                         "extra_body": {"top_k": 5, "auth": "hush"}},
+                                         "extra_body": {"top_k": 5, "auth": "hush",
+                                                        "providers": [{"api_key": "hush", "order": 1}],
+                                                        "relay": "https://user:hush@relay.test/v1"}},
                     headers={"X-Team-Key": "team-secret"})
 
     grade = await _grade(_step(default_model="claude-sonnet-4-6", effort="high"), _context())
@@ -67,8 +69,9 @@ async def test_a_direct_calls_record_opens_to_exactly_the_messages_format_and_se
     sent = _opened(store, call["input"])
     assert sent["messages"] == requests[0]["messages"]
     assert sent["response_format"] == requests[0]["response_format"]
-    assert sent["settings"] == {"temperature": 0, "max_tokens": 512, "extra_body": {"top_k": 5},
-                                "reasoning_effort": "high"}
+    assert sent["settings"] == {"temperature": 0, "max_tokens": 512, "reasoning_effort": "high", "extra_body": {
+        "top_k": 5, "providers": [{"order": 1}], "relay": "https://***@relay.test/v1"}}
+    assert not any(secret in data for data in store.objects.values() for secret in (b"hush", b"team-secret"))
     assert (requests[0]["extra_headers"], requests[0]["aws_secret_access_key"]) == ({"X-Team-Key": "team-secret"}, "hush")
 
 
