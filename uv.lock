@@ -298,7 +298,6 @@ dependencies = [
     { name = "anyio", version = "4.15.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.14'" },
     { name = "httpx" },
     { name = "pydantic" },
-    { name = "sniffio" },
     { name = "starlette" },
 ]
 
@@ -382,7 +381,6 @@ requires-dist = [
     { name = "python-xlib", marker = "extra == 'x11'", specifier = ">=0.33,<0.34" },
     { name = "regex", marker = "extra == 'agent'", specifier = ">=2023.12.25" },
     { name = "regex", marker = "extra == 'dev'", specifier = ">=2023.12.25" },
-    { name = "sniffio", specifier = ">=1.1" },
     { name = "starlette", specifier = ">=0.37" },
     { name = "trio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "uvicorn", marker = "extra == 'agent'", specifier = ">=0.30" },

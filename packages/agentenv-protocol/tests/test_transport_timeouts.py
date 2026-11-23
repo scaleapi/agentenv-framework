@@ -1,7 +1,9 @@
 """Exercise HTTPX's TCP, TLS and read timers against a loopback peer."""
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
+from textwrap import dedent
 
 import anyio
 import httpx
@@ -25,6 +27,40 @@ async def listen(handler):
             for writer in writers:
                 writer.close()
             await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_asyncio_card_lookup_without_sniffio(monkeypatch):
+    monkeypatch.setenv("no_proxy", "*")
+    probe = dedent("""
+        import asyncio
+        import sys
+
+        sys.modules["sniffio"] = None
+        try:
+            import anyio
+            import httpx
+        except ModuleNotFoundError as exc:
+            if exc.name == "sniffio":
+                sys.exit(77)
+            raise
+
+        from agentenv_protocol import client
+        assert asyncio.run(client.get_card(sys.argv[1], timeout=3)) == {"name": "items"}
+    """)
+
+    async def reply(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{"name":"items"}')
+        await writer.drain()
+
+    async with listen(reply) as address:
+        child = await asyncio.create_subprocess_exec(sys.executable, "-c", probe, f"http://{address}",
+                                                     stderr=asyncio.subprocess.PIPE)
+        _, stderr = await child.communicate()
+    if child.returncode == 77:
+        pytest.skip("the installed AnyIO or HTTPX version requires sniffio")
+    assert child.returncode == 0, stderr.decode()
 
 
 @pytest.mark.asyncio

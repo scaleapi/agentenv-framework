@@ -8,12 +8,18 @@ from typing import Any
 
 import anyio
 import httpx
-import sniffio
+
+try:
+    import sniffio
+except ImportError:
+    sniffio = None
 
 
 def _runtime():
-    # HTTPX uses native Trio when called from Trio. AnyIO 3's Trio adapter requires older Trio versions.
-    return import_module("trio") if sniffio.current_async_library() == "trio" else anyio
+    # Trio installs sniffio; asyncio-only HTTPX installations can omit it.
+    if sniffio is not None and sniffio.current_async_library() == "trio":
+        return import_module("trio")
+    return anyio
 
 
 async def _send_attempt(client: httpx.AsyncClient, request: httpx.Request, deadline: float, runtime) -> httpx.Response:
