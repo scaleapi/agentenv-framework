@@ -1557,9 +1557,24 @@ def is_prompt_step(step: Any) -> bool:
 
 def user_sim_agents(steps: Any) -> set[str]:
     """The agents a task's prompting steps talk to as their user: an always_on step's ``user_sim``, a prompt_agent
-    step's ``user_agent_name`` (its default when unset). ``steps`` are steps or step dicts."""
-    def field(step: Any, name: str) -> Any:
-        return step.get(name) if isinstance(step, dict) else getattr(step, name, None)
+    step's ``user_agent_name`` (its default when unset). ``steps`` are steps or step dicts; a name that isn't a string
+    names no agent."""
+    return {name for step in steps if is_prompt_step(step)
+            if isinstance(name := _field(step, "user_sim") or _field(step, "user_agent_name")
+                          or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME, str)}
 
-    return {field(step, "user_sim") or field(step, "user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME
-            for step in steps if is_prompt_step(step)}
+
+def solver_agents(steps: Any) -> set[str]:
+    """The agents a task's prompting steps talk to as the agent under test, not as its user (``user_sim_agents``): the
+    solver's. ``steps`` are steps or step dicts; a name that isn't a string names no agent."""
+    prompted = {name for step in steps if is_prompt_step(step) if isinstance(name := agent_name_of(step), str)}
+    return prompted - user_sim_agents(steps)
+
+
+def agent_name_of(step: Any) -> Any:
+    """The agent ``step``, a step or a step dict, names: its ``agent_name``, else the default agent's name."""
+    return _field(step, "agent_name") or PromptAgentTaskStep.DEFAULT_AGENT_NAME
+
+
+def _field(step: Any, name: str) -> Any:
+    return step.get(name) if isinstance(step, dict) else getattr(step, name, None)

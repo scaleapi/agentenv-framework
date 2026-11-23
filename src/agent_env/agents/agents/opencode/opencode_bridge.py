@@ -34,7 +34,9 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from agent_egress import clock_armed, egress_env
 from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent.clock import follows
 from model_relay import Calls, model_relay
+from opencode_date import env_date_rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +110,12 @@ def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_ser
             clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
     armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
-    connects to itself."""
+    connects to itself. Where the image follows the env's clock, the CLI starts on real time, since it orders a
+    session's messages by when they were written and takes no time before 1970; what it starts still reads the env's
+    time, and the turn's relay tells the model the env's date (``opencode_date``)."""
     urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
-    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed)}
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed),
+            **({"AGENTENV_REAL_TIME": "1"} if follows() else {})}
 
 
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
@@ -287,11 +292,13 @@ def _build_config(
     instructions: list[str] | None = None,
     builtin_tools: OpenCodeTools | None = None,
     max_output_tokens: int | None = None,
+    armed: bool = False,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
     Everything dynamic (model, MCP servers, headers) is rebuilt per turn so there
-    is no on-disk config to race on."""
+    is no on-disk config to race on. On an armed clock only the endpoint is enabled, whose calls the relay dates, so a
+    provider a project's config adds can't send the model the machine's date."""
     options: dict = {"baseURL": _base_url(environ), "apiKey": "{env:LITELLM_API_KEY}"}
     if headers:
         options["headers"] = dict(headers)
@@ -343,6 +350,8 @@ def _build_config(
     }
     if instructions:
         config["instructions"] = list(instructions)
+    if armed:
+        config["enabled_providers"] = ["litellm"]
 
     if mcp_servers:
         mcp: dict[str, dict] = {}
@@ -438,9 +447,10 @@ def _descendants(pid: int) -> list[int]:
 async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult:
     """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
     counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
-    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported."""
+    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported. The relay
+    tells the model the env's date on an armed clock (``opencode_date``)."""
     calls = Calls()
-    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls) as relay:
+    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, rewrite=env_date_rewrite) as relay:
         result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
     result.usage = calls.usage(result.tool_call_count)
     return result
@@ -493,10 +503,11 @@ async def _run_opencode(
             + json.dumps(schema, separators=(",", ":"))
         )
 
+    armed = clock_armed()
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
                            environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
                            instructions=instructions, builtin_tools=builtin_tools,
-                           max_output_tokens=max_output_tokens)
+                           max_output_tokens=max_output_tokens, armed=armed)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn
@@ -517,7 +528,7 @@ async def _run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=armed),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
         **({OUTPUT_TOKEN_MAX_ENV: str(max_output_tokens)} if max_output_tokens else {}),
     }

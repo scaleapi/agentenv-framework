@@ -167,6 +167,17 @@ def test_the_system_prompt_reaches_the_model_as_instructions_and_the_output_form
     assert Path(instructions).read_text() == "be brief"
 
 
+@pytest.mark.parametrize("armed", [False, True])
+def test_on_an_armed_clock_only_the_endpoint_the_relay_dates_is_enabled(monkeypatch, spawned, armed):
+    """A provider a project's opencode.json adds, as for a subagent's model, would reach a model with the real date."""
+    monkeypatch.setattr(opencode_bridge, "clock_armed", lambda: armed)
+
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+
+    ((_argv, env),) = spawned
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]).get("enabled_providers") == (["litellm"] if armed else None)
+
+
 def test_a_turn_with_no_system_prompt_names_no_instructions(spawned):
     asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
 
