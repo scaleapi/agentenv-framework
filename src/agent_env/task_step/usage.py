@@ -124,7 +124,8 @@ class RoleUsage:
             values = [getattr(usage, name) for usage in reported if getattr(usage, name) is not None]
             return sum(values) if values else None
 
-        counted = [usage for usage in reported if any(getattr(usage, name) is not None for name in _TOKEN_COUNTS)]
+        counted = [usage for usage in reported
+                   if usage.models or any(getattr(usage, name) is not None for name in _TOKEN_COUNTS)]
         flags = {usage.input_includes_cache for usage in counted}
         unreported = [n for usage in reported if (n := _unreported_calls(usage))]
         partial = (0 < len(counted) < len(self.turns) or bool(unreported)

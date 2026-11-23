@@ -128,3 +128,15 @@ def test_a_role_on_one_model_the_map_lacks_takes_the_agents_figure_only_when_eve
             input_tokens=100, output_tokens=10, input_includes_cache=True, cost_usd=cost)))
     [entry] = context.metadata["step_usage"]["solve"]
     assert (entry["cost_usd"], entry["cost_status"], entry["reported_cost_usd"]) == (None, "unpriced", None)
+
+
+def test_a_turn_whose_rows_cant_all_be_priced_leaves_the_entry_unpriced_rather_than_dropping(monkeypatch):
+    rows = (ModelUsage(model=SONNET, input_tokens=1000, output_tokens=10, input_includes_cache=True),
+            ModelUsage(model=HAIKU, output_tokens=5))
+    priced = Usage(input_tokens=1000, output_tokens=10, input_includes_cache=True)
+
+    entry = _entry(monkeypatch, priced, Usage(models=rows))
+
+    sonnet, haiku = entry["models"]
+    assert (haiku["cost_usd"], haiku["unpriced_reason"]) == (None, "no_tokens")
+    assert (entry["cost_usd"], entry["cost_status"]) == (None, "unpriced") and entry["turns"] == 2
