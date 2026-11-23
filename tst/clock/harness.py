@@ -2,9 +2,9 @@
 processes real, so this driver is on real time while it writes the clock page as the follower would, and every program
 under test runs as the session user, whom the library fakes. Each gate prints one JSON document on stdout.
 
-  harness.py waits | ratechange | jumps [ROUNDS] | cancel | timerfds | condstress [SECONDS] | semstress [SECONDS]
-             | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS] | forklock [FORKS] | tls
-             | chromium [agentenv|stock LAUNCHES PARALLEL LIMIT] | probe
+  harness.py waits | ratechange | jumps [ROUNDS] | cancel | timerfds | frozen_timers | condstress [SECONDS]
+             | semstress [SECONDS] | stall | torn [SECONDS] | deadwriter | end | end_waits | span | marker | identity
+             | envrace [SECONDS] | forklock [FORKS] | tls | chromium [agentenv|stock LAUNCHES PARALLEL LIMIT] | probe
 """
 import ctypes
 import json
@@ -315,6 +315,19 @@ def timerfds():
     return out
 
 
+def frozen_timers():
+    """On a clock frozen a day into its range: a periodic timerfd armed at its now, every second, has expired once 1.5 s
+    later, since a frozen clock brings no other; and one armed for an hour short of the end of the range has all of the
+    584 years between left (tfdfrozen.py)."""
+    preload()
+    fresh_page()
+    set_clock(-9223286400.0, 0)
+    r = subprocess.run(user_cmd(["python3", f"{PROGRAMS}/tfdfrozen.py", "9223368436"]), capture_output=True, text=True,
+                       cwd="/tmp", timeout=30)
+    preload(None)
+    return json.loads(r.stdout)
+
+
 def _with_page_changes(p) -> int:
     """+10 min every 0.5 s while ``p`` runs; how many."""
     n = 0
@@ -462,18 +475,60 @@ def deadwriter():
 
 
 def end():
-    """The clock a second short of the end of 64 bits of nanoseconds at rate 1, as a gateway that outlives its range
-    leaves it: two seconds on, reads in C, Python and Node show the end rather than wrap to 1677."""
+    """The clock a second short of the end of its range at rate 1, as a gateway that outlives its range leaves it: two
+    seconds on, reads in C, Python and Node show the end rather than run past it or wrap to 1677; and so they do after
+    the page is written with a universe past the end."""
     preload()
     fresh_page()
     set_clock(9223372035.0, 1)
     time.sleep(2.5)
-    reads = {name: subprocess.run(user_cmd(argv), capture_output=True, text=True).stdout.strip() for name, argv in (
+    reads = _end_reads()
+    set_clock(9223372100.0, 1)
+    after = _end_reads()
+    preload(None)
+    return {**reads, "after_write": after, "seq": page()[2]}
+
+
+def _end_reads() -> dict:
+    return {name: subprocess.run(user_cmd(argv), capture_output=True, text=True).stdout.strip() for name, argv in (
         ("date", ["date", "-u", "+%s.%N"]),
         ("python", ["python3", "-c", "import time; print(time.time_ns())"]),
         ("node", ["node", "-e", "console.log(Date.now())"]))}
+
+
+def end_waits():
+    """At the end of the range, run into it and then frozen there, as a follower writes the clock of a gateway that
+    outlived it: an absolute wait for a second past the time a read shows never ends, rather than at once, so a program
+    that waits in a loop doesn't spin (endwaits.py)."""
+    preload()
+    fresh_page()
+    set_clock(9223372035.0, 1)
+    time.sleep(2.5)
+    out = {"running": _waits_at_end()}
+    set_clock(9223372036.0, 0)
+    out["frozen"] = _waits_at_end()
     preload(None)
-    return reads
+    return out
+
+
+def _waits_at_end() -> dict:
+    r = subprocess.run(user_cmd(["python3", f"{PROGRAMS}/endwaits.py"]), capture_output=True, text=True, cwd="/tmp",
+                       timeout=30)
+    return json.loads(r.stdout)
+
+
+def span():
+    """A page from the start of the range run on at a day per second for 29.7 real hours without a rewrite (its follower
+    gone): its universe, 1970-06-17, is read where it ran to, not at the end of 64 bits."""
+    preload()
+    fresh_page()
+    anchor = time.time() - 29.7 * 3600
+    clockpage.write(1, -9223372036.0, 86400.0, anchor)
+    before = time.time()
+    read = float(subprocess.run(user_cmd(["date", "-u", "+%s.%N"]), capture_output=True, text=True).stdout)
+    after = time.time()
+    preload(None)
+    return {"read": read, "from": -9223372036 + (before - anchor) * DAY, "to": -9223372036 + (after - anchor) * DAY}
 
 
 def _classify(value: float, before: float, universe_offset: float) -> object:
@@ -698,8 +753,9 @@ def probe():
     return {"futex_waitv_errno": ctypes.get_errno() if r == -1 else 0}
 
 
-GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, condstress, semstress, stall, torn,
-                                 deadwriter, end, marker, identity, envrace, forklock, chromium, tls, probe)}
+GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, frozen_timers, condstress, semstress,
+                                 stall, torn, deadwriter, end, end_waits, span, marker, identity, envrace, forklock,
+                                 chromium, tls, probe)}
 
 if __name__ == "__main__":
     gate = GATES[sys.argv[1]]

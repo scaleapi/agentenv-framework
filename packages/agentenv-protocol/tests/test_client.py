@@ -338,6 +338,9 @@ def _error_response(status: int, **kwargs) -> httpx.Response:
     # A server from before the structured fields: its code, and nothing claimed about the effect.
     (_error_response(500, json={"ok": False, "error": {"code": "extension_failed", "message": "kaboom"}}),
      ("extension_failed", "kaboom", False, "unknown", None)),
+    # A route whose error is a bare string, as an env gateway's clock refusals are: it is the message.
+    (_error_response(400, json={"ok": False, "error": "virtual_time '3026-01-01T00:00:00Z' is outside the range"}),
+     (None, "virtual_time '3026-01-01T00:00:00Z' is outside the range", False, "unknown", None)),
     # A proxy's own error page.
     (_error_response(502, text="<html>Bad Gateway</html>"), (None, "Bad Gateway", False, "unknown", None)),
     (_error_response(404, json=["not", "an", "object"]), (None, "Not Found", False, "unknown", None)),

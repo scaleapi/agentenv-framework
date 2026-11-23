@@ -20,8 +20,8 @@ class ClockError(ValueError):
 
 MAX_RATE = 86400.0  # 1 real second = 1 virtual day (the max virtual-time speed)
 
-# Fast-fail a t0 that would pass LATEST within a real hour of advancement at `rate` (frozen clocks exempt): an hour, so
-# a day per second still arms at today's dates. Not the overflow guarantee — reads still saturate (_advance) past it.
+# Fast-fail a write that would bring the clock to LATEST within a real hour at `rate` (frozen clocks exempt): an hour,
+# so a day per second still arms at today's dates. Not the guarantee: a clock that runs to LATEST stands there.
 _OVERFLOW_HORIZON_S = 3600.0
 _MAX_T0 = datetime.max.replace(tzinfo=timezone.utc)
 # The times the clock holds: those 64 bits of nanoseconds since 1970 hold, as Python and the computers' clock page keep
@@ -47,7 +47,7 @@ def _parse_rate(rate) -> float:
 # fromisoformat is looser than RFC3339 (accepts basic format, week/ordinal dates, sub-minute
 # offsets), so gate on the grammar first and let it do only the arithmetic. A space separator is ok.
 _RFC3339_RE = re.compile(
-    r"""^\d{4}-\d{2}-\d{2}
+    r"""^(\d{4,})-\d{2}-\d{2}       # a year past four digits is read, to be refused as outside the range
         [Tt ]
         \d{2}:\d{2}:\d{2}           # seconds are mandatory
         (?:\.\d+)?
@@ -63,10 +63,11 @@ def _parse_rfc3339(text: str) -> datetime:
         raise ClockError(f"virtual_time must be an RFC3339 string, got {type(text).__name__}")
     # Don't strip: a whitespace-wrapped value would slip through the anchored grammar (a 200 the contract calls a 400).
     raw = text
-    if re.match(r"^\d{5,}-", raw):
-        raise ClockError(_outside(text))
-    if not _RFC3339_RE.match(raw):
+    grammar = _RFC3339_RE.match(raw)
+    if not grammar:
         raise ClockError(f"invalid RFC3339 virtual_time {text!r}: expected {_RFC3339_SHAPE}")
+    if len(grammar.group(1)) > 4 or grammar.group(1) == "0000":
+        raise ClockError(outside_range(f"virtual_time {text!r}"))
     if raw.endswith(("Z", "z")):
         raw = raw[:-1] + "+00:00"
     try:
@@ -76,18 +77,37 @@ def _parse_rfc3339(text: str) -> datetime:
     try:
         return dt.astimezone(timezone.utc)
     except OverflowError:
-        raise ClockError(f"invalid RFC3339 virtual_time {text!r}: out of representable range")
+        raise ClockError(outside_range(f"virtual_time {text!r}"))
 
 
 _WHY = "the times a 64-bit count of nanoseconds since 1970 holds, as Python and the computers that follow the clock keep time"
 
 
-def _outside(virtual_time: str) -> str:
-    return f"virtual_time {virtual_time!r} is outside the env clock's range, {_iso(EARLIEST)} to {_iso(LATEST)} ({_WHY})"
+def outside_range(what: str) -> str:
+    """The refusal of ``what``, a time the clock can't hold, naming its range and why."""
+    return f"{what} is outside the env clock's range, {_iso(EARLIEST)} to {_iso(LATEST)} ({_WHY})"
 
 
 def _past_end(what: str) -> str:
     return f"{what} would pass {_iso(LATEST)}, the end of the env clock's range, within a real hour ({_WHY})"
+
+
+def _ends_within_an_hour(at: datetime, rate: float) -> bool:
+    """Whether a clock at ``at``, running at ``rate``, reaches LATEST within _OVERFLOW_HORIZON_S real seconds."""
+    return (LATEST - at).total_seconds() < _OVERFLOW_HORIZON_S * rate
+
+
+def check_arm(virtual_time: str, rate=1.0, what: str | None = None) -> tuple[datetime, float]:
+    """``virtual_time`` and ``rate`` as set_time arms the clock at them, or the ClockError it refuses them with, which
+    names the time as ``what`` (``virtual_time '<it>'`` by default)."""
+    t0 = _parse_rfc3339(virtual_time)
+    r = _parse_rate(1.0 if rate is None else rate)
+    what = what or f"virtual_time {virtual_time!r}"
+    if not EARLIEST <= t0 <= LATEST:
+        raise ClockError(outside_range(what))
+    if _ends_within_an_hour(t0, r):
+        raise ClockError(_past_end(f"{what} at rate {r:g}"))
+    return t0, r
 
 
 def _iso(dt: datetime) -> str:
@@ -130,11 +150,8 @@ def _parse_duration(text) -> timedelta:
 
 
 def _advance(t0: datetime, seconds: float) -> datetime:
-    """t0 + seconds, saturating at datetime.min/max instead of raising.
-
-    set_time's horizon check can't bound a gateway that outlives _OVERFLOW_HORIZON_S, so reads
-    saturate rather than 500 — an armed clock always returns a (monotonic) time.
-    """
+    """t0 + seconds, saturating at datetime.min/max instead of raising, as a trigger's mark far past the clock's range
+    may need; the clock's own time stops at LATEST (Clock._upto_end)."""
     try:
         return t0 + timedelta(seconds=seconds)
     except (OverflowError, ValueError, OSError):
@@ -202,14 +219,9 @@ class Clock:
     def set_time(self, virtual_time: str, rate=1.0, time_zone: str | None = None) -> dict:
         """Arm/re-arm: anchor t0=virtual_time to now, advancing at `rate` virtual s per real s, in the universe's
         `time_zone` (its users' IANA zone), or none."""
-        t0 = _parse_rfc3339(virtual_time)
-        r = _parse_rate(1.0 if rate is None else rate)
+        t0, r = check_arm(virtual_time, rate)
         if time_zone is not None and _zone(time_zone) is None:
             raise ClockError(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as 'America/New_York'")
-        if not EARLIEST <= t0 <= LATEST:
-            raise ClockError(_outside(virtual_time))
-        if t0 > LATEST - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
-            raise ClockError(_past_end(f"virtual_time {virtual_time!r} at rate {r:g}"))
         with self._lock:
             self._bank(t0)
             self._t0 = t0
@@ -224,14 +236,14 @@ class Clock:
     def set_rate(self, rate) -> dict:
         """Change an armed clock's rate from its time at the call, keeping t0 and generation as an advance does, so time
         triggers keep their marks and a rate change can't step the clock back by a time read a moment earlier; 0 freezes
-        the clock."""
+        the clock. A faster rate that would bring it to the end of its range within a real hour is refused."""
         r = _parse_rate(rate)
         with self._lock:
             if not self._armed or self._t0 is None:
                 raise ClockError("clock is not armed")
             now = self._now()
             ran = (now - self._anchor) * self._rate
-            if _advance(self._t0, ran + self._ahead) > LATEST - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+            if r > self._rate and _ends_within_an_hour(self._upto_end(ran + self._ahead), r):
                 raise ClockError(_past_end(f"rate {r:g}"))
             self._lived += ran
             self._ahead += ran
@@ -241,19 +253,20 @@ class Clock:
         return self.state()
 
     def advance(self, virtual_time: str) -> dict:
-        """Jump forward to virtual_time on the current arm, keeping t0, rate and generation, so marks stay put."""
+        """Jump forward to virtual_time on the current arm, keeping t0, rate and generation, so marks stay put; one that
+        would bring the clock to the end of its range within a real hour is refused, but not one to the time it shows."""
         target = _parse_rfc3339(virtual_time)
         with self._lock:
             if not self._armed or self._t0 is None:
                 raise ClockError("clock is not armed")
             if target > LATEST:
-                raise ClockError(_outside(virtual_time))
-            if target > LATEST - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
-                raise ClockError(_past_end(f"virtual_time {virtual_time!r} at rate {self._rate:g}"))
-            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+                raise ClockError(outside_range(f"virtual_time {virtual_time!r}"))
+            current = self._upto_end((self._now() - self._anchor) * self._rate + self._ahead)
             jump = (target - current).total_seconds()
             if jump < 0:
                 raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
+            if jump > 0 and _ends_within_an_hour(target, self._rate):
+                raise ClockError(_past_end(f"virtual_time {virtual_time!r} at rate {self._rate:g}"))
             self._ahead += jump
             self._lived += jump
             self._count += 1
@@ -282,7 +295,7 @@ class Clock:
             if not self._armed or self._t0 is None:
                 return None
             elapsed = self._now() - self._anchor
-            return _advance(self._t0, elapsed * self._rate + self._ahead)
+            return self._upto_end(elapsed * self._rate + self._ahead)
 
     @property
     def time_zone(self) -> str | None:
@@ -305,13 +318,20 @@ class Clock:
         return {"virtual_time": _iso(current)}
 
     def state(self) -> dict:
+        """The clock as its followers take it up; one at the end of its range stands there, at rate 0."""
         with self._lock:
             if not self._armed or self._t0 is None:
                 return {"armed": False, "version": self.version}
-            elapsed = self._now() - self._anchor
-            return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
-                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
+            current = self._upto_end((self._now() - self._anchor) * self._rate + self._ahead)
+            return {"armed": True, "t0": _iso(self._t0),
+                    "virtual_seconds_per_real_second": 0.0 if current == LATEST else self._rate,
+                    "virtual_time": _iso(current),
                     **({"time_zone": self._time_zone} if self._time_zone else {}), "version": self.version}
+
+    def _upto_end(self, seconds: float) -> datetime:
+        """The current arm's time ``seconds`` after t0, standing at LATEST: no check at a write can bound a gateway that
+        outlives it, so the clock stops at the end of its range rather than leave it. Lock held."""
+        return min(_advance(self._t0, seconds), LATEST)
 
     def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""

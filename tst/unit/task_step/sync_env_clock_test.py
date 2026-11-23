@@ -1,5 +1,6 @@
 """Unit tests for SyncEnvClockTaskStep — round-trip + the per-server sync_time fan-out (mocked)."""
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, 
 
 T0 = "2026-01-01T00:00:00Z"
 CLOCK_URL = "http://gateway:9000/clock/time"
+RANGE = "the env clock's range, 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z"
 
 
 def _step(**kw):
@@ -339,6 +341,35 @@ def test_a_wall_clock_time_is_read_in_the_zone(virtual_time, zone, armed):
 def test_a_time_that_disagrees_with_the_zone_is_refused(virtual_time, zone, match):
     with pytest.raises(ValueError, match=match):
         _zoned(virtual_time, zone)
+
+
+@pytest.mark.parametrize("virtual_time, zone", [("0001-01-01T00:00:00", "Asia/Kolkata"),
+                                                ("9999-12-31T23:00:00", "America/Chicago")])
+def test_a_wall_time_whose_instant_no_date_holds_is_refused_naming_the_clocks_range(virtual_time, zone):
+    with pytest.raises(ValueError, match=re.escape(f"virtual_time '{virtual_time}' in {zone} is outside {RANGE}")):
+        _zoned(virtual_time, zone)
+
+
+@pytest.mark.parametrize("kwargs, problem", [
+    ({"virtual_time": "3026-01-01T00:00:00Z"}, f"virtual_time '3026-01-01T00:00:00Z' is outside {RANGE}"),
+    ({"virtual_time": "1677-09-21T05:00:00", "timezone": "Asia/Tokyo"},
+     f"virtual_time '1677-09-21T05:00:00' in Asia/Tokyo is outside {RANGE}"),
+    ({"virtual_time": "2262-04-11T23:00:00Z"},
+     "virtual_time '2262-04-11T23:00:00Z' at rate 1 would pass 2262-04-11T23:47:16Z, the end of the env clock's range"),
+    ({"virtual_time": "2026-01-01T12:00:00"}, "invalid RFC3339 virtual_time '2026-01-01T12:00:00'"),
+    ({"virtual_time": T0, "virtual_seconds_per_real_second": -1}, "rate must be non-negative"),
+])
+def test_a_time_or_rate_the_gateway_would_refuse_is_a_problem_before_anything_deploys(kwargs, problem):
+    problems = SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", depends_on=[], **kwargs).config_problems()
+    assert len(problems) == 1 and problems[0].startswith(f"step 'sync': {problem}"), problems
+
+
+def test_a_time_the_gateway_arms_at_is_no_problem():
+    assert _step().config_problems() == []
+    assert _step(virtual_seconds_per_real_second=0).config_problems() == []
+    assert SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", virtual_time="2262-04-11T23:47:16Z",
+                                virtual_seconds_per_real_second=0).config_problems() == []
+    assert _zoned("1677-09-21T09:31:43", "Asia/Tokyo").config_problems() == []
 
 
 def test_without_a_zone_virtual_time_is_passed_through_untouched():

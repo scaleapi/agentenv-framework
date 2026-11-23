@@ -28,6 +28,7 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.a2a_agent.clock import follow_agents, on_deployment, torn_down
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
+from agent_env.env.gateway.clock import ClockError, check_arm, outside_range
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -55,15 +56,19 @@ def resolve_virtual_time(virtual_time: str, timezone: Optional[str]) -> str:
         parsed = datetime.fromisoformat(virtual_time)
     except ValueError as e:
         raise ValueError(f"virtual_time {virtual_time!r} is not an ISO 8601 / RFC3339 timestamp") from e
-    if parsed.tzinfo is None:
-        local = parsed.replace(tzinfo=zone)
-        if local.astimezone(_utc_tz.utc).astimezone(zone).replace(tzinfo=None) != parsed:
-            raise ValueError(f"virtual_time {virtual_time!r} does not exist in {zone.key} (clock skips it)")
-        return local.astimezone(_utc_tz.utc).isoformat().replace("+00:00", "Z")
-    if parsed.astimezone(zone).utcoffset() != parsed.utcoffset():
-        raise ValueError(f"virtual_time {virtual_time!r} carries offset {parsed.utcoffset()} but {zone.key} is at "
-                         f"{parsed.astimezone(zone).utcoffset()} at that instant; drop the offset or fix the timezone")
-    return parsed.astimezone(_utc_tz.utc).isoformat().replace("+00:00", "Z")
+    try:
+        if parsed.tzinfo is None:
+            local = parsed.replace(tzinfo=zone)
+            if local.astimezone(_utc_tz.utc).astimezone(zone).replace(tzinfo=None) != parsed:
+                raise ValueError(f"virtual_time {virtual_time!r} does not exist in {zone.key} (clock skips it)")
+            return local.astimezone(_utc_tz.utc).isoformat().replace("+00:00", "Z")
+        if parsed.astimezone(zone).utcoffset() != parsed.utcoffset():
+            raise ValueError(f"virtual_time {virtual_time!r} carries offset {parsed.utcoffset()} but {zone.key} is at "
+                             f"{parsed.astimezone(zone).utcoffset()} at that instant; drop the offset or fix the "
+                             "timezone")
+        return parsed.astimezone(_utc_tz.utc).isoformat().replace("+00:00", "Z")
+    except OverflowError as e:
+        raise ValueError(outside_range(f"virtual_time {virtual_time!r} in {zone.key}")) from e
 
 
 class SyncEnvClockTaskStep(TaskStep):
@@ -112,6 +117,15 @@ class SyncEnvClockTaskStep(TaskStep):
         self.timeout_seconds = timeout_seconds
         self.timezone = timezone.strip() if isinstance(timezone, str) else timezone
         self.armed_virtual_time = resolve_virtual_time(virtual_time, self.timezone)
+
+    def config_problems(self) -> list[str]:
+        """A time or rate the gateway's clock would refuse to arm at, said before anything deploys."""
+        shown = f"virtual_time {self.virtual_time!r}" + (f" in {self.timezone}" if self.timezone else "")
+        try:
+            check_arm(self.armed_virtual_time, self.virtual_seconds_per_real_second, what=shown)
+        except ClockError as e:
+            return [f"step {self.id!r}: {e}"]
+        return []
 
     def to_dict(self) -> dict:
         base = super().to_dict()

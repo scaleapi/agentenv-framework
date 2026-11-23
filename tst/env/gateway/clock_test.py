@@ -234,32 +234,32 @@ def test_set_time_rejects_overflowing_t0():
         c.set_time("9999-12-31T00:00:00Z", rate=1.0)
 
 
-def test_set_time_allows_max_t0_when_frozen():
+def test_set_time_allows_the_last_t0_when_frozen():
     c = Clock(now_fn=FakeNow())
-    c.set_time("9999-12-31T00:00:00Z", rate=0)  # frozen never advances
-    assert c.read()["virtual_time"] == "9999-12-31T00:00:00Z"
+    c.set_time("2262-04-11T23:47:16Z", rate=0)  # frozen never advances
+    assert c.read()["virtual_time"] == "2262-04-11T23:47:16Z"
 
 
-def test_read_saturates_past_the_arm_time_horizon():
-    """A t0 accepted by the horizon check still overflows if the gateway outlives it — reads saturate, not 500."""
+def test_read_stops_at_the_end_of_the_range_past_the_arm_time_horizon():
+    """A t0 accepted by the horizon check still runs to the end if the gateway outlives it: reads stop there, not 500."""
     now = FakeNow()
     c = Clock(now_fn=now)
-    c.set_time("9999-12-30T00:00:00Z", rate=1.0)  # accepted: >1 real day of headroom
-    now.tick(86400.0 * 2)  # ...but still up two real days later
-    assert c.read()["virtual_time"] == "9999-12-31T23:59:59.999999Z"
-    assert c.state()["virtual_time"] == "9999-12-31T23:59:59.999999Z"
+    c.set_time("2262-04-11T22:47:16Z", rate=1.0)  # accepted: a real hour of headroom
+    now.tick(3600.0 * 2)  # ...but still up two real hours later
+    assert c.read()["virtual_time"] == "2262-04-11T23:47:16Z"
+    assert c.state()["virtual_time"] == "2262-04-11T23:47:16Z"
 
 
-def test_saturated_clock_stays_monotonic():
+def test_a_clock_at_the_end_stays_monotonic():
     now = FakeNow()
     c = Clock(now_fn=now)
-    c.set_time("9999-12-30T00:00:00Z", rate=1.0)
+    c.set_time("2262-04-11T22:47:16Z", rate=1.0)
     seen = []
     for _ in range(4):
-        now.tick(86400.0)
+        now.tick(1800.0)
         seen.append(c.read()["virtual_time"])
     assert seen == sorted(seen)
-    assert seen[-1] == "9999-12-31T23:59:59.999999Z"
+    assert seen[-1] == "2262-04-11T23:47:16Z"
 
 
 def test_elapsed_runs_at_each_arm_s_rate_and_counts_a_re_arm_forward_but_not_back():

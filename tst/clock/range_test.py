@@ -107,4 +107,21 @@ def test_chrome_runs_every_launch_near_either_end(gate, when):
 
 
 def test_a_clock_that_outlives_its_range_stops_at_the_end_rather_than_wrapping(gate):
-    assert gate("end") == {"date": "9223372036.854775807", "python": "9223372036854775807", "node": "9223372036854"}
+    end = {"date": "9223372036.000000000", "python": "9223372036000000000", "node": "9223372036000"}
+    r = gate("end")
+    assert r == {**end, "after_write": end, "seq": r["seq"]} and r["seq"] % 2 == 0, r
+
+
+def test_at_the_end_a_wait_for_a_time_past_it_never_ends_rather_than_ending_at_once(gate):
+    waited = {"now": 9223372036000000000, "clock_nanosleep_ended": False, "timerfd_fired": False}
+    assert gate("end_waits") == {"running": waited, "frozen": waited}
+
+
+def test_a_page_before_1970_left_to_run_for_a_day_reads_where_it_ran_to(gate):
+    r = gate("span")
+    assert r["from"] - 1 <= r["read"] <= r["to"] + 1, r
+
+
+def test_a_frozen_clocks_timers_expire_once_and_tell_all_the_time_left(gate):
+    r = gate("frozen_timers")
+    assert r["periodic_count"] == 1 and abs(r["far_left_s"] - (9223368436 + 9223286400)) < 1, r

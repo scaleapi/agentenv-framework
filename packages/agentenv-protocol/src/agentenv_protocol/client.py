@@ -36,12 +36,14 @@ class ExtensionCallError(httpx.HTTPStatusError):
 
 
 def _error_fields(response: httpx.Response) -> dict:
+    """The error object the body carries; an error that is a bare string, as an env gateway's own routes send, is its
+    message."""
     try:
         body = response.json()
     except ValueError:
         return {}
     error = body.get("error") if isinstance(body, dict) else None
-    return error if isinstance(error, dict) else {}
+    return error if isinstance(error, dict) else {"message": error} if isinstance(error, str) else {}
 
 
 def control_headers(token: str | None) -> dict[str, str]:

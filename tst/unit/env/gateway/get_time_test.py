@@ -275,21 +275,22 @@ def test_local_time_is_the_same_reading_at_second_precision(gw):
 
 
 @pytest.mark.asyncio
-async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw):
-    """A gateway that outlives its clock's range reads the last time a datetime holds, which Tokyo's clock can't show."""
-    now, zone = "9999-12-31T23:59:59Z", "Asia/Tokyo"
+@pytest.mark.parametrize("arm, rate, real_s, zone, now", [
+    ("2026-01-01T00:00:00Z", 86400, 1e9, "Asia/Tokyo", "2262-04-11T23:47:16Z"),
+    ("1677-09-21T00:12:44Z", 0, 0, "America/New_York", "1677-09-21T00:12:44Z"),
+], ids=["a-gateway-that-outlives-the-range", "the-start-of-the-range"])
+async def test_every_time_the_clock_holds_shows_in_any_zone(gw, arm, rate, real_s, zone, now):
+    """The clock stays within its range, even on a gateway that outlives it, and every zone's clock shows its ends."""
     real = FakeNow()
     gw._clock = Clock(now_fn=real)
-    gw._clock.set_time("2026-01-01T00:00:00Z", 86400)
-    real.tick(1e9)
+    gw._clock.set_time(arm, rate)
+    real.tick(real_s)
     gw._register_get_time_tool()
-    message = f"the current time {now} can't be shown in time zone {zone!r}: its local date is out of range"
 
-    assert await _mcp_call(gw, {"time_zone": zone}) == {
-        "content": [{"type": "text", "text": message}], "isError": True}
-    status, body = await _step_call(gw, {"time_zone": zone})
-    assert (status, json.loads(body)) == (
-        200, {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None})
+    payload = await _mcp_call(gw, {"time_zone": zone})
+    reading = json.loads(payload["content"][0]["text"])
+    assert reading["current_time"] == now and reading["time_zone"] == zone
+    assert datetime.fromisoformat(reading["local_time"]) == datetime.fromisoformat(now)
 
 
 def test_the_description_keeps_tool_dates_in_utc_and_gives_the_users_clock_when_their_zone_is_known():

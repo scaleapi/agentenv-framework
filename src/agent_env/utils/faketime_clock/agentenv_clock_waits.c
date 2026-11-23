@@ -168,8 +168,8 @@ static inline bool ft_valid_ts(const struct timespec *t)
 {
   return t != NULL && t->tv_nsec >= 0 && t->tv_nsec < FT_NS && t->tv_sec >= 0;
 }
-/* an absolute deadline on the universe's realtime, which is before 1970 only while the universe is set: on a real clock
-   the kernel refuses a negative time, so an unarmed page leaves such a deadline to it. */
+/* an absolute deadline on the universe's realtime, which is before 1970 only while the universe is set: a real clock has
+   no time before 1970, so an unarmed page leaves such a deadline to the real call. */
 static inline bool ft_valid_due(const struct timespec *t, const struct ft_clock_page *s)
 {
   return t != NULL && t->tv_nsec >= 0 && t->tv_nsec < FT_NS && (t->tv_sec >= 0 || s->armed);
@@ -190,13 +190,13 @@ static int64_t ft_page_rt(const struct ft_clock_page *s, int64_t t)
   return s->armed ? ft_universe_at(s, t) : t;
 }
 /* the real realtime at which the universe reaches ``due``; 0 (the past) once it has, FT_NEVER while frozen
-   short of it. */
+   short of it or for a time past the end of the range, where the universe stops. */
 static int64_t ft_real_of(const struct ft_clock_page *s, int64_t due)
 {
   double r;
   if (!s->armed) return due < 1 ? 1 : due;
   if (due <= s->universe_ns) return 1;
-  if (s->rate <= 0) return FT_NEVER;
+  if (s->rate <= 0 || due > FT_END) return FT_NEVER;
   r = (double) ((__int128) due - s->universe_ns) / s->rate;
   if (r > 4e18) return FT_NEVER;
   return s->anchor_ns + (int64_t) r + 1;
@@ -228,8 +228,8 @@ static void ft_tab_unlock(const sigset_t *old)
 /*
  * ---- timers for a realtime clock time: timerfds and POSIX timers armed at TIMER_ABSTIME on a realtime clock. The
  * kernel timer is armed at the real realtime the universe reaches the deadline at (in the past once it has, so it fires
- * now), its interval at interval / rate, and disarmed while frozen short of it; the helper arms it again on each change.
- * A one-shot timer that has fired is left alone. ----
+ * now), its interval at interval / rate (none while frozen, which brings no later expiration), and disarmed while frozen
+ * short of it; the helper arms it again on each change. A one-shot timer that has fired is left alone. ----
  */
 #define FT_TIMER_FDS 8
 struct ft_timer
@@ -313,7 +313,7 @@ static int ft_timer_arm(struct ft_timer *t, const struct ft_clock_page *s, bool 
   {
     real.it_value = ft_ts(at);
     if (real.it_value.tv_sec == 0 && real.it_value.tv_nsec == 0) real.it_value.tv_nsec = 1;
-    if (t->interval > 0)
+    if (t->interval > 0 && rate > 0)
     {
       int64_t iv = (int64_t) ((double) t->interval / rate);
       real.it_interval = ft_ts(iv < 1 ? 1 : iv);
@@ -347,7 +347,9 @@ static void ft_timer_value(struct ft_timer *t, struct itimerspec *out)
   {
     int64_t now = ft_page_rt(&s, ft_real_rt());
     __int128 left = (__int128) ft_timer_next(t, now) - now;
-    out->it_value = ft_ts(left < 1 ? 1 : left > INT64_MAX ? INT64_MAX : (int64_t) left);
+    if (left < 1) left = 1;
+    out->it_value.tv_sec = (time_t) (left / FT_NS);
+    out->it_value.tv_nsec = (long) (left % FT_NS);
   }
 }
 

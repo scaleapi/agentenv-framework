@@ -272,17 +272,21 @@ static void ft_page_open(void)
   ft_page = map;
 }
 
-/* the universe in ns at real realtime t on armed page s, saturated at the end of 64 bits: the gateway keeps the clock
-   inside them, and one that outlives its range stops at the end rather than wrapping. Reads and waits share it, so a wait
-   never ends before a read shows its deadline. */
+/* the end of the env clock's range, 2262-04-11T23:47:16Z, the last whole second 64 bits of ns hold (the gateway's
+   LATEST, and clockpage.py's) */
+#define FT_END 9223372036000000000LL
+
+/* the universe in ns at real realtime t on armed page s, standing at FT_END: the gateway keeps the clock inside its
+   range, and one that outlives it stops at the end rather than wrapping, as the gateway's own clock does. Summed in 128
+   bits, so a page before 1970 runs on exactly however far it runs (the gateway's rates, at most a day per second, keep
+   the run inside them). Reads and waits share it, so a wait never ends before a read shows its deadline. */
 static inline int64_t ft_universe_at(const struct ft_clock_page *s, int64_t t)
 {
-  int64_t fake;
-  double ran;
+  __int128 fake;
   if (s->rate == 0 || t <= s->anchor_ns) return s->universe_ns;
-  if (s->rate == 1.0) return __builtin_add_overflow(s->universe_ns, t - s->anchor_ns, &fake) ? INT64_MAX : fake;
-  ran = (double) (t - s->anchor_ns) * s->rate;
-  return ran >= 9.2e18 || __builtin_add_overflow(s->universe_ns, (int64_t) ran, &fake) ? INT64_MAX : fake;
+  fake = (__int128) s->universe_ns
+         + (s->rate == 1.0 ? (__int128) (t - s->anchor_ns) : (__int128) ((double) (t - s->anchor_ns) * s->rate));
+  return fake > FT_END ? FT_END : (int64_t) fake;
 }
 
 /* a time in ns as libfaketime's spec reads it (ft_parse_epoch): its sign once, before the whole value, so a time before
