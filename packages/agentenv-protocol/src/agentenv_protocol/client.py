@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from ._rpc_transport import rpc_client
 from .manifest import INTERFACE_MANIFEST_PATH
 from .transfers import WriteNamespaceGrant
 from .types import CONTROL_TOKEN_HEADER, INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataResponse, GetDataResponse, Part, ResetDataResponse
@@ -86,7 +87,7 @@ async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: b
                headers: dict[str, str] | None) -> dict:
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     url = f"{base_url.rstrip('/')}{RPC_PATH}"
-    async with httpx.AsyncClient(verify=verify) as client:
+    async with rpc_client(verify) as client:
         response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
         response.raise_for_status()
         body = response.json()
