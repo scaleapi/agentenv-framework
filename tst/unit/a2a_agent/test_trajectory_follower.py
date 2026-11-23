@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import time
 
 import httpx
@@ -198,7 +199,8 @@ async def test_a_follower_cancelled_as_it_is_stopped_ends():
 
 
 @pytest.mark.asyncio
-async def test_an_agent_that_fails_after_the_turn_ends_ends_following():
+async def test_an_agent_that_fails_after_the_turn_ends_is_retried_a_bounded_number_of_times(monkeypatch):
+    monkeypatch.setattr("agent_env.a2a_agent.trajectory_follower._STOPPED_RETRY_SECONDS", 0.01)
     agent = _Agent(httpx.Response(200, json=_page(0, [], "running")), *[httpx.Response(503)] * 100)
     stop = asyncio.Event()
     async with _following(agent, stop, poll_interval_seconds=30) as follower:
@@ -207,7 +209,60 @@ async def test_an_agent_that_fails_after_the_turn_ends_ends_following():
         async with asyncio.timeout(2):
             await follower
 
-    assert agent.afters == [0, 0]
+    assert agent.afters == [0] * 4
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_recovers_after_the_turn_ends_still_gets_its_tail_read(monkeypatch):
+    monkeypatch.setattr("agent_env.a2a_agent.trajectory_follower._STOPPED_RETRY_SECONDS", 0.01)
+    agent = _Agent(
+        httpx.Response(200, json=_page(0, [], "running")),
+        httpx.Response(503),
+        httpx.Response(200, json=_page(0, [{"i": 0}], "completed")),
+    )
+    batches: list[TrajectoryBatch] = []
+
+    async def sink(batch: TrajectoryBatch) -> None:
+        batches.append(batch)
+
+    stop = asyncio.Event()
+    async with agent.client() as client:
+        follower = asyncio.create_task(
+            follow_trajectory(_ENDPOINT, "task-1", sink, poll_interval_seconds=30, stop=stop, client=client)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while not agent.afters:
+                    await asyncio.sleep(0.01)
+            stop.set()
+            async with asyncio.timeout(2):
+                await follower
+        finally:
+            follower.cancel()
+            await asyncio.wait({follower})
+
+    assert batches[-1].events == [{"i": 0}]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_read_is_logged_with_its_count_and_escalates_to_error(monkeypatch, caplog):
+    monkeypatch.setattr("agent_env.a2a_agent.trajectory_follower._MAX_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("agent_env.a2a_agent.trajectory_follower._ERROR_AFTER_FAILURES", 3)
+    agent = _Agent(
+        *[httpx.Response(503)] * 4,
+        httpx.Response(200, json=_page(0, [], "completed")),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="agent_env.a2a_agent.trajectory_follower"):
+        await _follow(agent)
+
+    failed = [r for r in caplog.records if getattr(r, "event", None) == "live_trajectory_read_failed"]
+    assert [(r.consec, r.levelno, r.task_id) for r in failed] == [
+        (1, logging.WARNING, "task-1"),
+        (2, logging.WARNING, "task-1"),
+        (3, logging.ERROR, "task-1"),
+        (4, logging.ERROR, "task-1"),
+    ]
 
 
 @pytest.mark.asyncio
