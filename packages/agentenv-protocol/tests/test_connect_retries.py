@@ -6,8 +6,10 @@ import json
 import httpcore
 import httpx
 import pytest
+import trio
 from anyio.lowlevel import checkpoint
 from httpcore._backends.auto import AutoBackend
+from trio.testing import MockClock
 
 from agentenv_protocol import ExtensionCallError, ToolSession, ToolSessionError, client
 
@@ -18,17 +20,22 @@ _CARD = {"capabilities": {"extensions": [{"uri": "urn:test", "params": {"methods
 }}}]}}
 
 
-async def call(route, timeout=5):
+async def call(route, timeout=5, *, total_timeout=None):
+    budgets = {"timeout": timeout, "total_timeout": total_timeout}
     if route == "rpc":
-        return await client.add_data(_URL, [], timeout=timeout)
+        return await client.add_data(_URL, [], **budgets)
+    if route == "reset":
+        return await client.reset_data(_URL, **budgets)
+    if route == "data":
+        return await client.get_data(_URL, **budgets)
     if route == "card":
-        return await client.get_card(_URL, timeout=timeout)
+        return await client.get_card(_URL, **budgets)
     if route == "manifest":
-        return await client.get_interface_manifest(_URL, "items", timeout=timeout)
+        return await client.get_interface_manifest(_URL, "items", **budgets)
     if route == "tool":
         async with ToolSession(mcp_url=_URL + "/mcp", timeout=timeout) as session:
             return await session.call_tool("sample")
-    return await client.invoke_extension(_URL, _CARD, "urn:test", {"value": 1}, method=route, timeout=timeout)
+    return await client.invoke_extension(_URL, _CARD, "urn:test", {"value": 1}, method=route, **budgets)
 
 
 class Wire:
@@ -132,8 +139,8 @@ async def test_failed_connections_stop_after_three_attempts(wire, error):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", ["rpc", "card", "manifest", "set", "get", "tool"])
-async def test_retried_call_uses_the_original_deadline(wire, route):
+@pytest.mark.parametrize("route", ["rpc", "reset", "data", "card", "manifest", "set", "get", "tool"])
+async def test_retried_call_uses_the_whole_call_deadline(wire, route):
     async def connect(attempt):
         if attempt == 1:
             await asyncio.sleep(0.45)
@@ -142,7 +149,7 @@ async def test_retried_call_uses_the_original_deadline(wire, route):
 
     wire.on_connect = connect
     with pytest.raises(TimeoutError if route == "tool" else httpx.TimeoutException):
-        await call(route, timeout=1.4)
+        await call(route, timeout=1.4, total_timeout=1.4)
     assert wire.attempts == 2 and wire.requests == []
 
 
@@ -156,6 +163,27 @@ async def test_first_attempt_can_use_up_the_backoff_budget(wire):
     with pytest.raises(httpx.ConnectError, match="before sending"):
         await call("rpc", timeout=0.6)
     assert wire.attempts == 1 and wire.requests == []
+
+
+@pytest.mark.asyncio
+async def test_tool_session_preserves_refusal_when_backoff_cannot_fit(wire):
+    async def refuse(attempt):
+        raise httpcore.ConnectError("connection refused")
+
+    wire.on_connect = refuse
+    with pytest.raises(httpx.ConnectError, match="connection refused"):
+        await call("tool", timeout=0.25)
+    assert wire.attempts == 1 and wire.requests == []
+
+
+def test_retry_runs_on_native_trio(wire):
+    async def fail_once(attempt):
+        if attempt == 1:
+            raise httpcore.ConnectError("connection refused")
+
+    wire.on_connect = fail_once
+    trio.run(call, "card", clock=MockClock(autojump_threshold=0))
+    assert wire.attempts == 2 and len(wire.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -231,5 +259,5 @@ async def test_deadline_closes_an_incomplete_response_after_retry(monkeypatch, r
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", send)
     with pytest.raises(TimeoutError if route == "tool" else httpx.TimeoutException):
-        await call(route, timeout=0.7)
+        await call(route, timeout=0.7, total_timeout=0.7)
     assert attempts == 2 and closed == [True]

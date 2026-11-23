@@ -10,6 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
@@ -128,8 +129,9 @@ class ToolSession:
 
     async def _deadline(self, method: str, exchange: Any) -> Any:
         try:
-            return await asyncio.wait_for(exchange, self.timeout)
-        except asyncio.TimeoutError as e:
+            with anyio.fail_after(self.timeout):
+                return await exchange
+        except TimeoutError as e:
             raise TimeoutError(f"{method} did not finish within {self.timeout}s") from e
 
     async def _exchange(self, message: dict) -> dict:

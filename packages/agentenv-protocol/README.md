@@ -218,6 +218,14 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+Data-plane RPCs, card and manifest lookups, and extension calls retry TCP or TLS connection failures
+before sending the request. Up to three attempts share the connection budget from `timeout`, including
+backoffs of 0.5 and 1 second when time permits. After connecting, `timeout` keeps its HTTPX meaning
+for each read and write. A transfer can continue while it makes progress. For a wall-clock limit
+across retries and the entire reply, pass `total_timeout` in seconds, for example
+`await client.add_data(url, parts, timeout=30, total_timeout=120)`. Expiring that limit raises
+`httpx.TimeoutException`. Read and write errors retain their HTTPX exception types.
+
 An extension with several methods is served by giving each handler an `op`. Handlers sharing a URI
 merge into one card entry, each method under `params.methods.<op>` with its own verb and endpoint,
 by default `/agentenv/ext/<extension>/<op>`, where `<extension>` is the URN's name without
@@ -438,11 +446,9 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     call, and a stateless server has no session to lose, so neither restart raises anything.
   - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
     (600 s by default, the gateway's own limit on a tool call).
-  - MCP POSTs, data-plane RPCs, card and manifest lookups, and extension calls make up to three attempts to
-    connect, waiting 0.5 and 1 second after a connection failure. The request timeout covers all attempts,
-    waits and the reply. A data-plane call that exhausts this total budget raises `httpx.TimeoutException`.
-    After sending, a failed call may still have run on the server. The client propagates read and write errors
-    and HTTP error responses. Read the state back with `data/get` or end the episode before trying again.
+  - MCP POSTs use the same connection retries. The session's `timeout` covers attempts, waits and the
+    reply to each MCP request. After sending, a failed call may still have run on the server. Read the
+    state back with `data/get` or end the episode before trying again.
 - **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
   `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
 

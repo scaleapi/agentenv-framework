@@ -84,11 +84,12 @@ def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[
 
 
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,
-               headers: dict[str, str] | None) -> dict:
+               headers: dict[str, str] | None, total_timeout: float | None) -> dict:
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await _connect.request(client, "POST", url, json=request, timeout=timeout, headers=request_headers(url, headers))
+        response = await _connect.request(client, "POST", url, json=request, timeout=timeout, total_timeout=total_timeout,
+                                          headers=request_headers(url, headers))
         response.raise_for_status()
         body = response.json()
     if "error" in body:
@@ -98,19 +99,19 @@ async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: b
 
 
 async def reset_data(base_url: str, timeout: int = 30, verify: bool = True, *,
-                     headers: dict[str, str] | None = None) -> ResetDataResponse:
-    return ResetDataResponse.model_validate(await _rpc(base_url, METHOD_RESET, {}, timeout, verify, headers))
+                     headers: dict[str, str] | None = None, total_timeout: float | None = None) -> ResetDataResponse:
+    return ResetDataResponse.model_validate(await _rpc(base_url, METHOD_RESET, {}, timeout, verify, headers, total_timeout))
 
 
 async def add_data(base_url: str, parts: list[Part], timeout: int = 120, verify: bool = True, *,
-                   headers: dict[str, str] | None = None) -> AddDataResponse:
+                   headers: dict[str, str] | None = None, total_timeout: float | None = None) -> AddDataResponse:
     params = {"parts": [p.model_dump(mode="json", exclude_none=True) for p in parts]}
-    return AddDataResponse.model_validate(await _rpc(base_url, METHOD_ADD, params, timeout, verify, headers))
+    return AddDataResponse.model_validate(await _rpc(base_url, METHOD_ADD, params, timeout, verify, headers, total_timeout))
 
 
 async def get_data(
     base_url: str, timeout: int = 30, verify: bool = True, *, write_namespace: WriteNamespaceGrant | None = None,
-    paths: list[str] | None = None, headers: dict[str, str] | None = None,
+    paths: list[str] | None = None, headers: dict[str, str] | None = None, total_timeout: float | None = None,
 ) -> GetDataResponse:
     """`data/get`. A server advertising `DATA_OBJECTS_EXTENSION_URI` may be handed `write_namespace` to upload
     its export under; `uploaded_object_path` reads from the answer where it did. `paths` names what a computer
@@ -118,12 +119,13 @@ async def get_data(
     params = {} if write_namespace is None else {"write_namespace": write_namespace.model_dump(mode="json", exclude_none=True)}
     if paths is not None:
         params["paths"] = paths
-    return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify, headers))
+    return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify, headers, total_timeout))
 
 
-async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:
+async def get_card(base_url: str, timeout: int = 10, verify: bool = True, *, total_timeout: float | None = None) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await _connect.request(client, "GET", f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout)
+        response = await _connect.request(client, "GET", f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout,
+                                          total_timeout=total_timeout)
         response.raise_for_status()
         return response.json()
 
@@ -323,7 +325,7 @@ def find_child(card: dict, name: str) -> dict | None:
 
 
 async def get_interface_manifest(base_url: str, interface: str, endpoint: str = INTERFACE_MANIFEST_PATH, timeout: int = 30, verify: bool = True, *,
-                                 headers: dict[str, str] | None = None):
+                                 headers: dict[str, str] | None = None, total_timeout: float | None = None):
     """Fetch one interface's manifest from a server's manifest index endpoint.
 
     ``endpoint`` is the index path — pass the one advertised on the card under
@@ -334,13 +336,14 @@ async def get_interface_manifest(base_url: str, interface: str, endpoint: str = 
     """
     url = f"{base_url.rstrip('/')}{endpoint}/{interface}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await _connect.request(client, "GET", url, timeout=timeout, headers=request_headers(url, headers))
+        response = await _connect.request(client, "GET", url, timeout=timeout, total_timeout=total_timeout,
+                                          headers=request_headers(url, headers))
         response.raise_for_status()
         return response.json()
 
 
 async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | None = None, timeout: int = 30, verify: bool = True, *, method: str | None = None,
-                           headers: dict[str, str] | None = None):
+                           headers: dict[str, str] | None = None, total_timeout: float | None = None):
     """Invoke a card extension via its advertised REST endpoint.
 
     Reads the endpoint and HTTP verb of the extension method named `method` from the card, so the
@@ -362,7 +365,8 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
     sent = request_headers(url, headers)
     async with httpx.AsyncClient(verify=verify) as client:
         arguments = {"params": params or {}} if op["method"] == "GET" else {"json": params or {}}
-        response = await _connect.request(client, op["method"], url, timeout=timeout, headers=sent, **arguments)
+        response = await _connect.request(client, op["method"], url, timeout=timeout, total_timeout=total_timeout,
+                                          headers=sent, **arguments)
         if response.status_code >= 400:
             raise ExtensionCallError(response)
         return response.json()
