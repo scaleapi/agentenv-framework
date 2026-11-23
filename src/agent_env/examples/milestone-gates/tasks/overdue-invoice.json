@@ -2,7 +2,7 @@
   {"id": "env", "type": "deploy_env", "env_id": "desk", "sandbox_type": "local"},
   {"id": "agent", "type": "deploy_agent", "env_ids": ["desk"]},
   {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "dana", "multi_day": false,
-   "model": "gpt-4o-mini",
+   "model": "claude-haiku-4-5",
    "persona": {"display_name": "Dana Reyes", "first_name": "Dana",
                "description": {"who_you_are": ["You run accounts payable at a small studio."],
                                "how_you_write": ["Short messages, no greeting."],
