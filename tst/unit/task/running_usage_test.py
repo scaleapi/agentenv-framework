@@ -13,8 +13,7 @@ from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config import set_document_store
 from agent_env.config.model import ModelRole
 from agent_env.store import LocalSqliteDocumentStore
-from agent_env.task import running_usage
-from agent_env.task.running_usage import RunningUsage
+from agent_env.task import running_usage as running
 from agent_env.task.store import TaskInstanceStore, get_task_instance_store, set_task_instance_store
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
@@ -24,7 +23,7 @@ from agent_env.task_step.usage import STEP_USAGE_KEY, StepUsage
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    monkeypatch.setattr(running_usage, "INTERVAL_S", 0.02)
+    monkeypatch.setattr(running, "INTERVAL_S", 0.02)
     set_document_store(LocalSqliteDocumentStore(str(tmp_path / "instances.db")))
     s = TaskInstanceStore()
     set_task_instance_store(s)
@@ -105,7 +104,7 @@ async def test_a_worker_that_dies_mid_step_keeps_the_turns_written_before(store,
 
 @pytest.mark.asyncio
 async def test_usage_is_written_only_when_it_changed_and_stop_waits_for_a_write_in_flight(monkeypatch):
-    monkeypatch.setattr(running_usage, "INTERVAL_S", 0.01)
+    monkeypatch.setattr(running, "INTERVAL_S", 0.01)
     writes, landed = asyncio.Event(), []
 
     async def slow(instance_id, usage):
@@ -114,16 +113,14 @@ async def test_usage_is_written_only_when_it_changed_and_stop_waits_for_a_write_
         landed.append(usage)
         return True
 
-    monkeypatch.setattr(running_usage.store, "record_usage", slow)
+    monkeypatch.setattr(running.store, "record_running_usage", slow)
     context = TaskStepContext(metadata={STEP_USAGE_KEY: {"s": [{"role": "solver", "attempt": 0, "turns": 1}]}})
-    writer = RunningUsage("instance", "s", context).start()
-    await writes.wait()
-    await writer.stop()
-    assert landed == [[{"role": "solver", "attempt": 0, "turns": 1, "step_id": "s", "running": True}]]
+    async with running.running_usage("instance", "s", context):
+        await writes.wait()
+    assert landed == [[{"role": "solver", "attempt": 0, "turns": 1, "step_id": "s"}]]
 
-    writer = RunningUsage("instance", "s", context).start()
-    await asyncio.sleep(0.25)
-    await writer.stop()
+    async with running.running_usage("instance", "s", context):
+        await asyncio.sleep(0.25)
     assert len(landed) == 2
 
 
@@ -132,28 +129,27 @@ async def test_a_snapshot_that_lands_late_never_takes_the_ledger_back(store):
     """As a write a cancel left running in its thread, landing after the step's newer entry: a role's turns only grow,
     so the ledger keeps the entry with more of them."""
     context = await Task(id="t", version=1, steps=[_Turns("long", [100, 200])]).run(context=TaskStepContext())
-    late = {"attempt": 0, "step_id": "long", "role": "solver", "turns": 1, "input_tokens": 100, "running": True}
+    late = {"attempt": 0, "step_id": "long", "role": "solver", "turns": 1, "input_tokens": 100}
 
-    store.record_usage_sync(context.instance_id, [late])
+    store.record_running_usage_sync(context.instance_id, [late])
     assert _ledger(context.instance_id) == [(0, "long", 2, 300, False)]
 
-    store.record_usage_sync(context.instance_id, [{**late, "turns": 3, "input_tokens": 450}])
+    store.record_running_usage_sync(context.instance_id, [{**late, "turns": 3, "input_tokens": 450}])
     assert _ledger(context.instance_id) == [(0, "long", 3, 450, True)]
 
 
 @pytest.mark.asyncio
 async def test_a_write_that_failed_is_tried_again_though_nothing_changed(monkeypatch):
-    monkeypatch.setattr(running_usage, "INTERVAL_S", 0.01)
+    monkeypatch.setattr(running, "INTERVAL_S", 0.01)
     tries = []
 
     async def flaky(instance_id, usage):
         tries.append(usage)
         return len(tries) > 1
 
-    monkeypatch.setattr(running_usage.store, "record_usage", flaky)
+    monkeypatch.setattr(running.store, "record_running_usage", flaky)
     context = TaskStepContext(metadata={STEP_USAGE_KEY: {"s": [{"role": "solver", "attempt": 0, "turns": 1}]}})
-    writer = RunningUsage("instance", "s", context).start()
-    await asyncio.sleep(0.2)
-    await writer.stop()
+    async with running.running_usage("instance", "s", context):
+        await asyncio.sleep(0.2)
 
     assert len(tries) == 2 and tries[0] == tries[1]

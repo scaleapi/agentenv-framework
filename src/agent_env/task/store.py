@@ -839,12 +839,15 @@ class TaskInstanceStore:
         self._end_write(instance_id, entries_of(context.metadata.get(STEP_USAGE_KEY)), lambda doc: {"context": safe},
                         owns=lambda doc: doc.get("attempt_epoch", 0) <= attempt_epoch)
 
-    def record_usage_sync(self, instance_id: str, usage: list[dict]) -> None:
-        """Merge ``usage``, the entries of a step still running, into the ledger alone, each only when it is ahead of the
+    def record_running_usage_sync(self, instance_id: str, usage: list[dict]) -> None:
+        """Merge ``usage``, the entries of a step still running, into the ledger alone, marked ``running``, which makes
+        the run's total a lower bound as the turn in flight isn't in them. Each lands only when it is ahead of the
         ledger's (``ahead``), so a write that lands late, as one a cancel left running, never takes counts back. The
         step's completion writes the rest, and its final entries replace these."""
+        running = [{**entry, "running": True} for entry in usage]
+
         def _mutate(doc: dict) -> UpdateSpec | None:
-            spent = ledger_fields(doc, ahead(doc.get(LEDGER_KEY) or [], usage))
+            spent = ledger_fields(doc, ahead(doc.get(LEDGER_KEY) or [], running))
             return UpdateSpec(set=spent) if spent else None
 
         compare_and_swap(self._doc_store, TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), _mutate,
@@ -1006,11 +1009,11 @@ async def record_step_complete(
         )
 
 
-async def record_usage(instance_id: str, usage: list[dict]) -> bool:
-    """Async ``TaskInstanceStore.record_usage_sync``; whether it was written. A store error is logged, not raised, as
-    the step's completion writes its entries again."""
+async def record_running_usage(instance_id: str, usage: list[dict]) -> bool:
+    """Async ``TaskInstanceStore.record_running_usage_sync``; whether it was written. A store error is logged, not
+    raised, as the step's completion writes its entries again."""
     try:
-        await asyncio.to_thread(get_task_instance_store().record_usage_sync, instance_id, usage)
+        await asyncio.to_thread(get_task_instance_store().record_running_usage_sync, instance_id, usage)
         return True
     except Exception:
         logger.warning("Failed to record running usage for instance_id=%s", instance_id, exc_info=True)
