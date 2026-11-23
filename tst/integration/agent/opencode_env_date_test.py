@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.opencode.agent import AGENT_DIR, opencode_bridge
+from tst.unit.agents.opencode.agent import AGENT_DIR, opencode_bridge, opencode_date
 from tst.util import fake_openai
 
 pytestmark = [pytest.mark.integration]
@@ -104,8 +104,8 @@ def test_a_turn_on_an_armed_clock_tells_the_model_the_env_date_and_no_other(open
     monkeypatch.setenv("LITELLM_API_KEY", "sk-fake")
     monkeypatch.setenv("OPENCODE_ENABLE_EXA", "1")
     monkeypatch.setattr(opencode_bridge, "SESSIONS_ROOT", str(tmp_path / "sessions"))
-    monkeypatch.setattr(opencode_bridge, "clock_armed", lambda: True)
-    monkeypatch.setattr(opencode_bridge, "_env_today", env_today)
+    monkeypatch.setattr(opencode_date, "clock_armed", lambda: True)
+    monkeypatch.setattr(opencode_date, "_env_today", env_today)
     (tmp_path / "work").mkdir()
 
     with fake_openai.FakeOpenAI(respond=respond) as endpoint:
@@ -117,12 +117,12 @@ def test_a_turn_on_an_armed_clock_tells_the_model_the_env_date_and_no_other(open
     sent = [seen.body for seen in endpoint.completions()]
     turns = [body for body in sent if any("<env>" in text for text in _system_texts(body))]
     assert turns, (f"OpenCode {VERSION} sent its <env> block in no system message, so the relay can't tell the model "
-                   "the env's date: find where it puts its date now, and fix _ENV_DATE in opencode_bridge")
+                   "the env's date: find where it puts its date now, and fix _ENV_DATE in opencode_date.py")
     for body in turns:
         assert f"  Today's date: {ENV_TODAY}\n" in "\n".join(_system_texts(body)), (
-            f"OpenCode {VERSION}'s <env> block no longer writes its date where _ENV_DATE finds it")
+            f"OpenCode {VERSION}'s <env> block no longer writes its date where opencode_date's _ENV_DATE finds it")
         assert f"The current year is {ENV_YEAR}." in _descriptions(body).get("websearch", ""), (
-            f"OpenCode {VERSION}'s websearch tool no longer names its year where _SEARCH_YEAR finds it")
+            f"OpenCode {VERSION}'s websearch tool no longer names its year where opencode_date's _SEARCH_YEAR finds it")
     machine = _machine_dates()
     for body in sent:
         harness = "\n".join([*_system_texts(body), *_descriptions(body).values()])

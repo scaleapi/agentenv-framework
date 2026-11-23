@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -14,6 +15,8 @@ from typing import Any
 
 from agentenv_protocol.a2a_agent import Usage
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
+
+logger = logging.getLogger(__name__)
 
 # The routes whose POSTs are model calls: Chat Completions, Responses and Anthropic's Messages.
 _CALL_ROUTES = ("/chat/completions", "/responses", "/messages")
@@ -175,6 +178,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                     except Exception as exc:
                         status = 400
                         reason = str(exc) if isinstance(exc, Refusal) else f"model relay: {type(exc).__name__}: {exc}"
+                        logger.warning("model relay refused a call: %s", reason)
                         return web.json_response({"error": {"message": reason, "type": "invalid_request_error"}},
                                                  status=status)
                 async with client.request(request.method, f"{upstream}/{path}", params=request.query,
