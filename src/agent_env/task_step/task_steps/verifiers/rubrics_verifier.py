@@ -1666,6 +1666,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise
         except TimeoutError as e:
             usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            # Stop the judge, or it keeps working, and calling its model, beside a retry until its own time limit.
+            await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             if self.judge_timeout_retries is None:
                 raise
             raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e

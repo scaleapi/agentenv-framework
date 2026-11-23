@@ -1,5 +1,6 @@
 """judge_timeout_retries: an agent judge call that runs out of judge_timeout_seconds is tried again, and the timed-out
-attempt's trajectory is kept. Without it, a timeout fails the call at once, as it always has."""
+attempt's trajectory is kept. Without it, a timeout fails the call at once, as it always has. Either way the timed-out
+judge task is cancelled, so it stops calling its model."""
 
 from __future__ import annotations
 
@@ -23,10 +24,12 @@ def _verifier(**kw) -> RubricsVerifierTaskStep:
                                    verifier_id="vt", judge_timeout_seconds=60, **kw)
 
 
-def _judge(monkeypatch, verifier, outcomes: list) -> list[str]:
-    """The judge's calls: each outcome is "poll-timeout", "failed:<error code>:<message>", or a completed answer."""
+def _judge(monkeypatch, verifier, outcomes: list) -> tuple[list[str], list[str]]:
+    """The judge's calls: each outcome is "poll-timeout", "unreachable", "failed:<error code>:<message>", or a
+    completed answer. Returns the task ids whose trajectories were fetched and those cancelled."""
     sent: list[str] = []
     fetched: list[str] = []
+    cancelled: list[str] = []
 
     async def send(url, **kwargs):
         sent.append(kwargs["parts"][0]["text"])
@@ -36,6 +39,8 @@ def _judge(monkeypatch, verifier, outcomes: list) -> list[str]:
         outcome = outcomes.pop(0)
         if outcome == "poll-timeout":
             raise TimeoutError(f"A2A task {task_id} did not finish in 60s")
+        if outcome == "unreachable":
+            raise protocol.AgentUnreachableError(f"the judge stopped answering on {task_id}")
         if outcome.startswith("failed:"):
             code, _, message = outcome[7:].partition(":")
             return {"status": {"state": "failed", "message": {"parts": [
@@ -47,10 +52,14 @@ def _judge(monkeypatch, verifier, outcomes: list) -> list[str]:
         fetched.append(a2a_server_task_id)
         return f"mem://judge/{a2a_server_task_id}.json"
 
+    async def cancel(url, task_id):
+        cancelled.append(task_id)
+
     monkeypatch.setattr(protocol, "send_a2a_message", send)
     monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+    monkeypatch.setattr(protocol, "cancel_a2a_task", cancel)
     monkeypatch.setattr(verifier, "_fetch_judge_trajectory", fetch)
-    return fetched
+    return fetched, cancelled
 
 
 async def _grade(verifier):
@@ -63,36 +72,47 @@ async def _grade(verifier):
 @pytest.mark.asyncio
 async def test_without_retries_a_timeout_fails_at_once_and_nothing_is_fetched(monkeypatch):
     verifier = _verifier()
-    fetched = _judge(monkeypatch, verifier, ["poll-timeout", ANSWER])
+    fetched, cancelled = _judge(monkeypatch, verifier, ["poll-timeout", ANSWER])
 
     with pytest.raises(TimeoutError) as raised:
         await _grade(verifier)
 
-    assert type(raised.value) is TimeoutError and fetched == []
+    assert type(raised.value) is TimeoutError and fetched == [] and cancelled == ["task-1"]
 
 
 @pytest.mark.asyncio
 async def test_a_timed_out_call_is_tried_again_and_its_trajectory_kept(monkeypatch):
     verifier = _verifier(judge_timeout_retries=1)
-    fetched = _judge(monkeypatch, verifier, ["poll-timeout", ANSWER])
+    fetched, cancelled = _judge(monkeypatch, verifier, ["poll-timeout", ANSWER])
 
     results, output_retries, discrepancies, url = await _grade(verifier)
 
     assert results[0]["score"] == 1.0 and output_retries == 0 and url == "mem://judge/task-2.json"
     assert discrepancies == [{"kind": "judge_timeout", "attempt": 1, "timeout_seconds": 60,
                               "judge_trajectory_object_url": "mem://judge/task-1.json"}]
-    assert fetched == ["task-1", "task-2"]
+    assert fetched == ["task-1", "task-2"] and cancelled == ["task-1"]
 
 
 @pytest.mark.asyncio
 async def test_the_last_timeout_fails_with_its_trajectory(monkeypatch):
     verifier = _verifier(judge_timeout_retries=1)
-    _judge(monkeypatch, verifier, ["poll-timeout", "poll-timeout"])
+    _, cancelled = _judge(monkeypatch, verifier, ["poll-timeout", "poll-timeout"])
 
     with pytest.raises(JudgeTimeoutError, match=re.escape("its trajectory so far: mem://judge/task-2.json")) as raised:
         await _grade(verifier)
 
-    assert raised.value.trajectory_object_url == "mem://judge/task-2.json"
+    assert raised.value.trajectory_object_url == "mem://judge/task-2.json" and cancelled == ["task-1", "task-2"]
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_stopped_answering_isnt_sent_a_cancel(monkeypatch):
+    verifier = _verifier(judge_timeout_retries=1)
+    _, cancelled = _judge(monkeypatch, verifier, ["unreachable"])
+
+    with pytest.raises(protocol.AgentUnreachableError):
+        await _grade(verifier)
+
+    assert cancelled == []
 
 
 @pytest.mark.asyncio
@@ -104,11 +124,11 @@ async def test_the_last_timeout_fails_with_its_trajectory(monkeypatch):
 async def test_a_judge_task_that_fails_before_the_deadline_is_not_retried_whatever_it_says(monkeypatch, failure):
     """Only the poll's own deadline means the judge ran out of time: the judge is given longer than the poll waits."""
     verifier = _verifier(judge_timeout_retries=1)
-    fetched = _judge(monkeypatch, verifier, [failure, ANSWER])
+    fetched, cancelled = _judge(monkeypatch, verifier, [failure, ANSWER])
 
     with pytest.raises(RuntimeError, match="Judge A2A task failed"):
         await _grade(verifier)
-    assert fetched == []
+    assert fetched == [] and cancelled == []
 
 
 @pytest.mark.asyncio

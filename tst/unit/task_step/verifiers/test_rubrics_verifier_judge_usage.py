@@ -95,6 +95,7 @@ def _agent_judge(monkeypatch, state: str, answer: str, reported: dict) -> Rubric
     monkeypatch.setattr(protocol, "send_a2a_message", send)
     monkeypatch.setattr(protocol, "poll_a2a_task", poll)
     monkeypatch.setattr(protocol, "post_agent_config", nothing)
+    monkeypatch.setattr(protocol, "cancel_a2a_task", nothing)
     monkeypatch.setattr(verifier, "_fetch_judge_trajectory", nothing)
     monkeypatch.setattr(rubrics_verifier, "fetch_container_logs", nothing)
     return verifier
