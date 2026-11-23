@@ -3,8 +3,9 @@
 `~/.gemini/settings.json` holds what every run shares, the changelog's hook. Each run
 gets settings of its own as the CLI's system settings, which override the user's: the
 task's MCP servers with the turn's role header, the task directories that exist as
-included directories, and the turn's system prompt as a context file named by its content. So turns running at once never share a role, and a
-system prompt keeps one path from turn to turn.
+included directories, and the turn's system prompt as a context file named by its content.
+So turns running at once never share a role, and a system prompt keeps one path from turn
+to turn.
 """
 from __future__ import annotations
 
@@ -28,9 +29,10 @@ SYSTEM_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 _DEFAULT_SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
 # The CLI's context file in a workspace, which a run with a system prompt still loads beside its own.
 _WORKSPACE_CONTEXT_FILE = "GEMINI.md"
-# Where tasks put files for the agent outside its workspace. The CLI's file tools refuse paths outside the workspace
-# and its included directories, and it fails to start when an included directory is missing.
-TASK_DIRS = ("/app", "/tmp/data")
+# Where tasks put files for the agent outside its workspace: /tmp/file_artifacts is load_artifact's default for an
+# agent. The CLI's file tools refuse paths outside the workspace and its included directories, and it fails to start
+# when an included directory is missing.
+TASK_DIRS = ("/app", "/tmp/data", "/tmp/file_artifacts")
 _prompt_files: Counter[Path] = Counter()
 _prompt_files_lock = threading.Lock()
 
