@@ -222,6 +222,28 @@ async def test_a_cancelled_agent_judge_turn_is_a_call_of_unknown_usage(monkeypat
     assert (entry["turns"], entry["partial"]) == (1, True)
 
 
+@pytest.mark.asyncio
+async def test_an_agent_judge_cancelled_while_its_message_is_sent_is_a_call_of_unknown_usage(monkeypatch):
+    verifier = _agent_judge(monkeypatch, "completed", "", {})
+    sending = asyncio.Event()
+
+    async def waits(url, **kwargs):
+        sending.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(protocol, "send_a2a_message", waits)
+    context = TaskStepContext()
+    judging = asyncio.create_task(_judge_once(verifier, context))
+    await sending.wait()
+
+    judging.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await judging
+
+    [entry] = context.metadata["step_usage"]["verify"]
+    assert (entry["turns"], entry["partial"]) == (1, True)
+
+
 _ANSWER = json.dumps({"results": [{"id": "c1", "score": 1.0, "justification": "Checked record c1 with the sheet tool"}]})
 
 

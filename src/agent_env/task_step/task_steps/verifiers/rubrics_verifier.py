@@ -1491,14 +1491,19 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         limit, a cancel, a judge that stopped answering) goes in as a call of unknown usage."""
         from agent_env.a2a_agent import protocol
 
-        task_id, _ = await protocol.send_a2a_message(
-            judge_a2a_url,
-            parts=[{"kind": "text", "text": eval_prompt}],
-            message_id=uuid.uuid4().hex,
-            context_id=None,
-            timeout_seconds=self.judge_timeout_seconds,
-        )
         host = getattr(judge_agent, "model_endpoint_host", None)
+        try:
+            task_id, _ = await protocol.send_a2a_message(
+                judge_a2a_url,
+                parts=[{"kind": "text", "text": eval_prompt}],
+                message_id=uuid.uuid4().hex,
+                context_id=None,
+                timeout_seconds=self.judge_timeout_seconds,
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            # The judge may have taken the message before its task id came back; with no id, it can't be cancelled.
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            raise
         try:
             result = await protocol.poll_a2a_task(
                 judge_a2a_url,
