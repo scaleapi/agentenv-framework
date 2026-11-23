@@ -127,7 +127,20 @@ def test_a_role_on_one_model_the_map_lacks_takes_the_agents_figure_only_when_eve
         usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
             input_tokens=100, output_tokens=10, input_includes_cache=True, cost_usd=cost)))
     [entry] = context.metadata["step_usage"]["solve"]
-    assert (entry["cost_usd"], entry["cost_status"], entry["reported_cost_usd"]) == (None, "unpriced", None)
+    assert (entry["cost_usd"], entry["cost_status"], entry["reported_cost_usd"]) == (None, "unpriced", 0.002)
+
+
+def test_a_cut_off_turn_beside_a_reported_one_keeps_the_agents_figure_beside_the_maps_price(monkeypatch):
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PRICES)
+    context = TaskStepContext()
+    usage = StepUsage(context, "solve")
+    usage.start(ModelRole.SOLVER, SONNET, None)
+    usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
+        input_tokens=1000, output_tokens=10, input_includes_cache=True, cost_usd=0.004)))
+    usage.cut_off(ModelRole.SOLVER)
+    [entry] = context.metadata["step_usage"]["solve"]
+    assert (entry["cost_status"], entry["reported_cost_usd"], entry["partial"]) == ("priced", 0.004, True)
+    assert entry["cost_usd"] == pytest.approx((1000 * 3.0 + 10 * 15.0) / 1e6)
 
 
 def test_a_turn_whose_rows_cant_all_be_priced_leaves_the_entry_unpriced_rather_than_dropping(monkeypatch):

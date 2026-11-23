@@ -5,7 +5,7 @@ step that raises keeps its finished turns. An entry's counts have ``Usage``'s ke
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict
 
@@ -134,10 +134,10 @@ class RoleUsage:
         includes = flags.pop() if len(flags) == 1 else None
         charged = [Tokens.of(usage.to_dict()) for usage in counted]
         tokens = reduce(operator.add, charged) if charged and None not in charged else None
-        reported_usd = self._reported(total("cost_usd"))
+        figures = [usage.cost_usd if usage is not None else None for usage in self.turns]
         models = self._by_model(counted, prices) if any(usage.models for usage in counted) else None
-        cost = (price(tokens, reported_usd, model=self.model, prices=prices, reported_by=self.reported_by)
-                if models is None else _summed([cost for _, cost in models], reported_usd))
+        cost = (_priced(tokens, figures, model=self.model, prices=prices, reported_by=self.reported_by)
+                if models is None else _summed([cost for _, cost in models], total("cost_usd")))
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **counts, input_includes_cache=includes, **cost.fields(),
                            partial=partial)
@@ -167,21 +167,26 @@ class RoleUsage:
 
             charged = [Tokens.of(share.to_dict()) for share in of]
             tokens = reduce(operator.add, charged) if charged and None not in charged else None
-            reported = total("cost_usd") if all(share.cost_usd is not None for share in of) else None
-            cost = price(tokens, reported, model=model, prices=prices, reported_by=self.reported_by)
+            cost = _priced(tokens, [share.cost_usd for share in of], model=model, prices=prices,
+                           reported_by=self.reported_by)
             flags = {share.input_includes_cache for share in of}
             row = ModelEntry(model=model, **{name: total(name) for name in _MODEL_COUNTS},
                              input_includes_cache=flags.pop() if len(flags) == 1 else None, **cost.fields())
             rows.append((row, cost))
         return rows
 
-    def _reported(self, summed: Optional[float]) -> Optional[float]:
-        """The turns' summed figure, as ``price`` takes it: the agent's or endpoint's figures only when every turn
-        carried one, since a sum of some turns' isn't the role's cost; without, the map prices all of them, and a
-        model the map lacks is unpriced."""
-        if any(u is None or u.cost_usd is None for u in self.turns):
-            return None
-        return summed
+
+
+def _priced(tokens: Optional[Tokens], figures: list[Optional[float]], *, model: Optional[str], prices: PriceTable,
+            reported_by: ReportedBy) -> Cost:
+    """``price`` given the turns' (or a model's shares') own figures: they stand in for the map only when every one
+    came, since a sum of some isn't the cost, so a model the map lacks is then unpriced; their sum is kept beside the
+    cost as ``reported_usd`` either way."""
+    given = [figure for figure in figures if figure is not None]
+    summed = sum(given) if given else None
+    cost = price(tokens, summed if len(given) == len(figures) else None, model=model, prices=prices,
+                 reported_by=reported_by)
+    return cost if cost.reported_usd == summed else replace(cost, reported_usd=summed)
 
 
 def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
