@@ -154,6 +154,23 @@ class AtifCopies:
                            f"{timeout:.0f}s (continuing)")
             return None
 
+    @property
+    def folder(self) -> str:
+        """The run's folder for this agent's copies, where their ``media/`` paths resolve."""
+        return atif_folder(self._context, self._agent.agent_name)
+
+    async def pull_live_media(self, document: Mapping[str, Any], session_id: Any) -> None:
+        """Pull into the run's folder the media a live page's steps (``document``) name that it lacks, as the turn's
+        copy does once the turn ends, so a reader of the live pages sees them as they come. The record of what the
+        folder holds is the copies', so nothing is asked for twice; a failure is logged and left to the copy's pull."""
+        try:
+            store = get_config().get_object_store()
+            refs = _first_refs(document)
+            if refs:
+                await self._pull_media(refs, session_id, store, trajectory_prefix_key(store, self.folder))
+        except Exception as exc:
+            logger.warning(f"agent '{self._agent.agent_name}': a live page's media pull failed (continuing): {exc}")
+
     async def join(self) -> dict[int, str | None]:
         """Each copied turn's url, by its index, once every copy has been stored and its record filled; cancelled while
         waiting, it cancels the copies left."""

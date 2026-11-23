@@ -48,19 +48,26 @@ class _Shots(Adapter):
         turn.step(key=f"s{record['n']}", llm_call_count=1)
 
 
-def _app(*, atif: bool = True):
-    """An agent that, each turn, appends one shot, a new screenshot each time, and answers."""
+def _app(*, atif: bool = True, live: bool = False, pause: float = 0.0):
+    """An agent that, each turn, appends one shot, a new screenshot each time, and answers; with ``pause``, a second
+    shot, then a third after that long, so a live reader sees the first closed while the turn runs (a step closes when
+    the next begins)."""
     shots = iter(range(1, 1000))
 
     @a2a_agent(
         identity=AgentIdentity(name="solver", description="test", version="1"),
-        extensions=(enable(TRAJECTORY_V1, live=False, native=NATIVE, **({"atif": _Shots} if atif else {})),),
+        extensions=(enable(TRAJECTORY_V1, live=live, native=NATIVE, **({"atif": _Shots} if atif else {})),),
     )
     class Agent(AgentEnvAgent):
         async def run(self, request: TaskRequest) -> TaskResult:
             request.trajectory.set_format(NATIVE)
             n = next(shots)
             request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
+            if pause:
+                for wait in (0, pause):
+                    await asyncio.sleep(wait)
+                    n = next(shots)
+                    request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
             return TaskResult.text(f"shot {n}")
 
     return Agent().create_app()
@@ -70,9 +77,9 @@ class _Wire(httpx.AsyncBaseTransport):
     """The agent at ``http://agent.test``, served in-process, and the store's grant URLs, which write into the store.
     A test can hold the agent's atif/1 reads until it lets them go, rewrite their answers, or rewrite any answer."""
 
-    def __init__(self, store: GrantingObjectStore, *, atif: bool) -> None:
+    def __init__(self, store: GrantingObjectStore, *, atif: bool, live: bool = False, pause: float = 0.0) -> None:
         self.store = store
-        self._atif = atif
+        self._atif, self._live, self._pause = atif, live, pause
         self.restart()
         self.atif_reads: list[dict] = []
         self.native_reads: list[dict] = []
@@ -88,7 +95,7 @@ class _Wire(httpx.AsyncBaseTransport):
         self.unreachable: set[str] = set()
 
     def restart(self) -> None:
-        self.app = _app(atif=self._atif)
+        self.app = _app(atif=self._atif, live=self._live, pause=self._pause)
         self._agent = httpx.ASGITransport(app=self.app)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -125,13 +132,14 @@ class _Wire(httpx.AsyncBaseTransport):
 
 
 class _Run:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, atif: bool = True) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, atif: bool = True, live: bool = False,
+                 pause: float = 0.0) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
         self.root = tmp_path / "store"
         self.store = GrantingObjectStore(str(self.root), reaches=True)
         configure(object_store=self.store)
         quiet_conversations(monkeypatch)
-        self.wire = _Wire(self.store, atif=atif)
+        self.wire = _Wire(self.store, atif=atif, live=live, pause=pause)
         self.asked: list[int] = []
         route_clients(monkeypatch, self.wire)
 

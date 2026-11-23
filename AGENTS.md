@@ -135,7 +135,11 @@ or one of them only where it is used.
   (`agentenv_protocol.atif.task_document`), its media read from the document's `media/` and checked against their
   names, any other turn as native; always_on's judge stages an `atif/1` wake from that task's events
   (`turn_events.atif_turn_events`), each such wake's end naming its turn in the step's timeline, since the turns share
-  one url. So prescribing atif/1 changes what a run's judges read and can move its scores.
+  one url. A prompt step that follows its turns live (`live_trajectory`) follows the copy too
+  (`snapshot_utils/live_trajectory.py`): each poll's new closed steps a page under `<turn>/live/`, the header beside the
+  page where it changed, each sub-agent's under `sub/<id>/`, and the media its steps name pulled between polls; a turn
+  the agent won't serve atif/1 is followed natively, and one it stops serving partway ends naming why (`end.json`
+  `stopped`). So prescribing atif/1 changes what a run's judges read and can move its scores.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
