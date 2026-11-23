@@ -736,24 +736,24 @@ class _Run:
         finally:
             await self._clock_runs(False)
 
-    async def _stopped_at_time_limit(self, error: TimeoutError) -> Optional[str]:
-        """A turn that ran out of time, with continue_after_wake_limit on: the state the agent confirms it stopped in
+    async def _stopped_at_time_limit(self, error: TimeoutError) -> Optional[dict]:
+        """A turn that ran out of time, with continue_after_wake_limit on: its A2A task as the agent confirms it ended
         (``_stop_turn``), once CUT_OFF_GRACE_SECONDS more have passed, so what the turn still had under way lands
         before the wake reads its changes and messages. None, so the run ends as an error, with the setting off, for
         an agent that stopped answering (its sandbox died, which is not the time limit), or when the stop can't be
         confirmed."""
         if not self.step.continue_after_wake_limit or isinstance(error, protocol.AgentUnreachableError):
             return None
-        stopped = await self._stop_turn()
-        if stopped is not None:
+        ended = await self._stop_turn()
+        if ended is not None:
             await asyncio.sleep(CUT_OFF_GRACE_SECONDS)  # the task's clock stays frozen, as between any two turns
-        return stopped
+        return ended
 
-    async def _stop_turn(self) -> Optional[str]:
+    async def _stop_turn(self) -> Optional[dict]:
         """Stop a turn cut off at its time limit before the run goes on: ask the agent to cancel its task (A2A
-        tasks/cancel) and wait, up to STOP_TURN_SECONDS, for the agent to report the task ended. Its final state
-        ("canceled", or "failed" or "completed" when it ended on its own just then); None when it can't be confirmed:
-        no task was ever accepted, or the agent doesn't answer in time."""
+        tasks/cancel) and wait, up to STOP_TURN_SECONDS, for the agent to report the task ended. The task as it ended
+        (canceled, or failed or completed when it ended on its own just then); None when that can't be confirmed: no
+        task was ever accepted, or the agent doesn't answer in time."""
         task_id = self.turn_task_id
         if task_id is None:
             return None
@@ -765,7 +765,19 @@ class _Run:
             logger.warning(f"always_on: wake {self.wakes}: could not confirm the agent stopped its cut-off turn "
                            f"(task {task_id}): {type(e).__name__}: {e}")
             return None
-        return _state_name(((ended or {}).get("status") or {}).get("state"))
+        return ended or {}
+
+    def _stopped_turn(self, ended: dict, error: str) -> tuple[AgentTurn, Optional[str]]:
+        """The turn a time-limit cut-off left once stopped, and the state it stopped in when that state is what the
+        time limit made it. One the agent canceled, or that completed just then, stands for the time limit
+        (``_timed_out``). One that failed (or was rejected) meanwhile is taken as it ended, with no stopped state, so
+        its own error says whether a limit ended it (``_limit_reached``); any other failure still ends the run."""
+        state = _state_name((ended.get("status") or {}).get("state"))
+        if state in ("canceled", "completed"):
+            return _timed_out(self.turn_task_id, error), state
+        message = (ended.get("status") or {}).get("message") or {}
+        return AgentTurn(task_id=self.turn_task_id or "", task=ended,
+                         reply=protocol.TerminalResponse.from_message(message)), None
 
     def _limit_reached(self, state: Any, term: protocol.TerminalResponse) -> Optional[str]:
         """With continue_after_wake_limit on, the limit (TIME_LIMIT or TOOL_CALL_LIMIT) at which the agent's harness
@@ -1399,13 +1411,13 @@ class _Run:
             turn = await self._agent_turn(parts, msg_id, record)
             stopped = None
         except TimeoutError as e:
-            stopped = await self._stopped_at_time_limit(e)
-            if stopped is None:
+            ended = await self._stopped_at_time_limit(e)
+            if ended is None:
                 self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
                 self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1),
                          **({"stop": "unconfirmed"} if step.continue_after_wake_limit else {}))
                 return
-            turn = _timed_out(self.turn_task_id, f"agent turn timed out after {step.timeout_seconds}s: {e}")
+            turn, stopped = self._stopped_turn(ended, f"agent turn timed out after {step.timeout_seconds}s: {e}")
         task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
@@ -1484,14 +1496,14 @@ class _Run:
             turn = await self._agent_turn(parts, msg_id, record)
             stopped = None
         except TimeoutError as e:
-            stopped = await self._stopped_at_time_limit(e)
-            if stopped is None:
+            ended = await self._stopped_at_time_limit(e)
+            if ended is None:
                 self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
                 self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
                          state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1),
                          **({"stop": "unconfirmed"} if step.continue_after_wake_limit else {}))
                 return
-            turn = _timed_out(self.turn_task_id, f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
+            turn, stopped = self._stopped_turn(ended, f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
         task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count

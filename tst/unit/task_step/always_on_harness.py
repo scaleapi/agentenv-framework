@@ -51,6 +51,12 @@ class Fail:
                  state: str = "failed", error_code: Optional[str] = None) -> None:
         self.message, self.error_type, self.state, self.error_code = message, error_type, state, error_code
 
+    def parts(self) -> list[dict]:
+        """The turn's reply as the harness sends it: its message, and its error in a data part."""
+        data = {"error_message": self.message, **({"error_type": self.error_type} if self.error_type else {}),
+                **({"error_code": self.error_code} if self.error_code else {})}
+        return [{"kind": "text", "text": self.message}, {"kind": "data", "data": data}]
+
 
 class Slow:
     """An agent's turn that works for ``seconds`` of real time, then acts with ``then(rig)`` and ends with what it
@@ -58,13 +64,13 @@ class Slow:
     doesn't stop it; only a cancel of its A2A task does, unless ``stops_on_cancel`` is False (an agent that won't
     stop). As the agent framework's executor does, the agent reports a task it cancels canceled at once, while its work
     takes ``stopping_seconds`` more to stop and may still act meanwhile (``while_stopping(rig)``, a tool call already
-    under way)."""
+    under way). With ``ends_as``, the task had already failed that way when the cancel came, so it reads failed."""
 
     def __init__(self, seconds: float, then: Optional[Callable[["Rig"], Any]] = None,
                  stops_on_cancel: bool = True, stopping_seconds: float = 0,
-                 while_stopping: Optional[Callable[["Rig"], Any]] = None) -> None:
+                 while_stopping: Optional[Callable[["Rig"], Any]] = None, ends_as: Optional[Fail] = None) -> None:
         self.seconds, self.then, self.stops_on_cancel = seconds, then, stops_on_cancel
-        self.stopping_seconds, self.while_stopping = stopping_seconds, while_stopping
+        self.stopping_seconds, self.while_stopping, self.ends_as = stopping_seconds, while_stopping, ends_as
 
 
 class Rig:
@@ -309,11 +315,7 @@ class Rig:
             self.agent_tasks[task_id] = (work, closing)
             closing = await asyncio.shield(work)  # the step giving up on the turn leaves the agent's work running
         if isinstance(closing, Fail):
-            data = {"error_message": closing.message,
-                    **({"error_type": closing.error_type} if closing.error_type else {}),
-                    **({"error_code": closing.error_code} if closing.error_code else {})}
-            return _turn(task_id, closing.state,
-                         [{"kind": "text", "text": closing.message}, {"kind": "data", "data": data}])
+            return _turn(task_id, closing.state, closing.parts())
         reply = [{"kind": "text", "text": closing}] if closing else []
         reply += self._usage_part(self.solver_usage)
         return _turn(task_id, "completed", reply)
@@ -342,6 +344,9 @@ class Rig:
         """A2A tasks/get until the task ends: canceled as soon as the agent canceled it, its work maybe still stopping;
         else completed once its work is done; TimeoutError past ``timeout_seconds``."""
         if task_id in self.canceled:
+            ends_as = self.agent_tasks[task_id][1].ends_as
+            if ends_as is not None:
+                return {"id": task_id, "status": {"state": ends_as.state, "message": {"parts": ends_as.parts()}}}
             return {"id": task_id, "status": {"state": "canceled"}}
         work, _ = self.agent_tasks.get(task_id, (None, None))
         if work is not None:

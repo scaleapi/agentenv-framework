@@ -303,6 +303,46 @@ async def test_a_turn_that_fails_for_another_reason_still_ends_the_run_as_an_err
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_fails_for_another_reason_just_as_its_time_runs_out_still_ends_the_run(monkeypatch,
+                                                                                                 tmp_path):
+    """The step cuts the turn off at its time limit, but by the time the agent answers the cancel, the turn had
+    already failed on its own, for a reason that is no limit: that failure is what ended it, and the run ends."""
+    crash = Fail("claude CLI exited with code 1: API Error: 500 Internal server error")
+
+    def agent(n, texts, rig):
+        rig.message("on it")
+        return Slow(5, ends_as=crash)
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    ctx = await _run(rig, timeout_seconds=1, continue_after_wake_limit=True)
+
+    assert rig.cancels == ["task-1"] and len(rig.sent) == 1
+    record = rig.record(ctx)
+    assert (record["end_reason"], record["cut_off_wakes"]) == ("agent_turn_failed", [])
+    assert ctx.prompt_responses[0].error_message == crash.message
+    [turn] = rig.events(ctx, "agent_turn_end")
+    assert turn["state"] == "failed" and "cut_off" not in turn
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_reached_its_tool_call_limit_just_as_its_time_runs_out_is_cut_off(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        if n == 1:
+            rig.message("on it")
+            return Slow(5, ends_as=Fail(MAX_TURNS_ERROR))
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    ctx = await _run(rig, timeout_seconds=1, max_turns=150, continue_after_wake_limit=True)
+
+    assert rig.cancels == ["task-1"] and rig.sent[1][0] == TOOL_CALL_NOTE
+    [cut] = rig.record(ctx)["cut_off_wakes"]
+    assert (cut["limit"], cut["error"]) == ("tool_call_limit", MAX_TURNS_ERROR)
+    assert rig.record(ctx)["end_reason"] == "finished_nothing_pending"
+
+
+@pytest.mark.asyncio
 async def test_an_agent_that_stops_answering_still_ends_the_run(monkeypatch, tmp_path):
     def agent(n, texts, rig):
         raise AgentUnreachableError("The agent on sandbox sb stopped answering")
