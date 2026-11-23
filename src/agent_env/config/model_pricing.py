@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, ClassVar, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,10 @@ class Cost:
     unit_prices: Optional[dict[str, float]] = None
     assumed: tuple[Assumed, ...] = ()
     unpriced: Optional[Unpriced] = None
+
+    #: Every key ``fields`` can write, so a record built from them keeps a call's whole cost.
+    KEYS: ClassVar[tuple[str, ...]] = ("cost_usd", "cost_status", "cost_source", "reported_cost_usd",
+                                       "uncached_input_tokens", "unit_prices", "cost_assumed", "unpriced_reason")
 
     def fields(self) -> dict[str, Any]:
         """The cost as a usage entry's keys."""

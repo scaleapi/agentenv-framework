@@ -155,11 +155,8 @@ from agent_env.task_step.context import PromptResponse, StepContextError, TaskSt
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers import user_sim_judge_core as core
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
-    RubricsVerdict,
-    RubricsVerifierTaskStep,
-    judge_calls,
-)
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerdict, RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 from agent_env.task_step.task_steps.verifiers.verifier import Verification
 
@@ -390,7 +387,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 error["not_failing"] = NOT_FAILING_UNCONFIRMED
             else:
                 error["fails_task"] = True
-        answered = [call for call in judge_calls() if call["outcome"] == "answered"]
+        answered = [call for call in judge_usage.calls() if call["outcome"] == "answered"]
         output = {**judged.output, **entry, "user_sim_error": error, "calls": len(answered),
                   "usage": _usage(answered), **_cost(answered)}
         if error["value"] == "unknown":

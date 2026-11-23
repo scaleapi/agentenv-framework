@@ -12,8 +12,8 @@ import pytest
 
 from agent_env.a2a_agent import A2AAgent, protocol
 from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError
-from agent_env.task_step.task_steps.verifiers import rubrics_verifier
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import JudgeSettingRefused, JudgeUsage
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import JudgeSettingRefused
 from tst.unit.task_step.verifiers.test_rubrics_verifier_golden import TWO, _binary, _context, _ids, _step
 from tst.util.config import install_model_config
 
@@ -204,15 +204,11 @@ async def test_an_agent_judge_card_without_effort_leaves_it_out_and_the_record_s
     card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {
         "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": ["model"]}}}}}]}}
     context = TaskStepContext()
-    judge = JudgeUsage(context, "verify")
-    token = rubrics_verifier._JUDGE_USAGE.set(judge)
-    try:
-        with caplog.at_level(logging.WARNING):
-            await _step(use_agent_judge=True)._configure_judge_a2a(
-                judge_a2a_url="http://judge.test", judge_agent_card=card, model="m", judge_effort="high",
-                judge_max_thinking_tokens=None, context=context, headers={}, endpoint_host="gw.test")
-    finally:
-        rubrics_verifier._JUDGE_USAGE.reset(token)
+    with judge_usage.scope(), caplog.at_level(logging.WARNING):
+        judge = judge_usage.start(context, "verify")
+        await _step(use_agent_judge=True)._configure_judge_a2a(
+            judge_a2a_url="http://judge.test", judge_agent_card=card, model="m", judge_effort="high",
+            judge_max_thinking_tokens=None, context=context, headers={}, endpoint_host="gw.test")
 
     assert posted == [{"model": "m"}]
     assert (judge.sent, judge.not_sent, judge.endpoint_host) == ({}, {"effort": "high"}, "gw.test")

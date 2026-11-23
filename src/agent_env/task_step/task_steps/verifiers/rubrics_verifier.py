@@ -8,7 +8,6 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping, Sequence
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
@@ -25,7 +24,7 @@ from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.config import model_call
 from agent_env.config.model import ModelRole, no_key_for
-from agent_env.config.model_pricing import ReportedBy, Tokens, price
+from agent_env.config.model_pricing import Cost, ReportedBy
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -62,6 +61,8 @@ from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
 )
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from agent_env.task_step.task_steps.verifiers.judge_utils.judge_usage import JudgeUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
     AtifDocuments,
     TurnSource,
@@ -92,72 +93,6 @@ logger = logging.getLogger(__name__)
 _JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
 # The judge settings a call carries, besides its model.
 _JUDGE_SETTINGS = ("effort", "max_thinking_tokens")
-# A call's cost keys, as ``Cost.fields`` writes them.
-_COST_KEYS = ("cost_usd", "cost_status", "cost_source", "reported_cost_usd")
-
-
-class JudgeUsage(StepUsage):
-    """A judge step's usage, written as every step's is, and its own record of the run for its grade: each model call
-    it made (``calls``) and the settings those calls carried (``carried``): those sent, those it couldn't send, and the
-    endpoint host they reached."""
-
-    def __init__(self, context: TaskStepContext, step_id: str) -> None:
-        super().__init__(context, step_id)
-        self.calls: list[dict[str, Any]] = []
-        self.sent: Optional[dict[str, Any]] = None
-        self.not_sent: dict[str, Any] = {}
-        self.endpoint_host: Optional[str] = None
-        self._cutting = False
-
-    def call(self, role: ModelRole, usage: Optional[Usage], *, model: Optional[str], endpoint_host: Optional[str],
-             reported_by: ReportedBy = ReportedBy.HARNESS, cost: Optional[Mapping[str, Any]] = None) -> None:
-        """The base's, and the call in the record: ``cost``, the cost keys the call itself carried (a direct call's,
-        from ``model_call``), over its price from LiteLLM's map."""
-        super().call(role, usage, model=model, endpoint_host=endpoint_host, reported_by=reported_by)
-        cut = self._cutting
-        self._record("cut_off" if cut else "answered", None if cut else usage, model, endpoint_host, reported_by,
-                     cost=None if cut else cost)
-
-    def cut_off_call(self, role: ModelRole, *, model: Optional[str], endpoint_host: Optional[str],
-                     reported_by: ReportedBy = ReportedBy.HARNESS) -> None:
-        self._cutting = True
-        try:
-            super().cut_off_call(role, model=model, endpoint_host=endpoint_host, reported_by=reported_by)
-        finally:
-            self._cutting = False
-
-    def refused_call(self, *, model: Optional[str], endpoint_host: Optional[str], error: str) -> None:
-        """A call that got no answer and cost nothing, as one LiteLLM refused before sending it or one the endpoint
-        refused: in the grade's record, not in the step's usage."""
-        self._record("refused", None, model, endpoint_host, ReportedBy.PROVIDER, error=error)
-
-    def carried(self, sent: dict[str, Any], not_sent: dict[str, Any], endpoint_host: Optional[str]) -> None:
-        """The settings the run's calls carried, kept from its first call, since every call of a run carries the same."""
-        if self.sent is None:
-            self.sent, self.not_sent, self.endpoint_host = dict(sent), dict(not_sent), endpoint_host
-
-    def _record(self, outcome: str, usage: Optional[Usage], model: Optional[str], endpoint_host: Optional[str],
-                reported_by: ReportedBy, *, error: Optional[str] = None,
-                cost: Optional[Mapping[str, Any]] = None) -> None:
-        priced = price(Tokens.of(usage.to_dict()) if usage is not None else None,
-                       usage.cost_usd if usage is not None else None, model=model, prices=self._prices,
-                       reported_by=reported_by)
-        self.calls.append({"outcome": outcome, "model": model, "endpoint_host": endpoint_host,
-                           "usage": usage.to_dict() if usage is not None else None,
-                           **priced.fields(), **(cost or {}), "batch": _BATCH.get(), "attempt": _ATTEMPT.get(),
-                           **({"error": error} if error is not None else {})})
-
-
-# The run of a judge step this task is in, set by its execute; the judge batch and output attempt a call belongs to.
-_JUDGE_USAGE: ContextVar[Optional[JudgeUsage]] = ContextVar("judge_usage", default=None)
-_BATCH: ContextVar[Optional[int]] = ContextVar("judge_batch", default=None)
-_ATTEMPT: ContextVar[Optional[int]] = ContextVar("judge_attempt", default=None)
-
-
-def judge_calls() -> list[dict[str, Any]]:
-    """The record of each model call the judge step running in this task has made so far (``JudgeUsage.calls``)."""
-    judge = _JUDGE_USAGE.get()
-    return list(judge.calls) if judge is not None else []
 
 
 # The judge echoes each criterion's id back and results are matched by exact string.
@@ -930,7 +865,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             settings["judge_a2a_agent_id"] = get_config().get_default_a2a_agent_id()
         recorded = (context.metadata.get("models") or {}).get(ModelRole.JUDGE.record_key) or {}
         settings["judge_model"] = recorded[self.id] if self.id in recorded else self._judge_model(context)
-        if (judge := _JUDGE_USAGE.get()) is not None and judge.sent is not None:
+        if (judge := judge_usage.current()) is not None and judge.sent is not None:
             for key in _JUDGE_SETTINGS:
                 if key in settings or key in judge.sent or key in judge.not_sent:
                     settings[key] = judge.sent.get(key)
@@ -943,16 +878,13 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
     def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
         """``judge_calls``, the record of each model call the run's judge made, when it made any."""
-        judge = _JUDGE_USAGE.get()
-        return {"judge_calls": list(judge.calls)} if judge is not None and judge.calls else {}
+        calls = judge_usage.calls()
+        return {"judge_calls": calls} if calls else {}
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         """The base's, with this run's judge record scoped to it, so a grade reads only its own run's calls."""
-        token = _JUDGE_USAGE.set(None)
-        try:
+        with judge_usage.scope():
             return await super().execute(context)
-        finally:
-            _JUDGE_USAGE.reset(token)
 
     async def verify(self, context: TaskStepContext) -> Verification:
         verdict = self._gated(await self._judged(context))
@@ -1261,12 +1193,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
                                    f"output_format={self.output_format.value} is graded in one judge call.")
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
-            usage = JudgeUsage(context, self.id)
-            _JUDGE_USAGE.set(usage)
+            usage = judge_usage.start(context, self.id)
 
             async def grade(batch: list[dict], number: Optional[int] = None
                             ) -> tuple[list[dict], int, list[dict], Optional[str]]:
-                _BATCH.set(number)
+                judge_usage.batch(number)
                 prompt = eval_prompt_for(batch)
                 if len(batches) > 1:
                     prompt += self._BATCH_NOTE.format(
@@ -1684,7 +1615,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             },
         }
         params, sent, not_sent = _direct_settings(route, self._run_values(context))
-        judge = _JUDGE_USAGE.get()
+        judge = judge_usage.current()
         if judge is not None:
             judge.carried(sent, not_sent, route.endpoint_host)
         # Some endpoints reject json_schema with images. Fall back once on that exact
@@ -1767,7 +1698,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         if not_sent:
             logger.warning("Verifier '%s': the judge agent doesn't take %s; it grades without them",
                            self.verifier_id, sorted(not_sent))
-        if (judge := _JUDGE_USAGE.get()) is not None:
+        if (judge := judge_usage.current()) is not None:
             judge.carried(sent, not_sent, endpoint_host)
         # What the judge agent took; one that doesn't accept a model grades on its own.
         context.record_model(ModelRole.JUDGE.record_key, self.id, config_payload.get("model"))
@@ -1968,7 +1899,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
         except BaseException as exc:
-            recorded = isinstance(exc, Exception) and _JUDGE_USAGE.get() is not None
+            recorded = isinstance(exc, Exception) and isinstance(usage, JudgeUsage)
             if not recorded and model_call.cut_off(exc):
                 usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=None, reported_by=ReportedBy.PROVIDER)
             raise
@@ -1982,7 +1913,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
         if data.get("reported_cost_usd") is not None:
             read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])
-        extra = ({"cost": {key: data[key] for key in _COST_KEYS if key in data}}
+        extra = ({"cost": {key: data[key] for key in Cost.KEYS if key in data}}
                  if isinstance(usage, JudgeUsage) else {})
         usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
                    reported_by=ReportedBy.PROVIDER, **extra)
@@ -2031,7 +1962,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             )
 
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
-            _ATTEMPT.set(attempt)
+            judge_usage.attempt(attempt)
             if use_agent_judge:
                 data = await self._invoke_judge_retrying_timeouts(
                     discrepancy_log=discrepancy_log,
