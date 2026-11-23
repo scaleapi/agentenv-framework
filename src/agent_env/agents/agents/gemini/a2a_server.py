@@ -95,7 +95,7 @@ from gemini_changelog import (
     outermost,
     remove_settings_hooks,
 )
-from gemini_config import gemini_home, run_settings, user_settings_path
+from gemini_config import TASK_DIRS, gemini_home, run_settings, user_settings_path
 from gemini_kit import (
     DurableSessionRefs,
     FilePartMaterializeError,
@@ -343,7 +343,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
 def _changelog_roots() -> list[str]:
     """The changelog's default capture roots: the writable layer a fresh agent of the image reconstructs, the CLI's
     state (and its transcripts) included."""
-    return outermost([str(Path.home()), str(gemini_home()), GEMINI_CWD, "/app", "/tmp/data", "/usr/local", "/etc"])
+    return outermost([str(Path.home()), str(gemini_home()), GEMINI_CWD, *TASK_DIRS, "/usr/local", "/etc"])
 
 
 def _install_changelog_hook(command: str) -> None:
