@@ -1241,6 +1241,25 @@ def test_a_secret_the_generator_quotes_is_masked_in_the_logged_compose():
     assert redacted.splitlines() == ['      - "API_KEY=***"', '      - "DB_PASSWORD=***"', '      - "PLAIN=a: b"']
 
 
+def test_a_quoted_or_multiline_secret_in_a_rendered_compose_is_masked_and_the_compose_still_reads_back():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    secrets_in = {"VENDOR_API_KEY": "first: half", "SIGNING_PASSWORD": "-----BEGIN-----\nkey body\n-----END-----"}
+    rendered = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack", extra_env_vars=secrets_in)],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+    env = dict(item.split("=", 1) for item in yaml.safe_load(rendered)["services"]["slack"]["environment"])
+    assert {key: env[key] for key in secrets_in} == secrets_in
+
+    redacted = _redact_compose_secrets(rendered)
+    assert all(fragment not in redacted for fragment in ("first", "half", "BEGIN", "key body"))
+    redacted_env = dict(item.split("=", 1) for item in yaml.safe_load(redacted)["services"]["slack"]["environment"])
+    assert {key: redacted_env[key] for key in secrets_in} == {"VENDOR_API_KEY": "***", "SIGNING_PASSWORD": "***"}
+
+
 def test_redact_compose_secrets_masks_only_secret_env_lines():
     """The logged compose masks *SECRET/PASSWORD/TOKEN env values but leaves everything else
     (image refs, ports, non-secret env, DATABASE_URL) intact."""
