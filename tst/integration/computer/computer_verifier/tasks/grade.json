@@ -8,18 +8,18 @@
    "result_files": ["~/Desktop/budget.csv", "~/notes.txt"],
    "state_commands": [{"name": "mailbox", "command": ["cat", "/tmp/mail_mock.json"]}],
    "rubric": {"criteria": [
-     {"id": "csv", "title": "Provides a CSV file at ~/Desktop/budget.csv.", "weight": 5,
-      "annotations": {"criteria_type": "MUST-PASS"}},
      {"id": "total", "title": "budget.csv has a total row of 1500.", "weight": 50,
       "annotations": {"criteria_type": "REGULAR", "target_result_files": ["budget.csv"]}},
      {"id": "mail", "title": "An email to ana@example.com states the total of 1500.", "weight": 30,
       "annotations": {"criteria_type": "REGULAR"}},
      {"id": "wrong", "title": "Any file or email states a total other than 1500.", "weight": 20,
       "annotations": {"criteria_type": "NEGATIVE"}}]}},
-  {"id": "gate", "type": "computer_verifier", "env_id": "desk", "depends_on": ["work"], "verifier_id": "cua-gate",
-   "use_agent_judge": false, "result_files": ["~/Desktop/report.pdf", "~/notes.txt"],
-   "rubric": [
-     {"id": "pdf", "title": "Provides a PDF report at ~/Desktop/report.pdf.", "weight": 5,
-      "annotations": {"criteria_type": "MUST-PASS"}},
-     {"id": "note", "title": "notes.txt says the budget is done.", "weight": 10}]}
+  {"id": "csv", "type": "computer_verifier", "env_id": "desk", "depends_on": ["work"], "use_agent_judge": false,
+   "score_aggregator": "all_pass", "result_files": ["~/Desktop/budget.csv"],
+   "rubric": [{"id": "csv", "title": "Provides a CSV file at ~/Desktop/budget.csv."}]},
+  {"id": "pdf", "type": "computer_verifier", "env_id": "desk", "depends_on": ["work"], "use_agent_judge": false,
+   "score_aggregator": "all_pass", "result_files": ["~/Desktop/report.pdf"],
+   "rubric": [{"id": "pdf", "title": "Provides a PDF report at ~/Desktop/report.pdf."}]},
+  {"id": "final", "type": "aggregate_verifiers", "depends_on": ["grade", "csv"], "sources": ["grade"], "gates": ["csv"]},
+  {"id": "gated", "type": "aggregate_verifiers", "depends_on": ["grade", "pdf"], "sources": ["grade"], "gates": ["pdf"]}
 ]

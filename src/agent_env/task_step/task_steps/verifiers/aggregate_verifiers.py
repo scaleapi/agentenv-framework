@@ -10,10 +10,6 @@ skipped source is left out, and every source skipped, or a gate skipped, skips i
 ``verifier_ids``, the older form, names its sources by their ``verifier_id`` and pools the rows of their legacy
 ``verifications`` entries, as it always has: a source whose entry has no rows adds nothing. It takes none of the
 newer fields.
-
-A computer_verifier's score rests on must-pass gates and on criteria counted met or not, which pooling its rows would
-drop, so a pooled aggregate refuses one, by its grade or its legacy entry's ``gate_passed``: combine it as a
-``weighted_mean`` or name it in ``gates``.
 """
 from __future__ import annotations
 
@@ -24,7 +20,6 @@ from typing import Any, ClassVar, Optional, Sequence
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.verifiers.computer.computer_verifier import ComputerVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, trajectory_mistakes_key
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.verifiers.verifier import (
@@ -41,8 +36,6 @@ POOLED = "pooled"
 WEIGHTED_MEAN = "weighted_mean"
 COMBINES = (POOLED, WEIGHTED_MEAN)
 _NEWER_FIELDS = ("sources", "gates", "combine", "weights")
-_GATED = ("scored with must-pass gates, which pooling their rows would drop; name them in sources with combine "
-          "weighted_mean, or in gates")
 
 
 class AggregateVerifiersTaskStep(VerifierTaskStep):
@@ -190,8 +183,6 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
         ANY_PASS count; None when every source was skipped."""
         if not graded:
             return None
-        if gated := [step for step, grade in graded.items() if grade["verifier_type"] == ComputerVerifierTaskStep.type]:
-            raise RuntimeError(f"AggregateVerifiers: {gated} {_GATED}")
         rows = [{"score": row["score"], "weight": row["weight"], "result": row["passed"]}
                 for grade in graded.values() for row in grade["verifier_criteria"] if not row.get("skipped")]
         return aggregate_score(rows, self.score_aggregator)
@@ -214,10 +205,6 @@ class AggregateVerifiersTaskStep(VerifierTaskStep):
                 f"context.metadata.verifications: {missing}. "
                 f"Available: {list(all_verifications.keys())}"
             )
-
-        gated = [vid for vid in self.verifier_ids if "gate_passed" in all_verifications[vid]]
-        if gated:
-            raise RuntimeError(f"AggregateVerifiers: {gated} {_GATED}")
 
         merged_results: list[dict] = []
         for vid in self.verifier_ids:

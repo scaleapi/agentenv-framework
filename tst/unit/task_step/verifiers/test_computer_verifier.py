@@ -1,6 +1,6 @@
-"""computer_verifier: a computer-use task's rubric as rubrics_verifier's criteria, its score (binary criteria, weights,
-negative penalties, must-pass gates), and a run against a computer at its driver's boundary (``tst.unit.computer_home``)
-with the judge faked: the files the agent left read through the driver and rendered into the judge's prompt, a missing
+"""computer_verifier: a computer-use task's rubric as rubrics_verifier's criteria (weights, negative penalties, a
+must-pass one refused for a step of its own that an aggregate gates on), and a run against a computer at its driver's
+boundary (``tst.unit.computer_home``) with the judge faked: the files the agent left read through the driver and rendered into the judge's prompt, a missing
 one named, the golden files and the state commands' output beside them, the caller's guidance or the default, and the
 files graded alone when no prompt step names them; state output that was cut marked incomplete, a Windows computer
 refused."""
@@ -29,14 +29,13 @@ from agent_env.task_step.task_steps.verifiers.computer.computer_verifier import 
     RECORDS_KEY,
     ComputerVerifierTaskStep,
     criteria_from_rubric,
-    computer_rubric_score,
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.computer_home import CARD, Computer
 
 RUBRIC = {"criteria": [
     {"id": "sheet-exists", "title": "Provides report.xlsx.", "weight": 8,
-     "annotations": {"criteria_type": "MUST-PASS", "criteria_category": "format_gate"}},
+     "annotations": {"criteria_type": "REGULAR", "criteria_category": "format_gate"}},
     {"id": "total", "title": "Cell B3 of report.xlsx totals the amounts.", "weight": 50,
      "annotations": {"criteria_type": "REGULAR", "target_result_files": ["report.xlsx"]}},
     {"id": "note", "title": "notes.txt says the report is done.", "weight": 25,
@@ -47,48 +46,25 @@ RUBRIC = {"criteria": [
 ]}
 
 
-def test_the_rubric_becomes_criteria_by_kind_with_weights_and_annotations():
+def test_the_rubric_becomes_criteria_with_weights_and_annotations():
     criteria = {c["id"]: c for c in criteria_from_rubric(RUBRIC)}
 
-    assert criteria["sheet-exists"] == {"id": "sheet-exists", "title": "Provides report.xlsx.", "kind": "must-pass",
-                                        "weight": 8.0}
-    assert criteria["total"]["kind"] == "regular" and criteria["total"]["applies_to"] == {"result_files": ["report.xlsx"]}
-    assert criteria["note"]["kind"] == "regular"
+    assert criteria["sheet-exists"] == {"id": "sheet-exists", "title": "Provides report.xlsx.", "weight": 8.0}
+    assert criteria["total"]["applies_to"] == {"result_files": ["report.xlsx"]} and "negative" not in criteria["note"]
     assert criteria["leak"] == {"id": "leak", "title": "The email reveals the customer's card number.",
-                                "kind": "negative", "weight": -30.0, "negative": True}
+                                "weight": -30.0, "negative": True}
     assert criteria["look"]["weight"] == 0.0 and criteria["look"]["visual"] is True
-    assert criteria_from_rubric([{"id": "x", "title": "t", "weight": -2}])[0]["kind"] == "negative"
+    assert criteria_from_rubric([{"id": "x", "title": "t", "weight": -2}])[0]["negative"] is True
 
 
 @pytest.mark.parametrize("rubric, problem", [
     ({"criteria": []}, "non-empty list"), ([{"title": "t"}], "needs an id"), ([{"id": "x"}], "needs a title"),
     ([{"id": "x", "title": "t", "weight": "5"}], "weight must be a number"),
+    ([{"id": "x", "title": "t", "annotations": {"criteria_type": "MUST-PASS"}}], "in a computer_verifier of their own"),
 ])
 def test_a_rubric_it_cant_grade_is_refused(rubric, problem):
     with pytest.raises(ValueError, match=problem):
         criteria_from_rubric(rubric)
-
-
-def _rows(**scores) -> list[dict]:
-    return [{**c, "score": scores.get(c["id"], 1.0)} for c in criteria_from_rubric(RUBRIC)]
-
-
-@pytest.mark.parametrize("scores, expected", [
-    ({}, 1.0),                                   # all met, the failure mode absent
-    ({"note": 0.0}, 58 / 83),                    # a regular criterion missed
-    ({"leak": 0.0}, (83 - 30) / 83),             # the failure mode present: its penalty
-    ({"note": 0.0, "total": 0.0, "leak": 0.0}, 0.0),  # clamped at 0
-    ({"sheet-exists": 0.0}, 0.0),                # a must-pass gate failed
-    ({"total": 0.9}, 33 / 83),                   # binary: anything short of 1 is 0
-])
-def test_the_score_is_the_gated_weighted_average_less_the_penalties(scores, expected):
-    assert computer_rubric_score(_rows(**scores)) == pytest.approx(expected)
-
-
-def test_gates_alone_score_one_less_the_penalties():
-    rows = [{"id": "g", "kind": "must-pass", "weight": 0.0, "score": 1.0},
-            {"id": "n", "kind": "negative", "weight": -0.25, "score": 0.0}]
-    assert computer_rubric_score(rows) == pytest.approx(0.75)
 
 
 @pytest.fixture
@@ -163,8 +139,8 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
     assert len(_prompted_ids(prompt)) == 5
     assert ctx.prompt_responses == []  # the stand-in the files were graded with is gone
     entry = ctx.metadata["verifications"]["cua"]
-    assert entry["score"] == pytest.approx(58 / 83) and entry["gate_passed"] and "gates_failed" not in entry
-    assert {row["id"]: row["kind"] for row in entry["results"]}["sheet-exists"] == "must-pass"
+    assert entry["score"] == pytest.approx(58 / 83)
+    assert {row["id"]: row.get("negative") for row in entry["results"]}["leak"] is True
     record = ctx.metadata[RECORDS_KEY]["grade"]
     assert [(f["path"], f.get("rendered_as"), f.get("missing", False)) for f in record["files"]] == [
         (f"{computer.home}/Desktop/report.xlsx", "xlsx", False), ("~/notes.txt", "text", False),
@@ -174,24 +150,21 @@ async def test_the_files_left_in_the_computer_are_rendered_into_the_judges_promp
 
 
 @pytest.mark.asyncio
-async def test_a_failed_must_pass_gate_zeroes_the_score_is_named_and_no_aggregate_drops_it(computer):
-    step = _step(result_files=["~/notes.txt"])
-    _judge(step, [], failing=("sheet-exists",))
+async def test_must_pass_criteria_are_a_step_of_their_own_that_an_aggregate_gates_on(computer):
+    gate = _step(id="must", verifier_id="must", result_files=["~/notes.txt"], score_aggregator="all_pass",
+                 rubric=[{"id": "sheet-exists", "title": "Provides report.xlsx."}])
+    rest = _step(result_files=["~/notes.txt"])
+    _judge(gate, [], failing=("sheet-exists",))
+    _judge(rest, [])
     ctx = TaskStepContext(deployed_envs=[computer.deployed()])
 
-    await step.execute(ctx)
+    await gate.execute(ctx)
+    await rest.execute(ctx)
+    await AggregateVerifiersTaskStep(id="final", version=None, sources=["grade"], gates=["must"]).execute(ctx)
 
-    entry = ctx.metadata["verifications"]["cua"]
-    assert entry["score"] == 0.0 and not entry["gate_passed"] and entry["gates_failed"] == ["sheet-exists"]
-    with pytest.raises(RuntimeError, match=r"\['cua'\] scored with must-pass gates"):
-        await AggregateVerifiersTaskStep(id="final", version=None, verifier_ids=["cua"]).execute(ctx)
-    with pytest.raises(RuntimeError, match=r"\['grade'\] scored with must-pass gates"):
-        await AggregateVerifiersTaskStep(id="pooled", version=None, sources=["grade"]).execute(ctx)
-    await AggregateVerifiersTaskStep(id="mean", version=None, sources=["grade"], combine="weighted_mean").execute(ctx)
-    await AggregateVerifiersTaskStep(id="gated", version=None, gates=["grade"]).execute(ctx)
     grades = ctx.metadata["grades"]
-    assert grades["final"]["verifier_status"] == grades["pooled"]["verifier_status"] == "failed"
-    assert grades["mean"]["score"] == 0.0 and grades["gated"]["score"] == 0.0
+    assert grades["must"]["score"] == 0.0 and grades["grade"]["score"] == 1.0
+    assert grades["final"]["score"] == 0.0 and grades["final"]["verifier_output"]["failed_gates"] == ["must"]
 
 
 @pytest.mark.asyncio
@@ -271,7 +244,9 @@ def test_it_round_trips_through_the_registry_keeping_a_files_only_grade():
     again = get_task_step_registry()["computer_verifier"].from_dict(data)
 
     assert data["prompt_id"] is None and again.grades_files_alone and again.to_dict() == data
-    assert again.criteria == step.criteria and again.score_rows is not None
+    assert again.criteria == step.criteria and again.score_aggregator.value == "weighted_average"
+    gate = _step(score_aggregator="all_pass")
+    assert get_task_step_registry()["computer_verifier"].from_dict(gate.to_dict()).score_aggregator.value == "all_pass"
 
 
 @pytest.mark.parametrize("fields, problem", [
@@ -329,7 +304,7 @@ def test_preflight_refuses_a_stored_windows_computer(monkeypatch):
     monkeypatch.setattr(RubricsVerifierTaskStep, "preflight", lambda self: [])
 
     assert _step(result_files=["~/a.txt"]).preflight() == [
-        "step 'grade': env 'desk''s computer is windows, which computer_verifier can't read: it reads files and runs state "
-        "commands through sh and POSIX tools"]
+        "step 'grade': env 'desk''s computer is windows, which computer_verifier can't read: it reads files and runs "
+        "state commands through sh and POSIX tools"]
     desk.computer = SimpleNamespace(os=SimpleNamespace(type="linux"))
     assert _step(result_files=["~/a.txt"]).preflight() == []

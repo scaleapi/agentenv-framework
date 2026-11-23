@@ -1,9 +1,13 @@
-"""computer_verifier: a computer-use task's rubric, graded by rubrics_verifier's judge on what the agent left in the computer.
+"""computer_verifier: a computer-use task's rubric, graded by rubrics_verifier's judge on what the agent left in the
+computer.
 
 The rubric is a list of criteria (or ``{"criteria": [...]}``) with an ``id``, a ``title`` and a ``weight`` (0 when left
-out), each a ``must-pass`` gate, a ``negative`` one (a failure mode, its weight a penalty) or a regular one, by its
-``annotations``' ``criteria_type`` / ``criteria_category``; a ``visual`` category, and ``target_result_files`` /
-``target_GT_files``, say how to grade it. What the judge reads is what the agent left in the computer: each of
+out), a ``negative`` one (a failure mode, its weight a penalty) when its ``annotations``' ``criteria_type`` /
+``criteria_category`` say so or its weight is below 0, else a regular one; a ``visual`` category, and
+``target_result_files`` / ``target_GT_files``, say how to grade it. A ``must-pass`` criterion is refused: must-pass
+criteria are a step of their own, which an ``aggregate_verifiers`` names in its ``gates``.
+
+What the judge reads is what the agent left in the computer: each of
 ``result_files``, read through the computer's driver (computer-exec/v1 ``run``, the control route the agent can't call)
 and rendered as text (``computer/files.py``), a file that isn't there named as one the agent did not produce; the
 golden files of ``expected_artifact_id``, for reference only; the output of each of ``state_commands`` run in the
@@ -12,10 +16,9 @@ was given it. With no ``prompt_id`` the judge grades those alone; with one it al
 and state are read through ``sh`` and POSIX tools, so a Windows computer is refused, at preflight and before any read.
 
 How the judge grades is ``guidance``, and how it treats the golden files ``golden_note``: the caller's own wording, or
-short defaults of the framework's. The score: each criterion 1 or 0; the regular and passed must-pass criteria's weights
-averaged, less each negative criterion's weight when its failure mode is present, clamped to [0, 1]; and 0 whenever a
-must-pass criterion fails. A negative criterion is graded as rubrics_verifier grades one, 1 when its failure mode is
-absent, and keeps its penalty as a negative weight.
+short defaults of the framework's. The score is rubrics_verifier's, ``score_aggregator`` over the rows, a weighted
+average by default; a negative criterion is graded as rubrics_verifier grades one, 1 when its failure mode is absent,
+and keeps its penalty as a negative weight.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-from dataclasses import replace
 from typing import Any, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
@@ -34,8 +36,8 @@ from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_steps.computer.computer_exec import computer_problem, find_computer
 from agent_env.task_step.task_steps.verifiers.computer.files import render_isolated
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerdict, RubricsVerifierTaskStep
-from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,6 @@ RECORDS_KEY = "computer_verifier"
 DEFAULT_GUIDANCE = """Give each criterion 1.0 if what is shown above meets it and 0.0 if it doesn't, and say \
 where you found the evidence.
 
-- A criterion of kind "must-pass" that scores 0.0 sets the whole rubric's score to 0.
 - A criterion marked "negative": true names something that should not happen; score it as the instructions say.
 - A criterion's "applies_to" lists the files it is about; one without it is about the outputs as a whole.
 - A criterion marked "visual": true is about how a file looks, judged from its rendering.
@@ -65,8 +66,6 @@ READ_CHUNK_BYTES = 512 * 1024
 MAX_READ_BYTES = 32 * 1024 * 1024
 #: The most of a failed read's stderr its error quotes.
 ERROR_TAIL_CHARS = 300
-#: How far below 1 a criterion's score may be and still count as met, for scores that went through floating point.
-SCORE_TOLERANCE = 1e-9
 #: Exit status of a read when the file isn't there.
 _NOT_THERE = 3
 _SIZE = 'test -f "$1" || exit 3; wc -c < "$1"'
@@ -75,9 +74,9 @@ _READ_CHUNK = 'tail -c +"$3" -- "$1" | head -c "$2" | base64'
 
 
 def criteria_from_rubric(rubric: Any) -> list[dict]:
-    """A rubric (``{"criteria": [...]}`` or the list) as rubrics_verifier's criteria: each with its
-    ``id``, ``title``, ``kind``, ``weight`` (a negative one's as a penalty, below 0), and ``visual`` and ``applies_to``
-    when its annotations say."""
+    """A rubric (``{"criteria": [...]}`` or the list) as rubrics_verifier's criteria: each with its ``id``,
+    ``title`` and ``weight`` (a negative one's as a penalty, below 0), and ``negative``, ``visual`` and ``applies_to``
+    when its annotations say; a must-pass one is refused, as a step of its own that an aggregate gates on."""
     items = rubric.get("criteria") if isinstance(rubric, dict) else rubric
     if not isinstance(items, list) or not items:
         raise ValueError("rubric must be a non-empty list of criteria, or an object whose criteria is one")
@@ -92,10 +91,14 @@ def criteria_from_rubric(rubric: Any) -> list[dict]:
             raise ValueError(f"rubric criterion {item['id']!r}: weight must be a number")
         annotations = item.get("annotations") or {}
         tags = " ".join(str(annotations.get(key) or "").lower() for key in ("criteria_type", "criteria_category"))
-        kind = "must-pass" if "must-pass" in tags else "negative" if "negative" in tags or weight < 0 else "regular"
-        criterion = {"id": item["id"], "title": item["title"], "kind": kind,
-                     "weight": -abs(float(weight)) if kind == "negative" else float(weight)}
-        if kind == "negative":
+        if "must-pass" in tags:
+            raise ValueError(f"rubric criterion {item['id']!r} is must-pass: put must-pass criteria in a "
+                             "computer_verifier of their own, with score_aggregator all_pass, and name that step in an "
+                             "aggregate_verifiers' gates")
+        negative = "negative" in tags or weight < 0
+        criterion = {"id": item["id"], "title": item["title"],
+                     "weight": -abs(float(weight)) if negative else float(weight)}
+        if negative:
             criterion["negative"] = True
         if str(annotations.get("criteria_category") or annotations.get("category") or "").lower() == "visual":
             criterion["visual"] = True
@@ -106,21 +109,6 @@ def criteria_from_rubric(rubric: Any) -> list[dict]:
             criterion["applies_to"] = applies_to
         criteria.append(criterion)
     return criteria
-
-
-def computer_rubric_score(rows: list[dict]) -> float:
-    """A rubric's score: 0 when a must-pass criterion fails; else the weighted average of the regular
-    and must-pass criteria, less the negative criteria's penalties, clamped to [0, 1]; with no positive weight, 1 less
-    the penalties when there are must-pass gates, else 0."""
-    binary = [{**row, "score": 1.0 if _passed(row) else 0.0} for row in rows]
-    gates = [row for row in binary if row.get("kind") == "must-pass"]
-    if any(row["score"] < 1.0 for row in gates):
-        return 0.0
-    if gates and not any(float(row.get("weight", 0)) > 0 for row in binary):
-        penalty = sum(abs(float(row["weight"])) * (1.0 - row["score"]) for row in binary
-                      if float(row.get("weight", 0)) < 0)
-        return max(0.0, 1.0 - penalty)
-    return aggregate_score(binary, ScoreAggregator.WEIGHTED_AVERAGE)
 
 
 def _deployed_os(deployed: Any) -> Optional[str]:
@@ -142,18 +130,14 @@ def _stored_os_problem(env: Any, computer: Optional[str]) -> Optional[str]:
         return None
     os_type = getattr(getattr(target.computer, "os", None), "type", None)
     if os_type in UNSUPPORTED_OS:
-        return (f"env {env.id!r}'s computer is {os_type}, which computer_verifier can't read: it reads files and runs state "
-                "commands through sh and POSIX tools")
+        return (f"env {env.id!r}'s computer is {os_type}, which computer_verifier can't read: it reads files and runs "
+                "state commands through sh and POSIX tools")
     return None
-
-
-def _passed(row: dict) -> bool:
-    score = row.get("score")
-    return isinstance(score, (int, float)) and not isinstance(score, bool) and score >= 1.0 - SCORE_TOLERANCE
 
 
 class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
     type: ClassVar[str] = "computer_verifier"
+    DEFAULT_SCORE_AGGREGATOR: ClassVar[ScoreAggregator] = ScoreAggregator.WEIGHTED_AVERAGE
     entity_refs = (*RubricsVerifierTaskStep.entity_refs, EntityRef.env("env_id"),
                    EntityRef.artifact("expected_artifact_id", version_field="expected_artifact_version"))
     context_paths = RubricsVerifierTaskStep.context_paths
@@ -169,7 +153,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
                  judge_batch_size: Optional[int] = None, judge_batch_concurrency: Optional[int] = None,
                  **fields: Any):
         """``criteria`` is what ``rubric`` becomes (``criteria_from_rubric``), never read from a stored step; the rest is
-        rubrics_verifier's, but for ``score_aggregator``, which is this step's own (``computer_rubric_score``)."""
+        rubrics_verifier's."""
         where = f"computer_verifier '{id}'"
         for name, text in (("guidance", guidance), ("golden_note", golden_note)):
             if text is not None and (not isinstance(text, str) or not text.strip()):
@@ -182,7 +166,6 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
             if not (isinstance(command, dict) and isinstance(command.get("name"), str) and command["name"]
                     and isinstance(command.get("command"), (str, list)) and command["command"]):
                 raise ValueError(f"{where}: each of state_commands is {{\"name\": ..., \"command\": [...] or \"...\"}}")
-        fields.pop("score_aggregator", None)
         self.env_id = env_id
         self.rubric = rubric
         self.result_files = result_files
@@ -195,7 +178,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         self.golden_note = golden_note
         self.grades_files_alone = prompt_id is None
         super().__init__(id, version, criteria=criteria_from_rubric(rubric), prompt_id=prompt_id or f"{id}:files",
-                         use_trajectory=use_trajectory, score_aggregator=ScoreAggregator.WEIGHTED_AVERAGE,
+                         use_trajectory=use_trajectory,
                          default_model=default_model, default_model_api_base=default_model_api_base, effort=effort,
                          max_thinking_tokens=max_thinking_tokens, judge_a2a_agent_id=judge_a2a_agent_id,
                          judge_sandbox_type=judge_sandbox_type, judge_batch_size=judge_batch_size,
@@ -227,9 +210,6 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
                       guidance=data.get("guidance"), golden_note=data.get("golden_note"))
         return cls(**fields)
 
-    def score_rows(self, rows: list[dict]) -> float:
-        return computer_rubric_score(rows)
-
     def graded_response(self, context: TaskStepContext) -> Optional[PromptResponse]:
         """The prompt's response; for a step that grades the files alone, a stand-in of its own, which never joins the
         context, so no other step reads it as the agent's."""
@@ -239,24 +219,13 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
                               response="(Not graded: grade the files and state below, which are what the agent "
                                        "produced.)")
 
-    async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
-        """rubrics_verifier's verdict, its output with ``gate_passed``, whether every must-pass criterion was met, and
-        when one wasn't, ``gates_failed``, their ids; the base writes them into the entry with the rest. (A run's stored
-        context never gains an empty list, so there's no ``gates_failed`` when none failed.)"""
-        verdict = await super()._judged(context)
-        if verdict.skipped is not None:
-            return verdict
-        failed = [row.get("id") for row in verdict.criteria if row.get("kind") == "must-pass" and not _passed(row)]
-        return replace(verdict, output={**(verdict.output or {}), "gate_passed": not failed,
-                                        **({"gates_failed": failed} if failed else {})})
-
     async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
         """The files and state the agent left in the computer, the golden files, the instruction and how to grade;
         what was read is recorded under ``computer_verifier``."""
         deployed = find_computer(context, self.env_id, self.computer)
         if (os_type := _deployed_os(deployed)) in UNSUPPORTED_OS:
-            raise RuntimeError(f"computer_verifier '{self.id}': env {self.env_id!r} is a {os_type} computer, which it can't "
-                               "read: it reads files and runs state commands through sh and POSIX tools")
+            raise RuntimeError(f"computer_verifier '{self.id}': env {self.env_id!r} is a {os_type} computer, which it "
+                               "can't read: it reads files and runs state commands through sh and POSIX tools")
         record: dict = {"files": [], "golden_files": [], "state": []}
         sections = []
         produced, missing = [], []
@@ -328,10 +297,12 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
             try:
                 piece = base64.b64decode("".join((chunk.get("stdout") or "").split()), validate=True)
             except binascii.Error as e:
-                raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} came back unreadable") from e
+                raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} came back "
+                                   "unreadable") from e
             if len(piece) != min(READ_CHUNK_BYTES, size - len(data)):
-                raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} gave {len(piece)} bytes "
-                                   f"from byte {len(data)} of its {size}; it changed or couldn't be read while it was")
+                raise RuntimeError(f"computer_verifier '{self.id}': {path} in env {self.env_id!r} gave {len(piece)} "
+                                   f"bytes from byte {len(data)} of its {size}; it changed or couldn't be read while it "
+                                   "was")
             data += piece
         return bytes(data)
 

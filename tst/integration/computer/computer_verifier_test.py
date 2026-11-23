@@ -1,8 +1,9 @@
 """computer_verifier end to end on a real computer, its judge faked at its call boundary: an ubuntu-24.04 computer with the
 reference driver deployed, files and a mock mailbox's state left in it as an agent would leave them (by computer_exec),
 and a CUA rubric graded on them. The files and state are read through the driver into the judge's prompt; the fake
-judge meets each criterion unless it names a file the prompt lists as not produced, so every criterion met scores 1,
-and a second rubric, whose must-pass file the computer hasn't, scores 0 with the gate named."""
+judge meets each criterion unless it names a file the prompt lists as not produced. The rubric scores 1, and so does
+its aggregate gated on a step whose one criterion is the CSV; gated instead on a step for a PDF the computer hasn't,
+the aggregate scores 0, naming that gate."""
 
 import json
 import re
@@ -51,8 +52,9 @@ def test_a_rubric_is_graded_on_what_the_agent_left_in_the_computer(state, monkey
                                                               ("~/notes.txt", "text")], files
     assert metadata["computer_verifier"]["grade"]["state"] == [
         {"name": "mailbox", "exit_code": 0, "timed_out": False, "cut": False, "truncated": False}]
-    graded = metadata["verifications"]["cua"]
-    assert graded["score"] == 1.0 and graded["gate_passed"], graded["results"]
-    gated = metadata["verifications"]["cua-gate"]
-    assert metadata["computer_verifier"]["gate"]["files"][0] == {"path": "~/Desktop/report.pdf", "missing": True}
-    assert gated["score"] == 0.0 and not gated["gate_passed"] and gated["gates_failed"] == ["pdf"], gated["results"]
+    grades = metadata["grades"]
+    assert grades["grade"]["score"] == 1.0 and grades["csv"]["score"] == 1.0, grades["grade"]
+    assert grades["final"]["score"] == 1.0, grades["final"]
+    assert metadata["computer_verifier"]["pdf"]["files"][0] == {"path": "~/Desktop/report.pdf", "missing": True}
+    gated = grades["gated"]
+    assert gated["score"] == 0.0 and gated["verifier_output"]["failed_gates"] == ["pdf"], gated

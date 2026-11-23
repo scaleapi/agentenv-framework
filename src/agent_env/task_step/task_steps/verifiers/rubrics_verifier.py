@@ -755,11 +755,6 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         """The prompt response this step grades: an override point. Here, the run's response to ``prompt_id``."""
         return next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
 
-    def score_rows(self, rows: list[dict]) -> float:
-        """The rubric entry's score from its rows, the judge's and the unjudged ones, each carrying its criterion's
-        fields: an override point. Here, ``score_aggregator``'s."""
-        return aggregate_score(rows, self.score_aggregator)
-
     def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
         """The judge calls ``criteria`` are graded in, one batch per call: ``size`` at a time in order, or all in one
         call when ``size`` is None. An override point: a subclass may group them otherwise, putting every criterion
@@ -1229,7 +1224,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     f"({type(verification_results).__name__})")
             mistake_rows = trajectory_mistakes_rows_from_evidence(verification_results)
         verification_results.extend(unjudged)  # in place, so a ResultRows keeps its reasoning and checks
-        score = self.score_rows(verification_results)
+        score = aggregate_score(verification_results, self.score_aggregator)
         output = {**self._entry_format_fields(), **judge_call_fields}
         if isinstance(verification_results, ResultRows):
             # rubric_evidence: the judge's `reasoning` and policy `checks` ride on the entry, not the rows.
