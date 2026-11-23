@@ -5,6 +5,7 @@ Only the HTTP boundary is mocked; the loop routing itself is covered by the dev 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -49,6 +50,12 @@ def _serve_get(handler):
     return patch.object(httpx.AsyncHTTPTransport, "handle_async_request", handle)
 
 
+def _skip_prompt_waits():
+    prompt_asyncio = SimpleNamespace(**vars(asyncio))
+    prompt_asyncio.sleep = AsyncMock()
+    return patch("agent_env.task_step.task_steps.prompt_agent.asyncio", prompt_asyncio)
+
+
 # ---- _read_env_triggers -----------------------------------------------------
 
 @pytest.mark.asyncio
@@ -88,7 +95,7 @@ async def test_a_404_from_an_advertised_triggers_state_fails_closed():
 
     ctx = _ctx(_env("env-x", "http://gw-x"))
     with _serve_get(fake_get), \
-         patch("agent_env.task_step.task_steps.prompt_agent.asyncio.sleep", new=AsyncMock()):
+         _skip_prompt_waits():
         with pytest.raises(RuntimeError, match="fail-closed: could not read /triggers/state for env 'env-x'"):
             await _step()._read_env_triggers(ctx)
 
@@ -100,7 +107,7 @@ async def test_fail_closed_raises_on_persistent_error():
 
     ctx = _ctx(_env("env-x", "http://gw-x"))
     with _serve_get(fake_get), \
-         patch("agent_env.task_step.task_steps.prompt_agent.asyncio.sleep", new=AsyncMock()):
+         _skip_prompt_waits():
         with pytest.raises(RuntimeError, match="fail-closed: could not read /triggers/state for env 'env-x'"):
             await _step()._read_env_triggers(ctx)
 
@@ -117,7 +124,7 @@ async def test_retries_a_failed_trigger_state_read_then_succeeds():
 
     ctx = _ctx(_env("env-x", "http://gw-x"))
     with _serve_get(fake_get), \
-         patch("agent_env.task_step.task_steps.prompt_agent.asyncio.sleep", new=AsyncMock()):
+         _skip_prompt_waits():
         snap = await _step()._read_env_triggers(ctx)
 
     assert snap == {"env-x": {"t": "fired"}} and calls["n"] == 2
@@ -364,7 +371,7 @@ async def test_capture_does_not_wait_on_a_firing_recurring_clock_trigger():
 
     store, cfg_patch = _patched_store()
     with _serve_get(fake_get), cfg_patch, \
-         patch("agent_env.task_step.task_steps.prompt_agent.asyncio.sleep", new=AsyncMock()):
+         _skip_prompt_waits():
         await _capture_step()._persist_env_trigger_state(ctx)
 
     assert calls["n"] == 1, "a recurring clock trigger must not trigger the settle poll"
@@ -520,7 +527,7 @@ async def test_capture_fail_open_records_error():
 
     store, cfg_patch = _patched_store()
     with _serve_get(fake_get), cfg_patch, \
-         patch("agent_env.task_step.task_steps.prompt_agent.asyncio.sleep", new=AsyncMock()):
+         _skip_prompt_waits():
         await _capture_step()._persist_env_trigger_state(ctx)
 
     entry = ctx.metadata["env_trigger_state"]["env-a"]
@@ -548,7 +555,7 @@ async def test_capture_grace_polls_until_settled():
 
     store, cfg_patch = _patched_store()
     with _serve_get(fake_get), cfg_patch, \
-         patch("agent_env.task_step.task_steps.prompt_agent.asyncio.sleep", new=AsyncMock()):
+         _skip_prompt_waits():
         await _capture_step()._persist_env_trigger_state(ctx)
 
     assert calls["n"] == 2
