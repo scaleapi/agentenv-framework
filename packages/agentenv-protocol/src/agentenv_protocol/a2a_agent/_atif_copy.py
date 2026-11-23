@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from ..atif import FORMAT, Adapter, AdapterRun, AuxEntry, Media, ServedTurn, TurnContext
@@ -64,12 +64,16 @@ class AtifPage:
 
 
 class AtifCopy:
-    """One A2A context's atif/1 document. Safe to feed from the agent's thread while the loop reads it."""
+    """One A2A context's atif/1 document. Safe to feed from the agent's thread while the loop reads it. Everything it
+    serves goes through ``scrub``, the agent's secrets redacted."""
 
-    def __init__(self, adapter: type[Adapter], context_id: str) -> None:
-        self._run = AdapterRun(adapter, trajectory_id=uuid.uuid4().hex)
+    def __init__(self, adapter: type[Adapter], context_id: str, *,
+                 scrub: Callable[[Any], Any] = lambda served: served,
+                 media: Callable[[str, bytes], None] | None = None) -> None:
+        self._run = AdapterRun(adapter, media=media, trajectory_id=uuid.uuid4().hex)
         self._adapter = adapter.__name__
         self._context_id = context_id
+        self._scrub = scrub
         self._lock = threading.Lock()
         self._tasks: dict[str, _Task] = {}
         self._failed: str | None = None
@@ -126,8 +130,9 @@ class AtifCopy:
                 task.turn = ServedTurn.of(task.context, **ending)
             task.ended = True
 
-    def task_read(self, task_id: str) -> tuple[dict[str, Any], list[AuxEntry], ServedTurn] | None:
-        """An ended task's document as it stood when the task ended, its aux log and its served turn context."""
+    def task_read(self, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | None:
+        """An ended task's document as it stood when the task ended, its aux log and its served turn context, as served:
+        on the wire and scrubbed."""
         with self._lock:
             self._check()
             task = self._tasks.get(task_id)
@@ -135,19 +140,22 @@ class AtifCopy:
                 return None
             document = self._run.document(through=task.place)
             assert document is not None
-            return document, list(task.aux), task.turn
+            return (self._scrub(document), self._scrub([entry.wire() for entry in task.aux]),
+                    self._scrub(task.turn.wire()))
 
     def context_read(self) -> dict[str, Any] | None:
         """The context's live page: every closed step a reader may be served, or None before the first."""
         with self._lock:
             self._check()
-            return self._run.page()
+            page = self._run.page()
+        return None if page is None else self._scrub(page)
 
     def page(self, after: int, max_steps: int, max_bytes: int, *, task_id: str | None = None) -> AtifPage:
         """The closed steps after step ``after``, of the whole context or of task ``task_id``, within both budgets; the
         first is always returned, so one larger than ``max_bytes`` can't stall a reader. With them, the sub-agents of
         every task they belong to, as far as each is served: a sub-agent can gain steps while its task runs, and the
-        page that serves a task's last step, which closes only as the task ends, carries them whole."""
+        page that serves a task's last step, which closes only as the task ends, carries them whole. The byte budget
+        counts what it serves, scrubbed."""
         with self._lock:
             self._check()
             document = self._run.page()
@@ -162,21 +170,25 @@ class AtifCopy:
         served: list[dict[str, Any]] = []
         tasks: set[str | None] = set()
         used = 0
+        last = after
         for step, owner in pending[:max_steps]:
-            size = len(json.dumps(step))
+            scrubbed = self._scrub(step)
+            size = len(json.dumps(scrubbed))
             if served and used + size > max_bytes:
                 break
-            served.append(step)
+            served.append(scrubbed)
             tasks.add(owner)
             used += size
+            last = step["step_id"]
         header = None
         subagents: list[dict[str, Any]] = []
         if document is not None:
-            header = {key: value for key, value in document.items() if key not in ("steps", "subagent_trajectories")}
-            subagents = [sub for sub in document.get("subagent_trajectories", [])
-                         if sub_tasks.get(sub["trajectory_id"]) in tasks]
+            header = self._scrub({key: value for key, value in document.items()
+                                  if key not in ("steps", "subagent_trajectories")})
+            subagents = self._scrub([sub for sub in document.get("subagent_trajectories", [])
+                                     if sub_tasks.get(sub["trajectory_id"]) in tasks])
         return AtifPage(header=header, subagents=subagents, steps=served,
-                        next=served[-1]["step_id"] if served else after, has_more=len(served) < len(pending))
+                        next=last, has_more=len(served) < len(pending))
 
     def _open(self, task_id: str) -> _Task | None:
         if self._failed is not None:

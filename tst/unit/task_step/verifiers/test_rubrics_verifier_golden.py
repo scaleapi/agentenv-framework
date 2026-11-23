@@ -120,7 +120,7 @@ def _agent_judge_timing_out_once() -> tuple[RubricsVerifierTaskStep, TaskStepCon
     step = _step(criteria=_criteria(2), use_agent_judge=True, agent_name="judge", judge_timeout_retries=1)
     attempts: list[int] = []
 
-    async def judge(*, eval_prompt, judge_a2a_url, judge_agent_card, judge_agent):
+    async def judge(*, eval_prompt, judge_a2a_url, judge_agent_card, judge_agent, **_):
         attempts.append(1)
         if len(attempts) == 1:
             raise JudgeTimeoutError("ran out", "mem://judge/timed-out.json")

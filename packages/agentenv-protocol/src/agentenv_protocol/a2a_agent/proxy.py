@@ -58,7 +58,7 @@ from .extensions import (
     extension,
 )
 from .framework import AgentEnvAgent, AgentIdentity, a2a_agent
-from .tasks.v1 import AgentConfig, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage
+from .tasks.v1 import AgentConfig, ModelUsage, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage
 from ..tool_client import ToolResult, ToolSession, ToolSessionError
 from ..transfers import download
 from ..types import EnvironmentTool
@@ -112,7 +112,8 @@ class _Turn:
     pending: list[tuple[str, str]] = field(default_factory=list)  # (tool, its canonical arguments) not yet run
     last_event: str = field(default_factory=lambda: _now())
     model: str | None = None
-    model_usage: list[Usage] = field(default_factory=list)  # each recorded model call's, its input counting the cache
+    # Each recorded model call's model, as it named it, and usage, its input counting the cache.
+    model_calls: list[tuple[str | None, Usage]] = field(default_factory=list)
 
 
 @contextlib.asynccontextmanager
@@ -250,7 +251,7 @@ class ProxyAgent(AgentEnvAgent):
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
-        turn.model_usage.append(usage)
+        turn.model_calls.append((request.model, usage))
         for key in ("input_tokens", "output_tokens"):
             if (count := getattr(usage, key)) is not None:
                 span["attributes"][f"gen_ai.usage.{key}"] = count
@@ -560,7 +561,7 @@ def _turn_usage(turn: _Turn) -> Usage:
     (``cache_unsettled``), which leaves the turn's flag unknown; how many usages were in a shape none of the readers
     know (``unrecognized``); and each provider's split of the cache writes, summed, a reported ``Usage``'s split
     counted only where it holds counts, as its ``provider_details`` may hold anything."""
-    calls = turn.model_usage
+    calls = [usage for _, usage in turn.model_calls]
     sums, unreported = {}, {}
     for name in _USAGE_SUMS:
         values = [value for call in calls if (value := getattr(call, name)) is not None]
@@ -581,7 +582,18 @@ def _turn_usage(turn: _Turn) -> Usage:
                **({"unrecognized": unrecognized} if unrecognized else {}), **splits}
     return Usage(tool_call_count=len(turn.actions), **sums,
                  input_includes_cache=True if sums["input_tokens"] is not None and not unsettled else None,
-                 provider_details=details if calls else {})
+                 models=_by_model(turn), provider_details=details if calls else {})
+
+
+def _by_model(turn: _Turn) -> tuple[ModelUsage, ...]:
+    """The turn's recorded calls by the model each named (``ModelUsage.of``); none when a call named none, since the
+    proxy has no configured model to count it under."""
+    by_model: dict[str, list[Usage]] = {}
+    for named, usage in turn.model_calls:
+        if named is None:
+            return ()
+        by_model.setdefault(named, []).append(usage)
+    return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
 
 
 def _span(name: str, operation: str, started: str, model: str | None, *, prompt: Any = None,

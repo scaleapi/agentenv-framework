@@ -136,7 +136,7 @@ def _execs(vm: _RecordingVm) -> list[tuple]:
 async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
     vm, result, _ = await _deploy()
 
-    assert vm.exposed_ports == [AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT]
+    assert vm.exposed_ports == [AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT]
     scripts = _scripts(vm)
     assert scripts[0] == "mkdir -p /app"
     assert _written(scripts[1])[0] == "/app/init-schemas.sql"
@@ -151,8 +151,7 @@ async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
         assert ("sudo", "docker", "compose", "-f", "/app/docker-compose.yml", "ps", "-a", "-q", service) in execs
     assert not any("-p" in e or "--status" in e for e in execs)
     assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT}"
-    assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT}/"
-    assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT}/mcp"
+    assert f'"{DB_WEB_PORT}:' not in compose and f'"{DB_MCP_PORT}:' not in compose
     assert result.door_token is None
     assert not any("-H" in c[1] for c in vm.calls if c[0] == "exec" and c[1][0] == "curl")
     assert ("cat", "/etc/resolv.conf") not in execs
@@ -168,7 +167,7 @@ async def test_every_slot_deploy_draws_a_new_door_token():
     assert tokens[0] != tokens[1]
 
 
-SLOT_1_PORTS = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT)]
+SLOT_1_PORTS = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT)]
 
 
 def _walled_vm(running: set[str | None], ports: list[int] = SLOT_1_PORTS) -> _RecordingVm:
@@ -189,7 +188,7 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
     assert path == "/app/s1/docker-compose.yml"
     services = yaml.safe_load(compose)["services"]
     assert [name for name, service in services.items() if "ports" in service] == [DOOR_SERVICE_NAME]
-    shifted = [p + 2000 for p in (DB_WEB_PORT, DB_MCP_PORT, AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT)]
+    shifted = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, SIDECAR_HOST_PORT)]
     assert services[DOOR_SERVICE_NAME]["ports"] == [f"{p}:{p}" for p in shifted]
     assert f"MCP_PORT={AGENT_ENV_GATEWAY_MCP_PORT}" in compose
     assert scripts[4:] == ["cd /app/s1 && docker compose -p s1 up -d"]
@@ -203,8 +202,6 @@ async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
     assert (*compose_ps, "-a", "-q", "gateway") in _execs(vm)
     assert ("sudo", "docker", "ps") not in _execs(vm)
     assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT + 2000}"
-    assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT + 2000}/"
-    assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT + 2000}/mcp"
     assert gp.stack_layout == slot
 
 

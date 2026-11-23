@@ -6,7 +6,7 @@ from ..errors import AgentEnvError
 from .keys import canonical
 from .operations import declared
 from .recording import check_recording
-from .settings import ComputerSettings
+from .settings import MAX_SCREENSHOT_DELAY_MS, ComputerSettings
 
 BUTTONS = ("left", "right", "middle", "back", "forward")
 
@@ -32,6 +32,9 @@ def check_features(cls: type) -> None:
         value = getattr(cls, name)
         if not isinstance(value, int) or value < low:
             problems.append(f"{name} is an integer of at least {low}, got {value!r}")
+    delay = cls.screenshot_delay_ms
+    if not isinstance(delay, int) or not 0 <= delay <= MAX_SCREENSHOT_DELAY_MS:
+        problems.append(f"screenshot_delay_ms is an integer from 0 to {MAX_SCREENSHOT_DELAY_MS}, got {delay!r}")
     if cls.keys != "all":
         try:
             if [canonical(k) for k in cls.keys] != list(cls.keys):

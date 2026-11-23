@@ -23,6 +23,8 @@ to native exactly.
 
 - One document per agent per A2A context. Each A2A task starts at a `source: user` step that holds the inbound
   message, with the task's ids in that step's profile. Steps number from 1 across the whole document.
+- A served document leaves out the secrets its agent's SDK knows: each is written `[redacted:<length>]` wherever it
+  occurs, in any string, the aux log and turn context served with it included. The native log keeps them.
 - A context's record may span several documents: after an agent instance restarts or drops the context from memory,
   after a snapshot restore, and when long runs are sealed into segments. They share `session_id`, the first user step of each carries the continuing turn
   index, and each earlier document names the next in `continued_trajectory_ref`. The worker that stores the earlier
@@ -106,7 +108,10 @@ One vocabulary, in three places:
   `[video: media/<sha256>.mp4, 4.4 MB, 31 s]`. That covers video, documents, images other than JPEG, PNG, GIF and WebP
   (such as HEIC or SVG), audio outside ATIF's eight types, and other files.
 - Each file's details go in the `media` map of the profile of the object that holds the part (Step for a message,
-  ObservationResult for a result), keyed by its path.
+  ObservationResult for a result), keyed by its path. A PNG, JPEG, GIF or WebP image's `width` and `height` are read
+  from its header when the producer gives none.
+- A reader takes a part path only as `media/<sha256>.<ext>` in the document's own folder, never another path or a URL,
+  and checks each file's bytes against its name (`media_file`, `check_media`).
 
 ## Fields
 
@@ -164,7 +169,11 @@ cross-check that reads them; per-part origins, when a reader needs them; and an 
 producer's output to profile 1.0. `reader=True` checks someone else's document for reading instead: what a producer
 must not write only warns, and the document fails only where agentenv couldn't read it. `media` is the folder the
 document's media paths are relative to, the one holding `media/`, or the files by path; without it only the paths' form
-is checked. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. A sub-agent's task is its spawning call's, found through the references, so an embedded sub-agent that no served step references isn't held to `live-unanswered`. On
+is checked. `StoredMedia(sizes)` stands for files stored beside the document whose bytes were checked against their
+names as they were stored, as agent-env's worker checks each file an agent pushes: `media-bytes` then holds the
+profile's sha256 to each file's name and its size to the stored one, without reading the bytes. `validate_media(document, media)` gives the `media-bytes` findings alone, for a document
+newer than these models, which `validate` stops at. `media_refs` lists each
+place a document names a media file, with the profile's details for it, as these checks walk them. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. A sub-agent's task is its spawning call's, found through the references, so an embedded sub-agent that no served step references isn't held to `live-unanswered`. On
 the command line: `python -m agentenv_protocol.atif validate FILE [--media DIR] [--reader]`, which prints each finding
 and exits 1 when one is an error.
 

@@ -1,0 +1,57 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-api-error",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-5-5",
+  "tool_definitions": {
+   "shared": "tools/a2f232fa81dcec06.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-22T02:48:51.958133Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-api-error",
+     "task_id": "b33c3abc-ab57-40ed-9a5b-1bcd6e472ce1",
+     "message_id": "650eb2624978488aacd8e0c01473b93d",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-22T02:48:52.281Z",
+   "source": "agent",
+   "message": "API Error: 400 refused by the recording proxy",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "API Error: 400 refused by the recording proxy"
+     },
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 2
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

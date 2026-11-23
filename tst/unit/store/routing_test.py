@@ -10,6 +10,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from agent_env.a2a_agent import conversation_store
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -169,6 +170,66 @@ def test_merged_reads_sort_page_and_count_across_both_stores(stores):
     latest = router.latest_per_id("tasks", project, sort=Sort.by("rank"), limit=2, offset=1)
     assert [doc["rank"] for doc in latest] == [6, 5]
     assert router.count_distinct("tasks", project) == 6
+
+
+@pytest.mark.parametrize("task_id, namespace", [(LOCAL_TASK, "local"), (HUB_TASK, "hf"), ("registry-task", "configured")])
+@pytest.mark.parametrize("sort", [None, Sort()], ids=["implicit", "empty"])
+def test_unsorted_find_one_stops_at_the_first_namespace_match(stores, monkeypatch, task_id, namespace, sort):
+    router, configured, _ = stores
+    backends = {"configured": configured, **router.namespaces}
+    for name, store in backends.items():
+        store.insert("agent_env_a2a_conversations", {"conversation_id": "conversation", "namespace": name})
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("an unsorted match must not read a later namespace")
+
+    for name, store in backends.items():
+        if name != namespace:
+            monkeypatch.setattr(store, "find_one", unexpected_read)
+    with run_scope(task_id):
+        result = router.find_one("agent_env_a2a_conversations", Filter.of(conversation_id="conversation"), sort)
+    assert result["namespace"] == namespace
+
+
+@pytest.mark.parametrize("found", [False, True])
+def test_unsorted_find_one_falls_back_after_a_local_miss(stores, found):
+    router, configured, local = stores
+    local.insert("agent_env_a2a_conversations", {"conversation_id": "other"})
+    expected = {"conversation_id": "conversation"} if found else None
+    if found:
+        configured.insert("agent_env_a2a_conversations", expected)
+
+    with run_scope(LOCAL_TASK):
+        assert router.find_one("agent_env_a2a_conversations", Filter.of(conversation_id="conversation")) == expected
+
+
+@pytest.mark.parametrize("task_id", [LOCAL_TASK, "registry-task"])
+@pytest.mark.parametrize("descending", [False, True])
+def test_sorted_find_one_compares_matches_across_namespaces(stores, task_id, descending):
+    router, configured, local = stores
+    configured.insert("records", {"rank": 1})
+    local.insert("records", {"rank": 2})
+    router.namespaces["hf"].insert("records", {"rank": 3})
+
+    with run_scope(task_id):
+        result = router.find_one("records", Filter(), Sort.by("rank", descending=descending))
+    assert result["rank"] == (3 if descending else 1)
+
+
+def test_appending_a_local_conversation_turn_does_not_read_the_shared_store(stores, monkeypatch):
+    _, configured, _ = stores
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("appending a local conversation turn must not read the shared store")
+
+    with run_scope(LOCAL_TASK):
+        conversation_store.create_conversation("conversation", "instance", "user", "solver")
+        monkeypatch.setattr(configured, "find_one", unexpected_read)
+        result = conversation_store.add_a2a_task("conversation", [{"kind": "text", "text": "hello"}], "turn", "user")
+
+    assert result["messages"][0]["parts"] == [{"kind": "text", "text": "hello"}]
+    assert result["a2a_tasks"][0]["a2a_task_id"] == "turn"
+    assert result["a2a_tasks"][0]["input_message_idx"] == 0
 
 
 def test_reads_never_create_the_local_store(stores):

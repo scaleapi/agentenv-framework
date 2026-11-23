@@ -48,7 +48,7 @@ _ROUTE = re.compile(r"[A-Za-z0-9._~-]+")
 
 def write_server(source: str | Path, root: str | Path, *, name: str | None = None, sandbox: str | None = None,
                  reward: str | None = None, reward_components: bool = False, max_concurrent_envs: int = 8,
-                 reset_timeout: float = 600.0) -> Path:
+                 reset_timeout: float = 600.0, skip_lint: bool = False) -> Path:
     """``source``'s tasks as NeMo Gym's resources server ``name``, the bundle's env name by default, under the Gym root
     ``root``, returning the server's folder ``resources_servers/<name>``. It holds the server's ``app.py`` and
     ``pyproject.toml``; ``configs/<name>.yaml``, which runs the server, ``simple_agent`` to play its rows and the
@@ -58,14 +58,15 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
     ``source`` is the URL of an OpenEnv server serving the bundle, which the config names, or a bundle, a folder or an
     installed bundle's name, which the resources server serves itself, deploying where ``sandbox`` names, at most
     ``max_concurrent_envs`` episodes at once. ``reward_components`` has the server answer verify with each of a task's
-    scores, for NeMo RL's GDPO, their sum the reward, so it takes no ``reward``. A row's tools are every tool its
-    task's turns offer, found by playing one task of each toolset to its last turn, unscored, so writing deploys
-    those."""
+    scores, for NeMo RL's GDPO, their sum the reward, so it takes no ``reward``. ``skip_lint`` serves tasks task
+    lint's own rules refuse, as ``build_app``'s, and the config the server reads keeps it. A row's tools are every
+    tool its task's turns offer, found by playing one task of each toolset to its last turn, unscored, so writing
+    deploys those."""
     if reward is not None and reward_components:
         raise ValueError(REWARD_AND_COMPONENTS)
     url = str(source) if str(source).startswith(("http://", "https://")) else None
     served = None if url else Server(build_app(source, reward=summed if reward_components else reward, sandbox=sandbox,
-                                               max_concurrent_envs=1))
+                                               max_concurrent_envs=1, skip_lint=skip_lint))
     try:
         env_name, tasks, probed = tasks_and_tools(url or served.url, local="name the bundle's folder instead of its "
                                                   "server", timeout=reset_timeout)
@@ -83,6 +84,8 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
                  **({"sandbox": sandbox} if sandbox else {}), **({"reward": reward} if reward else {})}
     if reward_components:
         where["reward_components"] = True
+    if skip_lint and not url:
+        where["skip_lint"] = True
     server = Path(root) / "resources_servers" / name
     (server / "configs").mkdir(parents=True, exist_ok=True)
     (server / "data").mkdir(exist_ok=True)

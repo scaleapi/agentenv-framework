@@ -49,7 +49,8 @@ def _format_env(env) -> str:
         f"  env_version: {env.env_version}",
         *([f"  gateway_url: {env.gateway_url}"] if fronted else []),
         f"  mcp_url: {env.mcp_url}",
-        *([f"  db_web_url: {env.db_web_url}", f"  db_mcp_url: {env.db_mcp_url}"] if fronted else []),
+        *([f"  db_web_gateway_url: {env.db_web_gateway_url}", f"  db_mcp_gateway_url: {env.db_mcp_gateway_url}"]
+          if fronted else []),
     ]
     if isinstance(env, DeployedSandboxEnv):  # an env outside our sandboxes has no sandbox to name
         lines.append(f"  sandbox_id: {env.sandbox_id}")

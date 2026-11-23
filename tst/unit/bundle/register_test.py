@@ -395,6 +395,22 @@ def test_the_cli_says_what_it_would_write_asks_before_a_shared_store_and_dry_run
     assert [task.version for task in [Task.get("triage-t")]] == [1]
 
 
+def test_the_cli_says_each_lint_warning_once_and_a_lint_error_refuses_before_anything_is_written(home):
+    root = layout(home / "triage", TRIAGE)
+    warning = "  tasks/t.json: warning: no step grades this task, so a run has no score"
+
+    dry = CliRunner().invoke(cli, ["bundle", "register", str(root), "--dry-run"])
+    written = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes"])
+    (root / "tasks/t.json").write_text(json.dumps([BOX, {**_load("greet", "greeting"), "destinaton_path": "/app"}]))
+    refused = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes"])
+
+    assert dry.output.splitlines().count(warning) == written.output.splitlines().count(warning) == 1
+    assert refused.exit_code == 1
+    assert ("tasks/t.json: step 'greet': load_artifact doesn't read 'destinaton_path' (did you mean "
+            "'destination_path'?), so it would be ignored") in refused.output
+    assert Task.get("triage-t").version == 1
+
+
 def test_a_bundle_with_no_tasks_registers_every_entity(home):
     registered = register_bundle(layout(home / "library", {"artifacts/greeting/hello.txt": "hello\n"}))
 

@@ -76,7 +76,20 @@ def slot_compose(compose: str, layout: StackLayout, *, door_image: str, door_tok
     doc["networks"] = {network: config for network, config in _slot_networks(index).items() if network in used}
     if problems := slot_compose_problems(doc, layout):
         raise ValueError(f"slot {index}'s compose file breaks its walls: {'; '.join(problems)}")
-    return yaml.safe_dump(doc, sort_keys=False, width=float("inf"))
+    return yaml.dump(doc, Dumper=_OneLineDumper, sort_keys=False, width=float("inf"))
+
+
+class _OneLineDumper(yaml.SafeDumper):
+    """Writes a string with a line break double-quoted on one line, as the default generator does, so each env entry
+    stays one line and the logged compose's line-based masking (``_redact_compose_secrets``) covers all of it."""
+
+
+def _one_line_str(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
+    style = '"' if "\n" in value or "\r" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_OneLineDumper.add_representer(str, _one_line_str)
 
 
 def slot_compose_problems(doc: Mapping, layout: StackLayout) -> list[str]:

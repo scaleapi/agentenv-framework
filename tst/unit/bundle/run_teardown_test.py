@@ -489,7 +489,7 @@ def test_the_keep_listing_names_every_sandbox_it_counts_with_the_records_behind_
         deployed_sandboxes=[DeployedSandbox(sandbox_name="box", sandbox_id="sb-box", sandbox_mode="vm",
                                             sandbox_type="fake", tunnel_urls={"8080": "http://t"})],
         deployed_envs=[DeployedGatewayEnv(env_id="shop", env_version=1, gateway_url="http://g", mcp_url="http://m",
-                                          db_web_url="http://pgweb", sandbox_id="sb-gw", sandbox_type="fake",
+                                          db_web_gateway_url="http://gw/svc/pgweb/", sandbox_id="sb-gw", sandbox_type="fake",
                                           sandbox_ids={"service_db": {"orders": "sb-db"}})],
         deployed_agents=[DeployedAgent(agent_name="solver", api_url="http://a", a2a_url="http://a2a",
                                        sandbox_id="sb-box", sandbox_type="fake")],
@@ -502,7 +502,7 @@ def test_the_keep_listing_names_every_sandbox_it_counts_with_the_records_behind_
         "sb-gw  fake  env shop",
         "  mcp  http://m",
         "  gateway  http://g",
-        "  pgweb  http://pgweb",
+        "  pgweb  http://gw/svc/pgweb/",
         "sb-db  fake  env shop",
     ]
 

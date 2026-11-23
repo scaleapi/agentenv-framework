@@ -12,6 +12,7 @@ import pytest
 import agent_env.task.step_journal as journal_mod
 import agent_env.task.store as store_mod
 from agent_env.store import Filter, LocalSqliteDocumentStore, Sort
+from agent_env.store.document_store import UpdateSpec
 from agent_env.task.step_journal import _union, commit_ordered, replay_context
 from agent_env.task.store import (
     TASK_STEP_JOURNAL_COLLECTION, SupersededAttemptError, TaskInstanceStore, TaskStepResult, TaskStepStatus,
@@ -642,3 +643,158 @@ def test_a_seed_that_carries_one_deployment_twice_keeps_one_entry(store):
     store.seed_context(inst.instance_id, ContextUpdateOps(add_to_sets={"context.deployed_envs": [old, {**old, "mcp_server_name": "env1234"}]}))
     assert _doc(store, inst.instance_id)["context"]["deployed_envs"] == [old]
     assert _replay(store, inst.instance_id)["deployed_envs"] == [old]
+
+
+# ── usage ledger ─────────────────────────────────────────────────────────────
+
+def _spent(attempt, role="solver", input_tokens=100, cost=0.01, **more):
+    return {"role": role, "model": "m", "attempt": attempt, "turns": 1, "input_tokens": input_tokens,
+            "output_tokens": 10, "cost_usd": cost, "cost_status": "priced" if cost is not None else "unpriced",
+            "partial": False, **more}
+
+
+def _spends(pre: dict, step_id: str, *entries):
+    """The diff of a step that adds ``entries`` to the context's step usage, over ``pre``'s."""
+    return _ops({"step_usage": pre}, {"step_usage": {**pre, step_id: list(entries)}})
+
+
+def _ledger(store, iid):
+    return [(e["attempt"], e["step_id"], e["role"], e["input_tokens"]) for e in _doc(store, iid)["usage"]]
+
+
+def test_a_new_instance_starts_with_an_empty_ledger(store):
+    doc = _doc(store, _new(store))
+    assert doc["usage"] == [] and doc["usage_total"]["entries"] == 0 and doc["usage_total"]["cost_usd"] is None
+
+
+def test_a_completion_puts_its_steps_usage_in_the_ledger_and_its_total(store):
+    iid = _new(store)
+    _record(store, iid, "ask", _spends({}, "ask", _spent(0), _spent(0, "user_simulator", 30, 0.002)))
+    _record(store, iid, "check", _ops({}, {"x": 1}))
+    assert _ledger(store, iid) == [(0, "ask", "solver", 100), (0, "ask", "user_simulator", 30)]
+    total = _doc(store, iid)["usage_total"]
+    assert (total["entries"], total["input_tokens"], total["partial"], total["unpriced_entries"]) == (2, 130, False, 0)
+    assert total["cost_usd"] == pytest.approx(0.012)
+
+
+def test_a_write_sent_again_replaces_its_entries_never_adds_them(store):
+    iid = _new(store)
+    _record(store, iid, "ask", _spends({}, "ask", _spent(0)))
+    _record(store, iid, "ask", _spends({"ask": [_spent(0)]}, "ask", _spent(0, input_tokens=250, cost=0.03)))
+    _record(store, iid, "ask", _spends({"ask": [_spent(0, input_tokens=250, cost=0.03)]}, "ask",
+                                       _spent(0, input_tokens=250, cost=0.03)))
+    assert _ledger(store, iid) == [(0, "ask", "solver", 250)]
+    assert _doc(store, iid)["usage_total"]["cost_usd"] == pytest.approx(0.03)
+
+
+def test_an_unpriced_entry_stays_unpriced_and_makes_the_total_a_lower_bound(store):
+    iid = _new(store)
+    _record(store, iid, "ask", _spends({}, "ask", _spent(0, cost=None, partial=True)))
+    total = _doc(store, iid)["usage_total"]
+    assert (total["cost_usd"], total["unpriced_entries"], total["partial"]) == (None, 1, True)
+    _record(store, iid, "more", _spends({"ask": [_spent(0, cost=None, partial=True)]}, "more", _spent(0)))
+    total = _doc(store, iid)["usage_total"]
+    assert (total["cost_usd"], total["unpriced_entries"]) == (pytest.approx(0.01), 1)
+
+
+def test_an_undo_keeps_the_rolled_back_steps_usage_and_the_retry_adds_its_own(store):
+    iid = _new(store)
+    _record(store, iid, "a", _spends({}, "a", _spent(0, input_tokens=5)))
+    _record(store, iid, "s", _spends({"a": [_spent(0, input_tokens=5)]}, "s", _spent(0)))
+    # The failed step never completed: its entry reaches the ledger only through the undo.
+    after = store.undo_steps_sync(iid, {"s", "f"}, bump_epoch=True,
+                                  usage=[{**_spent(0), "step_id": "s"}, {**_spent(0, input_tokens=40), "step_id": "f"}])
+    assert after["context"]["metadata"]["step_usage"] == {"a": [_spent(0, input_tokens=5)]}
+    _record(store, iid, "s", _spends({"a": [_spent(0, input_tokens=5)]}, "s", _spent(1, input_tokens=120)), epoch=1)
+    assert _ledger(store, iid) == [(0, "a", "solver", 5), (0, "s", "solver", 100), (0, "f", "solver", 40),
+                                   (1, "s", "solver", 120)]
+    assert _doc(store, iid)["usage_total"]["input_tokens"] == 265
+
+
+def test_a_late_write_lands_its_usage_but_not_its_context_or_completion(store):
+    iid = _new(store)
+    _record(store, iid, "a", _ops({}, {"x": 1}))
+    store.undo_steps_sync(iid, {"b"}, bump_epoch=True)
+    with pytest.raises(SupersededAttemptError):
+        _record(store, iid, "b", _spends({}, "b", _spent(0, input_tokens=77)), epoch=0)
+    doc = _doc(store, iid)
+    assert "step_usage" not in doc["context"]["metadata"]
+    assert [c["step_id"] for c in doc["completed_steps"]] == ["a"]
+    assert "b" not in {e["step_id"] for e in _journal(store, iid)}
+    assert _ledger(store, iid) == [(0, "b", "solver", 77)]
+
+
+def test_a_failure_keeps_the_usage_of_every_step_the_context_holds(store):
+    iid = _new(store)
+    _record(store, iid, "a", _spends({}, "a", _spent(0, input_tokens=5)))
+    context = TaskStepContext(metadata={"step_usage": {"a": [_spent(0, input_tokens=5)],
+                                                       "b": [_spent(0, input_tokens=9, partial=True)]}})
+    store.record_task_failure_sync(iid, "b", context, RuntimeError("boom"), "now", attempt_epoch=0)
+    doc = _doc(store, iid)
+    assert (doc["status"], [c["step_id"] for c in doc["completed_steps"]]) == ("failed", ["a", "b"])
+    assert _ledger(store, iid) == [(0, "a", "solver", 5), (0, "b", "solver", 9)]
+    assert doc["usage_total"]["partial"] is True
+
+
+def test_a_terminal_write_a_guard_refuses_still_lands_its_usage(store):
+    iid = _new(store, total=1)
+    _record(store, iid, "a", _ops({}, {"x": 1}), total=1)
+    context = TaskStepContext(metadata={"step_usage": {"late": [_spent(0, input_tokens=3)]}})
+    store.record_task_failure_sync(iid, "late", context, RuntimeError("boom"), "now")
+    store.record_task_cancelled_sync(iid, "Ctrl-C", "now", usage=[{**_spent(0, "user_simulator", 4), "step_id": "late"}])
+    assert _doc(store, iid)["status"] == "completed"
+    assert _ledger(store, iid) == [(0, "late", "solver", 3), (0, "late", "user_simulator", 4)]
+
+
+def test_a_cancel_and_its_teardown_keep_the_usage_they_carry(store):
+    iid = _new(store)
+    store.record_task_cancelled_sync(iid, "Ctrl-C", "now", attempt_epoch=0, usage=[{**_spent(0), "step_id": "a"}])
+    context = TaskStepContext(metadata={"step_usage": {"a": [_spent(0, input_tokens=150)]}})
+    store.record_teardown_sync(iid, context, attempt_epoch=0)
+    doc = _doc(store, iid)
+    assert doc["status"] == "cancelled" and doc["context"]["metadata"]["step_usage"]["a"][0]["input_tokens"] == 150
+    assert _ledger(store, iid) == [(0, "a", "solver", 150)]
+
+
+def test_a_resumed_run_keeps_the_usage_from_before_it(store):
+    store.upsert_instance("i", "t", 1, total_steps=2)
+    seed_task_instance_context("i", TaskStepContext())
+    _record(store, "i", "a", _spends({}, "a", _spent(0, input_tokens=5)), total=2)
+    _record(store, "i", "b", _spends({"a": [_spent(0, input_tokens=5)]}, "b", _spent(0, input_tokens=7, partial=True)),
+            total=2)
+    resumed = store.upsert_instance("i", "t", 1, total_steps=2, start_step=1)
+    assert resumed.attempt_epoch == 1 and resumed.usage_total["entries"] == 2
+    seed_task_instance_context("i", TaskStepContext(metadata={"step_usage": {"a": [_spent(0, input_tokens=5)]}}), 1)
+    _record(store, "i", "b", _spends({"a": [_spent(0, input_tokens=5)]}, "b", _spent(1, input_tokens=11)), total=2,
+            epoch=1)
+    assert _ledger(store, "i") == [(0, "a", "solver", 5), (0, "b", "solver", 7), (1, "b", "solver", 11)]
+    assert store.get("i").usage_total["input_tokens"] == 23
+
+
+def test_resuming_an_instance_stored_before_the_ledger_keeps_the_usage_its_context_holds(store):
+    store.upsert_instance("old", "t", 1, total_steps=2)
+    seed_task_instance_context("old", TaskStepContext())
+    _record(store, "old", "a", _spends({}, "a", _spent(0, input_tokens=5)), total=2)
+    store._doc_store.update(INST, Filter.of(instance_id="old"), UpdateSpec(unset={"usage", "usage_total"}))
+    assert "usage" not in _doc(store, "old")
+
+    resumed = store.upsert_instance("old", "t", 1, total_steps=2, start_step=1)
+
+    assert [(e["attempt"], e["step_id"], e["input_tokens"]) for e in resumed.usage] == [(0, "a", 5)]
+    assert resumed.usage_total["input_tokens"] == 5 and resumed.attempt_epoch == 1
+    assert "step_usage" not in _doc(store, "old")["context"]["metadata"]
+
+
+
+def test_a_runner_that_sets_no_epoch_gets_each_steps_usage_once(store):
+    """Its entries carry no attempt, so they are kept by step and role: right for a run without retries, and a
+    gathered write that holds them again adds nothing."""
+    iid = _new(store)
+    _record(store, iid, "a", _spends({}, "a", _spent(None, input_tokens=5)))
+    _record(store, iid, "b", _spends({"a": [_spent(None, input_tokens=5)]}, "b", _spent(None, input_tokens=9)))
+    context = TaskStepContext(metadata={"step_usage": {"a": [_spent(None, input_tokens=5)],
+                                                       "b": [_spent(None, input_tokens=9)]}})
+    store.record_task_failure_sync(iid, None, context, RuntimeError("boom"), "now")
+    store.record_teardown_sync(iid, context, attempt_epoch=0)
+    assert _ledger(store, iid) == [(None, "a", "solver", 5), (None, "b", "solver", 9)]
+    assert _doc(store, iid)["usage_total"]["input_tokens"] == 14

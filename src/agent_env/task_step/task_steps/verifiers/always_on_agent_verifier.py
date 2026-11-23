@@ -15,6 +15,13 @@ plain rubrics_verifier, and this verifier only an always_on step's prompt: a tas
 A run that kept no timeline has its turns staged the same way by position, one wake file a turn, so the judge never
 reads a trajectory as stored.
 
+With full_app_changes (opt-in, with use_trajectory), each staged app change also carries its changed fields in full, an
+UPDATE's old and new values, an INSERT's or DELETE's whole row, from the run's ``metadata["env_changes"]`` (what a
+snapshot_env step with include_env_changes records, which the task must run after the always_on step and before this
+verifier), and a change seen before a wake's turn, a contact's reply say, is filed before that wake's input, so a
+wake file is in the order things happened. A change that record lacks keeps only its summary, and the entry counts it
+(``trajectory_staging.app_change_values``).
+
 For a run of the PSI neutral harness (its trace carries ``harness.*`` labels), the judge is told whose a compaction
 summary's losses are, by who wrote it (``harness.compaction.written_by``: the assistant's own model, graded as its own,
 or the harness, not held against the assistant), and, with a per-criterion format, says for each failed criterion
@@ -111,7 +118,7 @@ texts included: grep -r {wakes}/ (the wake files and {results}/, where a text to
 - Only the assistant's tool calls and its "agent" app changes are its acts. A draft is not a sent message. Messages \
 from the user, the user simulator or contacts are never the assistant's. Order events by their pretend time ("at"), \
 not by where they sit in the files.
-- You have Bash and Read only: no web, no other agents, and nothing to change.{by_position}{gaps}{harness}"""
+- You have Bash and Read only: no web, no other agents, and nothing to change.{by_position}{changes}{gaps}{harness}"""
 # Added to _FILES_NOTE for a run staged by position (it kept no timeline).
 _BY_POSITION_NOTE = """
 - This run kept no timeline, so each wake file is one turn of the assistant by its position, in the order the turns \
@@ -129,6 +136,17 @@ wrote there went to the harness, not the user, and it ran before the assistant s
 what the assistant did, but they change nothing in any app.
 - Lines with "subagent" are from a helper agent the assistant started.
 - Harness notes have no "at": read them in file order."""
+# Added to _FILES_NOTE for a run staged with full_app_changes (its record's "app_change_values").
+_FULL_CHANGES_NOTE = """
+- Each "app_change" line is one change to an app's data. "by" says whose: "agent" is the assistant's own, "others" \
+a contact's, the user's or the world's ("actors" names the trigger or role). "changed_fields" has the change in \
+full: an UPDATE's changed fields, each with its "old" and "new" value; an INSERT's whole new row; a DELETE's whole \
+removed row. "summary" is a shortened form of it.
+- App changes have no "at" ("recorded_at" is the app's own clock, which orders changes only among themselves). Each \
+sits in its wake file where it happened, by its "phase": a "before_turn" change before the wake's input (made before \
+the assistant saw this wake, such as a contact's reply); a "turn" or "nudge" change after that turn's tool calls (the \
+assistant's own were made by its calls of the tool "actors" names; another's came at some point during that turn); \
+an "after_turn" change after the turn ended (contacts and triggers answering it).{missing}"""
 # Added after _HARNESS_NOTE for a run with a compaction, by who wrote its summary (its note's "written_by", in
 # "compaction"): whose a loss the summary caused is.
 _COMPACTION_NOTES = {
@@ -174,6 +192,10 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
     # s a turn) bounds it near here anyway.
     DEFAULT_JUDGE_MAX_TURNS: ClassVar[int] = 400
 
+    def criterion_rows(self) -> Optional[int]:
+        """Its rows follow the run's timeline, not its criteria alone."""
+        return None
+
     def __init__(
         self,
         id: str,
@@ -194,14 +216,19 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         judge_batch_concurrency: Optional[int] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
+        full_app_changes: bool = False,
         **fields: Any,
     ):
-        """``run_context_for_judge`` defaults to every part of the run's context; the rest is rubrics_verifier's."""
+        """``run_context_for_judge`` defaults to every part of the run's context; ``full_app_changes`` stages each app
+        change in full and where it happened (the module's docstring); the rest is rubrics_verifier's."""
         output_format = JudgeOutputFormat(output_format)
         where = f"{self.type} '{id}'"
         if use_trajectory and not use_agent_judge:
             raise ValueError(f"{where}: use_trajectory needs the agent judge (use_agent_judge): an always_on run's "
                              "wakes are staged as files for a judge that searches them, never inlined")
+        if full_app_changes and not use_trajectory:
+            raise ValueError(f"{where}: full_app_changes needs use_trajectory: it changes how the run's app changes "
+                             "are staged as files, which only use_trajectory stages")
         if get_judge_output_format_spec(output_format).cites_evidence:
             raise ValueError(f"{where}: output_format={output_format.value} cites per-criterion screenshots, and an "
                              "always_on step's prompt is graded without its wakes' screenshots")
@@ -220,18 +247,43 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             judge_max_turns=self.DEFAULT_JUDGE_MAX_TURNS if judge_max_turns is None else judge_max_turns,
             **fields,
         )
+        self.full_app_changes = full_app_changes
 
     @classmethod
     def from_dict(cls, data: dict) -> AlwaysOnAgentVerifier:
         return super().from_dict({**data, "use_trajectory": data.get("use_trajectory", False)})
 
+    @classmethod
+    def _base_from_dict(cls, data: dict) -> dict:
+        return {**super()._base_from_dict(data), "full_app_changes": data.get("full_app_changes", False)}
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        if self.full_app_changes:
+            base["full_app_changes"] = True
+        return base
+
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
         """Its prompt must be an always_on step's: one only another prompt step makes is refused. A prompt no step of
-        the task makes is checked when the verifier runs."""
+        the task makes is checked when the verifier runs. With full_app_changes, a snapshot_env step with
+        include_env_changes must run after that always_on step and before this verifier, so the changes it records
+        are the whole run's when the verifier reads them."""
         prompts = [s for s in steps if isinstance(s, PromptAgentTaskStep) and s.prompt_id == self.prompt_id]
         if prompts and not any(isinstance(s, AlwaysOnTaskStep) for s in prompts):
             return [f"step '{self.id}' ({self.type}) grades prompt '{self.prompt_id}' of {prompts[0].type} step "
                     f"'{prompts[0].id}', which isn't an always_on step; grade it with rubrics_verifier"]
+        runs = [s for s in prompts if isinstance(s, AlwaysOnTaskStep)]
+        if self.full_app_changes and runs:
+            from agent_env.task.task import _ancestor_ids, _dependency_ids  # here: the task module imports the steps
+            from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
+
+            deps = _dependency_ids(steps)
+            mine = _ancestor_ids(self.id, deps)
+            if not any(isinstance(s, SnapshotEnvTaskStep) and s.include_env_changes and s.id in mine
+                       and any(r.id in _ancestor_ids(s.id, deps) for r in runs) for s in steps):
+                return [f"step '{self.id}' ({self.type}) has full_app_changes, which reads the app changes a "
+                        f"snapshot_env step with include_env_changes records: make it depend on one that runs after "
+                        f"always_on step '{runs[0].id}'"]
         return []
 
     async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
@@ -344,8 +396,10 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                                   if e.get("event") in ("agent_turn_end", "nudge") and e.get("trajectory_url")))
         turns = await self._read_turns(urls, _turn_names(timeline, by_position=by_position))
         run = run_context or await load_run_context(context, prompt_response)
+        # A run staged by position has no app changes to fill in.
+        values = await self._change_values(context) if self.full_app_changes and not by_position else None
         staged = await asyncio.to_thread(stage_run, timeline, turns, firings=run.firings_read(),
-                                         unavailable=run.unavailable, by_position=by_position)
+                                         unavailable=run.unavailable, by_position=by_position, change_values=values)
         _CONTEXT_LOSS_RUN.set(bool(staged.record.get("agent_labeled_trajectories"))
                               and self.output_format in _CONTEXT_LOSS_FORMATS)
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
@@ -374,6 +428,33 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                     return None
 
         return dict(zip(urls, await asyncio.gather(*(read(u) for u in urls))))
+
+    async def _change_values(self, context: TaskStepContext) -> dict[tuple[str, Any], Any]:
+        """Each app change's ``changed_fields`` by its env and changelog id, from the changes each env's
+        snapshot_env step with include_env_changes recorded (``metadata["env_changes"]``). An env whose record is
+        missing or can't be read adds none, and the log says so; staging counts the changes left without."""
+        values: dict[tuple[str, Any], Any] = {}
+        if not context.metadata.get("env_changes"):
+            logger.warning("Verifier '%s': the run recorded no env_changes (no snapshot_env step with "
+                           "include_env_changes ran before it); its app changes are staged with their summaries only",
+                           self.verifier_id)
+        for env_id, entry in (context.metadata.get("env_changes") or {}).items():
+            url = entry.get("object_url") if isinstance(entry, dict) else None
+            if not url:
+                logger.warning("Verifier '%s': env %s's changes weren't recorded (%s); its app changes are staged "
+                               "with their summaries only", self.verifier_id, env_id,
+                               (entry.get("error") if isinstance(entry, dict) else None) or "no object_url")
+                continue
+            try:
+                text = await asyncio.to_thread(self._read_trajectory_text, url)
+                rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+            except Exception as e:
+                logger.warning("Verifier '%s': env %s's changes could not be read from %s (%s: %s); its app changes "
+                               "are staged with their summaries only", self.verifier_id, env_id, url,
+                               type(e).__name__, e)
+                continue
+            values.update(((env_id, row.get("id")), row.get("changed_fields")) for row in rows)
+        return values
 
     async def _write_files(self, sandbox: Any, files: dict[str, str], container: Optional[str]) -> None:
         gate = asyncio.Semaphore(STAGING_CONCURRENCY)
@@ -454,11 +535,15 @@ def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> 
     writers = r.get("compaction_summaries_written_by") or {}
     harness = (_HARNESS_NOTE + "".join(note for writer, note in _COMPACTION_NOTES.items() if writer in writers)
                + (_CONTEXT_LOSS_NOTE if context_loss else "")) if r.get("agent_labeled_trajectories") else ""
+    values = r.get("app_change_values")
+    missing = (f"\n- {values['missing']} app changes have no \"changed_fields\": the run's record of its apps' changes "
+               "doesn't have them, so their \"summary\" is all there is.") if values and values["missing"] else ""
+    changes = _FULL_CHANGES_NOTE.format(missing=missing) if values else ""
     return _FILES_NOTE.format(index=f"{path}/{INDEX_FILE}", wakes=f"{path}/{WAKES_DIR}", first=f"{path}/{wakes[0] if wakes else WAKES_DIR}",
                               last=f"{path}/{wakes[-1] if wakes else WAKES_DIR}", results=f"{path}/{RESULTS_DIR}",
                               events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}",
                               by_position=_BY_POSITION_NOTE if r.get("turns_by_position") else "", gaps=gap_note,
-                              harness=harness)
+                              changes=changes, harness=harness)
 
 
 def turns_by_position(prompt_response: PromptResponse) -> list[dict]:

@@ -2,8 +2,9 @@
 an image for each arch this machine's Docker builds, gate 3 makes this machine's ready at full with cua-driver's own tools
 beside the computer_* tools; deployed, an agent's session gets cua-driver's instructions at connect and reads its skill
 resources, drives Thunar by element token through cua-driver's tools, in a cua-driver session another agent's doesn't
-see, computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and the local
-registry on localhost:5000."""
+see, and by pixel, whose reply names where it landed on the screen, as the driver reads it to draw the click on a
+recording; computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and
+the local registry on localhost:5000."""
 
 import asyncio
 import json
@@ -67,6 +68,11 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
                     row = re.search(r'\[(\d+)\] push button "Open Parent"', tree).group(1)
                     clicked = await session.call_tool("click", {"element_token": f"{snapshot}:{row}"})
                     parent = await _window(session, "home - Thunar")
+                    target = {"pid": parent["pid"], "window_id": parent["window_id"]}
+                    await session.call_tool("get_window_state", {**target, "include_screenshot": True})
+                    bounds = (await _window(session, "home - Thunar"))["bounds"]
+                    pixel = await session.call_tool("click", {**target, "x": 20, "y": bounds["height"] - 15,
+                                                              "delivery_mode": "foreground"})
             async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
                 async with ClientSession(read, write) as other:
                     await other.initialize()
@@ -77,6 +83,10 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
             report = await teardown_run(context)
 
     assert not launched.isError and not clicked.isError and parent["window_id"] == window["window_id"]
+    assert not pixel.isError, pixel.content
+    landed = re.search(r"screen_point=\((-?[\d.]+), (-?[\d.]+)\)", pixel.structuredContent["summary"])
+    assert landed, pixel.structuredContent
+    assert (float(landed[1]), float(landed[2])) == (bounds["x"] + 20, bounds["y"] + bounds["height"] - 15)
     assert not started.isError and "agent" in _named(mine) and "agent" not in _named(others)
     assert connected.instructions == json.loads(MANIFEST.read_text())["instructions"] and "AT-SPI" in linux.contents[0].text
     checks = {check["name"]: check for check in ready["checks"]}

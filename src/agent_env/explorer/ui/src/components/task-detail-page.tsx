@@ -1090,7 +1090,15 @@ export function TaskDetailPage({
           )}/cancel-run?workflow_id=${encodeURIComponent(workflowId)}`,
           { method: 'POST' },
         );
-        if (!res.ok) throw new Error(`Cancel failed (${res.status})`);
+        if (!res.ok) {
+          // A refusal says why (an episode is stopped by the trainer that plays it); show that, not just the status.
+          const body = (await res.json().catch(() => null)) as { detail?: unknown } | null;
+          throw new Error(
+            typeof body?.detail === 'string'
+              ? body.detail
+              : `Cancel failed (${res.status})`,
+          );
+        }
         // Cancel endpoint flips Mongo to `cancelled` synchronously; refresh
         // so the row transitions without waiting for the next background poll.
         fetchRunGroups();

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -28,6 +28,8 @@ def tool_prefix_problem(prefix: str) -> str | None:
     return None
 
 Space = Literal["frame", "norm"]
+#: The longest ``screenshot_delay_ms`` a driver or a deploy may give, in ms.
+MAX_SCREENSHOT_DELAY_MS = 10_000
 
 
 class ComputerSettings(BaseModel):
@@ -45,6 +47,8 @@ class ComputerSettings(BaseModel):
     drag_duration_ms: int = Field(default=500, ge=0)
     exec_output_bytes: int = Field(default=1 << 20, gt=0)
     exec_timeout_s: float = Field(default=60.0, gt=0, le=3600)
+    #: How long after an input ``screenshot: true`` captures, in ms; None for the driver's own ``screenshot_delay_ms``.
+    screenshot_delay_ms: Optional[int] = Field(default=None, ge=0, le=MAX_SCREENSHOT_DELAY_MS)
 
 
 def load_settings(environ: dict | None = None, model: type[ComputerSettings] = ComputerSettings) -> ComputerSettings:

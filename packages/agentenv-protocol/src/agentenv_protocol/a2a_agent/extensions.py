@@ -25,7 +25,7 @@ from pydantic import (
 )
 
 from ..atif import FORMAT as ATIF_FORMAT
-from ..atif import Adapter, AdapterSpec
+from ..atif import Adapter, AdapterSpec, media_file
 from ._triggers import MAX_SOLVER_MESSAGE_LENGTH
 from .tasks.v1 import AgentConfig
 from ..transfers import (
@@ -203,6 +203,47 @@ class TrajectoryUploadedObjects(ExtensionResponse):
 class TrajectoryObjectsResponse(ExtensionResponse):
     objects: TrajectoryUploadedObjects
     format: str | None = None
+
+
+#: The most media files one media call may name: a turn of a computer-use run holds a few hundred screenshots.
+MAX_MEDIA_OBJECTS = 10_000
+
+
+class TrajectoryMediaRequest(ExtensionRequest):
+    """The media files of a context's atif/1 copy the caller wants, by their paths in it (``media/<sha256>.<ext>``),
+    each under its own exact-object write grant."""
+
+    context_id: str = Field(min_length=1)
+    objects: dict[str, WriteObject] = Field(min_length=1, max_length=MAX_MEDIA_OBJECTS)
+
+    @field_validator("objects")
+    @classmethod
+    def _media_paths(cls, objects: dict[str, WriteObject]) -> dict[str, WriteObject]:
+        for path in objects:
+            media_file(path)
+        return objects
+
+
+class TrajectoryMediaResponse(ExtensionResponse):
+    """What a media call uploaded, by path; the paths the context holds no file for; and the uploads that failed, with
+    why. Neither of the last two stops the rest."""
+
+    objects: dict[str, Uploaded]
+    missing: list[str] = Field(default_factory=list)
+    failed: dict[str, str] = Field(default_factory=dict)
+
+
+class TrajectoryPrescribeRequest(ExtensionRequest):
+    """The trajectory formats beside native the agent builds for each conversation it starts from now on, each one
+    its card's ``formats`` lists; none for native only, which it always builds."""
+
+    formats: list[str] = Field(default_factory=list)
+
+
+class TrajectoryPrescribeResponse(ExtensionResponse):
+    """Every format the agent builds for a conversation it starts from now on: native first."""
+
+    formats: list[str]
 
 
 class AtifUploadedObjects(ExtensionResponse):
@@ -816,6 +857,9 @@ class OperationDefinition:
     implementation: ImplementationOwner
     request: RequestDefinition | type[BaseModel] | None = None
     response: FieldSchema | type[BaseModel] | None = None
+    #: Served by the SDK alone, from state only it holds: no agent overrides it, and an agent that overrides the
+    #: extension's other SDK operations needn't override it with them.
+    sdk_only: bool = False
     response_model: type[BaseModel] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -1104,6 +1148,7 @@ def _op(
     response_required: Iterable[str] = (),
     response_optional: Iterable[str] = (),
     variants: Iterable[RequestVariant] = (),
+    sdk_only: bool = False,
 ) -> OperationDefinition:
     response_required = _tuple(response_required)
     response_optional = _tuple(response_optional)
@@ -1123,6 +1168,7 @@ def _op(
         implementation=owner,
         request=request,
         response=response,
+        sdk_only=sdk_only,
     )
 
 
@@ -1194,6 +1240,8 @@ def _configure_trajectory(
     return ExtensionConfiguration(
         wire_params={"formats": formats, "native": native, "default": native} if native else {},
         options={"native": native, **({"atif": atif} if atif is not None else {})} if native else {},
+        # An agent that can build atif/1 builds it only when prescribed, and hands over its copies' media files.
+        features={"media", "prescribe"} if atif is not None else frozenset(),
         variants=(
             {"get": {"task_events", "context_events", "context", "context_objects"}} if live else {}
         ),
@@ -1340,6 +1388,34 @@ TRAJECTORY_V1 = ExtensionDefinition(
                 ),
             ),
         )
+    },
+    optional_features={
+        "media": OperationGroup(
+            operations={
+                "media": _op(
+                    "media",
+                    "POST",
+                    "/ext/trajectory/media",
+                    SDK,
+                    request_model=TrajectoryMediaRequest,
+                    response_model=TrajectoryMediaResponse,
+                    sdk_only=True,
+                ),
+            }
+        ),
+        "prescribe": OperationGroup(
+            operations={
+                "prescribe": _op(
+                    "prescribe",
+                    "POST",
+                    "/ext/trajectory/prescribe",
+                    SDK,
+                    request_model=TrajectoryPrescribeRequest,
+                    response_model=TrajectoryPrescribeResponse,
+                    sdk_only=True,
+                ),
+            }
+        ),
     },
     configuration_validator=_configure_trajectory,
 )

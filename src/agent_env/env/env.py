@@ -7,7 +7,6 @@ import shlex
 from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
-from urllib.parse import urlsplit
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.website import READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness, env_readiness
@@ -20,6 +19,7 @@ from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode
 from .door_headers import door_headers, slot_token_headers
+from .gateway.console_session import LINK_DEFAULT_SECONDS, LINK_PARAM, ConsoleSession
 from .gateway.constants import WELL_KNOWN_PATH
 from .store import get_env_store
 
@@ -241,8 +241,14 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     env_provider_type: Optional[str] = "gateway"
     gateway_url: str
     gateway_mode: str = GatewayMode.PERFORMANCE.value
+    # pgweb's and db-mcp's direct URLs, which only a record an older deploy wrote carries; nothing writes them now.
+    # Kept for one release so a consumer can still read an env deployed before then. Remove in the release after.
     db_web_url: Optional[str] = None
     db_mcp_url: Optional[str] = None
+    # pgweb and db-mcp behind the gateway, which take the control token (``control_headers_for``); None when the deploy
+    # renders no such console, has no control token, or its gateway doesn't guard and reach the console.
+    db_web_gateway_url: Optional[str] = None
+    db_mcp_gateway_url: Optional[str] = None
     website_frontend_urls: Optional[dict[str, str]] = None
     vnc_url: Optional[str] = None
     # Ids of the EnvStateInstance record(s) this deploy's state was provisioned into
@@ -264,15 +270,11 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
 
     @property
     def grants(self) -> dict[str, dict[str, str]]:
-        """In a slot, every address the door publishes takes its header: the gateway's with the control token, and
-        pgweb's and db-mcp's with the door's alone."""
+        """In a slot, the gateway's address takes the door's header with the control token, pgweb's and db-mcp's
+        ``/svc`` routes under it among them."""
         grants = super().grants
-        if self._door_header:
-            if self.gateway_url:
-                grants.setdefault(self.gateway_url.rstrip("/"), self.control_headers)
-            for url in (self.db_web_url, self.db_mcp_url):
-                if url:
-                    grants.setdefault(_origin(url), self._door_header)
+        if self._door_header and self.gateway_url:
+            grants.setdefault(self.gateway_url.rstrip("/"), self.control_headers)
         return grants
 
     @property
@@ -288,6 +290,8 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "gateway_mode": data.get("gateway_mode", GatewayMode.PERFORMANCE.value),
             "db_web_url": data.get("db_web_url"),
             "db_mcp_url": data.get("db_mcp_url"),
+            "db_web_gateway_url": data.get("db_web_gateway_url"),
+            "db_mcp_gateway_url": data.get("db_mcp_gateway_url"),
             "website_frontend_urls": data.get("website_frontend_urls"),
             "vnc_url": data.get("vnc_url"),
             "env_state_instance_ids": data.get("env_state_instance_ids") or [],
@@ -295,6 +299,13 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "stack_layout": data.get("stack_layout"),
             "door_token": data.get("door_token"),
         }
+
+    def pgweb_link(self, seconds: int = LINK_DEFAULT_SECONDS) -> Optional[str]:
+        """A link that opens pgweb in a browser once, within ``seconds``, without the control token ever reaching the
+        browser; None when the gateway serves no pgweb or the record holds no token."""
+        if not self.db_web_gateway_url or not self.control_token:
+            return None
+        return f"{self.db_web_gateway_url}?{LINK_PARAM}={ConsoleSession(self.control_token).link(seconds)}"
 
 
 @dataclass
@@ -610,12 +621,6 @@ def _mcp_url(url: str, card: dict) -> str:
     return f"{url.rstrip('/')}/{protocol_v1.mcp_path(card).lstrip('/')}"
 
 
-def _origin(url: str) -> str:
-    """``scheme://host[:port]`` of ``url``: all a door guards, since it holds the whole port."""
-    parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}"
-
-
 def _record_class(data: dict) -> type[DeployedEnv]:
     """A stored record's class: its provider type's, else its shape's, so a record from before the type (or of one unknown here) keeps every field."""
     from agent_env.providers.env_providers.env_provider import record_class_for  # providers import this module
@@ -631,5 +636,6 @@ def _record_class(data: dict) -> type[DeployedEnv]:
 
 
 # A record carrying any of these is a gateway's. Not gateway_mode: an older kernel writes its default into any record it round-trips.
-_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids",
-                        "child_envs", "stack_layout", "door_token")
+_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "db_web_gateway_url", "db_mcp_gateway_url",
+                        "website_frontend_urls", "vnc_url", "env_state_instance_ids", "child_envs", "stack_layout",
+                        "door_token")

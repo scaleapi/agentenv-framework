@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
-from test_a2a_atif_serving import NATIVE, Hooks, _atif, _ended, _Hold, _send, _state, _turn
+from test_a2a_atif_serving import _atif, _ended, _Hold, Hooks, NATIVE, _send, _serving, _state, _turn
 
 from agentenv_protocol.a2a_agent import (
     SNAPSHOT_STATE_PARAM,
@@ -37,7 +37,7 @@ from agentenv_protocol.a2a_agent import (
 from agentenv_protocol.a2a_agent import _snapshot_state, _turn_index
 from agentenv_protocol.a2a_agent._atif_copy import TurnStart
 from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
-from agentenv_protocol.atif import errors_in, validate
+from agentenv_protocol.atif import FORMAT, errors_in, validate
 
 _IDENTITY = AgentIdentity(name="toy-agent", description="test", version="2.0")
 
@@ -109,13 +109,13 @@ def objects(monkeypatch: pytest.MonkeyPatch) -> dict[str, bytes]:
 
 
 def test_a_restarted_server_goes_on_counting_in_a_new_document_of_the_same_session() -> None:
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         for tag in ("t1", "t2"):
             task_id = _send(client, f"work {tag}", f"m-{tag}")
             _ended(client, task_id)
         before = _atif(client, task_id=task_id)["trajectory"]
     # The same container's home, a new process.
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         task_id = _send(client, "work t3", "m-t3")
         _ended(client, task_id)
         after = _atif(client, task_id=task_id)["trajectory"]
@@ -128,6 +128,7 @@ def test_a_restarted_server_goes_on_counting_in_a_new_document_of_the_same_sessi
 
 def test_a_context_evicted_from_memory_goes_on_counting() -> None:
     trajectories = TaskTrajectories(max_contexts=1, native=NATIVE, atif=Hooks)
+    trajectories.prescribe([FORMAT])
 
     def play(task_id: str, context_id: str) -> None:
         log = trajectories.register(task_id, context_id)
@@ -148,7 +149,7 @@ def test_a_context_evicted_from_memory_goes_on_counting() -> None:
 
 def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_into(
         objects: dict[str, bytes], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         for tag in ("t1", "t2"):
             _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
         saved = _save(client)
@@ -157,7 +158,7 @@ def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_int
     assert json.loads(objects["state"]) == {"turns": 2}
     # Another container: none of the first one's counts.
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "fresh-agent"))
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         loaded = _load(client, "ctx-restored")
         assert loaded.status_code == 200, loaded.text
         task_id = _send(client, "work t3", "m-t3", context_id="ctx-restored")
@@ -169,7 +170,7 @@ def test_a_snapshot_carries_the_turn_count_to_the_fresh_agent_it_is_restored_int
 
 
 def test_a_restore_into_a_context_the_agent_holds_starts_a_new_document(objects: dict[str, bytes]) -> None:
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         _ended(client, _send(client, "work t1", "m-t1"))
         _save(client)
         task_id = _send(client, "work t2", "m-t2")
@@ -187,13 +188,13 @@ def test_a_restore_into_a_context_the_agent_holds_starts_a_new_document(objects:
 
 def test_a_snapshot_state_that_isnt_the_sdks_is_refused(objects: dict[str, bytes]) -> None:
     objects["state"] = b'{"turns": -1}'
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         refused = _load(client, "ctx-restored")
     assert refused.status_code == 400 and refused.json()["error"]["code"] == "snapshot_state_invalid", refused.text
 
 
 def test_an_agent_that_serves_no_atif_writes_no_state(objects: dict[str, bytes]) -> None:
-    with TestClient(_snapshotting(atif=None).create_app()) as client:
+    with _serving(_snapshotting(atif=None)) as client:
         saved = _save(client)
     assert saved.status_code == 200, saved.text
     assert "state" not in saved.json()["objects"] and "state" not in objects
@@ -211,7 +212,7 @@ def test_the_card_names_the_state_only_an_sdk_serving_atif_keeps() -> None:
 
 def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(objects: dict[str, bytes]) -> None:
     paused = _Hold()
-    with TestClient(_snapshotting(save_hold=paused).create_app()) as client:
+    with _serving(_snapshotting(save_hold=paused)) as client:
         for tag in ("t1", "t2"):
             _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
         with concurrent.futures.ThreadPoolExecutor(1) as pool:
@@ -233,7 +234,7 @@ def test_a_task_waits_for_its_contexts_save_so_the_saved_count_is_its_captures(o
 def test_a_load_into_a_context_waits_for_its_save_so_the_save_keeps_its_count(objects: dict[str, bytes]) -> None:
     objects["older-state"] = b'{"turns": 0}'
     paused = _Hold()
-    with TestClient(_snapshotting(save_hold=paused).create_app()) as client:
+    with _serving(_snapshotting(save_hold=paused)) as client:
         for tag in ("t1", "t2"):
             _ended(client, _send(client, f"work {tag}", f"m-{tag}"))
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
@@ -254,7 +255,7 @@ def test_a_load_into_a_context_waits_for_its_save_so_the_save_keeps_its_count(ob
 
 def test_a_save_while_a_task_runs_is_answered_without_waiting_for_it(objects: dict[str, bytes]) -> None:
     running = _Hold()
-    with TestClient(_snapshotting(run_hold=running).create_app()) as client:
+    with _serving(_snapshotting(run_hold=running)) as client:
         _ended(client, _send(client, "work t1", "m-t1"))
         task_id = _send(client, "late t2", "m-t2")
         running.reached()
@@ -299,7 +300,7 @@ def test_a_count_that_cant_be_read_starts_again_with_a_warning(tmp_path: Path, c
 
 
 def test_a_snapshot_state_grant_names_json() -> None:
-    with TestClient(_snapshotting().create_app()) as client:
+    with _serving(_snapshotting()) as client:
         refused = _save(client, state_type="application/octet-stream")
     assert refused.status_code == 400 and "state media_type" in refused.text
 

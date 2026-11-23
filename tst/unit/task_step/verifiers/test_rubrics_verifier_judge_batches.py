@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from agent_env.a2a_agent import protocol
 from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     RubricsVerifierTaskStep,
     _bulk_verdicts,
@@ -262,7 +263,7 @@ async def test_a_cancelled_batch_cancels_its_remote_judge_task(monkeypatch):
     monkeypatch.setattr(protocol, "cancel_a2a_task", fake_cancel)
     call = asyncio.create_task(v._invoke_judge_a2a(
         eval_prompt="grade", judge_a2a_url="http://judge", judge_agent_card={},
-        judge_agent=SimpleNamespace(sandbox_id="sb-1", control_headers={})))
+        judge_agent=SimpleNamespace(sandbox_id="sb-1", control_headers={}), model=None, usage=StepUsage(TaskStepContext(), "verify")))
     await polling.wait()
     call.cancel()
     with pytest.raises(asyncio.CancelledError):

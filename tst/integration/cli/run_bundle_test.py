@@ -20,7 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 import agent_env
-from agent_env.artifact import FileArtifactUniverse
+from agent_env.artifact import Artifact, FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle.hub import HubSource
 from agent_env.bundle.installed import find_bundle
@@ -35,6 +35,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import (
 )
 from agent_env.providers.sandbox_providers.sandbox_provider import reset_sandbox_provider
 from agent_env.store import Filter, LocalSqliteDocumentStore
+from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from tst.integration.utils.registry import REGISTRY_IMAGE
@@ -177,6 +178,48 @@ def test_a_task_file_naming_its_headline_verifiers_runs_and_its_stored_task_keep
     with namespace_routing():
         assert Task.get("@local/~/my-hello/hello").headline_verifiers is None
         assert Task.get("@local/~/my-hello/hello", 1).headline_verifiers == ["hello"]
+
+
+def test_a_task_file_with_a_field_its_step_doesnt_read_is_refused_before_anything_is_written(bundle, quiet_logs):
+    steps = json.loads((bundle / "tasks/hello.json").read_text())
+    (bundle / "tasks/hello.json").write_text(json.dumps([*steps[:2], {**steps[2], "min_passing_scor": 1.0}]))
+
+    refused = CliRunner().invoke(cli, ["run", str(bundle)])
+
+    assert refused.exit_code != 0
+    assert ("tasks/hello.json: step 'hello': verify_sandbox doesn't read 'min_passing_scor' (did you mean "
+            "'min_passing_score'?), so it would be ignored") in refused.output
+    with namespace_routing():
+        for get in (lambda: Task.get("@local/~/my-hello/hello"), lambda: Artifact.get("@local/~/my-hello/greeting")):
+            with pytest.raises(NotFoundError):
+                get()
+
+    (bundle / "tasks/hello.json").write_text(json.dumps([*steps, {**steps[2], "id": "again", "verifier_id": "again"}]))
+    output = _run(bundle)
+
+    assert "tasks/hello.json: warning: 2 verifiers and no headline_verifiers" in output
+    assert "tasks/hello.json v1: passed" in output
+
+
+def test_an_aggregate_naming_its_sources_by_step_id_weighs_and_gates_their_grades_in_a_run(bundle, quiet_logs):
+    steps = json.loads((bundle / "tasks/hello.json").read_text())
+    control = {**steps[2], "id": "control", "verifier_id": "control", "score_aggregator": "weighted_average",
+               "criteria": [
+        {"type": "probe_file_exists", "criterion": "has the greeting", "paths": ["hello.txt"]},
+        {"type": "probe_file_exists", "criterion": "has a farewell", "paths": ["goodbye.txt"]}]}
+    final = {"id": "final", "type": "aggregate_verifiers", "combine": "weighted_mean", "sources": ["hello", "control"],
+             "weights": {"hello": 3, "control": 1}, "gates": ["hello"], "min_passing_score": 0.8}
+    (bundle / "tasks/hello.json").write_text(json.dumps({"headline_verifiers": ["final"],
+                                                         "steps": [*steps, control, final]}))
+
+    output = _run(bundle)
+
+    (instance_id,) = re.findall(r"instance (@local/~/my-hello/hello-[a-z0-9]{8})\b", output)
+    with namespace_routing():
+        grades = Task.get_instance(instance_id).context["metadata"]["grades"]
+    assert (grades["control"]["score"], grades["hello"]["passed"]) == (0.5, True)
+    assert (grades["final"]["score"], grades["final"]["passed"]) == (0.875, True)
+    assert grades["final"]["verifier_output"]["gates"]["hello"]["passed"] is True
 
 
 @skip_without_gnu_stat()

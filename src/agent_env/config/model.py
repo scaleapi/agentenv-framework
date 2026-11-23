@@ -57,7 +57,7 @@ class ModelRole(StrEnum):
 
 
 ROLE_SYNONYMS: dict[str, ModelRole] = {"agent": ModelRole.SOLVER, "user": ModelRole.USER_SIMULATOR}
-JUDGE_FALLBACK_MODEL = "claude-sonnet-4-6"
+JUDGE_FALLBACK_MODEL = "claude-sonnet-5-5"
 
 
 class ModelSource(StrEnum):
@@ -264,7 +264,7 @@ def named_model(
 
 def config_model(role: ModelRole, config: Optional[ModelConfig]) -> ResolvedModel:
     """``role``'s model when no layer names one: ``[model.roles]``, then for the solver and the judge ``[model]
-    default``; a judge always has one, claude-sonnet-4-6 last."""
+    default``; a judge always has one, claude-sonnet-5-5 last."""
     if config is not None:
         if model := config.role_model(role):
             return ResolvedModel(role, model, ModelSource.CONFIG_ROLE)
@@ -310,6 +310,18 @@ def _endpoint(url: str) -> tuple:
 def _netloc(url: str) -> str:
     """``url``'s host and port, without any user or password it carries."""
     return urlsplit(url).netloc.rpartition("@")[2] or url
+
+
+def endpoint_host(url: object) -> Optional[str]:
+    """The host, and port when it names one, a model call to ``url`` reaches, for a record: never the user or
+    password a URL may carry. None for anything but a URL with a host, never raising, so a record can't fail what it
+    records."""
+    if not isinstance(url, str):
+        return None
+    try:
+        return urlsplit(url.strip()).netloc.rpartition("@")[2] or None
+    except ValueError:
+        return None
 
 
 def no_key_for(url: str, how: str) -> str:

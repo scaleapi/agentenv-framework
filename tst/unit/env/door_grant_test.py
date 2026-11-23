@@ -26,15 +26,16 @@ from agent_env.task_step.task_steps.mcp_env_validator.verify_spec_conformance im
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 
 GATEWAY = "https://s1-gw.modal.host"
-PGWEB = "https://s1-pgweb.modal.host/"
-DB_MCP = "https://s1-dbmcp.modal.host/mcp"
+PGWEB = f"{GATEWAY}/svc/pgweb/"
+DB_MCP = f"{GATEWAY}/svc/db-mcp/mcp"
 DOOR = {SLOT_TOKEN_HEADER: "door-tok"}
 CONTROL = {"Authorization": "Bearer ctl"}
 
 
 def _record(door_token: str | None) -> DeployedGatewayEnv:
-    return DeployedGatewayEnv(env_id="crm", env_version=1, sandbox_id="vm", gateway_url=GATEWAY, db_web_url=PGWEB,
-                              db_mcp_url=DB_MCP, environment_card_url=f"{GATEWAY}/.well-known/agent-env.json",
+    return DeployedGatewayEnv(env_id="crm", env_version=1, sandbox_id="vm", gateway_url=GATEWAY,
+                              db_web_gateway_url=PGWEB, db_mcp_gateway_url=DB_MCP,
+                              environment_card_url=f"{GATEWAY}/.well-known/agent-env.json",
                               control_token="ctl", door_token=door_token)
 
 
@@ -46,14 +47,13 @@ def test_the_default_stacks_grant_is_its_control_token_on_its_address_alone():
         assert record.door_headers_for(url) == {}
 
 
-def test_a_slots_grant_carries_the_door_header_to_each_of_its_addresses_and_nowhere_else():
+def test_a_slots_grant_carries_the_door_header_to_its_gateway_and_the_consoles_under_it_and_nowhere_else():
     record = _record("door-tok")
-    assert record.grants == {GATEWAY: {**DOOR, **CONTROL}, "https://s1-pgweb.modal.host": DOOR,
-                             "https://s1-dbmcp.modal.host": DOOR}
+    assert record.grants == {GATEWAY: {**DOOR, **CONTROL}}
     assert record.control_headers == {**DOOR, **CONTROL}
     assert record.control_headers_for(f"{GATEWAY}/svc/mcp-slack/api/reset") == {**DOOR, **CONTROL}
-    assert record.control_headers_for("https://s1-dbmcp.modal.host/") == DOOR
-    assert record.control_headers_for(f"{PGWEB}api/query") == DOOR
+    assert record.control_headers_for(DB_MCP) == {**DOOR, **CONTROL}
+    assert record.control_headers_for(f"{PGWEB}api/query") == {**DOOR, **CONTROL}
     for elsewhere in ("https://s2-gw.modal.host", "https://s1-gw.modal.host.evil.example", "https://example.com"):
         assert record.control_headers_for(elsewhere) == {}
     assert record.door_headers_for(f"{GATEWAY}/mcp") == DOOR
@@ -259,3 +259,21 @@ async def test_a_slot_refuses_computers_on_sandboxes_of_their_own_and_the_defaul
         await EnvironmentGatewayProvider()._deploy_gateway(
             SimpleNamespace(), state_instance=None, mcp_servers=[], mcp_server_images=[],
             existing_sandbox=SimpleNamespace(walls_verified=True), children=children, stack_layout=layout)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", [{}, DOOR])
+async def test_the_console_check_asks_through_the_door_so_the_first_401_is_the_gateways(monkeypatch, door):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if door and request.headers.get(SLOT_TOKEN_HEADER) != DOOR[SLOT_TOKEN_HEADER]:
+            return httpx.Response(401)
+        return httpx.Response(200 if request.headers.get("authorization") == CONTROL["Authorization"] else 401)
+
+    monkeypatch.setattr(httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    served = await EnvironmentGatewayProvider()._served_consoles(GATEWAY, ["pgweb"], "ctl", door=door)
+    assert served == {"pgweb": f"{GATEWAY}/svc/pgweb/"}
+    assert [request.headers.get(SLOT_TOKEN_HEADER) for request in requests] == [door.get(SLOT_TOKEN_HEADER)] * 2
+

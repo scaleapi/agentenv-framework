@@ -26,10 +26,10 @@ def get_instance(instance_id: str):
     if gateway:
         click.echo(f"Env Base Url: {gateway.gateway_url}")
     click.echo(f"Env MCP Url: {deployed_env.mcp_url}")
-    if gateway and gateway.db_web_url:
-        click.echo(f"Env DB Web Url: {gateway.db_web_url}")
-    if gateway and gateway.db_mcp_url:
-        click.echo(f"Env DB MCP Url: {gateway.db_mcp_url}")
+    if gateway and gateway.db_web_gateway_url:
+        click.echo(f"Env DB Web Url: {gateway.db_web_gateway_url}")
+    if gateway and gateway.db_mcp_gateway_url:
+        click.echo(f"Env DB MCP Url: {gateway.db_mcp_gateway_url}")
     for svc_name, url in ((gateway.website_frontend_urls if gateway else None) or {}).items():
         click.echo(f"Website Frontend ({svc_name}): {url}")
     if isinstance(deployed_env, DeployedSandboxEnv):

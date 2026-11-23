@@ -158,6 +158,11 @@ class TaskStep(ABC):
         ``preflight`` is, and also for a step whose preflight a dry run skips."""
         return []
 
+    def config_warnings(self) -> list[str]:
+        """Doubts about this step's own fields that don't stop it running, found without reading a store; empty when
+        fine. Task lint reports them as warnings, as it reports ``config_problems`` as errors."""
+        return []
+
     def task_problems(self, steps: list["TaskStep"]) -> list[str]:
         """Problems this step has with the task's other steps (``steps``: all of them, this one included, in order),
         found without reading a store; empty when fine. A task with any is refused when it loads."""

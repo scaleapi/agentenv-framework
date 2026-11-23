@@ -5,21 +5,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from mcp.types import CallToolResult
 
 from ..errors import AgentEnvError
 from ..tool_context import ToolContext
-from . import apps
+from . import annotate, apps
 from .errors import DeliveryFailed, DeviceUnavailable, DialogOpen, InputBusy, Internal
 from .frames import Frame, FrameStore, to_pil
 from .operations import DIALOG_BLOCKS, GROUPS, INPUT, Display, Image, PageState, ReadyCheck, resolve
 from .queue import InputQueue
 from .recording import RecordHints, Recordings
 from .results import EffectData, InputResult, send
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .driver import ComputerDriverEnvironment
@@ -106,24 +110,29 @@ class ComputerRuntime:
                   hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None,
                   wrap: Callable[[InputResult, Any], InputResult] | None = None) -> CallToolResult:
         """One input call: its turn in the queue, the operation (after a move, repeated or held), then the result
-        with others' input since ``frame`` and, when asked, a fresh frame. Whatever the call's turn can change is read
-        once it has the turn: a point ``mapped`` from ``frame`` is checked again, since the display may have changed
-        while it waited, and ``at_pointer`` reads the pointer and puts it before ``args``; input a page's open dialog
-        blocks is refused. ``then`` runs as soon as the input is delivered, and ``wrap`` makes the result from the
-        operation's own."""
+        with others' input since ``frame`` and, when asked, a fresh frame, ``effective_screenshot_delay_ms()`` after the
+        input so it shows what the input did: a smooth scroll or the page a key opens renders a couple of hundred milliseconds
+        after the input returns. Whatever the call's turn can change is read once it has the turn: a point ``mapped``
+        from ``frame`` is checked again, since the display may have changed while it waited, and ``at_pointer`` reads
+        the pointer and puts it before ``args``; input a page's open dialog blocks is refused. ``then`` runs as soon as
+        the input is delivered, and ``wrap`` makes the result from the operation's own."""
         identity = self.driver.caller_identity(ctx)
         sent = False
         async with self.queue.turn(self.driver.settings.queue_wait_s):
             if operation in DIALOG_BLOCKS and self.has("page") and (dialog := (await self.page_now()).dialog):
                 raise DialogOpen(f'a {dialog.type} dialog is open on the page: "{dialog.message}"; answer it with '
                                  f"{self.driver._computer_prefix.served('computer_dialog')} first")
+            display = None
             if mapped and frame is not None:
-                self.frames.check_current(frame, await self.display_now())
+                display = await self.display_now()
+                self.frames.check_current(frame, display)
             if at_pointer:
                 sx, sy = await self.pointer()
                 args, summary = (sx, sy, *args), f"{summary} at the pointer, screen ({sx}, {sy})"
             others = self.queue.others_since(frame.inputs, identity) if frame is not None else 0
             effect = None
+            if self.recordings.annotating():
+                await self._annotate(ctx, operation, args, move_to, repeat, hold, display)
             try:
                 if move_to is not None:
                     await self.call("pointer_move", *move_to)
@@ -148,6 +157,7 @@ class ComputerRuntime:
             result = wrap(result, effect)
         if not screenshot:
             return send(result)
+        await asyncio.sleep(self.effective_screenshot_delay_ms() / 1000)
         try:
             new = await self.capture(identity)
         except AgentEnvError as e:
@@ -155,6 +165,30 @@ class ComputerRuntime:
             return send(result)
         result.summary, result.frame = f"{result.summary}, then captured {new.id}{new.note()}", new.result()
         return send(result, new.encode(), new.captured_at)
+
+    def effective_screenshot_delay_ms(self) -> int:
+        """How long after an input its screenshot is taken: the deploy's ``screenshot_delay_ms`` setting, else the
+        driver class's."""
+        setting = self.driver.settings.screenshot_delay_ms
+        return self.driver.screenshot_delay_ms if setting is None else setting
+
+    async def _annotate(self, ctx: ToolContext, operation: str, args: tuple, move_to: tuple | None, repeat: int,
+                        hold: tuple | None, display: Display | None) -> None:
+        """Mark an input on the recordings that draw them, as it is about to be delivered: one with a point on the
+        display it acts on, ``display`` when the call already read it, a press or release with none at the pointer.
+        Best effort: the input goes ahead whether or not its mark could be made."""
+        try:
+            point, size = move_to, (1, 1)
+            if operation in annotate.POINTED:
+                display = display or await self.display_now()
+                size = (display.width, display.height)
+                if point is None and operation in ("pointer_down", "pointer_up") and self.has("pointer"):
+                    point = await self.pointer()
+            self.recordings.note(annotate.input_marks(
+                operation, args, role=ctx.role, at=datetime.now(timezone.utc), size=size, point=point,
+                repeat=repeat, hold_ms=hold[0] if hold is not None else None))
+        except Exception as e:
+            logger.warning("couldn't mark %s on an annotated recording: %s: %s", operation, type(e).__name__, e)
 
     async def _hold_for(self, ms: int, keys: list[str]) -> None:
         """Keep ``keys`` down for ``ms``, then release them, also when the call is cancelled meanwhile."""
