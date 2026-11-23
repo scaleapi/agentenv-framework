@@ -534,11 +534,7 @@ def _usage(result) -> Usage:
     """The turn's usage (``_counts``), its counts given as its model's when every call it made named one: Hermes runs
     its auxiliary tasks on the main model, and a delegate_task child inherits it, as the bridge's config pins no other
     for either. A turn whose calls named several models gives none rather than guess how they split."""
-    usage = _counts(result)
-    calls = result.killed_calls if result.killed_calls is not None else result.side_calls
-    named = set(calls.models) if calls is not None else set()
-    if result.killed_calls is None and isinstance(model := result.usage.get("model"), str) and model:
-        named.add(model)
+    usage, named = _counts(result), _named_models(result)
     if len(named) != 1 or (usage.input_tokens is None and usage.output_tokens is None):
         return usage
     (model,) = named
@@ -547,6 +543,17 @@ def _usage(result) -> Usage:
         output_tokens=usage.output_tokens, cache_read_tokens=usage.cache_read_tokens,
         cache_write_tokens=usage.cache_write_tokens, input_includes_cache=usage.input_includes_cache,
         cost_usd=usage.cost_usd),))
+
+
+def _named_models(result) -> set[str]:
+    """The models the turn's calls named: a killed turn's in their events; else the main loop's in the usage file and
+    each delegate_task child's in its events."""
+    if result.killed_calls is not None:
+        return set(result.killed_calls.models)
+    named = set(result.side_calls.models) if result.side_calls is not None else set()
+    if isinstance(model := result.usage.get("model"), str) and model:
+        named.add(model)
+    return named
 
 
 def _counts(result) -> Usage:

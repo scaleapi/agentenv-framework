@@ -573,6 +573,11 @@ _HOST_WORKDIR = "/app"
 _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
+# Codex's names for the counts Usage takes; OpenAI's input counts the cache.
+_COUNT_NAMES = {"input_tokens": "input_tokens", "output_tokens": "output_tokens",
+                "cache_read_tokens": "cached_input_tokens", "cache_write_tokens": "cache_write_input_tokens"}
+
+
 def _usage(result: CodexResult, model: str | None = None) -> Usage:
     """The turn's tool calls and token counts: the CLI's own, for this turn alone, its subagents' included
     (``token_usage``), by the model each thread ran on (``models``). OpenAI counts the cache in a call's input, so
@@ -593,9 +598,8 @@ def _usage(result: CodexResult, model: str | None = None) -> Usage:
         return Usage(tool_call_count=result.tool_call_count, provider_details=details)
     if result.unreported_calls:
         details["unreported_calls"] = result.unreported_calls
-    return Usage(tool_call_count=result.tool_call_count, input_tokens=inputs, output_tokens=outputs,
-                 total_tokens=inputs + outputs, cache_read_tokens=counts.get("cached_input_tokens"),
-                 cache_write_tokens=counts.get("cache_write_input_tokens"), input_includes_cache=True,
+    return Usage(tool_call_count=result.tool_call_count, total_tokens=inputs + outputs, input_includes_cache=True,
+                 **{ours: counts.get(theirs) for ours, theirs in _COUNT_NAMES.items()},
                  models=_by_model(result.threads, model), provider_details=details)
 
 
@@ -614,9 +618,8 @@ def _by_model(threads: list[ThreadCalls], model: str | None) -> tuple[ModelUsage
 
     return tuple(ModelUsage(
         model=name, calls=None if any(thread.requests is None for thread in of) else sum(t.requests for t in of),
-        input_tokens=total("input_tokens", of), output_tokens=total("output_tokens", of),
-        cache_read_tokens=total("cached_input_tokens", of), cache_write_tokens=total("cache_write_input_tokens", of),
-        input_includes_cache=True) for name, of in by_model.items())
+        **{ours: total(theirs, of) for ours, theirs in _COUNT_NAMES.items()}, input_includes_cache=True)
+        for name, of in by_model.items())
 
 
 @a2a_agent(
