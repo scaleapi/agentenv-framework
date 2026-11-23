@@ -61,6 +61,7 @@ from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
 )
+from agent_env.task_step.task_steps.load_artifact import LOADED_FILE_UNIVERSES, loads_into
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_usage import JudgeUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
@@ -324,7 +325,7 @@ def _direct_settings(route: model_call.ModelRoute, run: Mapping[str, Any]
 
 
 def _record_failed_call(judge: JudgeUsage, exc: BaseException, *, model: str, endpoint_host: Optional[str],
-                        sent: Mapping[str, Any]) -> None:
+                        sent: Optional[Mapping[str, Any]]) -> None:
     """A direct judge request that got no answer, in the run's record with what it was sent: cut off by a time limit
     (maybe billed, so a call of unknown usage in the step's usage too), or refused, costing nothing."""
     if model_call.cut_off(exc):
@@ -935,7 +936,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         run = self._run_values(context)
         judge = judge_usage.start(context, self.id)
         if run["use_agent_judge"] and self.agent_name:
-            judge.loaded = judge_usage.loads_into(context, self.agent_name)
+            judge.loaded = loads_into(context, self.agent_name)
         grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
@@ -1101,7 +1102,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
                     judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
                     provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
-                    sandbox = judge_usage.StagingRecorder(await provider.get_sandbox(judge_sandbox_id), judge)
+                    sandbox = judge.recording(await provider.get_sandbox(judge_sandbox_id))
                     staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
                     if staged is None and atif is not None:
                         media = await self._stage_atif_turns(
@@ -1132,7 +1133,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             loaded_for_judge: list[dict] = []
             if use_agent_judge and self.agent_name is not None:
                 loaded_for_judge = [
-                    e for e in (context.metadata.get("loaded_file_artifact_universes") or [])
+                    e for e in (context.metadata.get(LOADED_FILE_UNIVERSES) or [])
                     if e.get("agent_name") == self.agent_name
                 ]
             context_facts = (resolve_context_facts(self.context_facts_for_judge, context.metadata)
@@ -1610,10 +1611,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         cached_prefix: Optional[str] = None,
     ) -> dict:
         """Direct judge — no agent boot, no tools — through core's one model call (``config.model_call``). Returns
-        ``response`` and ``trajectory_object_url`` (None), and the call's record, which the step keeps in its usage
-        (``_record_direct_call``): its ``usage`` as the response carried it, the ``model`` called, the
-        ``endpoint_host`` it reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's
-        price map's figure.
+        ``response`` and ``trajectory_object_url`` (None), and the call's record: its ``usage`` as the response carried
+        it, the ``model`` called, the ``endpoint_host`` it reached, its cost's keys, ``cost_usd`` what the endpoint
+        billed or else LiteLLM's price map's figure, and under the run's judge record ``judge_input``, the reference to
+        what it was sent. A request that got no answer goes in that record here (``_record_failed_call``); the answered
+        one the step records from what this returns (``_record_direct_call``), so an override that answers itself
+        is recorded too.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1647,18 +1650,15 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge = judge_usage.current()
         if judge is not None:
             judge.carried(sent, not_sent, route.endpoint_host)
-        inputs: dict[bool, dict[str, Any]] = {}
         # Some endpoints reject json_schema with images. Fall back once on that exact
         # error shape; malformed JSON is handled by the outer output-retry loop.
         use_response_format = True
 
         last_exc: Exception | None = None
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
-            if judge is not None and use_response_format not in inputs:
-                inputs[use_response_format] = await judge.input({
-                    "messages": messages, "response_format": response_format if use_response_format else None,
-                    "settings": model_call.sent_params(route, params)})
-            judge_input = inputs.get(use_response_format, {})
+            judge_input = None if judge is None else await judge.input({
+                "messages": messages, "response_format": response_format if use_response_format else None,
+                "settings": model_call.sent_params(route, params)})
             try:
                 reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,
                                                   response_format=response_format if use_response_format else None,
@@ -1949,7 +1949,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     @staticmethod
     def _record_direct_call(usage: StepUsage, data: dict, *, model: str) -> None:
         """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
-        bill its cost when it sent one, with or without token counts."""
+        bill its cost when it sent one, with or without token counts; in a judge's record, with what it was sent."""
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
         if data.get("reported_cost_usd") is not None:
             read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])

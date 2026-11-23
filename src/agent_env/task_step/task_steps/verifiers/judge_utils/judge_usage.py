@@ -3,22 +3,15 @@ it was sent, and the settings and trajectory sources those calls carried, for it
 ``verifier_settings``). The record of the run in progress is held per task, since a step is shared by every run of its
 task: a judge step's ``execute`` scopes it (``scope``) and its judging starts it (``start``).
 
-What a call was sent is stored by its sha256 under ``judge-inputs/`` in the object store, so a retried request's input or
-a file another run staged is stored once, and a reader checks it against the key it's stored under. Uploads run in the
-background, off the judging's path (``JudgeUsage.upload``); the step waits for them once, before it writes its grade
-(``JudgeUsage.settle``), when an upload that failed or didn't finish is marked ``input_error``, which never fails the grade.
-An agent call's input names the files the judge step staged in the judge's sandbox and, for a judge the task deployed,
-what the task's own steps loaded there as the run recorded them (``loads_into``): best effort, since a file a step wrote
-by running a command there is recorded nowhere."""
+What each call was sent is uploaded in the background (``judge_inputs``) and its reference filled into the call's record
+when the run settles (``JudgeUsage.settle``), before the grade is written. An agent call's input names the files the
+judge step staged in the judge's sandbox and, for a judge the task deployed, what the task's own steps loaded there as
+the run recorded them (``load_artifact.loads_into``): best effort, since a file a step wrote by running a command there
+is recorded nowhere."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import functools
-import hashlib
-import json
-import logging
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -26,21 +19,11 @@ from typing import Any, Optional, Union
 
 from agentenv_protocol.a2a_agent import Usage
 
-from agent_env.config import get_config
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import ReportedBy, Tokens, price
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.thread_work import finish_on_thread
+from agent_env.task_step.task_steps.verifiers.judge_utils.judge_inputs import StagingRecorder, Uploads
 from agent_env.task_step.usage import StepUsage
-
-logger = logging.getLogger(__name__)
-
-INPUTS_PREFIX = "judge-inputs"
-#: The run's records of what its steps loaded into an agent's sandbox (``load_artifact``), each entry naming the agent.
-LOAD_RECORDS = ("loaded_file_artifact_universes", "loaded_environment_artifacts", "loaded_urls")
-#: How many of a judge run's uploads run at once, and how long its grade waits for those still running.
-UPLOAD_CONCURRENCY = 16
-SETTLE_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -52,6 +35,8 @@ class AgentInput:
     loaded: list[dict[str, Any]]
 
 
+#: What a call was sent: a direct call's input as uploaded (``Uploads.put``'s reference), or an agent call's, uploaded
+#: when the run settles.
 Sent = Union[Mapping[str, Any], AgentInput, None]
 
 
@@ -69,8 +54,7 @@ class JudgeUsage(StepUsage):
         self.staged: list[dict[str, Any]] = []
         self.loaded: list[dict[str, Any]] = []
         self.sources: Optional[list[dict[str, Any]]] = None
-        self._uploads: dict[str, asyncio.Task] = {}
-        self._gate = asyncio.Semaphore(UPLOAD_CONCURRENCY)
+        self.uploads = Uploads()
         self._deferred: list[tuple[dict[str, Any], AgentInput]] = []
 
     def call(self, role: ModelRole, usage: Optional[Usage], *, model: Optional[str], endpoint_host: Optional[str],
@@ -98,66 +82,36 @@ class JudgeUsage(StepUsage):
         adapter version that made it."""
         self.sources = list(sources)
 
-    def upload(self, data: bytes, content_type: str) -> dict[str, Any]:
-        """``data`` stored under ``judge-inputs/<sha256>`` in the background, once however often the run sends it: its
-        reference (``object_url``, ``bytes``, ``sha256``) at once; ``settle`` marks it if it wasn't stored."""
-        digest = hashlib.sha256(data).hexdigest()
-        config = get_config()
-        store, key = config.get_object_store(), f"{config.get_artifact_key_prefix()}{INPUTS_PREFIX}/{digest}"
-        if digest not in self._uploads:
-            task = asyncio.ensure_future(self._put(store, key, data, content_type))
-            task.add_done_callback(_logged)
-            self._uploads[digest] = task
-        return {"object_url": store.object_url(key), "bytes": len(data), "sha256": digest}
-
     async def input(self, body: Any) -> dict[str, Any]:
-        """``body`` as the JSON a call was sent, uploaded (``upload``): ``{"input": reference}``."""
-        return {"input": self.upload(await asyncio.to_thread(_encoded, body), "application/json")}
+        """``body`` as the JSON a direct call was sent, uploaded: its reference."""
+        return await self.uploads.put_json(body)
 
     def agent_input(self, message: str) -> AgentInput:
         """What an agent call is sent now: its message, the files staged so far and the task's loads into the judge."""
         return AgentInput(message, list(self.staged), list(self.loaded))
 
+    def recording(self, sandbox: Any) -> StagingRecorder:
+        """``sandbox``, every file written into it kept in ``staged``."""
+        return StagingRecorder(sandbox, self.staged, self.uploads)
+
     async def settle(self) -> None:
         """Waits, up to ``SETTLE_SECONDS`` all told, for the run's uploads; stores each agent call's input once its
         staged files are; and marks each staged file and call whose upload failed or hadn't finished ``input_error``."""
-        deadline = asyncio.get_running_loop().time() + SETTLE_SECONDS
-        await self._wait(deadline)
+        deadline = self.uploads.deadline()
+        await self.uploads.wait(deadline)
         for entry in self.staged:
-            if error := self._failed(entry.get("sha256")):
+            if error := self.uploads.failed(entry.get("sha256")):
                 entry.pop("object_url", None)
                 entry["input_error"] = error
         deferred, self._deferred = self._deferred, []
         for record, sent in deferred:
-            record.update(await self.input({"message": sent.message, "files": sent.files, "loaded": sent.loaded}))
-        await self._wait(deadline)
+            record["input"] = await self.uploads.put_json(
+                {"message": sent.message, "files": sent.files, "loaded": sent.loaded})
+        await self.uploads.wait(deadline)
         for record in self.calls:
-            if error := self._failed((record.get("input") or {}).get("sha256")):
+            if error := self.uploads.failed((record.get("input") or {}).get("sha256")):
                 del record["input"]
                 record["input_error"] = error
-
-    async def _put(self, store: Any, key: str, data: bytes, content_type: str) -> None:
-        async with self._gate:
-            await finish_on_thread(functools.partial(_put_once, store, key, data, content_type),
-                                   "Storing a judge's input")
-
-    async def _wait(self, deadline: float) -> None:
-        pending = [task for task in self._uploads.values() if not task.done()]
-        if pending:
-            await asyncio.wait(pending, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
-
-    def _failed(self, digest: Optional[str]) -> Optional[str]:
-        """Why the run's upload of ``digest`` didn't store it; None when it did, or the run uploaded no such thing."""
-        task = self._uploads.get(digest) if digest else None
-        if task is None:
-            return None
-        if not task.done():
-            task.cancel()
-            return f"TimeoutError: still uploading after {SETTLE_SECONDS:.0f}s"
-        if task.cancelled():
-            return "CancelledError: the upload was cancelled"
-        exc = task.exception()
-        return f"{type(exc).__name__}: {exc}"[:300] if exc is not None else None
 
     def carried(self, sent: dict[str, Any], not_sent: dict[str, Any], endpoint_host: Optional[str]) -> None:
         """The settings the run's calls carried, kept from its first call, since every call of a run carries the same."""
@@ -174,53 +128,11 @@ class JudgeUsage(StepUsage):
         record = {"outcome": outcome, "model": model, "endpoint_host": endpoint_host,
                   "usage": usage.to_dict() if usage is not None else None, **cost,
                   "batch": _BATCH.get(), "attempt": _ATTEMPT.get(),
-                  **(sent if isinstance(sent, Mapping) else {}), **({"error": error} if error is not None else {})}
+                  **({"input": dict(sent)} if isinstance(sent, Mapping) else {}),
+                  **({"error": error} if error is not None else {})}
         self.calls.append(record)
         if isinstance(sent, AgentInput):
             self._deferred.append((record, sent))
-
-
-def loads_into(context: TaskStepContext, agent_name: str) -> list[dict[str, Any]]:
-    """What the run's own steps loaded into ``agent_name``'s sandbox, each entry as its load recorded it, under the key
-    it's recorded under (``record``)."""
-    return [{"record": key, **entry} for key in LOAD_RECORDS for entry in context.metadata.get(key) or []
-            if isinstance(entry, Mapping) and entry.get("agent_name") == agent_name]
-
-
-def _encoded(body: Any) -> bytes:
-    return json.dumps(body, ensure_ascii=False, sort_keys=True).encode()
-
-
-def _put_once(store: Any, key: str, data: bytes, content_type: str) -> None:
-    if not store.exists(key):
-        store.put(key, data, content_type=content_type, allow_overwrite=True)
-
-
-def _logged(task: asyncio.Task) -> None:
-    if not task.cancelled() and (exc := task.exception()) is not None:
-        logger.warning("a judge's input wasn't stored: %s: %s", type(exc).__name__, exc)
-
-
-class StagingRecorder:
-    """The judge's sandbox, every file written into it kept in its run's manifest (``JudgeUsage.staged``): a file
-    written as text stored by its sha256 too, in the background (``JudgeUsage.upload``), one copied from a stored object
-    named by that object's URL."""
-
-    def __init__(self, sandbox: Any, judge: JudgeUsage) -> None:
-        self._sandbox, self._judge = sandbox, judge
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._sandbox, name)
-
-    async def write_file_from_text(self, text: str, path: str, **kwargs: Any) -> Any:
-        written = await self._sandbox.write_file_from_text(text, path, **kwargs)
-        self._judge.staged.append({"path": path, **self._judge.upload(text.encode(), "text/plain; charset=utf-8")})
-        return written
-
-    async def write_file_from_object(self, object_url: str, path: str, **kwargs: Any) -> Any:
-        written = await self._sandbox.write_file_from_object(object_url, path, **kwargs)
-        self._judge.staged.append({"path": path, "object_url": object_url})
-        return written
 
 
 _RUN: ContextVar[Optional[JudgeUsage]] = ContextVar("judge_run", default=None)
@@ -251,7 +163,8 @@ def current() -> Optional[JudgeUsage]:
 
 
 def calls() -> list[dict[str, Any]]:
-    """The record of each model call the judge run this task is in has made so far."""
+    """The record of each model call the judge run this task is in has made so far. A record is final once the run
+    settles (``JudgeUsage.settle``), which fills in its ``input`` or marks it ``input_error``."""
     judge = _RUN.get()
     return list(judge.calls) if judge is not None else []
 

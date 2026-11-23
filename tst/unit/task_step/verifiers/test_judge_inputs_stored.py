@@ -17,7 +17,7 @@ import pytest
 
 from agent_env.a2a_agent import protocol
 from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
-from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_inputs, judge_usage
 from tst.unit.task_step import test_always_on_agent_verifier as A
 from tst.unit.task_step.verifiers.test_rubrics_verifier_golden import _binary, _context, _direct_judge, _step
 from tst.unit.task_step.verifiers.test_rubrics_verifier_judge_settings import _grade, _llm
@@ -49,7 +49,7 @@ class _Store:
 
 
 def _using(monkeypatch, store: _Store) -> _Store:
-    monkeypatch.setattr(judge_usage, "get_config", lambda: SimpleNamespace(
+    monkeypatch.setattr(judge_inputs, "get_config", lambda: SimpleNamespace(
         get_artifact_key_prefix=lambda: "pfx/", get_object_store=lambda: store))
     return store
 
@@ -153,7 +153,7 @@ class _Sandbox:
 async def test_the_staging_recorder_keeps_each_file_put_in_the_judges_sandbox(store):
     judge = judge_usage.JudgeUsage(TaskStepContext(), "verify")
     sandbox = _Sandbox()
-    recorder = judge_usage.StagingRecorder(sandbox, judge)
+    recorder = judge.recording(sandbox)
 
     await recorder.write_file_from_text("turn one", "/tmp/run/turn_01.json")
     await recorder.write_file_from_object("mem://trajectories/2.json", "/tmp/run/turn_02.json")
@@ -313,7 +313,7 @@ async def test_the_judge_is_sent_its_message_while_its_staged_files_are_still_up
     monkeypatch.setattr(protocol, "poll_a2a_task", poll)
     with judge_usage.scope():
         judge = judge_usage.start(TaskStepContext(), "verify")
-        await judge_usage.StagingRecorder(_Sandbox(), judge).write_file_from_text("turn one", "/tmp/run/turn_01.json")
+        await judge.recording(_Sandbox()).write_file_from_text("turn one", "/tmp/run/turn_01.json")
         verifier = _step(use_agent_judge=True, criteria=[{"id": "c1", "title": "asked"}])
         await verifier._invoke_judge_a2a(eval_prompt="grade it", judge_a2a_url="http://judge.test",
                                          judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
@@ -329,7 +329,7 @@ async def test_the_judge_is_sent_its_message_while_its_staged_files_are_still_up
 async def test_an_upload_still_running_when_the_grade_is_written_is_marked_and_the_grade_goes_on(monkeypatch):
     released = threading.Event()
     _using(monkeypatch, _Store(gate=released))
-    monkeypatch.setattr(judge_usage, "SETTLE_SECONDS", 0.2)
+    monkeypatch.setattr(judge_inputs, "SETTLE_SECONDS", 0.2)
     _llm(monkeypatch)
 
     grade = await _grade(_step(default_model="gpt-4o-mini"), _context())
@@ -346,7 +346,7 @@ async def test_a_staged_file_that_wasnt_stored_is_marked_in_the_manifest_and_in_
     _answering_judge(monkeypatch)
     with judge_usage.scope():
         judge = judge_usage.start(TaskStepContext(), "verify")
-        recorder = judge_usage.StagingRecorder(_Sandbox(), judge)
+        recorder = judge.recording(_Sandbox())
         await recorder.write_file_from_text("secret turn", "/tmp/run/turn_01.json")
         await recorder.write_file_from_text("turn two", "/tmp/run/turn_02.json")
         verifier = _step(use_agent_judge=True)
