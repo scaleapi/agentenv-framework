@@ -314,3 +314,37 @@ def test_each_judge_call_is_handed_to_on_call_for_the_steps_usage(monkeypatch):
                                                                    on_call=seen.append))
 
     assert verdict.passed and seen == [reply]
+
+
+@pytest.mark.parametrize("error, recorded", [
+    (lambda: __import__("litellm").Timeout("judge timed out", model="judge-m", llm_provider="openai"), True),
+    (lambda: ValueError("bad route"), False),
+], ids=["timed-out", "never-sent"])
+def test_a_judge_call_cut_off_by_its_timeout_is_still_handed_to_on_call_as_one_of_unknown_usage(
+        monkeypatch, error, recorded):
+    from types import SimpleNamespace
+
+    from agent_env.config.model import ModelRole
+    from agent_env.task_step.context import TaskStepContext
+    from agent_env.task_step.usage import StepUsage
+
+    async def complete(route, messages, **kw):
+        raise error()
+
+    monkeypatch.setattr(model_call, "complete", complete)
+    context = TaskStepContext()
+    usage = StepUsage(context, "talk")
+    seen = []
+    route = SimpleNamespace(model="judge-m", endpoint_host="gw:443")
+    verdict = asyncio.run(UserSimGate(judge_model="judge-m").check(
+        "can you check the totals?", [], call_config=route,
+        on_call=lambda reply: (seen.append(reply), usage.reply(ModelRole.JUDGE, reply))))
+
+    assert verdict.passed and verdict.judge_error
+    if not recorded:
+        assert seen == [] and "talk" not in context.metadata.get("step_usage", {})
+        return
+    [reply] = seen
+    assert (reply.model, reply.endpoint_host, reply.usage, reply.cost.usd) == ("judge-m", "gw:443", None, None)
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert entry["role"] == "judge" and entry["partial"] and entry["cost_usd"] is None

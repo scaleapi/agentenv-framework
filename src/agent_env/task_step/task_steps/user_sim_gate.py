@@ -294,8 +294,11 @@ class UserSimGate:
                      user_note: Optional[str] = None, instructions: Optional[str] = None,
                      on_call: Optional[Callable[[ModelReply], None]] = None) -> Optional[dict]:
         """One judge call through core's one model-call path (config/model_call.py), on ``route``
-        (``judge_call_config``'s), or on the configured endpoint when none was given."""
+        (``judge_call_config``'s), or on the configured endpoint when none was given. A call cut off by its timeout or
+        a cancel may still be billed, so ``on_call`` sees it as a reply of unknown usage, marking the usage a lower
+        bound."""
         from agent_env.config import model_call
+        from agent_env.config.model_pricing import Cost, CostStatus, Unpriced
 
         prompt = _JUDGE_PROMPT.format(
             history=render_history(history, self.context_turns, self.context_chars),
@@ -306,10 +309,16 @@ class UserSimGate:
         )
         if route is None:
             route = judge_call_config(self, {})
-        reply = await model_call.complete(
-            route, [{"role": "user", "content": prompt}], timeout=self.judge_timeout_seconds,
-            response_format={"type": "json_schema",
-                             "json_schema": {"name": "user_sim_gate", "schema": _JUDGE_SCHEMA, "strict": True}})
+        try:
+            reply = await model_call.complete(
+                route, [{"role": "user", "content": prompt}], timeout=self.judge_timeout_seconds,
+                response_format={"type": "json_schema",
+                                 "json_schema": {"name": "user_sim_gate", "schema": _JUDGE_SCHEMA, "strict": True}})
+        except BaseException as exc:
+            if on_call is not None and model_call.cut_off(exc):
+                on_call(model_call.ModelReply("", route.model, route.endpoint_host, None,
+                                              Cost(None, CostStatus.UNPRICED, None, None, unpriced=Unpriced.NO_TOKENS)))
+            raise
         if on_call is not None:
             on_call(reply)
         return parse_judge(reply.content)
