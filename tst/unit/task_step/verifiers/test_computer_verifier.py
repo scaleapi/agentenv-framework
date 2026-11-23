@@ -225,13 +225,13 @@ async def test_a_result_file_an_app_owns_is_read_through_that_apps_data_get(comp
 async def test_a_file_uploaded_under_the_grant_is_read_only_under_the_limit(local_stores, monkeypatch):
     monkeypatch.setattr(computer_verifier, "MAX_READ_BYTES", 4)
     store = get_config().get_object_store()
-    store.put("exports/x/small.txt", b"tiny")
-    store.put("exports/x/big.txt", b"too big")
+    small, big = store.put("exports/x/small.txt", b"tiny"), store.put("exports/x/big.txt", b"too big")
     answer = GetDataResponse(parts=[uploaded_file_part("small.txt"), uploaded_file_part("big.txt")])
 
     files = await _step(result_files=[])._files_of(answer, (store, SimpleNamespace(root_path="exports/x")), "it")
 
-    assert files == {"small.txt": b"tiny", "big.txt": 7}
+    assert {path: (f.size, f.data, f.object_url) for path, f in files.items()} == {
+        "small.txt": (4, b"tiny", small), "big.txt": (7, None, big)}
 
 
 @pytest.mark.asyncio

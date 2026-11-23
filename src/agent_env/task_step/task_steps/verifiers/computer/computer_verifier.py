@@ -15,7 +15,8 @@ server), as the state the agent left; the golden files of ``expected_artifact_id
 ``instruction``, the task as the agent was given it. The judge also sees the agent's response to ``prompt_id``, and its
 trajectory with ``use_trajectory``. Nothing is run in the computer. An env that takes the data-objects form exports
 under a grant of the step's, within ``EXPORT_LIMITS``, so a file's size is known before it is read and one over
-``MAX_READ_BYTES`` is only named; one that doesn't, or whose network can't reach the object store, answers inline.
+``MAX_READ_BYTES`` is only named; the uploads stay in the object store as the grade's evidence, each one's url in the
+record. One that doesn't, or whose network can't reach the object store, answers inline.
 
 How the judge grades is ``guidance``, and how it treats the golden files ``golden_note``: the caller's own wording, or
 short defaults of the framework's. The score is rubrics_verifier's, ``score_aggregator`` over the rows, a weighted
@@ -29,8 +30,9 @@ import asyncio
 import base64
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, ClassVar, Optional, Union
+from typing import Any, ClassVar, Optional
 
 import httpx
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_GET, DataPart, FilePart
@@ -81,8 +83,25 @@ EXPORT_LIMITS = ObjectLimits(max_objects=10_000, max_object_bytes=1024**3, max_t
 #: Where the step's exports are uploaded, under the artifact key prefix.
 _EXPORT_KEY_PREFIX = "computer_verifier"
 _PATHS = TypeAdapter(list[RelativePath])
-#: A file as an export gave it: its bytes, or its size alone when it is over ``MAX_READ_BYTES``.
-Exported = Union[bytes, int]
+
+
+@dataclass(frozen=True)
+class _File:
+    """A file an export gave: its size, its bytes unless it is over ``MAX_READ_BYTES``, and the url it was uploaded at
+    under the step's grant, when it was."""
+
+    size: int
+    data: Optional[bytes]
+    object_url: Optional[str] = None
+
+    @classmethod
+    def read(cls, data: bytes) -> _File:
+        return cls(len(data), data)
+
+    def record(self, path: str, shown: Rendered) -> dict:
+        """What the step records of the file at ``path``, shown as ``shown``."""
+        return {"path": path, "bytes": self.size, "rendered_as": shown.kind, "cut": shown.cut,
+                **({"object_url": self.object_url} if self.object_url else {})}
 
 
 def criteria_from_rubric(rubric: Any) -> list[dict]:
@@ -233,7 +252,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
                 record["files"].append({"path": path, "missing": True})
                 continue
             shown = await _shown(path, data)
-            record["files"].append({"path": path, "bytes": _size(data), "rendered_as": shown.kind, "cut": shown.cut})
+            record["files"].append(data.record(path, shown))
             produced.append(f"### File {number}: {path} ({shown.kind})\n<file path=\"{path}\">\n{shown.text}\n</file>")
         sections = ["## Files under evaluation\nWhat the agent left at each path in its computer, rendered as text.\n\n"
                     + ("\n\n".join(produced) or "(none)")]
@@ -263,7 +282,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
             files = []
             for path, data in exported.items():
                 shown = await _shown(path, data)
-                files.append({"path": path, "bytes": _size(data), "rendered_as": shown.kind, "cut": shown.cut})
+                files.append(data.record(path, shown))
                 state.append(f"### {name}: {path} ({shown.kind})\n<state env=\"{name}\" path=\"{path}\">\n"
                              f"{shown.text}\n</state>")
             if not exported:
@@ -274,7 +293,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         return ["## Environment state\nWhat each environment exported (data/get) after the agent finished, rendered as "
                 "text.\n\n" + "\n\n".join(state)]
 
-    async def _result_files(self, computer: DeployedEnv) -> dict[str, Exported]:
+    async def _result_files(self, computer: DeployedEnv) -> dict[str, _File]:
         """Each of ``result_files`` there is, by its path under the home: from the export of the app on the computer
         whose card claims a path above it, as the computer's own ``data/get`` leaves those out, else from the
         computer's, asked for by path."""
@@ -285,7 +304,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
             app = next((child.name for child, owned in apps
                         if any(PurePosixPath(path).is_relative_to(prefix) for prefix in owned)), None)
             wanted.setdefault(app, []).append(path)
-        found: dict[str, Exported] = {}
+        found: dict[str, _File] = {}
         if own := wanted.pop(None, None):
             found |= await self._exported(computer, None, "its computer", paths=own)
         for child, _ in apps:
@@ -308,7 +327,7 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         raise RuntimeError(f"computer_verifier '{self.id}': env {self.env_id!r} has no environment named {name!r}")
 
     async def _exported(self, owner: DeployedEnv, child: Optional[protocol_v1.ChildEnv], what: str,
-                        paths: Optional[list[str]] = None) -> dict[str, Exported]:
+                        paths: Optional[list[str]] = None) -> dict[str, _File]:
         """What the ``data/get`` of ``child`` of ``owner``'s card (``owner``'s own when None) answers, each file by its
         path: under the step's grant when it takes the data-objects form and the store's grants reach it, each file's
         size read before its bytes; asked again without, inline, when it fails under one, as a computer whose network
@@ -332,14 +351,14 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
         return await self._files_of(answer, upload, what)
 
     async def _files_of(self, answer: GetDataResponse, upload: Optional[tuple[ObjectStore, Any]],
-                        what: str) -> dict[str, Exported]:
+                        what: str) -> dict[str, _File]:
         """Each file of ``answer`` by its path: one uploaded under ``upload``'s grant, read once its size is known; else
         one in the data-objects form by ``part_bytes`` (inline, through a read grant or from a URL); a plain inline one;
         or a data part, as JSON."""
-        files: dict[str, Exported] = {}
+        files: dict[str, _File] = {}
         for number, part in enumerate(answer.parts, start=1):
             if isinstance(part, DataPart):
-                files[f"data-{number}.json"] = json.dumps(part.data, indent=2).encode()
+                files[f"data-{number}.json"] = _File.read(json.dumps(part.data, indent=2).encode())
                 continue
             if not isinstance(part, FilePart):
                 raise RuntimeError(f"computer_verifier '{self.id}': data/get of {what} in env {self.env_id!r} gave a "
@@ -350,9 +369,9 @@ class ComputerVerifierTaskStep(RubricsVerifierTaskStep):
                     and "://" not in part.file.uri:
                 files[name] = await asyncio.to_thread(_read_uploaded, *upload, uploaded_object_path(part))
             elif marker is not None:
-                files[name] = await part_bytes(part)
+                files[name] = _File.read(await part_bytes(part))
             elif isinstance(part.file, FileWithBytes):
-                files[name] = base64.b64decode(part.file.bytes)
+                files[name] = _File.read(base64.b64decode(part.file.bytes))
             else:
                 raise RuntimeError(f"computer_verifier '{self.id}': data/get of {what} in env {self.env_id!r} gave "
                                    f"{name} only by a link outside the data-objects form")
@@ -388,20 +407,18 @@ def _upload_grant(card: dict, sandbox_type: Optional[str]) -> Optional[tuple[Obj
         return None
 
 
-def _read_uploaded(store: ObjectStore, grant: Any, path: str) -> Exported:
-    """The file an export uploaded at ``path`` under ``grant``: its bytes, or its size alone when over the limit."""
+def _read_uploaded(store: ObjectStore, grant: Any, path: str) -> _File:
+    """The file an export uploaded at ``path`` under ``grant``, its bytes read only when its size is under the limit."""
     url = store.object_url(f"{grant.root_path}/{path}")
     size = getattr(store.get_object_metadata_at(url), "size", None)
-    return size if size is not None and size > MAX_READ_BYTES else store.get(url)
+    if size is not None and size > MAX_READ_BYTES:
+        return _File(size, None, url)
+    data = store.get(url)
+    return _File(len(data), data, url)
 
 
-def _size(data: Exported) -> int:
-    return data if isinstance(data, int) else len(data)
-
-
-async def _shown(name: str, data: Exported) -> Rendered:
-    """``data`` as the judge reads it: rendered as text, or, its size alone or over ``MAX_READ_BYTES``, named as too
-    large."""
-    if isinstance(data, int) or len(data) > MAX_READ_BYTES:
-        return Rendered("too_large", f"(a file of {_size(data)} bytes, too large to show: over {MAX_READ_BYTES} bytes)")
-    return await render_isolated(name, data, MAX_FILE_CHARS)
+async def _shown(name: str, file: _File) -> Rendered:
+    """``file`` as the judge reads it: rendered as text, or, over ``MAX_READ_BYTES``, named as too large."""
+    if file.data is None or file.size > MAX_READ_BYTES:
+        return Rendered("too_large", f"(a file of {file.size} bytes, too large to show: over {MAX_READ_BYTES} bytes)")
+    return await render_isolated(name, file.data, MAX_FILE_CHARS)
