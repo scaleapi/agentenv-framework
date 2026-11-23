@@ -9,14 +9,12 @@ import (
 	"time"
 )
 
-// The clock page the follower writes (clockpage.py, version 3): magic version seq universe_s anchor_ns rate armed
-// universe_nsec generation check mono_universe_ns mono_anchor_ns, little-endian, 80 bytes, seq odd while it's written.
-// The universe at the anchor is universe_s seconds and universe_nsec nanoseconds, so it reaches past 2262.
+// The clock page the follower writes (clockpage.py, version 2): magic version seq universe_ns anchor_ns rate armed
+// reserved generation check mono_universe_ns mono_anchor_ns, little-endian, 80 bytes, seq odd while it's written.
 const (
-	pageSize    = 80
-	pageMagic   = 0x4B434541
-	pageVersion = 3
-	checkSalt   = 0x9E3779B97F4A7C15
+	pageSize  = 80
+	pageMagic = 0x4B434541
+	checkSalt = 0x9E3779B97F4A7C15
 )
 
 // state is the universe as the session reads it: armed, the universe at the anchor (seconds), the anchor (real
@@ -40,39 +38,35 @@ func (s state) at(t float64) float64 {
 	return s.V + (t-s.Anchor)*s.Rate
 }
 
-func pageCheck(seq uint64, us int64, unsec uint32, a int64, rate float64, armed uint32, generation uint64,
-	mu, ma int64) uint64 {
-	return seq ^ uint64(us) ^ uint64(unsec)<<32 ^ uint64(a) ^ math.Float64bits(rate) ^ uint64(armed) ^ generation ^
-		uint64(mu) ^ uint64(ma) ^ checkSalt
+func pageCheck(seq uint64, u, a int64, rate float64, armed uint32, generation uint64, mu, ma int64) uint64 {
+	return seq ^ uint64(u) ^ uint64(a) ^ math.Float64bits(rate) ^ uint64(armed) ^ generation ^ uint64(mu) ^
+		uint64(ma) ^ checkSalt
 }
 
 // readPage reads a consistent state from the page's bytes, or false when it's being written, torn or not a page.
 func readPage(b []byte) (state, bool) {
-	if len(b) < pageSize || binary.LittleEndian.Uint32(b[0:]) != pageMagic ||
-		binary.LittleEndian.Uint32(b[4:]) != pageVersion {
+	if len(b) < pageSize || binary.LittleEndian.Uint32(b[0:]) != pageMagic {
 		return state{}, false
 	}
 	seq := binary.LittleEndian.Uint64(b[8:])
 	if seq&1 == 1 {
 		return state{}, false
 	}
-	us := int64(binary.LittleEndian.Uint64(b[16:]))
+	u := int64(binary.LittleEndian.Uint64(b[16:]))
 	a := int64(binary.LittleEndian.Uint64(b[24:]))
 	rate := math.Float64frombits(binary.LittleEndian.Uint64(b[32:]))
 	armed := binary.LittleEndian.Uint32(b[40:])
-	unsec := binary.LittleEndian.Uint32(b[44:])
 	generation := binary.LittleEndian.Uint64(b[48:])
 	check := binary.LittleEndian.Uint64(b[56:])
 	mu := int64(binary.LittleEndian.Uint64(b[64:]))
 	ma := int64(binary.LittleEndian.Uint64(b[72:]))
-	if unsec >= 1e9 || check != pageCheck(seq, us, unsec, a, rate, armed, generation, mu, ma) ||
-		binary.LittleEndian.Uint64(b[8:]) != seq {
+	if check != pageCheck(seq, u, a, rate, armed, generation, mu, ma) || binary.LittleEndian.Uint64(b[8:]) != seq {
 		return state{}, false
 	}
 	if armed == 0 {
 		return unarmed, true
 	}
-	return state{Armed: true, V: float64(us) + float64(unsec)/1e9, Anchor: float64(a) / 1e9, Rate: rate}, true
+	return state{Armed: true, V: float64(u) / 1e9, Anchor: float64(a) / 1e9, Rate: rate}, true
 }
 
 // Universe follows the clock page, read every PagePoll, so a change is seen and the universe it left is held for Hold.

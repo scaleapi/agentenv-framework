@@ -103,7 +103,7 @@ def panel(tmp_path):
 
         def reanchor(self, by: float) -> None:
             with open(page.PAGE, "rb") as f:
-                _, armed, universe_ns, anchor_ns, rate, _ = page.read(f.read(page.LAYOUT.size))
+                _, _, _, universe_ns, anchor_ns, rate, armed, *_ = page.LAYOUT.unpack(f.read(page.LAYOUT.size))
             now = time.time_ns()
             page.write(armed, (universe_ns + (now - anchor_ns) * rate) / 1e9 + by, rate, now / 1e9)
 

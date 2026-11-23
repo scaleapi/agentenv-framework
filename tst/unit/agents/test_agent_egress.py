@@ -97,8 +97,6 @@ def _torn(page: bytes) -> bytes:
     pytest.param(_torn(_page(1)), True, id="torn-armed"),
     pytest.param(_torn(_page(0)), False, id="torn-unarmed"),
     pytest.param(_page(1)[:40], False, id="short"),
-    pytest.param(clockpage.encode(2, 253402300799 * 10**9, 0, 1.0, 1, 1, 0, 0), True, id="armed-in-9999"),
-    pytest.param(_page(1)[:4] + (2).to_bytes(4, "little") + _page(1)[8:], False, id="version-2"),
     pytest.param(b"\0" * 80, False, id="no-magic"),
     pytest.param(bytes(range(80)), False, id="garbage"),
     pytest.param(None, False, id="no-page"),

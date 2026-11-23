@@ -227,19 +227,14 @@ func (p *Proxy) forget(dst, sni string) {
 
 // inside is whether every universe lies inside [from + Margin, until - Margin].
 func inside(from, until time.Time, universes []float64) bool {
-	lo := seconds(from.Add(Margin))
-	hi := seconds(until.Add(-Margin))
+	lo := float64(from.Add(Margin).UnixNano()) / 1e9
+	hi := float64(until.Add(-Margin).UnixNano()) / 1e9
 	for _, u := range universes {
 		if u < lo || u > hi {
 			return false
 		}
 	}
 	return true
-}
-
-// seconds is t as Unix seconds at any date; UnixNano overflows past 2262, where a certificate may still end.
-func seconds(t time.Time) float64 {
-	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
 }
 
 // dialAny dials each address in turn until one answers: which, or every one's error.

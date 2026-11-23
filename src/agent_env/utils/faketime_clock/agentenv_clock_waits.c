@@ -56,9 +56,6 @@ static long ft_raw_syscall6(long n, long a, long b, long c, long d, long e, long
 
 #define FT_NS 1000000000LL
 #define FT_NEVER INT64_MAX
-/* a universe time in nanoseconds: 128 bits, so it reaches any date a 64-bit time_t holds (64 bits run out in 2262).
-   Real times, and elapsed and universe durations, stay 64-bit. */
-typedef __int128 ft_uns_t;
 static __thread struct ft_clock_page ft_tl_snap;
 static __thread bool ft_tl_snap_ok = false;
 
@@ -143,19 +140,6 @@ static inline int64_t ft_ns(const struct timespec *t)
   if (t->tv_sec < -9000000000LL) return -(FT_NEVER / 2);
   return (int64_t) t->tv_sec * FT_NS + t->tv_nsec;
 }
-static inline ft_uns_t ft_uns(const struct timespec *t)
-{
-  return (ft_uns_t) t->tv_sec * FT_NS + t->tv_nsec;
-}
-static inline ft_uns_t ft_page_universe(const struct ft_clock_page *s)
-{
-  return (ft_uns_t) s->universe_s * FT_NS + s->universe_nsec;
-}
-/* a universe duration as 64 bits, saturated. */
-static inline int64_t ft_clamp64(ft_uns_t v)
-{
-  return v > (ft_uns_t) FT_NEVER ? FT_NEVER : v < -(ft_uns_t) FT_NEVER ? -FT_NEVER : (int64_t) v;
-}
 static inline struct timespec ft_ts(int64_t ns)
 {
   struct timespec t;
@@ -199,27 +183,26 @@ static inline bool ft_universe_clock(clockid_t c)
 }
 
 /* the universe's realtime at real realtime t; before the anchor, the anchor's. */
-static ft_uns_t ft_page_rt(const struct ft_clock_page *s, int64_t t)
+static int64_t ft_page_rt(const struct ft_clock_page *s, int64_t t)
 {
-  int64_t sec, nsec;
   if (!s->armed) return t;
-  ft_page_at(s, t, &sec, &nsec);
-  return (ft_uns_t) sec * FT_NS + nsec;
+  if (s->rate == 0 || t <= s->anchor_ns) return s->universe_ns;
+  if (s->rate == 1.0) return s->universe_ns + (t - s->anchor_ns);
+  return s->universe_ns + (int64_t) ((double) (t - s->anchor_ns) * s->rate);
 }
 /* the real realtime at which the universe reaches ``due``; 0 (the past) once it has, FT_NEVER while frozen
    short of it. */
-static int64_t ft_real_of(const struct ft_clock_page *s, ft_uns_t due)
+static int64_t ft_real_of(const struct ft_clock_page *s, int64_t due)
 {
-  ft_uns_t u = ft_page_universe(s);
   double r;
-  if (!s->armed) return due < 1 ? 1 : ft_clamp64(due);
-  if (due <= u) return 1;
+  if (!s->armed) return due < 1 ? 1 : due;
+  if (due <= s->universe_ns) return 1;
   if (s->rate <= 0) return FT_NEVER;
-  r = (double) (due - u) / s->rate;
+  r = (double) (due - s->universe_ns) / s->rate;
   if (r > 4e18) return FT_NEVER;
   return s->anchor_ns + (int64_t) r + 1;
 }
-static inline bool ft_reached(const struct ft_clock_page *s, ft_uns_t due)
+static inline bool ft_reached(const struct ft_clock_page *s, int64_t due)
 {
   return ft_page_rt(s, ft_real_rt()) >= due;
 }
@@ -259,8 +242,7 @@ struct ft_timer
   int clock;
   int flags;                     /* the caller's flags, TFD_TIMER_CANCEL_ON_SET kept */
   int real_set;                  /* the kernel timer is armed */
-  ft_uns_t due;                  /* universe ns */
-  int64_t interval;              /* universe ns */
+  int64_t due, interval;         /* universe ns */
   struct ft_clock_page pg;       /* the page it was last armed from */
 };
 #define FT_TIMERS_MAX 1024
@@ -304,9 +286,9 @@ static int ft_timer_real_get(struct ft_timer *t, struct itimerspec *cur)
   return t->kind == 1 ? (*real_timerfd_gettime)(t->fds[0], cur) : (*real_timer_gettime_new)(t->id, cur);
 }
 /* the next expiration at or after ``after``. */
-static ft_uns_t ft_timer_next(const struct ft_timer *t, ft_uns_t after)
+static int64_t ft_timer_next(const struct ft_timer *t, int64_t after)
 {
-  ft_uns_t next = t->due;
+  int64_t next = t->due;
   if (t->interval > 0 && next < after) next += ((after - next + t->interval - 1) / t->interval) * t->interval;
   return next;
 }
@@ -316,8 +298,7 @@ static int ft_timer_arm(struct ft_timer *t, const struct ft_clock_page *s, bool 
 {
   struct itimerspec real, cur;
   double rate = s->armed ? s->rate : 1.0;
-  ft_uns_t next = t->due;
-  int64_t at;
+  int64_t next = t->due, at;
   int r;
   memset(&real, 0, sizeof real);
   if (!first && t->real_set && t->interval == 0 && ft_timer_real_get(t, &cur) == 0 && cur.it_value.tv_sec == 0
@@ -364,8 +345,8 @@ static void ft_timer_value(struct ft_timer *t, struct itimerspec *out)
   out->it_interval = ft_ts(t->interval);
   if (ft_snap(&s))
   {
-    ft_uns_t now = ft_page_rt(&s, ft_real_rt()), next = ft_timer_next(t, now);
-    out->it_value = ft_ts(next - now < 1 ? 1 : ft_clamp64(next - now));
+    int64_t now = ft_page_rt(&s, ft_real_rt()), next = ft_timer_next(t, now);
+    out->it_value = ft_ts(next - now < 1 ? 1 : next - now);
   }
 }
 
@@ -379,8 +360,7 @@ struct ft_cw
 {
   pthread_cond_t *cond;
   int used, woken;
-  ft_uns_t due;
-  int64_t real_due;
+  int64_t due, real_due;
   uint64_t gen;            /* the page generation its real_due came from; FT_CW_UNPLANNED before */
 };
 #define FT_CW_MAX 512
@@ -527,7 +507,7 @@ static inline void ft_deferred_cancel(int old)
 }
 
 /* a sleep until the universe reaches ``due``, on the page's seq. 0, or EINTR. */
-static int ft_rt_sleep(const struct ft_clock_page *first, ft_uns_t due)
+static int ft_rt_sleep(const struct ft_clock_page *first, int64_t due)
 {
   struct ft_clock_page s = *first;
   pthread_testcancel();
@@ -601,7 +581,7 @@ static int ft_wait2(uint32_t *word, uint32_t val, bool private_word, uint32_t se
 static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct timespec *abs, bool *handled)
 {
   struct ft_clock_page s;
-  ft_uns_t due = ft_uns(abs);
+  int64_t due = ft_ns(abs);
   *handled = false;
   if (!ft_snap(&s) || !ft_valid_due(abs, &s)) return 0;
   *handled = true;
@@ -645,7 +625,7 @@ static void ft_sem_unwait(void *sem)
 }
 /* as one of the semaphore's waiters (counted in data's high word): 0 with a token taken, or the error. A cancelled wait
    leaves the waiters it joined, as glibc's does. */
-static int ft_sem_wait_slow(struct ft_new_sem *sem, struct ft_clock_page *s, ft_uns_t due)
+static int ft_sem_wait_slow(struct ft_new_sem *sem, struct ft_clock_page *s, int64_t due)
 {
   volatile int err = 0;
   pthread_cleanup_push(ft_sem_unwait, sem);
@@ -682,7 +662,7 @@ static int ft_sem_wait_slow(struct ft_new_sem *sem, struct ft_clock_page *s, ft_
   pthread_cleanup_pop(err != 0);
   return err;
 }
-static int ft_u_sem_wait(sem_t *sem_, ft_uns_t due, bool *handled)
+static int ft_u_sem_wait(sem_t *sem_, int64_t due, bool *handled)
 {
   struct ft_new_sem *sem = (struct ft_new_sem *) sem_;
   struct ft_clock_page s;
@@ -726,8 +706,7 @@ static int ft_u_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex, const st
   struct ft_cw *w = NULL;
   struct timespec end;
   sigset_t old;
-  ft_uns_t due = ft_uns(abstime);
-  int64_t real_due;
+  int64_t due = ft_ns(abstime), real_due;
   int r, woken;
   if (!ft_snap(&s)) return -1;
   if (ft_reached(&s, due)) return ETIMEDOUT;
@@ -771,7 +750,7 @@ static int ft_u_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex, const st
 
 /* a realtime mutex wait: glibc's mutex has no way in, so slices (AGENTENV_WAIT_SLICE_MS) of a real
    CLOCK_MONOTONIC wait, which loses nothing when it times out, with the page read between them. */
-static int ft_u_mutex_lock(pthread_mutex_t *mutex, ft_uns_t due, bool *handled)
+static int ft_u_mutex_lock(pthread_mutex_t *mutex, int64_t due, bool *handled)
 {
   struct ft_clock_page s;
   *handled = false;
@@ -873,7 +852,7 @@ static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, 
   }
   t->clock = clock;
   t->flags = flags;
-  t->due = ft_uns(&nv->it_value);
+  t->due = ft_ns(&nv->it_value);
   t->interval = ft_ns(&nv->it_interval);
   t->tracked = 1;
   if (ov != NULL)
@@ -1171,7 +1150,7 @@ int timer_settime(timer_t id, int flags, const struct itimerspec *nv, struct iti
     else
       (*real_timer_gettime_new)(id, ov);
   }
-  t->due = ft_uns(&nv->it_value);
+  t->due = ft_ns(&nv->it_value);
   t->interval = ft_ns(&nv->it_interval);
   t->tracked = 1;
   r = ft_timer_arm(t, &s, true);

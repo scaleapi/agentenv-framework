@@ -72,11 +72,11 @@ def user_cmd(argv, env=None):
 
 def page():
     with open(clockpage.PAGE, "rb") as f:
-        return clockpage.read(f.read(clockpage.LAYOUT.size))
+        return clockpage.LAYOUT.unpack(f.read(clockpage.LAYOUT.size))
 
 
 def universe_now() -> tuple[float, float]:
-    _, armed, u, a, rate, _ = page()
+    _, _, _, u, a, rate, armed, _, _, _, _, _ = page()
     now = time.time()
     return (now, 1.0) if not armed else (u / 1e9 + (now - a / 1e9) * rate, rate)
 
@@ -99,7 +99,7 @@ def set_rate(rate: float) -> dict:
 
 def start(days: float = -182) -> float:
     """The universe a gate starts at: ``days`` from now, or the time CLOCK_BASE names (epoch seconds), which runs the
-    gates far past 2262, or before 1970, as well."""
+    gates near either end of the clock's range as well."""
     base = os.environ.get("CLOCK_BASE")
     return float(base) if base else time.time() + days * DAY
 
@@ -457,7 +457,7 @@ def deadwriter():
     written = set_clock(time.time() + 21 * DAY, 1)
     after = float(subprocess.run(user_cmd(["date", "+%s.%N"]), capture_output=True, text=True).stdout)
     preload(None)
-    return {"dead_seq": seq, "seq": page()[0], "continued": written["continued"],
+    return {"dead_seq": seq, "seq": page()[2], "continued": written["continued"],
             "read": _classify(after, before, 21 * DAY)}
 
 

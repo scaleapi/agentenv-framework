@@ -1,6 +1,6 @@
-/* rtbase.h: the universe's realtime as 64-bit nanoseconds counted from the second it was first read, so the values fit
-   at any date the clock reaches (a count from 1970 runs out in 2262); rt_ts turns one back into a time. Read it once
-   before starting threads. */
+/* rtbase.h: the universe's realtime as 64-bit nanoseconds counted from the second it was first read, so a deadline
+   computed near either end of the clock's range stays inside 64 bits, and rt_ts turns one back into a valid time before
+   1970 too (its nanoseconds floored, never negative). Read it once before starting threads. */
 #include <stdint.h>
 #include <time.h>
 static int64_t rt_base_s;

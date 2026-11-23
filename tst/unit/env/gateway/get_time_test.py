@@ -20,6 +20,7 @@ from agent_env.env.gateway.clock import Clock, ClockError
 from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_DESCRIPTION, GET_TIME_TOOL_NAME
 from agent_env.env.gateway.gateway import Gateway
+from tst.unit.env.gateway.triggers_time_test import FakeNow
 
 T = "2019-06-15T12:00:00Z"
 
@@ -274,12 +275,13 @@ def test_local_time_is_the_same_reading_at_second_precision(gw):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("now, zone", [
-    ("9999-12-31T20:00:00Z", "Asia/Tokyo"),
-    ("0001-01-01T02:00:00Z", "America/New_York"),
-], ids=["after-the-last-date", "before-the-first-date"])
-async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw, now, zone):
-    gw._clock.set_time(now, 0)
+async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw):
+    """A gateway that outlives its clock's range reads the last time a datetime holds, which Tokyo's clock can't show."""
+    now, zone = "9999-12-31T23:59:59Z", "Asia/Tokyo"
+    real = FakeNow()
+    gw._clock = Clock(now_fn=real)
+    gw._clock.set_time("2026-01-01T00:00:00Z", 86400)
+    real.tick(1e9)
     gw._register_get_time_tool()
     message = f"the current time {now} can't be shown in time zone {zone!r}: its local date is out of range"
 

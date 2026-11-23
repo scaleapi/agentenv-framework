@@ -1,6 +1,5 @@
-"""The follower's side of the clock page (version 3) and of the clock file: writes the universe's realtime
-clock to both. The page holds the universe at the anchor as whole seconds and nanoseconds, so it reaches any date the
-gateway's clock takes (to 9999-12-31); version 2's one signed 64-bit count of nanoseconds ran out on 2262-04-11. Elapsed time is real, so the page's monotonic fields are written as the real monotonic clock (identity)
+"""The follower's side of the clock page (version 2) and of the clock file: writes the universe's realtime
+clock to both. Elapsed time is real, so the page's monotonic fields are written as the real monotonic clock (identity)
 and no library reads them; they stay so the page keeps its 80-byte layout.
 
   clockpage.py set UNIVERSE RATE [ANCHOR]   armed: UNIVERSE (epoch s) at real time ANCHOR (default now), at RATE
@@ -31,12 +30,9 @@ from decimal import Decimal
 
 PAGE = os.environ.get("AGENTENV_CLOCK_PAGE", "/dev/shm/agentenv-clock")
 FILE = os.environ.get("AGENTENV_CLOCK_FILE", "/run/agentenv-clock/clock")
-MAGIC, VERSION = 0x4B434541, 3
-# magic version seq universe_s anchor_ns rate armed universe_nsec generation check mono_universe_ns mono_anchor_ns:
-# the universe at the anchor is universe_s seconds and universe_nsec (0 to 999,999,999) nanoseconds, floored, so a time
-# before 1970 has negative seconds and positive nanoseconds; the anchor is this machine's real time.
+MAGIC, VERSION = 0x4B434541, 2
+# magic version seq universe_ns anchor_ns rate armed reserved generation check mono_universe_ns mono_anchor_ns
 LAYOUT = struct.Struct("<IIQqqdIIQQqq")
-NS = 10**9
 MASK = 0xFFFFFFFFFFFFFFFF
 CONTINUITY_NS = 1_000_000_000
 _SYS_FUTEX = ({"x86_64": 202, "aarch64": 98, "arm64": 98}.get(platform.machine())
@@ -45,47 +41,18 @@ _FUTEX_WAKE = 1
 _libc = ctypes.CDLL(None, use_errno=True)
 
 
-def check(seq, universe_s, universe_nsec, anchor_ns, rate, armed, generation, mono_universe_ns, mono_anchor_ns) -> int:
+def check(seq, universe_ns, anchor_ns, rate, armed, generation, mono_universe_ns, mono_anchor_ns) -> int:
     rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
-    return (seq ^ (universe_s & MASK) ^ (universe_nsec << 32) ^ (anchor_ns & MASK) ^ rate_bits ^ armed ^ generation
+    return (seq ^ (universe_ns & MASK) ^ (anchor_ns & MASK) ^ rate_bits ^ armed ^ generation
             ^ (mono_universe_ns & MASK) ^ (mono_anchor_ns & MASK) ^ 0x9E3779B97F4A7C15) & MASK
 
 
 def encode(seq, universe_ns, anchor_ns, rate, armed, generation, mono_universe_ns, mono_anchor_ns) -> bytes:
-    """The page's bytes for these fields, the universe given in nanoseconds of any size, its check among them: what
-    every write writes and every reader checks, agent-env's libfaketime and the egress proxy (its egress/testdata pins
-    them)."""
-    universe_s, universe_nsec = divmod(universe_ns, NS)
-    return LAYOUT.pack(MAGIC, VERSION, seq, universe_s, anchor_ns, rate, armed, universe_nsec, generation,
-                       check(seq, universe_s, universe_nsec, anchor_ns, rate, armed, generation, mono_universe_ns,
-                             mono_anchor_ns),
+    """The page's bytes for these fields, its check among them: what every write writes and every reader checks,
+    agent-env's libfaketime and the egress proxy (its egress/testdata pins them)."""
+    return LAYOUT.pack(MAGIC, VERSION, seq, universe_ns, anchor_ns, rate, armed, 0, generation,
+                       check(seq, universe_ns, anchor_ns, rate, armed, generation, mono_universe_ns, mono_anchor_ns),
                        mono_universe_ns, mono_anchor_ns)
-
-
-def read(raw: bytes) -> tuple | None:
-    """A page's (seq, armed, universe_ns, anchor_ns, rate, generation), or None while it's being written, torn, or not a
-    version 3 page."""
-    if len(raw) < LAYOUT.size:
-        return None
-    magic, version, seq, universe_s, anchor_ns, rate, armed, universe_nsec, generation, checked, mono_u, mono_a = \
-        LAYOUT.unpack(raw[:LAYOUT.size])
-    if (magic, version) != (MAGIC, VERSION) or seq & 1 or universe_nsec >= NS or checked != check(
-            seq, universe_s, universe_nsec, anchor_ns, rate, armed, generation, mono_u, mono_a):
-        return None
-    return seq, armed, universe_s * NS + universe_nsec, anchor_ns, rate, generation
-
-
-def spec(armed: int, universe_ns: int, rate: float, anchor_ns: int) -> str:
-    """libfaketime's specification of this clock, exact at any date: "@seconds.nanoseconds", the sign written once in
-    front, as libfaketime reads a time before 1970."""
-    if not armed:
-        return "+0 x1"
-    return f"@{_seconds(universe_ns)} x{rate:g} ^{_seconds(anchor_ns)}"
-
-
-def _seconds(ns: int) -> str:
-    whole, part = divmod(abs(ns), NS)
-    return f"{'-' if ns < 0 else ''}{whole}.{part:09d}"
 
 
 def open_page() -> mmap.mmap:
@@ -97,7 +64,7 @@ def open_page() -> mmap.mmap:
         fd = os.open(PAGE, os.O_RDWR)
         if os.fstat(fd).st_uid != os.getuid():
             raise SystemExit(f"{PAGE} isn't ours")
-        if os.fstat(fd).st_size < LAYOUT.size or os.pread(fd, 8, 0) != struct.pack("<II", MAGIC, VERSION):
+        if os.fstat(fd).st_size < LAYOUT.size:
             os.close(fd)
             raise SystemExit(f"{PAGE} is an older page")
     m = mmap.mmap(fd, LAYOUT.size)
@@ -127,9 +94,8 @@ def _universe_at(armed, universe_ns, anchor_ns, rate, now_ns) -> int:
 
 def write(armed: int, universe: float, rate: float, anchor: float) -> dict:
     m = open_page()
-    _, _, seq, o_us, o_a, o_rate, o_armed, o_unsec, generation, _, _, _ = LAYOUT.unpack(m[:LAYOUT.size])
-    o_u = o_us * NS + o_unsec
-    universe_ns, anchor_ns = int(Decimal(str(universe)) * NS), int(Decimal(str(anchor)) * NS)
+    _, _, seq, o_u, o_a, o_rate, o_armed, _, generation, _, _, _ = LAYOUT.unpack(m[:LAYOUT.size])
+    universe_ns, anchor_ns = int(Decimal(str(universe)) * 10**9), int(Decimal(str(anchor)) * 10**9)
     if not armed:
         rate = 1.0
     generation += 1
@@ -149,12 +115,12 @@ def write(armed: int, universe: float, rate: float, anchor: float) -> dict:
     m[8:16] = struct.pack("<Q", seq + 2)
     _wake(m)
     m.close()
-    written = spec(armed, universe_ns, rate, anchor_ns)
+    spec = f"@{universe_ns / 1e9:.9f} x{rate:g} ^{anchor_ns / 1e9:.9f}" if armed else "+0 x1"
     os.makedirs(os.path.dirname(FILE), exist_ok=True)
     with open(FILE + ".part", "w") as f:
-        f.write(written + "\n")
+        f.write(spec + "\n")
     os.replace(FILE + ".part", FILE)
-    return {"generation": generation, "spec": written, "jump_ns": new_now - old_now if generation > 1 else 0,
+    return {"generation": generation, "spec": spec, "jump_ns": new_now - old_now if generation > 1 else 0,
             "continued": bool(continued), "universe_ns": universe_ns, "anchor_ns": anchor_ns}
 
 
@@ -164,9 +130,7 @@ def create(owner: str) -> None:
     try:
         st = os.lstat(PAGE)
         if stat.S_ISREG(st.st_mode) and st.st_uid == user.pw_uid and st.st_size == LAYOUT.size:
-            with open(PAGE, "rb") as f:
-                if f.read(8) == struct.pack("<II", MAGIC, VERSION):
-                    return
+            return
         os.unlink(PAGE)
     except FileNotFoundError:
         pass
@@ -190,4 +154,4 @@ if __name__ == "__main__":
         print(write(0, 0.0, 1.0, time.time()))
     else:
         with open(PAGE, "rb") as f:
-            print(read(f.read(LAYOUT.size)))
+            print(LAYOUT.unpack(f.read(LAYOUT.size)))

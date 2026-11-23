@@ -11,7 +11,7 @@
 #include <time.h>
 #include "rawsys.h"
 #define NS 1000000000LL
-/* offsets of 128 bits: a universe in 9999 is some 8,000 years from real time, past 64 bits of nanoseconds */
+/* offsets of 128 bits: a universe in 1677 is some 350 years from real time, past 64 bits of nanoseconds */
 typedef __int128 off_t128;
 static double seconds; static off_t128 off_a, off_b; static int64_t rt0, raw0;
 static int64_t ns(clockid_t c) { struct timespec t; clock_gettime(c, &t); return (int64_t)t.tv_sec * NS + t.tv_nsec; }

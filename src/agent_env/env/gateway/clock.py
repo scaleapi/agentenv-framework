@@ -20,13 +20,14 @@ class ClockError(ValueError):
 
 MAX_RATE = 86400.0  # 1 real second = 1 virtual day (the max virtual-time speed)
 
-# Fast-fail a t0 that would overflow within a real day of advancement at `rate` (frozen clocks
-# exempt). Not the overflow guarantee — reads still saturate (_advance) if the gateway outlives it.
-_OVERFLOW_HORIZON_S = 86400.0
+# Fast-fail a t0 that would pass LATEST within a real hour of advancement at `rate` (frozen clocks exempt): an hour, so
+# a day per second still arms at today's dates. Not the overflow guarantee — reads still saturate (_advance) past it.
+_OVERFLOW_HORIZON_S = 3600.0
 _MAX_T0 = datetime.max.replace(tzinfo=timezone.utc)
-# The latest time the clock reaches, as its errors name it: what a datetime holds, which the computers and agents that
-# follow it hold too.
-LATEST = "9999-12-31T23:59:59Z"
+# The times the clock holds: those 64 bits of nanoseconds since 1970 hold, as Python and the computers' clock page keep
+# time, so every program that follows the clock can read it (Python's time.time() raises outside them).
+EARLIEST = datetime(1677, 9, 21, 0, 12, 44, tzinfo=timezone.utc)
+LATEST = datetime(2262, 4, 11, 23, 47, 16, tzinfo=timezone.utc)
 
 
 def _parse_rate(rate) -> float:
@@ -63,7 +64,7 @@ def _parse_rfc3339(text: str) -> datetime:
     # Don't strip: a whitespace-wrapped value would slip through the anchored grammar (a 200 the contract calls a 400).
     raw = text
     if re.match(r"^\d{5,}-", raw):
-        raise ClockError(f"virtual_time {text!r} is past {LATEST}, the latest the env clock reaches")
+        raise ClockError(_outside(text))
     if not _RFC3339_RE.match(raw):
         raise ClockError(f"invalid RFC3339 virtual_time {text!r}: expected {_RFC3339_SHAPE}")
     if raw.endswith(("Z", "z")):
@@ -76,6 +77,17 @@ def _parse_rfc3339(text: str) -> datetime:
         return dt.astimezone(timezone.utc)
     except OverflowError:
         raise ClockError(f"invalid RFC3339 virtual_time {text!r}: out of representable range")
+
+
+_WHY = "the times a 64-bit count of nanoseconds since 1970 holds, as Python and the computers that follow the clock keep time"
+
+
+def _outside(virtual_time: str) -> str:
+    return f"virtual_time {virtual_time!r} is outside the env clock's range, {_iso(EARLIEST)} to {_iso(LATEST)} ({_WHY})"
+
+
+def _past_end(what: str) -> str:
+    return f"{what} would pass {_iso(LATEST)}, the end of the env clock's range, within a real hour ({_WHY})"
 
 
 def _iso(dt: datetime) -> str:
@@ -194,9 +206,10 @@ class Clock:
         r = _parse_rate(1.0 if rate is None else rate)
         if time_zone is not None and _zone(time_zone) is None:
             raise ClockError(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as 'America/New_York'")
-        if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
-            raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would pass {LATEST}, the latest the env clock "
-                             f"reaches, within a real day")
+        if not EARLIEST <= t0 <= LATEST:
+            raise ClockError(_outside(virtual_time))
+        if t0 > LATEST - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+            raise ClockError(_past_end(f"virtual_time {virtual_time!r} at rate {r:g}"))
         with self._lock:
             self._bank(t0)
             self._t0 = t0
@@ -218,9 +231,8 @@ class Clock:
                 raise ClockError("clock is not armed")
             now = self._now()
             ran = (now - self._anchor) * self._rate
-            if _advance(self._t0, ran + self._ahead) > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
-                raise ClockError(f"rate {r:g} would carry the clock past {LATEST}, the latest it reaches, within a real "
-                                 f"day")
+            if _advance(self._t0, ran + self._ahead) > LATEST - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+                raise ClockError(_past_end(f"rate {r:g}"))
             self._lived += ran
             self._ahead += ran
             self._anchor = now
@@ -234,9 +246,10 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 raise ClockError("clock is not armed")
-            if target > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
-                raise ClockError(f"virtual_time {virtual_time!r} at rate {self._rate:g} would pass {LATEST}, the latest "
-                                 f"the env clock reaches, within a real day")
+            if target > LATEST:
+                raise ClockError(_outside(virtual_time))
+            if target > LATEST - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
+                raise ClockError(_past_end(f"virtual_time {virtual_time!r} at rate {self._rate:g}"))
             current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
             jump = (target - current).total_seconds()
             if jump < 0:

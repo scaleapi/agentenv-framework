@@ -26,12 +26,13 @@ def clock_armed(page_path: str | None = None) -> bool:
                 raw = page.read(clockpage.LAYOUT.size)
                 if len(raw) < clockpage.LAYOUT.size:
                     return False
-                magic, version, *_ = fields = clockpage.LAYOUT.unpack(raw)
+                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
+                    clockpage.LAYOUT.unpack(raw)
                 if (magic, version) != (clockpage.MAGIC, clockpage.VERSION):
                     return False
-                if (state := clockpage.read(raw)) is not None:
-                    return bool(state[1])
-                armed = fields[6]
+                if seq % 2 == 0 and checked == clockpage.check(seq, universe, anchor, rate, armed, generation, mono_u,
+                                                               mono_a):
+                    return bool(armed)
                 time.sleep(_RETRY_S)
     except OSError:
         return False

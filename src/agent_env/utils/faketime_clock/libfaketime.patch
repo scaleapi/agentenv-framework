@@ -167,7 +167,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +  if (ft_uw_active())
 +  {
 +    struct ft_clock_page s;
-+    if (ft_snap(&s) && ft_valid_due(req, &s)) return ft_rt_sleep(&s, ft_uns(req));
++    if (ft_snap(&s) && ft_valid_due(req, &s)) return ft_rt_sleep(&s, ft_ns(req));
 +  }
    if (real_clock_nanosleep == NULL)
    {
@@ -356,7 +356,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -    DONT_FAKE_TIME(result = (*real_sem_clockwait)(sem, clockid, abstime));
 -    return result;
 +    bool handled;
-+    result = ft_u_sem_wait(sem, ft_uns(abs_timeout), &handled);
++    result = ft_u_sem_wait(sem, ft_ns(abs_timeout), &handled);
 +    if (handled) return result;
    }
 -
@@ -402,7 +402,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -    }
 -    real_abstime_pt = &real_abstime;
 +    bool handled;
-+    result = ft_u_sem_wait(sem, ft_uns(abstime), &handled);
++    result = ft_u_sem_wait(sem, ft_ns(abstime), &handled);
 +    if (handled) return result;
    }
 -  else
@@ -992,7 +992,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if ((faketimerc = open(custom_filename, O_RDONLY)) != -1 ||
        (faketimerc = open(filename, O_RDONLY)) != -1 ||
        (faketimerc = open("/etc/faketimerc", O_RDONLY)) != -1)
-@@ -3248,6 +3277,38 @@
+@@ -3248,6 +3277,48 @@
    tp_save.tv_nsec = tp->tv_nsec;
  
    if (dont_fake) return 0;
@@ -1020,10 +1020,20 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +      ft_tl_scale = (s.armed && s.rate > 0) ? 1.0 / s.rate : 1.0;
 +      if (s.armed)
 +      {
-+        int64_t now = (int64_t) tp->tv_sec * 1000000000LL + tp->tv_nsec, sec, nsec;
-+        ft_page_at(&s, now, &sec, &nsec);
-+        tp->tv_sec = (time_t) sec;
-+        tp->tv_nsec = (long) nsec;
++        int64_t now = (int64_t) tp->tv_sec * 1000000000LL + tp->tv_nsec, fake;
++        if (s.rate == 0 || now <= s.anchor_ns)
++          fake = s.universe_ns;
++        else if (s.rate == 1.0)
++          fake = s.universe_ns + (now - s.anchor_ns);
++        else
++          fake = s.universe_ns + (int64_t) ((double) (now - s.anchor_ns) * s.rate);
++        tp->tv_sec = fake / 1000000000LL;
++        tp->tv_nsec = fake % 1000000000LL;
++        if (tp->tv_nsec < 0)
++        {
++          tp->tv_sec -= 1;
++          tp->tv_nsec += 1000000000LL;
++        }
 +      }
 +      return 0;
 +    }
@@ -1384,7 +1394,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +  if (ft_uw_active() && ft_translates_wait(abstime) && real_pthread_mutex_clocklock != NULL)
 +  {
 +    bool handled;
-+    int r = ft_u_mutex_lock(mutex, ft_uns(abstime), &handled);
++    int r = ft_u_mutex_lock(mutex, ft_ns(abstime), &handled);
 +    if (handled) return r;
 +  }
 +  if (!ft_translates_wait(abstime) || real_pthread_mutex_clocklock == NULL)
@@ -1401,7 +1411,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +  if (ft_uw_active() && ft_translates_wait(abstime) && clockid == CLOCK_REALTIME)
 +  {
 +    bool handled;
-+    int r = ft_u_mutex_lock(mutex, ft_uns(abstime), &handled);
++    int r = ft_u_mutex_lock(mutex, ft_ns(abstime), &handled);
 +    if (handled) return r;
 +  }
 +  if (clockid != CLOCK_REALTIME || !ft_translates_wait(abstime))
