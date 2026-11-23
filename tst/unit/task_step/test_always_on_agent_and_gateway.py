@@ -43,6 +43,22 @@ async def test_the_rules_go_in_the_system_prompt_when_the_agent_takes_it(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("overrides, sent", [({}, 64000), ({"agent_max_output_tokens": 96000}, 96000)])
+async def test_the_step_s_max_output_tokens_reaches_the_agent_and_a_run_s_override_wins(monkeypatch, tmp_path,
+                                                                                         overrides, sent):
+    rig = Rig(monkeypatch, tmp_path, takes_config=True)
+    await rig.arm()
+    ctx = rig.context()
+    ctx.metadata["user_overrides"] = overrides
+    step = rig.step(max_output_tokens=64000)
+    await rig.run(step, ctx)
+
+    [(_, fields)] = [(u, f) for u, f in rig.configs if u.startswith(SOLVER)]
+    assert fields["max_output_tokens"] == sent
+    assert ao.AlwaysOnTaskStep.from_dict(step.to_dict()).max_output_tokens == 64000
+
+
+@pytest.mark.asyncio
 async def test_the_step_s_context_id_is_the_agent_s_session(monkeypatch, tmp_path):
     def agent(n, texts, rig):
         rig.message("blue or green?") if n == 1 else rig.quiet()

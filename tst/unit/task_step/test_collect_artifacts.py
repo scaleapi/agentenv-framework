@@ -59,7 +59,7 @@ def _non_cua_context():
         instance_id="inst-1",
         deployed_envs=[DeployedGatewayEnv(
             env_id="ubuntu-cua", env_version=1, gateway_url="http://gw",
-            mcp_url="http://gw", db_web_url=None, sandbox_id="vm-1",
+            mcp_url="http://gw", sandbox_id="vm-1",
             metadata={"some_other_env": True},
             environment_card_url=f"http://gw{WELL_KNOWN_PATH}", environment_card=_gateway_card(),
         )],
@@ -1092,15 +1092,14 @@ def _gateway_card(extensions: list = GATEWAY_EXTENSIONS) -> dict:
 
 def _cua_record(extensions: list = GATEWAY_EXTENSIONS) -> DeployedEnv:
     """An Ubuntu CUA env (the marker CuaEnv.deploy sets) whose stored card is the gateway's."""
-    return DeployedGatewayEnv(env_id="ubuntu-cua", env_version=1, gateway_url="http://gw", mcp_url="http://gw", db_web_url=None,
-                       sandbox_id="vm-1", metadata={"cua_vm_sandbox_id": "cua-vm-1"},
+    return DeployedGatewayEnv(env_id="ubuntu-cua", env_version=1, gateway_url="http://gw", mcp_url="http://gw", sandbox_id="vm-1", metadata={"cua_vm_sandbox_id": "cua-vm-1"},
                        environment_card_url=f"http://gw{WELL_KNOWN_PATH}", environment_card=_gateway_card(extensions))
 
 
 def _macos_record() -> DeployedEnv:
     """A macOS CUA env: the gateway (CUA MCP server, 18765) plus a distinct osworld sidecar (18768)."""
     return DeployedGatewayEnv(env_id="macos-cua", env_version=1, gateway_url="http://gw-18765", mcp_url="http://gw-18765/mcp",
-                       db_web_url=None, sandbox_id="vm-1",
+                       sandbox_id="vm-1",
                        metadata={"cua_vm_sandbox_id": "cua-vm-1", "cua_controller_url": "http://ctrl-18768"},
                        environment_card_url=f"http://gw-18765{WELL_KNOWN_PATH}", environment_card=_gateway_card())
 

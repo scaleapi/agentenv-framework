@@ -134,6 +134,8 @@ def _changelog_backup_exclusions() -> list[str]:
 class OpenCodeConfig(AgentConfig):
     model: str | None = None
     effort: str | None = None
+    # The output tokens, reasoning included, one model request may produce; None keeps OpenCode's 32,000.
+    max_output_tokens: int | None = Field(default=None, gt=0)
     system_prompt: str | None = None
     output_format: dict[str, Any] | None = None
     project_id: str | None = None
@@ -376,6 +378,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         session_id=session_id,
                         model=request.config.model,
                         effort=request.config.effort,
+                        max_output_tokens=request.config.max_output_tokens,
                         mcp_servers=dict(request.mcp_servers),
                         system_prompt=request.config.system_prompt,
                         output_format=request.config.output_format,

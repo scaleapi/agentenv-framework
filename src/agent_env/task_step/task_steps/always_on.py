@@ -239,8 +239,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
                  contact_replies_in_parallel: bool = True, time_budget_seconds: Optional[float] = None,
                  model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
-                 max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
-                 trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
+                 max_thinking_tokens: Optional[int] = None, max_output_tokens: Optional[int] = None,
+                 harness: Optional[str] = None, trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
             prompt_fields.pop(unsupported, None)
@@ -253,7 +253,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         prompt_fields["prompt"] = ""  # for prompt_agent's check; unset again below
         super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), model=model,
                          model_params=model_params, effort=effort, max_thinking_tokens=max_thinking_tokens,
-                         harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
+                         max_output_tokens=max_output_tokens, harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
         self.prompt = None
         if not user_sim:
             raise ValueError("always_on needs user_sim, the agent_name of a deploy_user_sim_agent step")
@@ -282,7 +282,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
             "scheduled_checks", "scheduled_check_min_interval", "contact_replies_in_parallel", "time_budget_seconds")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
-                      "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
+                      "max_output_tokens", "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
 
     def settle_cap_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one settle waits, whatever is still at work (queued fires, nl actions in a row): the longest
@@ -625,6 +625,7 @@ class _Run:
                    "harness": ctx.agent_harness or step.harness,
                    "max_turns": overrides.get("agent_max_turns") or step.max_turns,
                    "max_thinking_tokens": overrides.get("agent_max_thinking_tokens") or step.max_thinking_tokens,
+                   "max_output_tokens": overrides.get("agent_max_output_tokens") or step.max_output_tokens,
                    "output_format": step.output_format, "timeout_seconds": step.timeout_seconds,
                    "task_id": ctx.metadata.get("task_id"), "agentenv_tools": step.agentenv_tools,
                    "builtin_tools": card.get("builtin_tools")}

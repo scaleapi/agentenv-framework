@@ -15,11 +15,13 @@ from agent_env.store.ids import is_local_id
 from agent_env.task.task import Task, _ancestor_ids, _dependency_ids
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import StepRole, TaskStep, attach_base_fields
+from agent_env.task_step.task_steps.prompt_agent import solver_agents
 from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import (
     POOLED,
     AggregateVerifiersTaskStep,
     legacy_entry_writers,
 )
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 from agent_env.task_step.task_steps.verifiers.verifier import VerifierTaskStep
 
@@ -59,6 +61,7 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
         *_step_warnings(task.steps),
         *_headlines(task),
         *_aggregate_sources(task.steps),
+        *_judge_as_solver(task.steps),
         *_lopsided(task.steps),
         *(_unpinned(task.steps) if unpinned else ()),
         *_coverage(task),
@@ -272,6 +275,23 @@ def _named_sources(aggregate: AggregateVerifiersTaskStep, steps: Sequence[TaskSt
             else:
                 continue
             yield Finding(Severity.ERROR, "aggregate-source", f"{field} names {name!r}, {problem}", aggregate.id)
+
+
+def judges_in_solver(steps: Sequence[TaskStep]) -> list[RubricsVerifierTaskStep]:
+    """The agent judges that run in the solver's own agent: their ``agent_name`` names an agent a step prompts as the
+    agent under test (``solver_agents``), so the solver grades its own work."""
+    solver = solver_agents(steps)
+    return [step for step in steps if isinstance(step, RubricsVerifierTaskStep) and step.use_agent_judge
+            and isinstance(step.agent_name, str) and step.agent_name in solver]
+
+
+def _judge_as_solver(steps: Sequence[TaskStep]) -> Iterator[Finding]:
+    """A warning, not an error: the run still grades, but its grade is the solver's own, which may be the point."""
+    for judge in judges_in_solver(steps):
+        yield Finding(Severity.WARNING, "judge-as-solver",
+                      f"its judge runs in {judge.agent_name!r}, the agent under test, so the solver grades its own work; "
+                      "for a judge of its own, deploy a judge agent, load the files it grades into it (load_artifact "
+                      "with artifact_from_step_id) and name it in agent_name", judge.id)
 
 
 def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:

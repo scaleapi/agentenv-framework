@@ -229,8 +229,7 @@ def test_card_servers_of_a_leaf_card_is_the_env_itself_and_a_composed_card_servi
 def _record(card: dict | None, card_url: str | None = "https://env.example/.well-known/agent-env.json"):
     from agent_env.env.env import DeployedGatewayEnv
 
-    return DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None,
-                              sandbox_id="sb", environment_card_url=card_url, environment_card=card)
+    return DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", sandbox_id="sb", environment_card_url=card_url, environment_card=card)
 
 
 @pytest.mark.asyncio

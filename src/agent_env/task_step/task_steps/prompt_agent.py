@@ -176,7 +176,8 @@ class PromptAgentTaskStep(TaskStep):
     )
     # user_a2a_url stays the task's: setting it is also what tells a human counterpart from a simulator.
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
-        ("model", "model_params", "effort", "max_thinking_tokens", "harness", "user_model", "trajectory_output_prefix"),
+        ("model", "model_params", "effort", "max_thinking_tokens", "max_output_tokens", "harness", "user_model",
+         "trajectory_output_prefix"),
         FieldScope.USER)}
     DEFAULT_PROMPT_TIMEOUT_SECONDS: ClassVar[int] = 600
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 2
@@ -207,6 +208,7 @@ class PromptAgentTaskStep(TaskStep):
         max_turns: Optional[int] = None,
         output_format: Optional[dict[str, Any]] = None,
         max_thinking_tokens: Optional[int] = None,
+        max_output_tokens: Optional[int] = None,
         effort: Optional[str] = None,
         harness: Optional[str] = None,
         agentenv_tools: Optional[list[str]] = None,
@@ -258,6 +260,7 @@ class PromptAgentTaskStep(TaskStep):
         self.max_turns = max_turns
         self.output_format = output_format
         self.max_thinking_tokens = max_thinking_tokens
+        self.max_output_tokens = max_output_tokens
         self.effort = effort
         self.harness = harness
         self.agentenv_tools = agentenv_tools
@@ -323,6 +326,7 @@ class PromptAgentTaskStep(TaskStep):
         base["max_turns"] = self.max_turns
         base["output_format"] = self.output_format
         base["max_thinking_tokens"] = self.max_thinking_tokens
+        base["max_output_tokens"] = self.max_output_tokens
         base["effort"] = self.effort
         base["harness"] = self.harness
         base["agentenv_tools"] = self.agentenv_tools
@@ -361,6 +365,7 @@ class PromptAgentTaskStep(TaskStep):
             max_turns=data.get("max_turns"),
             output_format=data.get("output_format"),
             max_thinking_tokens=data.get("max_thinking_tokens"),
+            max_output_tokens=data.get("max_output_tokens"),
             effort=data.get("effort"),
             harness=data.get("harness"),
             agentenv_tools=data.get("agentenv_tools"),
@@ -572,13 +577,14 @@ class PromptAgentTaskStep(TaskStep):
         harness = context.agent_harness or self.harness
         overrides = context.metadata.get("user_overrides", {})
         max_thinking_tokens = overrides.get("agent_max_thinking_tokens") or self.max_thinking_tokens
+        max_output_tokens = overrides.get("agent_max_output_tokens") or self.max_output_tokens
         max_turns = overrides.get("agent_max_turns") or self.max_turns
 
         card = agent.a2a_card or {}
         desired_config = {
             "model": model, "system_prompt": system_prompt, "effort": effort,
             "harness": harness, "max_turns": max_turns,
-            "max_thinking_tokens": max_thinking_tokens,
+            "max_thinking_tokens": max_thinking_tokens, "max_output_tokens": max_output_tokens,
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
@@ -1712,9 +1718,24 @@ def is_prompt_step(step: Any) -> bool:
 
 def user_sim_agents(steps: Any) -> set[str]:
     """The agents a task's prompting steps talk to as their user: an always_on step's ``user_sim``, a prompt_agent
-    step's ``user_agent_name`` (its default when unset). ``steps`` are steps or step dicts."""
-    def field(step: Any, name: str) -> Any:
-        return step.get(name) if isinstance(step, dict) else getattr(step, name, None)
+    step's ``user_agent_name`` (its default when unset). ``steps`` are steps or step dicts; a name that isn't a string
+    names no agent."""
+    return {name for step in steps if is_prompt_step(step)
+            if isinstance(name := _field(step, "user_sim") or _field(step, "user_agent_name")
+                          or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME, str)}
 
-    return {field(step, "user_sim") or field(step, "user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME
-            for step in steps if is_prompt_step(step)}
+
+def solver_agents(steps: Any) -> set[str]:
+    """The agents a task's prompting steps talk to as the agent under test, not as its user (``user_sim_agents``): the
+    solver's. ``steps`` are steps or step dicts; a name that isn't a string names no agent."""
+    prompted = {name for step in steps if is_prompt_step(step) if isinstance(name := agent_name_of(step), str)}
+    return prompted - user_sim_agents(steps)
+
+
+def agent_name_of(step: Any) -> Any:
+    """The agent ``step``, a step or a step dict, names: its ``agent_name``, else the default agent's name."""
+    return _field(step, "agent_name") or PromptAgentTaskStep.DEFAULT_AGENT_NAME
+
+
+def _field(step: Any, name: str) -> Any:
+    return step.get(name) if isinstance(step, dict) else getattr(step, name, None)

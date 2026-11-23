@@ -34,7 +34,7 @@ def _context(*, card: dict | None = None, env_ids: tuple[str, ...] = ("env-x",),
     if registered_env_triggers is None:
         registered_env_triggers = {"env-x": ["v6-rate"]}
     envs = [DeployedGatewayEnv(env_id=e, env_version=1, gateway_url="http://gw", mcp_url="",
-                        db_web_url=None, sandbox_id="sb") for e in env_ids]
+                        sandbox_id="sb") for e in env_ids]
     agents = []
     if with_agent:
         agents.append(DeployedAgent(agent_name="stake-1", api_url="http://stakeholder:8000/api",
