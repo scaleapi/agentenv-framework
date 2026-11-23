@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Iterable, Mapping
 from typing import ClassVar, Optional
 
@@ -51,6 +52,26 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
 
 logger = logging.getLogger(__name__)
+
+# Some gateways issue keys that only a dedicated inference endpoint accepts, not the default
+# LiteLLM proxy. When a run is authed with such a key and the step chose no endpoint of its own,
+# the agent is pointed at that endpoint so its model calls authenticate. The key is recognised by
+# a prefix, and the endpoint URL is supplied by the deployment (``SMIG_OPENAI_BASE_URL``) rather
+# than hard-coded; unset means "no fallback" — the platform's default proxy is used, as before.
+_FALLBACK_KEY_PREFIX = "ssk"
+_FALLBACK_BASE_URL_ENV = "SMIG_OPENAI_BASE_URL"
+
+
+def _key_scoped_base_url(api_key: Optional[str]) -> Optional[str]:
+    """The LiteLLM base url a key's prefix forces when the step chose no endpoint, else None.
+
+    Returns the deployment-configured endpoint (``_FALLBACK_BASE_URL_ENV``) only for a key whose
+    prefix marks it as endpoint-scoped; otherwise None, so the caller keeps the default proxy. The
+    URL is never hard-coded here — it comes from the environment — so this is safe to open-source.
+    """
+    if not (api_key and api_key.strip().startswith(_FALLBACK_KEY_PREFIX)):
+        return None
+    return os.environ.get(_FALLBACK_BASE_URL_ENV) or None
 
 
 def linked_sandbox_problem(sandbox_name: str, sandbox_mode: str, ports: Iterable[int | str]) -> str | None:
@@ -567,9 +588,20 @@ class DeployAgentTaskStep(TaskStep):
         step's."""
         overrides = {**context.metadata.get("user_overrides", {}), **self.step_param_overrides(context)}
         endpoint = {}
+        api_key = None
         if overrides.get("litellm_api_key"):
-            endpoint["LITELLM_API_KEY"] = get_config().resolve_reference(overrides["litellm_api_key"])
-        if base_url := overrides.get("litellm_base_url") or self.litellm_base_url:
+            api_key = get_config().resolve_reference(overrides["litellm_api_key"])
+            endpoint["LITELLM_API_KEY"] = api_key
+        # Explicit endpoints win — step_params/run override, the step's field, or a base baked into
+        # the step's env_vars (which this dict is merged over) — then the run key's prefix selects
+        # one. Per-agent: each deploy_agent step resolves its own, so another agent's choice stands.
+        base_url = (
+            overrides.get("litellm_base_url")
+            or self.litellm_base_url
+            or (self.env_vars or {}).get("LITELLM_BASE_URL")
+            or _key_scoped_base_url(api_key)
+        )
+        if base_url:
             endpoint["LITELLM_BASE_URL"] = base_url
         return endpoint
 
