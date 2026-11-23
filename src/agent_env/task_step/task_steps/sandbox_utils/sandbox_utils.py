@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
+from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_sandbox_provider
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,15 @@ _STREAM_TAIL_CHARS = 500
 def agent_error_text(error_message: Optional[str], response_text: Optional[str]) -> str:
     """The agent's own failure text, bounded: its ``error_message``, else its response."""
     return (error_message or response_text or "")[:_AGENT_ERROR_TEXT_LIMIT]
+
+
+def ended_turn_error(state: Any, reply: TerminalResponse) -> str:
+    """Why an A2A turn ended without completing, for a record: its state, then the agent's own error type and text
+    (``state failed: error_type=api_error: ...``), so the cause survives the sandbox."""
+    detail = ", ".join(f"{k}={v}" for k, v in (("error_type", reply.error_type), ("error_code", reply.error_code),
+                                                ("exception", reply.error_class)) if v)
+    text = agent_error_text(reply.error_message, reply.response_text)
+    return ": ".join(part for part in (f"state {state}", detail, text) if part)
 
 
 async def fetch_container_logs(agent, tail: int = 500) -> Optional[str]:
