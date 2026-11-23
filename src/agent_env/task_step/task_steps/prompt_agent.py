@@ -1439,6 +1439,8 @@ class _BuiltInUserSim:
         self.replies = 0
         self.error: Optional[str] = None  # the user sim's error, once a read ended on one
         self.instructions: Optional[str] = None  # its system prompt, as the user-sim gate's judge reads it
+        # The last read stored whole: its object key and what was stored, so a rewrite can store what replaced it.
+        self._stored: Optional[tuple[str, dict]] = None
 
     @classmethod
     async def start(cls, step: PromptAgentTaskStep, context: TaskStepContext, record: dict, zone: str,
@@ -1517,6 +1519,7 @@ class _BuiltInUserSim:
             reads[-1].setdefault("first_message", reads[-1].get("message"))
             reads[-1].setdefault("gate_rewrites", []).append(rewrite)
             reads[-1].update({k: v for k, v in rewrite.items() if k in ("outcome", "message", "used", "schema_errors")})
+            await self._restore(reads[-1])
         outcome, said = ans.get("outcome"), (ans.get("message") or "").strip()
         if self.history:
             held = self.history[-1]["answer"]
@@ -1538,6 +1541,30 @@ class _BuiltInUserSim:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
         return {"end": "user_done" if outcome == "done" else "user_no_reply"}
 
+    async def _restore(self, summary: dict) -> None:
+        """Store the read again with the answer a rewrite put in its summary, and point the summary's ``object_url`` at
+        it, so the stored read, which the user-sim judge reads over the summary, holds the message that reached the
+        agent, as always_on's does. The store is write-once: the read as first stored stays at its own key."""
+        if self._stored is None or self._stored[1].get("turn") != summary.get("turn"):
+            return
+        full = self._stored[1]
+        full.update({k: summary[k] for k in ("outcome", "message", "used", "schema_errors", "first_message",
+                                              "gate_rewrites") if k in summary})
+        try:
+            key = self._read_key(full["turn"])
+            summary["object_url"] = await asyncio.to_thread(
+                get_config().get_object_store().put, key, json.dumps(full, indent=1, default=str).encode(),
+                content_type="application/json")
+            self._stored = (key, full)
+        except Exception as e:
+            logger.warning(f"prompt_agent '{self._step.id}': could not store user sim read {full['turn']} again: {e}")
+            summary["store_error"] = f"{type(e).__name__}: {str(e)[:300]}"
+
+    def _read_key(self, number: int) -> str:
+        """A fresh object key for read ``number`` of this step."""
+        return (f"{get_config().get_artifact_key_prefix()}prompt_agent_user_sim_reads/"
+                f"instance_id={self._context.instance_id or 'adhoc'}/{self._step.id}-{number}-{uuid.uuid4().hex[:8]}.json")
+
     async def _record(self, number: int, read: dict, ans: dict, calls: list[dict], error: Optional[str]) -> None:
         """Record the read as always_on does: a summary in ``metadata["user_sim_reads"][step_id]``, the whole read (what
         the user sim was shown, and its raw answers) in the object store at the summary's ``object_url``."""
@@ -1550,13 +1577,11 @@ class _BuiltInUserSim:
         if ans.get("first_answer"):  # its raw answer is in the stored read
             summary["first_answer"] = {"schema_errors": ans["first_answer"].get("schema_errors")}
         try:
-            config = get_config()
-            key = (f"{config.get_artifact_key_prefix()}prompt_agent_user_sim_reads/"
-                   f"instance_id={self._context.instance_id or 'adhoc'}/"
-                   f"{self._step.id}-{number}-{uuid.uuid4().hex[:8]}.json")
+            key = self._read_key(number)
             summary["object_url"] = await asyncio.to_thread(
-                config.get_object_store().put, key, json.dumps(full, indent=1, default=str).encode(),
+                get_config().get_object_store().put, key, json.dumps(full, indent=1, default=str).encode(),
                 content_type="application/json")
+            self._stored = (key, full)
         except Exception as e:
             logger.warning(f"prompt_agent '{self._step.id}': could not store user sim read {number}: {e}")
             summary["store_error"] = f"{type(e).__name__}: {str(e)[:300]}"

@@ -16,6 +16,7 @@ from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS
 from agent_env.task_step.task_steps import prompt_agent as pa
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, StoredTrajectory
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.user_sim_judge import _chat_reads
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step
 from tst.unit.task_step.test_prompt_agent_user_side import (
     _SWAP, AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, pattern_judge, text)  # noqa: F401
@@ -446,6 +447,12 @@ async def test_the_gate_holds_back_a_built_in_users_answer_that_reads_as_the_ass
     assert [(r["outcome"], r["message"], r["used"]) for r in first["gate_rewrites"]] == [
         ("reply", "do those numbers hold up?", "D1")]
     assert "user_sim_invalid" not in ctx.metadata
+    # The stored read says the same, and the user-sim judge, which reads it over the summary, grades what was sent.
+    stored = _full(first)
+    assert (stored["message"], stored["used"], stored["first_message"]) == ("do those numbers hold up?", "D1", _SWAP)
+    assert stored["gate_rewrites"] == first["gate_rewrites"] and stored["raw"] is not None
+    judged, _ = _chat_reads(_reads(ctx))
+    assert judged[0]["message"] == "do those numbers hold up?"
 
 
 @pytest.mark.asyncio
