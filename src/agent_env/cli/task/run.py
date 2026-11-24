@@ -27,7 +27,7 @@ from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, attempt_epoch, kind, record_teardown, teardown_run
-from agent_env.task.usage.summary import combine, summarize
+from agent_env.task.usage.summary import summarize
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.context_ops import build_context_update_ops
@@ -494,14 +494,14 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
 def _echo_usage(runs, k: int) -> None:
     """Each run's cost by role and model from its ledger, the runs' total when there were several, and where the costs
     came from."""
-    summaries = [(run.tag, summarize(run.instance.usage) if run.instance else None) for run in runs]
-    for tag, summary in summaries:
-        if cost := cost_line(summary):
+    ledgers = [(run.tag, run.instance.usage if run.instance else []) for run in runs]
+    for tag, ledger in ledgers:
+        if cost := cost_line(summarize(ledger)):
             click.echo(f"{tag} {cost}" if tag else cost)
-    if k > 1 and (cost := cost_line(combine(summary for _, summary in summaries), f"Cost over {k} runs",
-                                    attempts=False)):
+    total = summarize(entry for _, ledger in ledgers for entry in ledger)
+    if k > 1 and (cost := cost_line(total, f"Cost over {k} runs", attempts=False)):
         click.echo(cost)
-    if sources := sources_line(summary for _, summary in summaries):
+    if sources := sources_line(total):
         click.echo(sources)
 
 

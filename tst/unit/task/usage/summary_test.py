@@ -5,7 +5,7 @@ lines the run summaries print from it."""
 import pytest
 
 from agent_env.cli.usage_output import cost_line, sources_line
-from agent_env.task.usage.summary import combine, summarize
+from agent_env.task.usage.summary import summarize
 
 
 def _entry(role, model, input_tokens, output_tokens, cost, attempt=0, **more):
@@ -71,7 +71,6 @@ def test_a_cost_priced_on_an_assumed_rate_is_at_most_and_with_uncounted_usage_an
         "cost: estimated $0.0004 (solver gpt-4.1-mini at most $0.0004")
     assert cost_line(summarize([assumed, _entry("solver", "gpt-4.1-mini", 100, 1, None)])) == (
         "cost: estimated $0.0004 (solver gpt-4.1-mini estimated $0.0004, 1.1k in, 11 out)")
-    assert combine([summarize([_entry("judge", "j", 1, 1, 0.1)]), summarize([assumed])]).upper_bound
     assert cost_line(summarize([assumed, _entry("solver", "gpt-4.1-mini", 100, 1, 0.0001, running=True)])) == (
         "cost: estimated $0.0005 (solver gpt-4.1-mini estimated $0.0005, 1.1k in, 11 out, partial)")
 
@@ -104,17 +103,16 @@ def test_every_attempt_counts_and_is_named_when_there_were_more_than_one():
     assert "attempts" not in cost_line(summary, "cost over 1 run", attempts=False)
 
 
-def test_runs_combine_into_an_evals_total_by_role_and_model():
-    first = summarize([_entry("solver", "gpt-4.1-mini", 1000, 10, 0.0004)])
-    second = summarize([_entry("solver", "gpt-4.1-mini", 2000, 20, 0.0008),
-                        _entry("judge", "mystery-1", 500, 5, None)])
+def test_runs_ledgers_together_are_an_evals_total_by_role_and_model():
+    first = [_entry("solver", "gpt-4.1-mini", 1000, 10, 0.0004)]
+    second = [_entry("solver", "gpt-4.1-mini", 2000, 20, 0.0008), _entry("judge", "mystery-1", 500, 5, None)]
 
-    total = combine([first, None, second])
+    total = summarize([*first, *second])
 
     assert [(s.role, s.model, s.input_tokens, s.cost_usd, s.unpriced) for s in total.shares] == [
         ("solver", "gpt-4.1-mini", 3000, pytest.approx(0.0012), False), ("judge", "mystery-1", 500, None, True)]
     assert total.cost_usd == pytest.approx(0.0012) and total.lower_bound
-    assert combine([None]) is None and summarize([]) is None and cost_line(None) is None
+    assert summarize([]) is None and cost_line(None) is None
 
 
 def test_counts_and_costs_read_at_a_glance():
@@ -124,11 +122,11 @@ def test_counts_and_costs_read_at_a_glance():
 
 
 def test_the_closing_line_names_each_source_of_the_costs():
-    priced = summarize([_entry("solver", "m", 1, 1, 0.1)])
-    reported = summarize([{**_entry("judge", "j", 1, 1, 0.2), "cost_source": "harness"},
-                          {**_entry("user_simulator", "u", 1, 1, 0.3), "cost_source": "provider"}])
+    priced = [_entry("solver", "m", 1, 1, 0.1)]
+    reported = [{**_entry("judge", "j", 1, 1, 0.2), "cost_source": "harness"},
+                {**_entry("user_simulator", "u", 1, 1, 0.3), "cost_source": "provider"}]
 
-    assert sources_line([priced]) == "Costs priced from LiteLLM's price map, litellm@1.80.0."
-    assert sources_line([priced, reported]) == ("Costs priced from LiteLLM's price map, litellm@1.80.0; the endpoint's "
-                                                "bills; agents' own figures.")
-    assert sources_line([summarize([_entry("judge", "x", 1, 1, None)]), None]) is None
+    assert sources_line(summarize(priced)) == "Costs priced from LiteLLM's price map, litellm@1.80.0."
+    assert sources_line(summarize([*priced, *reported])) == (
+        "Costs priced from LiteLLM's price map, litellm@1.80.0; the endpoint's bills; agents' own figures.")
+    assert sources_line(summarize([_entry("judge", "x", 1, 1, None)])) is None and sources_line(None) is None

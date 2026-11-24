@@ -13,7 +13,7 @@ from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.usage_output import cost_line, sources_line
 from agent_env.store.ids import fs_safe
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.usage.summary import combine, summarize
+from agent_env.task.usage.summary import summarize
 from agent_env.task_step.context import TaskStepContext
 
 
@@ -99,13 +99,14 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
     # Summarize results
     failures = []
     successes = []
-    usage = []
+    entries = []
     for run in runs:
         context = run.instance.context if run.instance else None
         if output_dir and context is not None:
             _write_context(TaskStepContext.from_dict(context), run.task.id, output_dir, prefix=f"{run.tag} ")
-        summary = summarize(run.instance.usage) if run.instance else None
-        usage.append(summary)
+        ledger = run.instance.usage if run.instance else []
+        summary = summarize(ledger)
+        entries += ledger
         if run.completed:
             successes.append((run.tag, (context or {}).get("metadata", {}).get("score"), summary))
         else:
@@ -130,9 +131,10 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         ))
     else:
         click.echo(click.style(f"\nAll {total_runs} runs completed!", fg="blue"))
-    if cost := cost_line(combine(usage), f"Cost over {len(runs)} runs", attempts=False):
+    total = summarize(entries)
+    if cost := cost_line(total, f"Cost over {len(runs)} runs", attempts=False):
         click.echo(cost)
-    if sources := sources_line(usage):
+    if sources := sources_line(total):
         click.echo(sources)
     if interrupts.count:
         raise SystemExit(128 + interrupts.signum)

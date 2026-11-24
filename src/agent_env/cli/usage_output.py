@@ -3,43 +3,38 @@ naming where the costs came from."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from agent_env.config.model import ModelRole
+from agent_env.config.model_pricing import ReportedBy
 from agent_env.task.usage.summary import Share, UsageSummary
 
 _ROLE_NAMES = {role.value: role.record_key for role in ModelRole}
-# The cost sources that aren't the price map, as ``cost_source`` names them, in the order they're named.
-_REPORTED = (("provider", "the endpoint's bills"), ("harness", "agents' own figures"))
+# The cost sources that aren't the price map, in the order they're named.
+_REPORTED = {ReportedBy.PROVIDER: "the endpoint's bills", ReportedBy.HARNESS: "agents' own figures"}
 
 
 def cost_line(summary: UsageSummary | None, label: str = "cost", attempts: bool = True) -> str | None:
-    """``cost: $0.0532 (solver gpt-4.1-mini $0.0412, 115k in, 1.2k out; judge ...)``, the cost bounded as ``_bounded``
-    says and, with ``attempts``, the attempts named when there were more than one; None for no usage."""
+    """``cost: $0.0532 (solver gpt-4.1-mini $0.0412, 115k in, 1.2k out; judge ...)``, each cost as ``_cost`` gives it
+    and, with ``attempts``, the attempts named when there were more than one; None for no usage."""
     if summary is None:
         return None
-    total = "unpriced" if summary.cost_usd is None else _bounded(summary.cost_usd, summary.lower_bound,
-                                                                 summary.upper_bound)
     parts = [f"{summary.attempts} attempts"] if attempts and summary.attempts > 1 else []
-    return f"{label}: {total} ({'; '.join([*parts, *map(_share, summary.shares)])})"
+    return f"{label}: {_cost(summary)} ({'; '.join([*parts, *map(_share, summary.shares)])})"
 
 
-def sources_line(summaries: Iterable[UsageSummary | None]) -> str | None:
-    """Where the summaries' costs came from, as ``Costs priced from LiteLLM's price map, litellm@1.80.0.``; None when
-    none was priced."""
-    sources = {source for summary in summaries if summary is not None for source in summary.sources}
+def sources_line(summary: UsageSummary | None) -> str | None:
+    """Where ``summary``'s costs came from, as ``Costs priced from LiteLLM's price map, litellm@1.80.0.``; None when
+    nothing was priced."""
+    sources = summary.sources if summary is not None else ()
     if not sources:
         return None
-    named = [f"LiteLLM's price map, {source}" for source in sorted(sources) if source.startswith("litellm@")]
-    named += [name for source, name in _REPORTED if source in sources]
-    named += sorted(source for source in sources if not source.startswith("litellm@") and source not in dict(_REPORTED))
+    named = [f"LiteLLM's price map, {source}" for source in sources if source.startswith("litellm@")]
+    named += [name for source, name in _REPORTED.items() if source in sources]
+    named += [source for source in sources if not source.startswith("litellm@") and source not in _REPORTED]
     return f"Costs priced from {'; '.join(named)}."
 
 
 def _share(share: Share) -> str:
-    cost = "unpriced" if share.cost_usd is None else _bounded(share.cost_usd, share.unpriced or share.partial,
-                                                              share.assumed)
-    words = [f"{_ROLE_NAMES.get(share.role, share.role)} {share.model or 'an unnamed model'} {cost}"]
+    words = [f"{_ROLE_NAMES.get(share.role, share.role)} {share.model or 'an unnamed model'} {_cost(share)}"]
     if share.input_tokens is not None:
         words.append(f"{_count(share.input_tokens)} in")
     if share.output_tokens is not None:
@@ -49,11 +44,14 @@ def _share(share: Share) -> str:
     return ", ".join(words)
 
 
-def _bounded(usd: float, lower: bool, upper: bool) -> str:
-    """``usd`` with what it is: ``at least`` when some usage went uncounted, ``at most`` when some was priced on an
-    assumed rate, ``estimated`` when both."""
+def _cost(of: UsageSummary | Share) -> str:
+    """``of``'s cost with what it is: ``at least`` when some usage went unpriced or uncounted, ``at most`` when some
+    was priced on an assumed rate, ``estimated`` when both, and ``unpriced`` when nothing was priced."""
+    if of.cost_usd is None:
+        return "unpriced"
+    lower, upper = of.lower_bound, of.upper_bound
     word = "estimated " if lower and upper else "at least " if lower else "at most " if upper else ""
-    return f"{word}{_dollars(usd)}"
+    return f"{word}{_dollars(of.cost_usd)}"
 
 
 def _dollars(usd: float) -> str:
