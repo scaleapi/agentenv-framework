@@ -85,14 +85,11 @@ def test_a_map_that_cant_be_read_prices_nothing_and_says_why(monkeypatch, caplog
     assert "Usage stays unpriced, since LiteLLM's price map can't be read" in caplog.text
 
 
-def test_a_routing_prefix_is_stripped_to_find_a_model():
-    assert TABLE.lookup("openai/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini") is not None
-    assert TABLE.lookup("meta-llama/Llama-3-70b") is TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b") is not None
-
-
 def test_each_leading_route_segment_is_dropped_in_turn_to_find_a_model():
-    assert TABLE.lookup("vertex_ai/global/gpt-4o-mini") is TABLE.lookup("openrouter/openai/gpt-4o-mini") is not None
+    assert TABLE.lookup("openai/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini") is not None
+    assert TABLE.lookup("vertex_ai/global/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini")
     assert TABLE.lookup("openrouter/openai/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini")
+    assert TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b") is TABLE.lookup("meta-llama/Llama-3-70b") is not None
     assert TABLE.lookup("bedrock/converse/meta-llama/Llama-3-70b") is TABLE.lookup("meta-llama/Llama-3-70b")
     assert _judge(USAGE, "vertex_ai/global/gpt-4o-mini").usd == _judge(USAGE).usd is not None
 

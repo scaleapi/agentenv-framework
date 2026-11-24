@@ -93,13 +93,13 @@ class PriceTable:
         """``model``'s prices: the entry named as called, else without its leading ``/`` segments, dropped one at a time
         (``vertex_ai/global/<model>``), then each again without a trailing bracketed tag (``claude-opus-5-5[1m]``); None,
         never a zero price, when there's none. No name in the map carries a bracket, so a tag never hides an entry."""
-        for name in (*_unrouted(model), *_unrouted(_TRAILING_TAG.sub("", model))):
+        for name in (*_route_drops(model), *_route_drops(_TRAILING_TAG.sub("", model))):
             if name in self.entries:
                 return self.entries[name]
         return None
 
 
-def _unrouted(model: str) -> list[str]:
+def _route_drops(model: str) -> list[str]:
     """``model``, then it without each of its leading ``/`` segments in turn, the routes gateways read."""
     parts = model.split("/")
     return ["/".join(parts[i:]) for i in range(len(parts))]
