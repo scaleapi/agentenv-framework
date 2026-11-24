@@ -403,9 +403,11 @@ orchestrators call it the same way. What callers rely on:
   (`usage.ledger.ahead`), and the step's completion replaces them with its final entries. A re-register keeps it, so
   it holds every attempt and generation. `task/usage/summary.py` sums it by role, then by model, for the run summaries
   (`agent-env run`, `eval run`, `task run`), unpriced usage counted apart, never as $0, and a cost priced on an
-  assumed rate (`cost_assumed`) shown as at most. A runner that doesn't set `ATTEMPT_EPOCH` writes entries with no
-  attempt, kept by step and role alone: exact for a run without retries, a lower bound for one with. A runner that
-  writes the instance some other way loses that spend from the ledger.
+  assumed rate (`cost_assumed`) shown as at most. Its `to_dict` is the summary's one JSON shape, with the `Bound` the
+  CLI prints (`exact`, `at_least`, `at_most`, `estimated`, `unpriced`), for any reader that shows a run's cost. A
+  runner that doesn't set `ATTEMPT_EPOCH` writes entries with no attempt, kept by step and role alone: exact for a run
+  without retries, a lower bound for one with. A runner that writes the instance some other way loses that spend
+  from the ledger.
 - The runner writes its run identifier to `context.metadata["workflow_id"]` before calling `run()`;
   core stores it opaquely with the instance.
 - Each step runs under `protocol_v1.authorized` for the deployed envs in its context: a protocol-client
