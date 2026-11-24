@@ -64,9 +64,10 @@ PRESETS: dict[str, str] = {
 # The milestone preset: a post-turn hook checks the work and tells the user what it found in a note only they see.
 MILESTONE_LINES = (
     "After the assistant's reply you may get a note that only you see: what you found when you checked its work "
-    "yourself. Trust the note over what the reply says about itself. If it says something isn't done, bring it up in "
-    "your own words, never more specifically than the note: no answer, figure, name or record it doesn't give you. "
-    "Move on only when the note says so, and when it gives you a line to send next, send that line word for word.")
+    "yourself. Trust the note over what the reply says about itself. If it says something isn't done, always reply "
+    "(never no reply) and bring it up in your own words, never more specifically than the note: no answer, figure, "
+    "name or record it doesn't give you, not even one from the assistant's own reply. Move on only when the note says "
+    "so, and when it gives you a line to send next, send that line word for word.")
 DONE_MILESTONE = ('Answer "done" only after the note says everything is done and you\'ve sent your last line; until '
                   'then, keep the chat going.')
 # The parts of the prompt or the run a judge's rule may depend on (see ``features``).

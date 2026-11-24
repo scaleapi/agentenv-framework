@@ -44,7 +44,7 @@ It goes away once the step can learn it from the task.
 |---|---|---|
 | `chat` | One conversation with a `prompt_agent`; done ends it. `multi_day: false` | Nothing: the prompt is today's single-session one |
 | `always_on` | An `always_on` run; the user reads emails, texts and notifications between messages | Nothing: the prompt is today's multi-day one |
-| `milestone` | One conversation in steps that a `prompt_agent` post-turn hook checks (such as milestone-gates). `multi_day: false` | The prompt tells the user to trust the hook's note over the reply, press on what it raises in their own words and never more specifically, move on only when it says so, send the line it gives word for word, and answer done only after it says everything is done |
+| `milestone` | One conversation in steps that a `prompt_agent` post-turn hook checks (such as milestone-gates). `multi_day: false` | The prompt tells the user to trust the hook's note over the reply, always reply while it says something isn't done, press on what it raises in their own words and never more specifically (not even with names from the assistant's own reply), move on only when it says so, send the line it gives word for word, and answer done only after it says everything is done |
 
 Without a preset the user is `chat` or `always_on` by `multi_day`, as before. The task is refused when it loads if a
 `milestone` user's `prompt_agent` has no `post_turn_hooks`, if no `prompt_agent` talks to it, or if an `always_on`
