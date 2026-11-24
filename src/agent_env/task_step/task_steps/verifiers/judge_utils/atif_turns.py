@@ -16,7 +16,16 @@ from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from agentenv_protocol.atif import FORMAT, AtifError, check_media, media_file, media_paths, tasks, tasks_document
+from agentenv_protocol.atif import (
+    FORMAT,
+    AtifError,
+    check_media,
+    media_file,
+    media_paths,
+    profile_of,
+    tasks,
+    tasks_document,
+)
 
 from agent_env.config import get_config
 from agent_env.store.base import NotFoundError
@@ -192,6 +201,12 @@ def _has_image(content: Any) -> bool:
                                              for part in content)
 
 
+def is_compaction(step: Mapping[str, Any]) -> bool:
+    """Whether ``step`` is a compaction's: a summary a model call wrote to replace the conversation, the harness's
+    doing rather than the agent speaking."""
+    return profile_of(step).get("compaction") is not None
+
+
 def steps_of(trajectory: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """A trajectory's steps a reader can walk: a stored copy may be invalid, and is still graded as stored."""
     steps = trajectory.get("steps")
@@ -273,7 +288,7 @@ def compact_atif_trajectory(
 
     def walk(trajectory: Mapping[str, Any], tag: Mapping[str, Any]) -> None:
         for step in steps_of(trajectory):
-            if step.get("source") != "agent":
+            if step.get("source") != "agent" or is_compaction(step):
                 continue
             timestamp = step.get("timestamp") or ""
             if trajectory_filter.include_thinking and step.get("reasoning_content"):
@@ -302,8 +317,8 @@ def compact_atif_trajectory(
 
     walk(document, {})
     if trajectory_filter.include_response:
-        final = next((step for step in reversed(steps_of(document))
-                      if step.get("source") == "agent" and content_text(step.get("message")).strip()), None)
+        final = next((step for step in reversed(steps_of(document)) if step.get("source") == "agent"
+                      and not is_compaction(step) and content_text(step.get("message")).strip()), None)
         if final is not None:
             events.append({"type": "final_response", "text": content_text(final.get("message")),
                            "timestamp": final.get("timestamp") or ""})
@@ -325,7 +340,7 @@ def transcript_from_atif(
 
     def walk(trajectory: Mapping[str, Any]) -> None:
         for step in steps_of(trajectory):
-            if step.get("source") != "agent":
+            if step.get("source") != "agent" or is_compaction(step):
                 continue
             text = content_text(step.get("message"))
             if text.strip():

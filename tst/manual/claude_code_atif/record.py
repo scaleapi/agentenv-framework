@@ -64,6 +64,9 @@ def scenarios(thinking_model: str) -> dict[str, dict]:
         "retried": {"faults": "stall", "env": {"CLAUDE_API_ERROR_RETRIES": "1", "API_TIMEOUT_MS": "15000"},
                     "prompts": ["Run `echo first` with your Bash tool, then run `echo second` with it, then reply "
                                 "with both outputs on one line."]},
+        "autocompacted": {"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "20"}, "prompts": [
+            "Create big.txt holding 3000 numbered lines of filler text with one Bash command, print it whole with cat, "
+            "then reply with only its last line."]},
         "compacted": {"prompts": [
             "Create notes.txt holding three lines, alpha, beta and gamma, with your Bash tool, then reply with only ok.",
             "/compact",

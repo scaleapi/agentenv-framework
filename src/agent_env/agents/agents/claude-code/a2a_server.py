@@ -432,6 +432,21 @@ def _builds_atif(request: TaskRequest[ClaudeCodeConfig]) -> bool:
     return getattr(request.trajectory, "builds_atif", True)
 
 
+def _turn_record(usage: Usage) -> dict[str, Any]:
+    """The turn as the atif/1 adapter's ``turn`` record: its cost, and its token counts as a session record counts a
+    call's, the uncached input apart from the cache, unless they're a lower bound (calls no tally counted), with the
+    model when it was one."""
+    record: dict[str, Any] = {"type": "turn", "cost_usd": usage.cost_usd}
+    if usage.input_tokens is None or usage.provider_details.get("unreported_calls"):
+        return record
+    cached = (usage.cache_read_tokens or 0) + (usage.cache_write_tokens or 0) if usage.input_includes_cache else 0
+    record.update(input_tokens=usage.input_tokens - cached, output_tokens=usage.output_tokens or 0,
+                  cache_read_tokens=usage.cache_read_tokens or 0, cache_write_tokens=usage.cache_write_tokens or 0)
+    if len(usage.models) == 1:
+        record["model"] = usage.models[0].model
+    return record
+
+
 def _usage(result: ClaudeResult) -> Usage:
     """The turn's tool calls and token counts, with ``input_tokens`` counting the cache. The counts are the CLI's own
     tally for the turn (``_turn_tally``), which covers every call, its subagents' too, and its cost; the turn's
@@ -602,8 +617,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             self.set_session_ref_for_context(context_id, session_id)
 
         usage = _usage(result)
-        if usage.cost_usd is not None and _builds_atif(request):
-            request.trajectory.aux("turn", {"type": "turn", "cost_usd": usage.cost_usd})
+        if _builds_atif(request):
+            request.trajectory.aux("turn", _turn_record(usage))
         data: dict[str, Any] = {"tool_call_count": result.tool_call_count}
         if result.attempts > 1:
             data["cli_attempts"] = result.attempts
