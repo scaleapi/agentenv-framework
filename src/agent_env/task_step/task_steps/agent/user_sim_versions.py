@@ -232,7 +232,7 @@ def retry_line(person: dict) -> str:
     return "Your last answer wasn't in the required format. Answer again, only as JSON: " + answer_line(person)
 
 
-def _allowed(person: dict, parsed: dict) -> dict:
+def allowed(person: dict, parsed: dict) -> dict:
     """An answer whose outcome this user may not give (a no_reply, or an empty reply, from one who always answers) is a
     format error: retried once, and recorded as such if the retry is no better."""
     allowed = outcomes(person)
@@ -552,11 +552,11 @@ async def answer(version: str, person: dict, history: list[dict], read: dict,
     if text is None:
         return {"outcome": "no_reply", "message": "", "used": None, "input": None, "raw": None, "turns": 0}
     got = await ask(text)
-    first = _allowed(person, _parsed(got))
+    first = allowed(person, _parsed(got))
     if not first["schema_errors"] or got.get("error"):
         return {**first, "input": text, "raw": got.get("text"), "retried": False}
     again = await ask(retry_line(person))
-    second = _allowed(person, _parsed(again))
+    second = allowed(person, _parsed(again))
     if second["schema_errors"]:
         second["schema_errors"] = ([f"first answer: {e}" for e in first["schema_errors"]]
                                    + [f"answer after the retry: {e}" for e in second["schema_errors"]])

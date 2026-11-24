@@ -610,8 +610,8 @@ async def test_a_user_who_always_answers_and_says_no_reply_is_asked_again_in_the
 
 @pytest.mark.asyncio
 async def test_a_milestone_user_who_keeps_answering_no_reply_to_a_note_ends_the_run_as_a_user_sim_error(monkeypatch):
-    # The format retry first, then the guard's tries: none of them a reply.
-    Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")] * (2 + pa.NOTE_REPLY_TRIES)})
+    # The format retry first, then the guard's tries, each with its own format retry: none of them a reply.
+    Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")] * (2 + 2 * pa.NOTE_REPLY_TRIES)})
     ctx = await _context(monkeypatch, preset="milestone")
 
     result = await _noted().execute(ctx)
@@ -645,7 +645,8 @@ async def test_a_milestone_users_gate_rewrite_that_comes_back_as_no_reply_is_ask
                  post_turn_hooks=[{"file_artifact_id": hook, "params": {}}])
     result = await step.execute(ctx)
 
-    # The gate held the swap back; its rewrite came back as no_reply and was asked again, so the turn went on.
+    # The gate held the swap back; its rewrite came back as no_reply, which a milestone user may not give, so it was
+    # asked again in the answer's own format, and the turn went on.
     assert _to_agent(peers, ctx)[:2] == ["plan my parents' visit", "who else should be on it?"]
-    assert ctx.metadata["user_sim_note_retries"]["talk"] == [{"turn": 1}]
+    assert _asked_user(peers, ctx)[2] == user_sim_versions.retry_line({"preset": "milestone"})
     assert "user_sim_invalid" not in ctx.metadata and result.prompt_responses[-1].error_type is None

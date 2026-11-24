@@ -126,7 +126,12 @@ async def _post_turn(turn, spec):
     gates = await _run_gates(turn, spec, env, m, state)
     failed = [g for g in gates if g["passed"] is False]
     entry = {"milestone": m["id"], "gates": gates}
-    unchecked = bool(gates) and all(g["passed"] is None for g in gates)
+    checks = {g["id"]: g["check"] for g in m["gates"]}
+    # Unknown: no gate checked at all, or a tool/state gate (not a judge) that couldn't be checked, such as a no_new
+    # gate whose baseline couldn't be read. Either way the milestone isn't shown done. A judge that can't answer
+    # doesn't hold it up (see _judge).
+    unchecked = bool(gates) and (all(g["passed"] is None for g in gates) or any(
+        g["passed"] is None and not _costly(checks[g["id"]]) for g in gates if g["id"] in checks))
     if turn.last:  # nothing more can be asked: record where it stood, passed if its gates passed on this turn
         turn.record({**entry, "decision": "last_turn", "nudges": state["nudges"],
                      "passed": not failed and not unchecked})
@@ -198,6 +203,7 @@ def _gate_type(check: dict) -> str:
 def _summary(spec: dict, records: list[dict]) -> dict:
     """Where the conversation got to, from this hook's records, for whoever grades it (Turn.summarize): each
     milestone's status (not_reached, open, passed, skipped (done before it opened), gave_up (let go after max_nudges),
+    undone (done, then broken while the agent answered the wrap-up),
     passed_over (the user sim moved past it), derailed (a blocking one that never passed, which ended the run)), the
     turn it opened and closed, nudges spent, and each gate's last verdict and type; then the furthest milestone
     reached, how many were done, and the end reason once the hook ended the conversation."""
@@ -241,8 +247,11 @@ def _summary(spec: dict, records: list[dict]) -> dict:
         if r.get("decision") == "done":
             end = "milestones_done"
             final = r.get("gates") or []
-            if row is not None and final and all(g["passed"] for g in final) and row["status"] != "passed":
-                row.update(status="passed", closed_turn=turn)  # done in the end, after the wrap-up
+            if row is not None and final:
+                if all(g["passed"] for g in final) and row["status"] not in ("passed", "skipped"):
+                    row.update(status="passed", closed_turn=turn)  # done in the end, after the wrap-up
+                elif any(g["passed"] is False for g in final) and row["status"] in ("passed", "skipped"):
+                    row.update(status="undone", closed_turn=turn)  # done before, broken while answering the wrap-up
         elif r.get("decision") == "end":
             end = r.get("end")
     reached = [row["id"] for row in rows if row["status"] != "not_reached"]
@@ -291,9 +300,12 @@ async def _advance(turn, spec, env, state, entry, how):
         let_go = how == "gave_up" or any(r.get("decision") == "gave_up" for r in turn.records())
         final = spec["final_note_gave_up"] if let_go else spec["final_note"]
         note = (f"{head} " if how == "gave_up" or skipped else "") + final
-        # The last milestone stays the one checked: its baselines carry over for the final check after the wrap-up.
-        record = {**entry, "decision": how, "next_index": state["index"], "wrap_up": True, "note": note,
-                  "baselines": state["baselines"]}
+        # The final check after the wrap-up reads the last milestone: the open one, or the last one skipped as done
+        # (its baselines taken now, as the skip took them).
+        last = len(milestones) - 1 if skipped else state["index"]
+        baselines = state["baselines"] if last == state["index"] else await _baselines(env, spec, milestones[last])
+        record = {**entry, "decision": how, "next_index": last, "wrap_up": True, "note": note,
+                  "baselines": baselines}
     if skipped:
         record["skipped"] = skipped
     answer = await turn.ask_user(note=note)
@@ -463,15 +475,20 @@ def _baseline_key(m: dict, gate_id: str, i: int) -> str:
 async def _no_new(env, role, m, state, calls, gate_id: str) -> tuple[Optional[bool], str]:
     """Nothing added since the milestone opened. Unknown (None) when a baseline couldn't be read then: comparing
     against nothing would be a guess."""
-    added = []
+    added, missing = [], []
     for i, call in enumerate(calls):
         base = state["baselines"].get(_baseline_key(m, gate_id, i), call.get("baseline_count"))
         if base is None:
-            return None, f"unknown: no baseline for {call['tool']} (it couldn't be read when {m['id']} opened)"
+            missing.append(call["tool"])
+            continue
         n = _size(await _call(env, role, call))
         if n > base:
             added.append(f"{call['tool']} +{n - base}")
-    return (not added), ("nothing new" if not added else "new: " + ", ".join(added))
+    if added:  # a failure another call found stands, whatever couldn't be compared
+        return False, "new: " + ", ".join(added)
+    if missing:
+        return None, f"unknown: no baseline for {', '.join(missing)} (it couldn't be read when {m['id']} opened)"
+    return True, "nothing new"
 
 
 async def _baselines(env, spec, m) -> dict:

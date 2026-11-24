@@ -764,3 +764,43 @@ async def test_the_wrap_up_after_every_milestone_passed_says_so():
     await post_turn(Turn(env, records, 1), PARAMS)  # M1 passes, and M2 is already done: skipped, then the wrap-up
     wrap = next(r for r in records if r.get("wrap_up"))
     assert wrap["note"].endswith(mg.DEFAULT_FINAL) and mg.DEFAULT_FINAL_GAVE_UP not in wrap["note"]
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_with_a_gate_it_couldnt_check_is_held_not_passed():
+    state = {"ok": "yes", "a": {"items": []}, "b": {"items": []}}
+    records = []
+    await post_turn(Turn(ErrEnv(state, failing={"b"}), records, 1), _two_counts())  # M2's b baseline unread
+    t2 = Turn(Env(state), records, 2)
+    await post_turn(t2, _two_counts())
+    assert records[-1]["decision"] == "hold" and t2.notes == [mg.HOLD_NOTE]
+
+
+@pytest.mark.asyncio
+async def test_a_no_new_gate_keeps_a_failure_one_call_found_when_another_has_no_baseline():
+    params = {"role": "r", "milestones": [
+        {"id": "M1", "gates": [{"id": "m1", "nudge": "n", "check": {"call": {"tool": "ok"}, "expect": "exists"}}]},
+        {"id": "M2", "line": "next", "skip_if_done": False, "gates": [{"id": "q", "nudge": "hold off", "check": {
+            "no_new": [{"tool": "a", "path": "items"}, {"tool": "b", "path": "items"}]}}]}]}
+    state = {"ok": "yes", "a": {"items": []}, "b": {"items": []}}
+    records = []
+    await post_turn(Turn(ErrEnv(state, failing={"b"}), records, 1), params)
+    state["a"] = {"items": [1]}
+    await post_turn(Turn(Env(state), records, 2), params)
+    gate = records[-1]["gates"][0]
+    assert gate["passed"] is False and gate["why"] == "new: a +1"
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_broken_while_the_agent_answers_the_wrap_up_is_undone_in_the_summary():
+    w = world()
+    w["drive_list"] = {"files": [SHEET]}
+    w["trello_comments"] = {"comments": [{"text": "Vaultly cancelled"}]}
+    env, records = Env(w), []
+    await post_turn(Turn(env, records, 1), PARAMS)  # M1 passes; M2 already done: skipped; wrap-up
+    assert next(r for r in records if r.get("wrap_up"))["next_index"] == 1  # the final check reads M2, the last
+    w["trello_comments"] = {"comments": []}  # the agent removes its comment while answering the wrap-up
+    t2 = Turn(env, records, 2)
+    await post_turn(t2, PARAMS)
+    assert records[-1]["milestone"] == "M2"
+    assert _status(t2)[1][:2] == ("M2", "undone") and t2.summary["done"] == 1

@@ -1561,7 +1561,12 @@ class _BuiltInUserSim:
         ``schema_errors`` are the latest rewrite's), keeps what the user sim first answered as ``first_message``, and
         lists each rewrite under ``gate_rewrites``."""
         got = await ask_user_sim(note)
-        ans = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
+        ans = user_sim_versions.allowed(self.person, user_sim_versions.parse(
+            got["structured"] if isinstance(got.get("structured"), dict) else got.get("text")))
+        if ans["schema_errors"] and not got.get("error"):  # as an ordinary answer: one retry in the answer's format
+            got = await ask_user_sim(user_sim_versions.retry_line(self.person))
+            ans = user_sim_versions.allowed(self.person, user_sim_versions.parse(
+                got["structured"] if isinstance(got.get("structured"), dict) else got.get("text")))
         error = got.get("error")
         rewrite = {k: ans.get(k) for k in ("outcome", "message", "used", "schema_errors")}
         rewrite.update(user_sim_error=error, user_sim_trajectory_url=got.get("trajectory_url"))
