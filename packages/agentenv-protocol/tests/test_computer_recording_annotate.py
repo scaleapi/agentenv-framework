@@ -1,10 +1,11 @@
 """computer-recording/v1 ``annotate``: a recording started with it draws each input where it landed, in the colour
 of the role that sent it, on the frames captured after it; a call to the driver's own or forwarded tool that acts
-shows as a chip; a plain recording draws nothing."""
+shows as a chip, unless the driver marks what it did itself; a plain recording draws nothing."""
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +29,7 @@ from agentenv_protocol.computer import (  # noqa: E402
     Recording,
     record,
 )
+from agentenv_protocol.computer import annotate as annotate_module  # noqa: E402
 from agentenv_protocol.computer.annotate import (  # noqa: E402
     COLOURS,
     FADE_S,
@@ -113,6 +115,23 @@ class Forwarding(Recorded):
 
     async def answer(self, **arguments):
         return CallToolResult(content=[TextContent(type="text", text="done")])
+
+
+class Marking(Recorded):
+    """A driver serving another server's click and type, which draws what each did itself, as that server's reply
+    says: the click where it landed, the typing as text, and nothing for a call the server refused."""
+    marks_own_inputs = frozenset({"click", "type"})
+
+    def forwarded_tools(self):
+        schema = {"type": "object", "properties": {"text": {"type": "string"}, "refuse": {"type": "boolean"}}}
+        return [ForwardedTool(EnvironmentTool(name=name, description=f"{name.title()} somewhere.", inputSchema=schema),
+                              functools.partial(self.answer, name)) for name in ("click", "type")]
+
+    async def answer(self, name: str, **arguments):
+        if not arguments.get("refuse"):
+            await self.mark_inputs([("click", (*CLICK, "left", 1, []))] if name == "click" else
+                                   [("type_text", (arguments["text"],)), ("tool", ("submit", {"label": "Save"}))])
+        return CallToolResult(content=[TextContent(type="text", text="done")], isError=bool(arguments.get("refuse")))
 
 
 async def _clicked(driver, start: dict, meta: dict | None = None) -> tuple[datetime, dict, list]:
@@ -225,6 +244,47 @@ async def test_a_driver_tool_that_acts_shows_as_a_chip_and_one_that_only_reads_o
 
 
 @pytest.mark.asyncio
+async def test_a_driver_tool_whose_inputs_the_driver_marks_is_drawn_as_it_marks_them_and_not_as_a_chip():
+    driver = Marking()
+    noted = []
+    note = driver._computer.recordings.note
+    driver._computer.recordings.note = lambda marks: (noted.extend(marks), note(marks))
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        await asyncio.sleep(0.5)
+        sent = datetime.now(timezone.utc)
+        await session.call_tool("click", {"text": "Save"}, meta={ROLE_META_KEY: "user"})
+        await session.call_tool("type", {"text": "Q4"})
+        await session.call_tool("click", {"refuse": True})
+        marks = [(mark.kind, mark.role, mark.label, mark.points) for mark in noted]
+        await asyncio.sleep(0.5)
+        manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
+
+    assert marks == [("click", "user", "", ((CLICK[0] / 1280, CLICK[1] / 800),)),
+                     ("chip", "default", 'type "Q4"', ()), ("chip", "default", 'submit "Save"', ())]
+    before, after = _split(_timed_frames(manifest), sent)
+    assert not any(_marked(image, CLICK, role_colour("user")) for image in before)
+    assert all(_marked(image, CLICK, role_colour("user")) > 20 for image in after)
+
+
+@pytest.mark.asyncio
+async def test_marking_a_drivers_own_inputs_is_best_effort_and_needs_a_recording_that_draws_them(caplog):
+    driver = Marking()
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        assert not driver.draws_inputs()
+        assert (await session.call_tool("click", {"text": "Save"})).content[0].text == "done"
+        started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
+        assert driver.draws_inputs()
+        recording = driver._computer.recordings.running[started["recording_id"]]
+        await driver.mark_inputs([("click", ("nowhere",))])
+        kept = recording.annotations.marks
+        await http.post(END, json={"recording_id": started["recording_id"]})
+
+    assert kept == []
+    assert "couldn't mark ['click'] on an annotated recording" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_start_refuses_an_annotate_that_isnt_an_object_or_names_an_option_it_doesnt_take():
     async with http_client(Recorded()) as http:
         option = await http.post(START, json={"request_id": "a", "annotate": {"events": True}})
@@ -318,14 +378,19 @@ def test_marks_no_frame_draws_are_kept_only_so_long():
 
 
 @pytest.mark.asyncio
-async def test_an_input_goes_ahead_when_its_mark_cant_be_made():
-    """Reading the display for a mark fails: the scroll is still delivered, unmarked."""
+async def test_an_input_goes_ahead_when_its_mark_cant_be_made(monkeypatch):
+    """Making a scroll's mark fails: the scroll is still delivered, unmarked. The mark fails, not the display read it
+    makes, which the recording's own captures would race for."""
     driver = Recorded()
+
+    def unmarkable(*args, **kwargs):
+        raise DeviceUnavailable("the mark couldn't be made")
+
     async with http_client(driver) as http, mcp_session(driver) as session:
         started = (await http.post(START, json={"request_id": "r", "fps": 10, "annotate": {}})).json()
         recording = driver._computer.recordings.running[started["recording_id"]]
         await session.call_tool("computer_screenshot", {})
-        driver.fail["display"] = DeviceUnavailable("the display went away")
+        monkeypatch.setattr(annotate_module, "input_marks", unmarkable)
         scrolled = await session.call_tool("computer_scroll", {"direction": "down"})
         marks = list(recording.annotations.marks)
         await http.post(END, json={"recording_id": started["recording_id"]})

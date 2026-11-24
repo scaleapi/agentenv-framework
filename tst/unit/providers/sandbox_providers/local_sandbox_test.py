@@ -8,6 +8,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1165,6 +1166,18 @@ def _running(pid: int) -> bool:
         return False
 
 
+async def _execd(pid: int, program: str, sandbox_id: str, within_s: float = 10, poll_s: float = 0.01) -> None:
+    """Wait until ``pid`` has exec'd ``program`` and reads as ``sandbox_id``'s: while a process execs, /proc shows it no
+    environment, so a teardown scanning then wouldn't see it."""
+    deadline = time.monotonic() + within_s
+    while time.monotonic() < deadline:
+        argv0 = Path(f"/proc/{pid}/cmdline").read_text().split("\0")[0]
+        if argv0 == program and pid in ls._marked_pids(sandbox_id):
+            return
+        await asyncio.sleep(poll_s)
+    raise AssertionError(f"{pid} never ran {program} marked as {sandbox_id} within {within_s} s")
+
+
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
     """Start ``command`` the way a host install starts its agent, outliving the exec that started it, and wait until
     it reads as marked: while a process execs, /proc shows it no environment, which on a loaded machine can last."""
@@ -1217,7 +1230,8 @@ async def test_teardown_stops_what_a_command_left_running_and_only_that(tmp_path
 async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     sandbox = LocalSandbox(work_dir=tmp_path)
-    stubborn = await _detached(sandbox, "bash -c 'trap \"\" TERM; sleep 300'")
+    stubborn = await _detached(sandbox, "bash -c 'trap \"\" TERM; exec sleep 300'")
+    await _execd(stubborn, "sleep", sandbox.sandbox_id)
 
     await ls._stop_marked(sandbox.sandbox_id)
 
@@ -1423,10 +1437,11 @@ _HOST_IPS = ls._host_ips
 
 @pytest.mark.asyncio
 async def test_the_local_provider_pulls_only_the_published_images_its_docker_doesnt_hold(monkeypatch, tmp_path):
-    """So a run after the first needs no registry."""
+    """So a run after the first needs no registry; held means as the image's digest names it, not under its name."""
     images = [DockerImageArtifact(id=name, description="d", image_name=f"ghcr.io/team/{name}:src-1",
                                   image_digest="sha256:" + "9" * 64) for name in ("held", "new")]
-    monkeypatch.setattr(ls, "present", lambda image_name: image_name.startswith("ghcr.io/team/held:"))
+    monkeypatch.setattr(ls, "named_if_held", lambda image: image.id == "held")
+    monkeypatch.setattr(ls, "present", lambda image_name: True)
     asked = []
 
     async def pull_published(self, artifacts):

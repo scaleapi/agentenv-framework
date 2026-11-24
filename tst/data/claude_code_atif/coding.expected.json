@@ -1,0 +1,181 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-coding",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-5-5",
+  "tool_definitions": {
+   "shared": "tools/a2f232fa81dcec06.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-22T02:48:16.792566Z",
+   "source": "user",
+   "message": "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-coding",
+     "task_id": "cab81158-fa16-4f2e-80fe-0d0ff5e1dbbb",
+     "message_id": "ceda7241057648d5b8536aa4b734800d",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-22T02:48:18.655Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01AY4iPepjdsT6B22DWnt9dv",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "echo 'print(sum(range(1, 101)))' > hello.py && python3 hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01AY4iPepjdsT6B22DWnt9dv",
+      "content": "5050"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 28509,
+    "cached_tokens": 0,
+    "completion_tokens": 82,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 28507
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-22T02:48:19.730Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "5050",
+   "metrics": {
+    "prompt_tokens": 28593,
+    "cached_tokens": 28507,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 84
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-22T02:48:19.812968Z",
+   "source": "user",
+   "message": "Now change it to sum 1 to 1000, run it again, and reply with only the number.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-coding",
+     "task_id": "92b81db6-1617-40a6-809f-f1c64c5e6002",
+     "message_id": "abf9ce76226546899075dee65c5ede23",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-22T02:48:21.280Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01276nytUKBTzvSa73SRozAX",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "echo 'print(sum(range(1, 1001)))' > hello.py && python3 hello.py"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01276nytUKBTzvSa73SRozAX",
+      "content": "500500"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 28628,
+    "cached_tokens": 28591,
+    "completion_tokens": 78,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 33
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-22T02:48:22.215Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "500500",
+   "metrics": {
+    "prompt_tokens": 28713,
+    "cached_tokens": 28624,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 87
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 114443,
+  "total_completion_tokens": 168,
+  "total_cached_tokens": 85722,
+  "total_cost_usd": 0.0820497,
+  "total_steps": 6,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 28711
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

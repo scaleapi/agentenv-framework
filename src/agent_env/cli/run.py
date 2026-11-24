@@ -17,11 +17,13 @@ from agent_env.bundle.plan import NotInStore
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.teardown_output import echo_finish_teardown, gone
+from agent_env.cli.usage_output import cost_line, sources_line
 from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport, kind, recorded_sandboxes, sandbox_ids
+from agent_env.task.usage.summary import summarize
 from agent_env.task_step.context import TaskStepContext
 
 _COLORS = {Outcome.PASSED: "green", Outcome.BELOW_ONE: "yellow", Outcome.UNSCORED: "yellow", Outcome.FAILED: "red",
@@ -202,6 +204,8 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))
         if models := _models(run):
             click.echo(f"    models: {models}")
+        if cost := cost_line(run.usage_summary):
+            click.echo(f"    {cost}")
     if result.evals:
         click.echo("Evals:")
     for eval_run in result.evals:
@@ -210,9 +214,14 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
         line = f"  {result.path(eval_run.entry)} v{eval_run.version}: {passed} of {len(eval_run.runs)} passed"
         rest = [f"{failed} failed" if failed else "", f"{cancelled} cancelled" if cancelled else ""]
         click.echo(", ".join([line, *filter(None, rest)]))
+        if cost := cost_line(summarize(entry for run in eval_run.runs for entry in run.usage),
+                             f"cost over {len(eval_run.runs)} runs", attempts=False):
+            click.echo(f"    {cost}")
     for entry in result.skipped:
         click.echo(f"{result.path(entry)} isn't named by any eval, so it didn't run; run it with "
                    f"--task {shlex.quote(entry.name)}")
+    if sources := sources_line(summarize(entry for run in result.runs for entry in run.usage)):
+        click.echo(sources)
     if verbose:
         _print_tracebacks(result)
 

@@ -11,6 +11,7 @@ import pytest
 
 from agent_env.a2a_agent import A2AAgent, protocol
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import JudgeTimeoutError, RubricsVerifierTaskStep
 
 CRITERIA = [{"id": "c1", "title": "asked first"}]
@@ -56,7 +57,7 @@ async def _grade(verifier):
     return await verifier._run_judge_with_output_retries(
         eval_prompt="grade it", criteria=CRITERIA, context=TaskStepContext(), model="m",
         judge_a2a_url="http://judge.test", judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
-        judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True)
+        judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True, usage=StepUsage(TaskStepContext(), "verify"))
 
 
 @pytest.mark.asyncio

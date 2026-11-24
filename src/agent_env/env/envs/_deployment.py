@@ -150,7 +150,7 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifac
 def data_plane_headers(env: MCPServerEnv | WebsiteEnv, url: str) -> dict[str, str] | None:
     """The headers a call to ``url`` sends of ``env``'s record's control token; None, which leaves the call to a run's
     or a multi env's grant, when the record gives it none: no record, no token, or an address outside the record's."""
-    return (env._deployed.control_headers_for(url) or None) if env._deployed is not None else None
+    return env._deployed.control_headers_or_grant(url) if env._deployed is not None else None
 
 
 async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> bool:

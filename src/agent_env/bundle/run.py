@@ -30,12 +30,13 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
-from agent_env.task.store import record_task_cancelled
+from agent_env.task.store import find_task_instance, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.lint import said
 from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import TeardownReport, attempt_epoch, record_teardown, teardown_run
+from agent_env.task.usage.summary import UsageSummary, summarize
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 
 from .hub import SOURCE_KEY, HubSource
@@ -75,6 +76,7 @@ class TaskRun:
     started: bool = True  # False when it was cancelled before it started
     torn_down: TeardownReport | None = None  # None while its sandboxes are kept up
     attempt_epoch: int | None = None  # its instance's as its teardown began, which ``record_teardown`` is fenced by
+    usage: tuple[dict, ...] = ()  # its instance's ledger once the run ended, every attempt's entries
 
     @property
     def instance_id(self) -> str | None:
@@ -96,6 +98,11 @@ class TaskRun:
     def models(self) -> dict[str, dict[str, str | None]]:
         """The model each step asked for, by role then step id; None leaves it to the agent."""
         return self.context.metadata.get("models") or {}
+
+    @property
+    def usage_summary(self) -> UsageSummary | None:
+        """The run's usage by role and model, from its ledger; None when it recorded none."""
+        return summarize(self.usage)
 
     @property
     def outcome(self) -> Outcome:
@@ -276,6 +283,7 @@ def run_bundle(
                                            source))
             _mark_cancelled(runs, interrupts.reason)
             _record_teardowns(runs)
+            runs = _with_usage(runs)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
@@ -388,6 +396,22 @@ def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
         if run.cancelled and run.instance_id:
             with run_scope(run.task.id):
                 record_task_cancelled(run.instance_id, reason, Task._utc_now_str())
+
+
+def _with_usage(runs: tuple[TaskRun, ...]) -> tuple[TaskRun, ...]:
+    """Each run with its instance's ledger, read once the run's last write has landed. A read that fails leaves the
+    run without it, logged, since the result and the teardown after it matter more than the cost line."""
+    def read(run: TaskRun) -> TaskRun:
+        if not run.instance_id:
+            return run
+        try:
+            with run_scope(run.task.id):
+                instance = find_task_instance(run.instance_id)
+        except Exception as e:
+            logger.warning("usage of %s not read: %r", run.instance_id, e)
+            return run
+        return replace(run, usage=tuple(instance.usage)) if instance is not None else run
+    return tuple(read(run) for run in runs)
 
 
 def _record_teardowns(runs: Sequence[TaskRun]) -> None:

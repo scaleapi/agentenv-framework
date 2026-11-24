@@ -265,8 +265,8 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     if base_url is None:
         legacy_url = environment_base_url(gateway_url, environment_name, mcp=True)
         return await export_state(gateway_url, environment_name,
-                                  headers=(deployed.control_headers_for(legacy_url) or None) if deployed is not None else None)
-    headers = (deployed.control_headers_for(base_url) or None) if deployed is not None else None
+                                  headers=deployed.control_headers_or_grant(legacy_url) if deployed is not None else None)
+    headers = deployed.control_headers_or_grant(base_url) if deployed is not None else None
     response = await protocol_v1.get_data(base_url, headers=headers)
     if not response.parts:
         return {}

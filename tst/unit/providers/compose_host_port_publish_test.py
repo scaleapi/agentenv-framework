@@ -17,7 +17,6 @@ import pytest
 
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.env_providers import EnvironmentGatewayProvider, MCPServerConfig, SidecarConfig
-from agent_env.env.envs.service_db import DB_MCP_CONTAINER_PORT, DB_MCP_PORT, DB_WEB_PORT
 from agent_env.providers.env_state.local_postgres import LocalPostgresStateProvider
 
 SRC = Path(__file__).resolve().parents[3] / "src"
@@ -201,9 +200,9 @@ def test_gateway_compose_resolves_every_host_port(stub_postgres, environments, s
     )
 
     pairs = assert_all_resolved(compose)
-    # The gateway, pgweb and the DB MCP sidecar are always present; each extra sidecar adds
-    # one more publication.
-    assert len(pairs) == 3 + len(sidecars)
+    # The gateway is always published, and each extra sidecar adds one more publication; pgweb and the DB MCP
+    # sidecar publish none, since only the gateway reaches them.
+    assert len(pairs) == 1 + len(sidecars)
 
 
 def test_gateway_compose_defaults_to_identity(stub_postgres):
@@ -218,35 +217,26 @@ def test_gateway_compose_defaults_to_identity(stub_postgres):
         state_instance=_StateInstance(),
     )
 
-    assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' in compose
-    assert f'"{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in compose
+    assert f'"{AGENT_ENV_GATEWAY_MCP_PORT}:{AGENT_ENV_GATEWAY_MCP_PORT}"' in compose
     assert '"18768:8000"' in compose
 
 
-def test_postgres_sidecar_fragment_resolves_host_ports(stub_postgres):
-    """The state provider renders its own fragment, so it is checked directly as well as
-    through the full compose above."""
+@pytest.mark.parametrize("host_ips", [(), ("127.0.0.1",)], ids=["every-interface", "loopback"])
+def test_postgres_sidecars_publish_no_port(stub_postgres, host_ips):
+    """pgweb and db-mcp are reached only through the gateway, on the env's network, so the compose file publishes no
+    port for either."""
     lines = "\n".join(
-        stub_postgres.render_sidecar_containers(["slack"], host_port=lambda p: p + OFFSET),
+        stub_postgres.render_sidecar_containers(["slack"], host_port=lambda p: p + OFFSET, host_ips=host_ips),
     )
 
-    assert f'"{DB_WEB_PORT + OFFSET}:{DB_WEB_PORT}"' in lines
-    assert f'"{DB_MCP_PORT + OFFSET}:{DB_MCP_CONTAINER_PORT}"' in lines
-    # Container side untouched: it is the env's internal contract.
-    assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' not in lines
-
-
-def test_postgres_sidecar_fragment_defaults_to_identity(stub_postgres):
-    lines = "\n".join(stub_postgres.render_sidecar_containers(["slack"]))
-
-    assert f'"{DB_WEB_PORT}:{DB_WEB_PORT}"' in lines
-    assert f'"{DB_MCP_PORT}:{DB_MCP_CONTAINER_PORT}"' in lines
+    assert "  pgweb:" in lines and "  db-mcp:" in lines
+    assert "ports:" not in lines
+    assert _PORT_PAIR.findall(lines) == []
 
 
 @pytest.mark.parametrize("host_ips", [("127.0.0.1",), ("127.0.0.1", "172.17.0.1")], ids=["loopback", "loopback-and-bridge"])
 def test_gateway_compose_publishes_only_on_the_host_ips(stub_postgres, host_ips):
-    """Each port once per host IP, and none on every interface. pgweb and db-mcp, opened only from the
-    host, stay off the bridge address."""
+    """Each port once per host IP, and none on every interface."""
     compose = EnvironmentGatewayProvider.create_docker_compose(
         EnvironmentGatewayProvider.__new__(EnvironmentGatewayProvider),
         mcp_servers=[MCPServerConfig(image="slack:test", environment_name="slack")],
@@ -259,8 +249,6 @@ def test_gateway_compose_publishes_only_on_the_host_ips(stub_postgres, host_ips)
     )
 
     everywhere = [(AGENT_ENV_GATEWAY_MCP_PORT, AGENT_ENV_GATEWAY_MCP_PORT), (18768, 8000)]
-    host_only = [(DB_WEB_PORT, DB_WEB_PORT), (DB_MCP_PORT, DB_MCP_CONTAINER_PORT)]
     assert sorted(_PORT_PAIR.findall(compose)) == sorted(
         [(ip, str(host + OFFSET), str(container)) for ip in host_ips for host, container in everywhere]
-        + [(host_ips[0], str(host + OFFSET), str(container)) for host, container in host_only]
     )

@@ -47,6 +47,7 @@ from agentenv_protocol.a2a_agent import (
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
     InlineSkillRequest,
+    ModelUsage,
     ObjectSnapshotLoadRequest,
     ObjectSnapshotSaveRequest,
     SkillAddResponse,
@@ -66,6 +67,8 @@ from starlette.exceptions import HTTPException
 import codex_config
 from codex_bridge import (
     SESSIONS_DIR,
+    CodexResult,
+    ThreadCalls,
     find_rollout_path,
     get_last_attribution_snapshot,
     kill_running_clis,
@@ -570,6 +573,55 @@ _HOST_WORKDIR = "/app"
 _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
+# Codex's names for the counts Usage takes; OpenAI's input counts the cache.
+_COUNT_NAMES = {"input_tokens": "input_tokens", "output_tokens": "output_tokens",
+                "cache_read_tokens": "cached_input_tokens", "cache_write_tokens": "cache_write_input_tokens"}
+
+
+def _usage(result: CodexResult, model: str | None = None) -> Usage:
+    """The turn's tool calls and token counts: the CLI's own, for this turn alone, its subagents' included
+    (``token_usage``), by the model each thread ran on (``models``). OpenAI counts the cache in a call's input, so
+    ``input_tokens`` holds the cached reads and writes, and the reasoning is part of ``output_tokens``. A turn the CLI
+    gave no counts for, as one whose counters went back, reports none, its model requests counted in
+    ``unreported_calls`` rather than as nothing used; a turn the bridge stopped counts there too the request that was in
+    flight, which the CLI never counted."""
+    counts = result.token_usage or {}
+    details: dict[str, Any] = {}
+    if result.model_requests is not None:
+        details["model_calls"] = result.model_requests
+    if counts.get("reasoning_output_tokens"):
+        details["reasoning_tokens"] = counts["reasoning_output_tokens"]
+    inputs, outputs = counts.get("input_tokens"), counts.get("output_tokens")
+    if inputs is None or outputs is None:
+        if result.model_requests or result.unreported_calls:
+            details["unreported_calls"] = (result.model_requests or 0) + result.unreported_calls
+        return Usage(tool_call_count=result.tool_call_count, provider_details=details)
+    if result.unreported_calls:
+        details["unreported_calls"] = result.unreported_calls
+    return Usage(tool_call_count=result.tool_call_count, total_tokens=inputs + outputs, input_includes_cache=True,
+                 **{ours: counts.get(theirs) for ours, theirs in _COUNT_NAMES.items()},
+                 models=_by_model(result.threads, model), provider_details=details)
+
+
+def _by_model(threads: list[ThreadCalls], model: str | None) -> tuple[ModelUsage, ...]:
+    """The threads' counts by the model each ran on, a subagent's as ``spawn_agent`` chose it, one whose rollout names
+    none counted as ``model``'s, the turn's; none when no model is known for a thread."""
+    by_model: dict[str, list[ThreadCalls]] = {}
+    for thread in threads:
+        if not (name := thread.model or model):
+            return ()
+        by_model.setdefault(name, []).append(thread)
+
+    def total(name: str, of: list[ThreadCalls]) -> int | None:
+        values = [thread.counts[name] for thread in of if name in thread.counts]
+        return sum(values) if values else None
+
+    return tuple(ModelUsage(
+        model=name, calls=None if any(thread.requests is None for thread in of) else sum(t.requests for t in of),
+        **{ours: total(theirs, of) for ours, theirs in _COUNT_NAMES.items()}, input_includes_cache=True)
+        for name, of in by_model.items())
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="Codex",
@@ -741,7 +793,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             .add_text(result.response or (result.error or ""))
             .add_data(data)
             .session_ref(result.session_id)
-            .usage(Usage(tool_call_count=result.tool_call_count))
+            .usage(_usage(result, cfg.model))
             .build()
         )
 

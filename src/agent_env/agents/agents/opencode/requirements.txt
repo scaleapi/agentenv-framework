@@ -1,5 +1,7 @@
 # The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
-# image is built again only when this folder changes. The floor is the first that takes the native trajectory format
-# the agent declares (enable(TRAJECTORY_V1, native=...)); raise it when the agent needs a newer protocol.
-agentenv-framework-protocol[agent]>=0.1.588
+# image is built again only when this folder changes. The floor is the first with ModelUsage.of, which gives a model's
+# share of a turn from its calls; raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.643
 jsonschema>=4.18,<5
+# The model relay's server and client (model_relay.py).
+aiohttp>=3.9,<4

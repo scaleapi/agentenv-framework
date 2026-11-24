@@ -154,7 +154,7 @@ async def _card(keys: list[str]) -> dict:
 
 
 def _record(card: dict | None) -> DeployedEnv:
-    return DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=_GATEWAY, mcp_url=f"{_GATEWAY}/mcp", db_web_url=None, sandbox_id="sb",
+    return DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=_GATEWAY, mcp_url=f"{_GATEWAY}/mcp", sandbox_id="sb",
                        environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card)
 
 

@@ -30,7 +30,7 @@ def _fake_env(sandbox_id: str):
         await asyncio.sleep(0)
         return DeployedGatewayEnv(
             env_id=ENV_ID, env_version=1, gateway_url=f"https://gw-{sandbox_id}",
-            mcp_url=f"https://{sandbox_id}/mcp", db_web_url=None, sandbox_id=sandbox_id,
+            mcp_url=f"https://{sandbox_id}/mcp", sandbox_id=sandbox_id,
         )
 
     env = MagicMock()

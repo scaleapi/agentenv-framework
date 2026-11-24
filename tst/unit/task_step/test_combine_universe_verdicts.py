@@ -31,7 +31,7 @@ class _FakeStore:
 def _deployed_env(env_id="multi-x", env_version=3):
     return DeployedGatewayEnv(
         env_id=env_id, env_version=env_version, gateway_url="g", mcp_url="m",
-        db_web_url=None, sandbox_id="sb-1",
+        sandbox_id="sb-1",
     )
 
 

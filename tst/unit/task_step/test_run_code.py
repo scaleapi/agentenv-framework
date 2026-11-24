@@ -46,7 +46,7 @@ def _make_context(*, with_agent=True, metadata=None):
     )
     env = DeployedGatewayEnv(
         env_id="env-x", env_version=1, gateway_url="", mcp_url="",
-        db_web_url=None, sandbox_id="sb-env",
+        sandbox_id="sb-env",
     )
     return TaskStepContext(
         deployed_agents=[agent] if with_agent else [],

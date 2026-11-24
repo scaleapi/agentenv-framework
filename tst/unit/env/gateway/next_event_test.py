@@ -266,7 +266,7 @@ def gateway(tmp_path, monkeypatch) -> Gateway:
     gw._clock = Clock(now_fn=FakeNow())
     gw._tool_server_urls = {"send_email": "http://svc/mcp"}
 
-    async def call_child_tool(server_url, tool_name, arguments, *, caller=None):
+    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report):
         return _result()
 
     gw._call_child_tool = call_child_tool

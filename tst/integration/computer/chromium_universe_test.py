@@ -1,6 +1,6 @@
 """agentenv's chromium on the ubuntu-24.04 desktop, on the universe clock: its boot browser, never launched again, goes
 out through the computer's egress proxy by the base's policy and loads live sites it hasn't visited with the universe
-182 days back, 730 days on and six years on, and right after a jump back; and X runs no screensaver. Needs Docker, the
+400 days back, 730 days on and six years on, and right after a jump back; and X runs no screensaver. Needs Docker, the
 local registry on localhost:5000, and the internet."""
 
 import asyncio
@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import time
+import warnings
 
 import pytest
 from agentenv_protocol import client as protocol_v1
@@ -27,24 +28,38 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 DAY = 86400
 #: Live sites the browser hasn't visited, each with its page's title, opened in turn with the universe that many days
-#: from now: the last right after the jump back.
-STOPS = [(-182, "https://example.com/", "Example Domain"), (730, "https://example.org/", "Example Domain"),
-         (6 * 365, "https://example.net/", "Example Domain"), (-182, "https://www.wikipedia.org/", "Wikipedia")]
+#: from now: the last right after the jump back. Each stop has a second site that stands in when the first doesn't load,
+#: as a site refuses CI's runners for a while now and then (gnu.org did). None is behind a bot challenge, as
+#: Cloudflare's "Just a moment..." meets CI's browsers at example.com now. Each date is outside any certificate valid
+#: today, whose life is at most 398 days, so the egress proxy re-signs every site.
+STOPS = [(-400, [("https://www.python.org/", "Welcome to Python.org"),
+                 ("https://www.postgresql.org/", "PostgreSQL: The world's most advanced open source database")]),
+         (730, [("https://www.openbsd.org/", "OpenBSD"), ("https://www.netbsd.org/", "The NetBSD Project")]),
+         (6 * 365, [("https://www.kernel.org/", "The Linux Kernel Archives"),
+                    ("https://www.ruby-lang.org/en/", "Ruby Programming Language")]),
+         (-400, [("https://www.wikipedia.org/", "Wikipedia"), ("https://www.freebsd.org/", "The FreeBSD Project")])]
 #: How long a page may take to load before its tab counts as not loaded.
 LOAD_S = 45
 POLICY = "/etc/opt/chrome_for_testing/policies/managed/agentenv-egress.json"
 
 
-async def _loaded(ok, url: str, title: str) -> str:
-    """The title of the active tab once it's ``title`` after navigating to ``url``, else the tabs it last saw."""
-    await ok("navigate", {"url": url})
-    tabs, deadline = [], time.monotonic() + LOAD_S
-    while time.monotonic() < deadline:
-        tabs = (await ok("tabs/list", method="GET"))["tabs"]
-        if (active := next((tab for tab in tabs if tab["active"]), None)) and active["title"] == title:
-            return title
-        await asyncio.sleep(0.5)
-    return json.dumps(tabs)
+async def _first_loaded(call, ok, sites: list[tuple[str, str]]) -> tuple[str | None, list[str]]:
+    """The first of ``sites`` whose title the active tab shows within ``LOAD_S`` of navigating to it, and why each one
+    before it didn't; None when none did."""
+    missed = []
+    for url, title in sites:
+        response = await call("navigate", {"url": url})
+        if response.status_code != 200:
+            missed.append(f"{url}: {response.status_code} {response.text}")
+            continue
+        tabs, deadline = [], time.monotonic() + LOAD_S
+        while time.monotonic() < deadline:
+            tabs = (await ok("tabs/list", method="GET"))["tabs"]
+            if (active := next((tab for tab in tabs if tab["active"]), None)) and active["title"] == title:
+                return url, missed
+            await asyncio.sleep(0.5)
+        missed.append(f"{url}: {json.dumps(tabs)}")
+    return None, missed
 
 
 def _egress_rows(deployed) -> list[dict]:
@@ -61,14 +76,14 @@ async def test_its_boot_browser_loads_live_sites_at_any_universe_date_and_x_neve
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
-            _, ok = _client(deployed, lambda op: f"{deployed.environment_url}/svc/chromium"
+            call, ok = _client(deployed, lambda op: f"{deployed.environment_url}/svc/chromium"
                                                  f"{protocol_v1.find_extension_method(card, BROWSER, op)['endpoint']}")
             booted = await _browser_process(deployed)
             clock, loaded = UniverseClock(deployed), []
-            for days, url, title in STOPS:
+            for days, sites in STOPS:
                 clock.set(time.time() + days * DAY, 1)
                 await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
-                loaded.append(await _loaded(ok, url, title))
+                loaded.append(await _first_loaded(call, ok, sites))
             still = await _browser_process(deployed)
             rows = _egress_rows(deployed)
             xset = (await inside.run(deployed, ["xset", "q"], timeout_s=30))["stdout"]
@@ -76,9 +91,11 @@ async def test_its_boot_browser_loads_live_sites_at_any_universe_date_and_x_neve
         finally:
             report = await teardown_run(context)
 
-    assert loaded == [title for _, _, title in STOPS], loaded
+    assert all(url for url, _ in loaded), loaded
+    if stood_in := [missed for _, missed in loaded if missed]:
+        warnings.warn(f"a stand-in site loaded: {stood_in}")
     assert still["pid"] == booted["pid"]
-    hosts = {url.split("/")[2] for _, url, _ in STOPS}
+    hosts = {url.split("/")[2] for url, _ in loaded}
     intercepted = {row["host"] for row in rows if row.get("host") in hosts and row.get("mode") == "intercept"}
     assert intercepted == hosts, [row for row in rows if row.get("host") in hosts][-8:]
     assert re.search(r"Screen Saver:.*?timeout:\s+0\b", xset, re.S), xset
