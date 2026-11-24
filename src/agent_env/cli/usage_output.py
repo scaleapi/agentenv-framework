@@ -10,6 +10,10 @@ from agent_env.task.usage.summary import Share, UsageSummary
 _ROLE_NAMES = {role.value: role.record_key for role in ModelRole}
 # The cost sources that aren't the price map, in the order they're named.
 _REPORTED = {ReportedBy.PROVIDER: "the endpoint's bills", ReportedBy.HARNESS: "agents' own figures"}
+_DOLLAR_PLACES = 4
+_SMALLEST_DOLLARS = 0.0001  # the least a cost shows at _DOLLAR_PLACES; a smaller one reads "under" it
+_THOUSAND, _MILLION = 1_000, 1_000_000
+_TENTHS_OF_THOUSANDS_BELOW = 10 * _THOUSAND  # a count under it shows one decimal: 1.2k, not 1k
 
 
 def cost_line(summary: UsageSummary | None, label: str = "cost", attempts: bool = True) -> str | None:
@@ -55,14 +59,16 @@ def _cost(of: UsageSummary | Share) -> str:
 
 
 def _dollars(usd: float) -> str:
-    return "$0" if usd == 0 else f"${usd:.4f}" if usd >= 0.0001 else "under $0.0001"
+    if usd == 0:
+        return "$0"
+    return f"${usd:.{_DOLLAR_PLACES}f}" if usd >= _SMALLEST_DOLLARS else f"under ${_SMALLEST_DOLLARS:.{_DOLLAR_PLACES}f}"
 
 
 def _count(n: int) -> str:
-    if n < 1000:
+    if n < _THOUSAND:
         return str(n)
-    if n < 10_000:
-        return f"{n / 1000:.1f}k"
-    if n < 1_000_000:
-        return f"{round(n / 1000)}k"
-    return f"{n / 1_000_000:.1f}M"
+    if n < _TENTHS_OF_THOUSANDS_BELOW:
+        return f"{n / _THOUSAND:.1f}k"
+    if n < _MILLION:
+        return f"{round(n / _THOUSAND)}k"
+    return f"{n / _MILLION:.1f}M"
