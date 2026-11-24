@@ -66,18 +66,28 @@ TrajectorySink = Callable[[TrajectoryBatch], Awaitable[None]]
 
 
 @dataclass
+class _HeldSub:
+    """A sub-agent as a follower holds it: its header (the trajectory without its steps), that header's digest, and
+    its last step's ``step_id``."""
+
+    head: dict[str, Any] = field(default_factory=dict)
+    digest: str = ""
+    after: int = 0
+
+
+@dataclass
 class _Held:
     """What a follower holds of an atif/1 document, which its reads name so the agent sends only what it lacks: the
-    latest header and its digest, and each sub-agent's header, digest and last step. It makes each page stand alone
-    again, carrying the latest header and each served sub-agent's."""
+    latest header and its digest, and each sub-agent's. It makes each page stand alone again, carrying the latest
+    header and each served sub-agent's."""
 
     header: dict[str, Any] | None = None
     digest: str = ""
-    subs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    subs: dict[str, _HeldSub] = field(default_factory=dict)
 
     def request(self) -> dict[str, Any]:
         return {"header_digest": self.digest, "subagent_cursors": {
-            sub_id: {"after": sub["after"], "header_digest": sub["digest"]} for sub_id, sub in self.subs.items()}}
+            sub_id: {"after": sub.after, "header_digest": sub.digest} for sub_id, sub in self.subs.items()}}
 
     def take(self, page: AtifEventsResponse) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """The page's latest header and its sub-agents, each with its header. An answer with no sub-agent digests is in
@@ -88,17 +98,17 @@ class _Held:
         self.digest = page.header_digest or self.digest
         if page.subagent_header_digests is None:
             return self.header, page.subagents
-        digests = page.subagent_header_digests
         served = []
         for entry in page.subagents:
-            sub = self.subs.setdefault(entry["trajectory_id"], {"head": {}, "digest": "", "after": 0})
-            if digests.get(entry["trajectory_id"], sub["digest"]) != sub["digest"]:
-                sub["head"] = {key: value for key, value in entry.items() if key != "steps"}
-                sub["digest"] = digests[entry["trajectory_id"]]
+            sub = self.subs.setdefault(entry["trajectory_id"], _HeldSub())
+            digest = page.subagent_header_digests.get(entry["trajectory_id"])
+            if digest is not None and digest != sub.digest:
+                sub.head = {key: value for key, value in entry.items() if key != "steps"}
+                sub.digest = digest
             steps = entry.get("steps") or []
             if steps:
-                sub["after"] = steps[-1]["step_id"]
-            served.append({**sub["head"], "steps": steps})
+                sub.after = steps[-1]["step_id"]
+            served.append({**sub.head, "steps": steps})
         return self.header, served
 
 
@@ -158,7 +168,7 @@ async def follow_trajectory(
     async with nullcontext(client) if client is not None else httpx.AsyncClient() as http:
         while True:
             try:
-                holding = held.request() if held is not None and reading == ATIF else {}
+                holding = held.request() if held is not None else {}
                 response = await http.post(
                     endpoint, json={"task_id": task_id, "after": after, **named, **holding}, headers=headers,
                     timeout=_READ_TIMEOUT_SECONDS,
@@ -175,7 +185,7 @@ async def follow_trajectory(
                     if not stored_atif and fallback_format is not None:
                         logger.warning("Agent refused task %s's atif/1 trajectory (%s); following it as %s",
                                        task_id, refused, fallback_format)
-                        reading, named, after = fallback_format, {"format": fallback_format}, 0
+                        reading, named, after, held = fallback_format, {"format": fallback_format}, 0, None
                         continue
                     logger.warning("Agent refused task %s's atif/1 trajectory (%s); stopped following it",
                                    task_id, refused)
@@ -197,8 +207,10 @@ async def follow_trajectory(
                 page = parse_response(AtifEventsResponse if atif else TrajectoryEventsResponse, response.json(),
                                       operation="trajectory get")
                 last = page.state not in _OPEN_STATES and not page.has_more
-                header, subagents = (held.take(page) if held is not None else (page.header, page.subagents)) \
-                    if atif else (None, [])
+                if held is not None:
+                    header, subagents = held.take(page)
+                else:
+                    header, subagents = (page.header, page.subagents) if atif else (None, [])
                 if page.events or subagents or last:
                     extra = ({"header": header, "subagents": subagents, "schema_version": page.schema_version,
                               "profile_version": page.profile_version} if atif else {})

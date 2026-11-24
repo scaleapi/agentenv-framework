@@ -24,6 +24,10 @@ from tst.util.granting_object_store import GrantingObjectStore
 pytestmark = pytest.mark.usefixtures("local_stores")
 
 
+def _step(n: int, text: str) -> dict:
+    return {"step_id": n, "source": "agent", "message": text}
+
+
 def _live(run: _Run) -> dict[str, dict[str, bytes]]:
     """Each turn's live folder, by turn id: its files by name under ``live/``."""
     turns: dict[str, dict[str, bytes]] = {}
@@ -130,7 +134,8 @@ def test_only_a_card_declaring_the_digest_and_cursors_takes_them(monkeypatch, tm
     older = copy.deepcopy(card)
     [trajectory] = [ext for ext in older["capabilities"]["extensions"] if ext["uri"].endswith("trajectory/v1")]
     for branch in trajectory["params"]["methods"]["get"]["request"]["oneOf"]:
-        branch["optional"] = [name for name in branch.get("optional", []) if "digest" not in name and "cursor" not in name]
+        branch["optional"] = [name for name in branch.get("optional", [])
+                              if "digest" not in name and "cursor" not in name]
     assert live_reads_take_cursors(card) and not live_reads_take_cursors(older)
 
 
@@ -140,19 +145,18 @@ async def test_a_follow_with_cursors_stores_a_running_sub_agents_steps_before_th
     store = GrantingObjectStore(str(tmp_path / "store"), reaches=True)
     sink = LiveTrajectoryChunks(store, "p/", "turn-1")
     sub_head = {"trajectory_id": "toolu_1", "agent": {"name": "explorer"}}
-    step = lambda n, text: {"step_id": n, "source": "agent", "message": text}  # noqa: E731
     answers = [
         ({"header_digest": "", "subagent_cursors": {}}, "running", {
-            "header": {"session_id": "c", "trajectory_id": "d"}, "header_digest": "sha256:h1", "events": [step(1, "r1")],
-            "next": 1, "subagents": [{**sub_head, "steps": [step(1, "s1")]}],
+            "header": {"session_id": "c", "trajectory_id": "d"}, "header_digest": "sha256:h1",
+            "events": [_step(1, "r1")], "next": 1, "subagents": [{**sub_head, "steps": [_step(1, "s1")]}],
             "subagent_header_digests": {"toolu_1": "sha256:s"}}),
         ({"header_digest": "sha256:h1", "subagent_cursors": {"toolu_1": {"after": 1, "header_digest": "sha256:s"}}},
          "running", {"header_digest": "sha256:h1", "events": [], "next": 1,
-                     "subagents": [{"trajectory_id": "toolu_1", "steps": [step(2, "s2")]}],
+                     "subagents": [{"trajectory_id": "toolu_1", "steps": [_step(2, "s2")]}],
                      "subagent_header_digests": {"toolu_1": "sha256:s"}}),
         ({"header_digest": "sha256:h1", "subagent_cursors": {"toolu_1": {"after": 2, "header_digest": "sha256:s"}}},
          "completed", {"header": {"session_id": "c", "trajectory_id": "d", "final_metrics": {"total_steps": 2}},
-                       "header_digest": "sha256:h2", "events": [step(2, "r2")], "next": 2, "subagents": [],
+                       "header_digest": "sha256:h2", "events": [_step(2, "r2")], "next": 2, "subagents": [],
                        "subagent_header_digests": {"toolu_1": "sha256:s"}}),
     ]
     stored_before_root_closed: list[str] = []
@@ -187,9 +191,8 @@ async def test_an_agent_whose_card_declares_cursors_but_whose_answers_dont_carry
     store = GrantingObjectStore(str(tmp_path / "store"), reaches=True)
     sink = LiveTrajectoryChunks(store, "p/", "turn-1")
     sub = {"trajectory_id": "toolu_1", "agent": {"name": "explorer"}}
-    step = lambda n, text: {"step_id": n, "source": "agent", "message": text}  # noqa: E731
-    answers = [("running", [step(1, "r1")], 1, [step(1, "s1")]), ("completed", [step(2, "r2")], 2,
-                                                                    [step(1, "s1"), step(2, "s2")])]
+    answers = [("running", [_step(1, "r1")], 1, [_step(1, "s1")]), ("completed", [_step(2, "r2")], 2,
+                                                                    [_step(1, "s1"), _step(2, "s2")])]
     named = []
 
     def answer(request: httpx.Request) -> httpx.Response:
