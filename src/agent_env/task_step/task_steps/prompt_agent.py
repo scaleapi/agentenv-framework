@@ -31,10 +31,12 @@ from agent_env.a2a_agent.trajectory_follower import live_reads_take_cursors, liv
 from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
+    DEFERRED_CALL_PENDING,
     EXT_CLOCK_URI,
     EXT_NOTIFICATIONS_URI,
     EXT_TRIGGERS_URI,
     TRIGGER_IN_FLIGHT_STATUSES,
+    due_deferred_calls,
 )
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
@@ -1107,9 +1109,12 @@ class PromptAgentTaskStep(TaskStep):
 
     @staticmethod
     def _is_settling(state: dict) -> bool:
-        """Whether a trigger still has fire work outstanding.
+        """Whether a trigger still has fire work outstanding, or a deferred call the gateway clock has reached is still
+        to make (it and the triggers it provokes are under way); one not yet due is not waited for.
 
         An unbounded recurrence is excluded: it re-enters ``firing`` every arrival and never settles."""
+        if due_deferred_calls(state):
+            return True
         for t in state.get("triggers", []):
             # `pending` too: the queue itself, not a label, so it outlives a status we do not know.
             if t.get("status") not in TRIGGER_IN_FLIGHT_STATUSES and not t.get("pending"):
@@ -1133,10 +1138,13 @@ class PromptAgentTaskStep(TaskStep):
         """Whether the record can still change after this capture; None when not determinable.
 
         An older gateway has no ``type``, so an unresolved event-anchored trigger is
-        indistinguishable from an action trigger — claiming completeness there would be a false signal."""
+        indistinguishable from an action trigger — claiming completeness there would be a false signal.
+        A deferred call still to make will change it too, though settling never waits for one."""
         rows = state.get("triggers", [])
         if any("type" not in t for t in rows):
             return None
+        if any(c.get("status") == DEFERRED_CALL_PENDING for c in state.get("deferred_calls", [])):
+            return False
         return not any(t.get("status") in TRIGGER_IN_FLIGHT_STATUSES or t.get("pending")
                        or (t["type"] == "time" and t.get("status") == "armed") for t in rows)
 
