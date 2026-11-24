@@ -32,7 +32,7 @@ def a2a_agent() -> A2AAgent:
 @pytest.mark.xfail(
     reason=(
         "The echo agent has no model or tools: the MCP check needs a tool call and "
-        "the snapshot extension is not implemented."
+        "the snapshot check a model that recalls what it was told."
     ),
     strict=False,
 )

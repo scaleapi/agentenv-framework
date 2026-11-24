@@ -26,7 +26,8 @@ from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.env.env import DeployedGatewayEnv, _mcp_url
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, _mcp_url
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
@@ -49,12 +50,14 @@ from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
+from agent_env.config.errors import ConfigError
 from agent_env.store import EcrImageStore, NotFoundError
 from tst.unit.providers.env_state.fakes import (
     EXTERNAL_READINESS_SERVICE,
     EXTERNAL_STATE_TYPE,
     registered_external_provider as registered_external_provider,
 )
+from tst.util.config import config_with_document
 from tst.util.sandbox_providers import CONTAINERS, VMS_AND_CONTAINERS
 
 
@@ -344,6 +347,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeyp
         # Patch _wait_for_tunnel to skip the real HTTP poll; it returns the card it read
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
         gp._refuse_tool_name_clashes = AsyncMock()
+        gp._served_consoles = AsyncMock(return_value={})
         # Patch Env.get and config to return mock envs
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg, \
@@ -433,8 +437,8 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeyp
     gp._wait_for_tunnel.assert_awaited_once_with("https://agent-gateway.modal.host", timeout=120)
     assert result.environment_card == _CARD
     assert datetime.fromisoformat(result.environment_card_read_at_utc).utcoffset().total_seconds() == 0
-    assert result.db_web_url is None
-    assert result.db_mcp_url is None
+    assert result.db_web_gateway_url is None
+    assert result.db_mcp_gateway_url is None
 
 
 @pytest.mark.asyncio
@@ -462,6 +466,7 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
     with patch.object(provider, "create_container", side_effect=fake_create_container):
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
         gp._refuse_tool_name_clashes = AsyncMock()
+        gp._served_consoles = AsyncMock(return_value={})
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg:
             gateway_env = MagicMock()
@@ -521,6 +526,7 @@ async def test_container_mode_mcp_url_follows_the_card():
     with patch.object(provider, "create_container", side_effect=fake_create_container):
         gp._wait_for_tunnel = AsyncMock(return_value=card)
         gp._refuse_tool_name_clashes = AsyncMock()
+        gp._served_consoles = AsyncMock(return_value={})
         with patch("agent_env.env.env.Env.get") as env_get, patch("agent_env.config.get_config") as get_cfg:
             env_get.return_value.docker_image_artifact = _image("agent-gateway")
             get_cfg.return_value = MagicMock(default_gateway_env_id="gw-id")
@@ -601,6 +607,7 @@ def _slack_in_containers(gp: EnvironmentGatewayProvider, provider: ModalSandboxP
         gp._init_service_db_via_exec = AsyncMock()
         gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
         gp._refuse_tool_name_clashes = AsyncMock()
+        gp._served_consoles = AsyncMock(return_value={})
         with patch("agent_env.env.env.Env.get") as env_get, \
              patch("agent_env.config.get_config") as get_cfg:
             gateway_env = MagicMock()
@@ -1456,6 +1463,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
     sandbox_provider.create_vm = AsyncMock(return_value=sandbox)
 
     sidecar_art = _loadable("ecr/relay:1.0.4")
+    gateway_port, sidecar_port = 18765, 18768
 
     class _Stop(Exception):
         pass
@@ -1471,7 +1479,7 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
                 sandbox_provider=sandbox_provider,
                 mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
                 mcp_server_images=[_loadable("mcp-slack")],
-                gateway_port=18765,
+                gateway_port=gateway_port,
                 website_configs=None,
                 website_images=None,
                 gateway_mode=GatewayMode.PERFORMANCE,
@@ -1479,13 +1487,15 @@ async def test_deploy_via_vm_side_loads_sidecar_image():
                 disk_size_gb=10,
                 sidecars=[SidecarConfig(
                     environment_name="relay", image_artifact=sidecar_art,
-                    container_port=8000, host_port=18768,
+                    container_port=8000, host_port=sidecar_port,
                 )],
             )
 
     sandbox.load_docker_images.assert_awaited_once()
     loaded = sandbox.load_docker_images.call_args.args[0]
     assert sidecar_art in loaded, "sidecar image_artifact was not side-loaded onto the VM"
+    # The VM exposes the gateway and the sidecars, and no port of pgweb's or db-mcp's: the gateway serves both.
+    assert sandbox_provider.create_vm.call_args.kwargs["exposed_ports"] == [gateway_port, sidecar_port]
 
 
 # --- name injection: SERVICE_NAME + ENVIRONMENT_NAME --------------------------
@@ -1871,7 +1881,7 @@ _PROBE_CARD = {"name": "env1234", "children_environments": [
 
 
 def _probed(mcp_url: str = "https://gw.example/mcp") -> DeployedGateway:
-    return DeployedGateway(gateway_url="https://gw.example", mcp_url=mcp_url, db_web_url=None, environment_card=_PROBE_CARD)
+    return DeployedGateway(gateway_url="https://gw.example", mcp_url=mcp_url, environment_card=_PROBE_CARD)
 
 
 def _probe_records(caplog) -> list[logging.LogRecord]:
@@ -2099,9 +2109,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
     assert re.fullmatch(r"env\d{4}", compose.call_args.kwargs["mcp_server_name"])
     assert compose.call_args.kwargs["host_ips"] == ()
     assert dataclasses.asdict(record) == dataclasses.asdict(DeployedGatewayEnv(
-        env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", db_web_url=None,
-        sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, db_mcp_url=None,
-        environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
+        env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
         environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"],
         control_token=record.control_token))
     assert len(record.control_token) >= 43 and compose.call_args.kwargs["control_token"] == record.control_token
@@ -2156,8 +2164,8 @@ async def test_deploy_records_the_gateways_sidecar_urls_and_its_containers():
     async def deploy_gateway(sandbox_provider, **kwargs):
         gp._sandbox, gp._environment_sandboxes = sandboxes["gw"], {"slack": sandboxes["srv"]}
         gp._db_sandbox, gp._pgweb_sandbox, gp._db_mcp_sandbox = sandboxes["db"], sandboxes["pg"], sandboxes["dm"]
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url="https://pg/", db_mcp_url="https://dm/mcp",
-                               environment_card={"name": "env1234"}, env_state_instance_ids=["st-1"])
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_gateway_url="https://gw/svc/pgweb/",
+                               db_mcp_gateway_url="https://gw/svc/db-mcp/mcp", environment_card={"name": "env1234"}, env_state_instance_ids=["st-1"])
 
     with patch.object(gp, "_deploy_gateway", side_effect=deploy_gateway), \
          patch("agent_env.env.env.Env.get", MagicMock()), \
@@ -2165,7 +2173,8 @@ async def test_deploy_records_the_gateways_sidecar_urls_and_its_containers():
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value={"slack_send"})):
         record = await gp.deploy(env, ModalSandboxProvider())
 
-    assert (record.gateway_url, record.db_web_url, record.db_mcp_url, record.env_state_instance_ids) == ("https://gw", "https://pg/", "https://dm/mcp", ["st-1"])
+    assert (record.gateway_url, record.db_web_gateway_url, record.db_mcp_gateway_url, record.env_state_instance_ids) == (
+        "https://gw", "https://gw/svc/pgweb/", "https://gw/svc/db-mcp/mcp", ["st-1"])
     assert (record.sandbox_id, record.sandbox_type, record.website_frontend_urls, record.mcp_server_name) == ("gw", "modal", None, "env1234")
     assert record.sandbox_ids == {
         "gateway_server": "gw", "mcp_server": {"slack": "srv"}, "service_db": {"servicedb": "db", "pgweb": "pg", "db-mcp": "dm"}}
@@ -2196,7 +2205,7 @@ async def test_a_deploy_on_an_external_state_store_needs_no_servicedb_env(make):
 
     async def deploy_gateway(sandbox_provider, **kwargs):
         gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None, env_state_instance_ids=["st-ext"])
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", env_state_instance_ids=["st-ext"])
 
     external = MagicMock(state_type="remote", instance_id="st-ext")
     with _deploying(gp, deploy_gateway) as deploying, \
@@ -2234,7 +2243,8 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
     async def deploy_gateway(sandbox_provider, **kwargs):
         seen.update(kwargs)
         gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url="https://pg/", website_frontend_urls={"shop": "https://shop"},
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_gateway_url="https://gw/svc/pgweb/",
+                               website_frontend_urls={"shop": "https://shop"},
                                environment_card={"name": "crm"}, env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway) as deploying:
@@ -2247,9 +2257,8 @@ async def test_deploy_fronts_a_multi_envs_servers_and_websites_under_its_name():
     assert [i.image_name for i in seen["website_images"]] == ["shop-be", "shop-fe", "blog-be", "blog-fe"] and seen["mcp_server_name"] == "crm"
     deploying.acquire.assert_awaited_once_with(env_state_type=None, ttl_seconds=60, name_hint="crm-suite", env_state_instance_id="st-1")
     assert dataclasses.asdict(record) == dataclasses.asdict(DeployedGatewayEnv(
-        env_id="crm-suite", env_version=2, env_provider_type="gateway", gateway_url="https://gw", db_web_url="https://pg/",
-        sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={"gateway_server": "vm-1"}, db_mcp_url=None,
-        environment_card_url="https://gw/.well-known/agent-env.json", environment_card={"name": "crm"}, environment_card_read_at_utc=None,
+        env_id="crm-suite", env_version=2, env_provider_type="gateway", gateway_url="https://gw", db_web_gateway_url="https://gw/svc/pgweb/",
+        sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={"gateway_server": "vm-1"}, environment_card_url="https://gw/.well-known/agent-env.json", environment_card={"name": "crm"}, environment_card_read_at_utc=None,
         website_frontend_urls={"shop": "https://shop"}, gateway_mode="performance", env_state_instance_ids=["st-1"]))
     assert (record.mcp_url, record.mcp_server_name, deploying.tool_names.await_count) == ("https://gw/mcp", "crm", 1)
 
@@ -2266,7 +2275,7 @@ async def test_a_container_multi_env_record_names_its_gateway_servers_and_databa
         gp._sandbox = _FakeSandbox("gw", 18765, "https://gw")
         gp._environment_sandboxes = {name: _FakeSandbox(f"srv-{name}", 18765, "https://srv") for name in servers}
         gp._db_sandbox = _FakeSandbox("db", SERVICE_DB_PORT, "https://db")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None)
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp")
 
     with _deploying(gp, deploy_gateway):
         record = await gp.deploy(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp(n) for n in servers]), ModalSandboxProvider())
@@ -2280,7 +2289,7 @@ async def test_deploy_fronts_a_website_env():
     async def deploy_gateway(sandbox_provider, **kwargs):
         seen.update(kwargs)
         gp._sandbox = MagicMock(sandbox_id="vm-1", type="modal_vm")
-        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None, website_frontend_urls={"shop": "https://shop"},
+        return DeployedGateway(gateway_url="https://gw", mcp_url="https://gw/mcp", website_frontend_urls={"shop": "https://shop"},
                                env_state_instance_ids=["st-1"])
 
     with _deploying(gp, deploy_gateway):
@@ -2292,8 +2301,7 @@ async def test_deploy_fronts_a_website_env():
 
 
 def _multi_record(env_state_instance_ids: list[str]) -> DeployedGatewayEnv:
-    return DeployedGatewayEnv(env_id="crm-suite", env_version=2, gateway_url="https://gw", mcp_url="https://gw/mcp", db_web_url=None,
-                              sandbox_id="gw", sandbox_type="modal", env_state_instance_ids=env_state_instance_ids,
+    return DeployedGatewayEnv(env_id="crm-suite", env_version=2, gateway_url="https://gw", mcp_url="https://gw/mcp", sandbox_id="gw", sandbox_type="modal", env_state_instance_ids=env_state_instance_ids,
                               sandbox_ids={"gateway_server": "gw", "mcp_server": {"slack": "srv"}, "service_db": {"servicedb": "db", "pgweb": "pg"}})
 
 
@@ -3052,6 +3060,7 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
     gp._init_service_db_via_exec = AsyncMock()
     gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
     gp._refuse_tool_name_clashes = AsyncMock()
+    gp._served_consoles = AsyncMock(return_value={})
     with patch.object(provider, "create_container", side_effect=fake_create_container), \
          patch("agent_env.env.env.Env.get", side_effect=lambda env_id, *a, **k: gateway_env if env_id == "gw-id" else db_env), \
          patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id", default_service_db_env_id="db-id")):
@@ -3111,3 +3120,167 @@ def test_a_site_image_without_curl_passes_its_health_probe_once_its_health_path_
 
 def test_a_site_answering_only_errors_fails_its_health_probe(tmp_path):
     assert _run_probe(tmp_path, {"/.well-known/agent-env.json": 500, "/api/health": 503}) != 0
+
+
+_TIMEOUT = httpx.ReadTimeout("slow")
+_REFUSED = httpx.ConnectError("refused")
+_DROPPED = httpx.RemoteProtocolError("Server disconnected without sending a response.")
+_GUARDED = {"pgweb": ([401], [200]), "db-mcp": ([401], [404])}
+_BOTH = {"pgweb": "https://gw.example/svc/pgweb/", "db-mcp": "https://gw.example/svc/db-mcp/mcp"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answers, recorded", [
+    pytest.param(_GUARDED, _BOTH, id="both-guarded-and-reached"),
+    pytest.param({**_GUARDED, "db-mcp": ([401], [502] * 3)}, {"pgweb": _BOTH["pgweb"]}, id="db-mcp-unreachable"),
+    pytest.param({**_GUARDED, "db-mcp": ([401], [502, 404])}, _BOTH, id="db-mcp-up-on-the-second-ask"),
+    pytest.param({**_GUARDED, "pgweb": ([_TIMEOUT, 401], [200])}, _BOTH, id="pgweb-slow-once"),
+    pytest.param({**_GUARDED, "pgweb": ([_TIMEOUT] * 3, [])}, {"db-mcp": _BOTH["db-mcp"]}, id="pgweb-silent"),
+    pytest.param({**_GUARDED, "pgweb": ([_DROPPED, 401], [_REFUSED, 200])}, _BOTH, id="pgweb-tunnel-drops-once"),
+    pytest.param({"pgweb": ([404], []), "db-mcp": ([404], [])}, {}, id="older-gateway"),
+    pytest.param({"pgweb": ([200], []), "db-mcp": ([200], [])}, {}, id="open"),
+    pytest.param({"pgweb": ([_REFUSED] * 3, []), "db-mcp": ([_REFUSED] * 3, [])}, {}, id="unreachable-gateway"),
+])
+async def test_the_record_names_each_console_the_gateway_guards_and_reaches(monkeypatch, answers, recorded):
+    """A console counts when the gateway refuses it without the control token and, with the token, answers for it
+    rather than with a 5xx: an older gateway image answers 404, and a console bound where the gateway can't reach it
+    leaves the gateway a 502. A timeout, a dropped connection or a 5xx is asked again, three times in all here."""
+    queues = {(key, with_token): list(replies) for key, (bare, token) in answers.items()
+              for with_token, replies in ((False, bare), (True, token))}
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        key = request.url.path.split("/")[2]
+        with_token = request.headers.get("authorization") == "Bearer tok"
+        answer = queues[key, with_token].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return httpx.Response(answer)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(reply), **kw))
+    monkeypatch.setattr(env_gateway_provider, "_CONSOLE_RETRY_PAUSE_S", 0)
+    monkeypatch.setattr(env_gateway_provider, "_CONSOLE_ATTEMPTS", 3)
+    served = await EnvironmentGatewayProvider()._served_consoles("https://gw.example", ["pgweb", "db-mcp"], "tok")
+    assert served == recorded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consoles, token", [([], "tok"), (["pgweb", "db-mcp"], None)])
+async def test_a_deploy_without_consoles_or_a_token_asks_the_gateway_nothing(monkeypatch, consoles, token):
+    monkeypatch.setattr(httpx, "AsyncClient", MagicMock(side_effect=AssertionError("asked the gateway")))
+    assert await EnvironmentGatewayProvider()._served_consoles("https://gw.example", consoles, token) == {}
+
+
+
+@pytest.mark.parametrize("gateway, ancestors", [
+    ({}, None),
+    ({"console_frame_ancestors": ["https://app.example.com", "https://*.example.org"]},
+     "https://app.example.com https://*.example.org")], ids=["none", "two"])
+def test_the_gateway_takes_the_configured_frame_ancestors_with_its_consoles(monkeypatch, gateway, ancestors):
+    monkeypatch.setattr(env_gateway_provider, "get_config", lambda: config_with_document({"gateway": gateway}))
+    environment = env_gateway_provider.consoles_environment({"pgweb": "http://pgweb:8081"})
+    assert environment.get("CONSOLE_FRAME_ANCESTORS") == ancestors
+    assert environment["CONSOLE_URLS"] == "pgweb=http://pgweb:8081"
+    assert env_gateway_provider.consoles_environment({}) == {}
+
+
+@pytest.mark.parametrize("value", ["https://app.example.com", ["app.example.com"], ["https://app.example.com/x"], [1]],
+                         ids=["not-a-list", "no-scheme", "a-path", "not-a-string"])
+def test_a_frame_ancestors_setting_that_is_not_a_list_of_origins_is_refused(monkeypatch, value):
+    monkeypatch.setattr(env_gateway_provider, "get_config",
+                        lambda: config_with_document({"gateway": {"console_frame_ancestors": value}}))
+    with pytest.raises(ConfigError, match="console_frame_ancestors"):
+        env_gateway_provider.consoles_environment({"pgweb": "http://pgweb:8081"})
+
+@pytest.mark.parametrize("images, consoles", [
+    ({"db_web_image": "pgweb:1", "db_mcp_image": "db-mcp:1"}, "pgweb=http://pgweb:8081,db-mcp=http://db-mcp:8000"),
+    ({"db_web_image": "pgweb:1"}, "pgweb=http://pgweb:8081"), ({}, None)], ids=["both", "pgweb", "none"])
+def test_compose_hands_the_gateway_the_sql_consoles_it_renders_on_their_network(images, consoles):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(**images)),
+        state_instance=LocalPostgresStateProvider.default_instance(), control_token="t0k")
+    services = yaml.safe_load(compose)["services"]
+    gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
+    assert gateway.get("CONSOLE_URLS") == consoles
+    for console in (consoles or "").split(","):
+        if console:
+            name = console.split("=", 1)[0]
+            assert set(services[name]["networks"]) & set(services[GATEWAY_SERVICE_NAME]["networks"])
+
+
+@pytest.mark.asyncio
+async def test_container_mode_hands_the_gateway_its_consoles_on_the_private_network_and_records_them_there(monkeypatch):
+    """The gateway reaches pgweb and db-mcp at their private hosts, and the record names them under the gateway's URL
+    once the gateway refuses them without the token and serves them with it."""
+    provider, gp = ModalSandboxProvider(), EnvironmentGatewayProvider()
+    made: dict[str, tuple[_FakeSandbox, dict]] = {}
+
+    async def create_container(**kwargs):
+        name = kwargs["image_name"].rsplit("/", 1)[-1]
+        sandbox = _FakeSandbox(name, kwargs["port"], f"https://{name}.modal.host")
+        made[name] = (sandbox, kwargs)
+        return sandbox
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(
+        lambda request: httpx.Response(404 if not request.url.path.startswith("/svc/")
+                                       else 200 if request.headers.get("authorization") == "Bearer t0k" else 401)),
+        **kw))
+    with _slack_in_containers(gp, provider, create_container) as args:
+        del gp._served_consoles  # the real check, asking the gateway
+        deployed = await gp._deploy_via_containers(sandbox_provider=provider, control_token="t0k", **args)
+    pgweb, db_mcp = made["pgweb"][0], made["db-mcp"][0]
+    assert {name: kwargs.get("expose_externally", True) for name, (_, kwargs) in made.items()
+            if name in ("pgweb", "db-mcp")} == {"pgweb": False, "db-mcp": False}
+    assert made["agent-gateway"][1]["env"]["CONSOLE_URLS"] == (
+        f"pgweb=http://{pgweb.private_host}:8081,db-mcp=http://{db_mcp.private_host}:8000")
+    assert (deployed.db_web_gateway_url, deployed.db_mcp_gateway_url) == (
+        "https://agent-gateway.modal.host/svc/pgweb/", "https://agent-gateway.modal.host/svc/db-mcp/mcp")
+
+
+@pytest.mark.parametrize("name", ["pgweb", "db-mcp"])
+def test_a_website_cant_take_a_consoles_svc_key(name):
+    from agent_env.providers.env_providers.env_gateway_provider import _compose_name_problems
+
+    site = WebsiteConfig(backend_image="be", frontend_image=None, environment_name=name)
+    assert any("SQL console" in problem for problem in _compose_name_problems([], [site]))
+
+
+@pytest.mark.asyncio
+async def test_a_reattach_takes_back_the_slot_layout_its_record_kept():
+    sandboxes = {i: _FakeSandbox(i, 18765, f"https://{i}") for i in ("gw", "srv", "db", "pg")}
+    record = dataclasses.replace(_multi_record([]), stack_layout=StackLayout.for_slot(2).to_record())
+    gp = EnvironmentGatewayProvider()
+    with patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=AsyncMock(side_effect=sandboxes.get))):
+        await gp._reattach(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp("slack")]), record)
+    assert gp.stack_layout == StackLayout.for_slot(2)
+
+
+@pytest.mark.asyncio
+async def test_a_reattach_of_a_record_with_no_layout_uses_the_default_stack():
+    sandboxes = {i: _FakeSandbox(i, 18765, f"https://{i}") for i in ("gw", "srv", "db", "pg")}
+    gp = EnvironmentGatewayProvider()
+    gp._stack_layout = StackLayout.for_slot(1)
+    with patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=AsyncMock(side_effect=sandboxes.get))):
+        await gp._reattach(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp("slack")]), _multi_record([]))
+    assert gp.stack_layout is DEFAULT_STACK_LAYOUT
+
+
+@pytest.mark.asyncio
+async def test_a_reattach_of_a_damaged_layout_raises_before_touching_any_sandbox():
+    get_sandbox = AsyncMock()
+    record = dataclasses.replace(_multi_record([]), stack_layout={"compose_project": "s1"})
+    with patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=get_sandbox)), \
+         pytest.raises(ValueError):
+        await EnvironmentGatewayProvider()._reattach(MultiEnv(id="crm-suite", version=2, mcp_server_envs=[_mcp("slack")]), record)
+    get_sandbox.assert_not_awaited()
+
+
+def test_a_gateway_record_keeps_its_slot_layout_through_storage_and_an_older_record_has_none():
+    record = dataclasses.replace(_multi_record([]), stack_layout=StackLayout.for_slot(4).to_record())
+    assert DeployedEnv.from_dict(dataclasses.asdict(record)).stack_layout == StackLayout.for_slot(4).to_record()
+    older = {k: v for k, v in dataclasses.asdict(_multi_record([])).items() if k != "stack_layout"}
+    assert DeployedEnv.from_dict(older).stack_layout is None

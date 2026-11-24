@@ -204,7 +204,8 @@ async def _send_project_id(step, context):
         return
     negotiated = A2AAgent.negotiate_agent_config(agent.a2a_card or {}, {"project_id": project_id})
     assert negotiated and "project_id" in negotiated.fields, "the card doesn't take project_id over agent-config"
-    await protocol.post_agent_config((agent.a2a_url or agent.api_url) + negotiated.endpoint, negotiated.fields)
+    await protocol.post_agent_config((agent.a2a_url or agent.api_url) + negotiated.endpoint, negotiated.fields,
+                                     headers=agent.control_headers)
 
 
 def test_a_project_id_posted_over_agent_config_attributes_every_model_call_to_the_project(state, endpoint):

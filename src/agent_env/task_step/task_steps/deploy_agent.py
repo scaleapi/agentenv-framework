@@ -30,6 +30,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
+from agent_env.config.model import ModelRole, endpoint_host
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
@@ -520,7 +521,7 @@ class DeployAgentTaskStep(TaskStep):
             card.update(identity.fields)
             logger.info(f"Stamped card identity on '{self.agent_name}': {sorted(identity.fields)}")
 
-        default_model = config.get_model_for_role("agent")
+        default_model = config.resolve_model(ModelRole.SOLVER).model
         if default_model and not context.default_agent_model:
             context.default_agent_model = default_model
             logger.info(f"Set context.default_agent_model to '{default_model}'")
@@ -550,7 +551,10 @@ class DeployAgentTaskStep(TaskStep):
             role=self.role,
             network_policy=deployed.network_policy,
             env_ids=list(self.env_ids),
+            env_bindings={env_id: (d.metadata or {}).get("deploy_step_id")
+                          for env_id, d in env_deployments.items() if d is not None},
             control_token=deployed.control_token,
+            model_endpoint_host=endpoint_host(agent.model_base_url(env_vars, get_config())),
         ))
         # An agent deployed while a clock is armed follows it, as sync_env_clock had every agent then.
         from agent_env.a2a_agent.clock import follow_armed_clocks
@@ -725,6 +729,7 @@ class DeployAgentTaskStep(TaskStep):
             file_names=set((universe.file_artifact_refs or universe.file_artifact_ids or {}).keys()),
             target_context_id=self.agent_snapshot_target_context_id,
             sandbox_type=sandbox_type,
+            state=A2AAgent.keeps_snapshot_state(card),
         )
         answer = await invoke_transfer(
             a2a_url + load_path,

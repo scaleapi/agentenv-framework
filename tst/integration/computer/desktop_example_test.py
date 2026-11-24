@@ -51,6 +51,7 @@ def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
     context, manifest, frames = _recorded(ran.output, "desk", state)
     entry = context["metadata"]["computer_recordings"]["desk"]
     assert (entry["state"], entry["ended_by"], entry["missing_segments"]) == ("ended", "end", 0)
+    assert entry["annotated"] is False and "annotate" not in manifest
     assert manifest["source"] == "stream" and manifest["cursor"] is True and frames
     assert len(frames) == sum(s["frames"] for s in manifest["segments"])
     drive = json.loads(context["metadata"]["verifications"]["drive"]["results"][0]["description"])
@@ -72,6 +73,7 @@ def test_an_agent_given_the_computers_skill_files_a_loaded_file_in_a_new_folder_
     context, manifest, frames = _recorded(ran.output, "agent", state)
     entry = context["metadata"]["computer_recordings"]["agent"]
     assert (entry["state"], entry["missing_segments"]) == ("ended", 0) and frames
+    assert entry["annotated"] is True and manifest["annotate"] == {}
     assert "## Shortcuts" in context["metadata"]["env_skills"]["default-agent"]["desktop"]["desktop"]
 
 

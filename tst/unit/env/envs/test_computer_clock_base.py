@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 import agent_env
+from tst.util.build_context import sent
 from agentenv_protocol.computer import clock
 
 COMPUTERS = Path(agent_env.__file__).parent / "computers"
@@ -26,12 +27,12 @@ def _folder(base: str) -> Path:
 
 
 def _settings(base: str) -> dict[str, str]:
-    return dict(line.split("=", 1) for line in (_folder(base) / "clock" / "clock.conf").read_text().splitlines()
+    return dict(line.split("=", 1) for line in sent(_folder(base), "clock/clock.conf").read_text().splitlines()
                 if "=" in line and not line.startswith("#"))
 
 
 def _page_writer(base: str):
-    spec = importlib.util.spec_from_file_location("clockpage_defaults", _folder(base) / "clock" / "clockpage.py")
+    spec = importlib.util.spec_from_file_location("clockpage_defaults", sent(_folder(base), "clock/clockpage.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -41,7 +42,7 @@ def _page_writer(base: str):
 def test_the_bases_dockerfile_installs_the_follower_and_makes_its_user_and_config_folder_as_the_protocol_names_them(
         base):
     dockerfile = (_folder(base) / "Dockerfile").read_text()
-    install = (_folder(base) / "root" / "install.sh").read_text()
+    install = sent(_folder(base), "root/install.sh").read_text()
     config_folder = PurePosixPath(clock.CONFIG).parent
 
     assert f"clock/clock-follower {PurePosixPath(clock.FOLLOWER).parent}/\n" in dockerfile
@@ -54,8 +55,8 @@ def test_the_bases_dockerfile_installs_the_follower_and_makes_its_user_and_confi
 @base
 def test_roots_supervisord_runs_the_follower_as_its_user_and_init_makes_its_status_folder_and_page_its_own(base):
     root = configparser.ConfigParser(interpolation=None)
-    root.read_string((_folder(base) / "root.conf").read_text())
-    init = (_folder(base) / "root" / "init").read_text()
+    root.read_string(sent(_folder(base), "root.conf").read_text())
+    init = sent(_folder(base), "root/init").read_text()
 
     assert (root["program:clock"]["command"], root["program:clock"]["user"]) == (
         f"/usr/bin/python3 -I {clock.FOLLOWER}", USER)

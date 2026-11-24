@@ -285,7 +285,6 @@ def wiring(monkeypatch) -> _Wiring:
 
 def _gateway_env() -> DeployedGatewayEnv:
     return DeployedGatewayEnv(
-        env_id="crm", env_version=1, gateway_url="https://gw.example", mcp_url=_GATEWAY_MCP_URL, db_web_url=None,
-        sandbox_id="sb-1", environment_card_url="https://gw.example/.well-known/agent-env.json",
+        env_id="crm", env_version=1, gateway_url="https://gw.example", mcp_url=_GATEWAY_MCP_URL, sandbox_id="sb-1", environment_card_url="https://gw.example/.well-known/agent-env.json",
         environment_card={"name": "crm"},
     )

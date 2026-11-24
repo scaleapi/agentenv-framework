@@ -73,8 +73,7 @@ class _FakeDeployEnv:
         self.deploy_calls.append(self.id)
         context.deployed_envs.append(
             DeployedGatewayEnv(
-                env_id=self.id, env_version=1, gateway_url="g", mcp_url="m", db_web_url=None,
-                sandbox_id=f"sb-{self.id}-{len(self.deploy_calls)}", sandbox_type="fake",
+                env_id=self.id, env_version=1, gateway_url="g", mcp_url="m", sandbox_id=f"sb-{self.id}-{len(self.deploy_calls)}", sandbox_type="fake",
             )
         )
         return context
@@ -551,7 +550,7 @@ async def test_cancelled_sibling_is_rolled_back_and_redispatched(store):
             self.runs += 1
             context.deployed_envs.append(
                 DeployedGatewayEnv(env_id=self.id, env_version=1, gateway_url="g", mcp_url="m",
-                            db_web_url=None, sandbox_id="")
+                            sandbox_id="")
             )
             await release.wait()
             return context
@@ -812,7 +811,7 @@ def test_retry_config_from_dict_validates():
 
 
 def test_retry_config_round_trips_on_non_prompt_step():
-    # deploy_env's __init__ does not accept retry_config; attach_retry_config must
+    # deploy_env's __init__ does not accept retry_config; attach_base_fields must
     # still hydrate it on the generic parse path, and it must round-trip out.
     doc = {
         "id": "t", "type": "task", "version": 1,

@@ -11,13 +11,15 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
 
 from a2a.types import TaskStatusUpdateEvent
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ...atif import AdapterSpec
 
 logger = logging.getLogger(__name__)
 
@@ -155,34 +157,58 @@ class TrajectoryLog:
 
     Each event is serialized as it is appended, so an event once read never changes; append
     from one thread at a time. Unless the result carries a ``native_trajectory``, the log is
-    the task's final trajectory."""
+    the task's final trajectory. An agent whose card declares a ``native`` format starts with
+    that format, and setting or returning another fails the turn. With an ATIF adapter
+    (``adapter``, its spec), every event and aux record also feeds the context's atif/1 copy."""
 
-    __slots__ = ("_events", "_size_bytes", "_format", "_sealed", "_task_id", "_warned")
+    __slots__ = (
+        "_events", "_size_bytes", "_format", "_native", "_sealed", "_task_id", "_warned", "_adapter", "_atif",
+        "_starts_document",
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, *, native: str | None = None, adapter: AdapterSpec | None = None) -> None:
         self._events: list[bytes] = []
         self._size_bytes = 0
-        self._format: str | None = None
+        self._format: str | None = native
+        self._native = native
         self._sealed = False
         self._task_id: str | None = None
         self._warned = False
+        self._adapter = adapter
+        self._atif: Any = None
+        self._starts_document = False
 
     @property
     def format(self) -> str | None:
         return self._format
+
+    @property
+    def builds_atif(self) -> bool:
+        """Whether this task feeds an atif/1 copy: the agent has an ATIF adapter and the run prescribed atif/1. An agent
+        gathers what only its aux files take, such as a log it tails, only then."""
+        return self._atif is not None
+
+    @property
+    def starts_document(self) -> bool:
+        """Whether this task opens a new atif/1 document of its conversation: the conversation's first, or the first
+        since the copy was dropped (a restart, an eviction, a snapshot restore). What an agent feeds a document once,
+        such as the tools its model is offered, it feeds again then."""
+        return self._starts_document
 
     def set_format(self, format: str) -> None:
         """Name the events' versioned format, such as ``my-cli-events/1``; once an event is
         appended, it stays."""
         if not isinstance(format, str) or not format.strip():
             raise ValueError("trajectory format must be a non-empty string")
+        self._hold_to_native(format)
         self._ensure_open()
         if self._events and format != self._format:
             raise RuntimeError("the trajectory's format cannot change once events are appended")
         self._format = format
 
     def append(self, event: Mapping[str, Any]) -> None:
-        """Record one complete event, a JSON object, after ``set_format`` has named its format."""
+        """Record one complete event, a JSON object, once the log has a format: the card's
+        ``native``, or one ``set_format`` names."""
         if not isinstance(event, Mapping):
             raise TypeError("a trajectory event must be a JSON object")
         self._ensure_open()
@@ -191,6 +217,8 @@ class TrajectoryLog:
         encoded = json.dumps(dict(event), separators=(",", ":"), allow_nan=False).encode()
         self._events.append(encoded)
         self._size_bytes += len(encoded)
+        if self._atif is not None:
+            self._atif.native(json.loads(encoded))
         if not self._warned and self._size_bytes > _LARGE_LIVE_TRAJECTORY_BYTES:
             self._warned = True
             logger.warning(
@@ -199,8 +227,42 @@ class TrajectoryLog:
                 _LARGE_LIVE_TRAJECTORY_BYTES,
             )
 
+    def aux(self, name: str, record: Any) -> None:
+        """Feed a record of aux file ``name``, one the agent's ATIF adapter declares, such as a
+        hook's note, where it happened among the native events. It reaches the adapter and the
+        turn's atif/1 final read; the native log doesn't change."""
+        if self._adapter is None:
+            raise RuntimeError("aux records feed an ATIF adapter: enable(TRAJECTORY_V1, native=..., atif=...)")
+        if name not in self._adapter.aux:
+            raise ValueError(f"the ATIF adapter declares no aux file {name!r}")
+        self._ensure_open()
+        encoded = json.dumps(record, separators=(",", ":"), allow_nan=False)
+        if self._atif is not None:
+            self._atif.aux(name, json.loads(encoded))
+
     def __len__(self) -> int:
         return len(self._events)
+
+    def _hold_returned(self, format: str) -> None:
+        """Fail the turn when a returned native trajectory breaks the card: its format isn't the
+        native one, or the task also appended events while an ATIF adapter builds the atif/1 copy
+        from them, so the copy and the native record would come from different sources."""
+        self._hold_to_native(format)
+        if self._adapter is not None and self._events:
+            raise _TaskFailed(
+                "framework.trajectory_appended_and_returned",
+                "the task appended trajectory events and returned a native trajectory; with an ATIF adapter, "
+                "append the events or return the trajectory, not both",
+            )
+
+    def _hold_to_native(self, format: str) -> None:
+        """Fail the turn as the agent's error when ``format``, set or returned, isn't the native
+        format the card declares; a retry would fail the same way."""
+        if self._native is not None and format != self._native:
+            raise _TaskFailed(
+                "framework.trajectory_format_mismatch",
+                f"the trajectory format {format!r} is not {self._native!r}, the native format the card declares",
+            )
 
     def _ensure_open(self) -> None:
         if self._sealed:
@@ -302,64 +364,201 @@ class NativeTrajectory:
         object.__setattr__(self, "payload", _copy_json_value(self.payload))
 
 
+_USAGE_COUNTERS = (
+    "tool_call_count",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+)
+
+
+# The keys a model response's usage is read by, in any of the shapes ``Usage.from_model_response`` reads.
+_RESPONSE_USAGE_KEYS = frozenset({
+    "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens",
+    "prompt_tokens_details", "input_tokens_details", "cache_read_input_tokens", "cache_creation_input_tokens",
+})
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _check_counts(record: Any, names: Iterable[str]) -> None:
+    for name in names:
+        value = getattr(record, name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"{name} must be a non-negative integer")
+    if record.input_includes_cache is not None and not isinstance(record.input_includes_cache, bool):
+        raise ValueError("input_includes_cache must be true, false or null")
+    if record.cost_usd is not None and (
+        isinstance(record.cost_usd, bool) or not isinstance(record.cost_usd, (int, float)) or record.cost_usd < 0
+    ):
+        raise ValueError("cost_usd cannot be negative")
+
+
+_MODEL_COUNTERS = ("calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelUsage:
+    """One model's share of a turn's usage: the calls the turn made to ``model``, as it was called, and their counts,
+    read as ``Usage``'s are, with the agent's own cost for them when it has one."""
+
+    model: str
+    calls: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    input_includes_cache: bool | None = None
+    cost_usd: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, str) or not self.model:
+            raise ValueError("a model's usage must name the model")
+        _check_counts(self, _MODEL_COUNTERS)
+
+    @classmethod
+    def of(cls, model: str, usages: Iterable["Usage"]) -> "ModelUsage":
+        """``model``'s row from the usages of its calls, one each: each count summed over the calls that gave it, None
+        when none did; their cost only when every call reported one, since a sum of some isn't the model's cost; and
+        the includes-cache flag the calls that gave input counts agree on, else None."""
+        usages = list(usages)
+
+        def total(name: str) -> Any:
+            values = [value for usage in usages if (value := getattr(usage, name)) is not None]
+            return sum(values) if values else None
+
+        costs = [usage.cost_usd for usage in usages]
+        flags = {usage.input_includes_cache for usage in usages if usage.input_tokens is not None}
+        return cls(model=model, calls=len(usages), **{name: total(name) for name in _MODEL_COUNTERS[1:]},
+                   input_includes_cache=flags.pop() if len(flags) == 1 else None,
+                   cost_usd=sum(costs) if costs and None not in costs else None)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ModelUsage":
+        """The model's usage ``to_dict`` wrote; a key this version doesn't know is ignored."""
+        if not isinstance(data, Mapping):
+            raise TypeError("a model's usage must be a mapping")
+        return cls(**{f.name: data[f.name] for f in fields(cls) if data.get(f.name) is not None})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: value for f in fields(self) if (value := getattr(self, f.name)) is not None}
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Usage:
-    """Common execution metrics plus runtime-specific, JSON-shaped details."""
+    """Common execution metrics plus runtime-specific, JSON-shaped details. ``cache_read_tokens`` and
+    ``cache_write_tokens`` count the prompt tokens read from and written to the provider's prompt cache;
+    ``input_includes_cache`` says whether ``input_tokens`` counts both of them (True), neither (False), or is unknown
+    (None), which a price needs to read the counts. ``models`` is the counts by model, from an agent that knows each
+    call's model: it covers every call the turn counted, so a price can charge each model at its own rate. A count
+    the turn leaves out that every row gives is the rows' sum, and so is the includes-cache flag the rows agree on."""
 
     tool_call_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    input_includes_cache: bool | None = None
     cost_usd: float | None = None
+    models: tuple[ModelUsage, ...] = ()
     provider_details: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in (
-            "tool_call_count",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-        ):
-            value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
-                raise ValueError(f"{name} cannot be negative")
-        if self.cost_usd is not None and (
-            isinstance(self.cost_usd, bool)
-            or not isinstance(self.cost_usd, (int, float))
-            or self.cost_usd < 0
-        ):
-            raise ValueError("cost_usd cannot be negative")
+        _check_counts(self, _USAGE_COUNTERS)
+        if isinstance(self.models, (str, bytes, Mapping)) or not isinstance(self.models, Iterable):
+            raise TypeError("models must be a list of each model's usage")
+        object.__setattr__(self, "models", tuple(
+            model if isinstance(model, ModelUsage) else ModelUsage.from_dict(model) for model in self.models))
+        for name in _MODEL_COUNTERS[1:]:
+            values = [getattr(model, name) for model in self.models]
+            if getattr(self, name) is None and values and None not in values:
+                object.__setattr__(self, name, sum(values))
+        flags = {model.input_includes_cache for model in self.models}
+        if self.input_includes_cache is None and len(flags) == 1:
+            object.__setattr__(self, "input_includes_cache", flags.pop())
         if not isinstance(self.provider_details, Mapping):
             raise TypeError("provider_details must be a mapping")
         object.__setattr__(
             self, "provider_details", _copy_json_value(self.provider_details)
         )
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Usage":
+        """The usage ``to_dict`` wrote, from this protocol version or another: a field it leaves out is None, and a
+        key this version doesn't know is ignored. Raises ValueError or TypeError for a field it can't hold."""
+        if not isinstance(data, Mapping):
+            raise TypeError("usage must be a mapping")
+        known = {
+            f.name: data[f.name]
+            for f in fields(cls)
+            if f.name not in ("provider_details", "models") and data.get(f.name) is not None
+        }
+        if data.get("models") is not None:
+            known["models"] = data["models"]
+        details = data.get("provider_details")
+        return cls(**known, provider_details={} if details is None else details)
+
+    @classmethod
+    def from_model_response(cls, usage: Mapping[str, Any]) -> "Usage":
+        """A model call's usage as its response carried it, with ``input_tokens`` counting the cache: OpenAI's Chat
+        Completions (``prompt_tokens``) and Responses (``input_tokens``) shapes, and Anthropic's. An OpenAI count,
+        or a LiteLLM client's, says what it holds in its ``prompt_tokens_details`` or ``input_tokens_details``, whose
+        ``cached_tokens`` it counts, and ``cache_write_tokens`` with them. Anthropic's ``input_tokens``, and the
+        ``prompt_tokens`` a LiteLLM proxy sends with Anthropic's ``cache_read_input_tokens`` and
+        ``cache_creation_input_tokens`` beside it, count neither, so they're added, to ``total_tokens`` too. A
+        provider's split of its cache writes by how long they're kept (Anthropic's ``cache_creation``, OpenAI's
+        ``cache_write_tokens_details``), priced apart, is kept in ``provider_details``; so are the keys of a usage
+        in none of these shapes, as ``unrecognized``. A value that isn't a count is left out."""
+        key = "prompt_tokens" if "prompt_tokens" in usage else "input_tokens"
+        details = usage.get(f"{key}_details")
+        details = details if isinstance(details, Mapping) else {}
+        cached = _count(details.get("cached_tokens"))
+        read = cached if cached is not None else _count(usage.get("cache_read_input_tokens"))
+        written = _count(details.get("cache_write_tokens"))
+        write = written if written is not None else _count(usage.get("cache_creation_input_tokens"))
+        cache = (read or 0) + (write or 0)
+        input_tokens = _count(usage.get(key))
+        counts_cache = cached is not None and input_tokens is not None and input_tokens >= cache
+        missing = cache if input_tokens is not None and not counts_cache else 0
+        if input_tokens is not None:
+            input_tokens += missing
+        output = _count(usage.get("completion_tokens", usage.get("output_tokens")))
+        if (total := _count(usage.get("total_tokens"))) is not None:
+            total += missing
+        elif input_tokens is not None and output is not None:
+            total = input_tokens + output
+        kept = {"cache_creation": usage.get("cache_creation"),
+                "cache_write_tokens_details": details.get("cache_write_tokens_details")}
+        provider_details: dict[str, Any] = {
+            name: counts for name, split in kept.items() if isinstance(split, Mapping)
+            if (counts := {k: v for k, v in split.items() if _count(v) is not None})}
+        if usage and _RESPONSE_USAGE_KEYS.isdisjoint(usage):
+            provider_details["unrecognized"] = sorted(map(str, usage))
+        return cls(input_tokens=input_tokens, output_tokens=output, total_tokens=total, cache_read_tokens=read,
+                   cache_write_tokens=write, input_includes_cache=True if input_tokens is not None else None,
+                   provider_details=provider_details)
+
     @property
     def is_empty(self) -> bool:
-        return (
-            self.tool_call_count is None
-            and self.input_tokens is None
-            and self.output_tokens is None
-            and self.total_tokens is None
-            and self.cost_usd is None
-            and not self.provider_details
-        )
+        return (all(value is None for value in self._values().values()) and not self.models
+                and not self.provider_details)
 
     def to_dict(self) -> dict[str, Any]:
-        values = {
-            "tool_call_count": self.tool_call_count,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
-            "cost_usd": self.cost_usd,
-        }
-        result = {name: value for name, value in values.items() if value is not None}
+        result = {name: value for name, value in self._values().items() if value is not None}
+        if self.models:
+            result["models"] = [model.to_dict() for model in self.models]
         if self.provider_details:
             result["provider_details"] = _thaw(self.provider_details)
         return result
+
+    def _values(self) -> dict[str, Any]:
+        """Every field but ``models`` and ``provider_details``, by name, in declaration order."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("models", "provider_details")}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -425,11 +624,13 @@ class TaskResult:
         *,
         error_type: Literal["agent_error", "infra_error"] = "agent_error",
         parts: Iterable[TaskPart] | None = None,
+        usage: Usage | None = None,
     ) -> "TaskResult":
         return (
             cls.builder()
             .failed(code, message, error_type=error_type)
             .parts(parts if parts is not None else (TextPart(text=message),))
+            .usage(usage or Usage())
             .build()
         )
 

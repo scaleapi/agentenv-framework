@@ -10,7 +10,7 @@ from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.store import new_instance_id
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_step import TaskStep, attach_base_fields
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, is_prompt_step
 
 
@@ -38,7 +38,8 @@ class EpisodeSpec:
             raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
         sandboxed = {name: works_in_sandbox(seeded, name) for name in outside}
         steps = [_in_episode(step, as_run, sandboxed, turn_timeout) for step, as_run in zip(task.steps, seeded)]
-        return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
+        copy = Task(id=task.id, version=task.version, steps=steps, headline_verifiers=task.headline_verifiers)
+        return cls(copy=copy, trainer_agents=tuple(outside), seed=seed)
 
     @property
     def prompts(self) -> tuple[tuple[str, str | None], ...]:
@@ -56,14 +57,17 @@ class EpisodeSpec:
                 prompts.append((step.prompt, system_prompts[step.agent_name]))
         return tuple(prompts)
 
-    async def start(self, *, sandbox: str | None = None) -> Episode:
+    async def start(self, *, sandbox: str | None = None, run_group_id: str | None = None) -> Episode:
         """Start one run of the task, a new episode each call. It returns once the run's record exists, before
         anything is deployed; ``next_turn()`` is where the deploys and setup are waited for. ``sandbox`` is the
         provider its envs, agents, sandboxes and judge deploy on, as ``agent-env run --sandbox`` sets it. Its id is
         its run's, minted as ``agent-env run`` mints one, so what the run names after it stays in its task's
-        namespace."""
+        namespace. The run is in the run index, which the explorer lists; ``run_group_id`` groups it with the other
+        runs given the same id."""
         episode_id = new_instance_id(self._copy.id)
         metadata: dict[str, Any] = {"episode": {"id": episode_id, "trainer_agents": list(self.trainer_agents)}}
+        if run_group_id:
+            metadata["run_group_id"] = run_group_id
         if self._seed:
             metadata["seed"] = dict(self._seed)
         if sandbox:
@@ -100,5 +104,6 @@ def _in_episode(step: TaskStep, as_run: TaskStep, sandboxed: dict[str, bool], tu
             depends_on=step.depends_on, fail_task_on_error=step.fail_task_on_error,
         )
     if as_run.type == "prompt_agent" and as_run.agent_name in sandboxed and turn_timeout is not None:
-        return PromptAgentTaskStep.from_dict({**step.to_dict(), "timeout_seconds": math.ceil(turn_timeout)})
+        data = {**step.to_dict(), "timeout_seconds": math.ceil(turn_timeout)}
+        return attach_base_fields(PromptAgentTaskStep.from_dict(data), data)
     return step

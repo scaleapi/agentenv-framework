@@ -42,8 +42,8 @@ from tst.unit.env.envs.test_computer_env import DRIVER_CARD
 BOOT_DOCKERFILE = (DISK / "boot" / "Dockerfile").read_text()
 
 
-def test_each_arch_has_a_disk_made_from_its_container_on_a_base_disk_made_from_the_bases_container(disk_base, driver,
-                                                                                                  docker):
+def test_each_arch_has_a_disk_made_from_its_container_with_the_recipes_own_partition_at_the_bases_size(disk_base, driver,
+                                                                                                    docker):
     env = Env.get(_put(disk_base, driver).id)
 
     containers, disks = env.metadata["composed"]["container"], env.metadata["composed"]["disk"]
@@ -52,12 +52,12 @@ def test_each_arch_has_a_disk_made_from_its_container_on_a_base_disk_made_from_t
     assert all(r["image"].startswith("localhost:5000/agentenv-computers:") for r in disks.values())
     built = {build["tag"].split(":")[1].split("-", 1)[1]: build for build in docker.disk_builds
              if build["context"] != "tools"}
+    assert sorted(built) == ["disk-amd64", "disk-arm64"]
     for arch in ("amd64", "arm64"):
-        made, disk = built[f"base-disk-{arch}"], built[f"disk-{arch}"]
-        assert made["dockerfile"] == disk["dockerfile"] == BOOT_DOCKERFILE and made["platform"] == f"linux/{arch}"
-        assert made["args"]["ROOTFS"] == disk_base.image().image_name and made["args"]["SIZE_GB"] == "16"
-        assert "ESP" not in made["args"] and made["args"]["TOOLS"] == disk["args"]["TOOLS"]
-        assert (disk["args"]["ROOTFS"], disk["args"]["ESP"]) == (containers[arch]["image"], made["tag"])
+        disk = built[f"disk-{arch}"]
+        assert disk["dockerfile"] == BOOT_DOCKERFILE and disk["platform"] == f"linux/{arch}"
+        assert (disk["args"]["ROOTFS"], disk["args"]["SIZE_GB"]) == (containers[arch]["image"], "16")
+        assert "ESP" not in disk["args"] and disk["args"]["TOOLS"] == built["disk-amd64"]["args"]["TOOLS"]
         assert json.loads(base64.b64decode(disk["args"]["ROOTFS_CONFIG"])) == {"Labels": docker.labels[
             f"agentenv-computer:{containers[arch]['key'][7:23]}-{arch}"]}
         assert disk["labels"] == {composer.KEY_LABEL: disks[arch]["key"]}
@@ -130,7 +130,7 @@ def test_a_disk_is_looked_up_made_and_pushed_holding_a_lock_of_its_key_so_compos
             ("looked up", True), ("made", True), ("pushed", True)]
 
 
-def test_a_bases_disk_size_is_in_the_key_and_the_build_of_the_disk_made_for_it(disk_base, driver, docker):
+def test_a_bases_disk_size_is_in_the_key_and_the_build_of_its_disk(disk_base, driver, docker):
     bigger = _base(disk_base.image(), id="@local/~/kit/bigger", forms={
         **disk_base.forms.model_dump(exclude_none=True), "disk": {**DISK_FORM, "min_disk_gb": 32}})
 
@@ -138,7 +138,7 @@ def test_a_bases_disk_size_is_in_the_key_and_the_build_of_the_disk_made_for_it(d
     large = Env.get(_put(bigger, driver, id="@local/~/kit/other", environment_name="other").id)
 
     assert large.metadata["composed"]["disk"]["arm64"]["key"] != small["key"]
-    assert sorted(build["args"]["SIZE_GB"] for build in docker.disk_builds if "base-disk-arm64" in build["tag"]) == [
+    assert sorted(build["args"]["SIZE_GB"] for build in docker.disk_builds if build["tag"].endswith("-disk-arm64")) == [
         "16", "32"]
 
 
@@ -398,7 +398,7 @@ async def test_deploys_of_a_disk_no_compose_started_compose_it_once_first_reusin
     assert {arch: r["status"] for arch, r in disks.items()} == {"amd64": "unverified", "arm64": "ready"}
     assert stored.metadata["composed"]["container"] == containers and len(docker.builds) == built
     assert sorted(build["tag"].split(":")[1].split("-", 1)[1] for build in docker.disk_builds
-                  if build["context"] != "tools") == ["base-disk-amd64", "base-disk-arm64", "disk-amd64", "disk-arm64"]
+                  if build["context"] != "tools") == ["disk-amd64", "disk-arm64"]
     assert stored.computer_artifact().forms.disk is not None and len(vms.created) == 3
     assert all(record.metadata["computer"]["image"] == disks["arm64"]["image"] for record in deployed)
 

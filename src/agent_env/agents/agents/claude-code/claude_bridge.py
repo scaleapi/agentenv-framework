@@ -12,14 +12,16 @@ import re
 import signal
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,10 @@ _MODEL_ALIASES = (
 )
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# Settings every CLI run takes. The CLI deletes files older than cleanupPeriodDays by its own clock, so on an env clock
+# ahead of real time it deleted the transcript it resumes. It refuses 0, and --no-session-persistence keeps none, so
+# this is every day a JavaScript date can be from 1970: the cutoff is never after 1970, whatever the clock says.
+CLI_SETTINGS = {"cleanupPeriodDays": 100_000_000}
 
 
 # The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.
@@ -148,6 +154,18 @@ class ClaudeResult:
     structured_output: dict | None = None
     # How many `claude -p` runs the turn took; more than one means it was resumed.
     attempts: int = 1
+    # Every `result` event's `usage`, across the turn's runs: the main agent's calls, never a subagent's.
+    run_usage: list[dict] = field(default_factory=list)
+    # The CLI's own tally, `modelUsage`, at the turn's last `result`: every call, subagents' too, over the whole
+    # session, since a resume restores the session's tally.
+    model_usage: dict | None = None
+    # The session's tally before the turn: empty for a new session, None when it isn't known (a resumed session this
+    # process hasn't run before), so the turn's own tally is ``model_usage`` less this.
+    session_base: dict | None = None
+    # The subagents' model calls the turn's runs streamed, by message id.
+    subagent_calls: int = 0
+    # The model calls of runs that ended without a `result`, by message id: their usage is unknown.
+    unreported_calls: int = 0
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -173,8 +191,17 @@ def _model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
+def _api_root(url: str) -> str:
+    """``LITELLM_BASE_URL`` without a trailing ``/`` and one trailing ``/v1``: it may be configured either way, and
+    the CLI appends its own ``/v1/messages``. Core's ``api_root``, copied since this image can't import core; a unit
+    test keeps the copies equal."""
+    parts = urlsplit(url.strip())
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
+
+
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
-            task_id: str | None = None, max_thinking_tokens: int | None = None) -> dict[str, str]:
+            task_id: str | None = None, max_thinking_tokens: int | None = None,
+            clock_armed: bool = False, mcp_urls: Iterable[str] = ()) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
     token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
     aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
@@ -183,7 +210,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if not env.get("ANTHROPIC_AUTH_TOKEN") and env.get("LITELLM_API_KEY"):
         env["ANTHROPIC_AUTH_TOKEN"] = env["LITELLM_API_KEY"]
     if not env.get("ANTHROPIC_BASE_URL") and env.get("LITELLM_BASE_URL"):
-        env["ANTHROPIC_BASE_URL"] = env["LITELLM_BASE_URL"]
+        env["ANTHROPIC_BASE_URL"] = _api_root(env["LITELLM_BASE_URL"])
     if env.get("ANTHROPIC_AUTH_TOKEN"):
         env["ANTHROPIC_API_KEY"] = ""
     if model and env.get("ANTHROPIC_BASE_URL"):
@@ -203,6 +230,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     # Older CLIs prepend a changing attribution block to the system prompt on custom base URLs, which defeats the
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+    env.update(egress_env(environ, [env.get("ANTHROPIC_BASE_URL", ""), *mcp_urls], armed=clock_armed))
     return env
 
 
@@ -289,6 +317,65 @@ def _endpoint_hint(trajectory: list[dict]) -> str | None:
             "(<base>/v1/messages), such as a LiteLLM gateway, that knows the model")
 
 
+@dataclass(frozen=True)
+class RunUsage:
+    """What one run of the CLI says it used: each of its `result` events' ``usage`` (a run that hands work to a
+    subagent writes one, then another once the subagent answers), its last ``modelUsage``, the subagents' model calls
+    those `result` events span, and the model calls after its last `result` (all of them, for a run cut off before
+    any), which no `result` counts, so their usage is unknown. Calls are counted by message id; an assistant event's
+    own usage is no account of a call, being written as the message streams."""
+
+    results: list[dict]
+    model_usage: dict | None
+    subagent_calls: int
+    unreported_calls: int
+
+
+def _usage_of_run(trajectory: list[dict]) -> RunUsage:
+    last = max((index for index, event in enumerate(trajectory) if event.get("type") == "result"), default=-1)
+    results = [event for event in trajectory[:last + 1] if event.get("type") == "result"]
+    usage = [event["usage"] for event in results if isinstance(event.get("usage"), dict)]
+    tally = next((event["modelUsage"] for event in reversed(results) if isinstance(event.get("modelUsage"), dict)),
+                 None)
+
+    def calls(events: list[dict], subagent: bool | None = None) -> int:
+        return len({(event.get("message") or {}).get("id") for event in events if event.get("type") == "assistant"
+                    and (subagent is None or bool(event.get("parent_tool_use_id")) == subagent)} - {None})
+
+    return RunUsage(usage, tally, calls(trajectory[:last + 1], subagent=True), calls(trajectory[last + 1:]))
+
+
+# Each session's last tally (`modelUsage`) in this process: the base of its next turn when its transcript can't say.
+_SESSION_TALLIES: dict[str, dict] = {}
+
+
+def saved_session_tally(session_id: str) -> dict | None:
+    """The tally a resume of ``session_id`` starts from: the ``modelUsage`` of the last `cost-state` record in the
+    session's transcript, which the CLI writes as a run exits and restores on a resume, so a run killed before it
+    exited isn't in it. Empty for a session with no transcript or no model call yet; None when the transcript can't be
+    read, or has model calls but no `cost-state`."""
+    try:
+        data = session_jsonl_path(session_id).read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    tally, called = None, False
+    for raw_line in data.splitlines():
+        if b'"cost-state"' not in raw_line and b'"assistant"' not in raw_line:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "cost-state" and isinstance(record.get("modelUsage"), dict):
+            tally = record["modelUsage"]
+        called = called or record.get("type") == "assistant"
+    return tally if tally is not None else (None if called else {})
+
+
 def _ends_in_result(trajectory: list[dict]) -> bool:
     return bool(trajectory) and trajectory[-1].get("type") == "result"
 
@@ -368,6 +455,236 @@ def scrub_session_transcript(session_id: str | None) -> None:
     os.replace(staged, path)
 
 
+# What the ATIF adapter takes of a transcript record (claude_code_atif's `session` and `tools` aux files): a message's
+# ids, time and final usage, its content only when stdout hasn't carried it, as for a sub-agent's last answer, and each
+# request shape's tools.
+_TAIL_RECORD_KEYS = ("type", "uuid", "timestamp", "agentId", "isSidechain", "isApiErrorMessage")
+_TAIL_MESSAGE_KEYS = ("id", "model", "usage", "stop_reason")
+_SHAPE_RECORD = "api-request-shape"
+# How often a turn's transcripts are read for new records while the CLI runs.
+SESSION_POLL_S = 0.05
+# Where the tail reads a whole transcript, it reads it in pieces of this size.
+_TRANSCRIPT_PIECE_BYTES = 1 << 20
+_SUBAGENT_PREFIX = "agent-"
+
+
+def session_aux(record: dict, agent_id: str | None, on_stdout: Collection[str],
+                shapes: set[tuple[str | None, str]]) -> tuple[str, dict] | None:
+    """A transcript record as the ATIF adapter's aux record, ``(file, record)``, or None when it takes nothing of it.
+    ``agent_id`` names the sub-agent whose transcript it's from; ``shapes`` holds the request shapes already fed, by
+    agent and hash, and gains this one's."""
+    kind = record.get("type")
+    if kind in ("assistant", "user"):
+        if _is_api_error(record):
+            record = _redact_values(record)
+        kept = {key: record[key] for key in _TAIL_RECORD_KEYS if key in record}
+        if agent_id is not None:
+            kept.setdefault("agentId", agent_id)
+        message = record.get("message")
+        if isinstance(message, dict):
+            kept["message"] = {key: message[key] for key in _TAIL_MESSAGE_KEYS if key in message}
+            if kind == "assistant" and record.get("uuid") not in on_stdout and "content" in message:
+                kept["message"]["content"] = message["content"]
+        return "session", kept
+    shape = record.get("shape")
+    if kind == _SHAPE_RECORD and isinstance(shape, dict) and isinstance(record.get("shapeHash"), str):
+        key = (agent_id, record["shapeHash"])
+        if key in shapes:
+            return None
+        shapes.add(key)
+        tools = {"type": kind, "shapeHash": record["shapeHash"], "tools": shape.get("tools") or []}
+        if agent_id is not None:
+            tools["agentId"] = agent_id
+        return "tools", tools
+    return None
+
+
+@dataclass(frozen=True)
+class _TailedFile:
+    inode: int
+    offset: int
+    lines: int
+    # The last line read, newline included: a file whose bytes before ``offset`` no longer end in it was replaced, even
+    # where a new file took the old one's inode number.
+    last: bytes = b""
+
+
+class SessionTail:
+    """One turn's new transcript records, its sub-agents' transcripts' too, as the CLI appends them, each as the ATIF
+    adapter's aux record (``session_aux``). It starts where each file ends, so an earlier turn isn't fed again, and
+    finds its place in a file the scrub replaced between attempts by its line count, which a redaction keeps; a file is
+    taken as replaced when its inode or the line before the place it was read to changed.
+    ``read`` only reads; ``advance`` commits what it read, so a read abandoned midway is read again. For a new
+    document, ``new_document``, the first read also gives the latest request shape the transcript already held, which
+    the CLI writes once per session. Where it reads a whole file it reads it in pieces, since a long computer-use
+    session's transcript holds each screenshot twice."""
+
+    def __init__(self, session_id: str, on_stdout: Collection[str], shapes: set[tuple[str | None, str]], *,
+                 new_document: bool = False) -> None:
+        self._main = session_jsonl_path(session_id)
+        self._subagents = self._main.with_suffix("") / "subagents"
+        self._on_stdout = on_stdout
+        self._shapes = shapes
+        self._files: dict[Path, _TailedFile] = {}
+        self._earlier_shape: dict | None = None
+        for path in self._paths():
+            with contextlib.suppress(OSError):
+                with path.open("rb") as file:
+                    end, lines, last = _skim(file)
+                    self._files[path] = _TailedFile(os.fstat(file.fileno()).st_ino, end, lines, last)
+                if new_document and path == self._main:
+                    self._earlier_shape = _last_shape(path, end)
+
+    def _paths(self) -> list[Path]:
+        subagents = sorted(self._subagents.glob(f"{_SUBAGENT_PREFIX}*.jsonl")) if self._subagents.is_dir() else []
+        return ([self._main] if self._main.exists() else []) + subagents
+
+    def read(self) -> tuple[list[tuple[str, dict]], dict[Path, _TailedFile], set[tuple[str | None, str]]]:
+        """The aux records the files gained since the last ``advance``, where each file is read to, and the request
+        shapes fed then."""
+        records: list[tuple[str, dict]] = []
+        files: dict[Path, _TailedFile] = {}
+        shapes = set(self._shapes)
+        if self._earlier_shape is not None and (fed := session_aux(self._earlier_shape, None, (), shapes)):
+            records.append(fed)
+        for path in self._paths():
+            try:
+                tailed, lines = self._new_lines(path, self._files.get(path))
+            except OSError:
+                continue
+            files[path] = tailed
+            agent_id = path.stem.removeprefix(_SUBAGENT_PREFIX) if path.parent == self._subagents else None
+            for raw in lines:
+                try:
+                    record = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(record, dict) and (fed := session_aux(record, agent_id, self._on_stdout, shapes)):
+                    records.append(fed)
+        return records, files, shapes
+
+    def advance(self, files: Mapping[Path, _TailedFile], shapes: set[tuple[str | None, str]]) -> None:
+        self._files.update(files)
+        self._shapes.update(shapes)
+        self._earlier_shape = None
+
+    @staticmethod
+    def _new_lines(path: Path, tailed: _TailedFile | None) -> tuple[_TailedFile, list[bytes]]:
+        status = path.stat()
+        if tailed is None:
+            tailed = _TailedFile(status.st_ino, 0, 0)
+        with path.open("rb") as file:
+            if status.st_ino == tailed.inode and status.st_size >= tailed.offset and _ends_in(file, tailed):
+                offset, last = tailed.offset, tailed.last
+                file.seek(offset)
+                data = file.read()
+            else:
+                offset, counted, last = _skim(file, tailed.lines)
+                if counted < tailed.lines:
+                    return _TailedFile(status.st_ino, 0, 0), []
+                file.seek(offset)
+                data = file.read()
+        end = data.rfind(b"\n") + 1
+        lines = [line for line in data[:end].split(b"\n") if line.strip()]
+        return _TailedFile(status.st_ino, offset + end, tailed.lines + data.count(b"\n", 0, end),
+                           _line_before(data, end) if end else last), lines
+
+
+def _skim(file, lines: int | None = None) -> tuple[int, int, bytes]:
+    """Read ``file`` from its start, a piece at a time, to the end of its ``lines``-th line (its last whole line when
+    ``lines`` is None): the offset there, how many lines that is (fewer than ``lines`` when the file has fewer), and the
+    line just before it, newline included."""
+    file.seek(0)
+    offset = count = position = 0
+    while lines is None or count < lines:
+        piece = file.read(_TRANSCRIPT_PIECE_BYTES)
+        if not piece:
+            break
+        found = piece.count(b"\n")
+        if lines is None or count + found < lines:
+            if found:
+                count, offset = count + found, position + piece.rfind(b"\n") + 1
+        else:
+            at = -1
+            for _ in range(lines - count):
+                at = piece.find(b"\n", at + 1)
+            count, offset = lines, position + at + 1
+        position += len(piece)
+    return offset, count, _line_ending_at(file, offset)
+
+
+def _line_ending_at(file, end: int) -> bytes:
+    """The line just before ``end``, newline included; empty at the start. Read backward a piece at a time."""
+    size = _TRANSCRIPT_PIECE_BYTES
+    while end:
+        start = max(0, end - size)
+        file.seek(start)
+        data = file.read(end - start)
+        found = data.rfind(b"\n", 0, len(data) - 1)
+        if found >= 0 or start == 0:
+            return data[found + 1:]
+        size *= 2
+    return b""
+
+
+def _last_shape(path: Path, end: int) -> dict | None:
+    """The last request shape the transcript holds before ``end``, read a line at a time."""
+    shape, read, marker = None, 0, _SHAPE_RECORD.encode()
+    with path.open("rb") as file:
+        for raw in file:
+            read += len(raw)
+            if read > end:
+                break
+            if marker in raw:
+                with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                    record = json.loads(raw)
+                    if isinstance(record, dict) and record.get("type") == _SHAPE_RECORD:
+                        shape = record
+    return shape
+
+
+def _line_before(data: bytes, end: int) -> bytes:
+    """The line ``data`` holds just before ``end``, newline included; empty at the start."""
+    return data[data.rfind(b"\n", 0, end - 1) + 1:end] if end else b""
+
+
+def _ends_in(file, tailed: _TailedFile) -> bool:
+    """Whether the file's bytes before ``tailed.offset`` still end in the last line read there."""
+    if not tailed.last:
+        return True
+    file.seek(tailed.offset - len(tailed.last))
+    return file.read(len(tailed.last)) == tailed.last
+
+
+async def _stop_following(following: asyncio.Task, tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
+    """Stop following once the CLI has exited, then feed what its transcripts gained since the last read. A follower
+    that failed is logged; the turn goes on without its records."""
+    following.cancel()
+    try:
+        await following
+    except asyncio.CancelledError:
+        if (current := asyncio.current_task()) is not None and current.cancelling():
+            raise
+    except Exception:
+        logger.warning("following the session transcript failed; the ATIF copy lacks its later records", exc_info=True)
+        return
+    await _feed_tail(tail, feed)
+
+
+async def _follow(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
+    """Feed ``tail``'s records while the CLI runs."""
+    while True:
+        await _feed_tail(tail, feed)
+        await asyncio.sleep(SESSION_POLL_S)
+
+
+async def _feed_tail(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
+    records, files, shapes = await asyncio.to_thread(tail.read)
+    tail.advance(files, shapes)
+    for name, record in records:
+        feed(name, record)
+
+
 def _one_line(text: str) -> str:
     return _LINE_BREAK_PATTERN.sub(" ", text).strip()
 
@@ -421,22 +738,39 @@ async def run_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    aux_callback: Callable[[str, Any], None] | None = None,
+    tool_shapes: set[tuple[str | None, str]] | None = None,
+    new_document: bool = False,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
     is left of ``timeout_s``, so the turn never outlives its caller's deadline. ``CLAUDE_API_ERROR_RETRIES=0`` turns
     resumes off. ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is
-    held until it's known not to be resumed."""
+    held until it's known not to be resumed. ``aux_callback``, given, gets the ATIF adapter's aux records, in order
+    with the stdout events: the transcripts' new records as the CLI writes them, each resumed attempt's error
+    `result`; ``tool_shapes`` holds the request shapes the conversation's document was fed already, and
+    ``new_document`` says the turn opens a new one, which is fed the transcript's latest shape first."""
     deadline = time.monotonic() + timeout_s
     retries_left = _configured_api_error_retries()
+    on_stdout: set[str] = set()
     spawn = partial(
         _spawn_claude, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
         system_prompt=system_prompt, output_format=output_format, project_id=project_id, task_id=task_id,
         role=role, effort=effort, max_turns=max_turns, max_thinking_tokens=max_thinking_tokens,
-        builtin_tools=builtin_tools, event_callback=event_callback,
+        builtin_tools=builtin_tools, event_callback=event_callback, on_stdout=on_stdout,
     )
+    tail = (await asyncio.to_thread(partial(SessionTail, session_id, on_stdout, tool_shapes if tool_shapes is not None
+                                            else set(), new_document=new_document))
+            if aux_callback is not None else None)
     attempt_prompt, attempt_resume, attempt_session = prompt, resume, session_id
     trajectory: list[dict] = []
     tool_calls = 0
+    run_usage: list[dict] = []
+    model_usage: dict | None = None
+    session_base: dict | None = {}
+    if resume:
+        saved = await in_thread_to_its_end(saved_session_tally, session_id)
+        session_base = saved if saved is not None else _SESSION_TALLIES.get(session_id)
+    subagent_calls = unreported_calls = 0
     attempts = 0
     first_failure: str | None = None
 
@@ -446,14 +780,25 @@ async def run_claude(
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
         # Each scrub ends before the turn does, cancelled or not: a later turn on the context mustn't start while it
         # can still replace the transcript that turn appends to.
+        following = asyncio.create_task(_follow(tail, aux_callback)) if tail is not None else None
         try:
             result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
                                  timeout_s=attempt_timeout_s)
+            if following is not None:
+                await _stop_following(following, tail, aux_callback)
         finally:
+            if following is not None:
+                following.cancel()
             await in_thread_to_its_end(scrub_session_transcript, attempt_session)
         if result.session_id != attempt_session:
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)
         tool_calls += result.tool_call_count
+        run_usage += result.run_usage
+        model_usage = result.model_usage or model_usage
+        subagent_calls += result.subagent_calls
+        unreported_calls += result.unreported_calls
+        if result.model_usage is not None and result.session_id:
+            _SESSION_TALLIES[result.session_id] = result.model_usage
 
         failure = _resumable_api_failure(result)
         budget_left = deadline - time.monotonic()
@@ -469,9 +814,13 @@ async def run_claude(
             # The first attempt's `result` was dropped from the trajectory, so the error says how the turn began.
             error = result.error and _failure_message(result.error, result.error_detail, attempts, first_failure)
             return replace(result, response=_redact(result.response) if error else result.response,
-                           tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error)
+                           tool_call_count=tool_calls, trajectory=trajectory, attempts=attempts, error=error,
+                           run_usage=run_usage, model_usage=model_usage, session_base=session_base,
+                           subagent_calls=subagent_calls, unreported_calls=unreported_calls)
 
         trajectory.extend(_without_terminal_result(result.trajectory))
+        if aux_callback is not None and _ends_in_result(result.trajectory):
+            aux_callback("attempt", result.trajectory[-1])
         first_failure = first_failure or result.error_detail
         retries_left -= 1
         attempt_prompt, attempt_resume, attempt_session = _RESUME_PROMPT, True, result.session_id
@@ -615,7 +964,7 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
     the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
-           "--setting-sources", "user"]
+           "--setting-sources", "user", "--settings", json.dumps(CLI_SETTINGS)]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
         cmd += ["--model", _with_1m_window(model)]
@@ -670,6 +1019,7 @@ async def _spawn_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
+    on_stdout: set[str] | None = None,
 ) -> ClaudeResult:
     cmd = _command(session_id, resume, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
@@ -682,7 +1032,8 @@ async def _spawn_claude(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
-                    max_thinking_tokens=max_thinking_tokens),
+                    max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed(),
+                    mcp_urls=[info["url"] for info in (mcp_servers or {}).values()]),
         cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))
@@ -710,6 +1061,8 @@ async def _spawn_claude(
             # A failure's text can echo the endpoint's key, and the event is kept and streamed like any other.
             event = _redact_values(event)
         trajectory.append(event)
+        if on_stdout is not None and isinstance(event.get("uuid"), str):
+            on_stdout.add(event["uuid"])
         etype = event.get("type")
         if etype == "system" and event.get("subtype") == "init":
             cli_session_id = event.get("session_id", cli_session_id)
@@ -744,8 +1097,12 @@ async def _spawn_claude(
     except asyncio.TimeoutError:
         _kill_cli(proc)
         await _reap(proc)
+        # A CLI that wrote its `result` and then hung keeps the usage it reported.
+        used = _usage_of_run(trajectory)
         return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
-                            error=f"claude CLI timed out after {timeout_s}s")
+                            error=f"claude CLI timed out after {timeout_s}s", run_usage=used.results,
+                            model_usage=used.model_usage, subagent_calls=used.subagent_calls,
+                            unreported_calls=used.unreported_calls)
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.
         _kill_cli(proc)
@@ -768,9 +1125,12 @@ async def _spawn_claude(
     if structured_output is not None:
         final_response = json.dumps(structured_output)
 
+    used = _usage_of_run(trajectory)
     return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
-                        error_detail=detail, structured_output=structured_output)
+                        error_detail=detail, structured_output=structured_output, run_usage=used.results,
+                        model_usage=used.model_usage, subagent_calls=used.subagent_calls,
+                        unreported_calls=used.unreported_calls)
 
 
 _TAGS_HEADER = "x-litellm-tags"

@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clock-test egress-test trl-test nemo-gym-test verl-test skyrl-test miles-test slime-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clock-test egress-test trl-test nemo-gym-test verl-test skyrl-test miles-test slime-test tinker-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -66,15 +66,15 @@ installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and 
 
 # The TRL contract tier trains one GRPOTrainer step on CPU through agent_env.training.trl, with a tiny model from the
 # Hub. trl and torch aren't in the dev extra: install them first, as .github/workflows/trl.yml does.
-# The clock tier builds agent-env's libfaketime (src/agent_env/computers/artifacts/ubuntu-24.04/clock) and stock 0.9.12
+# The clock tier builds agent-env's libfaketime (src/agent_env/utils/faketime_clock) and stock 0.9.12
 # in an Ubuntu 24.04 image for this machine's Docker and runs its gates there, Chromium launches included;
 # .github/workflows/clock.yml runs it on x86_64 and arm64.
 clock-test: ## Build agent-env's libfaketime and run its gates in Docker (tst/clock)
 	$(PYTHON) -m pytest tst/clock --timeout=2400 $(PYTEST_ARGS)
 
-# The base computer's egress proxy, in the Go image its Dockerfile builds it with, so it needs Docker, not Go.
-EGRESS := src/agent_env/computers/artifacts/ubuntu-24.04/egress
-EGRESS_GO_IMAGE = $(shell awk '/^FROM .*golang/ {print $$2; exit}' $(EGRESS)/../Dockerfile)
+# The egress proxy (utils/egress_proxy), in the Go image ubuntu-24.04's Dockerfile builds it with, so it needs Docker, not Go.
+EGRESS := src/agent_env/utils/egress_proxy
+EGRESS_GO_IMAGE = $(shell awk '/^FROM .*golang/ {print $$2; exit}' src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile)
 
 egress-test: ## gofmt, go vet and go test -race for the base computer's egress proxy, in Docker
 	docker run --rm -v "$(CURDIR)/$(EGRESS):/src" -w /src $(EGRESS_GO_IMAGE) \
@@ -110,6 +110,12 @@ miles-test: ## Play rows through Miles' rollout and session server (needs Miles,
 # torch, and put SGLang's and Megatron-LM's checkouts on PYTHONPATH first, as .github/workflows/slime.yml does.
 slime-test: ## Play rows through the slime helper on slime's OpenAI adapter (needs slime, SGLang and Megatron-LM, CPU torch, and the Hub)
 	$(PYTHON) -m pytest tst/slime --timeout=900 $(PYTEST_ARGS)
+
+# The Tinker tier plays episodes through agent_env.training.tinker on tinker-cookbook itself, with a stand-in renderer,
+# so nothing samples. tinker-cookbook and torch aren't in the dev extra: install them first, as
+# .github/workflows/tinker.yml does.
+tinker-test: ## Play episodes through the Tinker helper on tinker-cookbook itself (needs tinker-cookbook and CPU torch)
+	$(PYTHON) -m pytest tst/tinker --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.

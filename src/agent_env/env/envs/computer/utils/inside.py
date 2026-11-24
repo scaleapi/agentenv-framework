@@ -92,11 +92,12 @@ async def read_file(deployed: DeployedSandboxEnv, path: str) -> bytes:
 
 
 async def run(deployed: DeployedSandboxEnv, argv: list[str], *, timeout_s: float,
-              env: Optional[dict[str, str]] = None) -> dict:
-    """computer-exec/v1 ``run``'s answer for ``argv``, under a request id of its own. A call whose connection breaks
-    fails rather than being sent again: a driver that restarted would run the command a second time, beside the first,
-    which outlives the driver that started it."""
-    params = {"argv": argv, "request_id": uuid.uuid4().hex, "timeout_s": timeout_s, **({"env": env} if env else {})}
+              env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> dict:
+    """computer-exec/v1 ``run``'s answer for ``argv``, in ``cwd`` relative to the home, the home by default, under a
+    request id of its own. A call whose connection breaks fails rather than being sent again: a driver that restarted
+    would run the command a second time, beside the first, which outlives the driver that started it."""
+    params = {"argv": argv, "request_id": uuid.uuid4().hex, "timeout_s": timeout_s, **({"env": env} if env else {}),
+              **({"cwd": cwd} if cwd else {})}
     try:
         return await deployed.invoke(COMPUTER_EXEC, "run", params, timeout=timeout_s + CALL_MARGIN_S)
     except httpx.TransportError as e:

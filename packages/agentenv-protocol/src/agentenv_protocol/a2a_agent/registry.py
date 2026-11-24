@@ -304,6 +304,8 @@ def build_registry(
             variant_handlers[key] = handler
             continue
 
+        if operation.sdk_only:
+            raise ValueError(f"{uri}.{operation.name} is served by the SDK alone; an agent can't override it")
         key = (uri, binding.operation)
         if key in operation_handlers:
             raise ValueError(f"multiple handlers for {uri}.{operation.name}")
@@ -424,7 +426,7 @@ def build_registry(
         active_sdk_operations = {
             name
             for name, operation in resolved_operations.items()
-            if operation.definition.implementation is ImplementationOwner.SDK
+            if operation.definition.implementation is ImplementationOwner.SDK and not operation.definition.sdk_only
         }
         overridden_sdk_operations = {
             name

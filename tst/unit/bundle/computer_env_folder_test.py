@@ -132,7 +132,7 @@ def test_a_computer_env_no_deploy_could_boot_stops_its_tasks_until_composing_it_
     assert stopped.value.problems == (
         f"envs/desktop: {env_id} v1 has no build a deploy can boot (container/amd64 failed; container/arm64 ready, by "
         f"another composer), so no task was written: register again to compose what it left, or compose it with "
-        f"agent-env env build --id {env_id} --version 1 and then register again",)
+        f"agent-env env build --id {env_id} --version 1, and then register again",)
     with pytest.raises(NotFoundError):
         Task.get(task_id)
 
@@ -243,6 +243,64 @@ def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming
 
     assert any(line.startswith("envs/desktop") and problem in line for line in refused.value.problems), refused.value
     assert composed == []
+
+
+#: The two app folders, each naming the computer and driver it deploys on alone.
+APPS_ALONE = {path: text + 'computer = "ubuntu-24.04"\ndriver = "reference"\n' if path.endswith("env.toml") else text
+              for path, text in APPS.items()}
+
+
+def _composed_ids(composed) -> list[str]:
+    return [call[0].rsplit("/", 1)[1] for call in composed]
+
+
+@pytest.mark.parametrize("names, expected, apps", [
+    ("desktop", ["desktop"], ("mail", "notes")), ("mail", ["mail"], ("mail",)),
+], ids=["the-desktop", "an-app-alone"])
+def test_a_run_composes_only_the_computer_envs_its_tasks_deploy_not_the_apps_on_one(tmp_path, composed, names,
+                                                                                    expected, apps):
+    """An app that names its own computer and driver is a computer too, which no task deploys while it's on a
+    desktop; a task that names it alone does deploy it."""
+    root = layout(tmp_path / "desk", {"envs/desktop/env.toml": WITH_APPS, **APPS_ALONE, "tasks/t.json": json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": names}])})
+
+    materialize(_plan(root), build_here=local_builds(_plan(root)))
+
+    id_root = _plan(root).bundle.bundle.id_root
+    assert _composed_ids(composed) == expected
+    assert all(Env.get(f"{id_root}/{app}").computer is not None for app in apps)
+
+
+def test_a_computer_a_multi_env_holds_is_deployed_with_it_but_not_that_computers_apps(tmp_path, composed):
+    root = layout(tmp_path / "desk", {"envs/desktop/env.toml": WITH_APPS, **APPS_ALONE,
+                                      "envs/office/env.toml": 'type = "multi"\ncomputer_envs = ["desktop"]\n',
+                                      "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env",
+                                                                   "env_id": "office"}])})
+
+    materialize(_plan(root), build_here=local_builds(_plan(root)))
+
+    assert _composed_ids(composed) == ["desktop"]
+
+
+def test_a_bundle_with_no_tasks_composes_every_computer_env_it_writes_each_deployable_alone(tmp_path, composed):
+    root = layout(tmp_path / "apps", APPS_ALONE)
+    resolved = resolve_bundle(parse_bundle(root))
+
+    materialize(plan_entities(resolved, [entry.id for entry in resolved.bundle.entries], installed=installed_bundles))
+
+    assert sorted(_composed_ids(composed)) == ["mail", "notes"]
+
+
+def test_a_reused_app_no_task_deploys_is_not_composed_again_nor_said_to_be(tmp_path, composed):
+    root = layout(tmp_path / "desk", {"envs/desktop/env.toml": WITH_APPS, **APPS_ALONE, "tasks/t.json": json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": "desktop"}])})
+    materialize(_plan(root), build_here=local_builds(_plan(root)))
+    told = []
+
+    dry = materialize(_plan(root), dry_run=True,
+                      on_progress=lambda write, line: told.append(write.id.rsplit("/", 1)[1]))
+
+    assert set(told) <= {"desktop"} and all(not name.endswith(("mail", "notes")) for name in dry.composing)
 
 
 def _office(root, computers):

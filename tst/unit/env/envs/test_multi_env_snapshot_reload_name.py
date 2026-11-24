@@ -14,7 +14,7 @@ from agent_env.env.envs.multi_env import MultiEnv, snapshot_compose
 from agent_env.env.envs.service_db import ServiceDBConfig
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers import EnvironmentGatewayProvider, MCPServerConfig, WebsiteConfig
-from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT
 from agent_env.providers.env_state import LocalPostgresStateProvider
 
 
@@ -127,7 +127,7 @@ async def test_the_reload_writes_its_compose_as_one_argument():
 
     assert "$(touch pwned) 'q' `x`" in _written(env)
     scripts = [call.args[0] for call in env._sandbox.exec_script.await_args_list]
-    assert any(argv[:2] == ["printf", "%s\\n"] and argv[3:] == [">", DOCKER_COMPOSE_PATH]
+    assert any(argv[:2] == ["printf", "%s\\n"] and argv[3:] == [">", DEFAULT_STACK_LAYOUT.compose_file]
                for argv in map(shlex.split, scripts))
     assert not any("<<" in script for script in scripts)
 

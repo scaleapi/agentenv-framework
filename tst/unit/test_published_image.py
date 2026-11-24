@@ -23,7 +23,8 @@ def docker(monkeypatch):
 
     def run(argv, **kwargs):
         state["calls"].append(argv[1:])
-        return subprocess.CompletedProcess(argv, 1 if argv[1] in state["fails"] else 0, "", state["fails"].get(argv[1], ""))
+        failed = state["fails"].get(argv[1], "")
+        return subprocess.CompletedProcess(argv, 1 if argv[1] in state["fails"] else 0, failed, failed)
 
     monkeypatch.setattr(published_image.subprocess, "run", run)
     monkeypatch.setattr(published_image, "published_pinned", lambda image: state["served"])
@@ -86,5 +87,5 @@ def test_a_failed_build_raises_with_dockers_output(docker):
     docker["served"] = None
     docker["fails"]["build"] = "no such file: Dockerfile"
 
-    with pytest.raises(RuntimeError, match="docker build .* failed: no such file: Dockerfile"):
+    with pytest.raises(RuntimeError, match=r"docker build of env-gateway failed \(exit 1\):\nno such file: Dockerfile"):
         _make()

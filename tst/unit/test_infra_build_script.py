@@ -196,6 +196,29 @@ def test_build_builds_an_image_for_its_platform_under_its_tag_with_its_source_on
     assert runs[0] == runs[1] and waits == [script._RETRY_WAITS_SECONDS[0]]
 
 
+def test_build_builds_a_base_with_a_shared_sources_toml_from_a_context_holding_what_it_takes(
+        script, monkeypatch, workflow):
+    built = []
+
+    def streamed(command):
+        context = Path(command[-1])
+        built.append((Path(command[command.index("-f") + 1]).relative_to(context).as_posix(),
+                      {path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()}))
+        return subprocess.CompletedProcess(command, 0, "#1 DONE\n", "")
+
+    monkeypatch.setattr(script, "_streamed", streamed)
+    monkeypatch.chdir(REPO)
+    base = "src/agent_env/computers/artifacts/ubuntu-24.04"
+
+    assert _run(script, monkeypatch, "build", _gateway(name="agentenv-ubuntu-24.04", context=base,
+                                                         dockerfile=f"{base}/Dockerfile",
+                                                         repository=f"{REGISTRY}/agentenv-ubuntu-24.04"), "amd64") == 0
+
+    [(dockerfile, files)] = built
+    assert dockerfile == "Dockerfile"
+    assert {"clock/build.sh", "egress/main.go", "root/init", "shared_sources.toml"} <= files
+
+
 def test_build_makes_a_disk_form_of_its_bases_image_of_the_arch_with_that_images_config_the_tools_and_its_size(
         script, monkeypatch, workflow):
     runs, _ = _attempts(script, monkeypatch, [("pulled\n", 0), ("#1 DONE\n", 0)])
@@ -225,9 +248,7 @@ def test_publish_tags_each_new_images_platform_builds_as_one_and_leaves_a_publis
     assert _run(script, monkeypatch, "publish", json.dumps([json.loads(_gateway()), json.loads(_disk())])) == 0
 
     assert calls[0] == ["docker", "login", "ghcr.io", "--username", "bot", "--password-stdin"]
-    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new,
-                     "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
-                     "--annotation", "index:org.opencontainers.image.revision=c0ffee", f"{new}-amd64", f"{new}-arm64"]]
+    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new, f"{new}-amd64", f"{new}-arm64"]]
     assert f"{published} is published already, so it's left as it is" in capsys.readouterr().out
 
 
@@ -358,8 +379,6 @@ def test_publish_computers_joins_each_apps_platform_manifests_into_one_index_and
     assert _run(script, monkeypatch, "publish-computers", str(folder)) == 0
 
     assert created == [["docker", "buildx", "imagetools", "create", "-t", _COMPUTER_INDEX,
-                        "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
-                        "--annotation", "index:org.opencontainers.image.revision=c0ffee",
                         f"{_LOCAL}@{_AMD64}", f"{_LOCAL}@{_ARM64}"]]
     computers = json.loads((folder / "computers.json").read_text())
     assert computers == [{"env": CHROMIUM, "form": "container", "index": f"{_COMPUTER_INDEX}@{_INDEX}", "arches": {
@@ -496,7 +515,7 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
 def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm, machine,
                                                                            how):
     console = "".join(f"success: {program} entered RUNNING\n"
-                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop"))
+                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop", "clock-panel"))
     calls, logs = [], iter(["agentenv-init: starting", console])
 
     def run(command, **kw):

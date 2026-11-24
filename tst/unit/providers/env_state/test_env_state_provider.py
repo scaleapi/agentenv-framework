@@ -278,6 +278,9 @@ def test_sidecar_specs_skip_images_the_image_store_does_not_own(image_store, cap
     # contributor can't tear down the shared session the changelog export relies on.
     pgweb_spec = next(s for s in both if s.name == "pgweb")
     assert pgweb_spec.env["PGWEB_LOCK_SESSION"] == "true"
+    # The gateway reaches db-mcp over Modal's private network, which is IPv6 only, so it listens on every family.
+    db_mcp_spec = next(s for s in both if s.name == "db-mcp")
+    assert "--streamable-http-host=" in db_mcp_spec.command
 
     # pgweb from Docker Hub + unset db-mcp → neither, and a warning for the configured one only.
     none = LocalPostgresStateProvider(

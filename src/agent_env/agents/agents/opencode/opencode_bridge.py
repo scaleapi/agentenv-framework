@@ -32,6 +32,12 @@ from typing import Literal
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from agent_egress import clock_armed, egress_env
+from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent.clock import follows
+from model_relay import Calls, model_relay
+from opencode_date import env_date_rewrite
+
 logger = logging.getLogger(__name__)
 
 # The model a run uses when neither the task nor the agent-config names one; the
@@ -41,6 +47,10 @@ ERROR_MESSAGE_LIMIT = 4000
 ROLE_HEADER = "AgentEnv-Role"
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+# OpenCode's experimental flag for its output-token cap (32,000 by default), checked against opencode-ai 1.17.18. The
+# CLI caps a step at min(the model's limit.output, this value), so limit.output alone can't raise the cap. A name the
+# CLI doesn't know is ignored without an error, so recheck it on every opencode-ai upgrade.
+OUTPUT_TOKEN_MAX_ENV = "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"
 
 # Root under which each A2A context_id gets its own OpenCode data dir; lives
 # under $HOME so host-mode instances don't share session state.
@@ -75,7 +85,7 @@ class OpenCodeTools(BaseModel):
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
-    """The endpoint's chat-completions root: agent-env's LITELLM_BASE_URL has no /v1 suffix."""
+    """The endpoint's chat-completions root: LITELLM_BASE_URL may end in /v1 or not."""
     base = (environ.get("LITELLM_BASE_URL") or "").rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
 
@@ -96,6 +106,18 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
+def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs, and on an
+    armed clock the egress proxy (``egress_env``) for the model endpoint and the env's MCP servers, which the CLI
+    connects to itself. Where the image follows the env's clock, the CLI starts on real time, since it orders a
+    session's messages by when they were written and takes no time before 1970; what it starts still reads the env's
+    time, and the turn's relay tells the model the env's date (``opencode_date``)."""
+    urls = [environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in (mcp_servers or {}).values())]
+    return {**environ, **_context_xdg(context_id), **egress_env(environ, urls, armed=clock_armed),
+            **({"AGENTENV_REAL_TIME": "1"} if follows() else {})}
+
+
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +135,7 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
     """`opencode export <session_id>` for the given context: the transcript JSON bytes."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "export", session_id, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode export failed: {err.decode(errors='replace')[:300]}")
@@ -123,7 +145,7 @@ async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI
 async def import_session(context_id: str, json_path: str, timeout_s: int = _CLI_TIMEOUT_S) -> str | None:
     """`opencode import <json_path>` into the given context's data dir: the imported session id, from
     'Imported session: <id>'."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "import", json_path, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode import failed: {err.decode(errors='replace')[:300]}")
@@ -142,6 +164,8 @@ class OpencodeResult:
     error: str | None = None
     error_code: str | None = None
     structured_output: object | None = None
+    # What the turn's model calls used, as its model relay counted them.
+    usage: Usage | None = None
 
 
 def validate_output_format(output_format: dict) -> dict:
@@ -267,11 +291,14 @@ def _build_config(
     environ: Mapping[str, str] = os.environ,
     instructions: list[str] | None = None,
     builtin_tools: OpenCodeTools | None = None,
+    max_output_tokens: int | None = None,
+    armed: bool = False,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
     Everything dynamic (model, MCP servers, headers) is rebuilt per turn so there
-    is no on-disk config to race on."""
+    is no on-disk config to race on. On an armed clock only the endpoint is enabled, whose calls the relay dates, so a
+    provider a project's config adds can't send the model the machine's date."""
     options: dict = {"baseURL": _base_url(environ), "apiKey": "{env:LITELLM_API_KEY}"}
     if headers:
         options["headers"] = dict(headers)
@@ -309,6 +336,8 @@ def _build_config(
                         "additional_drop_params": ["tool_choice"],
                         **({"reasoningEffort": effort} if effort else {}),
                     },
+                    # Output only: a limit.context would turn on OpenCode's auto-compaction.
+                    **({"limit": {"output": max_output_tokens}} if max_output_tokens else {}),
                 }},
             }
         },
@@ -321,6 +350,8 @@ def _build_config(
     }
     if instructions:
         config["instructions"] = list(instructions)
+    if armed:
+        config["enabled_providers"] = ["litellm"]
 
     if mcp_servers:
         mcp: dict[str, dict] = {}
@@ -413,7 +444,19 @@ def _descendants(pid: int) -> list[int]:
     return found
 
 
-async def run_opencode(
+async def run_opencode(prompt: str, context_id: str, **kwargs) -> OpencodeResult:
+    """Run one turn, ``_run_opencode``'s, with OpenCode's provider pointed at a model relay of the turn's own, which
+    counts every model call the CLI makes: its steps', its subagents' sessions', its compaction's, its title's and its
+    answered retries'. The turn's usage is theirs, a call answered without usage counted as unreported. The relay
+    tells the model the env's date on an armed clock (``opencode_date``)."""
+    calls = Calls()
+    async with model_relay(_base_url(os.environ).removesuffix("/v1"), calls, rewrite=env_date_rewrite) as relay:
+        result = await _run_opencode(prompt, context_id, base_url=relay, **kwargs)
+    result.usage = calls.usage(result.tool_call_count, kwargs.get("model"))
+    return result
+
+
+async def _run_opencode(
     prompt: str,
     context_id: str,
     session_id: str | None = None,
@@ -431,14 +474,19 @@ async def run_opencode(
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
     max_turns: int | None = None,
+    base_url: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> OpencodeResult:
-    """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
+    """Run one `opencode run` turn in ``workspace``, its provider calling ``base_url``, the endpoint's when None. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
     ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
 
     ``max_turns`` bounds the turn's steps, OpenCode's model requests, as ``--max-turns`` bounds Claude Code's: once
     the last step it allows asks for another, the CLI is killed and the turn fails. OpenCode v1's own ``steps`` limit
-    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921)."""
+    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921).
+
+    ``max_output_tokens`` raises or lowers the output tokens, reasoning included, one model request may produce; None
+    keeps OpenCode's default of 32,000."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -455,8 +503,11 @@ async def run_opencode(
             + json.dumps(schema, separators=(",", ":"))
         )
 
+    armed = clock_armed()
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
-                           instructions=instructions, builtin_tools=builtin_tools)
+                           environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
+                           instructions=instructions, builtin_tools=builtin_tools,
+                           max_output_tokens=max_output_tokens, armed=armed)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn
@@ -477,9 +528,9 @@ async def run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **os.environ,
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=armed),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-        **_context_xdg(context_id),
+        **({OUTPUT_TOKEN_MAX_ENV: str(max_output_tokens)} if max_output_tokens else {}),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")
@@ -628,6 +679,8 @@ class _EventParser:
         self.tool_calls: set[str] = set()
         self.steps: set[str] = set()
         self.last_step_continues = False
+        self.last_step_reason: object = None
+        self.last_step_tokens: dict | None = None
         self.session_id: str | None = None
         self.completed = False
         self.event_errors: list[str] = []
@@ -713,6 +766,9 @@ class _EventParser:
             reason = (part or event).get("reason")
             self.steps.add(str((part or event).get("id") or f"step-{len(self.steps)}"))
             self.last_step_continues = reason in _CONTINUING_STEP_REASONS
+            self.last_step_reason = reason
+            tokens = (part or event).get("tokens")
+            self.last_step_tokens = tokens if isinstance(tokens, dict) else None
             if reason == "stop":
                 self.completed = True
 
@@ -731,11 +787,17 @@ class _EventParser:
         # file's modality is unsupported but the model still answered), so we only
         # surface an error when no terminal stop was emitted.
         err: str | None = None
+        error_code = self.error_code
         if not self.completed:
             stderr_text = stderr.decode(errors="replace").strip()
             details = "\n".join(self.event_errors)
+            # Ahead of stderr: a step cut off at the cap exits 0 with no error event, and any stderr is incidental.
+            length = self._output_limit_error() if not details else None
+            if length:
+                error_code = "output_token_limit"
             err = (
                 details
+                or length
                 or stderr_text
                 or f"opencode exited with code {returncode} without completing"
             )[:ERROR_MESSAGE_LIMIT]
@@ -747,8 +809,20 @@ class _EventParser:
             session_id=self.session_id,
             trajectory=self.trajectory,
             error=err,
-            error_code=self.error_code if err else None,
+            error_code=error_code if err else None,
         )
+
+    def _output_limit_error(self) -> str | None:
+        """The error for a turn whose last step stopped at the output-token cap, with the step's token counts when its
+        event has them: opencode-ai 1.17.18's step-finish ``tokens`` counts ``reasoning`` apart from ``output``."""
+        if self.last_step_reason != "length":
+            return None
+        tokens = self.last_step_tokens or {}
+        reasoning, text = tokens.get("reasoning"), tokens.get("output")
+        counts = (f" ({reasoning + text} tokens: {reasoning} reasoning + {text} text)"
+                  if isinstance(reasoning, int) and isinstance(text, int) else "")
+        return (f"model hit the output token cap{counts} before finishing; "
+                "raise max_output_tokens on the prompt_agent step")
 
 
 _TAGS_HEADER = "x-litellm-tags"

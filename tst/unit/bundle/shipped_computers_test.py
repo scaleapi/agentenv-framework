@@ -2,8 +2,10 @@
 Dockerfile, or once a release has published it, the published image, read back from its registry; and the start script
 falls back to the defaults artifact.toml declares."""
 
+import io
 import json
 import re
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import AliasUse, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.config import get_config
 from agent_env.entity.refs import EntityKind
 from agent_env.env.published_images import COMPUTER_IMAGES
 from tst.unit.bundle._support import layout, local_builds
@@ -45,13 +48,14 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
     assert (computer.arch, computer.os.version, computer.session.user) == (["amd64", "arm64"], "24.04", "user")
     assert image.id == f"{UBUNTU}__forms_container_image" and image.dockerfile_path == "Dockerfile"
     built = next(call["build"] for call in builds if call["build"][2] == image.image_name)
-    assert built[1] == ["Dockerfile", "artifact.toml", *(f"clock/{name}" for name in (
-        "COPYING", "README.md", "agentenv_clock_page.c", "agentenv_clock_waits.c", "build.sh", "clock-follower",
-        "clock.conf", "clockpage.py", "libfaketime.patch", "tls_realtime.c")), *(f"egress/{name}" for name in (
-        "README.md", "agentenv-egress.sh", "boot.go", "boot_test.go", "chromium-policy.json", "clock.go",
-        "clock_test.go", "go.mod", "go.sum", "hello.go", "hello_test.go", "leaves.go", "main.go", "main_test.go", "proxy.go",
-        "proxy_test.go", "testdata/page-armed.hex", "testdata/page-unarmed.hex", "upstream.go")), "root.conf",
-                        "root/init", "root/install.sh", "start-desktop", "supervisord.conf", "xfwm4.xml"]
+    assert built[1] == ["Dockerfile", "artifact.toml", "clock-panel", "root.conf", "root/init", "root/install.sh",
+                        "shared_sources.toml", "start-desktop", "supervisord.conf", "xfwm4.xml"]
+    stored = get_config().get_object_store_at(image.build_context_object_url).get(image.build_context_object_url)
+    with tarfile.open(fileobj=io.BytesIO(stored), mode="r:gz") as context:
+        sent = set(context.getnames())
+    assert {f"clock/{name}" for name in ("build.sh", "clock-follower", "clock.conf", "clockpage.py", "libfaketime.patch")} <= sent
+    assert {"egress/main.go", "egress/go.mod", "egress/testdata/page-armed.hex", "root/init"} <= sent
+    assert "shared_sources.toml" not in sent
     assert computer.metadata["validated_images"]["container"]["arm64"]["status"] == "uninspected"
 
 

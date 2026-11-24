@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from agent_env.config.model import ModelConfig
+from agent_env.config.errors import ConfigError
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import SCREENSHOT_GROUNDING
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
@@ -29,6 +29,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
     final_frames_from_raw,
     strip_base64_images,
 )
+from tst.util.config import install_model_config
 
 
 def _expected_block(b64: str) -> dict:
@@ -400,16 +401,8 @@ async def test_prompt_llm_judge_base_url_precedence(monkeypatch):
     import types
 
     import litellm
-    import agent_env.config as cfg_mod
 
-    from agent_env.store import LocalSecretStore
-
-    real_cfg = cfg_mod.Config()
-    real_cfg.set_secret_store(LocalSecretStore(values={"litellm_api_key": "k"}, use_env=False))
-    monkeypatch.setattr(real_cfg, "_model_cfg", ModelConfig())
-    monkeypatch.setattr(cfg_mod, "get_config", lambda: real_cfg)
-    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    install_model_config(monkeypatch, secrets={"litellm_api_key": "k"})
 
     calls: list[dict] = []
 
@@ -425,16 +418,21 @@ async def test_prompt_llm_judge_base_url_precedence(monkeypatch):
         default_model_api_base="https://verifier-base.example/v1", verifier_id="vt",
     )
 
-    # Model passed through verbatim; no inferred provider; base = default_model_api_base.
-    await v._prompt_llm_judge("eval", model="openai/gemini-pro-latest",
-                              context=TaskStepContext(), image_blocks=None)
+    # Model passed through verbatim; no inferred provider; base = default_model_api_base, with the run's judge key.
+    await v._prompt_llm_judge("eval", model="openai/gemini-pro-latest", image_blocks=None,
+                              context=TaskStepContext(metadata={"user_overrides": {"judge_litellm_api_key": "jk"}}))
     assert calls[-1]["model"] == "openai/gemini-pro-latest"
     assert "custom_llm_provider" not in calls[-1]
-    assert calls[-1]["api_base"] == "https://verifier-base.example/v1"
+    assert (calls[-1]["api_base"], calls[-1]["api_key"]) == ("https://verifier-base.example/v1", "jk")
+
+    # Without a key of its own, the configured key isn't sent to default_model_api_base: the call is refused.
+    with pytest.raises(ConfigError, match="verifier-base.example isn't the configured model endpoint"):
+        await v._prompt_llm_judge("eval", model="openai/gemini-pro-latest", context=TaskStepContext(),
+                                  image_blocks=None)
 
     # A per-run override wins the base precedence.
     ctx_override = TaskStepContext(
-        metadata={"user_overrides": {"litellm_base_url": "https://override.example/v1"}})
+        metadata={"user_overrides": {"litellm_base_url": "https://override.example/v1", "litellm_api_key": "rk"}})
     await v._prompt_llm_judge("eval", model="openai/gemini-pro-latest",
                               context=ctx_override, image_blocks=None)
     assert calls[-1]["api_base"] == "https://override.example/v1"

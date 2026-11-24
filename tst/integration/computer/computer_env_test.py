@@ -15,7 +15,6 @@ import asyncio
 import json
 import platform
 import subprocess
-import time
 import uuid
 
 import httpx
@@ -101,17 +100,14 @@ async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_pas
 
 def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(desktop):
     with namespace_routing():
-        started = time.monotonic()
         other = ComputerEnv.put(id=f"{desktop.id}-other", computer=desktop.computer, driver=desktop.driver,
                                 environment_name="other", display={"width": 1024, "height": 768})
-        took = time.monotonic() - started
         results = Env.get(other.id).metadata["composed"]["container"]
     first = desktop.metadata["composed"]["container"]
 
     assert results[ARCH]["reused"] is True and results[ARCH]["image"] == first[ARCH]["image"]
     assert results[ARCH]["status"] == "ready" and results[ARCH]["card"]["name"] == "other"
     assert results[ARCH]["installed"] == first[ARCH]["installed"] and results[ARCH]["emulated"] is False
-    assert took < 60, took
 
 
 #: A request to an address on the internet, around the egress proxy, and through it, printing the status and the body

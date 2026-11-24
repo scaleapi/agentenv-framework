@@ -63,6 +63,10 @@ MILES = "miles_installed"
 #: SGLang and Megatron-LM and CPU torch aren't in the dev extra, and only that tier's CI job installs them.
 SLIME = "slime_installed"
 
+#: The Tinker tier (``tst/tinker``) plays episodes through ``agent_env.training.tinker`` on tinker-cookbook itself;
+#: tinker-cookbook and torch aren't in the dev extra, and only that tier's CI job installs them.
+TINKER = "tinker_installed"
+
 #: ``collect_artifacts`` sizes a file with ``stat -c %f:%s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"
@@ -78,6 +82,10 @@ WINDOWS_MEDIA = "windows_media"
 #: Composing an Omarchy computer builds its base from Omarchy's own VM image, which a run fetches into this machine's
 #: cache once, about 4 GB; a test that composes one needs it there already, and KVM, which boots linux/amd64 disks.
 OMARCHY_IMAGE = "omarchy_image"
+#: The agent clock end to end (FD-5916) runs over agent images built from the branch beforehand, which
+#: ``AGENTENV_E2E_AGENT_IMAGES`` names one per agent (``claude-code=<tag>,codex=<tag>``): no CI job builds agent images.
+AGENT_CLOCK_IMAGE = "agent_clock_image"
+AGENT_CLOCK_IMAGES_ENV = "AGENTENV_E2E_AGENT_IMAGES"
 #: The shipped Omarchy base, whose source the capability looks for.
 OMARCHY_ARTIFACT = Path(__file__).parents[2] / "src" / "agent_env" / "computers" / "artifacts" / "omarchy-4.5" / "artifact.toml"
 
@@ -239,6 +247,17 @@ def omarchy_image_is_available() -> bool:
     artifact = OMARCHY_ARTIFACT.read_text()
     sha256 = tomllib.loads(artifact)["forms"]["disk"]["source"]["sha256"]
     return "linux/amd64" in LocalSandboxProvider.disk_image_platforms() and source_path(sha256).exists()
+
+
+def agent_clock_image(agent: str) -> str:
+    """The image ``AGENTENV_E2E_AGENT_IMAGES`` names for ``agent``, or ''."""
+    named = dict(entry.split("=", 1) for entry in os.environ.get(AGENT_CLOCK_IMAGES_ENV, "").split(",") if "=" in entry)
+    return named.get(agent, "").strip()
+
+
+def skip_without_agent_clock_image(agent: str) -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for a test that runs over ``agent``'s image built with the agent clock."""
+    return pytest.mark.skipif(not agent_clock_image(agent), reason=missing_capability_reason(AGENT_CLOCK_IMAGE))
 
 
 def skip_without_omarchy_image() -> pytest.MarkDecorator:

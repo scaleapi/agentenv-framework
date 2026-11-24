@@ -14,7 +14,7 @@ from agent_env.artifact.store import artifact_write_lock
 from agent_env.store.ids import derive_id, fs_safe, is_local_id
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 from .universe_comparison import classify_issues, compare_dicts, normalize
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 class VerifyUniverseLoadExportRoundtripStep(TaskStep):
     type: ClassVar[str] = "verify_universe_load_export_roundtrip"
+    step_role = StepRole.GRADER
     entity_refs = (
         EntityRef.env("env_id"),
         EntityRef.artifact("universe_artifact_id", version_field="universe_artifact_version", artifact_type="environment_universe"),

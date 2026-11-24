@@ -94,11 +94,13 @@ async def test_every_click_lands_while_the_display_records_at_30_fps(image):
                 x, y = gx + (i % 8) * cell + cell // 2, gy + (i // 8) * cell + cell // 2
                 clicked = await session.call_tool("computer_click", {"x": x, "y": y})
                 assert not clicked.isError, clicked.content[0].text
-        await asyncio.sleep(1)
-        cells = json.loads((await driver.run("cat", "fixture/state.json"))["stdout"])["cells"]
+        cells = await _clicked_cells(driver, 64)
         manifest = await _end(driver, started)
     span = (_when(manifest.segments[-1].ended_at) - _when(manifest.segments[0].started_at)).total_seconds()
-    assert len(cells) == 64 and sum(s.frames for s in manifest.segments) / span > 25
+    missing = sorted({f"{i // 8},{i % 8}" for i in range(64)} - set(cells), key=lambda c: tuple(map(int, c.split(","))))
+    assert not missing, f"no click landed on cells {missing}; cells clicked more than once: " \
+                        f"{sorted(c for c, n in cells.items() if n > 1)}"
+    assert sum(s.frames for s in manifest.segments) / span > 25
 
 
 @pytest.mark.asyncio
@@ -112,6 +114,17 @@ async def test_a_restarted_driver_forgets_its_recording_and_keeps_the_segments_i
             await _end(driver, started)
         kept = (await driver.run("ls", f"{RECORDINGS}/{started['recording_id']}"))["stdout"].split()
     assert refused.value.code == "invalid_argument" and "0000.mp4" in kept
+
+
+async def _clicked_cells(driver: Driver, want: int, within_s: float = 15) -> dict:
+    """The cells the fixture recorded clicks on, once it has ``want`` of them or ``within_s`` has passed: a click the
+    driver sent is handled when the fixture gets to it, which a 30 fps recording's load can delay."""
+    deadline = time.monotonic() + within_s
+    while True:
+        cells = json.loads((await driver.run("cat", "fixture/state.json"))["stdout"])["cells"]
+        if len(cells) >= want or time.monotonic() > deadline:
+            return cells
+        await asyncio.sleep(0.25)
 
 
 @asynccontextmanager

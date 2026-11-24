@@ -140,13 +140,13 @@ async def test_a_retry_config_does_not_grade_the_run_again(monkeypatch, local_st
     v.retry_config = RetryConfig(retry_from_step_id="validity", max_retries=2)
     _judge(monkeypatch, v, {"world": False, "replies": True})
     graded = []
-    grade = v._grade
+    judged = v._judged
 
-    async def counting_grade(context):
+    async def counting_judged(context):
         graded.append(context)
-        return await grade(context)
+        return await judged(context)
 
-    monkeypatch.setattr(v, "_grade", counting_grade)
+    monkeypatch.setattr(v, "_judged", counting_judged)
 
     with pytest.raises(VerifierNotPassingError):
         await Task(id="t", version=None, steps=[v]).run(context=_context())

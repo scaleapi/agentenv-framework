@@ -10,6 +10,7 @@ from agent_env.env.gateway.constants import EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOO
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.deploy_agent import bound_deployment
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class ModifyEnvToolAccessStep(TaskStep):
         action: str,
         role: str,
         tools: list[str],
+        env_step_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -37,6 +39,7 @@ class ModifyEnvToolAccessStep(TaskStep):
         if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
             raise ValueError("tools must be a list of strings")
         self.env_id = env_id
+        self.env_step_id = env_step_id
         self.action = action
         self.role = role
         self.tools = tools
@@ -44,6 +47,7 @@ class ModifyEnvToolAccessStep(TaskStep):
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["env_id"] = self.env_id
+        base["env_step_id"] = self.env_step_id
         base["action"] = self.action
         base["role"] = self.role
         base["tools"] = self.tools
@@ -54,13 +58,14 @@ class ModifyEnvToolAccessStep(TaskStep):
         return cls(
             **cls._base_from_dict(data),
             env_id=data["env_id"],
+            env_step_id=data.get("env_step_id"),
             action=data["action"],
             role=data["role"],
             tools=data["tools"],
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
+        deployed = bound_deployment(context, self.env_id, env_step_id=self.env_step_id, step_id=self.id)
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         body = await deployed.invoke(_TOOL_ACCESS_URIS[self.action], self.action, {"role": self.role, "tools": self.tools})

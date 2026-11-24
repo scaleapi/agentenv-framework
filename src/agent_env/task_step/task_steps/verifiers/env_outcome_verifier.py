@@ -10,14 +10,17 @@ import logging
 import os
 import tempfile
 import uuid
+from collections.abc import Sized
 from typing import ClassVar, Optional
 
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import TaskStepDependency
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import AtifDocuments, atif_turns, turns
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierTaskStep
 
 __all__ = ["EnvOutcomeVerifierTaskStep", "ScoreAggregator", "aggregate_score"]
 
@@ -25,9 +28,11 @@ __all__ = ["EnvOutcomeVerifierTaskStep", "ScoreAggregator", "aggregate_score"]
 logger = logging.getLogger(__name__)
 
 
-class EnvOutcomeVerifierTaskStep(TaskStep):
+class EnvOutcomeVerifierTaskStep(VerifierTaskStep):
     """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, a
-    ``trajectory`` parameter that prompt's agent trajectory, and an ``env_url`` parameter the env's address, which the
+    ``trajectory`` parameter that prompt's agent trajectory (one document per turn, each read by its label:
+    ``_trajectory``), a ``trajectory_formats`` parameter each turn's label, such as ``atif/1`` or the agent's native
+    format, and an ``env_url`` parameter the env's address, which the
     protocol client takes as it is: like every step, ``verify`` runs under ``Task.run``'s grant of each deployed env's
     control token, so its calls reach the env's framework-only routes as written."""
 
@@ -44,21 +49,20 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         env_id: str,
         file_artifact_id: str,
         file_artifact_version: Optional[int] = None,
-        score_aggregator: Optional[ScoreAggregator] = None,
+        score_aggregator: Optional[ScoreAggregator | str] = None,
         verifier_id: Optional[str] = None,
         prompt_id: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        min_passing_score: Optional[float] = None,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.verifier_id = verifier_id or uuid.uuid4().hex
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         verifier_id=verifier_id or uuid.uuid4().hex, score_aggregator=score_aggregator,
+                         min_passing_score=min_passing_score)
         self.prompt_id = prompt_id
         self.env_id = env_id
         self.file_artifact_id = file_artifact_id
         self.file_artifact_version = file_artifact_version
-        if isinstance(score_aggregator, str):
-            score_aggregator = ScoreAggregator(score_aggregator)
-        self.score_aggregator = score_aggregator or ScoreAggregator.ALL_PASS
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -76,8 +80,6 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         """Store the step. With ``verify_script_file_path`` the script is uploaded as
         ``<id>-verifier-script`` first; otherwise the kwargs name an existing ``file_artifact_id``
         (the shape ``agent-env task create`` builds from JSON)."""
-        from agent_env.task_step.store import get_task_step_store
-
         if verify_script_file_path is not None:
             from agent_env.artifact import FileArtifact
 
@@ -87,23 +89,19 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
                 file_path=verify_script_file_path,
             )
             kwargs.update(file_artifact_id=artifact.id, file_artifact_version=artifact.version)
-        kwargs.setdefault("version", None)
-        return get_task_step_store().put_document(cls(**kwargs))
+        return super().put(**kwargs)
 
     @classmethod
     def from_dict(cls, data: dict) -> EnvOutcomeVerifierTaskStep:
-        raw = data.get("score_aggregator")
         return cls(
             **cls._base_from_dict(data),
             env_id=data["env_id"],
             file_artifact_id=data["file_artifact_id"],
             file_artifact_version=data.get("file_artifact_version"),
-            score_aggregator=ScoreAggregator(raw) if raw else None,
-            verifier_id=data.get("verifier_id"),
             prompt_id=data.get("prompt_id"),
         )
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def verify(self, context: TaskStepContext) -> Verification:
         from agent_env.artifact import FileArtifact
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
@@ -130,21 +128,20 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
                 keywords["run"] = await load_run_context(context, self._graded_prompt(context))
             if "trajectory" in parameters:
                 keywords["trajectory"] = await asyncio.to_thread(_trajectory, self._graded_prompt(context))
+            if "trajectory_formats" in parameters:
+                keywords["trajectory_formats"] = _trajectory_formats(self._graded_prompt(context))
             results = await module.verify(deployed.mcp_url, **keywords)
-
-            score = aggregate_score(results, self.score_aggregator)
-            if "verifications" not in context.metadata:
-                context.metadata["verifications"] = {}
-            context.metadata["verifications"][self.verifier_id] = {
-                "results": results,
-                "score": score,
-            }
-            logger.info(f"Verification '{self.verifier_id}' complete: {len(results)} criteria, score={score}")
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        return context
+        if not isinstance(results, Sized):
+            # Scores 0 with the rows as returned, and fails its step.
+            return Verification(criteria=results, raise_after=TypeError(
+                f"verify() in artifact '{self.file_artifact_id}' returned {results!r}, not a list of criterion rows"))
+        score = aggregate_score(results, self.score_aggregator)
+        logger.info(f"Verification '{self.verifier_id}' complete: {len(results)} criteria, score={score}")
+        return Verification(criteria=results, score=score)
 
     def _graded_prompt(self, context: TaskStepContext) -> Optional[PromptResponse]:
         if self.prompt_id is None:
@@ -156,10 +153,27 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
 
 
 def _trajectory(prompt_response: Optional[PromptResponse]) -> Optional[list]:
-    """The agent's trajectory of ``prompt_response``, one document per turn as the agent stored it, None for a turn it
-    stored none of; None when it stored none at all."""
+    """The agent's trajectory of ``prompt_response``, one document per turn by its label, None for a turn it stored none
+    of; None when it stored none at all. A native turn's document is as the agent stored it; an atif/1 turn's is that
+    turn alone, its A2A task cut out of the conversation's ATIF document (``agentenv_protocol.atif.task_document``:
+    steps numbered from 1, sub-agents it reaches kept, ``final_metrics`` dropped), its media paths relative to that
+    document's folder."""
     urls = ((prompt_response.target_agent_per_turn_trajectory_object_urls
              or [prompt_response.agent_trajectory_object_url]) if prompt_response is not None else [])
     if not any(urls):
         return None
-    return [json.loads(get_config().get_object_store_at(url).get(url)) if url else None for url in urls]
+    if atif_turns(prompt_response) is None:
+        return [json.loads(get_config().get_object_store_at(url).get(url)) if url else None for url in urls]
+    documents = AtifDocuments()
+    return [None if source is None else documents.view(source) if source.atif
+            else json.loads(get_config().get_object_store_at(source.url).get(source.url))
+            for source in turns(prompt_response)]
+
+
+def _trajectory_formats(prompt_response: Optional[PromptResponse]) -> Optional[list[Optional[str]]]:
+    """Each turn's label, beside ``_trajectory``'s entries: what that turn's document is, None where it says none."""
+    if prompt_response is None:
+        return None
+    records = prompt_response.target_agent_per_turn_trajectories or []
+    urls = prompt_response.target_agent_per_turn_trajectory_object_urls or [prompt_response.agent_trajectory_object_url]
+    return [records[index]["format"] if index < len(records) else None for index in range(len(urls))]

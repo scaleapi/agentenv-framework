@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1563"
+version = "0.9.1631"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -104,6 +104,11 @@ miles = [
 slime = [
     "agentenv-framework[openenv]",
 ]
+# agent_env.training.tinker: tinker-cookbook's rl.train on a bundle's tasks, each rollout an episode played in process;
+# openenv for the reward rules build_app applies. tinker-cookbook, Tinker and torch are the trainer's to pin.
+tinker = [
+    "agentenv-framework[openenv]",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
@@ -152,7 +157,7 @@ coreweave = [
     "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
 ]
 dev = [
-    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,tinker,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
@@ -235,4 +240,15 @@ log_cli_level = "INFO"
 log_cli_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 [tool.ruff.lint]
-select = ["F"]
+select = ["F", "ASYNC", "RUF006"]
+# Left out: a timeout parameter is this codebase's style (ASYNC109); its polling loops wait on processes, files and
+# other threads, which no asyncio.Event can signal (ASYNC110); its async file I/O is small writes and chunked streams
+# (ASYNC230, ASYNC240).
+ignore = ["ASYNC109", "ASYNC110", "ASYNC230", "ASYNC240"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests block the loop on purpose, to stand in for slow work or to drive a subprocess.
+"tst/**" = ["ASYNC2", "RUF006"]
+"packages/agentenv-protocol/tests/**" = ["ASYNC2", "RUF006"]
+# Lume's VM and its port relay are detached processes that outlive the call that starts them.
+"src/agent_env/providers/sandbox_providers/lume/provider.py" = ["ASYNC220"]

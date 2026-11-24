@@ -93,3 +93,16 @@ def test_a_reported_split_file_drops_its_tests_the_reports_dont_have(tmp_path):
     report = _report(tmp_path, "r.xml", [("tst.integration.env.gateway.gateway_test", "test_new", 7.0)])
     assert _refresh(table, tmp_path, report).returncode == 0
     assert json.loads(table.read_text())["seconds"] == {f"{SPLIT}::test_new": 7.0}
+
+
+def test_a_file_split_in_runs_keeps_its_tests_apart_and_the_split_as_it_is(tmp_path):
+    table = _checkout(tmp_path)
+    table.write_text(json.dumps({"split_in": {"tst/integration/cli/cli_test.py": 2}, "seconds": {}}))
+    report = _report(tmp_path, "r.xml", [("tst.integration.cli.cli_test", "test_deploy", 30.0),
+                                         ("tst.integration.cli.cli_test", "test_put", 12.5)])
+    result = _refresh(table, tmp_path, report)
+    assert result.returncode == 0, result.stdout
+    written = json.loads(table.read_text())
+    assert written["seconds"] == {"tst/integration/cli/cli_test.py::test_deploy": 30.0,
+                                  "tst/integration/cli/cli_test.py::test_put": 12.5}
+    assert written["split_in"] == {"tst/integration/cli/cli_test.py": 2}

@@ -52,8 +52,8 @@ def pytest_unconfigure(config):
 
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
-    """With ``AGENTENV_TEST_SHARD=i/N``, run only the i-th of N groups of the selected tests (``tst/util/shards.py``).
-    Last, so it splits what ``-m`` and the other filters left."""
+    """With ``AGENTENV_TEST_SHARD=i/N``, run only the i-th of N groups of the selected tests (``tst/util/shards.py``),
+    their files heaviest first. Last, so it splits what ``-m`` and the other filters left."""
     value = os.environ.get(shards.ENV_VAR)
     if not value:
         return
@@ -71,6 +71,8 @@ def pytest_collection_modifyitems(config, items):
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = [item for item in items if item.nodeid in keep]
+    position = {nodeid: n for n, nodeid in enumerate(shards.heaviest_first([item.nodeid for item in items], table))}
+    items.sort(key=lambda item: position[item.nodeid])
 
 
 @pytest.fixture

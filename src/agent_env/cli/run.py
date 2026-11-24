@@ -16,6 +16,7 @@ from agent_env.bundle.installed import InstalledBundle, checked, installed_bundl
 from agent_env.bundle.plan import NotInStore
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
+from agent_env.cli.teardown_output import echo_finish_teardown, gone
 from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
@@ -25,7 +26,7 @@ from agent_env.task_step.context import TaskStepContext
 
 _COLORS = {Outcome.PASSED: "green", Outcome.BELOW_ONE: "yellow", Outcome.UNSCORED: "yellow", Outcome.FAILED: "red",
            Outcome.CANCELLED: "yellow"}
-_ENV_ENDPOINTS = (("mcp", "mcp_url"), ("gateway", "gateway_url"), ("pgweb", "db_web_url"), ("db-mcp", "db_mcp_url"),
+_ENV_ENDPOINTS = (("mcp", "mcp_url"), ("gateway", "gateway_url"), ("pgweb", "db_web_gateway_url"), ("db-mcp", "db_mcp_gateway_url"),
                   ("vnc", "vnc_url"), ("expires", "expires_at_utc"))
 _DRY_RUN = "Dry run: nothing is written or run."
 
@@ -55,10 +56,12 @@ _DRY_RUN = "Dry run: nothing is written or run."
 @click.option("--no-emulate", is_flag=True,
               help="Skip, rather than emulate, a computer env's arch the provider it composes on doesn't run "
                    "natively; a later run or env build builds it.")
+@click.option("--skip-lint", is_flag=True,
+              help="Run tasks agent-env task lint refuses for its own rules (a field no step reads, a headline or aggregate source that grades nothing), saying them; a step's own config problems still refuse it.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
         user_model: str | None, judge_model: str | None, agent: str | None, settings: tuple[str, ...],
-        sandbox: str | None, keep: bool, dry_run: bool, no_emulate: bool):
+        sandbox: str | None, keep: bool, dry_run: bool, no_emulate: bool, skip_lint: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
     BUNDLE is a folder, the name of a bundle an installed package provides (PACKAGE/NAME when several
@@ -102,9 +105,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     """
     if bundle is None:
         if tasks or evals or model or user_model or judge_model or agent or settings or sandbox or keep or dry_run \
-                or no_emulate:
+                or no_emulate or skip_lint:
             raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --set, --sandbox, "
-                                   "--keep, --dry-run and --no-emulate need a BUNDLE to run")
+                                   "--keep, --dry-run, --no-emulate and --skip-lint need a BUNDLE to run")
         _list_installed()
         return
     verbose = ctx.find_root().params.get("verbose")
@@ -116,12 +119,12 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
                                            on_progress=click.echo, id_root=id_root, emulate=not no_emulate,
-                                           variant=variant))
+                                           variant=variant, skip_lint=skip_lint))
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
                             id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None,
-                            variant=variant)
+                            variant=variant, skip_lint=skip_lint)
     except BundleError as e:
         if isinstance(e, NotInStore) and hub is not None and hub.setup_note:
             e.add_note(hub.setup_note)
@@ -354,8 +357,7 @@ def _records(context: TaskStepContext) -> list[tuple[str, object, list[tuple[str
 def _report_teardown(result: BundleRun) -> None:
     reports = [run.torn_down or TeardownReport.skipped(run.context) for run in result.runs]
     terminated = sum(len(report.terminated) for report in reports)
-    still_up = [sandbox for report in reports for sandbox in report.still_up
-                if sandbox.sandbox_type != "local" or LocalSandbox.find_work_dir(sandbox.sandbox_id)]
+    still_up = [sandbox for report in reports for sandbox in report.still_up if not gone(sandbox)]
     if terminated or still_up:
         click.echo()
     if terminated:
@@ -364,6 +366,8 @@ def _report_teardown(result: BundleRun) -> None:
         click.echo(click.style(f"Still up, {_sandboxes(len(still_up))}:", fg="yellow"))
         for sandbox in still_up:
             click.echo(f"  {_still_up(sandbox)}")
+        echo_finish_teardown([run.instance_id for run, report in zip(result.runs, reports)
+                              if run.instance_id and any(sandbox in still_up for sandbox in report.still_up)])
 
 
 def _still_up(sandbox: RecordedSandbox) -> str:

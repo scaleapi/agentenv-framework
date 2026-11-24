@@ -24,7 +24,7 @@ START_TIMEOUT_S=120
 STOP_TIMEOUT_S=10
 dockerfile_arg() { sed -n "s/^ARG $1=//p" "$here/Dockerfile"; }
 NODE_VERSION=$(dockerfile_arg NODE_VERSION)
-AGENT_FILES="mcp_tools.ts a2a_server.py letta_code_bridge.py letta_code_kit.py requirements.txt run.sh"
+AGENT_FILES="mcp_tools.ts a2a_server.py letta_code_bridge.py letta_code_kit.py requirements.txt run.sh agent_clock/agent_egress.py clock/clockpage.py model_relay/model_relay.py"
 
 # put SRC DEST replaces DEST by a rename, so a binary an earlier install's agent still runs can be replaced; put_dir SRC
 # DEST copies a folder to DEST, which isn't there.
@@ -122,6 +122,7 @@ chmod 0755 "$stage/letta"
     printf '%s=%s\n' "$name" "$(quoted "${!name:-}")"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
+  [ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\n' "$(quoted "$AGENTENV_CONTROL_TOKEN")"
   # Letta Code's state, its sessions and skills, as the image keeps it under /data.
   printf 'A2A_PORT=%s\nLETTA_CODE_WORKSPACE_DIR=%s\nHOME=%s\n' \
     "$(quoted "$port")" "$(quoted "$workspace")" "$(quoted "$root/data")"
@@ -144,7 +145,7 @@ put "$stage/agent.env" "$root/agent.env"
 put "$here/package.json" "$root/npm/package.json"
 put "$here/package-lock.json" "$root/npm/package-lock.json"
 for file in $AGENT_FILES; do
-  put "$here/$file" "$root/app/$file"
+  put "$here/$file" "$root/app/${file##*/}"
 done
 on "chmod 0600 $r/agent.env && chmod 0755 $r/bin/uv $r/bin/letta $r/app/run.sh"
 

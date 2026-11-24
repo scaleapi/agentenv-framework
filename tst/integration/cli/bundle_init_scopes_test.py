@@ -83,17 +83,19 @@ def machines(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ENV_DOCUMENT_STORE", "local")
     monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "local")
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
-    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000")  # each machine's model endpoint, which no run calls
     monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
     config = tmp_path / "source.toml"
     config.write_text(f'[sandbox.providers]\nacme_vm = "{_HERE}:_AcmeVm"\n\n[task_steps]\nimpls = ["{_HERE}:_AcmeNote"]\n')
 
     def on(machine):
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / machine))
+        # Each machine's model endpoint, which no run calls: the source's is the one its tasks name.
         if machine == "source":
             monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
+            monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.acme.example")
         else:
             monkeypatch.delenv("AGENT_ENV_CONFIG", raising=False)
+            monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000")
         _reset()
         configure()
 

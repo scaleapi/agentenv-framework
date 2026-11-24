@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from agentenv_protocol.a2a_agent import Usage
 from starlette.testclient import TestClient
 
 import agent_env
+from agent_env.config.model_pricing import litellm_prices
+from agent_env.task_step.usage import RoleUsage
 
 AGENT_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "browser-use"
 # By its path: another agent's a2a_server, imported by the same name, may be loaded already.
@@ -58,7 +61,8 @@ def test_a_turn_returns_the_answer_and_a_context_keeps_one_conversation(client: 
     assert (task["status"]["state"], text) == ("completed", "The top story.")
     usage = data["usage"]
     assert (usage["tool_call_count"], usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (2, 100, 20, 120)
-    assert usage["provider_details"]["cache_read_tokens"] == 60 and usage["provider_details"]["requests"] == 3
+    assert (usage["cache_read_tokens"], usage["cache_write_tokens"], usage["input_includes_cache"]) == (60, 10, True)
+    assert usage["provider_details"]["requests"] == 3 and "cost_usd" not in usage
     turn = json.loads(record.read_text())
     assert (turn["prompt"], turn["model"], turn["effort"], turn["systemPrompt"]) == ("top story?", "gpt-test", "low", "Be brief.")
     # Unset, browser-use's own step budget and mode; its run ends before the turn's deadline, leaving it to deliver.
@@ -122,6 +126,40 @@ def test_a_run_that_stops_early_fails_with_its_reason(client: TestClient, monkey
     task = _send(client, "too long")
     assert task["status"]["state"] == "failed"
     assert _reply(task)[1]["error_code"] == "browser_use.max_steps"
+
+
+def _usage_of(client: TestClient, monkeypatch: pytest.MonkeyPatch, scenario: str) -> dict[str, Any]:
+    monkeypatch.setenv("FAKE_SCENARIO", scenario)
+    return _reply(_send(client, scenario))[1]["usage"]
+
+
+def test_a_request_cut_before_its_response_is_unknown_not_zero(client: TestClient,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """browser-use-cut-request, recorded on 2026-11-20: the run's budget cut its only request, which the proxy still
+    answered (2,739 in, 6 out), and browser-use counted no response; the turn's usage is unknown, not $0."""
+    usage = _usage_of(client, monkeypatch, "cut")
+    role = RoleUsage("solver", "claude-haiku-4-5-20251001")
+    role.add(Usage.from_dict(usage))
+    entry = role.entry(litellm_prices())
+
+    assert "input_tokens" not in usage and "cost_usd" not in usage
+    assert usage["provider_details"]["unreported_calls"] == 1
+    assert entry["partial"] is True and entry["cost_usd"] is None and entry["unreported_calls"] == 1
+
+
+def test_requests_without_a_counted_response_mark_the_turn_and_refused_ones_dont(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    mixed = _usage_of(client, monkeypatch, "mixed")
+    refused = _usage_of(client, monkeypatch, "refused")
+
+    assert mixed["input_tokens"] == 100 and mixed["provider_details"]["unreported_calls"] == 1
+    assert refused["input_tokens"] == 100 and "unreported_calls" not in refused["provider_details"]
+
+
+def test_a_turn_counts_its_own_tool_calls_not_the_conversations(client: TestClient,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """browser-use's run returns the whole conversation's messages; the turn's are those after the earlier turns'."""
+    assert _usage_of(client, monkeypatch, "follow_up")["tool_call_count"] == 2
 
 
 def test_effort_outside_browser_uses_is_refused_with_the_config(client: TestClient) -> None:

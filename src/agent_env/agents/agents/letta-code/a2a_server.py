@@ -287,7 +287,7 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
     config=LettaCodeConfig,
     extensions=(
         MCP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True),
+        enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT),
         enable(ATTRIBUTION_PROBE_V1),
         enable(
             INSTALL_V1,
@@ -295,8 +295,10 @@ _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install
             # Port the agent's A2A server listens on inside the container.
             a2a_port=8000,
             # Every placeholder referenced in install_commands must be in this list.
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",
@@ -370,7 +372,7 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
             await self._capture_changelog()
 
         parts = [TextPart(text=result.response or result.error or "")]
-        usage = Usage(tool_call_count=result.tool_call_count)
+        usage = result.usage or Usage(tool_call_count=result.tool_call_count)
         if result.error:
             details = {"error_type": "cli_error", "error_message": result.error[:ERROR_MESSAGE_LIMIT]}
             if result.error_code:
@@ -504,7 +506,7 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
                     ["tar", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
                      f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(record)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=_real_time_env(),
                 )
                 await config["uploader"].upload(f"{sequence:06d}.tgz", archive)
                 pending_snar.replace(_CHANGELOG_SNAR)
@@ -629,6 +631,12 @@ def _removable(path: object) -> bool:
             and path not in _SYSTEM_DIRS and os.path.lexists(path))
 
 
+def _real_time_env() -> dict[str, str]:
+    """The changelog's tar runs on real time, as file times are: on an env clock ahead, a tar that read it would record
+    its dump time in the snapshot file ahead of every real change, and the next increment would miss them."""
+    return {**os.environ, "AGENTENV_REAL_TIME": "1"}
+
+
 def _baseline_changelog(roots: list[str]) -> None:
     _CHANGELOG_DIR.mkdir(parents=True, exist_ok=True)
     _CHANGELOG_SNAR.unlink(missing_ok=True)
@@ -637,7 +645,7 @@ def _baseline_changelog(roots: list[str]) -> None:
         ["tar", f"--listed-incremental={_CHANGELOG_SNAR}",
          *_changelog_backup_exclusions(),
          "-cf", "/dev/null", *present],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=_real_time_env(),
     )
 
 

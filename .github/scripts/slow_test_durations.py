@@ -5,7 +5,7 @@
 
 Use a green ``main`` run: it has a ``junit-*`` artifact for every shard of the slow tier, the gateway tests, the unit
 tier and the installer tier, which ``gh run download`` puts in a folder each. Each test's time counts toward its file,
-or toward the test itself for a file the table names in ``split_by_test``; that list is kept as it is. A file the
+or toward the test itself for a file the table names in ``split_by_test`` or ``split_in``, which are kept as they are. A file the
 reports have no test of, such as one of a tier the run skipped, keeps the times the table had for it while it exists.
 """
 
@@ -30,7 +30,7 @@ def main() -> int:
     args = parser.parse_args()
 
     table = json.loads(args.table.read_text())
-    split = set(table.get("split_by_test", []))
+    split = set(table.get("split_by_test", [])) | set(table.get("split_in", {}))
     seconds: dict[str, float] = defaultdict(float)
     for report in args.reports:
         for case in ET.parse(report).getroot().iter("testcase"):

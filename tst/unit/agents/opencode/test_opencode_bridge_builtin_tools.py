@@ -172,4 +172,5 @@ def test_the_tool_names_are_those_of_the_cli_version_package_json_pins():
     pinned = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["opencode-ai"]
 
     assert opencode_bridge.TOOLS_CLI_VERSION == pinned, (
-        "the CLI version changed: record the tools the new CLI offers in OpenCodeTool, then TOOLS_CLI_VERSION")
+        "the CLI version changed: record the tools the new CLI offers in OpenCodeTool, then TOOLS_CLI_VERSION; "
+        "tst/integration/agent/opencode_env_date_test.py checks that opencode_date still finds where it writes its date")

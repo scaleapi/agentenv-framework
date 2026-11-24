@@ -33,6 +33,8 @@ PYTHON = os.environ.get("BROWSER_USE_PYTHON", "/opt/browser-use/bin/python")
 #: How much of the turn's deadline browser-use's own run leaves: its forced delivery when it runs out, and its stop.
 DELIVERY_SECONDS = 100
 STOP_SECONDS = 5
+#: The native trajectory: browser-use's messages, each turn's when it ends.
+TRAJECTORY_FORMAT = "browser-use-messages/1"
 #: browser-use and its browser daemon report usage to their makers unless told not to.
 _PRIVATE_ENV = {"ANONYMIZED_TELEMETRY": "false", "BH_TELEMETRY": "0"}
 
@@ -65,7 +67,8 @@ class BrowserUseConfig(AgentConfig):
     extensions=(
         MCP_CONFIG_V1,
         CDP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=False, description="browser-use's messages, each turn's when it ends."),
+        enable(TRAJECTORY_V1, live=False, native=TRAJECTORY_FORMAT,
+               description="browser-use's messages, each turn's when it ends."),
     ),
 )
 class BrowserUseAgent(AgentEnvAgent):
@@ -103,7 +106,7 @@ class BrowserUseAgent(AgentEnvAgent):
             "historyFile": str(HOME / "sessions" / f"{session}-{hashlib.sha256(model.encode()).hexdigest()[:8]}.json"),
         }
         (HOME / "sessions").mkdir(parents=True, exist_ok=True)
-        request.trajectory.set_format("browser-use-messages/1")
+        request.trajectory.set_format(TRAJECTORY_FORMAT)
 
         process = await asyncio.create_subprocess_exec(
             *self.command,
@@ -141,10 +144,10 @@ class BrowserUseAgent(AgentEnvAgent):
             error = (await stderr).decode(errors="replace")[-4000:] or f"agent.py exited {process.returncode}"
             return TaskResult.failure("browser_use.crashed", error, error_type="infra_error")
         tool_calls = 0
-        for message in result["messages"]:
+        for index, message in enumerate(result["messages"]):
             request.trajectory.append(message)
-            tool_calls += sum(part.get("part_kind") == "tool-call" for part in message.get("parts") or [])
-        usage = result["usage"]
+            if index >= result.get("prior", 0):  # the context's earlier turns counted theirs
+                tool_calls += sum(part.get("part_kind") == "tool-call" for part in message.get("parts") or [])
         builder = TaskResult.builder()
         if result["status"] == "completed":
             builder.succeeded()
@@ -153,17 +156,26 @@ class BrowserUseAgent(AgentEnvAgent):
         return (
             builder.add_text(result["text"] or result.get("error") or result["status"])
             .session_ref(session)
-            .usage(Usage(
-                tool_call_count=tool_calls,
-                input_tokens=usage["input"],
-                output_tokens=usage["output"],
-                total_tokens=usage["input"] + usage["output"],
-                provider_details={"steps": result["steps"], "model": result["model"], "requests": usage["requests"],
-                                  "cache_read_tokens": usage["cache_read"], "cache_write_tokens": usage["cache_write"],
-                                  "cost_usd": result.get("cost_usd"), "success": result.get("success")},
-            ))
+            .usage(_usage(result, tool_calls))
             .build()
         )
+
+
+def _usage(result: dict, tool_calls: int) -> Usage:
+    """The turn's usage as browser-use counts it, over the responses it got. browser-use counts the cache in its input
+    on both of its routes: Anthropic's Messages, whose cache it adds in, and OpenAI's Chat Completions, whose prompt
+    already holds it. A request sent and not refused that got no response it counts, cut off by the run's timeout or
+    retried, is counted in ``unreported_calls``; when no request got one, the counts are unknown, not zero."""
+    usage, calls = result["usage"], result.get("calls") or {}
+    unreported = max(calls.get("sent", 0) - calls.get("refused", 0) - usage["requests"], 0)
+    details = {"steps": result["steps"], "model": result["model"], "requests": usage["requests"],
+               "success": result.get("success"), **({"unreported_calls": unreported} if unreported else {})}
+    if unreported and not usage["requests"]:
+        return Usage(tool_call_count=tool_calls, provider_details=details)
+    return Usage(tool_call_count=tool_calls, input_tokens=usage["input"], output_tokens=usage["output"],
+                 total_tokens=usage["input"] + usage["output"], cache_read_tokens=usage["cache_read"],
+                 cache_write_tokens=usage["cache_write"], input_includes_cache=True, cost_usd=result.get("cost_usd"),
+                 provider_details=details)
 
 
 agent = BrowserUseAgent()

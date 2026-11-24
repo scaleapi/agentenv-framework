@@ -53,3 +53,15 @@ def test_its_problems_name_paths_in_the_folder():
         "gmail: holds one file, and has 2 ('a.json', 'b.json')",
         "slack: holds one file, and has 0",
     ]
+
+
+def test_a_universe_registered_under_a_registry_id_names_its_environments_as_a_local_one_does():
+    files, folders = _listing([environment_path(PurePosixPath(), name, "x.json") for name in ("gmail", "g__mail")])
+
+    read = read_folder("psi-ts-shelfway-laptop-elicitation-computer-u", files, folders)
+
+    ids = {entry.name: (entry.environment_id, entry.file_id) for entry in read.environments}
+    assert ids["gmail"] == ("psi-ts-shelfway-laptop-elicitation-computer-u__gmail",
+                            "psi-ts-shelfway-laptop-elicitation-computer-u__gmail__file")
+    digest = hashlib.sha256(b"g__mail").hexdigest()[:16]
+    assert ids["g__mail"][0] == f"psi-ts-shelfway-laptop-elicitation-computer-u__sha256__{digest}"

@@ -14,6 +14,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_r
 
 
 @pytest.fixture(scope="module")
+def desktop(desktop_with_disk):
+    """The shipped desktop, its disk composed with it: these tests boot its disk image themselves."""
+    return desktop_with_disk
+
+
+@pytest.fixture(scope="module")
 def ghost(desktop, tmp_path_factory):
     yield from ghost_disk(desktop.metadata["composed"]["disk"]["amd64"]["image"], tmp_path_factory.mktemp("ghost"))
 

@@ -25,6 +25,7 @@ from agentenv_protocol.a2a_agent import (
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 import agent_env.task.episode.run as episode_run
+from agent_env.runner import store as run_store
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
 from agent_env.env.env import DeployedEnv
@@ -192,7 +193,9 @@ async def _ended(episode):
 
 
 async def _until(holds):
-    async with asyncio.timeout(5):
+    # The budget covers a cold start: the first episode in a process imports every sandbox provider's SDK (seconds)
+    # before its first turn opens. The loop returns as soon as ``holds`` does, so a passing test never waits it out.
+    async with asyncio.timeout(30):
         while not holds():
             await asyncio.sleep(0.01)
 
@@ -447,6 +450,55 @@ async def test_an_episode_abandoned_as_it_starts_is_recorded_cancelled_with_the_
 
 
 @pytest.mark.asyncio
+async def test_an_episode_is_in_the_run_index_running_then_ended_in_the_group_it_was_started_in(teardowns):
+    played = await _spec(ITEMS, ALICE, TURN, REPLIES, seed={"week": "3"}).start(run_group_id="rg-train-0")
+    run = run_store.get_run(f"episode-{played.id}")
+    assert (run.runner, run.task_id, run.task_version, run.instance_id, run.status) == (
+        "episode", "dock", 4, played.id, "RUNNING")
+    assert run.overrides["metadata"] == {"episode": {"id": played.id, "trainer_agents": ["alice"]},
+                                         "run_group_id": "rg-train-0", "seed": {"week": "3"}}
+    await (await played.next_turn()).end("Added a crate.")
+    await played.result()
+    abandoned = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+    await abandoned.abandon("the trainer moved on")
+    failed = await _spec({**ITEMS, "fail": True}, ALICE, TURN, REPLIES).start()
+    with pytest.raises(RuntimeError):
+        await failed.result()
+
+    ended = {episode: run_store.get_run(f"episode-{episode.id}") for episode in (played, abandoned, failed)}
+    assert [(run.status, run.error) for run in ended.values()] == [
+        ("COMPLETED", None), ("CANCELED", "the trainer moved on"),
+        ("FAILED", "RuntimeError: the env didn't come up")]
+    assert all(run.finished_at_utc for run in ended.values())
+    assert ended[abandoned].overrides["metadata"].keys() == {"episode"}
+
+
+@pytest.mark.asyncio
+async def test_an_episode_whose_step_fails_without_failing_the_task_is_recorded_failed_as_a_runner_would(teardowns):
+    spare = {"id": "spare", "type": "episode_test_env", "env_id": "spare", "fail": True, "fail_task_on_error": False}
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES, spare).start()
+    await (await episode.next_turn()).end("Added a crate.")
+
+    assert await episode.result() == {"replies": 1.0}
+    run = run_store.get_run(f"episode-{episode.id}")
+    assert run.status == "FAILED" and "the env didn't come up" in run.error
+
+
+@pytest.mark.asyncio
+async def test_a_run_record_that_cant_be_written_is_the_runs_error_and_leaves_no_live_episode(teardowns, monkeypatch):
+    def refused(record):
+        raise RuntimeError("the run index is down")
+
+    monkeypatch.setattr(episode_run.run_store, "insert_run", refused)
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+
+    with pytest.raises(RuntimeError, match="the run index is down"):
+        await episode.next_turn()
+    assert episode.id not in episode_run._live
+    assert len(teardowns.finished) == 1
+
+
+@pytest.mark.asyncio
 async def test_an_episode_abandoned_mid_turn_drops_the_turn(teardowns):
     episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
     turn = await episode.next_turn()
@@ -571,6 +623,24 @@ async def test_a_tolerated_verifier_that_recorded_no_score_is_missing_from_the_s
     await (await episode.next_turn()).end("done")
 
     assert await episode.result() == {"replies": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_the_stored_run_holds_each_verifiers_named_grade_a_failed_one_included(teardowns):
+    passing = {"id": "crates", "type": "agent_prompt_response_verifier", "prompt_id": "turn",
+               "verifier_id": "has-crate", "criteria": [{"type": "response_contains", "needles": ["crate"]}]}
+    broken = {"id": "graded", "type": "agent_prompt_response_verifier", "prompt_id": "missing",
+              "verifier_id": "graded", "criteria": [{"type": "response_contains", "needles": ["crate"]}],
+              "fail_task_on_error": False}
+    episode = await _spec(ITEMS, ALICE, TURN, passing, broken).start()
+    await (await episode.next_turn()).end("Added a crate.")
+
+    assert await episode.result() == {"crates": 1.0}
+    grades = Task.get_instance(episode.id).context["metadata"]["grades"]
+    assert {step: (g["verifier_status"], g["score"], g["passed"]) for step, g in grades.items()} == {
+        "crates": ("graded", 1.0, True), "graded": ("failed", None, False)}
+    assert grades["graded"]["verifier_error_reasoning"].startswith("StepContextError: PromptResponse")
+    assert grades["crates"]["verifier_criteria"][0]["passed"] is True
 
 
 BREAKS_WHILE_THE_TURN_IS_OPEN = (

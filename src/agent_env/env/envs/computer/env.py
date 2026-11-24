@@ -165,7 +165,8 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         fields["apps"], fields["app_settings"] = _listed_apps(fields.get("apps", []), ctx)
         try:
-            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, **fields)
+            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, compose=ctx.compose,
+                           **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
 
