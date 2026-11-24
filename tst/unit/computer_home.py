@@ -1,5 +1,5 @@
 """A computer at its driver's boundary, for steps that reach inside one: its home a folder on this machine, ``data/add``
-writing there, ``data/get`` reading there (the files under the paths it's given, else under the desktop folders), and computer-exec/v1 ``run`` running commands there; each call recorded,
+writing there, ``data/get`` reading there, and computer-exec/v1 ``run`` running commands there; each call recorded,
 with the headers it sent, and the address each ``data/add`` is sent to."""
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from pathlib import Path
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_EXEC
-from agentenv_protocol.computer.dataplane import DEFAULT_DATA_PATHS
 from agentenv_protocol.types import FileWithBytes, GetDataResponse
 
 from agent_env.env.env import DeployedSandboxEnv
@@ -58,20 +57,13 @@ class Computer:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(base64.b64decode(part.file.bytes))
 
-    async def get_data(self, base_url, timeout=30, verify=True, *, write_namespace=None, paths=None, headers=None,
-                       max_bytes=None):
+    async def get_data(self, base_url, timeout=30, verify=True, *, write_namespace=None, paths=None, headers=None):
         self.calls.append(("data/get", paths))
         self.headers.append(headers)
-        files = []
-        for named in paths if paths is not None else DEFAULT_DATA_PATHS:
-            target = self.home / named
-            files += [target] if target.is_file() else sorted(p for p in target.rglob("*") if p.is_file())
-        if max_bytes is not None and sum(4 * -(-file.stat().st_size // 3) for file in files) > max_bytes:
-            raise protocol_v1.ResponseTooLarge(f"data/get's answer is over the {max_bytes} bytes asked for")
         return GetDataResponse(parts=[
-            FilePart(file=FileWithBytes(bytes=base64.b64encode(file.read_bytes()).decode()),
-                     metadata={DATA_OBJECTS_EXTENSION_URI: {"path": file.relative_to(self.home).as_posix()}})
-            for file in files])
+            FilePart(file=FileWithBytes(bytes=base64.b64encode((self.home / path).read_bytes()).decode()),
+                     metadata={DATA_OBJECTS_EXTENSION_URI: {"path": path}})
+            for path in paths if (self.home / path).is_file()])
 
     async def invoke_extension(self, base_url, card, uri, params=None, timeout=30, verify=True, *, method=None,
                                headers=None):

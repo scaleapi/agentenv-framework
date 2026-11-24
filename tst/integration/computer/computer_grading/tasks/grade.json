@@ -1,0 +1,21 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "office"},
+  {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "computer-grading-echo", "sandbox_type": "local"},
+  {"id": "judge", "type": "deploy_agent", "agent_name": "judge", "env_ids": [], "a2a_agent_id": "computer-grading-echo",
+   "sandbox_type": "local"},
+  {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "depends_on": ["agent"],
+   "prompt": "Write ~/Desktop/budget.csv with rent 1200 and food 300 and their total, and leave a note in ~/notes.txt stating the total."},
+  {"id": "work", "type": "computer_exec", "env_id": "office", "depends_on": ["env"],
+   "command": "mkdir -p Desktop && printf 'item,amount\\nrent,1200\\nfood,300\\ntotal,1500\\n' > Desktop/budget.csv && echo 'Budget done.' > notes.txt"},
+  {"id": "snapshot", "type": "snapshot_computer_env", "env_id": "office", "computer": "desk", "depends_on": ["work"],
+   "file_paths": ["Desktop/budget.csv", "notes.txt"]},
+  {"id": "result", "type": "load_artifact", "artifact_from_step_id": "snapshot", "agent_name": "judge",
+   "destination_path": "/tmp/grading/result", "depends_on": ["snapshot", "judge"]},
+  {"id": "golden", "type": "load_artifact", "artifact_id": "golden", "agent_name": "judge",
+   "destination_path": "/tmp/grading/golden", "depends_on": ["judge"]},
+  {"id": "grade", "type": "rubrics_verifier", "verifier_id": "files", "prompt_id": "ask", "agent_name": "judge",
+   "use_agent_judge": true, "use_trajectory": false, "score_aggregator": "weighted_average",
+   "depends_on": ["ask", "result", "golden"],
+   "criteria": [{"id": "budget", "description": "~/Desktop/budget.csv matches the golden budget.csv."},
+                {"id": "note", "description": "~/notes.txt matches the golden notes.txt, stating the total."}]}
+]

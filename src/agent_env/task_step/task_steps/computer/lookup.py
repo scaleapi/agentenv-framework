@@ -15,22 +15,29 @@ from agent_env.task_step.context import TaskStepContext
 
 def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]) -> DeployedSandboxEnv:
     """The deploy record of the computer in ``env_id`` that serves computer-exec/v1 ``run``: the env's own, or one of a
-    multi env's computers' (``DeployedGatewayEnv.child_envs``), the one ``computer`` names else its only one."""
+    multi env's computers' (``child_computer``)."""
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
         raise RuntimeError(f"env {env_id!r} isn't in context.deployed_envs")
+    if computer is None and deployed.supports(COMPUTER_EXEC, "run"):
+        return deployed
+    return child_computer(deployed, computer)[1]
+
+
+def child_computer(deployed: DeployedEnv, computer: Optional[str]) -> tuple[str, DeployedSandboxEnv]:
+    """A multi env's computer in its deployment (``DeployedGatewayEnv.child_envs``), by its name and with its deploy
+    record: the one ``computer`` names, else its only one serving computer-exec/v1 ``run``."""
     children = {name: DeployedEnv.from_dict(data)
                 for name, data in (getattr(deployed, "child_envs", None) or {}).items()}
     if computer is not None:
         found = children.get(computer)
         if found is None:
-            raise RuntimeError(f"env {env_id!r} has no computer named {computer!r} (it has {sorted(children)})")
-        return found
-    if deployed.supports(COMPUTER_EXEC, "run"):
-        return deployed
-    computers = [record for record in children.values() if record.supports(COMPUTER_EXEC, "run")]
+            raise RuntimeError(f"env {deployed.env_id!r} has no computer named {computer!r} "
+                               f"(it has {sorted(children)})")
+        return computer, found
+    computers = [(name, record) for name, record in children.items() if record.supports(COMPUTER_EXEC, "run")]
     if len(computers) != 1:
-        raise RuntimeError(f"env {env_id!r} has {len(computers) or 'no'} computers serving {COMPUTER_EXEC} run"
+        raise RuntimeError(f"env {deployed.env_id!r} has {len(computers) or 'no'} computers serving {COMPUTER_EXEC} run"
                            + (f": name one as computer, of {sorted(children)}" if computers else ""))
     return computers[0]
 
