@@ -68,11 +68,13 @@ class _GradeFields(TypedDict):
 class Grade(_GradeFields, total=False):
     """A verifier step's named grade, as ``context.metadata["grades"][<step id>]`` holds it. ``verifier_status`` is a
     ``VerifierStatus`` value, and ``score`` is None unless it is ``graded``; each ``verifier_criteria`` row has ``id``,
-    ``score``, ``passed``, ``weight`` and ``skipped``, besides any other keys the verifier gave it. The two fields here
-    are written only for a large output."""
+    ``score``, ``passed``, ``weight`` and ``skipped``, besides any other keys the verifier gave it. The two
+    ``verifier_output`` fields here are written only for a large output; ``judge_calls``, a judge's record of each model
+    call it made, only by a judge (``grade_fields``)."""
 
     verifier_output_ref: dict[str, Any]
     verifier_output_offload_error: str
+    judge_calls: list[dict[str, Any]]
 
 
 @dataclass
@@ -159,6 +161,16 @@ class VerifierTaskStep(TaskStep):
         fields = {k: v for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
         return {**fields, "score_aggregator": self.score_aggregator.value}
 
+    def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
+        """Fields of the grade beside the base's, written whether the step graded, skipped or failed, so they say what
+        a failed run did too, as a judge's ``judge_calls``. None by default."""
+        return {}
+
+    def criterion_rows(self) -> Optional[int]:
+        """How many criterion rows a run of this verifier grades, when its config alone says, for lint to weigh a
+        pooled aggregate's sources; None when only a run can tell, as for a script's or a test run's rows."""
+        return None
+
     def config_problems(self) -> list[str]:
         problems = super().config_problems()
         if not isinstance(self.verifier_id, str):
@@ -205,6 +217,7 @@ class VerifierTaskStep(TaskStep):
             verifier_type=self.type,
             verifier_version=_providing_version(type(self).__module__),
             verifier_settings=self._settings(context),
+            **self.grade_fields(context),
         )
 
     def _score(self, verification: Verification) -> Optional[float]:

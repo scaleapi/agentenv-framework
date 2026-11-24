@@ -57,7 +57,7 @@ def test_random_default_is_env_plus_four_digits():
 
 
 def test_deployed_env_records_the_gateway_name():
-    base = dict(env_id="e", env_version=1, gateway_url="g", mcp_url="m", db_web_url=None, sandbox_id="s")
+    base = dict(env_id="e", env_version=1, gateway_url="g", mcp_url="m", sandbox_id="s")
     assert DeployedEnv.from_dict({**base, "mcp_server_name": "env4821"}).mcp_server_name == "env4821"
     assert DeployedEnv.from_dict(base).mcp_server_name is None
 
@@ -65,8 +65,7 @@ def test_deployed_env_records_the_gateway_name():
 @pytest.mark.asyncio
 async def test_a_deploy_records_the_mcp_url_and_name_its_gateway_card_gives():
     card = {"name": "crm", "additionalInterfaces": [{"url": "/mcp", "transport": "mcp"}]}
-    result = SimpleNamespace(gateway_url="https://gw.example", mcp_url="https://gw.example/mcp", db_web_url=None, db_mcp_url=None,
-                             db_web_gateway_url="https://gw.example/svc/pgweb/",
+    result = SimpleNamespace(gateway_url="https://gw.example", mcp_url="https://gw.example/mcp", db_web_gateway_url="https://gw.example/svc/pgweb/",
                              db_mcp_gateway_url="https://gw.example/svc/db-mcp/mcp",
                              website_frontend_urls=None, environment_card=card, environment_card_read_at_utc="t",
                              env_state_instance_ids=[], mcp_server_name="crm", control_token="t0k")

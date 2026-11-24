@@ -1,6 +1,7 @@
 """The built-in user sim: deploy_user_sim_agent writes its system prompt with ``setup``, and the always_on step reads
 with ``answer``. The interface is in deploy_user_sim_agent.py; how to write a user for it is in user_sim.md. It has
-one version, ``ours``.
+one version, ``ours``, and three presets (``PRESETS``): chat, always_on and milestone. A preset sets the done line
+and, for milestone, how the user takes a post-turn hook's note; ``features`` names what a judge's rules may depend on.
 
 ``setup`` writes the system prompt once per run: fixed lines on how a real person reads and answers, the description
 as tagged sections (with the opening request), the user's rules from ``permissions`` and ``keep_private``, and the
@@ -51,6 +52,33 @@ RULES_AFTER = "decisions"
 # A description section that isn't one, with where its lines go: a task that has it is refused at load with that.
 MOVED_SECTIONS: dict[str, str] = {
     "never_supply": "put facts the assistant should find in what_to_look_up, and secrets in keep_private",
+}
+
+# What kind of run the user sim is in. Each sets its done line and any rules for what it's sent, and names the parts
+# of the prompt and the run a judge's rules may depend on (``features``). None: chat or always_on, by ``done_ends_run``.
+PRESETS: dict[str, str] = {
+    "chat": "one conversation; done ends it",
+    "always_on": "a run over hours or days; the user reads emails, texts and notifications between messages",
+    "milestone": "one conversation in steps a post-turn hook checks; the user moves on when its note says so",
+}
+# The milestone preset: a post-turn hook checks the work and tells the user what it found in a note only they see.
+MILESTONE_LINES = (
+    "After the assistant's reply you may get a note that only you see: what you found when you checked its work "
+    "yourself. Trust the note over what the reply says about itself. If it says something isn't done, always reply "
+    "(never no reply) and bring it up in your own words, never more specifically than the note: no answer, figure, "
+    "name or record it doesn't give you, not even one from the assistant's own reply. Move on only when the note says "
+    "so, and when it gives you a line to send next, send that line word for word.")
+DONE_MILESTONE = ('Answer "done" only after the note says everything is done and you\'ve sent your last line; until '
+                  'then, keep the chat going.')
+# The parts of the prompt or the run a judge's rule may depend on (see ``features``).
+FEATURES: dict[str, str] = {
+    "told_lines": "a THINGS YOU ALREADY TOLD THE ASSISTANT section (T lines)",
+    "should_know_lines": "a THINGS THE ASSISTANT SHOULD ALREADY KNOW section (C lines)",
+    "permission_rules": "rules for the assistant: just do, ask first, never, tell you after",
+    "when_done": "a WHEN YOU'RE DONE section",
+    "phone": "reads that show the emails, texts and notifications that reached the user",
+    "milestones": "a run in steps that a hook opens one at a time",
+    "hook_notes": "notes from a post-turn hook on what the user found checking the work",
 }
 
 PERMISSION_KINDS: dict[str, str] = {
@@ -124,7 +152,9 @@ def _first(person: dict) -> str:
 
 def _preamble(person: dict) -> list[str]:
     full, first = person["name"], _first(person)
-    if person.get("done_ends_run"):
+    if preset_of(person) == "milestone":
+        done = DONE_MILESTONE
+    elif person.get("done_ends_run"):
         done = DONE_ENDS_RUN
     elif person["description"].get("when_done"):
         done = DONE_MULTI_DAY
@@ -141,9 +171,33 @@ def _preamble(person: dict) -> list[str]:
         "make calls about it unless the assistant asks, or your description says to.",
         "If the assistant asks something no line below covers: for a choice, choose the way you would; for a fact "
         "about you or anyone else that isn't written below, say you don't know. Never guess facts.",
+        *([MILESTONE_LINES] if preset_of(person) == "milestone" else []),
         done,
         'In "used", write the tag of the line you relied on, or "none". Answer in JSON:\n' + ANSWER_LINE,
     ]
+
+
+def preset_of(person: dict) -> str:
+    """The run kind the user sim is in: its ``preset``, else chat when done ends the run, else always_on."""
+    return person.get("preset") or ("chat" if person.get("done_ends_run") else "always_on")
+
+
+def features(person: dict) -> frozenset[str]:
+    """The parts of this user sim's prompt and run that a judge's rules may depend on (``FEATURES``): a section the
+    description fills in, rules the permissions give, and what the preset adds. A judge given these reads only the
+    rules that fit this sim, so one product's rules never reach a sim whose prompt never asked for them."""
+    description = person.get("description") or {}
+    have = {feature for key, feature in (("already_told", "told_lines"), ("should_already_know", "should_know_lines"),
+                                         ("when_done", "when_done"))
+            if _lines(description.get(key))}
+    if any(_items((person.get("permissions") or {}).get(kind))[0] for kind in PERMISSION_KINDS):
+        have.add("permission_rules")
+    preset = preset_of(person)
+    if preset == "always_on":
+        have.add("phone")
+    if preset == "milestone":
+        have |= {"milestones", "hook_notes"}
+    return frozenset(have)
 
 
 def tag_line(tag: str, text: str) -> str:
@@ -270,6 +324,11 @@ def problems(person: Any) -> list[str]:
         out.append("keep_private must be a list of non-empty lines")
     if person.get("time_zone") is not None:
         out += zone_problems(person["time_zone"])
+    preset = person.get("preset")
+    if preset is not None and preset not in PRESETS:
+        out.append(f"preset {preset!r} is not one of {list(PRESETS)}")
+    elif preset in ("chat", "milestone") and not person.get("done_ends_run"):
+        out.append(f"preset {preset!r} is one conversation: it can't run over more than one day")
     return out
 
 

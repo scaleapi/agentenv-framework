@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from agent_env.config import model_pricing as prices_module
+from agent_env.config.model import JUDGE_FALLBACK_MODEL
 from agent_env.config.model_pricing import (
     PER_MILLION,
     Assumed,
@@ -62,6 +63,10 @@ def test_the_installed_litellms_map_is_read_without_importing_litellm():
     version = importlib.metadata.version("litellm")
     assert out == (f"litellm@{version} ModelPrice(input=0.4, output=1.6, cache_read=0.1, cache_write=None) False")
     assert len(litellm_prices().entries) > 1000
+
+
+def test_the_judge_a_run_falls_back_to_is_priced_by_the_installed_map():
+    assert litellm_prices().lookup(JUDGE_FALLBACK_MODEL) is not None
 
 
 def test_a_map_that_cant_be_read_prices_nothing_and_says_why(monkeypatch, caplog):

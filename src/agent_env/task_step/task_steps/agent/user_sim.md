@@ -32,10 +32,25 @@ Its own fields:
 | `persona` | required | Who the user is: `display_name` (their full name), `first_name` (else the display name's first word), `time_zone` (their IANA zone; else the task clock's, else UTC; a clock that sets a different zone is refused), `description`, `permissions`, `keep_private`, `schedule`, `response_times`, `max_replies` (after that many replies the user stops reading) |
 | `model` | required | The user sim's model. This step's `step_params` `model` wins, then the run's `user_model` (`--user-model`), then this |
 | `opening_prompt` | required | The user's first message: text, or text and file parts (below). The always-on step sends it and has no prompt of its own |
+| `preset` | optional | `chat`, `always_on` or `milestone`: the kind of run (below) |
 | `multi_day` | required, for now | Whether the run goes past the day it starts on (always-on's `end_time` falls on a later day). It picks the prompt's done line; always-on refuses a run of the other kind |
 
 `multi_day` is a stopgap: the prompt is written before the run, so the step has to be told which done line to use.
 It goes away once the step can learn it from the task.
+
+`preset` (optional) names the kind of run the user is in:
+
+| Preset | The run | What it changes |
+|---|---|---|
+| `chat` | One conversation with a `prompt_agent`; done ends it. `multi_day: false` | Nothing: the prompt is today's single-session one |
+| `always_on` | An `always_on` run; the user reads emails, texts and notifications between messages | Nothing: the prompt is today's multi-day one |
+| `milestone` | One conversation in steps that a `prompt_agent` post-turn hook checks (such as milestone-gates). `multi_day: false` | The prompt tells the user to trust the hook's note over the reply, always reply while it says something isn't done, press on what it raises in their own words and never more specifically (not even with names from the assistant's own reply), move on only when it says so, send the line it gives word for word, and answer done only after it says everything is done |
+
+Without a preset the user is `chat` or `always_on` by `multi_day`, as before. The task is refused when it loads if a
+`milestone` user's `prompt_agent` has no `post_turn_hooks`, if no `prompt_agent` talks to it, or if an `always_on`
+step plays a `chat` or `milestone` user. The step records the preset as written and `features`: the parts of the
+prompt and run a judge's rules may depend on (`told_lines`, `should_know_lines`, `permission_rules`, `when_done`,
+`phone`, `milestones`, `hook_notes`), so a judge can read only the rules that fit this user.
 
 **A first message with files.** `opening_prompt` can be a list of parts in `prompt_agent`'s `parts` format, text and
 file parts, for a first message that attaches a photo, a PDF, a spreadsheet or any other file:

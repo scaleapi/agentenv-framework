@@ -134,6 +134,8 @@ def _changelog_backup_exclusions() -> list[str]:
 class OpenCodeConfig(AgentConfig):
     model: str | None = None
     effort: str | None = None
+    # The output tokens, reasoning included, one model request may produce; None keeps OpenCode's 32,000.
+    max_output_tokens: int | None = Field(default=None, gt=0)
     system_prompt: str | None = None
     output_format: dict[str, Any] | None = None
     project_id: str | None = None
@@ -376,6 +378,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         session_id=session_id,
                         model=request.config.model,
                         effort=request.config.effort,
+                        max_output_tokens=request.config.max_output_tokens,
                         mcp_servers=dict(request.mcp_servers),
                         system_prompt=request.config.system_prompt,
                         output_format=request.config.output_format,
@@ -399,7 +402,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
             await self._capture_changelog()
 
         parts = [TextPart(text=result.response or result.error or "")]
-        usage = Usage(tool_call_count=result.tool_call_count)
+        usage = result.usage or Usage(tool_call_count=result.tool_call_count)
         if result.error:
             details = {"error_type": "cli_error", "error_message": result.error[:ERROR_MESSAGE_LIMIT]}
             if result.error_code:
@@ -517,7 +520,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                     ["tar", "--ignore-failed-read", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
                      f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(record)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=_real_time_env(),
                 )
                 await config["uploader"].upload(f"{sequence:06d}.tgz", archive)
                 pending_snar.replace(_CHANGELOG_SNAR)
@@ -643,8 +646,15 @@ def _baseline_changelog(roots: list[str]) -> None:
         ["tar", "--ignore-failed-read", f"--listed-incremental={_CHANGELOG_SNAR}",
          *_changelog_backup_exclusions(),
          "-cf", "/dev/null", *present],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=_real_time_env(),
     )
+
+
+def _real_time_env() -> dict[str, str]:
+    """This server's environment for the changelog's tar, which keeps the time it starts at as the next capture's
+    baseline and archives only the files changed since, by their real mtimes, so it runs on real time: the server
+    does, but libfaketime took the marker out of the server's environment, so what it starts doesn't."""
+    return {**os.environ, "AGENTENV_REAL_TIME": "1"}
 
 
 def gnu_tar() -> bool:

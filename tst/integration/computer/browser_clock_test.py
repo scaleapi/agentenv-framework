@@ -151,8 +151,8 @@ async def test_alone_the_browser_computer_keeps_real_time_and_its_live_sites_pas
         try:
             read = time.time()
             page = await _page_now(deployed)
-            loaded = await _load_all(deployed, {"https://example.com/": "Example Domain"})
-            rows = [row for row in _egress_rows(deployed.sandbox_id) if row.get("host") == "example.com"]
+            loaded = await _load_all(deployed, {"https://www.python.org/": "Python"})
+            rows = [row for row in _egress_rows(deployed.sandbox_id) if row.get("host") == "www.python.org"]
         finally:
             report = await teardown_run(context)
 

@@ -17,7 +17,7 @@ async def _env_deploy_ttl(step_ttl, overrides) -> int:
     env = MagicMock()
     env.deploy = AsyncMock(return_value=DeployedGatewayEnv(
         env_id="art-1", env_version=2, gateway_url="http://gw", mcp_url="http://mcp",
-        db_web_url=None, sandbox_id="s1", metadata=None,
+        sandbox_id="s1", metadata=None,
     ))
     step = DeployEnvTaskStep(id="d", version=None, env_id="art-1", env_version=2, ttl_seconds=step_ttl)
     ctx = TaskStepContext(metadata={"user_overrides": overrides})

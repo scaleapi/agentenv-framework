@@ -190,19 +190,13 @@ async def invoke_transfer(
     try:
         if staged is not None:
             await staged.push()
-        async with httpx.AsyncClient() as client:
-            send = client.post if verb == "POST" else client.put
-            resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
         try:
-            raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
-        except httpx.HTTPStatusError as exc:
-            hint = _STAGING_UNREACHABLE if staged is not None else (
-                unreachable_hint(call.payload) if call.mode == "objects" else None
-            )
-            if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
-                raise
-            raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
-        body = resp.json()
+            body = await _send(url, call, verb=verb, operation=operation, timeout=timeout, headers=headers,
+                               staged=staged is not None)
+        except Exception as exc:
+            if staged is not None and not isinstance(exc, _UNSENT):
+                await _collect_staged(staged, operation)
+            raise
         if staged is not None:
             await staged.pull()
     finally:
@@ -211,6 +205,36 @@ async def invoke_transfer(
     if call.mode == "objects" and response_model is not None:
         return parse_response(response_model, body, operation=operation)
     return body
+
+
+async def _send(url: str, call: TransferCall, *, verb: Literal["POST", "PUT"], operation: str, timeout: float,
+                headers: Mapping[str, str] | None, staged: bool) -> Any:
+    """The agent's answer to ``call``, raising for an error status with a hint when the agent couldn't reach the
+    objects the call named: its own staging when ``staged``, else the grants' store."""
+    async with httpx.AsyncClient() as client:
+        send = client.post if verb == "POST" else client.put
+        resp = await send(url, json=call.payload, headers=headers, timeout=timeout)
+    try:
+        raise_for_extension_status(resp, operation=operation, include_body=call.mode == "legacy")
+    except httpx.HTTPStatusError as exc:
+        hint = _STAGING_UNREACHABLE if staged else unreachable_hint(call.payload) if call.mode == "objects" else None
+        if hint is None or not str(exc).endswith(f": {_TRANSFER_UNAVAILABLE}"):
+            raise
+        raise httpx.HTTPStatusError(f"{exc}. {hint}", request=exc.request, response=exc.response) from exc
+    return resp.json()
+
+
+#: Failures of a call that never reached the agent, which therefore staged nothing to collect.
+_UNSENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
+async def _collect_staged(staged: StagedObjectStore, operation: str) -> None:
+    """Move what the agent wrote before its call failed into the store, as an upload through a grant reaches it
+    whether or not the answer does; best-effort, so the call's own error is the one raised."""
+    try:
+        await staged.pull()
+    except Exception as exc:
+        logger.warning(f"{operation}: collecting what the agent staged before the call failed: {exc}")
 
 
 def parse_response(model: type[_Response], body: Any, *, operation: str) -> _Response:
@@ -355,6 +379,24 @@ async def readable_parts(
             await staging.release()
 
 
+@dataclass(frozen=True)
+class AgentTurn:
+    """An A2A peer's turn as it ended: its task id, its final task as the peer reported it, and the reply read from
+    the task's status message, whose ``usage`` is what the turn's model calls used."""
+
+    task_id: str
+    task: dict
+    reply: protocol.TerminalResponse
+
+    @property
+    def state(self) -> Any:
+        return (self.task.get("status") or {}).get("state")
+
+    @property
+    def message(self) -> dict:
+        return (self.task.get("status") or {}).get("message") or {}
+
+
 async def send_and_wait(
     a2a_url: str,
     parts: list[dict],
@@ -367,9 +409,9 @@ async def send_and_wait(
     before_send: Callable[[], None] | None = None,
     on_sent: Callable[[str], None] | None = None,
     shareable: Collection[str] | None = None,
-) -> tuple[str, dict]:
-    """Send ``parts`` to the A2A peer at ``a2a_url`` and wait for its task to end: the task's id and its
-    final state. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
+) -> AgentTurn:
+    """Send ``parts`` to the A2A peer at ``a2a_url`` and wait for its task to end, returning the turn with its
+    reply and the reply's usage. A peer that is an ``agent`` agent-env deployed is sent each file part a configured store
     owns, of those ``shareable`` names when given, as an HTTPS URL it can read (``readable_parts``); any
     other peer, such as a human's hub, reads the store itself and is sent the parts as they are.
     ``before_send`` runs once the parts are ready, just before the message goes out, and ``on_sent`` with the
@@ -389,10 +431,12 @@ async def send_and_wait(
         task_id, _ = await protocol.send_a2a_message(a2a_url, sent, message_id, context_id, timeout_seconds)
         if on_sent is not None:
             on_sent(task_id)
-        return task_id, await protocol.poll_a2a_task(
+        task = await protocol.poll_a2a_task(
             a2a_url, task_id, timeout_seconds, poll_interval_seconds,
             sandbox_id=agent.sandbox_id if agent is not None else None,
         )
+    message = (task.get("status") or {}).get("message") or {}
+    return AgentTurn(task_id=task_id, task=task, reply=protocol.TerminalResponse.from_message(message))
 
 
 def skill_bundle_request(

@@ -4,6 +4,7 @@ this module imports it only where it's used, since its import takes seconds."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import math
@@ -87,12 +88,14 @@ def litellm_route(model: str, api_base: Optional[str], provider_of: Callable[...
 
 
 async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional[float],
-                   response_format: Optional[dict] = None) -> ModelReply:
-    """One chat completion by ``route``, raising what LiteLLM raises."""
+                   response_format: Optional[dict] = None, settings: Optional[dict[str, Any]] = None) -> ModelReply:
+    """One chat completion by ``route``, raising what LiteLLM raises. ``settings`` are LiteLLM params for this call, such
+    as ``reasoning_effort``, over the config's ``[model.params]``; a caller sends only those ``takes`` says the route
+    takes."""
     import litellm
 
-    request: dict[str, Any] = dict(model=route.litellm_model, messages=messages, timeout=timeout,
-                                   **route.call.client_kwargs())
+    request: dict[str, Any] = {ModelParam.MODEL: route.litellm_model, ModelParam.MESSAGES: messages,
+                               ModelParam.TIMEOUT: timeout, **route.call.client_kwargs(), **(settings or {})}
     if response_format is not None:
         request[ModelParam.RESPONSE_FORMAT] = response_format
     response = await litellm.acompletion(**request)
@@ -103,6 +106,39 @@ async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional
     cost = price(tokens, _billed(getattr(response, "_hidden_params", None)), model=route.model,
                  prices=litellm_prices(), reported_by=ReportedBy.PROVIDER)
     return ModelReply(response.choices[0].message.content or "", route.model, route.endpoint_host, usage, cost)
+
+
+def takes(route: ModelRoute, param: str) -> bool:
+    """Whether LiteLLM sends ``param`` (``reasoning_effort``, ``thinking``) on ``route``: one of the params it takes for
+    the route's provider and model, as LiteLLM's own table says. A route it can't place takes none."""
+    import litellm
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            model, provider, _, _ = litellm.get_llm_provider(
+                route.litellm_model, custom_llm_provider=route.call.params.get("custom_llm_provider"))
+        supported = litellm.get_supported_openai_params(model=model, custom_llm_provider=provider)
+    except Exception:
+        return False
+    return param in (supported or ())
+
+
+def refused_setting(exc: BaseException) -> bool:
+    """Whether ``exc`` is LiteLLM refusing a param's value for the model before sending the call, as GPT-5 refuses
+    ``reasoning_effort="xhigh"``: the call wasn't made, so nothing was spent."""
+    import litellm
+
+    return isinstance(exc, litellm.UnsupportedParamsError)
+
+
+def cut_off(exc: BaseException) -> bool:
+    """Whether ``exc`` stopped a call that may have reached the model, so it may be billed with no answer: a cancel, or
+    LiteLLM's ``Timeout``, raised itself or as the cause of a failure after retries. A timeout LiteLLM's client retried
+    on its own and then answered (the OpenAI SDK's ``max_retries``) never reaches the caller, so it isn't seen."""
+    import litellm
+
+    return isinstance(exc, asyncio.CancelledError) or any(
+        isinstance(e, litellm.Timeout) for e in (exc, exc.__cause__))
 
 
 def setup_errors() -> tuple[type[BaseException], ...]:

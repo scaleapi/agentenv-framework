@@ -370,6 +370,8 @@ async def test_a_rating_that_fails_is_recorded_and_the_step_goes_on(monkeypatch,
     assert rating["score"] is None
     if error:
         assert rating["user_sim_error"].startswith("timeout")
+        [usage] = ctx.metadata["step_usage"]["rate"]
+        assert (usage["turns"], usage["input_tokens"], usage["partial"]) == (1, None, True)
     else:
         assert rating["retried"] is True and len(rating["schema_errors"]) == 2
 
@@ -385,6 +387,30 @@ async def test_a_rating_past_its_timeout_is_recorded(monkeypatch, tmp_path):
     await _rater(timeout_seconds=0.05).execute(ctx)
     rating = ctx.metadata[SATISFACTION_KEY]["week"]
     assert rating["score"] is None and rating["user_sim_error"].lower().startswith("timeout")
+    [usage] = ctx.metadata["step_usage"]["rate"]
+    assert (usage["turns"], usage["partial"]) == (1, True)
+
+
+@pytest.mark.asyncio
+async def test_the_rating_s_user_sim_turns_are_the_step_s_usage(monkeypatch, tmp_path):
+    rig, ctx = await _always_on_run(monkeypatch, tmp_path, _reply("blue!"), _reply("amazing, thanks"),
+                                    "a solid 4", json.dumps(rated(4)))
+    week = copy.deepcopy(ctx.metadata.get("step_usage", {}).get("week"))
+    rig.user_usage = {"input_tokens": 400, "output_tokens": 20, "cache_read_tokens": 300, "input_includes_cache": True}
+    sim = next(a for a in ctx.deployed_agents if a.agent_name == "user-sim")
+    sim.model_endpoint_host = "sim-proxy.example"
+
+    await _rater().execute(ctx)
+
+    [usage] = ctx.metadata["step_usage"]["rate"]
+    assert (usage["role"], usage["model"], usage["endpoint_host"], usage["turns"]) == (
+        "user_simulator", "sim-model", "sim-proxy.example", 2)
+    assert (usage["input_tokens"], usage["output_tokens"], usage["cache_read_tokens"], usage["partial"]) == (
+        800, 40, 600, False)
+    assert ctx.metadata["models"]["user simulator"]["rate"] == "sim-model"
+    assert ctx.metadata["model_endpoints"]["user_simulator"]["rate"] == {
+        "model": "sim-model", "endpoint_host": "sim-proxy.example"}
+    assert ctx.metadata.get("step_usage", {}).get("week") == week  # the run's own usage is as it was
 
 
 @pytest.mark.asyncio
@@ -510,13 +536,28 @@ async def test_after_a_prompt_agent_chat_a_malformed_answer_gets_one_retry(monke
 
 @pytest.mark.asyncio
 async def test_a_prompt_agent_chat_the_user_sim_broke_is_not_rated(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", said("reply", "x"))]})
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", [{"kind": "data", "data": {"error_message": "the model was refused"}}])]})
     ctx = await _context(monkeypatch)
     await _step().execute(ctx)
     await _hannah_rater().execute(ctx)
     assert len(_user_asks(peers)) == 1
     rating = ctx.metadata[SATISFACTION_KEY]["talk"]
-    assert rating["skipped"] == "the user sim failed: state failed" and rating["score"] is None
+    assert rating["skipped"] == "the user sim failed: state failed: the model was refused" and rating["score"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_agent_chat_the_user_sim_gate_cut_off_is_not_rated_and_the_agent_isnt_blamed(monkeypatch):
+    from agent_env.task_step.context import PromptResponse
+
+    ctx = await _context(monkeypatch)
+    ctx.metadata.setdefault("a2a_conversations", {})["talk"] = None
+    ctx.prompt_responses.append(PromptResponse(
+        prompt_id="p", response="draft", error_type="user_sim_error",
+        error_message="The user simulator failed: user_sim_gate: user-sim message at turn 1 ...", step_id="talk"))
+    await _hannah_rater().execute(ctx)
+    rating = ctx.metadata[SATISFACTION_KEY]["talk"]
+    assert rating["skipped"] == "the user sim failed: user_sim_gate: user-sim message at turn 1 ..."
+    assert rating["score"] is None
 
 
 @pytest.mark.asyncio
@@ -527,3 +568,14 @@ async def test_a_prompt_agent_chat_whose_agent_turn_failed_is_not_rated(monkeypa
         await _step().execute(ctx)
     await _hannah_rater().execute(ctx)
     assert ctx.metadata[SATISFACTION_KEY]["talk"]["skipped"] == "the agent's turn failed"
+
+
+
+@pytest.mark.parametrize("record, skipped", [
+    ({"end_reason": "user_sim_error", "error_type": "user_sim_error"}, "the run ended on user_sim_error"),
+    ({"end_reason": "user_sim_invalid"}, None),   # on_fail "end": no error, so the run is rated as one that ended
+], ids=["on_fail fail", "on_fail end"])
+def test_an_always_on_run_the_gate_failed_as_an_error_is_not_rated(record, skipped):
+    from agent_env.task_step.task_steps.agent import rate_user_satisfaction as rus
+
+    assert rus._always_on_session({"user_sim": {"name": "linda"}, **record}).skipped == skipped

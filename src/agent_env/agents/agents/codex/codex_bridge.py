@@ -114,6 +114,16 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
 
 
 @dataclass
+class ThreadCalls:
+    """One thread's share of a turn, the turn's own or a subagent's: the model its rollout last ran on (its
+    ``turn_context``), its counts and its model requests."""
+
+    model: str | None
+    counts: dict[str, int]
+    requests: int | None
+
+
+@dataclass
 class CodexResult:
     response: str
     tool_call_count: int
@@ -128,6 +138,8 @@ class CodexResult:
     usage: dict = field(default_factory=dict)
     token_usage: dict | None = None
     model_requests: int | None = None
+    # The threads `token_usage` sums, the turn's own first.
+    threads: list[ThreadCalls] = field(default_factory=list)
     # A model request the bridge's own stop cut short: the CLI counts a response only once it completes, so the one in
     # flight when the bridge stopped it at its tool-call limit, timeout or stall is in neither count. A stop during a
     # tool call cut none: the response that asked for the tool was counted.
@@ -255,44 +267,18 @@ def _kill_process_group(proc) -> None:
         proc.kill()
 
 
-def read_rollout_usage(thread_id: str | None) -> dict[str, int] | None:
-    """Read Codex's latest cumulative token total from a native rollout."""
-    if not thread_id:
-        return None
-    path = find_rollout_path(thread_id)
-    if path is None:
-        return None
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return None
-    for line in reversed(lines):
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("type") != "event_msg":
-            continue
-        payload = record.get("payload") or {}
-        if payload.get("type") != "token_count":
-            continue
-        info = payload.get("info") or {}
-        total = info.get("total_token_usage") or {}
-        if not isinstance(total, dict):
-            continue
-        usage = {
-            key: int(total[key])
-            for key in _USAGE_KEYS
-            if isinstance(total.get(key), (int, float))
-            and not isinstance(total.get(key), bool)
-        }
-        if usage:
-            return usage
-    return None
+@dataclass(frozen=True)
+class Rollout:
+    """What a thread's native rollout says of its model calls: its latest running total (``usage``), how many model
+    requests raised that total, and the model its last turn ran on (its ``turn_context``)."""
+
+    usage: dict[str, int] | None = None
+    requests: int = 0
+    model: str | None = None
 
 
-def read_rollout_requests(thread_id: str | None) -> int | None:
-    """How many model requests a native rollout records: its token counts that raised the thread's total."""
+def read_rollout(thread_id: str | None) -> Rollout | None:
+    """The thread's native rollout, read in one pass; None when there's none to read."""
     path = find_rollout_path(thread_id) if thread_id else None
     if path is None:
         return None
@@ -300,21 +286,28 @@ def read_rollout_requests(thread_id: str | None) -> int | None:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return None
-    requests, last = 0, 0
+    usage, requests, last, model = None, 0, 0, None
     for line in lines:
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(record, dict) or record.get("type") != "event_msg":
+        if not isinstance(record, dict):
             continue
         payload = record.get("payload") or {}
-        if payload.get("type") != "token_count":
+        if record.get("type") == "turn_context" and isinstance(payload.get("model"), str) and payload["model"]:
+            model = payload["model"]
+        if record.get("type") != "event_msg" or payload.get("type") != "token_count":
             continue
-        total = ((payload.get("info") or {}).get("total_token_usage") or {}).get("total_tokens")
-        if isinstance(total, int) and total > last:
-            requests, last = requests + 1, total
-    return requests
+        total = (payload.get("info") or {}).get("total_token_usage")
+        if not isinstance(total, dict):
+            continue
+        counts = {key: int(total[key]) for key in _USAGE_KEYS
+                  if isinstance(total.get(key), (int, float)) and not isinstance(total.get(key), bool)}
+        usage = counts or usage
+        if isinstance(total.get("total_tokens"), int) and total["total_tokens"] > last:
+            requests, last = requests + 1, total["total_tokens"]
+    return Rollout(usage, requests, model)
 
 
 def subagent_threads(thread_id: str | None) -> list[str]:
@@ -344,27 +337,27 @@ def subagent_threads(thread_id: str | None) -> list[str]:
     return found
 
 
-def _subagent_baselines(thread_id: str | None) -> dict[str, tuple[dict[str, int] | None, int]]:
-    return {child: (read_rollout_usage(child), read_rollout_requests(child) or 0)
-            for child in subagent_threads(thread_id)}
+def _subagent_baselines(thread_id: str | None) -> dict[str, Rollout]:
+    return {child: read_rollout(child) or Rollout() for child in subagent_threads(thread_id)}
 
 
-def _add_subagent_calls(result: CodexResult, baselines: Mapping[str, tuple[dict[str, int] | None, int]]) -> None:
+def _add_subagent_calls(result: CodexResult, baselines: Mapping[str, Rollout]) -> None:
     """Adds what the turn's subagents used since the turn began to its own counts."""
     for child in subagent_threads(result.session_id):
-        usage, requests = baselines.get(child, (None, 0))
+        before, after = baselines.get(child, Rollout()), read_rollout(child) or Rollout()
+        made = after.requests - before.requests
         if result.model_requests is not None:
-            result.model_requests += (read_rollout_requests(child) or 0) - requests
-        current = read_rollout_usage(child)
-        if result.token_usage is None or current is None:
+            result.model_requests += made
+        if result.token_usage is None or after.usage is None:
             continue
-        delta = _usage_delta(current, usage)
+        delta = _usage_delta(after.usage, before.usage)
         if delta is None:
             result.token_usage = None
             result.warnings.append(f"codex subagent {child}'s token counters regressed; incremental usage is unavailable")
             continue
         result.token_usage = {key: result.token_usage.get(key, 0) + delta.get(key, 0)
                               for key in {**result.token_usage, **delta}}
+        result.threads.append(ThreadCalls(after.model, delta, made))
 
 
 def _usage_delta(
@@ -969,8 +962,7 @@ async def run_codex(
     counts include its subagents' calls, read from their own rollouts.
     """
     deadline = time.monotonic() + timeout_s
-    usage_baseline = read_rollout_usage(thread_id)
-    requests_baseline = read_rollout_requests(thread_id) or 0
+    before = read_rollout(thread_id) or Rollout()
     subagent_baselines = _subagent_baselines(thread_id)
     retries_left = _configured_api_error_retries()
     attempt_prompt = prompt
@@ -1033,15 +1025,14 @@ async def run_codex(
             result.tool_call_count = tool_call_count
             result.attempts = attempts
             result.error = error
-            requests = read_rollout_requests(result.session_id)
-            if requests is not None:
-                result.model_requests = requests - requests_baseline
-            cumulative_usage = result.usage or (
-                read_rollout_usage(result.session_id) or {}
-            )
+            after = read_rollout(result.session_id)
+            if after is not None:
+                result.model_requests = after.requests - before.requests
+            after = after or Rollout()
+            cumulative_usage = result.usage or after.usage or {}
             if cumulative_usage:
                 result.token_usage = _usage_delta(
-                    cumulative_usage, usage_baseline
+                    cumulative_usage, before.usage
                 )
                 if result.token_usage is None:
                     warning = (
@@ -1049,6 +1040,8 @@ async def run_codex(
                         "incremental usage is unavailable"
                     )
                     result.warnings.append(warning)
+                else:
+                    result.threads = [ThreadCalls(after.model, dict(result.token_usage), result.model_requests)]
             _add_subagent_calls(result, subagent_baselines)
             return result
 

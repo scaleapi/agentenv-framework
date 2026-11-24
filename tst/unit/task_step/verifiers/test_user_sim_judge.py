@@ -276,7 +276,7 @@ async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns(monkey
                                        "not_failing": usj.NOT_FAILING_OFF}
     assert entry["format"] == "user_sim_checks" and entry["score"] == 0.0
     assert len(fake.calls) == 7 == entry["calls"] and {c["model"] for c in fake.calls} == {JUDGE}
-    assert entry["usage"]["prompt_tokens"] == 700 and entry["cost"] == pytest.approx(0.007)
+    assert entry["usage"]["input_tokens"] == 700 and entry["cost"] == pytest.approx(0.007)
 
 
 class _PricedFirst(FakeModel):
@@ -770,7 +770,7 @@ async def test_a_claude_judge_gets_the_system_message_and_the_run_marked_for_the
         assert cached["text"].startswith('You check a user simulator ("the user sim")')
         assert rest["text"].startswith("\n\n# THE CRITERIA\n") and "cache_control" not in rest
     assert calls[0]["messages"][1]["content"][0] == calls[1]["messages"][1]["content"][0]
-    assert entry["usage"]["prompt_tokens"] > 0 and entry["cost"] > 0
+    assert entry["usage"]["input_tokens"] > 0 and entry["cost"] > 0
 
 
 _GPT = dict(llm_provider="openai", model="openai/gpt-4o")
@@ -990,7 +990,7 @@ def test_by_default_it_fails_the_task_on_a_slip_and_judges_with_the_verifiers_de
     monkeypatch.setattr("agent_env.task_step.task_steps.verifiers.rubrics_verifier.get_config", lambda: fake)
     judge = usj.UserSimJudge("s", None, run_step_id="week")
     assert judge.default_model is None
-    assert judge._judge_model(TaskStepContext()) == "claude-sonnet-4-6"
+    assert judge._judge_model(TaskStepContext()) == "claude-sonnet-5-5"
     fake.roles = {"judge": "anthropic/claude-opus-4-8"}
     assert judge._judge_model(TaskStepContext()) == "anthropic/claude-opus-4-8"
 

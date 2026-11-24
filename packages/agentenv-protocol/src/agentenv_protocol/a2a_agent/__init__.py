@@ -131,6 +131,7 @@ from .tasks.v1 import (
     TaskStreamItem,
     TextPart,
     TrajectoryLog,
+    ModelUsage,
     Usage,
     WriteOnly,
 )
@@ -272,6 +273,7 @@ __all__ = [
     "TriggerDecideRequest",
     "TriggerRegisterRequest",
     "Uploaded",
+    "ModelUsage",
     "Usage",
     "WriteNamespaceGrant",
     "WriteObject",

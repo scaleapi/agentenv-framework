@@ -4,7 +4,8 @@ An image that is only its build context is built where it runs. Here that is thi
 under the image's name, labeled with the sources it was built from, and built again only when those change, so a later
 deploy, a parallel one or another run finds it. A VM on this machine starts with no build cache, so it loads a saved
 copy of that build, kept once per sources. Neither is a store version: the image is its build context. An image a
-registry publishes is pulled here by its digest, and built from its build context only when it can't be.
+registry publishes is pulled here by its digest, unless Docker holds it by that digest already, and built from its build
+context only when it can't be.
 """
 
 from __future__ import annotations
@@ -49,11 +50,19 @@ def holds(image_name: str, image_sources: str | None) -> bool:
     return image_sources is not None and _built_from(image_name) == image_sources
 
 
-def holds_digest(image: DockerImageArtifact) -> bool:
-    """Whether this machine's Docker holds ``image``, one with an ``image_digest``, under its name as the image that
-    digest names: pulled by it, or built here from the image's sources. A tag can name another image than the one a
-    version records, so holding its name isn't enough."""
-    return image.image_digest in _repo_digests(image.image_name) or held(image)
+def named_if_held(image: DockerImageArtifact) -> bool:
+    """Whether this machine's Docker holds ``image``, one with an ``image_digest``, as that digest names it, under its
+    name (``_holds_under_name``) or by the digest alone, as ``docker pull <repo>@<digest>`` leaves an image, which it
+    then names with ``image_name`` over whatever that name held, so a container started by the name runs it."""
+    if _holds_under_name(image):
+        return True
+    if image.image_digest not in _repo_digests(image.pinned_name):
+        return False
+    if present(image.image_name):
+        logger.warning("%s named another image than the one it's pinned to, %s; it now names the pinned one",
+                       image.image_name, image.image_digest)
+    _tag(image)
+    return True
 
 
 def present(image_name: str) -> bool:
@@ -146,20 +155,32 @@ def pull_lock(image_name: str) -> str:
 
 def pull(image: DockerImageArtifact) -> None:
     """Have this machine's Docker hold ``image``, one with an ``image_digest``, under its name, unless it already holds
-    it (``holds_digest``): pulled by its digest, or, when that fails, built from its build context. Raises RuntimeError
+    it (``named_if_held``): pulled by its digest, or, when that fails, built from its build context. Raises RuntimeError
     when it can't be pulled or built."""
     with holding_locks([pull_lock(image.pinned_name)]):
-        if holds_digest(image):
+        if named_if_held(image):
             return
         pulled = subprocess.run(["docker", "pull", image.pinned_name], capture_output=True, text=True, errors="replace")
         if pulled.returncode == 0:
-            subprocess.run(["docker", "tag", image.pinned_name, image.image_name], capture_output=True, check=True)
+            _tag(image)
             return
     why = (pulled.stderr.strip().splitlines() or [f"docker pull exited {pulled.returncode}"])[-1]
     if not image.buildable:
         raise RuntimeError(f"Couldn't pull {image.pinned_name}: {why}")
     logger.warning("Couldn't pull %s, so it's built from its build context: %s", image.pinned_name, why)
     build(image)
+
+
+def _holds_under_name(image: DockerImageArtifact) -> bool:
+    """Whether this machine's Docker holds ``image``, one with an ``image_digest``, under its name as the image that
+    digest names: pulled by it, or built here from the image's sources. A tag can name another image than the one a
+    version records, so holding its name isn't enough, and an image held by the digest alone isn't under its name."""
+    return image.image_digest in _repo_digests(image.image_name) or held(image)
+
+
+def _tag(image: DockerImageArtifact) -> None:
+    """Name the image Docker holds by ``image``'s digest with ``image``'s name, where a deploy finds it."""
+    subprocess.run(["docker", "tag", image.pinned_name, image.image_name], capture_output=True, check=True)
 
 
 async def pull_here(image: DockerImageArtifact) -> None:
