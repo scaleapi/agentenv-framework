@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 from agentenv_protocol.a2a_agent import Usage
 
+from agent_env.config.describe import is_secret_key, mask_value
 from agent_env.config.errors import ConfigError
 from agent_env.config.model import ModelCallConfig, ModelParam, api_root, endpoint_host, no_key_for
 from agent_env.config.model_pricing import Cost, ReportedBy, Tokens, litellm_prices, price
@@ -106,6 +107,23 @@ async def complete(route: ModelRoute, messages: list[dict], *, timeout: Optional
     cost = price(tokens, _billed(getattr(response, "_hidden_params", None)), model=route.model,
                  prices=litellm_prices(), reported_by=ReportedBy.PROVIDER)
     return ModelReply(response.choices[0].message.content or "", route.model, route.endpoint_host, usage, cost)
+
+
+def sent_params(route: ModelRoute, settings: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """The params a call by ``route`` with ``settings`` sends (``complete``), the config's ``[model.params]`` with
+    ``settings`` over them, as a record of the call keeps them: a value under a secret-shaped key (``config show``'s
+    rule, which takes in ``extra_headers``) is left out, through tables and lists, unless it's a number, as
+    ``max_tokens`` is, and a URL's userinfo is masked."""
+    return _without_secrets({**route.call.params, **(settings or {})})
+
+
+def _without_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_secrets(item) for key, item in value.items()
+                if not is_secret_key(key) or isinstance(item, (int, float))}
+    if isinstance(value, list):
+        return [_without_secrets(item) for item in value]
+    return mask_value("", value)
 
 
 def takes(route: ModelRoute, param: str) -> bool:
