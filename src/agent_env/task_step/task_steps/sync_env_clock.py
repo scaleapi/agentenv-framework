@@ -124,7 +124,7 @@ class SyncEnvClockTaskStep(TaskStep):
         try:
             check_arm(self.armed_virtual_time, self.virtual_seconds_per_real_second, what=shown)
         except ClockError as e:
-            return [f"step {self.id!r}: {e}"]
+            return [str(e)]
         return []
 
     def to_dict(self) -> dict:

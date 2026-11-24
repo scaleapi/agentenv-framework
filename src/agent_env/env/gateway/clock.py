@@ -20,8 +20,8 @@ class ClockError(ValueError):
 
 MAX_RATE = 86400.0  # 1 real second = 1 virtual day (the max virtual-time speed)
 
-# Fast-fail a write that would bring the clock to LATEST within a real hour at `rate` (frozen clocks exempt): an hour,
-# so a day per second still arms at today's dates. Not the guarantee: a clock that runs to LATEST stands there.
+# Fast-fail arming a clock that would reach LATEST within a real hour at `rate` (frozen clocks exempt): an hour, so a
+# day per second still arms at today's dates. Not the guarantee: a clock that runs to LATEST stands there.
 _OVERFLOW_HORIZON_S = 3600.0
 _MAX_T0 = datetime.max.replace(tzinfo=timezone.utc)
 # The times the clock holds: those 64 bits of nanoseconds since 1970 hold, as Python and the computers' clock page keep
@@ -236,15 +236,14 @@ class Clock:
     def set_rate(self, rate) -> dict:
         """Change an armed clock's rate from its time at the call, keeping t0 and generation as an advance does, so time
         triggers keep their marks and a rate change can't step the clock back by a time read a moment earlier; 0 freezes
-        the clock. A faster rate that would bring it to the end of its range within a real hour is refused."""
+        the clock. No rate is refused for nearing the end of the range, which the clock stands at once it gets there, so
+        a harness that froze it near the end can always start it again."""
         r = _parse_rate(rate)
         with self._lock:
             if not self._armed or self._t0 is None:
                 raise ClockError("clock is not armed")
             now = self._now()
             ran = (now - self._anchor) * self._rate
-            if r > self._rate and _ends_within_an_hour(self._upto_end(ran + self._ahead), r):
-                raise ClockError(_past_end(f"rate {r:g}"))
             self._lived += ran
             self._ahead += ran
             self._anchor = now
@@ -253,8 +252,9 @@ class Clock:
         return self.state()
 
     def advance(self, virtual_time: str) -> dict:
-        """Jump forward to virtual_time on the current arm, keeping t0, rate and generation, so marks stay put; one that
-        would bring the clock to the end of its range within a real hour is refused, but not one to the time it shows."""
+        """Jump forward to virtual_time on the current arm, keeping t0, rate and generation, so marks stay put; a time
+        past the end of the range is refused, one in its last real hour isn't, and the clock stands at the end once
+        there."""
         target = _parse_rfc3339(virtual_time)
         with self._lock:
             if not self._armed or self._t0 is None:
@@ -265,8 +265,6 @@ class Clock:
             jump = (target - current).total_seconds()
             if jump < 0:
                 raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
-            if jump > 0 and _ends_within_an_hour(target, self._rate):
-                raise ClockError(_past_end(f"virtual_time {virtual_time!r} at rate {self._rate:g}"))
             self._ahead += jump
             self._lived += jump
             self._count += 1

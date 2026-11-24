@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
+from agent_env.env.gateway.clock import outside_range
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, WELL_KNOWN_PATH
+from agent_env.task import Task
+from agent_env.task.lint import lint
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps import sync_env_clock as mod
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, resolve_virtual_time
@@ -361,7 +364,13 @@ def test_a_wall_time_whose_instant_no_date_holds_is_refused_naming_the_clocks_ra
 ])
 def test_a_time_or_rate_the_gateway_would_refuse_is_a_problem_before_anything_deploys(kwargs, problem):
     problems = SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", depends_on=[], **kwargs).config_problems()
-    assert len(problems) == 1 and problems[0].startswith(f"step 'sync': {problem}"), problems
+    assert len(problems) == 1 and problems[0].startswith(problem), problems
+
+
+def test_lint_names_the_step_of_a_time_the_gateway_would_refuse_once():
+    step = SyncEnvClockTaskStep(id="clock", version=1, env_id="e1", virtual_time="3026-01-01T00:00:00Z", depends_on=[])
+    found = [finding.text for finding in lint(Task(id="t", version=1, steps=[step])) if finding.rule == "step-config"]
+    assert found == ["step 'clock': " + outside_range("virtual_time '3026-01-01T00:00:00Z'")]
 
 
 def test_a_time_the_gateway_arms_at_is_no_problem():

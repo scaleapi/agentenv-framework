@@ -1,7 +1,8 @@
 """The env clock's range, the times 64 bits of nanoseconds since 1970 hold, as Python and the computers that follow the
 clock keep time: the gateway arms and runs anywhere in it, before 1970 too and a day per second at today's dates, and
-refuses a time outside it, however it's spelled, or a write that would bring the clock to the end within a real hour, up
-front, naming the range. A clock that runs to the end anyway, on a gateway that outlives it, stands there."""
+refuses a time outside it, however it's spelled, or arming the clock where it would run to the end within a real hour,
+up front, naming the range. A clock that runs to the end anyway, on a gateway that outlives it or sped up in its last
+hour, stands there."""
 from __future__ import annotations
 
 import re
@@ -54,43 +55,52 @@ def test_a_string_that_isnt_a_time_is_refused_as_one(virtual_time):
         Clock(now_fn=FakeNow()).set_time(virtual_time, rate=0)
 
 
-def test_arming_advancing_or_speeding_a_clock_that_would_pass_the_end_within_a_real_hour_names_it():
-    clock = Clock(now_fn=FakeNow())
+def test_arming_a_clock_that_would_pass_the_end_within_a_real_hour_names_it():
     with _refused(f"virtual_time '2262-04-11T23:00:00Z' at rate 1 {END}"):
-        clock.set_time("2262-04-11T23:00:00Z")
-
-    clock.set_time("2262-04-01T00:00:00Z")
-    with _refused(f"virtual_time '2262-04-11T23:00:00Z' at rate 1 {END}"):
-        clock.advance("2262-04-11T23:00:00Z")
-    with _refused(f"rate 3600 {END}"):
-        clock.set_rate(3600)
-    assert clock.read()["virtual_time"] == "2262-04-01T00:00:00Z"
+        Clock(now_fn=FakeNow()).set_time("2262-04-11T23:00:00Z")
 
 
 def test_however_slow_a_clock_runs_from_the_end_it_would_pass_it():
     with _refused(f"virtual_time '2262-04-11T23:47:16Z' at rate 1e-10 {END}"):
         Clock(now_fn=FakeNow()).set_time("2262-04-11T23:47:16Z", rate=1e-10)
-    clock = Clock(now_fn=FakeNow())
-    clock.set_time("2262-04-11T23:47:16Z", rate=0)
-    with _refused(f"rate 1e-10 {END}"):
-        clock.set_rate(1e-10)
 
 
-def test_in_its_last_real_hour_a_clock_takes_every_write_that_doesnt_bring_the_end_closer():
-    """An advance to the time it shows (as a settle does to set a due event going) and a rate no faster go through; a
-    jump or a faster rate doesn't."""
+def test_a_clock_frozen_in_its_last_real_hour_starts_again_and_runs_to_the_end():
+    """As always_on runs one: frozen between turns, advanced while frozen to a due event, then run at the task's rate
+    for the next turn."""
     now = FakeNow()
     clock = Clock(now_fn=now)
-    clock.set_time("2262-04-11T22:00:00Z")
-    now.tick(50 * 60)
+    clock.set_time("2262-04-11T22:40:00Z")
+    now.tick(60)
+    clock.set_rate(0)
+    clock.advance("2262-04-11T23:00:00Z")
 
-    assert clock.advance("2262-04-11T22:50:00Z")["virtual_time"] == "2262-04-11T22:50:00Z"
     assert clock.set_rate(1)["virtual_seconds_per_real_second"] == 1
-    with _refused(f"virtual_time '2262-04-11T22:50:01Z' at rate 1 {END}"):
-        clock.advance("2262-04-11T22:50:01Z")
-    with _refused(f"rate 2 {END}"):
-        clock.set_rate(2)
-    assert clock.set_rate(0.5)["virtual_seconds_per_real_second"] == 0.5
+    now.tick(40 * 60)
+    assert clock.read() == {"virtual_time": "2262-04-11T23:40:00Z"}
+    now.tick(10 * 60)
+    state = clock.state()
+    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
+
+
+def test_in_its_last_real_hour_a_running_clock_takes_any_advance_or_rate_and_stands_at_the_end():
+    now = FakeNow()
+    clock = Clock(now_fn=now)
+    clock.set_time("2262-04-11T22:47:16Z")
+
+    assert clock.advance("2262-04-11T23:30:00Z")["virtual_time"] == "2262-04-11T23:30:00Z"
+    assert clock.set_rate(86400)["virtual_seconds_per_real_second"] == 86400
+    now.tick(1)
+    assert clock.now() == LATEST
+    with _refused(f"virtual_time '2262-04-11T23:47:17Z' is outside {RANGE}"):
+        clock.advance("2262-04-11T23:47:17Z")
+
+
+def test_a_clock_armed_frozen_at_the_end_takes_a_rate_as_one_that_ran_there_does():
+    clock = Clock(now_fn=FakeNow())
+    clock.set_time("2262-04-11T23:47:16Z", rate=0)
+    state = clock.set_rate(1e-10)
+    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
 
 
 def test_a_clock_that_outlives_its_range_stands_at_the_end_and_can_still_be_frozen_or_set_back():
