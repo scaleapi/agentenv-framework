@@ -578,6 +578,63 @@ async def test_a_call_on_a_consistent_gateway_waits_its_turn_and_its_write_is_at
                                              "tool": DELIVER, "role": "alice"}]]
 
 
+def _writing(chat: _Chat, *, note: bool = False, failing_deliveries: int = 0) -> None:
+    """Make chat_note write a row when ``note``, and the first ``failing_deliveries`` deliveries write one and then lose
+    their transport."""
+    real = chat.call_tool
+    failing = itertools.repeat(None, failing_deliveries)
+
+    async def call_tool(name, arguments, *args, **kwargs):
+        if name == NOTE and note:
+            chat.rows += 1
+        if name == DELIVER and next(failing, True) is None:
+            chat.calls.append({"tool": name, "args": dict(arguments or {})})
+            chat.rows += 1
+            raise ConnectionError("connection lost after the write")
+        return await real(name, arguments, *args, **kwargs)
+
+    chat.call_tool = call_tool
+
+
+@pytest.mark.asyncio
+async def test_a_write_another_role_makes_between_attempts_is_not_credited_to_the_deferred_call(tmp_path, monkeypatch):
+    """Each attempt has a window of its own, read under its lock: the lock is free during a retry's backoff, so a window
+    from the first attempt to the last would hold a live call's write made then."""
+    async with _chat(tmp_path, monkeypatch, mode=GatewayMode.CONSISTENT) as (gw, chat):
+        monkeypatch.setattr(gw, "_query_changelog_id", lambda: chat.rows)
+        monkeypatch.setattr(gw._deferred, "RETRY_BACKOFF_S", 0.5)
+        _writing(chat, note=True)
+        chat.deliveries = [ConnectionError("chat restarting")]
+        await _arm(gw)
+        await _schedule(gw, chat, _declared())
+        await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
+        await _until(lambda: chat.made(DELIVER))
+        await _mcp_call(gw, "bob", NOTE)
+        assert len(chat.made(DELIVER)) == 1 and chat.rows == 1
+        await _until(lambda: _events(tmp_path, "deferred_call"))
+        [event] = _events(tmp_path, "deferred_call")
+        assert event["changelog_windows"] == [[0, 0], [1, 2]] and event["attempts"] == 2
+        actors = gw._changes.actors([1, 2])
+        assert [[(a["kind"], a["role"]) for a in row] for row in actors] == [[("tool_call", "bob")],
+                                                                              [("deferred_call", "alice")]]
+
+
+@pytest.mark.asyncio
+async def test_a_write_by_an_attempt_that_then_lost_its_transport_is_credited_to_the_deferred_call(tmp_path, monkeypatch):
+    async with _chat(tmp_path, monkeypatch, mode=GatewayMode.CONSISTENT) as (gw, chat):
+        monkeypatch.setattr(gw, "_query_changelog_id", lambda: chat.rows)
+        monkeypatch.setattr(gw._deferred, "RETRY_BACKOFF_S", 0.01)
+        _writing(chat, failing_deliveries=1)
+        await _arm(gw)
+        await _schedule(gw, chat, _declared())
+        await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
+        await _until(lambda: _events(tmp_path, "deferred_call"))
+        [event] = _events(tmp_path, "deferred_call")
+        assert event["changelog_windows"] == [[0, 1], [1, 2]] and event["ok"] is True
+        credited = {"kind": "deferred_call", "event_id": event["event_id"], "key": "m1", "tool": DELIVER, "role": "alice"}
+        assert gw._changes.actors([1, 2]) == [[credited], [credited]]
+
+
 @pytest.mark.asyncio
 async def test_the_trajectory_records_each_deferred_call_on_both_clocks(tmp_path, monkeypatch):
     async with _chat(tmp_path, monkeypatch) as (gw, chat):

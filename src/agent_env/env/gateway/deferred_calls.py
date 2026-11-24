@@ -105,26 +105,25 @@ class DeferredCalls:
 
     async def _make(self, key: str, record: _Call, server_url: str) -> None:
         """Wait for the call's time and make it, again after a transport failure, each attempt under the tool-call lock
-        as a live call is, its changelog window from before the first attempt to after the last; report it to the
-        trigger engine when it went through, then log it. An error result is final, and so is anything unexpected. A
+        as a live call is, with a changelog window of its own read under that lock, so a write made between attempts is
+        not the call's; report it to the trigger engine when it went through, then log it. An error result is final, and so is anything unexpected. A
         call finished leaves the calls to make for the latest finished, its key kept for good once made."""
         try:
             await self._until(record.at)
-            result, error, before, after = None, None, None, None
+            result, error, windows = None, None, []
             while result is None and record.attempts < self.RETRY_ATTEMPTS:
                 if record.attempts:
                     await asyncio.sleep(self.RETRY_BACKOFF_S * 2 ** (record.attempts - 1))
                 record.attempts += 1
                 async with self._gw._tool_call_guard():
-                    if record.attempts == 1:
-                        before = self._gw._query_changelog_id()
+                    before = self._gw._query_changelog_id()
                     try:
                         result = await self._gw._call_child_tool(server_url, record.tool, record.arguments,
                                                                  caller=Caller(role=record.role), report=record.report)
                     except Exception as e:
                         error = (str(e) or type(e).__name__)[:self.ERROR_TEXT_LIMIT]
                         logger.warning(f"deferred call {key!r} ({record.tool}) attempt {record.attempts} failed: {error}")
-                    after = self._gw._query_changelog_id()
+                    windows.append([before, self._gw._query_changelog_id()])
             ok = result is not None and not result.isError
             text = None if result is None else _result_text(result)
             if text is not None and not ok:
@@ -138,7 +137,8 @@ class DeferredCalls:
                 "event_type": "deferred_call", "key": key, "at": _iso(record.at), "tool": record.tool,
                 "report_as": report_as["tool"], "role": record.role, "ok": ok, "reported": reported,
                 "attempts": record.attempts, **({} if text is None else {"result_sha256": _digest(text)}),
-                "changelog_id_before": before, "changelog_id_after": after, **({} if ok else {"error": error})})
+                "changelog_id_before": windows[0][0], "changelog_id_after": windows[-1][1], "changelog_windows": windows,
+                **({} if ok else {"error": error})})
         except Exception:
             logger.exception(f"deferred call {key!r} ({record.tool}) failed")
             if record.status == DEFERRED_CALL_PENDING:
