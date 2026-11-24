@@ -66,8 +66,8 @@ def scenarios(thinking_model: str) -> dict[str, dict]:
                     "prompts": ["Run `echo first` with your Bash tool, then run `echo second` with it, then reply "
                                 "with both outputs on one line."]},
         "autocompacted": {"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "50000"}, "prompts": [
-            "Create big.txt holding 3000 numbered lines of filler text with one Bash command, print it whole with cat, "
-            "then reply with only its last line."]},
+            "Create big.txt holding 3000 numbered lines of filler text with one Bash command, then read it whole with "
+            "your Read tool, 500 lines at a time, and reply with only its last line."]},
         "compacted": {"prompts": [
             "Create notes.txt holding three lines, alpha, beta and gamma, with your Bash tool, then reply with only ok.",
             "/compact",
