@@ -26,7 +26,8 @@ from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
 from agent_env.task.outcome import FailedStep
 from agent_env.task.teardown import env_record_ids
-from agent_env.task.usage_ledger import entries_of
+from agent_env.task.usage.ledger import entries_of
+from agent_env.task.usage.running import running_usage
 from agent_env.task_step.context import (
     ATTEMPT_EPOCH,
     ENTITY_IDS_KEY,
@@ -712,7 +713,8 @@ class Task:
             ATTEMPT_EPOCH.set(dispatch_epoch)
             try:
                 with protocol_v1.authorized({d.environment_url: d.control_headers for d in context.deployed_envs}):
-                    await step.execute(context)
+                    async with running_usage(instance_id, step.id, context):
+                        await step.execute(context)
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
