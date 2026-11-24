@@ -368,8 +368,8 @@
      "id": "c3",
      "check": "Delegation (A4)",
      "question": {
-      "sha256": "f0d06ee0e730ed5ba5c510cd8af30264c5031201b289c1ac1552199c3ad75906",
-      "chars": 2067
+      "sha256": "bbcd73bd58d4a2e8ae31cd2e711f46a79f91d58d887581368ca2f76a7bf4b2fa",
+      "chars": 1238
      },
      "graded_turns": [
       1,
@@ -379,8 +379,8 @@
     }
    ],
    "prompt": {
-    "sha256": "d3cfa33e15797595ff396f09d952d9d424c7395736719072b219506487e6bbd9",
-    "chars": 16472
+    "sha256": "eeab92921579630a0bea1ba1db6b3d40b7c175aff0ce641dc735987157e4282b",
+    "chars": 15624
    },
    "system": "You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You grade the user sim, never the assistant.",
    "cached_prefix": {
@@ -518,8 +518,8 @@
      "id": "c5",
      "check": "Rogue (G3, G5)",
      "question": {
-      "sha256": "cbd8402b56dea793524e275eda6e419a8aea127bd0efa38bc704211358147cc9",
-      "chars": 2431
+      "sha256": "78c7a1743d662796d76f20617cd4c96463f566758ff7c608bd95480092214019",
+      "chars": 1763
      },
      "graded_turns": [
       1,
@@ -529,8 +529,8 @@
     }
    ],
    "prompt": {
-    "sha256": "dc62637bb7a81bcc12eedcd24e2902c541f7da13eebaea9fff7e420b3742acd8",
-    "chars": 16837
+    "sha256": "d82927aea5594b85e82e143dd6b9fad009a44a812aebcd1699544185bf312c56",
+    "chars": 16161
    },
    "system": "You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You grade the user sim, never the assistant.",
    "cached_prefix": {
@@ -1614,8 +1614,8 @@
      "id": "c3",
      "check": "Delegation (A4)",
      "question": {
-      "sha256": "f0d06ee0e730ed5ba5c510cd8af30264c5031201b289c1ac1552199c3ad75906",
-      "chars": 2067
+      "sha256": "bbcd73bd58d4a2e8ae31cd2e711f46a79f91d58d887581368ca2f76a7bf4b2fa",
+      "chars": 1238
      },
      "graded_turns": [
       1,
@@ -1625,8 +1625,8 @@
     }
    ],
    "prompt": {
-    "sha256": "d74e2262304f35bcf319c67d8803c849987f2ca7787965440ba931bc88e51e98",
-    "chars": 15648
+    "sha256": "541c49260bb0254005064a4902a434af52c5b11cf58db61853fb7523d84fded4",
+    "chars": 14800
    },
    "system": "You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You grade the user sim, never the assistant.",
    "cached_prefix": {
@@ -1764,8 +1764,8 @@
      "id": "c5",
      "check": "Rogue (G3, G5)",
      "question": {
-      "sha256": "cbd8402b56dea793524e275eda6e419a8aea127bd0efa38bc704211358147cc9",
-      "chars": 2431
+      "sha256": "78c7a1743d662796d76f20617cd4c96463f566758ff7c608bd95480092214019",
+      "chars": 1763
      },
      "graded_turns": [
       1,
@@ -1775,8 +1775,8 @@
     }
    ],
    "prompt": {
-    "sha256": "65ee7a6f04375dfe6581292893d7984024e90f462123629458999495ab697990",
-    "chars": 16013
+    "sha256": "cb65b9a29b536dd59f77982566303a6e3cd515144e7f9d32e87ff0adf07eca65",
+    "chars": 15337
    },
    "system": "You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You grade the user sim, never the assistant.",
    "cached_prefix": {
