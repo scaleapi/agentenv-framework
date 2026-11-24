@@ -4,7 +4,7 @@ reports itself into one ``Usage`` whose ``input_tokens`` counts the cache, and t
 in the run's conversation. Local stores, no Docker."""
 
 import pytest
-from agentenv_protocol.a2a_agent.tasks.v1 import Usage
+from agentenv_protocol.a2a_agent.tasks.v1 import ModelUsage, Usage
 
 from agent_env.a2a_agent import conversation_store
 from agent_env.artifact.store import reset_artifact_store
@@ -70,6 +70,8 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
     assert Usage.from_dict(usage) == Usage(
         tool_call_count=0, input_tokens=120 + 123 + 14, output_tokens=18, total_tokens=127 + 132 + 16,
         cache_read_tokens=210, cache_write_tokens=20, input_includes_cache=True, cost_usd=0.02,
+        models=(ModelUsage(model="policy-model", calls=3, input_tokens=257, output_tokens=18, cache_read_tokens=210,
+                           cache_write_tokens=20, input_includes_cache=True),),
         provider_details={"model_calls": 3, "unreported": {"cache_write_tokens": 2, "cost_usd": 2}})
 
 

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent import ModelUsage, Usage
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 logger = logging.getLogger(__name__)
@@ -36,27 +36,29 @@ class Refusal(Exception):
 
 @dataclass
 class Calls:
-    """The model calls a relay forwarded: each answered call's usage, read as ``Usage.from_model_response`` reads one,
-    and how many were answered without usage or refused. A refused call (an error status, or none at all) counts
-    nothing."""
+    """The model calls a relay forwarded: each answered call's model, as its request named it, and usage, read as
+    ``Usage.from_model_response`` reads one, and how many were answered without usage or refused. A refused call (an
+    error status, or none at all) counts nothing."""
 
-    answered: list[Usage] = field(default_factory=list)
+    answered: list[tuple[str | None, Usage]] = field(default_factory=list)
     unreported: int = 0
     refused: int = 0
 
-    def add(self, status: int | None, usage: Usage | None) -> None:
-        """A call that ended with ``status`` (None when it had none), and the usage its answer carried."""
+    def add(self, status: int | None, usage: Usage | None, model: str | None = None) -> None:
+        """A call that ended with ``status`` (None when it had none), the usage its answer carried and the model its
+        request named."""
         if status is None or status >= 400:
             self.refused += 1
             return
         if usage is None:
             self.unreported += 1
         else:
-            self.answered.append(usage)
+            self.answered.append((model, usage))
 
-    def usage(self, tool_call_count: int) -> Usage:
+    def usage(self, tool_call_count: int, model: str | None = None) -> Usage:
         """The calls' usage summed, with ``input_tokens`` counting the cache, and the calls without usage counted in
-        ``unreported_calls``; no counts when no call had any."""
+        ``unreported_calls``; no counts when no call had any. ``models`` holds them by the model each named, a call
+        that named none counted as ``model``'s, the one the turn was configured with."""
         details: dict[str, Any] = {}
         if self.answered or self.unreported:
             details["model_calls"] = len(self.answered) + self.unreported
@@ -64,14 +66,25 @@ class Calls:
             details["unreported_calls"] = self.unreported
         if not self.answered:
             return Usage(tool_call_count=tool_call_count, provider_details=details)
+        usages = [usage for _, usage in self.answered]
 
         def total(name: str) -> int | None:
-            values = [getattr(usage, name) for usage in self.answered if getattr(usage, name) is not None]
+            values = [getattr(usage, name) for usage in usages if getattr(usage, name) is not None]
             return sum(values) if values else None
 
-        flags = {usage.input_includes_cache for usage in self.answered}
+        flags = {usage.input_includes_cache for usage in usages}
         return Usage(tool_call_count=tool_call_count, **{name: total(name) for name in _COUNTS},
-                     input_includes_cache=flags.pop() if len(flags) == 1 else None, provider_details=details)
+                     input_includes_cache=flags.pop() if len(flags) == 1 else None, models=self._by_model(model),
+                     provider_details=details)
+
+    def _by_model(self, configured: str | None) -> tuple[ModelUsage, ...]:
+        """The answered calls' counts by model; none when a call named no model and the turn has none configured."""
+        by_model: dict[str, list[Usage]] = {}
+        for named, usage in self.answered:
+            if (name := named or configured) is None:
+                return ()
+            by_model.setdefault(name, []).append(usage)
+        return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
 
 
 class AnswerReader:
@@ -136,6 +149,15 @@ class AnswerReader:
         return read if any(getattr(read, name) for name in _COUNTS) else None
 
 
+def _request_model(body: bytes) -> str | None:
+    """The model a call's request body names, as its JSON's ``model``; None for a body that names none."""
+    try:
+        model = json.loads(body).get("model")
+    except (ValueError, AttributeError):
+        return None
+    return model if isinstance(model, str) and model else None
+
+
 def answer_usage(answer: bytes) -> Usage | None:
     """The usage a whole answer carried, as ``AnswerReader`` reads it."""
     reader = AnswerReader()
@@ -169,7 +191,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
             # Answered as sent, so its usage can be read.
             outgoing["accept-encoding"] = "identity"
             call = request.method == "POST" and path.rstrip("/").endswith(_CALL_ROUTES)
-            status, reader = None, AnswerReader()
+            status, reader, body = None, AnswerReader(), b""
             try:
                 body = await request.read()
                 if call and rewrite is not None:
@@ -211,7 +233,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                 raise
             finally:
                 if call:
-                    calls.add(status, reader.usage())
+                    calls.add(status, reader.usage(), _request_model(body))
 
         app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
         app.router.add_route("*", "/{token}/{path:.*}", forward)

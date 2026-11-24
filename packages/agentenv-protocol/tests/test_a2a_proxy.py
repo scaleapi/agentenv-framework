@@ -603,6 +603,33 @@ def test_a_turns_usage_sums_its_recorded_calls_with_input_counting_the_cache(cli
             "input_tokens": 1, "output_tokens": 1, "total_tokens": 1, "cache_read_tokens": 1, "cache_write_tokens": 2}}}
 
 
+def _recorded_turn(client, calls) -> dict:
+    """The usage of a turn whose recorded calls are ``calls``, each a model name (or None) and its usage."""
+    task_id = _send(client, "go")
+    for model, usage in calls:
+        assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage,
+                      **({"model": model} if model else {})).status_code == 200
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+    return _usage(_settled(client, task_id))
+
+
+def test_a_turns_recorded_calls_are_given_by_the_model_each_named(client):
+    usage = _recorded_turn(client, [("gpt-4.1-mini", {"prompt_tokens": 1000, "completion_tokens": 10}),
+                                    ("gpt-4o-mini", {"prompt_tokens": 300, "completion_tokens": 5}),
+                                    ("gpt-4o-mini", None)])
+
+    assert usage["models"] == [
+        {"model": "gpt-4.1-mini", "calls": 1, "input_tokens": 1000, "output_tokens": 10, "input_includes_cache": True},
+        {"model": "gpt-4o-mini", "calls": 2, "input_tokens": 300, "output_tokens": 5, "input_includes_cache": True}]
+
+
+def test_a_turn_with_a_call_that_named_no_model_gives_no_rows(client):
+    usage = _recorded_turn(client, [("gpt-4.1-mini", {"prompt_tokens": 1000, "completion_tokens": 10}),
+                                    (None, {"prompt_tokens": 200, "completion_tokens": 2})])
+
+    assert "models" not in usage and usage["input_tokens"] == 1200
+
+
 def test_counts_a_recorded_call_doesnt_give_or_cant_be_read_are_left_out(client):
     task_id = _send(client, "go")
     for usage in ({"prompt_tokens": "9", "completion_tokens": True, "prompt_tokens_details": "none"},
@@ -837,3 +864,15 @@ def test_what_a_turn_still_runs_is_stopped_when_the_app_stops(monkeypatch, tmp_p
             time.sleep(0.02)
 
     _stopped(int((tmp_path / "child").read_text()))
+
+
+def test_a_models_cost_is_its_calls_only_when_every_one_reported_one(client):
+    task_id = _send(client, "go")
+    for usage in ({"agentenv_usage": {"input_tokens": 10, "output_tokens": 1, "cost_usd": 0.01}},
+                  {"prompt_tokens": 20, "completion_tokens": 2}):
+        assert _proxy(client, "record", task_id=task_id, message="Thinking.", usage=usage,
+                      model="policy-model").status_code == 200
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
+
+    [row] = _usage(_settled(client, task_id))["models"]
+    assert (row["calls"], row["input_tokens"], "cost_usd" in row) == (2, 30, False)

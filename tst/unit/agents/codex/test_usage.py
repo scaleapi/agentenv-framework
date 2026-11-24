@@ -5,7 +5,7 @@ each Responses call beside them: a smoke turn on gpt-4.1-mini made three calls."
 import asyncio
 import json
 
-from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent import ModelUsage, Usage
 
 from tst.unit.agents.codex.agent import a2a_server, codex_bridge
 
@@ -95,12 +95,16 @@ PARENT, CHILD = "01a1fb01-2718-7003-9a69-04d8a681cdf8", "01a1fb01-2fd1-7923-92f5
 SUBAGENT_CALLS = [(PARENT, 11873, 0, 62), (CHILD, 11491, 2432, 11), (PARENT, 11957, 11776, 21), (PARENT, 12040, 11904, 5)]
 
 
-def _write_rollout(sessions, thread, calls, parent=None):
-    """A thread's rollout as Codex writes it: its session_meta, then the thread's running total after each call."""
+def _write_rollout(sessions, thread, calls, parent=None, model=None):
+    """A thread's rollout as Codex writes it: its session_meta, the turn_context naming its model when one is given,
+    then the thread's running total after each call."""
     meta = {"id": thread, "source": "exec"}
     if parent:
         meta |= {"parent_thread_id": parent, "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}}
-    records, total = [{"type": "session_meta", "payload": meta}], dict.fromkeys(
+    records = [{"type": "session_meta", "payload": meta}]
+    if model:
+        records.append({"type": "turn_context", "payload": {"cwd": "/app", "model": model, "effort": "medium"}})
+    total = dict.fromkeys(
         ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"), 0)
     for inputs, cached, outputs in calls:
         total = {**total, "input_tokens": total["input_tokens"] + inputs,
@@ -114,13 +118,13 @@ def _write_rollout(sessions, thread, calls, parent=None):
 
 
 def _turn(monkeypatch, tmp_path, rollouts, thread_id=None):
-    """Runs a turn whose CLI leaves ``rollouts`` (thread, calls, parent) behind."""
+    """Runs a turn whose CLI leaves ``rollouts`` (thread, calls, parent, and optionally its model) behind."""
     sessions = tmp_path / "sessions"
     monkeypatch.setattr(codex_bridge, "SESSIONS_DIR", sessions)
 
     async def cli(**kwargs):
-        for thread, calls, parent in rollouts:
-            _write_rollout(sessions, thread, calls, parent)
+        for thread, calls, parent, *model in rollouts:
+            _write_rollout(sessions, thread, calls, parent, *model)
         return codex_bridge.CodexResult(response="42", tool_call_count=1, session_id=PARENT)
 
     monkeypatch.setattr(codex_bridge, "_run_codex_once", cli)
@@ -160,3 +164,30 @@ def test_a_later_turn_counts_only_what_its_subagents_used_in_it(monkeypatch, tmp
     assert result.model_requests == 3
     assert {key: result.token_usage[key] for key in ("input_tokens", "cached_input_tokens", "output_tokens")} == {
         "input_tokens": 200 + 60 + 30, "cached_input_tokens": 100 + 40, "output_tokens": 2 + 3 + 4}
+
+
+def test_a_turns_counts_are_given_by_the_model_each_thread_ran_on(monkeypatch, tmp_path):
+    """A subagent ``spawn_agent`` started on another model is that model's; the parent's calls are its own model's."""
+    calls = {PARENT: [], CHILD: []}
+    for thread, *counts in SUBAGENT_CALLS:
+        calls[thread].append(counts)
+
+    result = _turn(monkeypatch, tmp_path, [(PARENT, calls[PARENT], None, "gpt-5.3-codex"),
+                                           (CHILD, calls[CHILD], PARENT, "gpt-5.4-mini")])
+    usage = a2a_server._usage(result, "gpt-5.3-codex")
+
+    assert usage.models == (
+        ModelUsage(model="gpt-5.3-codex", calls=3, input_tokens=11873 + 11957 + 12040, output_tokens=62 + 21 + 5,
+                   cache_read_tokens=11776 + 11904, input_includes_cache=True),
+        ModelUsage(model="gpt-5.4-mini", calls=1, input_tokens=11491, output_tokens=11, cache_read_tokens=2432,
+                   input_includes_cache=True))
+    assert sum(row.input_tokens for row in usage.models) == usage.input_tokens
+
+
+def test_a_thread_whose_rollout_names_no_model_counts_as_the_turns_and_none_known_gives_no_rows(monkeypatch, tmp_path):
+    result = _turn(monkeypatch, tmp_path, [(PARENT, [(100, 0, 1)], None),
+                                           (CHILD, [(50, 0, 2)], PARENT, "gpt-5.4-mini")])
+
+    assert [(row.model, row.input_tokens) for row in a2a_server._usage(result, "gpt-5.3-codex").models] == [
+        ("gpt-5.3-codex", 100), ("gpt-5.4-mini", 50)]
+    assert a2a_server._usage(result).models == ()

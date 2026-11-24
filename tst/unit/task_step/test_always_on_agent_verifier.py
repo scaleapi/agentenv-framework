@@ -26,6 +26,7 @@ from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import (
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RUN_CONTEXT_PARTS, RubricsVerifierTaskStep
 from tst.unit.task_step.always_on_harness import Rig
+from tst.util import atif_runs
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -260,11 +261,27 @@ class _Sandbox:
         self.files[destination_path] = content
 
 
-def _staged_run(monkeypatch, *, object_url: bool = True) -> tuple[TaskStepContext, _Sandbox, dict[str, str]]:
+def _staged_run(monkeypatch, *, object_url: bool = True,
+                atif_wakes: int = 0) -> tuple[TaskStepContext, _Sandbox, dict[str, str]]:
     """A recorded always_on run's context with a deployed judge; ``sources`` serves each stored trajectory: wake 2's
-    a Claude Code turn, wake 4's a PSI neutral harness v7 wake (Claude's: a save turn, a compaction, its own turn)."""
+    a Claude Code turn, wake 4's a PSI neutral harness v7 wake (Claude's: a save turn, a compaction, its own turn).
+    ``atif_wakes``: the run prescribed atif/1, its first wakes' copies (the ``two_turns`` fixture's tasks, one a wake)
+    are their trajectories, at the one url they share, and every wake's end names its turn, as the step logs it then."""
     stored = json.loads((RECORDED / "always_on_timeline.json").read_text())
-    urls = [e["trajectory_url"] for e in stored["timeline"] if e["event"] == "agent_turn_end"]
+    ends = [e for e in stored["timeline"] if e["event"] == "agent_turn_end"]
+    urls = [e["trajectory_url"] for e in ends]
+    records = None
+    if atif_wakes:
+        document, through = atif_runs.stored("two_turns", run="week"), atif_runs.through_steps("two_turns")
+        copied = ("task-91c2", "task-91c3")[:atif_wakes]
+        records = []
+        for n, end in enumerate(ends):
+            if n < len(copied):
+                urls[n] = end["trajectory_url"] = document
+                records.append(atif_runs.record(document, copied[n], through[copied[n]]))
+            else:
+                records.append(atif_runs.native(f"task-{n}"))
+            end["turn"], end["trajectory_format"] = n, records[-1]["format"]
     record = {k: v for k, v in stored.items() if k != "timeline"}
     if object_url:
         record["object_url"] = get_config().get_object_store().put(
@@ -274,6 +291,7 @@ def _staged_run(monkeypatch, *, object_url: bool = True) -> tuple[TaskStepContex
     ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="[Fri Nov 6] Dinner is booked",
                                                prompt_text="dinner for 7", step_id="week",
                                                target_agent_per_turn_trajectory_object_urls=urls,
+                                               target_agent_per_turn_trajectories=records,
                                                agent_trajectory_object_url=urls[-1]))
     ctx.deployed_agents.append(DeployedAgent(agent_name="judge", api_url="http://judge.test",
                                              a2a_url="http://judge.test", sandbox_id="sb-judge"))
@@ -306,6 +324,23 @@ def _agent_judge(monkeypatch, verifier, sources) -> dict:
     monkeypatch.setattr(verifier, "_run_judge_with_output_retries", judge)
     monkeypatch.setattr(verifier, "_read_trajectory_text", read)
     return captured
+
+
+@pytest.mark.asyncio
+async def test_a_prescribed_runs_wakes_are_each_staged_from_their_own_task_of_the_copy(monkeypatch):
+    """Its wakes' copies share one document; each wake is staged from its own A2A task cut out of it, and the wakes
+    whose copies couldn't be had from their native trajectories."""
+    ctx, sandbox, sources = _staged_run(monkeypatch, atif_wakes=2)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    [root] = {path.split("/")[3] for path in sandbox.files}
+    wake = {n: sandbox.files[f"/tmp/always_on_run/{root}/wakes/wake_00{n}.jsonl"] for n in range(1, 5)}
+    assert '"command": "pytest tests/test_parse.py -q"' in wake[1] and "test_offset" not in wake[1]
+    assert "def test_offset(): ..." in wake[2] and "pytest tests/test_parse.py" not in wake[2]
+    assert '"tool": "slow_search"' in wake[4]
 
 
 @pytest.mark.asyncio

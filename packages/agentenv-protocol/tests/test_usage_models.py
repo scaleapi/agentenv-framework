@@ -69,3 +69,21 @@ def test_a_turn_that_gives_only_its_rows_takes_their_sums_as_its_counts():
 def test_from_dict_refuses_a_models_value_that_isnt_a_list_even_when_empty(models):
     with pytest.raises(TypeError, match="models must be a list"):
         Usage.from_dict({"input_tokens": 1, "models": models})
+
+
+def test_a_models_row_of_its_calls_sums_what_they_gave_and_counts_each_call():
+    row = ModelUsage.of("m", [Usage(input_tokens=100, output_tokens=10, cache_read_tokens=80, input_includes_cache=True),
+                              Usage(input_tokens=50, output_tokens=5, input_includes_cache=True), Usage()])
+    assert row == ModelUsage(model="m", calls=3, input_tokens=150, output_tokens=15, cache_read_tokens=80,
+                             input_includes_cache=True)
+
+
+def test_a_models_row_takes_its_calls_cost_only_when_every_call_reported_one():
+    assert ModelUsage.of("m", [Usage(input_tokens=1, cost_usd=0.25), Usage(input_tokens=1, cost_usd=0.5)]).cost_usd == 0.75
+    assert ModelUsage.of("m", [Usage(input_tokens=1, cost_usd=0.25), Usage(input_tokens=1)]).cost_usd is None
+
+
+def test_a_models_row_takes_the_flag_its_counted_calls_agree_on():
+    assert ModelUsage.of("m", [Usage(input_tokens=1, input_includes_cache=True), Usage()]).input_includes_cache is True
+    assert ModelUsage.of("m", [Usage(input_tokens=1, input_includes_cache=True),
+                               Usage(input_tokens=1, input_includes_cache=False)]).input_includes_cache is None
