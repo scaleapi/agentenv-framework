@@ -162,7 +162,8 @@ TRIGGER_NOTIFY = "notify"
 TRIGGER_WEBSITE_OP = "website_op"
 # state reports each fire in flight (running, waits) and each executor call in progress (executor_calls).
 TRIGGER_FIRES_IN_STATE = "fires_in_state"
-# a server's deferred calls (AGENT_ENV_DEFERRED_CALLS_META_KEY) are made, reported to the triggers and listed in state.
+# a server's deferred calls (AGENT_ENV_DEFERRED_CALLS_META_KEY) are made, reported to the triggers, listed in state (each
+# `due` once the clock reaches it and until it is made) and counted in its next_event_at.
 TRIGGER_DEFERRED_CALLS = "deferred_calls"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
@@ -198,7 +199,8 @@ AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
 # MCP tools/call result `_meta` key by which a server declares calls on itself for the gateway to make later: a list of
 # {key, at (RFC 3339), call {tool, arguments}, report_as {tool, arguments}}, each made once per server and key when
 # the gateway clock reaches `at`, as the declaring call's role, and reported to the triggers as that role's call
-# `report_as`. The gateway takes it off the result, so no caller sees it.
+# `report_as` (unless a trigger action's own call declared it). The gateway takes it off the result, so no caller sees
+# it. agentenv_protocol.DEFERRED_CALLS_META_KEY, mirrored here as the gateway container ships without the protocol.
 AGENT_ENV_DEFERRED_CALLS_META_KEY = "agentenv.io/deferredCalls"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"

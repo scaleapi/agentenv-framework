@@ -48,7 +48,7 @@ def gateway(tmp_path, monkeypatch):
     gw._tool_server_urls = {"items_add_item": "http://items/mcp"}
     gw.calls = []
 
-    async def call_child_tool(server_url, tool_name, arguments, *, caller=None):
+    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report=True):
         gw.calls.append((arguments["item"], gw._clock.read()["virtual_time"]))
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
@@ -148,9 +148,9 @@ async def test_a_recurring_trigger_whose_action_outlasts_its_interval_still_move
 async def test_a_fire_the_agents_turn_set_off_lands_before_the_clock_jumps(hook, gateway, monkeypatch):
     real = gateway._call_child_tool
 
-    async def slow(server_url, tool_name, arguments, *, caller=None):
+    async def slow(server_url, tool_name, arguments, *, caller=None, report=True):
         await asyncio.sleep(0.3)
-        return await real(server_url, tool_name, arguments, caller=caller)
+        return await real(server_url, tool_name, arguments, caller=caller, report=report)
 
     gateway._call_child_tool = slow
     _register(gateway, {"id": "ack", "when": {"type": "action", "tool": "send_email"}, "actions": _add("ack")},
@@ -161,6 +161,23 @@ async def test_a_fire_the_agents_turn_set_off_lands_before_the_clock_jumps(hook,
 
     assert decisions[0] == _nudge("2026-03-03T09:00:00Z")
     assert gateway.calls == [("ack", MONDAY), ("tue", "2026-03-03T09:00:00Z")]
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_server_deferred_gets_a_wake_at_its_time_and_the_reply_it_provokes_lands_first(hook, gateway):
+    """A message an agent scheduled is an env event: the clock jumps to its time, not past it, and the agent wakes once
+    the trigger its posting set off has run."""
+    _register(gateway, {"id": "ack", "when": {"type": "action", "tool": "items_post"}, "actions": _add("ack")},
+              {"id": "wed", "when": {"type": "time", "at": "2026-03-04T09:00:00Z"}, "actions": _add("wed")})
+    gateway._deferred.take(CallToolResult(content=[], isError=False, _meta={"agentenv.io/deferredCalls": [
+        {"key": "m1", "at": "2026-03-03T09:00:00Z", "call": {"tool": "items_add_item", "arguments": {"item": "posted"}},
+         "report_as": {"tool": "items_post", "arguments": {}}}]}), "http://items/mcp", "default")
+
+    decisions = await _turns(hook, _context())
+
+    assert decisions == [_nudge("2026-03-03T09:00:00Z"), _nudge("2026-03-04T09:00:00Z"), {"end": "no_pending_events"}]
+    assert gateway.calls == [("posted", "2026-03-03T09:00:00Z"), ("ack", "2026-03-03T09:00:00Z"),
+                             ("wed", "2026-03-04T09:00:00Z")]
 
 
 @pytest.mark.asyncio

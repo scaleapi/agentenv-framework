@@ -92,17 +92,23 @@ grant a hidden tool after such steps. Trigger tool actions call it as usual.
 
 A tool's successful result can ask the gateway to call the same server later, for something the
 server does at a time of its own (a scheduled message posted at its time) that no tool call would
-otherwise mark. Its `_meta` `"agentenv.io/deferredCalls"` is a list of `{"key", "at", "call",
-"report_as"}`: `at` an RFC 3339 instant with an offset, `call` and `report_as` each `{"tool",
-"arguments"}`. The gateway takes the key off the result, so no caller sees it, and schedules each
-entry once per server and `key` (one its server declares again while pending or done is ignored). When the gateway clock
-reaches `at` (its virtual time while armed, wall UTC while not) it calls `call.tool` as the role
-that made the declaring call, and again after a transport failure, so make that tool idempotent
-(and `hidden_by_default`, as plumbing). Unless the result is an error, the gateway hands its
-triggers that result as that role's call of `report_as.tool` with `report_as.arguments`.
-`GET /triggers/state` lists each under `deferred_calls`. Behind no gateway, or one that ignores the
-key, nothing calls it, so a server still acts by itself once the time has passed (on its next read,
-say).
+otherwise mark. Its `_meta` `"agentenv.io/deferredCalls"` (`DEFERRED_CALLS_META_KEY`) is a list of
+`{"key", "at", "call", "report_as"}`: `at` an RFC 3339 instant with an offset, `call` and
+`report_as` each `{"tool", "arguments"}`. The gateway takes the key off the result, so no caller sees
+it, and schedules each entry once per server and `key` (one its server declares again while pending
+or done is ignored). When the gateway clock reaches `at` (its virtual time while armed, wall UTC
+while not) it calls `call.tool` as the role that made the declaring call, as it makes a live call
+(under the consistent mode's lock, its write attributed to it). After a transport failure it calls
+again: five attempts in all, 1, 2, 4 and 8 s apart, each of which first reopens the server's session
+if it must (retrying the connection for about ten seconds), so against a server that stays down the
+call fails about 51 s after its first attempt (as observed). So make that tool idempotent (and
+`hidden_by_default`, as plumbing). Unless the result is an error, the gateway hands its triggers that
+result as that role's call of `report_as.tool` with `report_as.arguments`; a trigger action's own
+call provokes no trigger, and neither does one it declares. `GET /triggers/state` lists each under
+`deferred_calls` (`due` marks one the clock has reached that is still to make, which settle checks
+wait for), and counts the earliest still to make in `next_event_at`. Behind no gateway, or one that
+ignores the key, nothing calls it, so a server still acts by itself once the time has passed (on its
+next read, say).
 
 `@tool(..., annotations={"readOnlyHint": True}, structured_output=True, meta={...})` lists the tool
 with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and on fastmcp alike.

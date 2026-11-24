@@ -6,12 +6,14 @@ gateway."""
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import agentenv_protocol
 import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent, Tool as MCPTool
@@ -20,7 +22,10 @@ from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_META_KEY
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.clock import _iso
+from agent_env.env.gateway.constants import AGENT_ENV_DEFERRED_CALLS_META_KEY, TRIGGER_IN_FLIGHT_STATUSES, GatewayMode
+from agent_env.env.gateway.deferred_calls import DeferredCalls
 from agent_env.env.gateway.gateway import Gateway
+from agent_env.env.gateway.triggers import _ECHO_DIGEST_CHARS
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 DEFERRED = "agentenv.io/deferredCalls"
@@ -45,15 +50,17 @@ def _json(data, *, is_error: bool = False, meta: dict | None = None) -> CallTool
 
 
 class _Chat:
-    """A chat server: chat_schedule declares what `declare` holds, chat_deliver answers as `deliveries` say (an exception
-    to raise or a result to return, else a posted message), and every call is recorded with the gateway clock's time."""
+    """A chat server: chat_schedule declares what `declare` holds (or returns, when it is a function), chat_deliver
+    answers as `deliveries` say (an exception to raise or a result to return, else a posted message, a changelog row),
+    and every call is recorded with the gateway clock's time."""
 
     def __init__(self):
         self.gw: Gateway | None = None
         self.calls: list[dict] = []
-        self.declare: list = []
+        self.declare = []
         self.schedule_error = False
         self.deliveries: list = []
+        self.rows = 0
 
     async def list_tools(self):
         schema = {"type": "object", "properties": {}}
@@ -64,14 +71,16 @@ class _Chat:
         self.calls.append({"tool": name, "args": dict(arguments or {}), "meta": meta,
                            "virtual": self.gw._clock.now(), "wall": datetime.now(timezone.utc)})
         if name == SCHEDULE:
+            declared = self.declare() if callable(self.declare) else list(self.declare)
             return _json({"ok": True, "scheduled": True}, is_error=self.schedule_error,
-                         meta={DEFERRED: list(self.declare), "other": 1})
+                         meta={DEFERRED: declared, "other": 1})
         if name == DELIVER:
             outcome = self.deliveries.pop(0) if self.deliveries else None
             if isinstance(outcome, BaseException):
                 raise outcome
             if outcome is not None:
                 return outcome
+            self.rows += 1
             return _json({"ok": True, "channel": "C1", "ts": "1783364580.000100", "message": {"text": "hi"}})
         return _json({"ok": True})
 
@@ -80,11 +89,12 @@ class _Chat:
 
 
 @asynccontextmanager
-async def _chat(tmp_path, monkeypatch):
+async def _chat(tmp_path, monkeypatch, mode: GatewayMode = GatewayMode.PERFORMANCE):
     """A gateway in front of the chat server, inside its process lifespan, whose shutdown unwinds it at the end."""
     monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
     chat = _Chat()
-    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[InternalMCPServer("chat", URL)])
+    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[InternalMCPServer("chat", URL)],
+                 gateway_mode=mode)
     chat.gw = gw
 
     async def open_session(server, stack, report):
@@ -161,6 +171,15 @@ async def _fired(gw: Gateway) -> int:
     return next(t["fire_count"] for t in state["triggers"] if t["id"] == "reply")
 
 
+async def _next_event_at(gw: Gateway) -> str | None:
+    return (await _request(gw, "GET", "/triggers/state")).json()["next_event_at"]
+
+
+def test_the_meta_key_is_the_protocols():
+    """The gateway container ships without agentenv_protocol, so its key is a literal; it must stay the protocol's."""
+    assert AGENT_ENV_DEFERRED_CALLS_META_KEY == agentenv_protocol.DEFERRED_CALLS_META_KEY == DEFERRED
+
+
 # ---- the declaration on the result ----------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -214,6 +233,21 @@ async def test_each_key_is_scheduled_once_while_pending_and_once_done(tmp_path, 
         await asyncio.sleep(0.1)
         assert len(chat.made(DELIVER)) == 1
         assert [(c["key"], c["status"]) for c in await _deferred(gw)] == [("m1", "done")]
+
+
+@pytest.mark.asyncio
+async def test_state_keeps_the_latest_calls_finished_and_every_key_made_stays_known(tmp_path, monkeypatch):
+    monkeypatch.setattr(DeferredCalls, "FINISHED_KEPT", 2)
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        await _schedule(gw, chat, *(_declared(f"m{i}", at=T0) for i in range(4)))
+        await _until(lambda: len(_events(tmp_path, "deferred_call")) == 4)
+        first, *_, last_but_one, last = [e["key"] for e in _events(tmp_path, "deferred_call")]
+        await _schedule(gw, chat, _declared(first, at=T0), _declared("m4"))  # one no longer listed, and a new one
+        await asyncio.sleep(0.1)
+        assert len(chat.made(DELIVER)) == 4
+        assert [(c["key"], c["status"]) for c in await _deferred(gw)] == [(last_but_one, "done"), (last, "done"),
+                                                                           ("m4", "pending")]
 
 
 @pytest.mark.asyncio
@@ -363,6 +397,27 @@ async def test_a_trigger_tool_action_s_declaration_is_made_as_its_role_and_the_d
 
 
 @pytest.mark.asyncio
+async def test_a_call_a_trigger_action_declared_is_made_but_provokes_no_trigger(tmp_path, monkeypatch):
+    """A trigger action's own calls provoke no trigger, nor does a call it defers: a trigger on the agent's sends whose
+    action schedules a message, with no `as`, would otherwise take that message for the agent's, and so on without
+    end."""
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        keys = itertools.count()
+        chat.declare = lambda: [_declared(f"k{next(keys)}", at=T0)]  # each a new key, due at once
+        await _request(gw, "POST", "/triggers/register", json={"watch_roles": ["default"], "triggers": [
+            {"id": "echo", "when": {"type": "action", "tool": SEND, "repeat": True},
+             "actions": [{"type": "tool", "tool": SCHEDULE, "args": {}}]}]})
+        await _mcp_call(gw, "default", SEND, {"channel": "C1"})
+        await _until(lambda: _events(tmp_path, "deferred_call"))
+        await asyncio.sleep(0.3)
+        assert (len(chat.made(SCHEDULE)), len(chat.made(DELIVER))) == (1, 1)
+        assert [(c["key"], c["status"]) for c in await _deferred(gw)] == [("k0", "done")]
+        [event] = _events(tmp_path, "deferred_call")
+        assert event["ok"] is True and event["reported"] is False
+
+
+@pytest.mark.asyncio
 async def test_an_error_delivery_is_final_logged_and_not_reported(tmp_path, monkeypatch):
     async with _chat(tmp_path, monkeypatch) as (gw, chat):
         await _arm(gw)
@@ -379,7 +434,8 @@ async def test_an_error_delivery_is_final_logged_and_not_reported(tmp_path, monk
         assert "message_not_found" in event["error"]
 
         await _schedule(gw, chat, _declared(at="2026-07-06T19:10:00Z"))  # a failed key may be declared afresh
-        assert [(c["status"], c["at"]) for c in await _deferred(gw)] == [("pending", "2026-07-06T19:10:00Z")]
+        assert [(c["status"], c["at"]) for c in await _deferred(gw)] == [("failed", AT),
+                                                                          ("pending", "2026-07-06T19:10:00Z")]
 
 
 @pytest.mark.asyncio
@@ -414,16 +470,109 @@ async def test_retries_are_bounded_and_a_call_that_never_goes_through_fails(tmp_
 # ---- state, trajectory, shutdown ------------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_state_lists_each_deferred_call_and_prompt_agent_does_not_wait_for_a_pending_one(tmp_path, monkeypatch):
+async def test_state_lists_each_deferred_call_and_prompt_agent_does_not_wait_for_one_not_yet_due(tmp_path, monkeypatch):
     async with _chat(tmp_path, monkeypatch) as (gw, chat):
         await _arm(gw)
         await _schedule(gw, chat, _declared())
         state = (await _request(gw, "GET", "/triggers/state")).json()
         assert state["deferred_calls"] == [
             {"key": "m1", "server": URL, "at": AT, "tool": DELIVER, "role": "alice", "status": "pending",
-             "attempts": 0}]
-        assert state["triggers"] == [] and state["next_event_at"] is None
+             "attempts": 0, "due": False}]
+        assert state["triggers"] == [] and state["next_event_at"] == AT
         assert PromptAgentTaskStep._is_settling(state) is False
+
+
+@pytest.mark.asyncio
+async def test_a_call_the_clock_has_reached_is_due_until_it_is_made(tmp_path, monkeypatch):
+    """The gateway says which calls its clock has reached and are still to make, so a client needs no clock of its own
+    to wait for them."""
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        released = asyncio.Event()
+        call_tool = chat.call_tool
+
+        async def held_delivery(name, arguments, *args, **kwargs):
+            if name == DELIVER:
+                await released.wait()
+            return await call_tool(name, arguments, *args, **kwargs)
+
+        chat.call_tool = held_delivery
+        await _arm(gw)
+        await _schedule(gw, chat, _declared())
+        await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
+        state = (await _request(gw, "GET", "/triggers/state")).json()
+        assert [(c["status"], c["due"]) for c in state["deferred_calls"]] == [("pending", True)]
+
+        released.set()
+        await _until(lambda: _events(tmp_path, "deferred_call"))
+        state = (await _request(gw, "GET", "/triggers/state")).json()
+        assert [(c["status"], c["due"]) for c in state["deferred_calls"]] == [("done", False)]
+
+
+@pytest.mark.asyncio
+async def test_next_event_at_counts_the_earliest_call_still_to_make(tmp_path, monkeypatch):
+    """A harness jumping the clock to the next event stops at a deferred call's time rather than past it; once made, the
+    call counts no more."""
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        await _request(gw, "POST", "/triggers/register", json={"triggers": [
+            {"id": "later", "when": {"type": "time", "at": "2026-07-06T19:10:00Z"},
+             "actions": [{"type": "tool", "tool": NOTE, "args": {}}]}]})
+        assert await _next_event_at(gw) == "2026-07-06T19:10:00Z"
+        await _schedule(gw, chat, _declared("m1"), _declared("m2", at="2026-07-06T19:20:00Z"))
+        assert await _next_event_at(gw) == AT
+
+        await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
+        await _until(lambda: _events(tmp_path, "deferred_call"))
+        assert await _next_event_at(gw) == "2026-07-06T19:10:00Z"
+
+
+@pytest.mark.asyncio
+async def test_no_state_reads_settled_between_an_advance_that_makes_a_call_due_and_the_fire_it_provokes(
+        tmp_path, monkeypatch):
+    """From the advance until the reply has fired, every state read shows the call due or the trigger it provoked at
+    work, however long the call's trajectory event takes to write."""
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        await _request(gw, "POST", "/triggers/register", json=_reply_trigger())
+        await _schedule(gw, chat, _declared())
+        log_event = gw._log_event
+
+        async def slow_log(event):
+            if event.get("event_type") == "deferred_call":
+                await asyncio.sleep(0.2)
+            return await log_event(event)
+
+        monkeypatch.setattr(gw, "_log_event", slow_log)
+        await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
+        deadline = time.monotonic() + 5
+        while True:
+            state = (await _request(gw, "GET", "/triggers/state")).json()
+            [reply] = state["triggers"]
+            if reply["fire_count"]:
+                break
+            assert any(c["due"] for c in state["deferred_calls"]) or reply["status"] in TRIGGER_IN_FLIGHT_STATUSES, state
+            assert time.monotonic() < deadline, "the reply never fired"
+            await asyncio.sleep(0.005)
+
+
+@pytest.mark.asyncio
+async def test_a_call_on_a_consistent_gateway_waits_its_turn_and_its_write_is_attributed_to_it(tmp_path, monkeypatch):
+    """Like a live call it takes the tool-call lock and logs its changelog window, so changes/v1 names it, not whichever
+    call ran alongside."""
+    async with _chat(tmp_path, monkeypatch, mode=GatewayMode.CONSISTENT) as (gw, chat):
+        monkeypatch.setattr(gw, "_query_changelog_id", lambda: chat.rows)
+        await _arm(gw)
+        await _schedule(gw, chat, _declared())
+        await gw._tool_call_lock.acquire()  # a live call under way
+        await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
+        await asyncio.sleep(0.2)
+        assert chat.made(DELIVER) == []
+        gw._tool_call_lock.release()
+        await _until(lambda: _events(tmp_path, "deferred_call"))
+        [event] = _events(tmp_path, "deferred_call")
+        assert (event["changelog_id_before"], event["changelog_id_after"]) == (0, 1)
+        assert gw._changes.actors([1]) == [[{"kind": "deferred_call", "event_id": event["event_id"], "key": "m1",
+                                             "tool": DELIVER, "role": "alice"}]]
 
 
 @pytest.mark.asyncio
@@ -435,7 +584,21 @@ async def test_the_trajectory_records_each_deferred_call_on_both_clocks(tmp_path
         await _until(lambda: _events(tmp_path, "deferred_call"))
         [event] = _events(tmp_path, "deferred_call")
         assert (event["key"], event["tool"], event["role"], event["ok"]) == ("m1", DELIVER, "alice", True)
+        assert (event["at"], event["report_as"], event["reported"]) == (AT, SEND, True)
+        assert len(event["result_sha256"]) == _ECHO_DIGEST_CHARS
         assert event["virtual_time"] == AT and event["timestamp_utc"]
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_error_leaves_the_call_failed_not_pending(tmp_path, monkeypatch):
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        async def broken(at):
+            raise RuntimeError("clock gone")
+
+        monkeypatch.setattr(gw._deferred, "_until", broken)
+        await _schedule(gw, chat, _declared())
+        await _until(lambda: not gw._deferred._tasks)
+        assert await _status(gw) == "failed" and chat.made(DELIVER) == []
 
 
 @pytest.mark.asyncio
@@ -450,3 +613,24 @@ async def test_a_pending_call_is_cancelled_when_the_gateway_shuts_down(tmp_path,
     gw._trigger_engine.clock_changed()
     await asyncio.sleep(0.1)
     assert chat.made(DELIVER) == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_ends_the_deferred_calls_before_the_trigger_actions_and_schedules_none_after(
+        tmp_path, monkeypatch):
+    """No call made at shutdown can set off a trigger fire the gateway has stopped cancelling, and none a trigger action
+    declares as it is cancelled is left waiting."""
+    seen = {}
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        await _schedule(gw, chat, _declared())
+        cancel_scheduled = gw._trigger_engine.cancel_scheduled
+
+        async def cancelling_trigger_actions():
+            seen["deferred_left"] = len(gw._deferred._tasks)
+            gw._deferred.take(_json({"ok": True}, meta={DEFERRED: [_declared("late")]}), URL, "alice")
+            await cancel_scheduled()
+
+        monkeypatch.setattr(gw._trigger_engine, "cancel_scheduled", cancelling_trigger_actions)
+    assert seen["deferred_left"] == 0 and not gw._deferred._tasks
+    assert [c["key"] for c in gw._deferred.state()] == ["m1"]

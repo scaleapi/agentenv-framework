@@ -6,6 +6,7 @@ from .errors import Applied, AgentEnvError
 from .preflight import intake_fit_check
 from .tool_client import ToolResult, ToolSession, ToolSessionError
 from .agent_env_environment import (
+    DEFERRED_CALLS_META_KEY,
     HIDDEN_BY_DEFAULT_META_KEY,
     AgentEnvApplication,
     AgentEnvEnvironment,
@@ -114,6 +115,7 @@ __all__ = [
     "ROLE_META_KEY",
     "SESSION_META_KEY",
     "HIDDEN_BY_DEFAULT_META_KEY",
+    "DEFERRED_CALLS_META_KEY",
     "ROLE_HEADER",
     "DEFAULT_ROLE",
     "EnvironmentCapabilities",

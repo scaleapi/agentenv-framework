@@ -49,6 +49,8 @@ _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
 
 #: MCP tools/list ``_meta`` key marking a tool a gateway hides from every role until a tool-access step names it.
 HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
+#: MCP tools/call result ``_meta`` key by which a server declares calls on itself for a gateway to make later.
+DEFERRED_CALLS_META_KEY = "agentenv.io/deferredCalls"
 
 OP_RESET_DATA = "reset_data"
 OP_ADD_DATA = "add_data"

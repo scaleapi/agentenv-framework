@@ -32,6 +32,10 @@ class ChangeAttribution:
             self._add(event.get("changelog_id_before"), event.get("changelog_id_after"), {
                 "kind": "trigger_action", "event_id": event["event_id"], "trigger_id": event.get("trigger_id"),
                 "action_index": event.get("action_index"), "tool": event.get("tool"), "role": event.get("as")})
+        elif kind == "deferred_call" and event.get("tool") not in self._unwindowed():
+            self._add(event.get("changelog_id_before"), event.get("changelog_id_after"), {
+                "kind": "deferred_call", "event_id": event["event_id"], "key": event.get("key"),
+                "tool": event.get("tool"), "role": event.get("role")})
         elif kind == "http_request":
             self._add(event.get("changelog_id_before"), event.get("changelog_id_after"), {
                 "kind": "request", "event_id": event["event_id"],
