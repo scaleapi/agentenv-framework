@@ -15,6 +15,10 @@ import statistics
 from typing import Any, Optional
 
 DEFAULT_MIN_AGREEMENT = 0.5
+# Agreement is kept to this many decimal places, so a bar of 0.67 is two samples of three.
+AGREEMENT_PLACES = 2
+# The most a split's agreement reads, one step under 1.0 at those places, so only unanimous samples read 1.0.
+SPLIT_AGREEMENT_MAX = round(1 - 10 ** -AGREEMENT_PLACES, AGREEMENT_PLACES)
 
 
 class JudgeDisagreementError(RuntimeError):
@@ -41,7 +45,7 @@ def validated_agreement(value: Any) -> Optional[float]:
 
 def _share(agreeing: int, total: int) -> float:
     """``agreeing`` of ``total`` to two places, 1.0 only when all agree, so no split reads as unanimous."""
-    return 1.0 if agreeing == total else min(round(agreeing / total, 2), 0.99)
+    return 1.0 if agreeing == total else min(round(agreeing / total, AGREEMENT_PLACES), SPLIT_AGREEMENT_MAX)
 
 
 def median_rows(sampled: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
