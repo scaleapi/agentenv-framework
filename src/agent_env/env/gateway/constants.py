@@ -69,9 +69,17 @@ METHOD_ADD = "data/add"
 METHOD_GET = "data/get"
 MCP_TRANSPORT = "mcp"
 CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
+AGENT_TOKEN_HEADER = "AgentEnv-Agent-Token"
+COMPUTER_TOKEN_HEADER = "AgentEnv-Computer-Token"
 # The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
 # it out of logged compose files.
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
+# The roles the gateway declares at startup, a JSON list of {"role": ..., "auth": {"type": "none"|"token"}}: they come
+# back with a restart, without members, as no role declared at runtime does.
+GATEWAY_ROLES_ENV = "GATEWAY_ROLES"
+# Each computer's attribution token as `name=sha256 hex`, comma-separated. A gateway started with it, even empty, believes
+# AgentEnv-Computer only with that computer's token; TOKEN in the name keeps it out of logged compose files.
+COMPUTER_TOKEN_DIGESTS_ENV = "COMPUTER_TOKEN_DIGESTS"
 # The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
 # The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
@@ -108,6 +116,10 @@ EXT_USER_CHAT_URI = "urn:agentenv:user-chat/v1"
 EXT_WEBSITE_URI = "urn:agentenv:website/v1"
 EXT_BROWSER_URI = "urn:agentenv:browser/v1"
 EXT_COMPUTER_APP_URI = "urn:agentenv:computer-app/v1"
+EXT_ROLES_URI = "urn:agentenv:roles/v1"
+# The roles extension's two paths; the role travels in the JSON body, since the control check matches exact paths.
+ROLES_PATH = "/roles"
+ROLE_MEMBERS_PATH = "/roles/members"
 WEBSITE_READY_OP = "ready"
 WEBSITE_BROWSE_URL_PARAM = "browse_url"
 
@@ -217,15 +229,15 @@ DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
 TOOL_ENABLE_ACTION = "enable"
-# The harness's routes that take the deploy's control token: the ones that change tool access, triggers and
-# notifications. The gateway also takes it for the data plane and for an MCP server's own endpoint behind its proxy
-# (Gateway._takes_control_token). Every other route stays open for now, the clock's writes included: callers outside
-# agent-env set the clock over plain HTTP and don't send the token yet.
+# The harness's routes that take the deploy's control token: the ones that change tool access, triggers,
+# notifications and roles. The gateway also takes it for the data plane and for an MCP server's own endpoint behind its
+# proxy (Gateway._takes_control_token). Every other route stays open for now, the clock's writes included: callers
+# outside agent-env set the clock over plain HTTP and don't send the token yet.
 CONTROL_ROUTES = frozenset({
     f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
     "/triggers/register", "/triggers/remove", "/triggers/clear",
     "/notifications/config", "/notifications/take", "/notifications/clear",
-    CLOCK_FOLLOWERS_PATH,
+    CLOCK_FOLLOWERS_PATH, ROLES_PATH, ROLE_MEMBERS_PATH,
 })
 
 
@@ -261,6 +273,7 @@ _STEP_REQUEST = {
     "then": {"required": ["tool_name"]},
 }
 _WAIT_FOLLOWERS = {"wait_followers_s": {"type": "number", "minimum": 0, "maximum": CLOCK_MAX_WAIT_FOLLOWERS_S}}
+_ROLE = {"role": {"type": "string", "minLength": 1, "maxLength": 100}}
 
 GATEWAY_EXTENSIONS = [
     {
@@ -303,7 +316,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_TRAJECTORY_URI,
-        "description": "Env trajectory (urn:agentenv:trajectory/v1): the env's append-only JSONL record of tool calls, results, trigger firings and the requests that may write through its REST proxy, each write with the changelog ids it spanned, virtual_time-stamped while the clock is armed.",
+        "description": "Env trajectory (urn:agentenv:trajectory/v1): the env's append-only JSONL record of tool calls, results, trigger firings and the requests that may write through its REST proxy, each write with the changelog ids it spanned, virtual_time-stamped while the clock is armed. An event naming the caller's role also says how the gateway established it, as role_auth: agent_token (a member's agent token), control_token (the env's), computer_token (a computer's attribution token, for the role driving it), header (AgentEnv-Role alone) or default (nothing named one).",
         "params": {"endpoint": "/trajectory", "methods": {
             "get": {"method": "GET", "endpoint": "/trajectory"}}},
         "required": False,
@@ -359,3 +372,22 @@ GATEWAY_EXTENSIONS = [
         "required": False,
     },
 ]
+
+# Served and advertised only by a gateway with a control token: without one the gateway is open to everyone, so a role
+# it declared could be undeclared by anyone.
+ROLES_EXTENSION = {
+    "uri": EXT_ROLES_URI,
+    "description": "Roles (urn:agentenv:roles/v1, harness control path): declare a role none (any caller may name it in AgentEnv-Role, as every role nobody declared) or token (only the agent token of one of its members, sent as AgentEnv-Agent-Token, or the env's control token plays it); add_member makes the agent holding an agent token a member of a declared role (404 for an undeclared one), answering its member_id, the same for the same token, and the role's auth; create again as it is changes nothing, and with another auth, or its name cased another way, is a 409 naming the role as declared and its auth; delete makes a role undeclared, and open, again. A role is the same role however its name is cased. state lists each role's auth, member ids and whether the gateway's environment declared it at startup, never a token. Roles live in memory: a restart brings back the startup roles, one deleted since included, without members, and no other. A call acting as a token role without its token is refused with 403.",
+    "params": {"endpoint": ROLES_PATH, "methods": {
+        "create": {"method": "POST", "endpoint": ROLES_PATH, "request": {"type": "object", "properties": {
+            **_ROLE, "auth": {"type": "object", "properties": {"type": {"enum": ["none", "token"]}}, "required": ["type"]}},
+            "required": ["role"]}},
+        "state": {"method": "GET", "endpoint": ROLES_PATH, "request": {"type": "object", "properties": {}}},
+        "delete": {"method": "DELETE", "endpoint": ROLES_PATH, "request": {"type": "object", "properties": {**_ROLE},
+                                                                          "required": ["role"]}},
+        "add_member": {"method": "POST", "endpoint": ROLE_MEMBERS_PATH, "request": {"type": "object", "properties": {
+            **_ROLE, "agent_token": {"type": "string", "minLength": 1}}, "required": ["role", "agent_token"]}},
+        "remove_member": {"method": "DELETE", "endpoint": ROLE_MEMBERS_PATH, "request": {"type": "object", "properties": {
+            **_ROLE, "member_id": {"type": "string"}}, "required": ["role", "member_id"]}}}},
+    "required": False,
+}

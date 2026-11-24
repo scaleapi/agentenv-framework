@@ -93,12 +93,13 @@ class _Upstream:
 
 
 async def _call(gw: Gateway, path: str, *, method="GET", headers=None, body=b"", disconnect_after: int | None = None,
-                disconnect_before_response=False, raw_headers=None, root_path=""):
+                disconnect_before_response=False, raw_headers=None, root_path="", served=False):
     """Run one request through the ASGI app; return (status, headers, chunks). `disconnect_after` = number of body
     chunks after which the downstream client goes away; `disconnect_before_response` = it is already gone when the
     response starts (and the status-line send suspends, as a real server's can under write flow control).
-    `scope["path"]` is percent-decoded and `raw_path` is not, exactly as uvicorn builds them."""
-    app = gw._mcp.streamable_http_app()
+    `scope["path"]` is percent-decoded and `raw_path` is not, exactly as uvicorn builds them. `served` runs it
+    through the app ``Gateway.run`` serves, which resolves who the request is first."""
+    app = gw._asgi_app() if served else gw._mcp.streamable_http_app()
     url = urlsplit(path)
     scope = {
         "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1",
@@ -441,6 +442,25 @@ async def test_the_website_proxy_stamps_the_role_too(monkeypatch):
     await _call(gw, "/website/web/assets/app.js", headers={"AgentEnv-Role": "viewer"})
     await _call(gw, "/website/web")
     assert [r.headers.get_list("agentenv-role") for r in up.forwarded] == [["viewer"], ["default"]]
+
+
+@pytest.mark.asyncio
+async def test_no_identity_header_reaches_a_service_and_it_reads_the_role_the_gateway_resolved(monkeypatch):
+    """The served app reads the agent token and a computer's headers once and strips them: /svc and /website stamp
+    the role they resolved to, here the token's only role, which the client never named."""
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"}, control_token="s3cret")
+    gw._roles.create("brooke@example.com", {"type": "token"})
+    gw._roles.add_member("brooke@example.com", "member-token")
+    identity = {"AgentEnv-Agent-Token": "member-token", "AgentEnv-Computer": "desktop",
+                "AgentEnv-Computer-Token": "computer-token"}
+    for path in ("/svc/mcp-svc/x", "/website/web/page"):
+        status, _, _ = await _call(gw, path, method="POST", headers=identity, served=True)
+        assert status == 200
+    assert [r.headers.get_list("agentenv-role") for r in up.forwarded] == [["brooke@example.com"]] * 2
+    assert [{"agentenv-agent-token", "agentenv-computer", "agentenv-computer-token"} & set(r.headers.keys())
+            for r in up.forwarded] == [set(), set()]
 
 
 def _rpc(**params) -> dict:

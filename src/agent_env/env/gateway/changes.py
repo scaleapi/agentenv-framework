@@ -66,4 +66,5 @@ class ChangeAttribution:
 
 
 def _who(event: dict) -> dict:
-    return {"role": event.get("role"), **({"caused_by": event["caused_by"]} if event.get("caused_by") else {})}
+    return {"role": event.get("role"), **({"role_auth": event["role_auth"]} if event.get("role_auth") else {}),
+            **({"caused_by": event["caused_by"]} if event.get("caused_by") else {})}

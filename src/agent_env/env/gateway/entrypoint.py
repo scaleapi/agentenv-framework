@@ -1,7 +1,9 @@
 """Entry point for the Gateway container."""
 import asyncio
+import json
 import logging
 import os
+import re
 import time
 from urllib.parse import urlsplit
 
@@ -9,10 +11,11 @@ import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
 from .console_session import frame_ancestor_problem
-from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
-                        GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
+from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTER_TOKEN_DIGESTS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
+                        GATEWAY_PROVIDER_HEADERS_ENV, GATEWAY_ROLES_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
                         WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
+from .roles import RoleError, auth_type, role_key, role_name
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ def parse_internal_servers(spec: str, port: int) -> list[InternalMCPServer]:
 _INTERNAL_SERVER_TIMEOUT_S = int(os.environ.get("GATEWAY_INTERNAL_SERVER_TIMEOUT_S", "180"))
 _INTERNAL_SERVER_POLL_S = 2
 _UNREAD = object()
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def _ready_url(mcp_url: str) -> str:
@@ -212,6 +216,51 @@ def parse_clock_followers(spec: str) -> dict[str, str]:
     return followers
 
 
+def parse_roles(spec: str) -> dict[str, str]:
+    """``GATEWAY_ROLES``: the roles the gateway declares at startup, a JSON list of ``{"role": ..., "auth": {"type":
+    "none"|"token"}}`` (auth ``none`` when absent), by name with their auth, checked as ``POST /roles`` checks them."""
+    if not spec.strip():
+        return {}
+    try:
+        entries = json.loads(spec)
+    except ValueError:
+        raise ValueError(f"{GATEWAY_ROLES_ENV} is not JSON") from None
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise ValueError(f"{GATEWAY_ROLES_ENV} must be a JSON list of {{role, auth}} objects")
+    roles: dict[str, str] = {}
+    named: dict[str, str] = {}  # each role's name by its role_key, a role being one role however its name is cased
+    for entry in entries:
+        if unknown := sorted(set(entry) - {"role", "auth"}):
+            raise ValueError(f"{GATEWAY_ROLES_ENV} entry has unknown field(s) {unknown}")
+        try:
+            name, auth = role_name(entry.get("role")), auth_type(entry.get("auth"))
+        except RoleError as e:
+            raise ValueError(f"invalid {GATEWAY_ROLES_ENV} entry: {e}") from None
+        if (earlier := named.get(role_key(name))) is not None:
+            raise ValueError(f"{GATEWAY_ROLES_ENV} names {name!r} twice" + (
+                f" (first as {earlier!r})" if earlier != name else ""))
+        named[role_key(name)] = name
+        roles[name] = auth
+    return roles
+
+
+def parse_computer_digests(spec: str | None) -> dict[str, str] | None:
+    """``COMPUTER_TOKEN_DIGESTS``: each computer's attribution token as ``name=sha256 hex``, comma-separated; None when
+    the variable isn't set, so the gateway keeps believing AgentEnv-Computer alone."""
+    if spec is None:
+        return None
+    digests: dict[str, str] = {}
+    for index, entry in enumerate(filter(None, (part.strip() for part in spec.split(","))), start=1):
+        name, sep, value = (part.strip() for part in entry.partition("="))
+        if not sep or not name or not _SHA256.fullmatch(value):
+            # named by its position: a malformed entry may hold a raw token, in its name as well as its value
+            raise ValueError(f"invalid {COMPUTER_TOKEN_DIGESTS_ENV} entry {index}: expected 'name=sha256 hex'")
+        if name in digests:
+            raise ValueError(f"{COMPUTER_TOKEN_DIGESTS_ENV} names {name!r} twice")
+        digests[name] = value.lower()
+    return digests
+
+
 def parse_site_names(env_str: str) -> dict[str, tuple[str, ...]]:
     """Each site's names from ``WEBSITE_NAMES``: ``shop=shop.test|www.shop.test,docs=docs.test``."""
     names: dict[str, tuple[str, ...]] = {}
@@ -259,6 +308,8 @@ if __name__ == "__main__":
         computers=[name.strip() for name in os.environ.get(COMPUTERS_ENV, "").split(",") if name.strip()],
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
         clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
+        roles=parse_roles(os.environ.get(GATEWAY_ROLES_ENV, "")),
+        computer_digests=parse_computer_digests(os.environ.get(COMPUTER_TOKEN_DIGESTS_ENV)),
         site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),
         listed_by_name=[site.strip() for site in os.environ.get(WEBSITE_LISTED_BY_NAME_ENV, "").split(",")
                         if site.strip()],

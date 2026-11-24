@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import dataclasses
 import hmac
 import json
 import logging
@@ -42,15 +43,17 @@ if TYPE_CHECKING:
 from .constants import (
     AGENT_ENV_COMPUTER_HEADER,
     AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
-    AGENT_ENV_ROLE_HEADER,
-    AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
+    AGENT_ENV_ROLE_HEADER,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
+    AGENT_ENV_ROLE_META_KEY,  # noqa: F401
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
+    AGENT_TOKEN_HEADER,
     CARD_FETCH_TIMEOUT_S,
     CHANGES_PAGE_DEFAULT,
     CLOCK_FOLLOWERS_PATH,
     CLOCK_WATCH_PATH,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
+    COMPUTER_TOKEN_HEADER,
     CONTROL_ROUTES,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
@@ -64,6 +67,9 @@ from .constants import (
     METHOD_GET,
     METHOD_RESET,
     PROTOCOL_VERSION,
+    ROLE_MEMBERS_PATH,
+    ROLES_EXTENSION,
+    ROLES_PATH,
     RPC_PATH,
     STATE_TOOL_NAME_CLASHES_KEY,
     STEP_SOURCE_POST_TURN_HOOK,
@@ -76,7 +82,7 @@ from .constants import (
     GatewayMode,
     tool_name_clashes_text,
 )
-from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
+from .browser_proxy import PING_INTERVAL_S, TOKEN as CDP_TOKEN, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
 from .child_sessions import ChildSessions, is_dead_session
@@ -110,6 +116,7 @@ from .rest_proxy import (
     upstream_url,
     website_routes,
 )
+from .roles import HEADER, Computer, Resolution, RoleError, Roles, digest
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 from .user_chat import MESSAGE_USER_TOOL_NAME, UserChat, UserChatError, build_user_chat_tool
@@ -125,6 +132,18 @@ BROWSER_ROUTE = "/browser/{key}/cdp/{token}/{path:path}"
 # and httpx's, for each request the gateway forwards.
 _TOKEN_LOGGERS = ("uvicorn.access", "uvicorn.error", "httpx")
 _STEP_API = {"source": "step_api"}
+# The headers that say who a request is besides its role, which the served app reads once and strips before anything
+# behind it, a handler or a service, sees the request.
+_AGENT_TOKEN, _COMPUTER, _COMPUTER_TOKEN = (name.lower().encode() for name in (
+    AGENT_TOKEN_HEADER, AGENT_ENV_COMPUTER_HEADER, COMPUTER_TOKEN_HEADER))
+_IDENTITY_HEADERS = frozenset({_AGENT_TOKEN, _COMPUTER, _COMPUTER_TOKEN})
+# The routes beside the MCP endpoint and /step that act as the caller's role; every other route takes none.
+_ACTING_PREFIXES = ("/svc/", "/website/", "/browser/")
+# The key of a request's scope state holding who it acts as, which the served app resolves.
+_IDENTITY = "agentenv_identity"
+# How many distinct unrecognised agent tokens, and ignored computer names, the gateway logs before it stops logging
+# them, so a client sending made-up values can't grow its memory without end.
+_LOGGED_ONCE_MAX = 1000
 
 
 class SiteCard(NamedTuple):
@@ -187,6 +206,8 @@ class Gateway:
         listed_by_name: Iterable[str] = (),
         console_urls: Mapping[str, str] | None = None,
         console_frame_ancestors: Iterable[str] = (),
+        roles: Mapping[str, str] | None = None,
+        computer_digests: Mapping[str, str] | None = None,
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
         which the gateway takes off every request it forwards to a service behind it. `clock_followers` names the
@@ -198,7 +219,11 @@ class Gateway:
         that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
         requests its browser sends take. `console_urls` are the env's SQL consoles by key, each served at /svc/<key>/
         only with the control token or, on pgweb, a session minted from it, and not at all without one;
-        `console_frame_ancestors` are the origins besides its own that may show pgweb in a frame."""
+        `console_frame_ancestors` are the origins besides its own that may show pgweb in a frame. `roles` are the roles
+        it declares at startup, each with its auth, `none` or `token`. `computer_digests` are the sha256 of each
+        computer's attribution token: given, even empty, it believes AgentEnv-Computer only together with that
+        computer's token (AgentEnv-Computer-Token); without it, it believes the header alone while the driver's role is
+        open."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -212,7 +237,7 @@ class Gateway:
         self._site_cards: dict[str, SiteCard] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
-                                       self._attribution, self._request_role, withheld=self._withheld)
+                                       self._attribution, self._request_identity, withheld=self._withheld)
         for name in _TOKEN_LOGGERS:  # each names a CDP address's path, its token in it, at INFO
             log = logging.getLogger(name)
             if not any(isinstance(f, TokenRedaction) for f in log.filters):
@@ -221,6 +246,11 @@ class Gateway:
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
+        self._roles = Roles(roles)
+        self._unknown_agent_tokens: set[str] = set()  # digests, each logged once (_first_time)
+        self._computer_digests = dict(computer_digests) if computer_digests is not None else None
+        self._ignored_computers: set[str] = set()  # each logged once (_first_time)
+        self._extensions = [*GATEWAY_EXTENSIONS, ROLES_EXTENSION] if control_token else GATEWAY_EXTENSIONS
         self._control_token_children = frozenset(control_token_children)
         self._consoles = dict(console_urls or {}) if control_token else {}
         self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
@@ -323,6 +353,30 @@ class Gateway:
         @self._mcp.custom_route(f"/tools/{TOOL_ENABLE_ACTION}", methods=["POST"])
         async def tools_enable(request: Request) -> Response:
             return await self._handle_role_mutation(request, action=TOOL_ENABLE_ACTION)
+
+        if control_token:
+            @self._mcp.custom_route(ROLES_PATH, methods=["POST"])
+            async def roles_create(request: Request) -> Response:
+                return await self._roles_write(request, lambda body: self._roles.create(body.get("role"),
+                                                                                        body.get("auth")))
+
+            @self._mcp.custom_route(ROLES_PATH, methods=["GET"])
+            async def roles_state(request: Request) -> Response:
+                return self._json_response(self._roles.state(), 200)
+
+            @self._mcp.custom_route(ROLES_PATH, methods=["DELETE"])
+            async def roles_delete(request: Request) -> Response:
+                return await self._roles_write(request, lambda body: self._roles.delete(body.get("role")))
+
+            @self._mcp.custom_route(ROLE_MEMBERS_PATH, methods=["POST"])
+            async def roles_add_member(request: Request) -> Response:
+                return await self._roles_write(request, lambda body: self._roles.add_member(body.get("role"),
+                                                                                            body.get("agent_token")))
+
+            @self._mcp.custom_route(ROLE_MEMBERS_PATH, methods=["DELETE"])
+            async def roles_remove_member(request: Request) -> Response:
+                return await self._roles_write(request, lambda body: self._roles.remove_member(body.get("role"),
+                                                                                               body.get("member_id")))
 
         @self._mcp.custom_route("/state", methods=["GET"])
         async def get_state(request: Request) -> Response:
@@ -604,11 +658,12 @@ class Gateway:
             timeout_keep_alive=IDLE_CONNECTION_TIMEOUT_S,
         )
 
-    # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
-    # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
-    # session, in the session's server task before any handler task is spawned, so the key bound there is inherited
-    # by every tools/call of that session (and the role is the one its initialize request carried, which that task
-    # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
+    # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the request
+    # resolved to (Roles.resolve), with how it was established and the agent token's digest. Session: mcp's Server.run
+    # enters the session lifespan once per inbound MCP session, in the session's server task before any handler task is
+    # spawned, so the key bound there is inherited by every tools/call of that session (and the role is the one its
+    # initialize request resolved to, which that task inherited, checked again on each call). Process: child sessions
+    # and the time-trigger driver, outer to the MCP session manager's lifespan.
 
     def _keeps_control_token(self, path: str) -> bool:
         """Whether a request to ``path`` keeps the gateway's control token: its clock watch, where a computer it fronts
@@ -627,11 +682,15 @@ class Gateway:
             inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
-            if self._control_bearer and scope["type"] in ("http", "websocket"):
+            if scope["type"] not in ("http", "websocket"):
+                await inner(scope, receive, send)
+                return
+            identity = self._identify(scope.get("headers", ()))
+            if self._control_bearer:
                 headers = scope.get("headers", ())
                 pgweb = scope["type"] == "http" and self._console_session is not None and self._is_pgweb(scope)
                 link = self._console_session.opening_link(scope) if pgweb else None
-                bearer = hmac.compare_digest(dict(headers).get(b"authorization", b""), self._control_bearer)
+                bearer = self._bears_control_token(headers)
                 session = pgweb and not bearer and self._console_session.admits(scope)
                 if pgweb:
                     send = self._pgweb_send(send, renew=session and self._console_session.renews(scope))
@@ -651,21 +710,82 @@ class Gateway:
                     headers = [(name, value) for name, value in headers if not (
                         name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]
                 scope = {**scope, "headers": without_session_cookie(headers)}
+            scope = {**scope, "headers": [(name, value) for name, value in scope.get("headers", ())
+                                          if name.lower() not in _IDENTITY_HEADERS],
+                     "state": {**scope.get("state", {}), _IDENTITY: identity}}
+            if identity.refusal is not None and self._acts_as_role(scope["path"]):
+                await self._refuse(identity, scope, receive, send)
+                return
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
-            role = DEFAULT_ROLE
-            for name, value in scope.get("headers", ()):
-                if name == ROLE_HEADER_BYTES:
-                    role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
-                    break
-            token = Caller(role=role, session=Caller.current().session).bind()
+            token = Caller(identity.role, Caller.current().session, identity.source, identity.member).bind()
             try:
                 await inner(scope, receive, send)
             finally:
                 Caller.reset(token)
 
         return app
+
+    def _identify(self, headers: Iterable[tuple[bytes, bytes]]) -> Resolution:
+        """Who a request acts as (``Roles.resolve``), from its headers as it arrived, before any is stripped: the first
+        copy of each, decoded as Starlette decodes them. An agent token the gateway doesn't know is logged once, by a
+        prefix of its digest."""
+        first: dict[bytes, bytes] = {}
+        for name, value in headers:
+            first.setdefault(name.lower(), value)
+        agent_token = first.get(_AGENT_TOKEN, b"").strip()
+        agent_digest = digest(agent_token) if agent_token else None
+        identity = self._roles.resolve(first.get(ROLE_HEADER_BYTES, b"").decode("latin-1").strip(), agent_digest,
+                                       control=self._bears_control_token(headers), computer=self._computer(first))
+        if agent_digest is not None and not self._roles.roles_of(agent_digest) \
+                and _first_time(self._unknown_agent_tokens, agent_digest, "unrecognised agent tokens"):
+            logger.warning("an agent token the gateway doesn't recognise (sha256 %s...) counts as none",
+                           agent_digest[:12])
+        return identity
+
+    def _bears_control_token(self, headers: Iterable[tuple[bytes, bytes]]) -> bool:
+        return self._control_bearer is not None and hmac.compare_digest(
+            dict(headers).get(b"authorization", b""), self._control_bearer)
+
+    def _computer(self, headers: Mapping[bytes, bytes]) -> Computer | None:
+        """The computer a request says it comes from (AgentEnv-Computer), with the role driving it now; None for one
+        that names none. Started with computer digests, the gateway believes the header only with that computer's
+        attribution token, and otherwise ignores it, logged once per computer."""
+        name = headers.get(_COMPUTER, b"").decode("latin-1").strip()
+        if not name:
+            return None
+        if self._computer_digests is None:
+            return Computer(self._drivers.get(name), verified=False)
+        token = headers.get(_COMPUTER_TOKEN, b"").strip()
+        expected = self._computer_digests.get(name)
+        if token and expected is not None and hmac.compare_digest(digest(token), expected):
+            return Computer(self._drivers.get(name), verified=True)
+        if _first_time(self._ignored_computers, name[:100], "ignored AgentEnv-Computer names"):
+            logger.warning("ignored AgentEnv-Computer %r: it came without that computer's attribution token",
+                           name[:100])
+        return None
+
+    def _acts_as_role(self, path: str) -> bool:
+        """Whether a request to ``path`` acts as its role, and so may be refused it: the MCP endpoint, /step, and the
+        routes to a service, site or browser, but a SQL console, where only the env's owner acts and for no role."""
+        if path.rstrip("/") in (self._mcp.settings.streamable_http_path.rstrip("/"), "/step"):
+            return True
+        if path.startswith("/svc/") and path.removeprefix("/svc/").split("/", 1)[0] in self._consoles:
+            return False
+        return path.startswith(_ACTING_PREFIXES)
+
+    async def _refuse(self, identity: Resolution, scope: dict, receive, send) -> None:
+        """Answer a request that may not act as the role it resolved to with 403, a WebSocket's handshake included,
+        logged with its route, a CDP address's token left out, and the role it named."""
+        route = CDP_TOKEN.sub(r"\1<redacted>", scope["path"])
+        logger.warning("refused %s %s as %r: %s", scope.get("method", "WebSocket"), route, identity.role,
+                       identity.refusal)
+        response = self._json_response({"ok": False, "error": f"refused: {identity.refusal}"}, 403)
+        if scope["type"] == "http":
+            await response(scope, receive, send)
+        else:
+            await refuse_websocket(WebSocket(scope, receive, send), response)
 
     def _console_opened(self, scope: dict) -> Response:
         """The answer to a link that opened the pgweb console: its session cookie, and the console's index without the
@@ -712,7 +832,7 @@ class Gateway:
     async def _session_lifespan(self, mcp: FastMCP):
         """Once per inbound MCP session: the session's key joins the caller, and a connect gets to heal a failed
         startup discovery (tools/list is synchronous and cannot). Nothing process-scoped lives here."""
-        Caller(role=Caller.current().role, session=uuid4().hex).bind()
+        dataclasses.replace(Caller.current(), session=uuid4().hex).bind()
         try:
             await self._ensure_tools_discovered()
         except ToolNameClash as e:
@@ -787,16 +907,29 @@ class Gateway:
         original_call_tool = tm.call_tool
 
         def filtered_list_tools():
-            role = Caller.current().role
-            return [t for t in original_list_tools() if not self._is_disabled(role, t.name)]
+            caller = Caller.current()
+            if not self._roles.may_play(caller.role, caller.source, caller.member):
+                return []
+            return [t for t in original_list_tools() if not self._is_disabled(caller.role, t.name)]
 
         async def filtered_call_tool(name, arguments, context=None, convert_result=False):
-            role = Caller.current().role
+            caller = Caller.current()
+            role = caller.role
+            # an MCP session keeps the role its initialize took, so a role protected or a membership ended or begun
+            # since applies to it here, and the call records how it is authorized now
+            if (refusal := self._roles.refusal(role, caller.source, caller.member)) is not None:
+                logger.warning("refused tools/call %s as %r: %s", name, role, refusal)
+                raise ToolError(f"refused: {refusal}")
             if self._is_disabled(role, name):
                 raise ToolError(f"Tool '{name}' is disabled for role '{role}'")
+            caller = dataclasses.replace(caller, source=self._roles.source_now(role, caller.source, caller.member))
             native = name not in self._tool_server_urls
-            event_id = await self._log_native_tool_call(name, arguments, role) if native else None
-            result = await original_call_tool(name, arguments, context=context, convert_result=convert_result)
+            event_id = await self._log_native_tool_call(name, arguments, role, caller.source) if native else None
+            token = caller.bind()
+            try:
+                result = await original_call_tool(name, arguments, context=context, convert_result=convert_result)
+            finally:
+                Caller.reset(token)
             if native:
                 await self._log_native_tool_result(event_id, result)
             barrier_tasks, barrier_timeout_s = self._fire_triggers(role, name, arguments, result)
@@ -855,6 +988,21 @@ class Gateway:
                                                   f"didn't show it (waited up to {wait:g} s; one that has stopped "
                                                   "watching isn't waited for): their clocks are behind")}, 504)
         return self._json_response(state, 200)
+
+    async def _roles_write(self, request: Request, change) -> Response:
+        """A roles route: its JSON object body applied by ``change``, answering what it returns, or the status and
+        fields of the ``RoleError`` it raises. A body that isn't a JSON object is a 400 that never echoes it, since it
+        may carry an agent token."""
+        try:
+            body = await request.json()
+        except Exception:
+            return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+        if not isinstance(body, dict):
+            return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+        try:
+            return self._json_response(change(body), 200)
+        except RoleError as e:
+            return self._json_response({"ok": False, "error": str(e), **e.fields}, e.status)
 
     async def _change_clock(self, change, wait_s: float = 0.0) -> tuple[dict, list[str]]:
         """Every change of the clock goes through here. ``change`` applied, then: the time triggers re-evaluated when it
@@ -925,7 +1073,8 @@ class Gateway:
         base_url = url_map.get(service_name)
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
-        role = self._request_role(request)
+        identity = self._request_identity(request)
+        role = identity.role
         mcp_endpoint = self._mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
         mcp_server = mcp_endpoint is not None
         mcp_endpoint = mcp_endpoint or "mcp"
@@ -938,7 +1087,7 @@ class Gateway:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                                  withheld=self._withheld, mcp_endpoint=mcp_endpoint, site_names=site_names)
         changelog_before = self._query_changelog_id()
-        attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
+        attribution = self._attribution(role, identity.source)  # at the start: a fire may be gone when it ends
 
         async def log_write(status: int) -> None:
             changelog_after = self._query_changelog_id()
@@ -1029,17 +1178,18 @@ class Gateway:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
+    def _request_identity(self, request: HTTPConnection) -> Resolution:
+        """Who a request acts as: what the served app resolved before stripping its identity headers, else, for one
+        served without it, a resolution of its headers now. Read once per request, so its forwarding, its write and its
+        triggers name one role, whoever drives a computer after."""
+        state = request.scope.setdefault("state", {})
+        if _IDENTITY not in state:
+            state[_IDENTITY] = self._identify(request.scope.get("headers", ()))
+        return state[_IDENTITY]
+
     def _request_role(self, request: HTTPConnection) -> str:
-        """The role the gateway attributes a REST request to: the first AgentEnv-Role header; else, from a computer's
-        site proxy (AgentEnv-Computer), the role driving that computer as the request arrived; else the default role.
-        Read once per request, so its forwarding, its write and its triggers name one role, whoever drives after."""
-        known = getattr(request.state, "agentenv_role", None)
-        if known is None:
-            role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip()
-            computer = request.headers.get(AGENT_ENV_COMPUTER_HEADER, "").strip()
-            known = role or self._drivers.get(computer) or DEFAULT_ROLE
-            request.state.agentenv_role = known
-        return known
+        """The role the gateway attributes a request to (``_request_identity``)."""
+        return self._request_identity(request).role
 
     def _drive(self, role: str, tool_name: str) -> None:
         """An input call to a computer's tools makes its caller that computer's driver as it starts, so a request the
@@ -1167,7 +1317,7 @@ class Gateway:
         return None if child is None else self._rewrite_child_card(key, child)
 
     def _gateway_extensions(self) -> list[dict]:
-        return GATEWAY_EXTENSIONS
+        return self._extensions
 
     async def _serve_env_card(self) -> Response:
         """Compose the env card: the gateway's own extensions + each backing server's card nested
@@ -1380,7 +1530,8 @@ class Gateway:
         except Exception:
             return self._json_response({"error": "Invalid JSON body"}, 400)
         action = body.get("action")
-        role = self._request_role(request)
+        identity = self._request_identity(request)
+        role = identity.role
         source = _step_source(body)
         if source is None:
             return self._json_response({"error": f"'source' may only be '{STEP_SOURCE_POST_TURN_HOOK}', with a "
@@ -1388,7 +1539,7 @@ class Gateway:
         if action == "list_tools":
             return self._step_list_tools(role)
         elif action == "call_tool":
-            return await self._step_call_tool(body, role, source)
+            return await self._step_call_tool(body, role, source, role_auth=identity.source)
         else:
             return self._json_response({"error": f"Unknown action: {action}. Expected 'list_tools' or 'call_tool'."}, 400)
 
@@ -1406,7 +1557,8 @@ class Gateway:
         ]
         return self._json_response({"tools": tools}, 200)
 
-    async def _step_call_tool(self, body: dict, role: str, source: dict = _STEP_API) -> Response:
+    async def _step_call_tool(self, body: dict, role: str, source: dict = _STEP_API, *,
+                              role_auth: str = HEADER) -> Response:
         tool_name = body.get("tool_name")
         if not tool_name or not isinstance(tool_name, str):
             return self._json_response({"error": "Missing or invalid 'tool_name' field"}, 400)
@@ -1422,12 +1574,12 @@ class Gateway:
 
         server_url = self._tool_server_urls.get(tool_name)
         if server_url is None:
-            return await self._step_call_gateway_tool(tool_name, arguments, role, source)
+            return await self._step_call_gateway_tool(tool_name, arguments, role, source, role_auth=role_auth)
         tool_call_event_id = await self._log_event({
             "event_type": "tool_call",
             **source,
             "tool_call": {"function_name": tool_name, "arguments": arguments},
-            **self._attribution(role),
+            **self._attribution(role, role_auth),
         })
         try:
             async with self._tool_call_guard():
@@ -1461,7 +1613,7 @@ class Gateway:
             return self._json_response({"error": f"Tool execution failed ({type(e).__name__}): {error_detail}"}, 500)
 
     async def _step_call_gateway_tool(self, tool_name: str, arguments: dict, role: str = DEFAULT_ROLE,
-                                      source: dict = _STEP_API) -> Response:
+                                      source: dict = _STEP_API, *, role_auth: str = HEADER) -> Response:
         """Call a FastMCP-registered tool (e.g. list_website_urls) for /step."""
         tool = self._mcp._tool_manager._tools.get(tool_name)
         if tool is None:
@@ -1470,12 +1622,12 @@ class Gateway:
             "event_type": "tool_call",
             **source,
             "tool_call": {"function_name": tool_name, "arguments": arguments},
-            **self._attribution(role),
+            **self._attribution(role, role_auth),
         })
         try:
             async with self._tool_call_guard():
                 # bound as the MCP path binds it, so a tool that acts for its caller (schedule_check) reads the role
-                token = Caller(role=role, session=Caller.current().session).bind()
+                token = Caller(role=role, session=Caller.current().session, source=role_auth).bind()
                 try:
                     result = await tool.run(arguments)
                 finally:
@@ -1653,7 +1805,7 @@ class Gateway:
                     "function_name": tool_name,
                     "arguments": kwargs,
                 },
-                **self._attribution(caller.role),
+                **self._attribution(caller.role, caller.source),
             })
 
             async with self._tool_call_guard():
@@ -1702,13 +1854,13 @@ class Gateway:
         if self._trajectory_file and not self._trajectory_file.closed:
             self._trajectory_file.close()
 
-    async def _log_native_tool_call(self, name: str, arguments: dict | None, role: str) -> str | None:
+    async def _log_native_tool_call(self, name: str, arguments: dict | None, role: str, role_auth: str) -> str | None:
         """Trajectory record for a gateway-owned tool on the MCP path (fail-open)."""
         try:
             return await self._log_event({
                 "event_type": "tool_call",
                 "tool_call": {"function_name": name, "arguments": arguments or {}},
-                **self._attribution(role),
+                **self._attribution(role, role_auth),
             })
         except Exception:
             logger.exception(f"Failed to log tool_call for gateway tool '{name}'")
@@ -1736,11 +1888,11 @@ class Gateway:
         except Exception:
             logger.exception("Failed to log a failed tool call")
 
-    def _attribution(self, role: str) -> dict:
-        """Who made a tool call, for its trajectory event: the caller's role, and the trigger fires it was made for
-        when that role is an executor realizing them."""
+    def _attribution(self, role: str, role_auth: str) -> dict:
+        """Who made a tool call or request, for its trajectory event: the caller's role, how the gateway established it
+        (``role_auth``), and the trigger fires it was made for when that role is an executor realizing them."""
         causes = self._trigger_engine.caused_by(role)
-        return {"role": role, **({"caused_by": causes} if causes else {})}
+        return {"role": role, "role_auth": role_auth, **({"caused_by": causes} if causes else {})}
 
     async def _log_event(self, event: dict) -> str:
         async with self._event_lock:
@@ -1848,6 +2000,18 @@ class _ProxyArgModelBase(ArgModelBase):
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
         return kwargs
+
+
+def _first_time(seen: set[str], value: str, what: str) -> bool:
+    """Whether ``value`` is new to ``seen``, which it then joins, and so to be logged. Past ``_LOGGED_ONCE_MAX`` values
+    nothing more joins and nothing more is logged, which is said once, naming ``what`` goes unlogged."""
+    if value in seen or len(seen) > _LOGGED_ONCE_MAX:
+        return False
+    seen.add(value)
+    if len(seen) > _LOGGED_ONCE_MAX:
+        logger.warning("further %s are not logged", what)
+        return False
+    return True
 
 
 def _step_source(body: dict) -> dict | None:

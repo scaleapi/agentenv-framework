@@ -212,6 +212,25 @@ async def test_a_websocket_is_relayed_both_ways_and_each_connection_is_an_event_
 
 
 @pytest.mark.asyncio
+async def test_no_identity_header_and_no_role_the_client_wrote_reach_the_browser(tmp_path, monkeypatch):
+    """Discovery and the relay pass on the client's headers but the agent token, a computer's headers and the role it
+    named, which the gateway reads for the connection's event and keeps to itself."""
+    seen: list[dict] = []
+    sent = {"AgentEnv-Role": "buyer", "AgentEnv-Agent-Token": "agent-token", "AgentEnv-Computer": "desktop",
+            "AgentEnv-Computer-Token": "computer-token", "X-Kept": "yes"}
+    async with _gateway(tmp_path, monkeypatch, seen=seen) as (url, events), httpx.AsyncClient() as client:
+        discovered = (await client.get(f"{url}/browser/web/cdp/{TOKEN}/json/version", headers=sent)).json()
+        async with connect(discovered["webSocketDebuggerUrl"], additional_headers=sent) as conn:
+            await conn.send("hi")
+            await conn.recv()
+        recorded = await events(1)
+
+    assert [{name for name in headers if name.startswith("agentenv-")} for headers in seen] == [set(), set()]
+    assert [headers.get("x-kept") for headers in seen] == ["yes", "yes"]
+    assert [(event["role"], event["role_auth"]) for event in recorded] == [("buyer", "header")]
+
+
+@pytest.mark.asyncio
 async def test_the_providers_headers_reach_the_browser_on_no_cdp_route(tmp_path, monkeypatch):
     seen: list[dict] = []
     sent = {"CF-Access-Client-Id": "id", "X-Kept": "yes"}

@@ -20,8 +20,11 @@ CONTROL = {
     "/tools/disable": "POST", "/tools/enable": "POST",
     "/triggers/register": "POST", "/triggers/remove": "POST", "/triggers/clear": "POST",
     "/notifications/config": "POST", "/notifications/take": "POST", "/notifications/clear": "POST",
-    "/clock/followers": "PUT",
+    "/clock/followers": "PUT", "/roles": "POST", "/roles/members": "POST",
 }
+# Every verb the roles extension serves at its two paths, which the control check matches by path whatever the verb.
+ROLES = [("POST", "/roles"), ("GET", "/roles"), ("DELETE", "/roles"), ("POST", "/roles/members"),
+         ("DELETE", "/roles/members")]
 OPEN = {"/state": "GET", "/step": "POST", "/clock/time": "GET", "/clock/state": "GET", "/triggers/state": "GET",
         "/notifications/state": "GET", "/trajectory": "GET", "/changes": "GET", "/.well-known/agent-env.json": "GET",
         "/clock/set-time": "PUT", "/clock/advance": "PUT", "/clock/clear": "POST"}
@@ -70,6 +73,18 @@ async def test_a_control_route_answers_a_call_with_the_token(path):
     async with _client(TOKEN) as client:
         response = await client.request(CONTROL[path], path, json={}, headers={"Authorization": f"Bearer {TOKEN}"})
     assert response.status_code != 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, path", ROLES)
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}], ids=["none", "wrong"])
+async def test_every_roles_operation_refuses_a_call_without_the_token(method, path, headers):
+    async with _client(TOKEN) as client:
+        response = await client.request(method, path, json={"role": "brooke@example.com", "auth": {"type": "token"}},
+                                        headers=headers)
+        listed = await client.get("/roles", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert response.status_code == 401
+    assert listed.json() == {"roles": []}
 
 
 @pytest.mark.asyncio

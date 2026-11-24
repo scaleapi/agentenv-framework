@@ -314,3 +314,45 @@ async def test_a_site_that_refuses_the_handshake_has_its_answer_relayed():
         await site_server.shutdown()
 
     assert refused.value.response.status_code == 403 and unknown.value.response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_no_identity_header_reaches_the_site_and_it_reads_the_role_the_gateway_resolved(stack):
+    site, route = stack
+    async with connect(f"{route}/live", additional_headers=[
+            ("AgentEnv-Role", "grader"), ("AgentEnv-Agent-Token", "agent-token"), ("AgentEnv-Computer", "desktop"),
+            ("AgentEnv-Computer-Token", "computer-token")]) as websocket:
+        await websocket.send("hello")
+        await asyncio.wait_for(websocket.recv(), 5)
+
+    ((_, headers),) = site.handshakes
+    assert {name for name in headers if name.startswith("agentenv-")} == {"agentenv-role"}
+    assert headers["agentenv-role"] == "grader"
+
+
+@pytest.mark.asyncio
+async def test_a_websocket_naming_a_token_role_without_its_token_is_refused_before_it_reaches_the_site():
+    site = EchoSite()
+    site_server, site_port = await serve(site.app)
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                      rest_proxy_urls={"notes": f"http://127.0.0.1:{site_port}"},
+                      website_urls={"notes": f"http://127.0.0.1:{site_port}"}, control_token="s3cret")
+    gateway._roles.create("brooke@example.com", {"type": "token"})
+    gateway._roles.add_member("brooke@example.com", "member-token")
+    gateway_server, gateway_port = await serve(gateway._asgi_app())
+    route = f"ws://127.0.0.1:{gateway_port}/website/notes/live"
+    try:
+        with pytest.raises(InvalidStatus) as refused:
+            async with connect(route, additional_headers=[("AgentEnv-Role", "brooke@example.com")]):
+                pass
+        async with connect(route, additional_headers=[("AgentEnv-Role", "brooke@example.com"),
+                                                      ("AgentEnv-Agent-Token", "member-token")]) as websocket:
+            await websocket.send("hello")
+            echoed = await asyncio.wait_for(websocket.recv(), 5)
+    finally:
+        await gateway_server.shutdown()
+        await site_server.shutdown()
+
+    assert refused.value.response.status_code == 403
+    assert echoed == "HELLO"
+    assert [headers["agentenv-role"] for _, headers in site.handshakes] == ["brooke@example.com"]

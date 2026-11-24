@@ -143,10 +143,11 @@ def upstream_url(base_url: str, request: HTTPConnection) -> str:
 
 def client_headers(connection: HTTPConnection, withheld: frozenset[bytes] = frozenset()) -> list[tuple[bytes, bytes]]:
     """What any route of the gateway may pass on of a connection's headers: one entry per raw header, so repeated
-    fields (cookie, x-forwarded-for) keep their multiplicity, minus the hop-by-hop set and the headers named in
-    `withheld` (lower case), the credentials of the provider in front of the gateway, so no service behind it reads
-    them."""
-    return [(k, v) for k, v in connection.headers.raw if k.lower() not in HOP_BY_HOP and k.lower() not in withheld]
+    fields (cookie, x-forwarded-for) keep their multiplicity, minus the hop-by-hop set, the role the client named,
+    which only the gateway writes upstream, and the headers named in `withheld` (lower case), the credentials of the
+    provider in front of the gateway, so no service behind it reads them."""
+    return [(k, v) for k, v in connection.headers.raw
+            if k.lower() not in HOP_BY_HOP and k.lower() != ROLE_HEADER_BYTES and k.lower() not in withheld]
 
 
 def upstream_headers(request: HTTPConnection, role: str, *, withheld: frozenset[bytes] = frozenset(),
@@ -156,8 +157,7 @@ def upstream_headers(request: HTTPConnection, role: str, *, withheld: frozenset[
     the upstream never reads a value the gateway did not write. So are the forwarded-address headers
     (`forwarded_address`), and ``Host`` is the site's own name when the client reached it at one of `site_names`
     (``site_host``), else the upstream's address."""
-    headers = httpx.Headers([(k, v) for k, v in client_headers(request, withheld)
-                             if k.lower() != ROLE_HEADER_BYTES and k.lower() not in _FORWARDED])
+    headers = httpx.Headers([(k, v) for k, v in client_headers(request, withheld) if k.lower() not in _FORWARDED])
     headers[AGENT_ENV_ROLE_HEADER] = role
     headers.update(forwarded_address(request))
     if host := site_host(request, site_names):
