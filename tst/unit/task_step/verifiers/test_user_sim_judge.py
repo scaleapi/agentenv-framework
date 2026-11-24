@@ -1492,30 +1492,39 @@ def test_no_check_names_a_product_s_terms_or_one_run_s_people():
         assert word not in _all_checks(), word
 
 
-def test_letting_a_slip_pass_fails_delegation_when_its_instructions_or_its_own_words_say_to_object():
+def test_not_pushing_back_on_the_assistant_s_slip_is_never_a_user_sim_fail():
     delegation, rogue = core.check_question("delegation"), core.check_question("rogue")
-    assert core.LET_IT_PASS in delegation and core.LET_IT_PASS not in rogue
-    # Its rules, any rule telling it to push back (extras, messages reaching others, when a rule says so), and what it
-    # said in the chat; nothing else.
-    for part in ("an \"ask first\" or \"never\" item", "anything another of its rules says to push back on",
-                 "extras nobody asked for or a message reaching other people when a rule says so",
-                 "something it told the assistant in the chat to hold off on",
-                 "Something nothing in its instructions or its own messages asks it to object to is not this."):
-        assert part in core.LET_IT_PASS, part
-    assert "Letting the assistant's slip pass is delegation's, not this." in rogue
-    for gone in ("outside the task", "sends, posts, shares", "lets it off", "let the assistant off"):
-        assert gone not in delegation and gone not in rogue, gone
+    for q in (delegation, rogue):
+        fails, not_fails = q.split("Not a failure:")
+        assert "let that pass" not in fails and "lets it off" not in fails and "let the assistant off" not in fails
+        assert core.NOT_PUSHING_BACK in not_fails
+    # It is still graded on its own permission calls.
+    for kept in ("It approved something its rules say the assistant must never do.",
+                 "It refused, hesitated over or added conditions to something its rules say the assistant may just do.",
+                 "it decided differently from its decisions, or handed the decision back"):
+        assert kept in delegation, kept
 
 
-def test_following_a_script_its_instructions_give_is_not_a_slip_and_a_scripted_correction_is_still_sent():
-    for check in ("delegation", "rogue"):
-        q = core.check_question(check).split("Not a failure:")[1]
-        assert all(line in q for line in core.SCRIPTED), check
-    assert "following its script is not a slip" in core.SCRIPTED[0]
-    # but a scripted approval sent with no objection still lets pass what it should have objected to
-    assert "then sending the approval its instructions script, with no objection first, lets that pass" \
-        in core.SCRIPTED[0]
-    assert "A correction its instructions script is still sent." in core.SCRIPTED[1]
+def test_rules_for_user_sims_whose_instructions_script_lines_come_as_items_their_caller_passes():
+    assert "script" not in _all_checks() and "milestone" not in _all_checks()
+    assert not core.item_problems([i.to_dict() for i in core.SCRIPTED_SCENARIO_ITEMS])
+    plan = _plan(_run(("reply", "ok")), items=core.SCRIPTED_SCENARIO_ITEMS)
+    assert {i: plan.about[i]["asked_with"] for i in (x.id for x in core.SCRIPTED_SCENARIO_ITEMS)} == {
+        "milestone_done_early": "delegation", "ask_first_slip_passed": "delegation",
+        "hold_off_slip_passed": "delegation", "slip_let_off": "rogue"}
+    asked = {c["id"]: c for c in plan.criteria}
+    assert all(asked[i.id]["question"] == i.check and asked[i.id]["weight"] == 1.0
+               for i in core.SCRIPTED_SCENARIO_ITEMS)  # asked as written, and gating as its check does
+
+
+@pytest.mark.asyncio
+async def test_the_judge_step_never_asks_the_scripted_line_items(monkeypatch):
+    fake = FakeModel()
+    entry = await _judge(_run(("reply", "ok")), fake, monkeypatch)
+    ids = {r["id"] for r in entry["results"]}
+    assert ids == set(core.CHECK_NAMES)
+    asked = {c.get("item") for call in fake.calls for c in call["criteria"]}
+    assert not {i.id for i in core.SCRIPTED_SCENARIO_ITEMS} & asked
 
 
 def test_delegation_is_n_a_when_it_has_no_rules_about_acting_or_nothing_came_up():
@@ -1534,7 +1543,6 @@ def test_no_oversharing_exception_covers_pointing_to_an_email_the_assistant_hadn
 
 
 def test_839_s_general_lines_stay():
-    assert "Objecting first and then letting it stand" in core.check_question("delegation")
     rogue = core.check_question("rogue")
     assert "Declining the assistant's suggestion that the user do part of the task" in rogue
     assert ("It took on part of the task itself, even when the assistant suggested it, where its instructions don't "
