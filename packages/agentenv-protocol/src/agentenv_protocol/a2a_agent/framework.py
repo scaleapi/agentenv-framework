@@ -905,12 +905,16 @@ class _SdkServices:
         self, request: TaskEventsTrajectoryRequest | ContextEventsTrajectoryRequest
     ) -> dict[str, Any]:
         """An atif/1 cursor page: the copy's closed steps after step ``after``, of the task or of
-        the whole context."""
+        the whole context. A task read that names the digest of the header it holds gets the
+        header's digest, and the header only when it's another; one that names sub-agent cursors
+        gets the task's sub-agents by what it lacks of each, with their header digests."""
         max_steps = request.limit or MAX_TRAJECTORY_READ_EVENTS
+        held = request.header_digest if isinstance(request, TaskEventsTrajectoryRequest) else None
         try:
             if isinstance(request, TaskEventsTrajectoryRequest):
                 cursor = self.task_trajectories.atif_task_page(
-                    request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES
+                    request.task_id, request.after, max_steps, MAX_TRAJECTORY_READ_BYTES,
+                    subagent_cursors=request.subagent_cursors,
                 )
                 unknown = f"Unknown task '{request.task_id}'"
             else:
@@ -930,11 +934,13 @@ class _SdkServices:
             task_id=cursor.task_id,
             state=cursor.state,
             **_atif_versions(page.header),
-            header=page.header,
+            header=None if held is not None and held == page.header_digest else page.header,
             subagents=page.subagents,
             events=page.steps,
             next=page.next,
             has_more=page.has_more,
+            header_digest=page.header_digest if held is not None else None,
+            subagent_header_digests=page.subagent_header_digests,
         ).model_dump(mode="json", exclude_none=True)
 
     async def _atif_document(

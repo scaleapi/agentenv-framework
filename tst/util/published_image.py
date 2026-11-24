@@ -1,5 +1,6 @@
 """Tag an image on this machine's Docker the way the gateway tier's and the base computer's fixtures do: pulled when the
-registry serves the image agent-env published from the same Dockerfile and build context, else built here."""
+registry serves the image agent-env published from the same Dockerfile and build context, else built here. And hold the
+registry still for a test, as the integration tier does for each."""
 
 from __future__ import annotations
 
@@ -8,6 +9,9 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from agent_env.env import published_images
 from agent_env.env.bootstrap import PUBLISHED_IMAGES
 from agent_env.env.published_images import published_pinned
 from agent_env.store.image_store.registry_api import read_manifest
@@ -33,6 +37,21 @@ def pull_published_else_build(name: str, dockerfile: Path, context: Path, tag: s
         logger.warning(f"Pulling {name}'s published image failed, so it's built: {e}")
     logger.info(f"Building {name} Docker image...")
     build_image(dockerfile, context, tag, platform=platform)
+
+
+def hold_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For the rest of the test, each image's published digest, or that it has none, as the test's first lookup of it
+    found it: a release can publish an image between two runs of one test's bundle, and the second would then plan a
+    pull where the first built. The lookup keeps what it finds published for the process, not what it doesn't."""
+    lookup = published_images._registry_digest
+    answers: dict[str, str | None] = {}
+
+    def held(ref: str) -> str | None:
+        if ref not in answers:
+            answers[ref] = lookup(ref)
+        return answers[ref]
+
+    monkeypatch.setattr(published_images, "_registry_digest", held)
 
 
 def _platform_image(pinned: str | None, platform: str) -> str | None:

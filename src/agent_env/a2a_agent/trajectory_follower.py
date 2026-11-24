@@ -27,6 +27,7 @@ from agent_env.a2a_agent.protocol import extension_error_code, raise_for_extensi
 logger = logging.getLogger(__name__)
 
 _CURSOR_FIELDS = frozenset(request_fields(TaskEventsTrajectoryRequest).required)
+_HELD_FIELDS = _CURSOR_FIELDS | {"format", "header_digest", "subagent_cursors"}
 _OPEN_STATES = frozenset({TrajectoryState.PENDING, TrajectoryState.RUNNING})
 _READ_TIMEOUT_SECONDS = 30
 _MAX_BACKOFF_SECONDS = 60
@@ -45,8 +46,8 @@ class _NotStarted(Exception):
 class TrajectoryBatch:
     """Events ``after`` to ``next`` of a task's trajectory, as one read returned them; ``last``
     when the task has ended and no event remains unread. An atif/1 read's also carry the document's ``header``, its
-    ``subagents`` as far as served and its versions; ``stopped`` names why an atif/1 follow ended before the task did
-    (the agent's refusal), with no events."""
+    ``subagents`` as far as served (by their new steps alone, each with its header, for a follow with cursors) and its
+    versions; ``stopped`` names why an atif/1 follow ended before the task did (the agent's refusal), with no events."""
 
     after: int
     next: int
@@ -62,6 +63,46 @@ class TrajectoryBatch:
 
 
 TrajectorySink = Callable[[TrajectoryBatch], Awaitable[None]]
+
+
+@dataclass
+class _Held:
+    """What a follower holds of an atif/1 document, which its reads name so the agent sends only what it lacks: the
+    latest header and its digest, and each sub-agent's header, digest and last step. It makes each page stand alone
+    again, carrying the latest header and each served sub-agent's."""
+
+    header: dict[str, Any] | None = None
+    digest: str = ""
+    subs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def request(self) -> dict[str, Any]:
+        return {"header_digest": self.digest, "subagent_cursors": {
+            sub_id: {"after": sub["after"], "header_digest": sub["digest"]} for sub_id, sub in self.subs.items()}}
+
+    def take(self, page: AtifEventsResponse) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        if page.header is not None:
+            self.header = page.header
+        self.digest = page.header_digest or self.digest
+        digests = page.subagent_header_digests or {}
+        served = []
+        for entry in page.subagents:
+            sub = self.subs.setdefault(entry["trajectory_id"], {"head": {}, "digest": "", "after": 0})
+            if digests.get(entry["trajectory_id"], sub["digest"]) != sub["digest"]:
+                sub["head"] = {key: value for key, value in entry.items() if key != "steps"}
+                sub["digest"] = digests[entry["trajectory_id"]]
+            steps = entry.get("steps") or []
+            if steps:
+                sub["after"] = steps[-1]["step_id"]
+            served.append({**sub["head"], "steps": steps})
+        return self.header, served
+
+
+def live_reads_take_cursors(card: dict) -> bool:
+    """Whether the agent's live atif/1 reads take the digest of the header the reader holds and a cursor per
+    sub-agent; an agent on an older SDK's card doesn't declare them."""
+    extension = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+    method, _ = A2AAgent.operation(extension, "get")
+    return bool(method) and card_request_accepts(method.get("request") or {}, _HELD_FIELDS)
 
 
 def live_trajectory_endpoint(card: dict, a2a_url: str) -> str | None:
@@ -86,6 +127,7 @@ async def follow_trajectory(
     headers: Mapping[str, str] | None = None,
     format: str | None = None,
     fallback_format: str | None = None,
+    cursors: bool = False,
 ) -> None:
     """Read task ``task_id``'s trajectory from its first event, handing ``sink`` each page that has
     events and the last one, until the task has ended and every event is read. Each read names
@@ -94,7 +136,10 @@ async def follow_trajectory(
     An atif/1 follow the agent refuses before any of its pages was stored goes on in ``fallback_format`` from the
     task's first event; one refused after that hands ``sink`` a batch naming why it ``stopped`` and ends, so a turn's
     pages never mix formats. Before its first page, an atif/1 read answered 404 is a copy not started yet, read again
-    until ``stop`` is set.
+    until ``stop`` is set. With ``cursors`` (an agent whose card takes them), each atif/1 read names the digest of the
+    header it holds and how far it holds each sub-agent, so the agent sends the header only when it changed and each
+    sub-agent's steps as they close, the step that started it open or not; each batch still carries the latest header
+    and each served sub-agent's.
 
     Between reads it waits ``poll_interval_seconds``, or less once ``stop`` is set. Transport errors
     and 5xx answers are retried with backoff until ``stop`` is set, and end following after it; a
@@ -104,11 +149,13 @@ async def follow_trajectory(
     reading = format
     named = {"format": format} if format is not None else {}
     stored_atif = False
+    held = _Held() if cursors and format == ATIF else None
     async with nullcontext(client) if client is not None else httpx.AsyncClient() as http:
         while True:
             try:
+                holding = held.request() if held is not None and reading == ATIF else {}
                 response = await http.post(
-                    endpoint, json={"task_id": task_id, "after": after, **named}, headers=headers,
+                    endpoint, json={"task_id": task_id, "after": after, **named, **holding}, headers=headers,
                     timeout=_READ_TIMEOUT_SECONDS,
                 )
                 if response.status_code == 404:
@@ -145,8 +192,10 @@ async def follow_trajectory(
                 page = parse_response(AtifEventsResponse if atif else TrajectoryEventsResponse, response.json(),
                                       operation="trajectory get")
                 last = page.state not in _OPEN_STATES and not page.has_more
-                if page.events or last:
-                    extra = ({"header": page.header, "subagents": page.subagents, "schema_version": page.schema_version,
+                header, subagents = (held.take(page) if held is not None else (page.header, page.subagents)) \
+                    if atif else (None, [])
+                if page.events or subagents or last:
+                    extra = ({"header": header, "subagents": subagents, "schema_version": page.schema_version,
                               "profile_version": page.profile_version} if atif else {})
                     await sink(
                         TrajectoryBatch(
@@ -160,7 +209,7 @@ async def follow_trajectory(
                         )
                     )
                     after = page.next
-                    stored_atif = stored_atif or (atif and bool(page.events))
+                    stored_atif = stored_atif or (atif and bool(page.events or subagents))
                 if last:
                     return
                 if page.has_more:

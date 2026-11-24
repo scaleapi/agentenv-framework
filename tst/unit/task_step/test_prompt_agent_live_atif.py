@@ -5,6 +5,7 @@ serving partway ends with the reason. Against a live SDK agent served in-process
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from pathlib import Path
 
@@ -13,9 +14,10 @@ import pytest
 from agentenv_protocol.a2a_agent import TrajectoryState
 from agentenv_protocol.atif import FORMAT as ATIF, media_paths, tasks
 
-from agent_env.a2a_agent.trajectory_follower import TrajectoryBatch, follow_trajectory
+from agent_env.a2a_agent.trajectory_follower import TrajectoryBatch, follow_trajectory, live_reads_take_cursors
 from agent_env.task_step.snapshot_utils import atif_copies
 from agent_env.task_step.snapshot_utils.live_trajectory import LiveTrajectoryChunks
+from agent_env.task_step.task_steps import prompt_agent as pa
 from tst.unit.task_step.test_prompt_agent_atif_copies import _PREFIX, NATIVE, _atifs, _Run
 from tst.util.granting_object_store import GrantingObjectStore
 
@@ -87,6 +89,96 @@ async def test_a_turns_header_is_stored_once_per_change_not_once_a_page(monkeypa
     pages = [name for name in files if name.endswith(".jsonl")]
     assert json.loads(files["meta.json"])["format"] == ATIF and len(pages) >= 2
     assert 1 <= len({files[name] for name in headers}) == len(headers) < len(pages) + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursors", [True, False], ids=["card-takes-cursors", "older-card"])
+async def test_an_agent_whose_card_takes_cursors_sends_the_header_only_when_it_changed(monkeypatch, tmp_path, cursors):
+    """An older agent's card doesn't take them, and it's read as before #890's follower did: the header on every read,
+    the stored pages the same either way. The turn holds until three reads were answered, so some find it unchanged."""
+    answered = asyncio.Event()
+    if not cursors:
+        monkeypatch.setattr(pa, "live_reads_take_cursors", lambda card: False)
+    run = _Run(monkeypatch, tmp_path, live=True, gate=answered)
+    reads: list[tuple[dict, dict]] = []
+
+    def seen(request, path, sent, response):
+        if path == "/ext/trajectory" and sent.get("format") == ATIF and "after" in sent and response.status_code == 200:
+            reads.append((sent, json.loads(response.content)))
+            if len(reads) >= 3:
+                answered.set()
+
+    run.wire.answer = seen
+    context = run.context()
+    response = await run.execute(context, live_trajectory=True, max_conversation_turns=1)
+
+    [files] = _live(run).values()
+    header, steps = _reassembled(files)
+    final = run.read(_atifs(response)[-1]["url"])
+    assert steps == final["steps"][:len(steps)] and header["agent"] == final["agent"]
+    served = [answer["header"] for _, answer in reads if "header" in answer]
+    if cursors:
+        assert all("header_digest" in sent and sent["subagent_cursors"] == {} for sent, _ in reads)
+        assert len(served) < len(reads) and all(a != b for a, b in zip(served, served[1:]))
+    else:
+        assert not any("header_digest" in sent or "subagent_cursors" in sent for sent, _ in reads)
+        assert len(served) == len(reads)
+
+
+def test_only_a_card_declaring_the_digest_and_cursors_takes_them(monkeypatch, tmp_path):
+    card = _Run(monkeypatch, tmp_path, live=True).card
+    older = copy.deepcopy(card)
+    [trajectory] = [ext for ext in older["capabilities"]["extensions"] if ext["uri"].endswith("trajectory/v1")]
+    for branch in trajectory["params"]["methods"]["get"]["request"]["oneOf"]:
+        branch["optional"] = [name for name in branch.get("optional", []) if "digest" not in name and "cursor" not in name]
+    assert live_reads_take_cursors(card) and not live_reads_take_cursors(older)
+
+
+@pytest.mark.asyncio
+async def test_a_follow_with_cursors_stores_a_running_sub_agents_steps_before_the_call_that_started_it_closes(tmp_path):
+    """A read names what the follower holds; the agent sends what's new: a sub-agent's steps while the root has none."""
+    store = GrantingObjectStore(str(tmp_path / "store"), reaches=True)
+    sink = LiveTrajectoryChunks(store, "p/", "turn-1")
+    sub_head = {"trajectory_id": "toolu_1", "agent": {"name": "explorer"}}
+    step = lambda n, text: {"step_id": n, "source": "agent", "message": text}  # noqa: E731
+    answers = [
+        ({"header_digest": "", "subagent_cursors": {}}, "running", {
+            "header": {"session_id": "c", "trajectory_id": "d"}, "header_digest": "sha256:h1", "events": [step(1, "r1")],
+            "next": 1, "subagents": [{**sub_head, "steps": [step(1, "s1")]}],
+            "subagent_header_digests": {"toolu_1": "sha256:s"}}),
+        ({"header_digest": "sha256:h1", "subagent_cursors": {"toolu_1": {"after": 1, "header_digest": "sha256:s"}}},
+         "running", {"header_digest": "sha256:h1", "events": [], "next": 1,
+                     "subagents": [{"trajectory_id": "toolu_1", "steps": [step(2, "s2")]}],
+                     "subagent_header_digests": {"toolu_1": "sha256:s"}}),
+        ({"header_digest": "sha256:h1", "subagent_cursors": {"toolu_1": {"after": 2, "header_digest": "sha256:s"}}},
+         "completed", {"header": {"session_id": "c", "trajectory_id": "d", "final_metrics": {"total_steps": 2}},
+                       "header_digest": "sha256:h2", "events": [step(2, "r2")], "next": 2, "subagents": [],
+                       "subagent_header_digests": {"toolu_1": "sha256:s"}}),
+    ]
+    stored_before_root_closed: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        expected, state, page = answers.pop(0)
+        assert {key: sent[key] for key in expected} == expected
+        if state == "completed":
+            stored_before_root_closed.extend(store.list("p/turn-1/live/sub/"))
+        return httpx.Response(200, json={"context_id": "c", "task_id": "t", "state": state, "format": ATIF,
+                                         "schema_version": "ATIF-v1.8", "profile_version": "1.0", "has_more": False,
+                                         **page})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        await follow_trajectory("http://agent.test/ext/trajectory", "t", sink, poll_interval_seconds=0,
+                                stop=asyncio.Event(), client=client, format=ATIF, fallback_format=NATIVE, cursors=True)
+
+    names = sorted(key[len("p/turn-1/live/"):] for key in store.list("p/turn-1/live/"))
+    assert sorted(key[len("p/turn-1/live/"):] for key in stored_before_root_closed) == [
+        "sub/toolu_1/00000000-00000001.0001.header.json", "sub/toolu_1/00000000-00000001.jsonl",
+        "sub/toolu_1/00000001-00000002.jsonl"]
+    assert [n for n in names if n.endswith(".header.json") and "/" not in n] == [
+        "00000000-00000001.0001.header.json", "00000001-00000002.0002.header.json"]
+    assert json.loads(store.read("p/turn-1/live/sub/toolu_1/00000000-00000001.0001.header.json")) == sub_head
+    assert not answers
 
 
 @pytest.mark.asyncio

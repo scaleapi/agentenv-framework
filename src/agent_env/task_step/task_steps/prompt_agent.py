@@ -27,7 +27,7 @@ from agent_env.a2a_agent.object_transfer import (
     trajectory_mode,
 )
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
-from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
+from agent_env.a2a_agent.trajectory_follower import live_reads_take_cursors, live_trajectory_endpoint
 from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
@@ -657,7 +657,8 @@ class PromptAgentTaskStep(TaskStep):
         atif_copies = AtifCopies(context, agent, target_url, traj_ext_cached,
                                  prescribed=ATIF_FORMAT in prescribed_formats(context))
         live = self._live_trajectory_target(context, card, target_url, trajectory_output_prefix)
-        live_atif = LiveAtif(atif_copies.pull_live_media, atif_copies.folder) if atif_copies.replaces_native else None
+        live_atif = LiveAtif(atif_copies.pull_live_media, atif_copies.folder, cursors=live_reads_take_cursors(card)) \
+            if atif_copies.replaces_native else None
         live_turns = (
             LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds, headers=agent.control_headers,
                       format=formats.native, atif=live_atif)
