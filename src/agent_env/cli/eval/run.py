@@ -8,7 +8,7 @@ from uuid import uuid4
 import click
 
 from agent_env.cli import submitted_runs
-from agent_env.cli.utils import judge_samples_option
+from agent_env.cli.utils import judge_samples_option, min_judge_agreement_option
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.store.ids import fs_safe
@@ -36,10 +36,11 @@ def _write_context(context, task_id, output_dir, prefix=""):
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @judge_samples_option
+@min_judge_agreement_option
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--skip-lint", is_flag=True,
               help="Run tasks agent-env task lint finds errors in, saying them, as eval run did before it linted")
-def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, judge_samples: int | None, agent_artifact_id: str | None, skip_lint: bool):
+def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, judge_samples: int | None, min_judge_agreement: float | None, agent_artifact_id: str | None, skip_lint: bool):
     """Run all tasks in an eval through the configured [runner], concurrently."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
@@ -84,8 +85,11 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     client_id = get_agent_env_client_id()
     base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else {}
-    if overrides := {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
-                                                   ("judge_samples", judge_samples)) if value}:
+    overrides = {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
+                                               ("judge_samples", judge_samples)) if value}
+    if min_judge_agreement is not None:
+        overrides["min_judge_agreement"] = min_judge_agreement
+    if overrides:
         base_metadata["user_overrides"] = overrides
 
     submissions = [(f"[{task.id} run {i}]" if k > 1 else f"[{task.id}]", task, copy.deepcopy(base_metadata), None)

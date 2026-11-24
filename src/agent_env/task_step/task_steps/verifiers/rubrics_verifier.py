@@ -499,8 +499,8 @@ def _unbatchable_format_message(output_format: JudgeOutputFormat) -> str:
     return f"judge_batch_size does not apply to output_format={output_format.value}."
 
 
-def _unsamplable_format_message(output_format: JudgeOutputFormat) -> str:
-    return (f"judge_samples does not apply to output_format={output_format.value}: only a rubric_binary or "
+def _unsamplable_format_message(output_format: JudgeOutputFormat, field: str = "judge_samples") -> str:
+    return (f"{field} does not apply to output_format={output_format.value}: only a rubric_binary or "
             "rubric_partial judge's rows have one score each to take the median of.")
 
 
@@ -553,7 +553,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     context_paths = ("context_facts_for_judge{}",)
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
         ("judge_a2a_agent_id", "default_model", "default_model_api_base", "effort", "max_thinking_tokens",
-         "judge_sandbox_type", "judge_batch_size", "judge_batch_concurrency", "judge_samples"), FieldScope.USER)}
+         "judge_sandbox_type", "judge_batch_size", "judge_batch_concurrency", "judge_samples", "min_judge_agreement"),
+        FieldScope.USER)}
     DEFAULT_JUDGE_TIMEOUT_SECONDS: ClassVar[int] = 1000
     DEFAULT_JUDGE_BATCH_CONCURRENCY: ClassVar[int] = 4
     _PER_ROW_EVIDENCE_NOTE: ClassVar[str] = (
@@ -611,6 +612,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_batch_size: Optional[int] = None,
         judge_batch_concurrency: Optional[int] = None,
         judge_samples: Optional[int] = None,
+        min_judge_agreement: Optional[float] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
@@ -637,6 +639,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         # Grade each criterion this many times and keep its median, the lower middle score on a tie, every sample's
         # score kept.
         self.judge_samples = judge_samples_rule.validated(judge_samples)
+        # The share of samples that must give each criterion's kept verdict, else the grade fails; None is the
+        # default, 1.0, so a split fails rather than being decided by the median.
+        self.min_judge_agreement = judge_samples_rule.validated_agreement(min_judge_agreement)
         # An agent judge call (a batch's, with batches) that runs out of judge_timeout_seconds is tried again this many
         # times, and the timed-out attempt's trajectory is kept; None keeps the first timeout fatal, as it always was.
         if judge_timeout_retries is not None and (isinstance(judge_timeout_retries, bool)
@@ -706,6 +711,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise ValueError(_unbatchable_format_message(self.output_format))
         if (self.judge_samples or 1) > 1 and not self._spec().samplable:
             raise ValueError(_unsamplable_format_message(self.output_format))
+        if self.min_judge_agreement is not None and not self._spec().samplable:
+            raise ValueError(_unsamplable_format_message(self.output_format, "min_judge_agreement"))
 
     def _spec(self) -> JudgeOutputFormatSpec:
         return get_judge_output_format_spec(self.output_format)
@@ -777,6 +784,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             base["judge_batch_concurrency"] = self.judge_batch_concurrency
         if self.judge_samples is not None:
             base["judge_samples"] = self.judge_samples
+        if self.min_judge_agreement is not None:
+            base["min_judge_agreement"] = self.min_judge_agreement
         if self.judge_timeout_retries is not None:
             base["judge_timeout_retries"] = self.judge_timeout_retries
         if self.judge_max_turns is not None:
@@ -810,6 +819,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             run_context_for_judge=data.get("run_context_for_judge"),
             judge_batch_size=data.get("judge_batch_size"),
             judge_samples=data.get("judge_samples"),
+            min_judge_agreement=data.get("min_judge_agreement"),
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
             judge_timeout_retries=data.get("judge_timeout_retries"),
             judge_max_turns=data.get("judge_max_turns"),
@@ -885,6 +895,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             "judge_batch_size": _override_or(overrides, "judge_batch_size", self.judge_batch_size),
             "judge_batch_concurrency": _override_or(overrides, "judge_batch_concurrency", self.judge_batch_concurrency),
             "judge_samples": _override_or(overrides, "judge_samples", self.judge_samples),
+            "min_judge_agreement": _override_or(overrides, "min_judge_agreement", self.min_judge_agreement),
             "judge_sandbox_type": (overrides.get("agent_sandbox") or self.judge_sandbox_type)
             if use_agent_judge and self.agent_name is None else self.judge_sandbox_type,
         }
@@ -901,8 +912,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys one, and
         ``overridden``, the settings this run's overrides changed. Once the judge has called, its effort and thinking
         budget are those its calls carried, ``not_sent`` those it couldn't send, with ``judge_endpoint_host`` and any
-        ``temperature`` and ``seed`` the config gave a direct call; a run's ``judge_samples`` its format can't take is
-        in ``not_sent`` too. Never a key, header or base URL."""
+        ``temperature`` and ``seed`` the config gave a direct call; a run's ``judge_samples`` or ``min_judge_agreement``
+        its format can't take is in ``not_sent`` too, and a sampled judge's ``min_judge_agreement`` is the bar it
+        applied, the default included. Never a key, header or base URL."""
         settings = super().verifier_settings(context)
         settings.pop("default_model_api_base", None)
         values, stored = self._recorded_values(context), self._recorded_values(TaskStepContext())
@@ -926,11 +938,18 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 settings["judge_endpoint_host"] = judge.endpoint_host
         if judge is not None and judge.sources:
             settings["trajectory_sources"] = list(judge.sources)
-        asked = values.get("judge_samples")
-        if isinstance(asked, int) and asked > 1 and not self._spec().samplable:
+        asked, bar = values.get("judge_samples"), values.get("min_judge_agreement")
+        if not self._spec().samplable:
             # A run-wide judge_samples reaches every judge; one whose format can't take it grades once.
-            settings["judge_samples"] = 1
-            settings["not_sent"] = {**(settings.get("not_sent") or {}), "judge_samples": asked}
+            refused = {**({"judge_samples": asked} if isinstance(asked, int) and asked > 1 else {}),
+                       **({"min_judge_agreement": bar} if bar is not None else {})}
+            if "judge_samples" in refused:
+                settings["judge_samples"] = 1
+            settings.pop("min_judge_agreement", None)
+            if refused:
+                settings["not_sent"] = {**(settings.get("not_sent") or {}), **refused}
+        elif isinstance(asked, int) and asked > 1:
+            settings["min_judge_agreement"] = judge_samples_rule.DEFAULT_MIN_AGREEMENT if bar is None else bar
         return {**settings, "overridden": overridden}
 
     def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
@@ -958,8 +977,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
     def _gated(self, verdict: RubricsVerdict) -> RubricsVerdict:
         """``verdict``, failing its step once recorded when ``fail_task_when_not_passing`` and it scores under
-        ``min_passing_score``, naming the rows that weren't met."""
-        if not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
+        ``min_passing_score``, naming the rows that weren't met; one that failed already, as a judge whose samples
+        split, keeps its own error."""
+        if verdict.error is not None or not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
             return verdict
         unmet = [str(row.get("id")) for row in verdict.criteria
                  if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
@@ -1080,10 +1100,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                                f"{sorted(map(str, clashing))}")
 
         samples = judge_samples_rule.validated(run["judge_samples"]) or 1
+        bar = judge_samples_rule.validated_agreement(run["min_judge_agreement"])
         if samples > 1 and not self._spec().samplable:
             logger.warning("Verifier '%s': %s It grades once.", self.verifier_id,
                            _unsamplable_format_message(self.output_format))
             samples = 1
+        bar = judge_samples_rule.DEFAULT_MIN_AGREEMENT if bar is None else bar
 
         async def judge_agent() -> _JudgeAgent:
             """An agent judge for the run, the trajectory staged in its sandbox: the task's agent, or one this step
@@ -1390,7 +1412,16 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
         if judges and judges[0].staged is not None:
             judge_call_fields["trajectory_staging"] = judges[0].staged.record
-        return self._entries(verification_results, judge_call_fields, unjudged=unjudged)
+        verdict = self._entries(verification_results, judge_call_fields, unjudged=unjudged)
+        if samples > 1 and (split := judge_samples_rule.disagreeing(verdict.criteria, bar)):
+            # The rows stay on the failed grade, each with its samples, for whoever has to see why it split.
+            reason = judge_samples_rule.disagreement(self.verifier_id, split, bar)
+            logger.warning(reason)
+            verdict = replace(verdict, error=reason, raise_after=judge_samples_rule.JudgeDisagreementError(reason),
+                              output={**verdict.output, "judge_disagreement": {
+                                  "min_judge_agreement": bar,
+                                  "criteria": [{"id": row.get("id"), "agreement": row["agreement"]} for row in split]}})
+        return verdict
 
     def _entries(self, verification_results: list[dict], judge_call_fields: dict, *,
                  unjudged: Sequence[dict] = ()) -> RubricsVerdict:

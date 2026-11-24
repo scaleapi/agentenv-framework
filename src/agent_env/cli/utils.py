@@ -77,6 +77,22 @@ def judge_samples_option(f):
              "each sample's score is kept.")(f)
 
 
+def _min_judge_agreement(ctx: click.Context, param: click.Parameter, value: float | None) -> float | None:
+    try:
+        return judge_samples.validated_agreement(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
+def min_judge_agreement_option(f):
+    """``--min-judge-agreement SHARE``, the run's ``min_judge_agreement``: a number from 0 to 1."""
+    return click.option(
+        "--min-judge-agreement", type=float, default=None, callback=_min_judge_agreement, metavar="SHARE",
+        help="The share of a sampled judge's samples that must give each criterion's kept verdict, else its grade "
+             "fails (1.0 by default, so any split fails; 0.67 is two of three), in every judge that samples, "
+             "whatever the tasks say.")(f)
+
+
 def refuse_unwritable_ids(*ids: str) -> None:
     """Refuse, before anything is built, an id the store a put writes it to wouldn't take, such as an @local id the
     image's suffix makes too long."""

@@ -2,12 +2,22 @@
 middle scores for an even count, so it is always a score a sample gave. A score of 1 is always the agent's pass (a
 negative criterion's is inverted), so a tie fails: two samples pass only together, four need three. For a 0-or-1
 criterion an odd count is the majority vote. The row kept is that sample's (its justification, and its outcome on a
-criterion with fixed outcomes), with every sample's score and justification beside it."""
+criterion with fixed outcomes), with every sample's score, verdict and justification beside it.
+
+``min_judge_agreement`` is how many of the samples must give the kept row's verdict, as a share: 1.0 by default, so a
+criterion the samples split on fails the grade (``JudgeDisagreementError``) rather than being decided by the median.
+The share is kept to two places, so 0.67 is two samples of three."""
 
 from __future__ import annotations
 
 import statistics
 from typing import Any, Optional
+
+DEFAULT_MIN_AGREEMENT = 1.0
+
+
+class JudgeDisagreementError(RuntimeError):
+    """A sampled judge's samples split on a criterion more than ``min_judge_agreement`` allows."""
 
 
 def validated(value: Any) -> Optional[int]:
@@ -19,15 +29,45 @@ def validated(value: Any) -> Optional[int]:
     return value
 
 
+def validated_agreement(value: Any) -> Optional[float]:
+    """``value`` as a min_judge_agreement: None, or a number from 0 to 1; anything else is a ValueError."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        raise ValueError(f"min_judge_agreement must be a number from 0 to 1, got {value!r}")
+    return float(value)
+
+
 def median_rows(sampled: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     """Each criterion's row across ``sampled``, one list of rows per sample, each with every criterion: the first
-    sample's row that scored the low median, with ``samples``, each sample's score and justification in order."""
+    sample's row that scored the low median, with its ``agreement``, the share of samples whose verdict (``result``)
+    is that row's, and ``samples``, each sample's score, verdict and justification in order."""
     by_sample = [{row["id"]: row for row in rows} for rows in sampled]
     merged = []
     for row in sampled[0]:
         rows = [sample[row["id"]] for sample in by_sample]
         median = statistics.median_low(each["score"] for each in rows)
         chosen = next(each for each in rows if each["score"] == median)
-        merged.append({**chosen, "samples": [{"score": each["score"], "justification": each.get("justification")}
-                                             for each in rows]})
+        verdict = chosen.get("result") is True
+        agreeing = sum(1 for each in rows if (each.get("result") is True) == verdict)
+        merged.append({**chosen, "agreement": round(agreeing / len(rows), 2),
+                       "samples": [{"score": each["score"], "passed": each.get("result") is True,
+                                    "justification": each.get("justification")} for each in rows]})
     return merged
+
+
+def disagreeing(rows: list[dict[str, Any]], bar: float) -> list[dict[str, Any]]:
+    """The sampled rows whose ``agreement`` is under ``bar``."""
+    return [row for row in rows if "agreement" in row and row["agreement"] < bar]
+
+
+def disagreement(verifier_id: str, rows: list[dict[str, Any]], bar: float) -> str:
+    """Why a grade whose samples split on ``rows`` failed, naming how each split."""
+    splits = []
+    for row in rows:
+        passes = sum(1 for sample in row["samples"] if sample["passed"])
+        splits.append(f"{row.get('id')} ({passes} of {len(row['samples'])} samples pass it)")
+    which = "a criterion" if len(rows) == 1 else f"{len(rows)} criteria"
+    return (f"Verifier '{verifier_id}': its judge samples split on {which}, under min_judge_agreement {bar:g}: "
+            f"{', '.join(splits)}. Each sample's verdict and justification are on the grade's rows; a lower "
+            "min_judge_agreement keeps the median instead.")

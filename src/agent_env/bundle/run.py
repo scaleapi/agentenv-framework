@@ -221,6 +221,7 @@ def run_bundle(
     user_model: str | None = None,
     judge_model: str | None = None,
     judge_samples: int | None = None,
+    min_judge_agreement: float | None = None,
     agent: str | None = None,
     sandbox: str | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -233,7 +234,7 @@ def run_bundle(
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
-    user simulator and the judges run on, ``judge_samples`` how many times each judge that can grades each criterion,
+    user simulator and the judges run on, ``judge_samples`` how many times each judge that can grades each criterion and ``min_judge_agreement`` the share of those samples each criterion's verdict needs,
     and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
     pick the forms a computer env composes, on the env's default provider, this machine unless the config names
     another; that compose emulates an arch no link of it runs natively unless ``emulate`` is False, which leaves it
@@ -260,12 +261,13 @@ def run_bundle(
     ends.
 
     Before anything is written, raises RuntimeError when an event loop is already running, ValueError when
-    ``sandbox`` names no provider or ``judge_samples`` isn't a positive count, and BundleError when the bundle can't be planned or a deploy can't run where
+    ``sandbox`` names no provider or ``judge_samples`` isn't a positive count or ``min_judge_agreement`` a number from 0 to 1, and BundleError when the bundle can't be planned or a deploy can't run where
     it would (``preflight``). A task that fails its preflight raises BundleError once the entities it reads are
     written, before any task is. Building an infra env the run needs raises what the build raises, before any task
     runs."""
     _refuse_a_running_loop()
     judge_samples = judge_samples_rule.validated(judge_samples)
+    min_judge_agreement = judge_samples_rule.validated_agreement(min_judge_agreement)
     composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
@@ -274,7 +276,7 @@ def run_bundle(
                             variant=variant, skip_lint=skip_lint)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
-            overrides = _overrides(sandbox, user_model, judge_model, judge_samples)
+            overrides = _overrides(sandbox, user_model, judge_model, judge_samples, min_judge_agreement)
             runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, overrides,
                                            solver_params(plan, prepared.materialization), keep, say, interrupts,
                                            source))
@@ -539,12 +541,15 @@ def solver_params(plan: Plan, materialization: Materialization) -> dict[str, dic
 
 
 def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None,
-               judge_samples: int | None = None) -> dict[str, Any]:
-    """The run's ``user_overrides``: where everything deploys, the models the user simulator and judges run on, and
-    how many samples the judges take."""
+               judge_samples: int | None = None, min_judge_agreement: float | None = None) -> dict[str, Any]:
+    """The run's ``user_overrides``: where everything deploys, the models the user simulator and judges run on, how
+    many samples the judges take and how many of them must agree."""
     overrides = sandbox_overrides(sandbox) if sandbox else {}
-    return {**overrides, **{key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
-                                                          ("judge_samples", judge_samples)) if value}}
+    overrides.update({key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
+                                                    ("judge_samples", judge_samples)) if value})
+    if min_judge_agreement is not None:
+        overrides["min_judge_agreement"] = min_judge_agreement
+    return overrides
 
 
 async def _run_all(
