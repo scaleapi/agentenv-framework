@@ -1,5 +1,5 @@
-"""The built-in user sim's presets: chat and always_on keep today's prompt byte for byte, milestone adds how the user
-takes a post-turn hook's note, each names the features a judge's rules may depend on, and a preset that doesn't fit
+"""The built-in user sim's presets: chat keeps today's single-session prompt except its answer format, always_on keeps
+today's prompt byte for byte, milestone adds how the user takes a post-turn hook's note, each names the features a judge's rules may depend on, and a preset that doesn't fit
 the task's other steps is refused when the task loads."""
 
 from __future__ import annotations
