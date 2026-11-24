@@ -1872,17 +1872,21 @@ class _ForwardingArgModelBase(ArgModelBase):
 _JSON_CONTAINER_TYPES: dict[str, type] = {"array": list, "object": dict}
 
 
+_JSON_VALUE_TYPES: dict[type, str] = {str: "string", type(None): "null", list: "array", dict: "object", bool: "boolean"}
 _SCHEMA_REF_DEPTH = 8  # local $ref hops followed when typing a property; deeper (or cyclic) refs add no type
 
 
 def _schema_types(schema: Any, root: Any = None, depth: int = 0) -> set[str]:
     """The JSON types a property schema allows: its `type` (a name or a list), those of its anyOf/oneOf/allOf branches
     (allOf: [{$ref}] is how older pydantic and zod wrap a reference), and those of a local `$ref` (``#/$defs/...``,
-    ``#/definitions/...``) into ``root``, the tool's input schema. Empty when the schema names no type."""
+    ``#/definitions/...``) into ``root``, the tool's input schema, plus the types of its `enum` / `const` values.
+    Empty when the schema says nothing about type."""
     if not isinstance(schema, dict) or depth > _SCHEMA_REF_DEPTH:
         return set()
     declared = schema.get("type")
     types = {declared} if isinstance(declared, str) else {t for t in declared or () if isinstance(t, str)}
+    values = list(schema.get("enum") or ()) + ([schema["const"]] if "const" in schema else [])
+    types |= {_JSON_VALUE_TYPES.get(type(v), "number") for v in values}
     for key in ("anyOf", "oneOf", "allOf"):
         for branch in schema.get(key) or ():
             types |= _schema_types(branch, root, depth + 1)

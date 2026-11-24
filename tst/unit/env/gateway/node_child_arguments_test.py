@@ -72,7 +72,7 @@ async def _via_step(gw: Gateway, arguments: dict) -> tuple[bool, dict]:
 async def test_the_gateway_lists_the_node_childs_schema_verbatim(gateway):
     listed = {tool.name: tool for tool in await gateway._mcp.list_tools()}
     assert listed[TOOL].inputSchema["additionalProperties"] is False
-    assert set(listed[TOOL].inputSchema["properties"]) == {"q", "labels", "filters", "ids", "tags", "sort", "meta"}
+    assert set(listed[TOOL].inputSchema["properties"]) == {"q", "labels", "filters", "ids", "tags", "sort", "meta", "mode"}
 
 
 @pytest.mark.asyncio
@@ -104,6 +104,8 @@ async def test_an_undeclared_argument_reaches_the_node_child_which_refuses_it_by
     ({"meta": "null"}, {"meta": None}),
     ({"q": "null"}, {"q": "null"}),  # q is typed string: it stays the string
     ({"meta": "7"}, {"meta": "7"}),  # JSON, but a number: stays the string, as before
+    ({"mode": "null"}, {"mode": "null"}),  # an untyped enum of strings takes strings: they stay strings
+    ({"mode": "[]"}, {"mode": "[]"}),
 ])
 async def test_a_json_string_for_an_array_or_object_parameter_reaches_the_node_child_decoded(gateway, arguments,
                                                                                             decoded):

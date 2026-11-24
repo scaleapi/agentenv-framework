@@ -17,6 +17,7 @@ const TOOL = {
       tags: { $ref: "#/$defs/Tags" },
       sort: { allOf: [{ $ref: "#/$defs/Sort" }], description: "older pydantic / zod wrap a $ref in allOf" },
       meta: { description: "untyped: any JSON value" },
+      mode: { enum: ["null", "auto", "[]"] },
     },
     additionalProperties: false,
     $defs: { Tags: { type: "array", items: { type: "string" } }, Sort: { type: "object" } },
@@ -31,6 +32,7 @@ function invalidFields(args) {
     else if (key === "labels" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
     else if ((key === "filters" || key === "sort") && !(value !== null && typeof value === "object" && !Array.isArray(value)))
       bad.push(key);
+    else if (key === "mode" && !TOOL.inputSchema.properties.mode.enum.includes(value)) bad.push(key);
     else if (key === "tags" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
     else if (key === "ids" && !(value === null || (Array.isArray(value) && value.every((v) => typeof v === "string"))))
       bad.push(key);
