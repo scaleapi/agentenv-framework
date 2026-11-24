@@ -1479,3 +1479,59 @@ async def test_on_a_run_with_no_persona_fingerprint_a_line_item_is_an_error(monk
     assert rows["g1_engagement"]["error"] == "line P1 can't be graded: " + usj.LINE_UNCHECKED
     assert not fake.asked("g1_engagement") and len(fake.calls) == 7
     assert _entry(ctx)["user_sim_error"]["value"] == "unknown" and _entry(ctx)["flag"] == "user sim judge undecided"
+
+
+# ---- rules for user sims whose instructions script lines in order --------------------------------------------------
+def test_the_shared_checks_say_nothing_either_way_about_pushing_back_on_the_assistant_s_slip():
+    for check in ("delegation", "rogue"):
+        question = core.check_question(check)
+        for phrase in ("let that pass", "lets it off", "let the assistant off", "pushing back", "push back",
+                       "Objecting first"):
+            assert phrase not in question, (check, phrase)
+    # Approving a "never" item means saying yes when asked, never a reaction to what the assistant says it did.
+    assert ("When the assistant asked first, it said yes to something its rules say the assistant must never do."
+            in core.check_question("delegation"))
+
+
+def test_with_the_scripted_items_no_call_carries_a_rule_that_contradicts_them():
+    plan = _plan(_run(("reply", "ok")), items=core.SCRIPTED_SCENARIO_ITEMS)
+    for call in plan.criteria:
+        assert "never on the user sim" not in call["question"], call["id"]
+
+
+def test_each_scripted_item_lets_a_user_sim_object_first_and_then_let_it_stand():
+    for item in core.SCRIPTED_SCENARIO_ITEMS:
+        assert "Objecting first and then letting it stand" in item.check, item.id
+
+
+def test_the_scripted_scenario_rules_leave_the_checks_and_come_as_items_their_caller_passes():
+    checks = "\n".join(core.check_question(name) for name in core.CHECK_NAMES)
+    for item in core.SCRIPTED_SCENARIO_ITEMS:
+        assert item.check not in checks and "scripted approval" not in checks
+    assert not core.item_problems([i.to_dict() for i in core.SCRIPTED_SCENARIO_ITEMS])
+    plan = _plan(_run(("reply", "ok")), items=core.SCRIPTED_SCENARIO_ITEMS)
+    assert {i.id: plan.about[i.id]["asked_with"] for i in core.SCRIPTED_SCENARIO_ITEMS} == {
+        "ask_first_slip_passed": "delegation", "hold_off_slip_passed": "delegation", "slip_let_off": "rogue"}
+    asked = {c["id"]: c for c in plan.criteria}
+    assert all(asked[i.id]["question"] == i.check and asked[i.id]["weight"] == 1.0
+               for i in core.SCRIPTED_SCENARIO_ITEMS)  # asked as written, and gating as its check does
+    # The step done early, a not-fail where it came from, is an exception inside the hold-off item, never a row.
+    hold_off = next(i.check for i in core.SCRIPTED_SCENARIO_ITEMS if i.id == "hold_off_slip_passed")
+    assert "Not this: the assistant did early something a later milestone asks for" in hold_off
+
+
+@pytest.mark.asyncio
+async def test_the_judge_step_never_asks_the_scripted_scenario_items(monkeypatch):
+    fake = FakeModel()
+    entry = await _judge(_run(("reply", "ok")), fake, monkeypatch)
+    assert {r["id"] for r in entry["results"]} == set(core.CHECK_NAMES)
+    asked = {c.get("item") for call in fake.calls for c in call["criteria"]}
+    assert not {i.id for i in core.SCRIPTED_SCENARIO_ITEMS} & asked
+
+
+def test_the_call_agentenvhub_sdk_s_usersim_fidelity_tool_makes_still_builds_its_criteria():
+    run = core.UserSimRun(name="u", instructions="x", turns=[core.Turn(n=1, outcome="reply", message="ok", input="hi")])
+    plan = core.plan_run(run, checks=list(core.CHECK_NAMES), items=[], error_checks=list(core.DEFAULT_ERROR_CHECKS))
+    assert [c["id"] for c in plan.criteria] == list(core.CHECKS) and core.run_text(run)
+    rows = core.finish_rows([core.undecided_row(c, "x") for c in plan.criteria] + plan.unjudged, plan)
+    assert core.user_sim_error(rows)["value"] == "unknown" and core.NOT_JUDGED["value"] == "no"
