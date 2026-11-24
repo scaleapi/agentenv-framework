@@ -6,14 +6,14 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..atif import FORMAT as ATIF_FORMAT
 from ..atif import Adapter
 from ._atif_copy import AtifCopy, AtifPage, TurnStart
 from ._media_spool import MediaSpool
 from ._turn_index import TurnIndex
-from .extensions import TrajectoryState
+from .extensions import SubagentCursor, TrajectoryState
 from .tasks.v1 import TaskError, TrajectoryLog
 
 logger = logging.getLogger(__name__)
@@ -320,16 +320,18 @@ class TaskTrajectories:
         return copy.context_read()
 
     def atif_task_page(
-        self, task_id: str, after: int, max_steps: int, max_bytes: int
+        self, task_id: str, after: int, max_steps: int, max_bytes: int, *,
+        subagent_cursors: Mapping[str, SubagentCursor] | None = None,
     ) -> AtifCursor | None:
-        """A cursor page of the task's closed atif/1 steps, in the task's state."""
+        """A cursor page of the task's closed atif/1 steps, in the task's state; with ``subagent_cursors``, its
+        sub-agents by what the reader lacks of each (``AtifCopy.page``)."""
         record = self._tasks.get(task_id)
         copy = self._copy(record.context_id) if record is not None else None
         if copy is None:
             return None
         self._touch(record.context_id)
         state = record.state
-        page = copy.page(after, max_steps, max_bytes, task_id=task_id)
+        page = copy.page(after, max_steps, max_bytes, task_id=task_id, subagent_cursors=subagent_cursors)
         return AtifCursor(page=page, context_id=record.context_id, task_id=task_id, state=state)
 
     def atif_context_page(

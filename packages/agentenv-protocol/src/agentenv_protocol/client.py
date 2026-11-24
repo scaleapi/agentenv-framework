@@ -77,9 +77,28 @@ def request_headers(url: str, headers: dict[str, str] | None = None) -> dict[str
 
 def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[str, str]:
     """What ``grants``, env addresses and the headers that carry their control tokens, give a call to ``url``: those of
-    the address it is or is under, and none anywhere else."""
-    return next((sent for base, sent in grants.items()
-                 if base and (url == base.rstrip("/") or url.startswith(f"{base.rstrip('/')}/"))), {})
+    the address it resolves to or under, and none anywhere else."""
+    where = _resolved(url)
+    if where is None:
+        return {}
+    for base, sent in grants.items():
+        address = _resolved(base) if base else None
+        if address is not None and where[0] == address[0] and where[1][:len(address[1])] == address[1]:
+            return sent
+    return {}
+
+
+def _resolved(url: str) -> tuple[tuple[str, str, int | None], list[str]] | None:
+    """``url``'s origin and path segments as its server routes them, dot segments resolved; None for a relative url or
+    one whose path still holds a dot segment once percent-decoded, which a server may resolve out of its address."""
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL:
+        return None
+    segments = parsed.path.rstrip("/").split("/")
+    if not parsed.is_absolute_url or any(segment in (".", "..") for segment in segments):
+        return None
+    return (parsed.scheme, parsed.host, parsed.port), segments
 
 
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,

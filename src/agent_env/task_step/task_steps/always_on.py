@@ -134,6 +134,7 @@ from agent_env.env.gateway.constants import (
     EXT_STATE_URI,
     EXT_TRIGGERS_URI,
     EXT_USER_CHAT_URI,
+    due_deferred_calls,
 )
 from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
@@ -150,6 +151,7 @@ from agent_env.task_step.task_steps.prompt_agent import (
     fetch_native_trajectory,
     prescribe_formats,
     prescribed_formats,
+    resend_tool_settings,
 )
 from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
@@ -679,7 +681,7 @@ class _Run:
                    "max_output_tokens": overrides.get("agent_max_output_tokens") or step.max_output_tokens,
                    "output_format": step.output_format, "timeout_seconds": step.timeout_seconds,
                    "task_id": ctx.metadata.get("task_id"), "agentenv_tools": step.agentenv_tools,
-                   "builtin_tools": card.get("builtin_tools")}
+                   **A2AAgent.tool_settings(card)}
         desired = {k: v for k, v in desired.items() if v is not None}
         self.max_turns = desired.get("max_turns")
         model_params = get_config().get_model_params(step.model_params)
@@ -703,6 +705,7 @@ class _Run:
                            "on its first wake instead")
 
         if self.us.get("prompt_set"):  # deploy_user_sim_agent set the user sim's prompt and model at deploy
+            await resend_tool_settings(self.user_agent, self.user_url)  # its tools, though, again, as the agent's
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
             self.user_setup = dict(self.us["setup"])
             self.usage.start(ModelRole.USER_SIMULATOR, self.user_model, self.user_agent)
@@ -714,7 +717,8 @@ class _Run:
         self.user_model, self.user_model_from = self._user_model()
         user_config = {"model": self.user_model, "system_prompt": setup.get("system_prompt"),
                        "output_format": setup.get("output_format")}
-        user_config = {k: v for k, v in user_config.items() if v is not None}
+        user_config = {k: v for k, v in user_config.items() if v is not None} | A2AAgent.tool_settings(
+            self.user_agent.a2a_card or {})
         negotiated = A2AAgent.negotiate_agent_config(self.user_agent.a2a_card or {}, user_config)
         if negotiated:
             await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields,
@@ -994,7 +998,8 @@ class _Run:
             f["last_still_at_work"] = stuck
 
     async def settle(self) -> list[dict]:
-        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time. A contact's
+        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time, and no
+        deferred call the clock has reached still to make. A contact's
         reply (a call to a trigger's executor) counts as in progress until it ends or its time limit passes (plus
         ``CONTACT_GRACE_SECONDS``); any other work, an event due that an advance to now doesn't set going among it,
         gets ``settle_timeout_seconds``, from the start or from the last contact call seen. A gateway that reports no
@@ -1023,13 +1028,15 @@ class _Run:
                                                  + max(c["seconds_left"] for c in live))
                 busy = [row for row in rows if _busy(row, now)]
                 due = state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now
+                calls = [c["key"] for c in due_deferred_calls(state)]
                 limit = min(cap, max(track["contact_until"],
                                      track["live_call_seen"] + self.step.settle_timeout_seconds))
-                if not due and not busy:
+                if not due and not busy and not calls:
                     waiting.pop(i)
                 elif mono >= limit:  # a due event that won't go, like other work, gets settle_timeout_seconds
                     stuck.append({"env_id": env.env_id, "triggers": [_at_work(row) for row in busy],
-                                  **({"due_not_going": state["next_event_at"]} if due else {})})
+                                  **({"due_not_going": state["next_event_at"]} if due else {}),
+                                  **({"deferred_calls_due": calls} if calls else {})})
                     waiting.pop(i)
                 elif due:  # an event already due: an advance to now sets it going
                     try:

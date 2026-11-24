@@ -229,6 +229,53 @@ async def test_a_selection_the_agent_cannot_take_fails_before_any_request(wiring
     assert wiring.agent.close.await_count == 1
 
 
+PEER_CONFIG = _agent_config(["name", "description", "peer_tools"])
+
+
+@pytest.mark.asyncio
+async def test_peer_tools_off_is_sent_once_with_its_identity_and_kept_on_the_card(wiring):
+    context = await wiring.deploy(_card(HEADERS_MCP, PEER_CONFIG), role=None, peer_tools=False)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "peer_tools": False}]
+    assert context.deployed_agents[0].a2a_card["peer_tools"] is False
+
+
+@pytest.mark.asyncio
+async def test_peer_tools_left_unset_sends_none(wiring):
+    await wiring.deploy(_card(HEADERS_MCP, PEER_CONFIG), role=None)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card", [_card(HEADERS_MCP, ROLE_CONFIG), _card(HEADERS_MCP)],
+                         ids=["config-without-it", "no-agent-config"])
+async def test_peer_tools_off_on_an_agent_that_cannot_take_it_fails_before_any_request(wiring, card):
+    with pytest.raises(RuntimeError, match="takes no 'peer_tools'"):
+        await wiring.deploy(card, role=None, peer_tools=False)
+
+    assert wiring.requests == []
+    assert wiring.agent.close.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_tools_on_for_an_agent_that_cant_take_it_is_dropped_and_the_deploy_goes_on(wiring):
+    # true is the default an agent already has, so it isn't checked against the card: negotiation leaves it out.
+    context = await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role=None, peer_tools=True)
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver"}]
+    assert "peer_tools" not in context.deployed_agents[0].a2a_card
+
+
+def test_peer_tools_is_a_bool_and_round_trips():
+    with pytest.raises(ValueError):
+        DeployAgentTaskStep(id="ag", version=None, peer_tools="no")
+    step = DeployAgentTaskStep(id="ag", version=None, peer_tools=False)
+    assert DeployAgentTaskStep.from_dict({**step.to_dict(), "version": 1}).peer_tools is False
+    assert DeployAgentTaskStep.from_dict({**DeployAgentTaskStep(id="ag", version=None).to_dict(),
+                                          "version": 1}).peer_tools is None
+
+
 def test_a_selection_takes_exactly_one_of_disable_and_only():
     for selection in ({}, {"disable": "*", "only": ["Read"]}, {"enable": ["Read"]}):
         with pytest.raises(ValueError):

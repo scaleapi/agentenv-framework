@@ -174,7 +174,7 @@
  },
  "extra": {
   "agentenv": {
-   "version": "1.0",
+   "version": "1.1",
    "native_format": "claude-code-stream-json/1",
    "adapter": {
     "name": "claude-code-stream-json-atif",

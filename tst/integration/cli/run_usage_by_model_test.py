@@ -1,7 +1,7 @@
 """A turn whose agent reports its counts by model (``Usage.models``) is priced model by model, each at its own rate
 from LiteLLM's price map, end to end: the echo agent (tst/data/a2a_agent) sends the breakdown over A2A, the host reads
-it, the prompt step's entry keeps a row per model, and the task instance's ledger totals what the rows cost. Builds
-the echo agent; needs Docker."""
+it, the prompt step's entry keeps a row per model, the task instance's ledger totals what the rows cost, and the run's
+summary splits it by model as ``agent-env run`` prints it. Builds the echo agent; needs Docker."""
 
 import json
 import logging
@@ -13,6 +13,7 @@ import pytest
 
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import run_bundle
+from agent_env.cli.usage_output import cost_line
 from agent_env.config import configure, reset_config
 from agent_env.config.model_pricing import ReportedBy, Tokens, litellm_prices, price
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -91,3 +92,10 @@ def test_a_turns_counts_by_model_are_priced_at_each_models_rate_and_reach_the_le
     with namespace_routing():
         instance = get_task_instance_store().get(run.context.instance_id)
     assert instance.usage_total["cost_usd"] == pytest.approx(sum(expected))
+    summary = run.usage_summary
+    assert [(share.role, share.model) for share in summary.shares] == [("solver", "gpt-4.1-mini"),
+                                                                     ("solver", "gpt-4o-mini")]
+    assert summary.cost_usd == pytest.approx(sum(expected)) and not summary.lower_bound
+    line = cost_line(summary)
+    assert line.startswith("cost: $") and "solver gpt-4.1-mini $" in line and "9.0k in, 400 out" in line
+    assert "solver gpt-4o-mini $" in line and "3.0k in, 90 out" in line

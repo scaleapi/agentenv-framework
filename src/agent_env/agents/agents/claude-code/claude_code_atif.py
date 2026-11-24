@@ -8,7 +8,12 @@ same agent has its own, or the task ends.
 Sub-agents are embedded trajectories, each named by the call that spawned it in its task. Their final answer reaches
 only their own transcript, so a message the session gives and stdout doesn't is written from the session record.
 Records match across the two by uuid, the CLI's own id for each. A sub-agent the CLI continues in a later task is a new
-trajectory there, under the call that continued it."""
+trajectory there, under the call that continued it.
+
+A compaction (a ``compact_boundary``, then the summary as a user message) is the step of the call that wrote the
+summary, which no session record counts: it waits for the turn's own count, then takes what the turn reported beyond
+its other steps, so a live reader never sees it change. The CLI's own messages, a command's output say, are system
+steps."""
 from __future__ import annotations
 
 import base64
@@ -24,6 +29,8 @@ NATIVE_FORMAT = "claude-code-stream-json/1"
 TESTED_WITH = ("2.1.322",)
 #: The model a message the CLI wrote itself names, such as an API error's, which no model call produced.
 _SYNTHETIC_MODEL = "<synthetic>"
+#: A step's token counts as the builder takes them, and as the turn record and a session record give them.
+_COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 
 
 @dataclass(eq=False)
@@ -34,6 +41,12 @@ class _Entry:
     agent: str | None
     from_stdout: bool
     ready: bool = False
+    #: A compaction's summary, held until the turn's count gives its call's usage, and what set it off.
+    summary: bool = False
+    held: bool = False
+    trigger: str | None = None
+    usage: dict[str, int] | None = None
+    model: str | None = None
 
 
 def _is_mapping(value: Any) -> bool:
@@ -64,8 +77,8 @@ def _function(tool: Any) -> dict[str, Any] | None:
 class ClaudeCodeAtif(Adapter):
     """One A2A context's Claude Code session as ATIF. Aux files the bridge feeds: ``session``, the transcript's message
     records (one already on stdout without its content); ``tools``, each request shape's tools, once per shape;
-    ``attempt``, the error `result` of an attempt the bridge resumed; ``turn``, the turn's cost as the agent reports
-    it."""
+    ``attempt``, the error `result` of an attempt the bridge resumed; ``turn``, the turn's cost and token counts as the
+    agent reports them."""
 
     def __init__(self, turn: Any) -> None:
         self._seq = 0
@@ -85,6 +98,15 @@ class ClaudeCodeAtif(Adapter):
         self._unplaced: set[str] = set()
         self._inits = 0
         self._attempt_step: str | None = None
+        self._summary_next = False
+        self._summary_trigger: str | None = None
+        self._task_counts: dict[str, int] = {}
+        #: The model the task's latest root call named, as the API answered, and each model the turn's tally named as
+        #: called (a gateway route prefixes it) by the name its calls answered as: a compaction is named as they are.
+        self._task_model: str | None = None
+        self._answered_as: dict[str, str] = {}
+        #: The task's model calls written so far, by step key: those not in ``_stamped`` have no counts yet.
+        self._task_calls: set[str] = set()
 
     # Records
 
@@ -98,9 +120,19 @@ class ClaudeCodeAtif(Adapter):
             self._spawner_of_uuid[uuid] = agent
             self._link(uuid)
         entry = self._enqueue(record, uuid, agent, from_stdout=True)
+        if self._summary_next and agent is None and record.get("type") == "user" and _texts(record):
+            entry.summary, entry.held, entry.trigger = True, True, self._summary_trigger
+            self._summary_next = False
         if uuid is not None and uuid in self._session:
             self._match(entry)
         self._flush(turn)
+
+    @native(type="system", where={"subtype": "compact_boundary"})
+    def boundary(self, record: dict[str, Any], turn: Any) -> None:
+        """The CLI's compaction: the next user message on stdout is its summary."""
+        metadata = record.get("compact_metadata") if _is_mapping(record.get("compact_metadata")) else {}
+        self._summary_next = True
+        self._summary_trigger = metadata.get("trigger") if metadata.get("trigger") in ("manual", "auto") else None
 
     @native(type="system", where={"subtype": "init"})
     def init(self, record: dict[str, Any], turn: Any) -> None:
@@ -154,6 +186,15 @@ class ClaudeCodeAtif(Adapter):
         cost = record.get("cost_usd")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             turn.task_cost(float(cost), source="harness")
+        held = [entry for entry in self._queue if entry.held]
+        left = self._left_over(record) if len(held) == 1 else None
+        called = record.get("model") if isinstance(record.get("model"), str) else None
+        if called is not None and self._task_model is not None:
+            self._answered_as[called] = self._task_model
+        model = self._answered_as.get(called, called) if called is not None else self._task_model
+        for entry in held:
+            entry.usage, entry.held, entry.model = left, False, model
+        self._flush(turn)
 
     @finish
     def end(self, turn: Any) -> None:
@@ -166,6 +207,10 @@ class ClaudeCodeAtif(Adapter):
         self._cli_of_uuid.clear()
         self._inits = 0
         self._attempt_step = None
+        self._summary_next = False
+        self._task_model = None
+        self._task_counts = {}
+        self._task_calls = set()
         self._task += 1
 
     # The queue: records in the order they came, each written once its session record is in
@@ -194,7 +239,8 @@ class ClaudeCodeAtif(Adapter):
     def _flush(self, turn: Any, *, everything: bool = False) -> None:
         while self._queue:
             head = self._queue[0]
-            waiting = not head.ready and not (head.from_stdout and self._matched.get(head.agent, 0) > head.seq)
+            waiting = head.held or (not head.ready and not (head.from_stdout and self._matched.get(head.agent, 0) >
+                                                             head.seq))
             if waiting and not everything:
                 return
             self._queue.pop(0)
@@ -228,7 +274,7 @@ class ClaudeCodeAtif(Adapter):
         if kind == "assistant":
             self._assistant(record, session, entry.agent, turn)
         elif kind == "user":
-            self._user(record, session, turn)
+            self._user(entry, session, turn)
 
     def _declare(self, agent: str, turn: Any) -> None:
         """Embed the sub-agent the call ``agent`` spawned. One whose call already has its result, as when its first
@@ -257,8 +303,8 @@ class ClaudeCodeAtif(Adapter):
     def _assistant(self, record: dict[str, Any], session: dict[str, Any] | None, agent: str | None,
                    turn: Any) -> None:
         message = record.get("message") if _is_mapping(record.get("message")) else {}
-        key = message.get("id") if isinstance(message.get("id"), str) else record.get("uuid")
-        if not isinstance(key, str):
+        key = _message_key(record)
+        if key is None:
             return
         model = message.get("model") if isinstance(message.get("model"), str) else None
         synthetic = model == _SYNTHETIC_MODEL
@@ -270,12 +316,17 @@ class ClaudeCodeAtif(Adapter):
             text = "".join(b.get("text", "") for b in _blocks(record) if b.get("type") == "text")
             turn.error(message=text or "the CLI reported an error", kind="infra_error", step=key, agent=agent)
         elif key not in self._stamped:
+            self._task_calls.add(key)
             usage = self._usage(session)
             if usage is not None:
                 self._stamped.add(key)
+                for name, value in usage.items():
+                    self._task_counts[name] = self._task_counts.get(name, 0) + value
             turn.step(key=key, model_name=model, time=when, agent=agent, **(usage or {}))
         if agent is None:
             self._attempt_step = key
+            if model is not None and not synthetic:
+                self._task_model = model
 
     def _block(self, block: dict[str, Any], key: str, agent: str | None, when: Any, turn: Any) -> None:
         kind = block.get("type")
@@ -295,13 +346,49 @@ class ClaudeCodeAtif(Adapter):
             if _is_mapping(arguments) and isinstance(arguments.get("subagent_type"), str):
                 self._spawn_names[block["id"]] = arguments["subagent_type"]
 
-    def _user(self, record: dict[str, Any], session: dict[str, Any] | None, turn: Any) -> None:
+    def _user(self, entry: _Entry, session: dict[str, Any] | None, turn: Any) -> None:
+        """A user record's tool results; and on the root, its text: a compaction's summary, or else a message the CLI
+        put in the conversation itself, as a system step. A sub-agent's prompt stays in its spawning call."""
         when = session.get("timestamp") if session is not None else None
-        for block in _blocks(record):
-            if block.get("type") != "tool_result" or not isinstance(block.get("tool_use_id"), str):
+        for block in _blocks(entry.record):
+            if block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
+                turn.tool_result(source_call_id=block["tool_use_id"], content=self._result_content(block, turn),
+                                 status="error" if block.get("is_error") else "ok", time=when)
+        if entry.agent is not None:
+            return
+        for text in _texts(entry.record):
+            if entry.summary:
+                key = f"compaction-{entry.uuid or entry.seq}"
+                turn.message(step=key, text=text, time=when)
+                turn.compaction(step=key, written_by="assistant", trigger=entry.trigger)
+                turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
+                entry.summary = False
+            else:
+                turn.system_message(text=text, time=when)
+
+    def _left_over(self, record: dict[str, Any]) -> dict[str, int] | None:
+        """What the turn reported beyond its model calls written or still queued: the one call no session record
+        counts, the summary's. None when the turn gave no counts, counted less than its calls (a lower bound), or one of
+        its calls has no counts, whose tokens the remainder would hold too."""
+        reported = {name: record.get(name) for name in _COUNTS}
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in reported.values()):
+            return None
+        if self._task_calls - self._stamped:
+            return None
+        counted, seen = dict(self._task_counts), set(self._stamped)
+        for queued in self._queue:
+            key = _message_key(queued.record) if queued.record.get("type") == "assistant" else None
+            message = queued.record.get("message") if _is_mapping(queued.record.get("message")) else {}
+            if key is None or key in seen or message.get("model") == _SYNTHETIC_MODEL:
                 continue
-            turn.tool_result(source_call_id=block["tool_use_id"], content=self._result_content(block, turn),
-                             status="error" if block.get("is_error") else "ok", time=when)
+            usage = self._usage(self._session.get(queued.uuid)) if queued.uuid is not None else None
+            if usage is None:
+                return None
+            seen.add(key)
+            for name, value in usage.items():
+                counted[name] = counted.get(name, 0) + value
+        left = {name: reported[name] - counted.get(name, 0) for name in _COUNTS}
+        return left if all(value >= 0 for value in left.values()) else None
 
     def _result_content(self, block: dict[str, Any], turn: Any) -> list[Any]:
         content = block.get("content")
@@ -385,6 +472,19 @@ class ClaudeCodeAtif(Adapter):
         if last_text is not None:
             log.append({"type": "result", "subtype": "success", "is_error": False, "result": last_text})
         return Native(log=log)
+
+
+def _texts(record: dict[str, Any]) -> list[str]:
+    """A user record's text blocks, in order, each with something in it."""
+    return [block["text"] for block in _blocks(record)
+            if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip()]
+
+
+def _message_key(record: dict[str, Any]) -> str | None:
+    """An assistant record's step key: its message id, else its uuid."""
+    message = record.get("message") if _is_mapping(record.get("message")) else {}
+    key = message.get("id") if isinstance(message.get("id"), str) else record.get("uuid")
+    return key if isinstance(key, str) else None
 
 
 def _text(message: Any) -> list[dict[str, Any]]:

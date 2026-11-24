@@ -54,10 +54,12 @@ LiveMedia = Callable[[Mapping[str, Any], Any], Awaitable[None]]
 class LiveAtif:
     """A turn followed as atif/1, its native format the fallback for a turn the agent refuses atif/1 before its first
     page: ``media`` pulls the media a page's new steps name (given them as a document, and the session) into
-    ``media_base``, the folder their ``media/`` paths resolve in."""
+    ``media_base``, the folder their ``media/`` paths resolve in. With ``cursors``, its reads name what the follower
+    holds, for an agent whose card takes that (``live_reads_take_cursors``)."""
 
     media: LiveMedia
     media_base: str
+    cursors: bool = False
 
 
 class LiveTrajectoryChunks:
@@ -215,6 +217,7 @@ class LiveTurn:
                     self._endpoint, task_id, sink, poll_interval_seconds=self._poll_interval_seconds, stop=self.stop,
                     headers=self._headers, format=ATIF if self._atif else self._format,
                     fallback_format=self._format if self._atif else None,
+                    cursors=self._atif is not None and self._atif.cursors,
                 )
             )
         )

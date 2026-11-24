@@ -18,15 +18,14 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER, COMPUTER_EXEC
 
 from agent_env.entity.refs import EntityRef
-from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
-from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.envs.computer.utils.sites import RootChannel
-from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.computer.lookup import computer_problem, find_computer
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +100,9 @@ Command = Union[list[str], str]
 class ComputerExecTaskStep(TaskStep):
     """Run ``command`` inside the computer of the env ``env_id`` as its session user, in ``cwd`` (relative to the home,
     the home by default), with ``env`` added to its environment, for at most ``timeout_s``. ``command`` is a program and
-    its arguments, or a string run by ``sh -c``. For a multi env, ``computer`` names the computer, by its environment
-    name, and may be left out when the env has one.
+    its arguments, or a string run by ``sh -c``. For a multi env, ``computer_name`` names the computer by its
+    environment name there (its key in the deploy's ``child_envs``, not its env id), and may be left out when the env
+    has one.
 
     With ``scope: "system"`` it runs as root instead, through the computer's sandbox rather than its driver, in the
     same folder and with the session user's ``HOME``; a computer booted from a disk has no such route.
@@ -118,14 +118,14 @@ class ComputerExecTaskStep(TaskStep):
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(self, id: str, version: Optional[int], env_id: str, command: Command,
-                 computer: Optional[str] = None, cwd: Optional[str] = None, env: Optional[dict[str, str]] = None,
+                 computer_name: Optional[str] = None, cwd: Optional[str] = None, env: Optional[dict[str, str]] = None,
                  timeout_s: float = DEFAULT_TIMEOUT_S, background: bool = False, check: bool = True,
                  scope: str = "session", depends_on: Optional[list[TaskStepDependency]] = None,
                  fail_task_on_error: bool = True):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.command = command
-        self.computer = computer
+        self.computer_name = computer_name
         self.cwd = cwd
         self.env = env
         self.timeout_s = timeout_s
@@ -142,8 +142,8 @@ class ComputerExecTaskStep(TaskStep):
                 problems.append(f"step {self.id!r}: command must not be blank")
         elif not (isinstance(self.command, list) and self.command and all(isinstance(a, str) for a in self.command)):
             problems.append(f"step {self.id!r}: command must be a non-empty list of strings, or a string run by sh -c")
-        if self.computer is not None and (not isinstance(self.computer, str) or not self.computer):
-            problems.append(f"step {self.id!r}: computer, when given, must be a non-empty string")
+        if self.computer_name is not None and (not isinstance(self.computer_name, str) or not self.computer_name):
+            problems.append(f"step {self.id!r}: computer_name, when given, must be a non-empty string")
         if self.cwd is not None and (not isinstance(self.cwd, str) or self.cwd.startswith("/")):
             problems.append(f"step {self.id!r}: cwd is a folder relative to the session user's home, not {self.cwd!r}")
         if self.env is not None and not (isinstance(self.env, dict) and all(
@@ -171,21 +171,22 @@ class ComputerExecTaskStep(TaskStep):
         problems = super().preflight()
         if not isinstance(self.env_id, str) or not self.env_id or (env := stored_env(self.env_id)) is None:
             return problems
-        if problem := _computer_problem(env, self.computer):
+        if problem := computer_problem(env, self.computer_name):
             problems.append(f"step {self.id!r}: {problem}")
         return problems
 
     def to_dict(self) -> dict:
-        return {**super().to_dict(), "env_id": self.env_id, "command": self.command, "computer": self.computer,
-                "cwd": self.cwd, "env": self.env, "timeout_s": self.timeout_s, "background": self.background,
-                "check": self.check, "scope": self.scope}
+        return {**super().to_dict(), "env_id": self.env_id, "command": self.command,
+                "computer_name": self.computer_name, "cwd": self.cwd, "env": self.env, "timeout_s": self.timeout_s,
+                "background": self.background, "check": self.check, "scope": self.scope}
 
     @classmethod
     def from_dict(cls, data: dict) -> ComputerExecTaskStep:
         return cls(**cls._base_from_dict(data), env_id=data["env_id"], command=data["command"],
-                   computer=data.get("computer"), cwd=data.get("cwd"), env=data.get("env"),
-                   timeout_s=data.get("timeout_s", DEFAULT_TIMEOUT_S), background=data.get("background", False),
-                   check=data.get("check", True), scope=data.get("scope", "session"))
+                   computer_name=data.get("computer_name", data.get("computer")), cwd=data.get("cwd"),
+                   env=data.get("env"), timeout_s=data.get("timeout_s", DEFAULT_TIMEOUT_S),
+                   background=data.get("background", False), check=data.get("check", True),
+                   scope=data.get("scope", "session"))
 
     def command_argv(self) -> list[str]:
         """The command as a program and its arguments: through ``sh -c`` when it's a string."""
@@ -197,7 +198,7 @@ class ComputerExecTaskStep(TaskStep):
         return ["sh", "-c", background_script(), "computer_exec", *argv] if self.background else argv
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        deployed = find_computer(context, self.env_id, self.computer)
+        deployed = find_computer(context, self.env_id, self.computer_name)
         if missing := [m for m in inside.missing(deployed) if m.startswith(COMPUTER_EXEC)]:
             raise RuntimeError(f"{self.type} {self.id!r}: env {self.env_id!r}'s computer serves no {missing[0]}")
         if self.timeout_s > (limit := inside.max_timeout_s(deployed)):
@@ -212,7 +213,7 @@ class ComputerExecTaskStep(TaskStep):
             answer = await self._as_root(deployed, argv)
         else:
             answer = await inside.run(deployed, argv, timeout_s=self.timeout_s, env=self.env, cwd=self.cwd)
-        record = {"env_id": self.env_id, "computer": self.computer, "argv": argv, "scope": self.scope,
+        record = {"env_id": self.env_id, "computer_name": self.computer_name, "argv": argv, "scope": self.scope,
                   "background": self.background,
                   "exit_code": answer.get("exit_code"), "timed_out": bool(answer.get("timed_out")),
                   "truncated": bool(answer.get("truncated")),
@@ -257,43 +258,6 @@ class ComputerExecTaskStep(TaskStep):
         return {"exit_code": None if timed_out else code, "timed_out": timed_out,
                 "truncated": max(len(out), len(err)) >= SYSTEM_OUTPUT_BYTES,
                 "stdout": out.decode("utf-8", errors="replace"), "stderr": err.decode("utf-8", errors="replace")}
-
-
-def find_computer(context: TaskStepContext, env_id: str, computer: Optional[str]) -> DeployedSandboxEnv:
-    """The deploy record of the computer in ``env_id`` that serves computer-exec/v1 ``run``: the env's own, or one of a
-    multi env's computers' (``DeployedGatewayEnv.child_envs``), the one ``computer`` names else its only one."""
-    deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
-    if deployed is None:
-        raise RuntimeError(f"env {env_id!r} isn't in context.deployed_envs")
-    children = {name: DeployedEnv.from_dict(data)
-                for name, data in (getattr(deployed, "child_envs", None) or {}).items()}
-    if computer is not None:
-        found = children.get(computer)
-        if found is None:
-            raise RuntimeError(f"env {env_id!r} has no computer named {computer!r} (it has {sorted(children)})")
-        return found
-    if deployed.supports(COMPUTER_EXEC, "run"):
-        return deployed
-    computers = [record for record in children.values() if record.supports(COMPUTER_EXEC, "run")]
-    if len(computers) != 1:
-        raise RuntimeError(f"env {env_id!r} has {len(computers) or 'no'} computers serving {COMPUTER_EXEC} run"
-                           + (f": name one as computer, of {sorted(children)}" if computers else ""))
-    return computers[0]
-
-
-def _computer_problem(env: object, computer: Optional[str]) -> Optional[str]:
-    if isinstance(env, ComputerEnv):
-        return None if computer is None else f"env {env.id!r} is a computer env, so it takes no computer name"
-    if not isinstance(env, MultiEnv):
-        return f"env {getattr(env, 'id', '?')!r} is no computer env, nor a multi env with one"
-    browser = env.website_browser().computer
-    names = [computer_env.environment_name for computer_env in (*env.computer_envs, *([browser] if browser else []))]
-    if computer is not None and computer not in names:
-        return f"env {env.id!r} has no computer named {computer!r} (it has {names})"
-    if computer is None and len(names) != 1:
-        return (f"env {env.id!r} has {len(names) or 'no'} computers" +
-                (f": name one as computer, of {names}" if names else ""))
-    return None
 
 
 def _os(deployed: DeployedSandboxEnv) -> Optional[str]:

@@ -78,6 +78,7 @@ NEGATIVE: dict[str, tuple[str, Callable[[dict[str, Any]], None]]] = {
     "profile": ("coding", lambda d: d["steps"][0]["extra"]["agentenv"].update(turn="zero")),
     "profile-key": ("coding", lambda d: d["steps"][0]["extra"]["agentenv"].update(later=1)),
     "profile-version": ("coding", lambda d: d["extra"]["agentenv"].update(version="2.0")),
+    "compaction": ("coding", lambda d: d["steps"][0]["extra"]["agentenv"].update(compaction={"written_by": "assistant"})),
     "vocabulary": ("coding", lambda d: d["steps"][-1]["extra"]["agentenv"].update(state="paused")),
     "outside-key": ("coding", lambda d: d["steps"][0]["extra"].update(note="x")),
     "call-id": ("coding", _duplicate_call_id),
@@ -141,6 +142,29 @@ def test_an_unknown_profile_key_fails_a_producer_and_only_warns_a_reader(tmp_pat
     path.write_text(json.dumps(document), encoding="utf-8")
     assert main(["validate", "--reader", str(path)]) == 0
     assert "warning profile-key steps[0].extra.agentenv.later" in capsys.readouterr().out
+
+
+def test_a_compaction_sits_on_an_agent_step_names_who_wrote_it_and_holds_its_vocabularies():
+    document = _fixture("coding")
+    profile = document["steps"][1].setdefault("extra", {}).setdefault("agentenv", {})
+    profile["compaction"] = {"written_by": "assistant", "trigger": "manual"}
+    assert errors_in(validate(document)) == []
+    profile["compaction"] = {"trigger": "auto"}
+    assert [(f.rule, f.where) for f in errors_in(validate(document))] == [
+        ("compaction", "steps[1].extra.agentenv.compaction.written_by")]
+    profile["compaction"] = {"written_by": "someone", "trigger": "now"}
+    assert [(f.rule, f.where) for f in errors_in(validate(document))] == [
+        ("vocabulary", "steps[1].extra.agentenv.compaction.written_by"),
+        ("vocabulary", "steps[1].extra.agentenv.compaction.trigger")]
+
+
+@pytest.mark.parametrize(("version", "known"), [("1.0", True), ("1.1", True), ("1.2", False), ("2.0", False)])
+def test_a_document_of_an_earlier_minor_is_read_whole_and_a_later_one_is_flagged(version, known):
+    """A minor only adds optional fields, so a validator of 1.1 checks a 1.0 copy, from an agent on an older SDK, as its
+    own; one it doesn't know yet is flagged, as a newer document is."""
+    document = _fixture("coding")
+    document["extra"]["agentenv"]["version"] = version
+    assert ("profile-version" in _rules(errors_in(validate(document)))) is not known
 
 
 def test_media_bytes_are_checked_against_their_name_and_profile():

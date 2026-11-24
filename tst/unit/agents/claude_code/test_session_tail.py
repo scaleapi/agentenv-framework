@@ -184,14 +184,15 @@ def test_a_task_that_builds_no_atif_copy_feeds_nothing_beside_stdout(turns, clie
     assert "aux_callback" not in turns[0] and "tool_shapes" not in turns[0]
 
 
-def test_a_task_that_builds_an_atif_copy_is_fed_its_records_and_the_turns_cost(turns, client):
+def test_a_task_that_builds_an_atif_copy_is_fed_its_records_and_the_turns_cost_and_counts(turns, client):
     client.post("/ext/trajectory/prescribe", json={"formats": ["atif/1"]}).raise_for_status()
     task = send(client, "hello", context_id="ctx-a")
     assert terminal(task)[0] == "completed"
     assert callable(turns[0]["aux_callback"]) and turns[0]["tool_shapes"] == set()
     read = client.post("/ext/trajectory", json={"task_id": task["id"], "format": "atif/1"}).json()
-    assert {"name": "turn", "record": {"type": "turn", "cost_usd": 0.25}} in [
-        {key: entry[key] for key in ("name", "record")} for entry in read["aux"]]
+    [turn] = [entry["record"] for entry in read["aux"] if entry["name"] == "turn"]
+    assert turn["cost_usd"] == 0.25
+    assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= set(turn)
     assert read["trajectory"]["final_metrics"]["total_cost_usd"] == 0.25
 
 

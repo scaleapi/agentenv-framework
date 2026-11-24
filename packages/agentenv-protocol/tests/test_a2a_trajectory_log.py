@@ -157,7 +157,7 @@ def test_live_card_advertises_the_cursor_reads() -> None:
             {"required": ["task_id", "objects"]},
             {"required": ["context_id"]},
             {"required": ["context_id", "objects"]},
-            {"required": ["task_id", "after"], "optional": ["limit"]},
+            {"required": ["task_id", "after"], "optional": ["limit", "header_digest", "subagent_cursors"]},
             {"required": ["context_id", "after"], "optional": ["limit"]},
         ]
     }
@@ -166,6 +166,8 @@ def test_live_card_advertises_the_cursor_reads() -> None:
     assert card_request_accepts(request, {"task_id", "after", "limit"})
     assert card_request_accepts(request, {"context_id", "after"})
     assert card_request_accepts(request, {"task_id", "format"})
+    assert card_request_accepts(request, {"task_id", "after", "format", "header_digest", "subagent_cursors"})
+    assert not card_request_accepts(request, {"context_id", "after", "header_digest"})
     with pytest.raises(TypeError, match="live must be a boolean"):
         enable(TRAJECTORY_V1, live="yes")
 

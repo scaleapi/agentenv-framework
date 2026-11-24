@@ -282,13 +282,13 @@ async def test_a_multi_envs_only_computer_is_found_by_itself_and_one_of_several_
     ctx = await _step("echo one", env_id="multi").execute(_context(_multi(computer, "desk")))
     assert ctx.metadata[RECORDS_KEY]["exec"]["stdout"] == "one\n"
 
-    ctx = await _step("echo two", env_id="multi", computer="b").execute(_context(_multi(computer, "a", "b")))
+    ctx = await _step("echo two", env_id="multi", computer_name="b").execute(_context(_multi(computer, "a", "b")))
     assert ctx.metadata[RECORDS_KEY]["exec"]["stdout"] == "two\n"
 
-    with pytest.raises(RuntimeError, match=r"has 2 computers .*: name one as computer"):
+    with pytest.raises(RuntimeError, match=r"has 2 computers .*: name one as computer_name"):
         await _step("true", env_id="multi").execute(_context(_multi(computer, "a", "b")))
     with pytest.raises(RuntimeError, match=r"has no computer named 'c'"):
-        await _step("true", env_id="multi", computer="c").execute(_context(_multi(computer, "a", "b")))
+        await _step("true", env_id="multi", computer_name="c").execute(_context(_multi(computer, "a", "b")))
 
 
 @pytest.mark.asyncio
@@ -313,7 +313,7 @@ def _stored_multi(*computers: str, browser: str | None = None) -> MultiEnv:
     (("desk",), None, None, None),
     ((), "chromium", None, None),
     (("desk",), "chromium", "chromium", None),
-    (("desk",), "chromium", None, "has 2 computers: name one as computer, of ['desk', 'chromium']"),
+    (("desk",), "chromium", None, "has 2 computers: name one as computer_name, of ['desk', 'chromium']"),
     (("desk",), None, "chromium", "has no computer named 'chromium' (it has ['desk'])"),
     ((), None, None, "has no computers"),
 ], ids=["its-only-computer", "its-browser-computer-alone", "its-browser-computer-by-name", "two-unnamed",
@@ -324,7 +324,7 @@ def test_preflight_finds_a_multi_envs_computers_and_its_browser_computer(monkeyp
                         lambda id: _stored_multi(*computers, browser=browser))
     monkeypatch.setattr(TaskStep, "preflight", lambda self: [])
 
-    problems = _step("true", env_id="office", computer=named).preflight()
+    problems = _step("true", env_id="office", computer_name=named).preflight()
 
     assert problems == ([] if problem is None else [f"step 'exec': env 'office' {problem}"])
 
@@ -346,9 +346,11 @@ def test_bad_configs_are_named(fields, problem):
 
 
 def test_it_round_trips_through_the_registry():
-    step = _step(["open", "x.xlsx"], computer="desk", cwd="Desktop", env={"A": "1"}, timeout_s=30, background=True,
+    step = _step(["open", "x.xlsx"], computer_name="desk", cwd="Desktop", env={"A": "1"}, timeout_s=30, background=True,
                  check=False)
     again = get_task_step_registry()["computer_exec"].from_dict(step.to_dict())
     assert again.to_dict() == step.to_dict()
+    stored = {key: value for key, value in step.to_dict().items() if key != "computer_name"}
+    assert get_task_step_registry()["computer_exec"].from_dict({**stored, "computer": "desk"}).computer_name == "desk"
     root = _step("apt-get install -y jq", scope="system")
     assert get_task_step_registry()["computer_exec"].from_dict(root.to_dict()).scope == "system"
