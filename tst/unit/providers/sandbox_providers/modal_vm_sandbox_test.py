@@ -109,6 +109,22 @@ def test_from_stdin_runs_a_script_past_linuxs_128_kib_argument_limit(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.skipif(not _bash_has_mapfile_d(), reason="needs bash 4.4+ (mapfile -d), as the VM has")
+def test_from_stdin_leaves_another_programs_dash_c_as_it_is(tmp_path):
+    # Only a shell's -c is a shell script; python3 -c gets its own source, not the eval.
+    import os
+    import shutil
+    import subprocess
+
+    python = shutil.which("python3")
+    source = "# " + "x" * (40 * 1024) + "\nimport sys; print(sys.argv[1:])"
+    argv = [python, "-c", source, "a b"]
+    out = subprocess.run(["bash", "-c", mvs._FROM_STDIN], input=b"".join(a.encode() + b"\0" for a in argv),
+                         capture_output=True, check=True, env={**os.environ, "TMPDIR": str(tmp_path)})
+    assert out.stdout == b"['a b']\n"
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.asyncio
 async def test_setup_starts_dockerd_polls_until_ready_and_skips_iptables():
     s = _sandbox()

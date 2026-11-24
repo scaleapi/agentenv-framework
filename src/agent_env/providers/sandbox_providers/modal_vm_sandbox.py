@@ -133,10 +133,11 @@ _DISK_IDLE_TIMEOUT_S = 30 * 60
 #: The most bytes of arguments an exec sends as argv; Modal rejects one past ~48 KB. A longer one goes over stdin.
 _MAX_EXEC_ARG_BYTES = 32 * 1024
 #: Reads a NUL-separated argv from stdin and runs it, with no input of its own. Linux caps one argument at 128 KiB
-#: (MAX_ARG_STRLEN), so a ``-c`` script goes into a file that the shell reads, removes and evals, keeping its $0 and $@.
+#: (MAX_ARG_STRLEN), so a shell's ``-c`` script goes into a file that the shell reads, removes and evals, keeping its $0
+#: and $@. Another program's ``-c`` (python3, say) is left as it is.
 _FROM_STDIN = (
     'mapfile -d "" -t a && '
-    'if [ "${#a[@]}" -ge 3 ] && [ "${a[1]}" = -c ]; then '
+    'if [ "${#a[@]}" -ge 3 ] && [ "${a[1]}" = -c ] && case "${a[0]##*/}" in bash|sh) true;; *) false;; esac; then '
     r'f=$(mktemp) && printf %s "${a[2]}" > "$f" && a[2]="eval \"\$(cat -- $f && rm -f -- $f)\""; fi && '
     'exec "${a[@]}" </dev/null'
 )
