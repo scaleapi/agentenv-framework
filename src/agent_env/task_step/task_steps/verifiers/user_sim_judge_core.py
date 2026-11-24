@@ -840,16 +840,21 @@ def finish_rows(rows: list[dict], plan: Plan) -> list[dict]:
 def unnamed(rows: list[dict], plan: Plan) -> list[str]:
     """The judged rows whose fail could change the grade but name nothing the run lists as graded (``would_change``
     holds none of ``plan.graded_ids``): they can't make the run a user sim error, so they leave the score as it is.
-    Each is set to score 1 here, its verdict and could_change_grade kept. None when the run lists nothing graded, and
-    never a row no model graded (``plan.unjudged``: an auto item, a line that can't be read), since no judge named."""
+    Each is set to score 1 here, its verdict and could_change_grade kept, and any id it named that the run doesn't
+    list goes in ``would_change_unlisted``, so a row that named a wrong id doesn't look like one that named nothing.
+    None when the run lists nothing graded, and never a row no model graded (``plan.unjudged``: an auto item, a line
+    that can't be read), since no judge named."""
     if plan.graded_ids is None:
         return []
     computed = {r["id"] for r in plan.unjudged}
     out = []
     for r in rows:
+        named = set(r.get("would_change") or [])
         if (r["id"] not in computed and r.get("verdict") == "fail" and r.get("could_change_grade")
-                and not set(r.get("would_change") or []) & plan.graded_ids):
+                and not named & plan.graded_ids):
             r.update(score=1.0, result=True)
+            if named:
+                r["would_change_unlisted"] = sorted(named)
             out.append(r["id"])
     return out
 

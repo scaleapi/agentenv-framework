@@ -1415,6 +1415,19 @@ def _never_gates(criterion: dict) -> bool:
         return False
 
 
+def _named_ids(named: list[str]) -> list[str]:
+    """The ids a fail names in ``would_change``, as the criteria list them: the judge is shown each as ``[c3]``, so
+    surrounding brackets and spaces go."""
+    out = []
+    for x in named:
+        x = x.strip()
+        if x.startswith("[") and x.endswith("]"):
+            x = x[1:-1].strip()
+        if x:
+            out.append(x)
+    return out
+
+
 def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     """One result checked against its criterion: ``(row, [])``, or ``(None, problems)`` naming the row. The row
     lowers the score (score 0.0, result false) only on a fail with could_change_grade, and never at weight 0;
@@ -1464,7 +1477,7 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     row = {**criterion, "id": rid, "reason": reason,
            "turns": [t for t in turns if graded is None or t in graded],
            "verdict": verdict, "could_change_grade": change,
-           "would_change": [x.strip() for x in named if x.strip()] if change else [], "assistant_asked": asked,
+           "would_change": _named_ids(named) if change else [], "assistant_asked": asked,
            "justification": reason, "score": 0.0 if lowers else 1.0, "result": not lowers}
     outside = [t for t in turns if graded is not None and t not in graded]
     if outside:

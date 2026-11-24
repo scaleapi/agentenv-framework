@@ -1769,6 +1769,18 @@ async def test_the_judge_reads_what_the_assistant_is_graded_on_and_a_fail_counts
 
 
 @pytest.mark.asyncio
+async def test_a_fail_naming_a_graded_id_in_brackets_counts_and_a_wrong_id_is_kept_on_the_row(monkeypatch):
+    # The judge is shown each criterion as "- [buyers_answered] ...", so it may name it with the brackets.
+    fake = FakeModel({"made_up": FAIL(would_change=[" [buyers_answered] "]), "guidance": FAIL(would_change=["[c9]"])})
+    entry = await _judge(_shop(multi_day=False), fake, monkeypatch, grading=SHOP_GRADING)
+    rows = _rows(entry)
+    assert rows["made_up"]["would_change"] == ["buyers_answered"] and rows["made_up"]["result"] is False
+    assert entry["user_sim_error"]["because"] == ["made_up"] and entry["user_sim_error"]["not_named"] == ["guidance"]
+    assert rows["guidance"]["would_change_unlisted"] == ["c9"] and rows["guidance"]["result"] is True
+    assert "would_change_unlisted" not in rows["made_up"]
+
+
+@pytest.mark.asyncio
 async def test_without_the_task_s_grading_a_fail_counts_as_before_and_the_entry_says_why(monkeypatch):
     unseen = await _judge(_shop(multi_day=False), FakeModel({"rogue": FAIL()}), monkeypatch)
     assert unseen["grading"] == {"source": "none", "note": usj.GRADING_UNSEEN}
