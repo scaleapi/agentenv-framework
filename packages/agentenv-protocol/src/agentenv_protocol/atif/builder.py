@@ -20,6 +20,7 @@ from ._image_size import image_size
 from .adapter import AdapterSpec
 from .models.content import AudioMediaType, ContentPart, ImageSource
 from .profile import (
+    COMPACTION_TRIGGERS,
     COST_SOURCES,
     ERROR_KINDS,
     PROFILE_KEY,
@@ -27,6 +28,7 @@ from .profile import (
     RAW_ARGUMENTS,
     RESULT_STATUSES,
     SCHEMA_VERSION,
+    SUMMARY_WRITERS,
     TASK_STATES,
     VISIBILITIES,
     AtifError,
@@ -344,6 +346,9 @@ class Document:
 
     def step_for(self, key: str, agent: str | None) -> _Step:
         return self.peek(key, agent) or self._start(self._traj(agent), "agent", key)
+
+    def system_step(self) -> _Step:
+        return self._start(self._traj(None), "system", None)
 
     def open_step(self, agent: str | None) -> _Step:
         step = self._traj(agent).open
@@ -898,6 +903,30 @@ class AtifTurn:
         target = self._doc.step_for(_key(step), agent) if step is not None else self._doc.open_step(agent)
         target.profile["error"] = {k: v for k, v in (("kind", kind), ("message", message), ("code", code))
                                    if v is not None}
+
+    def system_message(self, *, text: str | None = None, content: Sequence[Any] | None = None,
+                       time: str | datetime | None = None) -> None:
+        """A message the harness itself put in the conversation, such as a command's output: a ``source: system`` step
+        of its own in the root trajectory, which closes the step before it. Profile 1.1."""
+        parts, media = self._doc.parse_parts(content, text)
+        when = timestamp(time)
+        target = self._doc.system_step()
+        target.parts.extend(parts)
+        target.media.update(media)
+        self._touch(target, when)
+
+    def compaction(self, *, step: str, written_by: str, trigger: str | None = None, agent: str | None = None) -> None:
+        """Mark step ``step`` a compaction: its message a summary that replaced the conversation before it in what the
+        agent sees, written by ``written_by`` (``assistant``, the agent's own model, or ``harness``) and set off by
+        ``trigger`` (``manual``, something asked for it, or ``auto``). The step is the call that wrote the summary,
+        so its usage goes on it with ``step``. Profile 1.1."""
+        if written_by not in SUMMARY_WRITERS:
+            raise AtifError(f"written_by {written_by!r} isn't one of {', '.join(SUMMARY_WRITERS)}")
+        if trigger is not None and trigger not in COMPACTION_TRIGGERS:
+            raise AtifError(f"trigger {trigger!r} isn't one of {', '.join(COMPACTION_TRIGGERS)}")
+        target = self._doc.step_for(_key(step), agent)
+        target.profile["compaction"] = {key: value for key, value in (("written_by", written_by), ("trigger", trigger))
+                                        if value is not None}
 
     def attempt(self, number: int) -> None:
         """A harness retry: steps from here on carry attempt ``number``."""

@@ -1,6 +1,6 @@
 # The agentenv profile of ATIF
 
-Profile 1.0. agentenv records what an agent did as an ATIF v1.8 document: Harbor's
+Profile 1.1. agentenv records what an agent did as an ATIF v1.8 document: Harbor's
 [Agent Trajectory Interchange Format](https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md),
 whose models are vendored in `models/`. An agent serves it as format `atif/1`, beside its native log. What ATIF has no
 typed field for, agentenv adds under `extra.agentenv` on the objects that have an `extra`. This file is the profile's spec.
@@ -36,7 +36,7 @@ to native exactly.
   call's result by `subagent_trajectory_ref`. It belongs to the task of the call that spawned it. A sub-agent that
   wrote no step is left out, and so is the reference to it. A spawning call with no result when its task ends gets
   one, with no content and `status: canceled`, so its sub-agent stays referenced.
-- `schema_version` is the oldest ATIF version that holds the document's fields: `ATIF-v1.8` for profile 1.0.
+- `schema_version` is the oldest ATIF version that holds the document's fields: `ATIF-v1.8` for profile 1.1.
 - Format id: `atif/1`. The profile's own version is the root's `extra.agentenv.version`.
 
 ## Steps
@@ -44,6 +44,12 @@ to native exactly.
 - A step is one model response, keyed by its native id (a message id), or a step with no model call
   (`llm_call_count` 0, no metrics or reasoning). A step closes when the next step of its trajectory starts, or when its
   task ends.
+- A `source: system` step is a message the harness itself put in the conversation, such as a command's output: neither
+  the agent's words nor the user's. A reader that stages a turn for a judge shows it as a note. (1.1)
+- A compaction is when the harness replaces the conversation so far with a summary, in what the agent sees from then
+  on. The summary is the message of the step of the model call that wrote it: a `source: agent` step carrying that
+  call's metrics, its profile's `compaction` saying who wrote it and what set it off. A reader that stages a turn for a
+  judge shows it as a note, not as the agent speaking. (1.1)
 - A result always sits in the step that made its call, as ATIF requires. One that arrives after that step closed records
   when, in `arrived`.
 - A live reader is served closed steps only, each trajectory up to its first step still waiting on a result or
@@ -117,7 +123,7 @@ One vocabulary, in three places:
 
 | Object | Field | Meaning | Read by |
 | --- | --- | --- | --- |
-| Trajectory | `version` | The profile version: `1.0` | every reader |
+| Trajectory | `version` | The profile version: `1.1` | every reader |
 | Trajectory | `native_format` | The native format id the copy was built from | the worker that stores copies; renormalizing |
 | Trajectory | `adapter` | The adapter's `name` and `version` | the worker that stores copies; renormalizing |
 | Trajectory | `unmatched` | Native records no method took, counted by type | the adapter kit |
@@ -126,6 +132,7 @@ One vocabulary, in three places:
 | Step | `attempt` | The harness attempt the step belongs to; absent means 1 | the explorer |
 | Step | `error` | A step-level error: `kind`, `message`, `code` | the explorer |
 | Step | `data` | On a task's last step: its final response's diagnostic DataParts, in order, each `data` and its `metadata` | the explorer |
+| Step | `compaction` | On a compaction's step: who wrote the summary (`written_by`) and what set it off (`trigger`). (1.1) | judges' turn events |
 | Step | `reasoning` | Each reasoning block: `chars`, `visibility`, `signature`, `data` | resuming a session; RL replay |
 | Step | `media` | Details of the media the message names, by path | media transfer; the explorer |
 | ObservationResult | `status` | The result's status; absent means `ok` | the explorer, judges' turn events |
@@ -137,12 +144,13 @@ One vocabulary, in three places:
 | FinalMetrics | `cost_source` | Where `total_cost_usd` came from | the run's usage and cost result |
 | FinalMetrics | `total_cache_write_tokens` | Cache writes summed over the steps | the run's usage and cost result |
 
-A media entry (MediaInfo) holds `sha256`, `bytes`, and, where they apply, `width`, `height`, `duration_ms`, `pages`
-and `name`, plus `media_type` for media ATIF has no part type for. A reasoning block (ReasoningBlock) holds `chars`,
-its share of `reasoning_content` (0 when the provider withheld the text), its `visibility`, the provider's `signature`,
-and a redacted block's ciphertext as `data`, byte for byte. A step error (StepError) holds `kind`, `message` and `code`.
-An arrival (Arrival) holds `at` and `step_id`. The Agent, ToolCall and SubagentTrajectoryRef profiles define no fields
-in 1.0.
+A media entry (MediaInfo) holds `sha256`, `bytes`, and, where they apply, `width`, `height`, `duration_ms`, `pages` and
+`name`, plus `media_type` for media ATIF has no part type for. A reasoning block (ReasoningBlock) holds `chars`, its
+share of `reasoning_content` (0 when the provider withheld the text), its `visibility`, the provider's `signature`, and
+a redacted block's ciphertext as `data`, byte for byte. A step error (StepError) holds `kind`, `message` and `code`. An
+arrival (Arrival) holds `at` and `step_id`. A compaction (Compaction) holds `written_by`, `assistant` for the agent's
+own model or `harness`, and `trigger`, `manual` when something asked for it, such as a command, or `auto` when the
+harness set it off itself. The Agent, ToolCall and SubagentTrajectoryRef profiles define no fields in 1.1.
 
 ## Vocabularies
 
@@ -155,18 +163,27 @@ A reader keeps a value it doesn't know.
 | `StepError.kind` | `agent_error`, `infra_error` |
 | `ReasoningBlock.visibility` | `raw`, `summary`, `omitted`, `redacted` |
 | `MetricsProfile.cost_source`, `FinalMetricsProfile.cost_source` | `harness`, `provider` |
+| `Compaction.written_by` | `assistant`, `harness` |
+| `Compaction.trigger` | `manual`, `auto` |
 
 ## Versions
 
 A minor version only adds optional fields and vocabulary values, each with the reader or producer that needs it. A
-field added in a later minor names the version it arrived in. Proposed for a later minor, with their first producer:
-`input_includes_cache` on the root and `cost_status` (`reported`, `priced` or `unpriced`), with the usage
-cross-check that reads them; per-part origins, when a reader needs them; and an always-on harness's fields.
+field added in a later minor names the version it arrived in, and a reader of a minor reads every one before it.
+
+- 1.1 adds `compaction` and `source: system` steps as the harness's own messages. Their first producer is Claude
+  Code's adapter, and their reader the judges' turn events.
+- Proposed for a later minor, with their first producer:
+  - `input_includes_cache` on the root and `cost_status` (`reported`, `priced` or `unpriced`), with the usage
+    cross-check that reads them;
+  - per-part origins, when a reader needs them;
+  - the rest of an always-on harness's fields: the facts of its compaction (what it kept), the purpose of its
+    messages, and the tools it provides itself.
 
 ## Validator
 
 `validate(document)` returns findings, each with a rule id below, a severity and where in the document it is. It holds a
-producer's output to profile 1.0. `reader=True` checks someone else's document for reading instead: what a producer
+producer's output to this profile. `reader=True` checks someone else's document for reading instead: what a producer
 must not write only warns, and the document fails only where agentenv couldn't read it. `media` is the folder the
 document's media paths are relative to, the one holding `media/`, or the files by path; without it only the paths' form
 is checked. `StoredMedia(sizes)` stands for files stored beside the document whose bytes were checked against their
@@ -182,8 +199,9 @@ and exits 1 when one is an error.
 | `json` | The document is a JSON object: UTF-8, with no NaN or infinity | error | error |
 | `atif` | ATIF's own models, vendored from Harbor, accept it | error | error |
 | `profile` | Each `extra.agentenv` parses with its profile model | error | error |
-| `profile-key` | Each `extra.agentenv` holds only the fields profile 1.0 defines | error | warning |
-| `profile-version` | The root's `extra.agentenv.version`, when given, is `1.0` | error | warning |
+| `profile-key` | Each `extra.agentenv` holds only the fields this profile defines | error | warning |
+| `profile-version` | The root's `extra.agentenv.version`, when given, is a 1.x this validator knows: 1.0 or 1.1 | error | warning |
+| `compaction` | A step's `compaction` is on a `source: agent` step and names who wrote its summary | error | warning |
 | `vocabulary` | A vocabulary field holds one of its values | error | warning |
 | `outside-key` | No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments` | error | warning |
 | `call-id` | Each `tool_call_id` is unique across the document and its sub-agents | error | warning |
