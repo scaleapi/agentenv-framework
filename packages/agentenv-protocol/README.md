@@ -1366,7 +1366,11 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
   record no method takes is counted in the root profile. `turn.tool_definitions([...], agent=None)` writes the tools
   the model was offered, in OpenAI's function form, to a trajectory's `agent.tool_definitions`; a later call adds
-  tools and replaces those of the same name.
+  tools and replaces those of the same name. A message the harness itself put in the conversation, such as a
+  command's output, is `turn.system_message(text=...)`, a `source: system` step of its own. A compaction, a summary
+  that replaced the conversation in what the agent sees, is the message of the step of the call that wrote it,
+  marked by `turn.compaction(step=..., written_by="assistant" | "harness", trigger="manual" | "auto")`, its usage
+  that call's (profile 1.1).
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
