@@ -484,6 +484,14 @@ def test_settle_poll_does_not_wait_out_a_delay_or_working_hours():
     assert PromptAgentTaskStep._capture_is_final(waiting) is False
 
 
+def test_settle_poll_does_not_wait_for_a_deferred_call_the_gateway_has_yet_to_make():
+    """A server's deferred call may be due hours of virtual time on, so only triggers can keep the capture waiting."""
+    state = {"triggers": [{"id": "t", "type": "action", "status": "armed", "when": {"type": "action", "tool": "x"}}],
+             "deferred_calls": [{"key": "m1", "at": "2026-07-06T19:03:00Z", "tool": "deliver", "role": "default",
+                                 "status": "pending", "attempts": 0}]}
+    assert PromptAgentTaskStep._is_settling(state) is False
+
+
 @pytest.mark.asyncio
 async def test_capture_noop_without_registrations():
     calls = {"n": 0}

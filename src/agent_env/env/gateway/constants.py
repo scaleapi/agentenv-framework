@@ -162,9 +162,11 @@ TRIGGER_NOTIFY = "notify"
 TRIGGER_WEBSITE_OP = "website_op"
 # state reports each fire in flight (running, waits) and each executor call in progress (executor_calls).
 TRIGGER_FIRES_IN_STATE = "fires_in_state"
+# a server's deferred calls (AGENT_ENV_DEFERRED_CALLS_META_KEY) are made, reported to the triggers and listed in state.
+TRIGGER_DEFERRED_CALLS = "deferred_calls"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
-                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP, TRIGGER_FIRES_IN_STATE)
+                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP, TRIGGER_FIRES_IN_STATE, TRIGGER_DEFERRED_CALLS)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
@@ -193,6 +195,11 @@ AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"
 AGENT_ENV_SESSION_META_KEY = "agentenv.io/session"
 # MCP tools/list `_meta` key marking a tool hidden from every role until a rule names it; "*"-tool rules skip it.
 AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
+# MCP tools/call result `_meta` key by which a server declares calls on itself for the gateway to make later: a list of
+# {key, at (RFC 3339), call {tool, arguments}, report_as {tool, arguments}}, each made once per key when the gateway
+# clock reaches `at`, as the declaring call's role, and reported to the triggers as that role's call `report_as`. The
+# gateway takes it off the result, so no caller sees it.
+AGENT_ENV_DEFERRED_CALLS_META_KEY = "agentenv.io/deferredCalls"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
