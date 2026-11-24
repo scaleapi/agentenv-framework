@@ -260,7 +260,7 @@ def run_bundle(
     ends.
 
     Before anything is written, raises RuntimeError when an event loop is already running, ValueError when
-    ``sandbox`` names no provider or ``judge_samples`` isn't a positive odd count, and BundleError when the bundle can't be planned or a deploy can't run where
+    ``sandbox`` names no provider or ``judge_samples`` isn't a positive count, and BundleError when the bundle can't be planned or a deploy can't run where
     it would (``preflight``). A task that fails its preflight raises BundleError once the entities it reads are
     written, before any task is. Building an infra env the run needs raises what the build raises, before any task
     runs."""

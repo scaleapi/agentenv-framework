@@ -69,11 +69,12 @@ def _judge_samples(ctx: click.Context, param: click.Parameter, value: int | None
 
 
 def judge_samples_option(f):
-    """``--judge-samples N``, the run's ``judge_samples``: an odd count, refused at once otherwise."""
+    """``--judge-samples N``, the run's ``judge_samples``: a positive count, refused at once otherwise."""
     return click.option(
         "--judge-samples", type=int, default=None, callback=_judge_samples, metavar="N",
-        help="Grade each criterion N times, an odd number, and keep its median, in every judge that can (a "
-             "rubric_binary or rubric_partial one), whatever the tasks say; each sample's score is kept.")(f)
+        help="Grade each criterion N times and keep its median, the lower middle score on a tie (so a tie "
+             "fails), in every judge that can (a rubric_binary or rubric_partial one), whatever the tasks say; "
+             "each sample's score is kept.")(f)
 
 
 def refuse_unwritable_ids(*ids: str) -> None:

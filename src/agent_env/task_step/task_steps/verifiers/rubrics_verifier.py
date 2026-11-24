@@ -634,7 +634,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         # judge_batch_concurrency at once), and retry a batch whose rows read as bulk verdicts.
         self.judge_batch_size = _validated_batch_option("judge_batch_size", judge_batch_size)
         self.judge_batch_concurrency = _validated_batch_option("judge_batch_concurrency", judge_batch_concurrency)
-        # Grade each criterion this many times (an odd count) and keep its median, every sample's score kept.
+        # Grade each criterion this many times and keep its median, the lower middle score on a tie, every sample's
+        # score kept.
         self.judge_samples = judge_samples_rule.validated(judge_samples)
         # An agent judge call (a batch's, with batches) that runs out of judge_timeout_seconds is tried again this many
         # times, and the timed-out attempt's trajectory is kept; None keeps the first timeout fatal, as it always was.

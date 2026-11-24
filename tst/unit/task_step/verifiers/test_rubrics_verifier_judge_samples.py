@@ -1,5 +1,6 @@
-"""judge_samples: a rubric_binary or rubric_partial judge grades each criterion that many times, an odd count, and keeps
-its median, the row of the first sample that scored it with every sample's score and justification beside it; each
+"""judge_samples: a rubric_binary or rubric_partial judge grades each criterion that many times and keeps its median, the
+lower middle score on a tie, so a tie fails, the row of the first sample that scored it with every sample's score and
+justification beside it; each
 call's record names its sample; the samples share the judge's concurrency; one that fails fails the grade; a judge the
 verifier deploys gets one of its own per sample, while the task's own judge takes every sample; a run's count reaches
 every judge that can take it, and one that can't grades once and records it as not sent."""
@@ -70,13 +71,11 @@ def _two_to_one(sample, ids) -> dict[str, float]:
     return {"c1": 0.0 if sample == 2 else 1.0, "c2": 0.0 if sample == 1 else 1.0, **{i: 1.0 for i in ids[2:]}}
 
 
-def test_a_count_is_odd_and_positive_and_an_even_one_names_its_odd_neighbours():
-    assert [judge_samples.validated(n) for n in (None, 1, 3, 7)] == [None, 1, 3, 7]
+def test_a_count_is_any_positive_integer():
+    assert [judge_samples.validated(n) for n in (None, 1, 2, 3, 4)] == [None, 1, 2, 3, 4]
     for bad in (0, -3, True, 3.0, "3"):
-        with pytest.raises(ValueError, match="positive odd integer"):
+        with pytest.raises(ValueError, match="positive integer"):
             judge_samples.validated(bad)
-    with pytest.raises(ValueError, match="must be odd, so each criterion's median is a score a sample gave: use 3 or 5"):
-        judge_samples.validated(4)
 
 
 def test_each_criterion_keeps_the_first_row_that_scored_its_median_and_every_samples_score_and_reason():
@@ -90,16 +89,27 @@ def test_each_criterion_keeps_the_first_row_that_scored_its_median_and_every_sam
                               {"score": 0.5, "justification": "3:0.5"}]
 
 
-def test_a_task_that_asks_an_even_count_or_samples_a_format_without_one_score_a_row_fails_to_load():
-    with pytest.raises(ValueError, match="use 1 or 3"):
-        RubricsVerifierTaskStep.from_dict({**G._step().to_dict(), "judge_samples": 2})
+@pytest.mark.parametrize("scores, kept", [([1.0, 0.0], 0.0), ([0.0, 1.0], 0.0), ([1.0, 1.0, 0.0, 1.0], 1.0),
+                                          ([1.0, 0.0, 0.0, 1.0], 0.0), ([0.75, 0.25], 0.25)])
+def test_an_even_count_s_tie_keeps_the_lower_middle_score_and_the_first_sample_that_gave_it(scores, kept):
+    sampled = [[{"id": "a", "score": score, "justification": f"sample {n}"}] for n, score in enumerate(scores, 1)]
+
+    [row] = judge_samples.median_rows(sampled)
+
+    assert row["score"] == kept and row["justification"] == f"sample {scores.index(kept) + 1}"
+    assert [each["score"] for each in row["samples"]] == scores
+
+
+def test_a_task_that_asks_no_samples_or_samples_a_format_without_one_score_a_row_fails_to_load():
+    with pytest.raises(ValueError, match="judge_samples must be a positive integer, got 0"):
+        RubricsVerifierTaskStep.from_dict({**G._step().to_dict(), "judge_samples": 0})
     with pytest.raises(ValueError, match="judge_samples does not apply to output_format=rubric_evidence"):
         G._evidence_step("rubric_evidence", judge_samples=3)
     with pytest.raises(ValueError, match="judge_samples"):
         UserSimJudge.from_dict({"id": "sim", "version": 1, "type": "user_sim_judge", "run_step_id": "week",
                                 "judge_samples": 3})
-    step = G._step(judge_samples=3)
-    assert RubricsVerifierTaskStep.from_dict(step.to_dict()).judge_samples == 3
+    for count in (2, 3):
+        assert RubricsVerifierTaskStep.from_dict(G._step(judge_samples=count).to_dict()).judge_samples == count
     assert "judge_samples" not in G._step().to_dict()
 
 
@@ -121,6 +131,19 @@ async def test_a_direct_judge_grades_each_criterion_three_times_and_keeps_each_o
     assert grade["verifier_settings"]["judge_samples"] == 3
     entry = context.metadata["verifications"]["vid"]
     assert entry["judge_samples"] == 3 and all(len(row["samples"]) == 3 for row in entry["results"])
+
+
+@pytest.mark.asyncio
+async def test_two_samples_that_split_fail_the_criterion_with_the_failing_samples_reason(monkeypatch):
+    _sampled_llm(monkeypatch, _two_to_one)
+
+    grade = await _grade(G._step(default_model="gpt-4o-mini", judge_samples=2), G._context())
+
+    rows = {row["id"]: row for row in grade["verifier_criteria"]}
+    assert (rows["table-reserved"]["score"], rows["party-size"]["score"]) == (0.0, 0.0)
+    assert rows["table-reserved"]["justification"] == "sample 2 scored c1 0.0"
+    assert rows["party-size"]["justification"] == "sample 1 scored c2 0.0"
+    assert grade["score"] == 0.0 and grade["verifier_settings"]["judge_samples"] == 2
 
 
 @pytest.mark.asyncio
@@ -186,11 +209,11 @@ async def test_a_runs_count_a_format_cant_take_grades_once_and_is_recorded_as_no
 
 
 @pytest.mark.asyncio
-async def test_a_runs_even_count_fails_the_grade_saying_why(monkeypatch):
+async def test_a_runs_count_of_zero_fails_the_grade_saying_why(monkeypatch):
     _sampled_llm(monkeypatch, lambda sample, ids: dict.fromkeys(ids, 1.0))
-    context = G._context({"judge_samples": 2})
+    context = G._context({"judge_samples": 0})
 
-    with pytest.raises(ValueError, match="use 1 or 3"):
+    with pytest.raises(ValueError, match="judge_samples must be a positive integer, got 0"):
         await G._step(default_model="gpt-4o-mini").execute(context)
 
     assert context.metadata["grades"]["verify"]["verifier_status"] == "failed"
@@ -227,14 +250,14 @@ async def test_the_tasks_own_agent_judge_takes_every_sample_each_in_a_conversati
     assert sorted(c["sample"] for c in grade["judge_calls"]) == [1, 2, 3]
 
 
-def test_the_run_flag_sets_the_runs_count_and_refuses_an_even_one_or_none_at_all(tmp_path):
-    assert _overrides(None, None, None, 3) == {"judge_samples": 3}
+def test_the_run_flag_sets_the_runs_count_and_refuses_one_below_one(tmp_path):
+    assert _overrides(None, None, None, 2) == {"judge_samples": 2}
     assert _overrides(None, None, None, None) == {}
-    for bad in (0, 2):
-        with pytest.raises(ValueError, match="judge_samples must be"):
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="judge_samples must be a positive integer"):
             run_bundle(tmp_path, judge_samples=bad)
-    result = CliRunner().invoke(run_command, ["some-bundle", "--judge-samples", "2"])
-    assert result.exit_code != 0 and "use 1 or 3" in result.output
+    result = CliRunner().invoke(run_command, ["some-bundle", "--judge-samples", "0"])
+    assert result.exit_code != 0 and "positive integer" in result.output
 
 
 class _Fleet:
