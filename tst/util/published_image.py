@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -42,14 +43,19 @@ def pull_published_else_build(name: str, dockerfile: Path, context: Path, tag: s
 def hold_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """For the rest of the test, each image's published digest, or that it has none, as the test's first lookup of it
     found it: a release can publish an image between two runs of one test's bundle, and the second would then plan a
-    pull where the first built. The lookup keeps what it finds published for the process, not what it doesn't."""
+    pull where the first built. The lookup keeps what it finds published for the process, not what it doesn't. Two
+    lookups at once, as parallel builds make, both get the answer stored first."""
     lookup = published_images._registry_digest
     answers: dict[str, str | None] = {}
+    lock = threading.Lock()
 
     def held(ref: str) -> str | None:
-        if ref not in answers:
-            answers[ref] = lookup(ref)
-        return answers[ref]
+        with lock:
+            if ref in answers:
+                return answers[ref]
+        found = lookup(ref)
+        with lock:
+            return answers.setdefault(ref, found)
 
     monkeypatch.setattr(published_images, "_registry_digest", held)
 
