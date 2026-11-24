@@ -95,6 +95,15 @@ async def test_long_stdout_does_not_push_out_stderr(install):
 
 
 @pytest.mark.asyncio
+async def test_max_chars_widens_each_stream(install):
+    sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("x" * 5000, "y" * 5000)})
+
+    out = await fetch_container_logs(install(sandbox), max_chars=3000)
+
+    assert (out.count("x"), out.count("y")) == (3000, 3000)
+
+
+@pytest.mark.asyncio
 async def test_no_docker_is_none_after_one_exec(install):
     sandbox = FakeSandbox(docker_ok=False)
 
