@@ -1416,7 +1416,6 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         if samples > 1 and (split := judge_samples_rule.disagreeing(verdict.criteria, bar)):
             # The rows stay on the failed grade, each with its samples, for whoever has to see why it split.
             reason = judge_samples_rule.disagreement(self.verifier_id, split, bar)
-            logger.warning(reason)
             verdict = replace(verdict, error=reason, raise_after=judge_samples_rule.JudgeDisagreementError(reason),
                               output={**verdict.output, "judge_disagreement": {
                                   "min_judge_agreement": bar,

@@ -244,14 +244,17 @@ async def test_overwritten_scalar_is_restored_by_the_rollback(store):
 
 
 @pytest.mark.asyncio
-async def test_self_retry_reruns_only_the_failed_step(store):
+async def test_self_retry_reruns_only_the_failed_step_and_says_why(store, caplog):
     deploy = _FakeDeployEnv("s0")
     # retry_from = the step itself -> span is just {s1}, deploy is not rolled back.
     flaky = _FlakyPrompt("s1", retry_config=RetryConfig(retry_from_step_id="s1"), fail_times=1)
     task = Task(id="t", version=1, steps=[deploy, flaky])
 
     ctx = TaskStepContext()
-    result = await task.run(context=ctx)
+    with caplog.at_level(logging.WARNING, logger="agent_env.task.task"):
+        result = await task.run(context=ctx)
+
+    assert "Step s1 failed (RuntimeError: flaky boom); rolling back span ['s1']" in caplog.text
 
     assert deploy.deploy_calls == ["s0"]  # deploy NOT re-run
     assert flaky.attempts == 2
