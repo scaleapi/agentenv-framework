@@ -133,6 +133,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "the assistant did, or gave away what would bother or impress it before it happened.",
             "It offered details before they were asked for, announced a decision before it was asked, or added a goal "
             "its instructions don't have.",
+            "It pointed the assistant to where a fact lives (\"it's in your email\", \"check the chat\") where its "
+            "instructions don't say to point there: that hands the assistant where to look.",
         ),
         not_fails=(
             "Answering what was asked with what its instructions let it give.",
@@ -232,7 +234,6 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "Choices, preferences and opinions its instructions leave open.",
             "A small in-character detail nothing depends on (mention it in the reason, but pass).",
             "Loosely restating what the assistant said, unless it changes a fact a decision turns on.",
-            "Pointing to where something might be (\"check the chat\").",
             "Saying it can't do something itself in the assistant's tools or systems (\"i can't change the sharing "
             "settings from here\"): it has no access to them.",
         ),

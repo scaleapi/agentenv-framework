@@ -1570,3 +1570,13 @@ def test_the_core_loads_on_its_own_by_file_path_without_the_framework():
             "assert 'agent_env' not in sys.modules; print(len(m.CHECKS))")
     got = subprocess.run([sys.executable, "-I", "-c", load, core.__file__], capture_output=True, text=True, check=True)
     assert got.stdout.strip() == str(len(core.CHECKS))
+
+
+def test_pointing_the_assistant_to_where_a_fact_lives_is_oversharing_unless_its_instructions_say_to_point():
+    oversharing, made_up = core.check_question("oversharing"), core.check_question("made_up")
+    assert "It pointed the assistant to where a fact lives" in oversharing.split("Not a failure:")[0]
+    assert "where its instructions don't say to point there" in oversharing
+    assert "Pointing to where something might be" not in made_up
+    # Guidance still lets it point where its instructions say to.
+    guidance = core.check_question("guidance")
+    assert "Pointing to where a look-up fact lives when its instructions say to point" in guidance
