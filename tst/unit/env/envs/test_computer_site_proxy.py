@@ -40,6 +40,10 @@ from tst.unit.env.gateway.website_websocket_test import EchoSite
 
 pytestmark = pytest.mark.usefixtures("socket_enabled")
 
+#: How long a test waits for answers that come back in under a second: generous, since the wait ends once every answer is
+#: in, and a busy test worker's event loop can stall for seconds, as a full garbage collection of its heap does.
+ANSWERS_WAIT_S = 5.0
+
 
 def _ok(body=b"hello", extra=()):
     async def respond(start, headers, request_body, reader, writer):
@@ -887,9 +891,7 @@ async def test_dns_over_udp_answers_every_query_a_client_sends_while_a_slow_name
             client.sendto(_query("eu.chat.test", 1))
             for _ in range(passed_on):
                 client.sendto(_query("example.org", 1))
-            # Generous, since the wait ends once every answer is in: a busy test worker's event loop can stall for
-            # seconds, as a full garbage collection of its heap does.
-            deadline = loop.time() + 25 * nameserver_delay_s
+            deadline = loop.time() + ANSWERS_WAIT_S
             while loop.time() < deadline and len(answered) < passed_on + 1:
                 await asyncio.sleep(0.05)
         finally:

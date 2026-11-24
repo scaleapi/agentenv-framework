@@ -29,6 +29,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples as judge_samples_rule
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.store import record_task_cancelled
@@ -259,11 +260,12 @@ def run_bundle(
     ends.
 
     Before anything is written, raises RuntimeError when an event loop is already running, ValueError when
-    ``sandbox`` names no provider, and BundleError when the bundle can't be planned or a deploy can't run where
+    ``sandbox`` names no provider or ``judge_samples`` isn't a positive odd count, and BundleError when the bundle can't be planned or a deploy can't run where
     it would (``preflight``). A task that fails its preflight raises BundleError once the entities it reads are
     written, before any task is. Building an infra env the run needs raises what the build raises, before any task
     runs."""
     _refuse_a_running_loop()
+    judge_samples = judge_samples_rule.validated(judge_samples)
     composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():

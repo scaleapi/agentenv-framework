@@ -218,6 +218,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         judge_sandbox_type: Optional[str] = None,
         judge_batch_size: Optional[int] = None,
         judge_batch_concurrency: Optional[int] = None,
+        judge_samples: Optional[int] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
         full_app_changes: bool = False,
@@ -245,7 +246,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             default_model=default_model, default_model_api_base=default_model_api_base, effort=effort,
             max_thinking_tokens=max_thinking_tokens, judge_a2a_agent_id=judge_a2a_agent_id,
             judge_sandbox_type=judge_sandbox_type, judge_batch_size=judge_batch_size,
-            judge_batch_concurrency=judge_batch_concurrency,
+            judge_batch_concurrency=judge_batch_concurrency, judge_samples=judge_samples,
             judge_timeout_retries=(self.DEFAULT_JUDGE_TIMEOUT_RETRIES if judge_timeout_retries is None
                                    else judge_timeout_retries),
             judge_max_turns=self.DEFAULT_JUDGE_MAX_TURNS if judge_max_turns is None else judge_max_turns,

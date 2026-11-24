@@ -14,7 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.a2a_agent import protocol
-from agent_env.bundle.run import _overrides
+from agent_env.bundle.run import _overrides, run_bundle
 from agent_env.cli.run import run as run_command
 from agent_env.task_step.context import DeployedAgent
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples, judge_usage
@@ -222,8 +222,11 @@ async def test_an_agent_judge_takes_each_sample_in_a_conversation_of_its_own(mon
     assert sorted(c["sample"] for c in grade["judge_calls"]) == [1, 2, 3]
 
 
-def test_the_run_flag_sets_the_runs_count_and_refuses_an_even_one():
+def test_the_run_flag_sets_the_runs_count_and_refuses_an_even_one_or_none_at_all(tmp_path):
     assert _overrides(None, None, None, 3) == {"judge_samples": 3}
     assert _overrides(None, None, None, None) == {}
+    for bad in (0, 2):
+        with pytest.raises(ValueError, match="judge_samples must be"):
+            run_bundle(tmp_path, judge_samples=bad)
     result = CliRunner().invoke(run_command, ["some-bundle", "--judge-samples", "2"])
     assert result.exit_code != 0 and "use 1 or 3" in result.output
