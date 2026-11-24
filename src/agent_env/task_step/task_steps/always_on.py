@@ -151,6 +151,7 @@ from agent_env.task_step.task_steps.prompt_agent import (
     fetch_native_trajectory,
     prescribe_formats,
     prescribed_formats,
+    resend_tool_settings,
 )
 from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
@@ -680,7 +681,7 @@ class _Run:
                    "max_output_tokens": overrides.get("agent_max_output_tokens") or step.max_output_tokens,
                    "output_format": step.output_format, "timeout_seconds": step.timeout_seconds,
                    "task_id": ctx.metadata.get("task_id"), "agentenv_tools": step.agentenv_tools,
-                   "builtin_tools": card.get("builtin_tools")}
+                   **A2AAgent.tool_settings(card)}
         desired = {k: v for k, v in desired.items() if v is not None}
         self.max_turns = desired.get("max_turns")
         model_params = get_config().get_model_params(step.model_params)
@@ -704,6 +705,7 @@ class _Run:
                            "on its first wake instead")
 
         if self.us.get("prompt_set"):  # deploy_user_sim_agent set the user sim's prompt and model at deploy
+            await resend_tool_settings(self.user_agent, self.user_url)  # its tools, though, again, as the agent's
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
             self.user_setup = dict(self.us["setup"])
             self.usage.start(ModelRole.USER_SIMULATOR, self.user_model, self.user_agent)
@@ -715,7 +717,8 @@ class _Run:
         self.user_model, self.user_model_from = self._user_model()
         user_config = {"model": self.user_model, "system_prompt": setup.get("system_prompt"),
                        "output_format": setup.get("output_format")}
-        user_config = {k: v for k, v in user_config.items() if v is not None}
+        user_config = {k: v for k, v in user_config.items() if v is not None} | A2AAgent.tool_settings(
+            self.user_agent.a2a_card or {})
         negotiated = A2AAgent.negotiate_agent_config(self.user_agent.a2a_card or {}, user_config)
         if negotiated:
             await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields,
