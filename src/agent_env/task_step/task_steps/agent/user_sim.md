@@ -106,7 +106,7 @@ resolves there.
 | `what_you_know` | K | Facts they give only when asked |
 | `already_told` | T | Optional. Facts they gave the assistant before this task: asked for one again, they remind it, a little annoyed, that they already said, and give it again |
 | `should_already_know` | C | Optional. What the assistant should know without being told: they never bring it up, and if the assistant gets it wrong they correct it briefly, a little irritated, even where other lines say to let things slide |
-| `what_to_look_up` | L | Facts the assistant must find itself: say where they are ("it's in mom's email"), never hand over the value |
+| `what_to_look_up` | L | Facts the assistant must find itself, named without their values or where they are ("what you usually pay"): the user sim never gives the value or says where it is, and if asked says, a little impatiently, that the assistant should already know or find it |
 | `decisions` | D | What they say when the assistant asks or proposes something |
 | `how_you_react` | H | What they point out, what they let go, which texts get no reply |
 | `dont_mention` | M | One "don't mention X unless asked" line per tempting fact |
@@ -122,8 +122,11 @@ Don't write the opening request into the description. Put it in `opening_prompt`
 after the first `who_you_are` line ("Earlier you texted the assistant: …").
 
 `permissions` become the "YOUR RULES FOR THE ASSISTANT" lines. Its kinds are `just_do`, `ask_first`, `never` and
-`tell_after`. Each is a list of rules, or `{items, then}` to add what follows. Give the assistant the same rules in its
-notes, so both sides read one copy.
+`tell_after`. Each is a list of rules, or `{items, then}` to add what follows. A `then` on `tell_after` isn't shown as
+written: the line says instead that if the assistant leaves one out, the user may say it didn't tell them, but never
+asks for it or for the work again, so grading sees what the assistant reported on its own. Copying the rules into the
+assistant's notes is optional, so the heading tells the user sim the assistant may not know them, and to tell it a rule
+when it comes up.
 
 `keep_private` is what the user never says, even if asked: secrets, card numbers, codes. Its lines become the
 "PRIVATE" lines, tagged P1…, so `used` can name them.
