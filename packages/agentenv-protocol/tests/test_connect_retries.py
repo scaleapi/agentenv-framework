@@ -68,13 +68,14 @@ async def test_only_opted_in_extensions_retry(monkeypatch, method):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["data", "card", "manifest", "tool"])
 async def test_other_clients_still_make_one_attempt_in_the_retry_context(monkeypatch, route):
-    attempts = []
+    hosts = []
 
-    def refuse(request):
-        attempts.append(request)
-        raise httpx.ConnectError("connection refused")
+    async def refuse(self, host, **kwargs):
+        hosts.append(host)
+        raise httpcore.ConnectError("connection refused")
 
-    mock_http(monkeypatch, refuse)
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(AutoBackend, "connect_tcp", refuse)
     with client.retry_extension_connections(), pytest.raises(httpx.ConnectError):
         if route == "data":
             await client.add_data(_URL, [])
@@ -85,7 +86,7 @@ async def test_other_clients_still_make_one_attempt_in_the_retry_context(monkeyp
         else:
             async with ToolSession(mcp_url=_URL + "/mcp"):
                 pytest.fail("MCP initialization should fail")
-    assert len(attempts) == 1
+    assert hosts == ["env.test"]
 
 
 @pytest.mark.asyncio
