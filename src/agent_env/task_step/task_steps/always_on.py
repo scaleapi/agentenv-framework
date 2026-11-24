@@ -134,6 +134,7 @@ from agent_env.env.gateway.constants import (
     EXT_STATE_URI,
     EXT_TRIGGERS_URI,
     EXT_USER_CHAT_URI,
+    due_deferred_calls,
 )
 from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
@@ -1024,7 +1025,7 @@ class _Run:
                                                  + max(c["seconds_left"] for c in live))
                 busy = [row for row in rows if _busy(row, now)]
                 due = state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now
-                calls = [c["key"] for c in state.get("deferred_calls", []) if c.get("due")]  # reached, still to make
+                calls = [c["key"] for c in due_deferred_calls(state)]
                 limit = min(cap, max(track["contact_until"],
                                      track["live_call_seen"] + self.step.settle_timeout_seconds))
                 if not due and not busy and not calls:

@@ -154,6 +154,12 @@ DEFERRED_CALL_PENDING = "pending"
 DEFERRED_CALL_DONE = "done"
 DEFERRED_CALL_FAILED = "failed"
 
+
+def due_deferred_calls(state: dict) -> list[dict]:
+    """The deferred calls a GET /triggers/state lists as ``due``: reached by the gateway clock and still to make, so
+    they and the triggers they provoke are under way, and a settle check waits for them."""
+    return [call for call in state.get("deferred_calls", []) if call.get("due")]
+
 # What triggers/v1 takes beyond its first release, declared on the card so a client can refuse an older gateway.
 TRIGGER_NAMED_EXECUTORS = "named_executors"
 TRIGGER_PROVOKING_ROLES = "provoking_roles"

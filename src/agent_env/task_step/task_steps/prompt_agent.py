@@ -36,6 +36,7 @@ from agent_env.env.gateway.constants import (
     EXT_NOTIFICATIONS_URI,
     EXT_TRIGGERS_URI,
     TRIGGER_IN_FLIGHT_STATUSES,
+    due_deferred_calls,
 )
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
@@ -1111,7 +1112,7 @@ class PromptAgentTaskStep(TaskStep):
         to make (it and the triggers it provokes are under way); one not yet due is not waited for.
 
         An unbounded recurrence is excluded: it re-enters ``firing`` every arrival and never settles."""
-        if any(c.get("due") for c in state.get("deferred_calls", [])):
+        if due_deferred_calls(state):
             return True
         for t in state.get("triggers", []):
             # `pending` too: the queue itself, not a label, so it outlives a status we do not know.

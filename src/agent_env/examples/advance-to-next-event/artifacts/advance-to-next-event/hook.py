@@ -8,6 +8,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from agent_env.env.gateway.constants import due_deferred_calls
 from agent_env.task_step.task_steps.notification_delivery import label_time
 
 CLOCK = "urn:agentenv:clock/v1"
@@ -164,7 +165,7 @@ async def _settle(turn, envs, timeout):
             now = _utc(clock["virtual_time"])
             if state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now:
                 await _advance(env, now)
-            elif not any(_busy(row, now) for row in state["triggers"]) and not _due_calls(state):
+            elif not any(_busy(row, now) for row in state["triggers"]) and not due_deferred_calls(state):
                 waiting.discard(i)
         if waiting:
             turn.heartbeat()
@@ -221,8 +222,3 @@ def _utc(text):
 
 def _iso(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _due_calls(state):
-    """The deferred calls whose time the env's clock has reached and that the gateway is still to make."""
-    return [call for call in state.get("deferred_calls", []) if call.get("due")]
