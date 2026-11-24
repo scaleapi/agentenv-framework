@@ -158,9 +158,13 @@ def test_a_compaction_sits_on_an_agent_step_names_who_wrote_it_and_holds_its_voc
         ("vocabulary", "steps[1].extra.agentenv.compaction.trigger")]
     profile["compaction"] = {"written_by": "assistant", "tokens_before": 28634, "tokens_after": 2839}
     assert errors_in(validate(document)) == []
-    profile["compaction"] = {"written_by": "assistant", "tokens_before": -1}
-    assert [(f.rule, f.where) for f in errors_in(validate(document))] == [
-        ("compaction", "steps[1].extra.agentenv.compaction.tokens_before")]
+    # Counts the profile model takes as ints in lax mode are this rule's; 2.5 its model refuses itself.
+    for count in (-1, "-1", -1.0, "300", True):
+        profile["compaction"] = {"written_by": "assistant", "tokens_before": count}
+        assert [(f.rule, f.where) for f in errors_in(validate(document))] == [
+            ("compaction", "steps[1].extra.agentenv.compaction.tokens_before")], count
+    profile["compaction"] = {"written_by": "assistant", "tokens_before": 2.5}
+    assert [f.rule for f in errors_in(validate(document))] == ["profile"]
 
 
 @pytest.mark.parametrize(("version", "known"), [("1.0", True), ("1.1", True), ("1.2", True), ("1.3", False),

@@ -461,6 +461,16 @@ def test_a_compaction_names_its_model_as_the_agents_calls_answered_it_and_never_
         MODEL, MODEL, "gateway/another-model", called]
 
 
+def test_a_summary_in_several_text_blocks_is_one_compaction_as_natively():
+    summary = {"type": "user", "uuid": "u3", "parent_tool_use_id": None, "session_id": "s",
+               "message": {"role": "user", "content": [text("The first part."), text("The second part.")]}}
+    feed = Feed().out(_boundary("b1")).out(summary).transcript(summary, "2026-11-22T02:01:01.000Z")
+    document = run(feed.aux("turn", COUNTED_TURN)).document
+    [compaction] = [step for step in document["steps"] if "compaction" in profile_of(step)]
+    assert compaction["message"] == "The first part.\nThe second part."
+    assert not [step for step in document["steps"] if step["source"] == "system"]
+
+
 def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts():
     """A call whose transcript record never came has no counts, which the turn's remainder would hold too."""
     uncounted, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u4", text("done"))

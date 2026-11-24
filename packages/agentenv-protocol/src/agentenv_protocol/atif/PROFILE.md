@@ -206,7 +206,7 @@ and exits 1 when one is an error.
 | `profile` | Each `extra.agentenv` parses with its profile model | error | error |
 | `profile-key` | Each `extra.agentenv` holds only the fields this profile defines | error | warning |
 | `profile-version` | The root's `extra.agentenv.version`, when given, is a 1.x this validator knows: 1.0 to 1.2 | error | warning |
-| `compaction` | A step's `compaction` is on a `source: agent` step and names who wrote its summary, and its token counts, when given, aren't negative | error | warning |
+| `compaction` | A step's `compaction` is on a `source: agent` step and names who wrote its summary, and its token counts, when given, are whole numbers, not negative | error | warning |
 | `vocabulary` | A vocabulary field holds one of its values | error | warning |
 | `outside-key` | No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments` | error | warning |
 | `call-id` | Each `tool_call_id` is unique across the document and its sub-agents | error | warning |

@@ -365,16 +365,17 @@ class ClaudeCodeAtif(Adapter):
                                  status="error" if block.get("is_error") else "ok", time=when)
         if entry.agent is not None:
             return
-        for text in _texts(entry.record):
-            if entry.summary:
-                key = f"compaction-{entry.uuid or entry.seq}"
-                turn.message(step=key, text=text, time=when)
-                turn.compaction(step=key, written_by="assistant", trigger=entry.trigger, tokens_before=entry.tokens[0],
-                                tokens_after=entry.tokens[1])
-                turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
-                entry.summary = False
-            else:
-                turn.system_message(text=text, time=when)
+        texts = _texts(entry.record)
+        if entry.summary:
+            key = f"compaction-{entry.uuid or entry.seq}"
+            turn.message(step=key, text="\n".join(texts), time=when)
+            turn.compaction(step=key, written_by="assistant", trigger=entry.trigger, tokens_before=entry.tokens[0],
+                            tokens_after=entry.tokens[1])
+            turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
+            entry.summary = False
+            return
+        for text in texts:
+            turn.system_message(text=text, time=when)
 
     def _left_over(self, record: dict[str, Any]) -> dict[str, int] | None:
         """What the turn reported beyond its model calls written or still queued: the one call no session record

@@ -71,7 +71,7 @@ RULES: dict[str, Rule] = {rule.id: rule for rule in (
     Rule("profile-version", ERROR, WARNING, "The root's `extra.agentenv.version`, when given, is a 1.x this validator "
                                             "knows: 1.0 to 1.2"),
     Rule("compaction", ERROR, WARNING, "A step's `compaction` is on a `source: agent` step and names who wrote its "
-                                       "summary, and its token counts, when given, aren't negative"),
+                                       "summary, and its token counts, when given, are whole numbers, not negative"),
     Rule("vocabulary", ERROR, WARNING, "A vocabulary field holds one of its values"),
     Rule("outside-key", ERROR, WARNING, "No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments`"),
     Rule("call-id", ERROR, WARNING, "Each `tool_call_id` is unique across the document and its sub-agents"),
@@ -299,8 +299,10 @@ def _profiles(objects: list[tuple[str, str, Mapping[str, Any]]], found: _Finding
                 if compaction.get(name) is not None:
                     _vocabulary(f"Compaction.{name}", f"{at}.compaction.{name}", compaction[name], found)
             for name in ("tokens_before", "tokens_after"):
-                if isinstance(compaction.get(name), int) and compaction[name] < 0:
-                    found.add("compaction", f"{at}.compaction.{name}", f"{name} counts tokens, so it isn't negative")
+                count = compaction.get(name)
+                if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 0):
+                    found.add("compaction", f"{at}.compaction.{name}",
+                              f"{name} counts tokens, a whole number that isn't negative, not {count!r}")
         if kind == "Trajectory" and where == "" and not _known_version(profile.get("version")):
             found.add("profile-version", f"{at}.version",
                       f"this is profile {profile['version']!r}; the validator checks profile {PROFILE_VERSION} and "
