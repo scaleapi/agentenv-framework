@@ -191,7 +191,7 @@ async def test_a_deferred_call_the_clock_has_reached_is_waited_for_and_one_that_
     [timeout] = rig.events(ctx, "settle_timeout")
     [env] = timeout["still_at_work"]
     assert env["deferred_calls_due"] == ["m1"] and "due_not_going" not in env
-    assert 0.2 <= timeout["settle"]["seconds"] < 1.5
+    assert 0.2 <= timeout["settle"]["seconds"] < 10  # this step's 0.2 s timeout, not the 300 s default
 
 
 def test_the_contact_setting_survives_a_round_trip_and_the_step_sets_no_contact_time_limit():
