@@ -24,7 +24,8 @@ Params:
   env             the deployed env's env_id to read (default: the first deployed env)
   judge_model     model for an artifact's judge gates (needed when one is used)
   excerpt_chars   how much of a milestone's ``show`` artifact goes in the note (default 600)
-  final_note      the note after the last milestone passes
+  final_note      the note after the last milestone passes, when every milestone passed
+  final_note_gave_up  the note after the last milestone when one was let go (never says everything is done)
   idle_end        end after the sim sends the same message this many turns in a row (default 2; 0 = never)
   trajectory_judge_model   model for trajectory_judge gates (needed when one is used; a small model misreads long
                            logs)
@@ -71,6 +72,9 @@ HOLD_NOTE = ("Nothing could be checked this time. Don't move on: reply to what t
              "milestone you're on.")
 MILESTONE_KEYS = {"id", "line", "type", "skip_if_done", "blocking", "max_nudges", "show", "artifacts", "gates"}
 DEFAULT_FINAL = "Everything you asked for is done. Wrap up the way you planned (send your last line), then stop."
+# The wrap-up after a milestone was let go: nothing claims it was all done, and the user takes on nothing new.
+DEFAULT_FINAL_GAVE_UP = ("Wrap up now: send your last line, then stop. Don't say everything is done, and don't ask "
+                         "for or agree to anything new.")
 JUDGE_SYSTEM = ("You check one statement against a document. Use only the document. Answer passed=true only if the "
                 "document clearly shows the statement is true. Keep why to one sentence of at most 30 words.")
 TRAJECTORY_JUDGE_SYSTEM = (
@@ -108,7 +112,11 @@ async def _post_turn(turn, spec):
     state = _state(turn.records())
     milestones = spec["milestones"]
     if state["finished"]:  # the wrap-up was sent and the agent has answered it
-        turn.record({"decision": "done"})
+        # Check the last milestone once more: the agent may have changed its work while answering the wrap-up, and
+        # the summary should match what it left, as the task's final rubric will.
+        m = milestones[state["index"]]
+        gates = await _run_gates(turn, spec, _env(turn, spec), m, state)
+        turn.record({"decision": "done", "milestone": m["id"], "gates": gates})
         return {"end": "milestones_done"}
     if state["idle"]:  # the sim repeated itself last turn; the agent has answered that, so end before asking again
         turn.record({"decision": "end", "end": "sim_idle"})
@@ -171,7 +179,8 @@ def _state(records: list[dict]) -> dict:
         if r.get("next_index") is not None:  # passed, let go, or followed the sim to a later milestone
             index, nudges, baselines = r["next_index"], 0, r.get("baselines") or {}
             finished = r.get("wrap_up", False)
-            since = int(r.get("turn", 0)) + 1  # its line goes to the agent in the next turn
+            if not finished:  # the wrap-up keeps the last milestone's turns as the step a final check reads
+                since = int(r.get("turn", 0)) + 1  # its line goes to the agent in the next turn
         elif r.get("decision") in ("nudge", "hold"):
             nudges = r["nudges"]
     return {"index": index, "nudges": nudges, "baselines": baselines, "finished": finished, "idle": idle,
@@ -231,6 +240,9 @@ def _summary(spec: dict, records: list[dict]) -> dict:
                 rows[nxt].update(status="open", opened_turn=turn + 1)
         if r.get("decision") == "done":
             end = "milestones_done"
+            final = r.get("gates") or []
+            if row is not None and final and all(g["passed"] for g in final) and row["status"] != "passed":
+                row.update(status="passed", closed_turn=turn)  # done in the end, after the wrap-up
         elif r.get("decision") == "end":
             end = r.get("end")
     reached = [row["id"] for row in rows if row["status"] != "not_reached"]
@@ -276,8 +288,12 @@ async def _advance(turn, spec, env, state, entry, how):
                 else f"{head} Open {milestones[nxt]['id']} now: send its line.")
         record = {**entry, "decision": how, "next_index": nxt, "baselines": baselines, "note": note}
     else:
-        note = (f"{head} " if how == "gave_up" or skipped else "") + spec["final_note"]
-        record = {**entry, "decision": how, "next_index": state["index"], "wrap_up": True, "note": note}
+        let_go = how == "gave_up" or any(r.get("decision") == "gave_up" for r in turn.records())
+        final = spec["final_note_gave_up"] if let_go else spec["final_note"]
+        note = (f"{head} " if how == "gave_up" or skipped else "") + final
+        # The last milestone stays the one checked: its baselines carry over for the final check after the wrap-up.
+        record = {**entry, "decision": how, "next_index": state["index"], "wrap_up": True, "note": note,
+                  "baselines": state["baselines"]}
     if skipped:
         record["skipped"] = skipped
     answer = await turn.ask_user(note=note)
@@ -842,4 +858,5 @@ def _spec(params: dict) -> dict:
             "trajectory_max_chars": int(params.get("trajectory_max_chars", 600_000)),
             "excerpt_chars": int(params.get("excerpt_chars", 600)),
             "final_note": params.get("final_note", DEFAULT_FINAL),
+            "final_note_gave_up": params.get("final_note_gave_up", DEFAULT_FINAL_GAVE_UP),
             "idle_end": int(params.get("idle_end", 2))}

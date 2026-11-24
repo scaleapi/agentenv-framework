@@ -189,7 +189,7 @@ async def test_a_non_blocking_milestone_is_let_go_and_the_last_one_wraps_up_then
     assert t2.notes == ["Did the comment go on the card?"]
     t3 = Turn(env, records, 3)
     await post_turn(t3, PARAMS)  # still failing, not blocking: let go, and it was the last
-    assert t3.notes == ["M2 isn't done, but let it go. " + mg.DEFAULT_FINAL]
+    assert t3.notes == ["M2 isn't done, but let it go. " + mg.DEFAULT_FINAL_GAVE_UP]  # not "everything is done"
     assert records[-1]["decision"] == "gave_up" and records[-1]["wrap_up"] is True
     t4 = Turn(env, records, 4)
     assert await post_turn(t4, PARAMS) == {"end": "milestones_done"}
@@ -736,3 +736,31 @@ async def test_a_field_artifact_counts_the_fields_own_paragraphs(field, passed):
     await post_turn(Turn(Env({"list_drafts": [draft]}), records, 1), params)
     # As JSON the body's blank lines are escaped, so the whole item reads as one paragraph and passes wrongly.
     assert records[-1]["gates"][0]["passed"] is passed
+
+
+@pytest.mark.asyncio
+async def test_the_last_milestone_is_checked_again_after_the_wrap_up_and_the_summary_shows_what_the_agent_left():
+    # M2 is let go, then the agent fixes it while answering the wrap-up: the final check finds it done.
+    w = world()
+    w["drive_list"] = {"files": [SHEET]}
+    env, records = Env(w), []
+    await post_turn(Turn(env, records, 1), PARAMS)  # M1 passes
+    await post_turn(Turn(env, records, 2), PARAMS)  # M2 nudged
+    await post_turn(Turn(env, records, 3), PARAMS)  # M2 let go; wrap-up sent
+    w["trello_comments"] = {"comments": [{"text": "Vaultly cancelled"}]}  # done while answering the wrap-up
+    t4 = Turn(env, records, 4)
+    assert await post_turn(t4, PARAMS) == {"end": "milestones_done"}
+    assert records[-1]["decision"] == "done" and records[-1]["milestone"] == "M2"
+    assert all(g["passed"] for g in records[-1]["gates"])
+    assert _status(t4)[1] == ("M2", "passed", 2, 4, 1)  # passed in the end, after the wrap-up
+
+
+@pytest.mark.asyncio
+async def test_the_wrap_up_after_every_milestone_passed_says_so():
+    w = world()
+    w["drive_list"] = {"files": [SHEET]}
+    w["trello_comments"] = {"comments": [{"text": "Vaultly cancelled"}]}
+    env, records = Env(w), []
+    await post_turn(Turn(env, records, 1), PARAMS)  # M1 passes, and M2 is already done: skipped, then the wrap-up
+    wrap = next(r for r in records if r.get("wrap_up"))
+    assert wrap["note"].endswith(mg.DEFAULT_FINAL) and mg.DEFAULT_FINAL_GAVE_UP not in wrap["note"]

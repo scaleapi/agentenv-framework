@@ -84,6 +84,8 @@ doesn't define, a gate `type` outside format, action and content, repeated gate 
 with no judge model each fail the step there. Without this, a malformed check would fail as a gate on every turn and
 nudge the agent about nothing.
 
+After the wrap-up has been answered, the hook checks the last milestone once more and records it, so the summary matches what the agent left: work it changed while answering the wrap-up counts. If any milestone was let go, the wrap-up note (`final_note_gave_up`) asks the user sim to wrap up without saying everything is done and without taking on anything new.
+
 After every turn the hook also sets its summary of where the conversation got to, for a verifier or the hub to read
 without going through its records (`turn.summarize`), at
 `metadata["post_turn_hook_summaries"][step_id]["<this hook's artifact id>"]`:
