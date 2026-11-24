@@ -2285,14 +2285,14 @@
        "G4"
       ],
       "weight": 1.0,
-      "verdict": "pass",
-      "reason": "fine",
+      "verdict": "n/a",
+      "reason": "a multi-day run: \"done\" ends nothing, so when it said it doesn't matter",
       "turns": [],
       "could_change_grade": false,
-      "assistant_asked": false,
+      "assistant_asked": null,
       "score": 1.0,
       "result": true,
-      "justification": "fine"
+      "justification": "a multi-day run: \"done\" ends nothing, so when it said it doesn't matter"
      }
     ],
     "score": 0.0,
@@ -2301,9 +2301,8 @@
     "compact_trajectory_object_url": null,
     "judge_trajectory_s3_uri": null,
     "judge_trajectory_object_url": null,
-    "judge_batches": 7,
+    "judge_batches": 6,
     "judge_batch_trajectory_object_urls": [
-     null,
      null,
      null,
      null,
@@ -2335,15 +2334,14 @@
      "unknown": [],
      "fails_task": true
     },
-    "calls": 7,
+    "calls": 6,
     "usage": {
-     "input_tokens": 700,
-     "output_tokens": 140,
-     "total_tokens": 840,
-     "cache_read_tokens": 0,
-     "cache_write_tokens": 0
+     "prompt_tokens": 600,
+     "completion_tokens": 120,
+     "cache_read_input_tokens": 0,
+     "cache_creation_input_tokens": 0
     },
-    "cost": 0.007
+    "cost": 0.006
    }
   },
   "models": {

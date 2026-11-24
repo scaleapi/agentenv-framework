@@ -28,6 +28,9 @@ call. An item's ``line`` (a tag, "P1") is graded by that line's text in the run'
 Each row has a weight: 1 for a check in the step's ``error_checks`` (every check but style, by default) and for an
 item that can make the run a user sim error, else 0. ``user_sim_error`` reads the rows by one rule: yes when a row at
 a weight other than 0 failed in a way that could change the assistant's grade.
+
+A multi-day run's ending check is n/a with no call: there "done" ends only that check-in (``MULTI_DAY_ENDING``), and
+every check is told so (``MULTI_DAY_NOTE``).
 """
 from __future__ import annotations
 
@@ -285,6 +288,7 @@ class UserSimRun:
     # Each tag the user sim's instructions showed, with its line (deploy_user_sim_agent's record); None: not recorded.
     tagged_lines: Optional[dict[str, str]] = None
     missing_answers: int = 0  # the run's answers its record didn't keep (always_on's tail drops the earliest)
+    multi_day: bool = False  # the run goes on to its end time whatever it answers: "done" ends only that check-in
 
 
 # ---- a task's own rubric items ------------------------------------------------------------------------------------
@@ -540,12 +544,19 @@ def resolve_lines(items: list[RubricItem], tagged_lines: Optional[dict[str, str]
     return out, missing
 
 
+MULTI_DAY_NOTE = ("this run is multi-day: it goes on until its end time whatever the user sim answers, so \"done\" "
+                  "only closes that check-in and ends nothing; the assistant is woken again later")
+MULTI_DAY_ENDING = "a multi-day run: \"done\" ends nothing, so when it said it doesn't matter"
+
+
 def render_run(run: UserSimRun) -> tuple[str, str]:
     """The run as the judge reads it, in two parts so a prompt cache can share the first across calls: the
     instructions and every turn's input up to the last graded turn's answers stay the same for all checks."""
     head = ["# THE USER SIM'S INSTRUCTIONS"]
     head.append("<instructions>\n" + (run.instructions or "(not recorded)").strip() + "\n</instructions>")
     head += ["", "# THE RUN"]
+    if run.multi_day:
+        head.append(f"Note: {MULTI_DAY_NOTE}")
     head += [f"Note: {n}" for n in run.notes]
     answers = []
     last_graded = max((t.n for t in run.turns if t.graded), default=None)
@@ -678,7 +689,9 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
     trusted."""
     graded = sorted(t.n for t in run.turns if t.graded)
     resolved, no_line = resolve_lines(list(items), run.tagged_lines, lines_unusable)
-    calls = plan_calls(list(checks), resolved)
+    # A check that can't apply to this run is n/a with no call; the items its families own go in the task's call.
+    settled = {"ending": MULTI_DAY_ENDING} if run.multi_day and "ending" in checks else {}
+    calls = plan_calls([c for c in checks if c not in settled], resolved)
     plan = Plan(order=list(checks) + [i.id for i in items])
     for name in checks:
         plan.about[name] = {"title": CHECKS[name].title, "families": list(CHECKS[name].families),
@@ -705,6 +718,9 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
             size += 1
         if size:
             plan.batches.append(size)
+    for name, reason in settled.items():
+        plan.unjudged.append({"id": name, **computed_row({"verdict": "n/a", "reason": reason, "turns": []},
+                                                          plan.about[name]["weight"])})
     for item in items:
         if item.id in no_line:
             got, asked_with = no_line[item.id], NO_LINE

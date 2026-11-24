@@ -551,7 +551,9 @@ async def test_on_an_always_on_run_the_judge_reads_what_the_user_sim_got_and_sai
     assert (entry["run_step_id"], entry["run_kind"], entry["user_sim"], entry["judge_model"]) == (
         "week", "always_on", "user-sim", JUDGE)
     assert entry["instructions"]["matches"] is True and entry["notes"] == []
-    assert _verdicts(entry) == {**dict.fromkeys(core.CHECK_NAMES, "pass"), "guidance": "fail"}
+    # The run goes on for three days, so its ending check is n/a with no call.
+    assert _verdicts(entry) == {**dict.fromkeys(core.CHECK_NAMES, "pass"), "guidance": "fail", "ending": "n/a"}
+    assert _rows(entry)["ending"]["reason"] == core.MULTI_DAY_ENDING and "Note: " + core.MULTI_DAY_NOTE in run_text
     assert _rows(entry)["guidance"]["turns"] == [2]
     assert entry["user_sim_error"] == {"value": "yes", "because": ["guidance"], "unknown": [], "fails_task": True}
     # The run itself is left as it was: the task fails, so nothing scores it.
@@ -612,7 +614,7 @@ async def test_a_run_s_judge_model_override_chooses_the_model_as_for_every_judge
 
     await _step(fake, monkeypatch, run_step_id="week").execute(ctx)
 
-    assert {c["model"] for c in fake.calls} == {"other"} and len(fake.calls) == 7
+    assert {c["model"] for c in fake.calls} == {"other"} and len(fake.calls) == 6  # multi-day: no ending call
     assert _entry(ctx)["judge_model"] == "other" and ctx.metadata["models"]["judge"]["judge_user_sim"] == "other"
 
 
@@ -1580,3 +1582,46 @@ def test_pointing_the_assistant_to_where_a_fact_lives_is_oversharing_unless_its_
     # Guidance still lets it point where its instructions say to.
     guidance = core.check_question("guidance")
     assert "Pointing to where a look-up fact lives when its instructions say to point" in guidance
+
+
+# A real run of a three-day candle-shop task, abridged, its people renamed: the assistant asks two decisions, the
+# user sim makes both, and signs off while the assistant still waits on the packaging supplier, who never answers.
+SHOP_INSTRUCTIONS = """You are Mara Quill. You run Lanternwick, a one-person candle shop.
+DECISIONS:
+  D5 Wholesale: never below $15 a 12 oz jar.
+  D7 No custom orders this season.
+  D8 Pour days are Saturdays; a batch is listed on its pour day.
+  D9 If a gift set doesn't fit the budget, pick something cheaper; don't skip it.
+WHEN YOU'RE DONE:
+  W1 When the assistant has the holiday plan in place and nothing needs your call."""
+
+
+SHOP_TURNS = [
+    ("It's Sun, Nov 1, 8:15 AM.\n\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):\n"
+     "  [8:15 AM] Supplies are ordered within your $1,800 November budget (Fernhill $750, glass $468, Boxwell $136).\n"
+     "  Two decisions: 1) Odile's wholesale, 48 jars at $13 by Dec 1. 2) Tobias's custom order, 40 named tins.",
+     "reply", "odile's a no, $13 is under my floor, tell her. tobias too, no custom orders this season."),
+    ("It's Sun, Nov 1, 9:18 AM.\n\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):\n"
+     "  [9:17 AM] Done, both declined as you said. Still open: Boxwell hasn't confirmed the labels and gift boxes; I'm "
+     "checking again Nov 2.\n  RESULT: DONE",
+     "done", "thanks, good work this morning."),
+]
+
+
+def _shop(multi_day: bool) -> core.UserSimRun:
+    turns = [core.Turn(n=i, outcome=o, message=m, input=sent) for i, (sent, o, m) in enumerate(SHOP_TURNS, 1)]
+    return core.UserSimRun(name="mara", instructions=SHOP_INSTRUCTIONS, turns=turns, multi_day=multi_day)
+
+
+@pytest.mark.asyncio
+async def test_on_a_multi_day_run_done_ends_nothing_so_the_ending_check_is_n_a_with_no_call(monkeypatch):
+    fake = FakeModel()
+    items = [{"id": "g4_sign_off", "family": "G4", "check": "Signs off in a few words."}]
+    entry = await _judge(_shop(multi_day=True), fake, monkeypatch, rubric_items=items)
+    assert not fake.asked("ending") and len(fake.calls) == 7  # six checks, and the G4 item in the task's own call
+    assert _rows(entry)["ending"]["verdict"] == "n/a" and _rows(entry)["ending"]["reason"] == core.MULTI_DAY_ENDING
+    assert _rows(entry)["g4_sign_off"]["asked_with"] == core.TASK_ITEMS
+    assert "Note: " + core.MULTI_DAY_NOTE in fake.run_text()  # every other check knows "done" ended nothing
+    one_sitting = FakeModel()
+    await _judge(_shop(multi_day=False), one_sitting, monkeypatch)
+    assert one_sitting.asked("ending") and core.MULTI_DAY_NOTE not in one_sitting.run_text()

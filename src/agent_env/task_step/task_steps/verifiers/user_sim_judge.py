@@ -40,7 +40,9 @@ The criteria (``user_sim_judge_core.plan_run``): each of the seven checks (``use
 criterion and one call, and a task's ``rubric_items`` ride in the call of the check that owns their family, at most
 ``MAX_ITEMS_PER_CALL`` to a call. Each row has a weight: 1 for every check but style
 (``user_sim_judge_core.DEFAULT_ERROR_CHECKS``) and for an item that can make the run a user sim error (its
-``can_error``, unset as its family's check), else 0. A weight-0 row is recorded and never gates.
+``can_error``, unset as its family's check), else 0. A weight-0 row is recorded and never gates. On a multi-day
+always_on run (its record's ``multi_day``) "done" ends nothing, so the ending check is n/a with no call, and every
+check is told so.
 
 A rubric item is the shape of a criterion in a task's ``usersim.yaml`` (psi-benchmark-tasks), which that repo turns
 into this step's settings; this step reads no file:
@@ -589,7 +591,8 @@ def _read_run(kind: str, step_id: str, record: Optional[dict], context: TaskStep
     turns = [_turn(n, e) for n, e in enumerate(reads, 1)]
     more += _reply_limit_note(turns, (us or {}).get("max_replies"))
     run = core.UserSimRun(name=name or "the user", instructions=instructions, turns=turns, notes=notes + more,
-                          tagged_lines=(us or {}).get("tagged_lines"), missing_answers=missing)
+                          tagged_lines=(us or {}).get("tagged_lines"), missing_answers=missing,
+                          multi_day=multi_day is True)
     return run, {"user_sim": name, "instructions": check}
 
 
