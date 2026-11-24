@@ -1244,6 +1244,8 @@ class _UserSide:
                 self._record("user_side_notes", {"turn": number, "note": note})
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
                                               note=note)
+            if note is not None and self._built_in.person.get("preset") == "milestone":
+                answer = await self._keep_replying(number, answer)
             if self._gate is not None and "message" in answer:
                 async def rewrite_built_in(why: str) -> dict:  # the gate's request alone: the hook's note went once
                     return await self._built_in.rewrite(number, why, self._ask_built_in)
@@ -1252,6 +1254,22 @@ class _UserSide:
             self._end_after = answer.get("end_after")
             return answer
         return await self._ask_peer(number, agent_parts, note)
+
+    async def _keep_replying(self, number: int, answer: dict) -> dict:
+        """A milestone user sim stays in the conversation while a hook's note is in play: a no_reply to a turn that
+        carried a note is asked again, up to ``NOTE_REPLY_TRIES`` times, in the same session (each try is listed under
+        the read's ``gate_rewrites``). A user sim that still won't reply ends the run as a user-sim error, so verifiers
+        skip it and it is redone, rather than grading the agent on a conversation the user abandoned mid-milestone."""
+        for _ in range(NOTE_REPLY_TRIES):
+            if answer.get("end") != "user_no_reply":
+                return answer
+            self._record("user_sim_note_retries", {"turn": number})
+            answer = await self._built_in.rewrite(number, NOTE_NO_REPLY, self._ask_built_in)
+        if answer.get("end") == "user_no_reply":
+            self._built_in.error = ("the milestone user sim answered no_reply to a turn that carried a hook's note, "
+                                    f"{NOTE_REPLY_TRIES + 1} times")
+            return {"end": "user_sim_error"}
+        return answer
 
     async def _ask_built_in(self, text: str) -> dict:
         """One turn of the user sim deploy_user_sim_agent deployed, in this conversation's session: ``{"text",
@@ -1433,6 +1451,13 @@ class _UserSide:
 
 def _text_of(parts: list[dict]) -> str:
     return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
+
+
+# A milestone user sim that answers no_reply while a hook's note is in play is asked again this many times.
+NOTE_REPLY_TRIES = 2
+NOTE_NO_REPLY = ("[Conversation system note, not from the assistant.] The chat isn't over: what you found checking its "
+                 "work still needs answering. Reply to the assistant about it, in your own words and no more "
+                 "specifically than your note. Answer in JSON: " + user_sim_versions.ANSWER_LINE)
 
 
 class _BuiltInUserSim:

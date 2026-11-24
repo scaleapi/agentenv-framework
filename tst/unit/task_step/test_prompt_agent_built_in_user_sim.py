@@ -564,3 +564,64 @@ async def test_the_judge_reads_the_built_in_users_own_instructions(monkeypatch):
     await _gated().execute(ctx)
 
     assert len(seen) == 1 and seen[0] and "Hannah" in seen[0]
+
+
+# ---- a milestone user keeps replying while a hook's note is in play -------------------------------------------------
+NOTE_HOOK = """
+    async def post_turn(turn, params):
+        return None if turn.last else await turn.ask_user(note="check who the reply went to.")
+"""
+
+
+def _noted(turns: int = 3) -> PromptAgentTaskStep:
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    return _step(turns=turns, post_turn_hooks=[{"file_artifact_id": _hook("noted", NOTE_HOOK), "params": {}}])
+
+
+def _to_agent(peers, ctx) -> list[str]:
+    return [r[2]["params"]["message"]["parts"][0]["text"] for r in peers.requests(ctx)
+            if r[1] == f"{AGENT}/a2a" and r[2].get("method") == "message/send"]
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_user_who_answers_no_reply_to_a_note_is_asked_again_and_their_reply_goes_on(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard."), text("Added Arthur."), text("ok")],
+                                USER: [said("no_reply"), said("reply", "who else should be on it?"),
+                                       said("reply", "thanks")]})
+    ctx = await _context(monkeypatch, preset="milestone")
+
+    result = await _noted().execute(ctx)
+
+    assert _to_agent(peers, ctx)[:2] == ["plan my parents' visit", "who else should be on it?"]
+    asked_again = [r[2]["params"]["message"]["parts"][0]["text"] for r in peers.requests(ctx)
+                   if r[1] == f"{USER}/a2a" and r[2].get("method") == "message/send"][1]
+    assert asked_again == pa.NOTE_NO_REPLY
+    first = _reads(ctx)[0]
+    assert (first["outcome"], first["message"]) == ("reply", "who else should be on it?")
+    assert [r["outcome"] for r in first["gate_rewrites"]] == ["reply"]
+    assert ctx.metadata["user_sim_note_retries"]["talk"] == [{"turn": 1}]
+    assert result.prompt_responses[-1].error_type is None
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_user_who_keeps_answering_no_reply_to_a_note_ends_the_run_as_a_user_sim_error(monkeypatch):
+    Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")] * (pa.NOTE_REPLY_TRIES + 1)})
+    ctx = await _context(monkeypatch, preset="milestone")
+
+    result = await _noted().execute(ctx)
+
+    response = result.prompt_responses[-1]
+    assert response.error_type == "user_sim_error" and "no_reply" in response.error_message
+    assert len(ctx.metadata["user_sim_note_retries"]["talk"]) == pa.NOTE_REPLY_TRIES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preset", [None, "chat"])
+async def test_without_the_milestone_preset_a_no_reply_to_a_note_still_ends_the_run(monkeypatch, preset):
+    peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")]})
+    ctx = await _context(monkeypatch, **({"preset": preset} if preset else {}))
+
+    result = await _noted().execute(ctx)
+
+    assert _to_agent(peers, ctx) == ["plan my parents' visit"]
+    assert "user_sim_note_retries" not in ctx.metadata and result.prompt_responses[-1].error_type is None
