@@ -3366,6 +3366,15 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             assert GET_TIME not in (await _get_time_surfaces(client, gw, result.mcp_url)).mcp
             assert (await _read(client, gw)).status_code == 404, "rejected arm must not arm the clock"
 
+            # With no follower that holds only a range of times (no computer, no clock-following agent), the clock
+            # arms past 2262-04-11 as it always has.
+            for far in ("3026-11-23T12:00:00Z", "9999-06-01T12:00:00Z"):
+                armed_far = await client.put(f"{gw}/clock/set-time",
+                                             json={"virtual_time": far, "virtual_seconds_per_real_second": 0}, timeout=30)
+                assert armed_far.status_code == 200 and armed_far.json()["virtual_time"] == far, armed_far.text
+            assert (await client.post(f"{gw}/clock/clear", timeout=30)).status_code == 200
+            assert (await _read(client, gw)).status_code == 404
+
             # Without the deploy's control token, every control route refuses; the clock's routes and the reads stay open.
             async with httpx.AsyncClient() as agent:
                 for method, path in (("POST", "/tools/enable"), ("POST", "/tools/disable"), ("POST", "/triggers/register"),
