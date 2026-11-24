@@ -320,7 +320,7 @@ async def test_a_running_clock_makes_it_at_its_time_holds_it_at_rate_0_and_resum
         await _request(gw, "PUT", "/clock/set-rate", json={"virtual_seconds_per_real_second": 3600})
         await _until(lambda: chat.made(DELIVER))
         at = _at((await _deferred(gw))[0]["at"])
-        assert at <= chat.made(DELIVER)[0]["virtual"] < at + timedelta(minutes=10)
+        assert at <= chat.made(DELIVER)[0]["virtual"] < at + timedelta(hours=1)  # within a real second at 3600x
 
 
 @pytest.mark.asyncio
