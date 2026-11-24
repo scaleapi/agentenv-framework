@@ -46,6 +46,11 @@ It goes away once the step can learn it from the task.
 | `always_on` | An `always_on` run; the user reads emails, texts and notifications between messages | Nothing: the prompt is today's multi-day one |
 | `milestone` | One conversation in steps that a `prompt_agent` post-turn hook checks (such as milestone-gates). `multi_day: false` | The prompt tells the user to trust the hook's note over the reply, always reply while it says something isn't done, press on what it raises in their own words and never more specifically (not even with names from the assistant's own reply), move on only when it says so, send the line it gives word for word, and answer done only after it says everything is done |
 
+A `chat` or `milestone` user always answers: its answer format, the line at the end of each read and the schema set on
+its agent offer only `reply` and `done`, and a `no_reply` (or an empty reply) is a format error, asked again once in the
+same session. Don't write a persona for these presets that tells the user to answer no_reply. Without a preset, and
+for `always_on`, the user may stay quiet as before.
+
 A `milestone` user that answers no_reply to a turn that carried a hook's note is asked again in the same session, up
 to twice (each try listed under the read's `gate_rewrites`, each recorded in `metadata["user_sim_note_retries"]`); one
 that still won't reply ends the run as a user-sim error (`error_type: user_sim_error`), so verifiers skip it and it is

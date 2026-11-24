@@ -583,29 +583,35 @@ def _to_agent(peers, ctx) -> list[str]:
             if r[1] == f"{AGENT}/a2a" and r[2].get("method") == "message/send"]
 
 
+def _asked_user(peers, ctx) -> list[str]:
+    return [r[2]["params"]["message"]["parts"][0]["text"] for r in peers.requests(ctx)
+            if r[1] == f"{USER}/a2a" and r[2].get("method") == "message/send"]
+
+
 @pytest.mark.asyncio
-async def test_a_milestone_user_who_answers_no_reply_to_a_note_is_asked_again_and_their_reply_goes_on(monkeypatch):
+@pytest.mark.parametrize("preset", ["milestone", "chat"])
+async def test_a_user_who_always_answers_and_says_no_reply_is_asked_again_in_the_answers_own_format(
+        monkeypatch, preset):
     peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard."), text("Added Arthur."), text("ok")],
                                 USER: [said("no_reply"), said("reply", "who else should be on it?"),
                                        said("reply", "thanks")]})
-    ctx = await _context(monkeypatch, preset="milestone")
+    ctx = await _context(monkeypatch, preset=preset)
 
     result = await _noted().execute(ctx)
 
     assert _to_agent(peers, ctx)[:2] == ["plan my parents' visit", "who else should be on it?"]
-    asked_again = [r[2]["params"]["message"]["parts"][0]["text"] for r in peers.requests(ctx)
-                   if r[1] == f"{USER}/a2a" and r[2].get("method") == "message/send"][1]
-    assert asked_again == pa.NOTE_NO_REPLY
+    person = {"preset": preset}
+    assert _asked_user(peers, ctx)[1] == user_sim_versions.retry_line(person)  # not one of reply | done: format retry
+    assert '"no_reply"' not in user_sim_versions.retry_line(person)
     first = _reads(ctx)[0]
-    assert (first["outcome"], first["message"]) == ("reply", "who else should be on it?")
-    assert [r["outcome"] for r in first["gate_rewrites"]] == ["reply"]
-    assert ctx.metadata["user_sim_note_retries"]["talk"] == [{"turn": 1}]
-    assert result.prompt_responses[-1].error_type is None
+    assert (first["outcome"], first["retried"]) == ("reply", True)
+    assert "user_sim_note_retries" not in ctx.metadata and result.prompt_responses[-1].error_type is None
 
 
 @pytest.mark.asyncio
 async def test_a_milestone_user_who_keeps_answering_no_reply_to_a_note_ends_the_run_as_a_user_sim_error(monkeypatch):
-    Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")] * (pa.NOTE_REPLY_TRIES + 1)})
+    # The format retry first, then the guard's tries: none of them a reply.
+    Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")] * (2 + pa.NOTE_REPLY_TRIES)})
     ctx = await _context(monkeypatch, preset="milestone")
 
     result = await _noted().execute(ctx)
@@ -616,10 +622,9 @@ async def test_a_milestone_user_who_keeps_answering_no_reply_to_a_note_ends_the_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("preset", [None, "chat"])
-async def test_without_the_milestone_preset_a_no_reply_to_a_note_still_ends_the_run(monkeypatch, preset):
+async def test_without_a_preset_a_no_reply_to_a_note_still_ends_the_run(monkeypatch):
     peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")]})
-    ctx = await _context(monkeypatch, **({"preset": preset} if preset else {}))
+    ctx = await _context(monkeypatch)
 
     result = await _noted().execute(ctx)
 

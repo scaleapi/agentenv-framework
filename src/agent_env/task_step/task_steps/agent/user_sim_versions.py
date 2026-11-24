@@ -1,7 +1,8 @@
 """The built-in user sim: deploy_user_sim_agent writes its system prompt with ``setup``, and the always_on step reads
 with ``answer``. The interface is in deploy_user_sim_agent.py; how to write a user for it is in user_sim.md. It has
-one version, ``ours``, and three presets (``PRESETS``): chat, always_on and milestone. A preset sets the done line
-and, for milestone, how the user takes a post-turn hook's note; ``features`` names what a judge's rules may depend on.
+one version, ``ours``, and three presets (``PRESETS``): chat, always_on and milestone. A preset sets the done line,
+whether the user may answer no_reply (chat and milestone always answer: ``outcomes``) and, for milestone, how the user
+takes a post-turn hook's note; ``features`` names what a judge's rules may depend on.
 
 ``setup`` writes the system prompt once per run: fixed lines on how a real person reads and answers, the description
 as tagged sections (with the opening request), the user's rules from ``permissions`` and ``keep_private``, and the
@@ -111,6 +112,10 @@ ANSWER_SCHEMA: dict[str, Any] = {
     "required": ["outcome", "message"],
 }
 OUTPUT_FORMAT: dict[str, Any] = {"type": "json_schema", "schema": ANSWER_SCHEMA}
+# A one-conversation preset's user always answers: no no_reply in its answer line, its schema or its reads.
+ALWAYS_ANSWERS = ("chat", "milestone")
+OUTCOMES_ALWAYS = ("reply", "done")
+CLOSING_ALWAYS = "Your AI assistant sent you this. As {first}, decide: reply, or say you're done."
 
 DONE_ENDS_RUN = ('Only answer "done" with a short sign-off. If your message answers a question or tells the assistant '
                  'to do something, answer "reply": after "done", the conversation is over.')
@@ -173,7 +178,7 @@ def _preamble(person: dict) -> list[str]:
         "about you or anyone else that isn't written below, say you don't know. Never guess facts.",
         *([MILESTONE_LINES] if preset_of(person) == "milestone" else []),
         done,
-        'In "used", write the tag of the line you relied on, or "none". Answer in JSON:\n' + ANSWER_LINE,
+        'In "used", write the tag of the line you relied on, or "none". Answer in JSON:\n' + answer_line(person),
     ]
 
 
@@ -198,6 +203,42 @@ def features(person: dict) -> frozenset[str]:
     if preset == "milestone":
         have |= {"milestones", "hook_notes"}
     return frozenset(have)
+
+
+def outcomes(person: dict) -> tuple[str, ...]:
+    """The outcomes this user may answer with: a chat or milestone preset's user always answers (no no_reply);
+    without a preset, or always_on, all three, as before."""
+    return OUTCOMES_ALWAYS if person.get("preset") in ALWAYS_ANSWERS else OUTCOMES
+
+
+def answer_line(person: dict) -> str:
+    allowed = outcomes(person)
+    if allowed == OUTCOMES:
+        return ANSWER_LINE
+    return '{"outcome": ' + " | ".join(f'"{o}"' for o in allowed) + ', "message": "...", "used": "..."}'
+
+
+def output_format(person: dict) -> dict[str, Any]:
+    """The answer format set on the user sim's agent: OUTPUT_FORMAT, its outcome enum this user's ``outcomes``."""
+    allowed = outcomes(person)
+    if allowed == OUTCOMES:
+        return OUTPUT_FORMAT
+    schema = {**ANSWER_SCHEMA, "properties": {**ANSWER_SCHEMA["properties"],
+                                              "outcome": {"type": "string", "enum": list(allowed)}}}
+    return {"type": "json_schema", "schema": schema}
+
+
+def retry_line(person: dict) -> str:
+    return "Your last answer wasn't in the required format. Answer again, only as JSON: " + answer_line(person)
+
+
+def _allowed(person: dict, parsed: dict) -> dict:
+    """An answer whose outcome this user may not give (a no_reply, or an empty reply, from one who always answers) is a
+    format error: retried once, and recorded as such if the retry is no better."""
+    allowed = outcomes(person)
+    if not parsed["schema_errors"] and parsed["outcome"] not in allowed:
+        return {**parsed, "schema_errors": [f"outcome {parsed['outcome']!r} is not one of {list(allowed)}"]}
+    return parsed
 
 
 def tag_line(tag: str, text: str) -> str:
@@ -432,8 +473,9 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
     if read.get("user_note"):  # from a post-turn hook: what the user saw checking the work, never sent to the assistant
         out.append("\nWHAT YOU FOUND WHEN YOU CHECKED ITS WORK YOURSELF (the assistant doesn't see this):")
         out += ["  " + line for line in read["user_note"].strip().splitlines()]
-    out.append("\n" + CLOSING.format(first=_first(person)))
-    out.append("Answer in JSON: " + ANSWER_LINE)
+    closing = CLOSING_ALWAYS if outcomes(person) == OUTCOMES_ALWAYS else CLOSING
+    out.append("\n" + closing.format(first=_first(person)))
+    out.append("Answer in JSON: " + answer_line(person))
     return "\n".join(out)
 
 
@@ -500,7 +542,7 @@ def setup(version: str, person: dict) -> dict:
     found = problems(person)
     if found:
         raise ValueError(f"user sim {person.get('name')!r}: " + "; ".join(found))
-    return {"system_prompt": system_prompt(person), "output_format": OUTPUT_FORMAT}
+    return {"system_prompt": system_prompt(person), "output_format": output_format(person)}
 
 
 async def answer(version: str, person: dict, history: list[dict], read: dict,
@@ -510,11 +552,11 @@ async def answer(version: str, person: dict, history: list[dict], read: dict,
     if text is None:
         return {"outcome": "no_reply", "message": "", "used": None, "input": None, "raw": None, "turns": 0}
     got = await ask(text)
-    first = _parsed(got)
+    first = _allowed(person, _parsed(got))
     if not first["schema_errors"] or got.get("error"):
         return {**first, "input": text, "raw": got.get("text"), "retried": False}
-    again = await ask(RETRY)
-    second = _parsed(again)
+    again = await ask(retry_line(person))
+    second = _allowed(person, _parsed(again))
     if second["schema_errors"]:
         second["schema_errors"] = ([f"first answer: {e}" for e in first["schema_errors"]]
                                    + [f"answer after the retry: {e}" for e in second["schema_errors"]])

@@ -34,9 +34,26 @@ async def test_an_always_on_preset_keeps_todays_prompt_byte_for_byte(monkeypatch
     assert record["preset"] == "always_on"
 
 
-def test_a_chat_preset_writes_the_prompt_a_single_session_writes_today():
+def test_a_chat_preset_writes_todays_single_session_prompt_but_always_answers():
     single = _person(done_ends_run=True)
-    assert usv.system_prompt({**single, "preset": "chat"}) == usv.system_prompt(single)
+    chat = usv.system_prompt({**single, "preset": "chat"})
+    assert chat == usv.system_prompt(single).replace(usv.ANSWER_LINE, usv.answer_line({"preset": "chat"}))
+    assert usv.ANSWER_LINE not in chat  # the persona's own lines may still mention it; the answer format doesn't
+
+
+@pytest.mark.parametrize("preset, allowed", [(None, ["reply", "no_reply", "done"]), ("always_on", ["reply", "no_reply", "done"]),
+                                             ("chat", ["reply", "done"]), ("milestone", ["reply", "done"])])
+def test_the_answer_format_offers_no_reply_only_to_a_user_who_may_stay_quiet(preset, allowed):
+    person = _person(done_ends_run=preset != "always_on", **({"preset": preset} if preset else {}))
+    fmt = usv.setup(usv.VERSION, person)["output_format"]
+    assert fmt["schema"]["properties"]["outcome"]["enum"] == allowed
+    read = {"time": "2026-11-16T09:00:00Z", "assistant_messages": [{"at": "2026-11-16T09:00:00Z", "text": "done?"}],
+            "phone": [], "you_sent": [], "done_ends_run": preset != "always_on"}
+    rendered = usv.render(person, [], read)
+    assert rendered.endswith("Answer in JSON: " + usv.answer_line(person))
+    assert ("don't reply" in rendered) == ("no_reply" in allowed)
+    if preset is None:
+        assert fmt is usv.OUTPUT_FORMAT  # today's, unchanged
 
 
 def test_a_milestone_preset_tells_the_user_how_to_take_a_hooks_note_and_when_it_is_done():
