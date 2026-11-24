@@ -1665,7 +1665,8 @@ class Gateway:
 
         # The child validates its own arguments: the model declares none and forwards what the caller sent, as /step
         # does, so a missing, misnamed, undeclared or wrong-typed argument gets the child's own answer. The one repair
-        # kept from the typed model: a JSON string for a parameter the child types array or object is decoded.
+        # kept from the typed model: a JSON string for a declared parameter that takes no strings is decoded to the
+        # list, dict or null it holds when the parameter takes that.
         arg_model = create_model(f"{tool_name}Args", __base__=_ForwardingArgModelBase)
         arg_model.json_container_params = _json_container_params(input_schema)
         return FastMCPTool(
@@ -1846,8 +1847,9 @@ class _ProxyArgModelBase(ArgModelBase):
 class _ForwardingArgModelBase(ArgModelBase):
     """A child proxy's arguments: no declared fields, so nothing is required or typed, and every key the caller sent
     (an explicit null included) is forwarded as sent. The exception is the JSON-string repair the gateway's typed model
-    used to give through FastMCP's pre-parsing: a string sent for a parameter the child types array or object (and
-    not string) is decoded when it decodes to that type, so a model's '["a"]' still reaches a strict child as a list."""
+    used to give through FastMCP's pre-parsing: a string sent for a declared parameter that takes no strings is decoded
+    when it decodes to a list, dict or null the parameter takes (``_json_container_params``), so a model's '["a"]'
+    still reaches a strict child as a list and "null" as null."""
 
     model_config = ConfigDict(extra="allow")
     json_container_params: ClassVar[dict[str, tuple[type, ...]]] = {}
@@ -1874,13 +1876,14 @@ _SCHEMA_REF_DEPTH = 8  # local $ref hops followed when typing a property; deeper
 
 
 def _schema_types(schema: Any, root: Any = None, depth: int = 0) -> set[str]:
-    """The JSON types a property schema allows: its `type` (a name or a list), those of its anyOf/oneOf branches, and
-    those of a local `$ref` (``#/$defs/...``, ``#/definitions/...``) into ``root``, the tool's input schema."""
+    """The JSON types a property schema allows: its `type` (a name or a list), those of its anyOf/oneOf/allOf branches
+    (allOf: [{$ref}] is how older pydantic and zod wrap a reference), and those of a local `$ref` (``#/$defs/...``,
+    ``#/definitions/...``) into ``root``, the tool's input schema. Empty when the schema names no type."""
     if not isinstance(schema, dict) or depth > _SCHEMA_REF_DEPTH:
         return set()
     declared = schema.get("type")
     types = {declared} if isinstance(declared, str) else {t for t in declared or () if isinstance(t, str)}
-    for key in ("anyOf", "oneOf"):
+    for key in ("anyOf", "oneOf", "allOf"):
         for branch in schema.get(key) or ():
             types |= _schema_types(branch, root, depth + 1)
     ref = schema.get("$ref")
@@ -1894,14 +1897,17 @@ def _schema_types(schema: Any, root: Any = None, depth: int = 0) -> set[str]:
 
 
 def _json_container_params(input_schema: dict[str, Any]) -> dict[str, tuple[type, ...]]:
-    """Each property the child types array and/or object but not string, with the Python types a JSON string sent for
-    it may decode to. A property that also accepts a string keeps the string the caller sent."""
+    """Each declared property that takes no string, with the Python types a JSON string sent for it may decode to, as
+    the typed model's FastMCP pre-parsing did: a list or dict when the child types it array or object, or names no
+    type at all (``{}``), and None (the string "null") always. A property that accepts a string keeps the string the
+    caller sent, and a string decoding to a number or boolean stays a string."""
     params: dict[str, tuple[type, ...]] = {}
     for name, schema in (input_schema.get("properties") or {}).items():
         types = _schema_types(schema, input_schema)
-        kinds = tuple(_JSON_CONTAINER_TYPES[t] for t in sorted(types) if t in _JSON_CONTAINER_TYPES)
-        if kinds and "string" not in types:
-            params[name] = kinds
+        if "string" in types:
+            continue
+        containers = types & _JSON_CONTAINER_TYPES.keys() if types else _JSON_CONTAINER_TYPES.keys()
+        params[name] = (*(_JSON_CONTAINER_TYPES[t] for t in sorted(containers)), type(None))
     return params
 
 

@@ -15,9 +15,11 @@ const TOOL = {
       filters: { type: "object" },
       ids: { anyOf: [{ type: "array", items: { type: "string" } }, { type: "null" }] },
       tags: { $ref: "#/$defs/Tags" },
+      sort: { allOf: [{ $ref: "#/$defs/Sort" }], description: "older pydantic / zod wrap a $ref in allOf" },
+      meta: { description: "untyped: any JSON value" },
     },
     additionalProperties: false,
-    $defs: { Tags: { type: "array", items: { type: "string" } } },
+    $defs: { Tags: { type: "array", items: { type: "string" } }, Sort: { type: "object" } },
   },
 };
 
@@ -27,7 +29,8 @@ function invalidFields(args) {
     if (!(key in TOOL.inputSchema.properties)) bad.push(key);
     else if (key === "q" && typeof value !== "string") bad.push(key);
     else if (key === "labels" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
-    else if (key === "filters" && !(value !== null && typeof value === "object" && !Array.isArray(value))) bad.push(key);
+    else if ((key === "filters" || key === "sort") && !(value !== null && typeof value === "object" && !Array.isArray(value)))
+      bad.push(key);
     else if (key === "tags" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) bad.push(key);
     else if (key === "ids" && !(value === null || (Array.isArray(value) && value.every((v) => typeof v === "string"))))
       bad.push(key);
