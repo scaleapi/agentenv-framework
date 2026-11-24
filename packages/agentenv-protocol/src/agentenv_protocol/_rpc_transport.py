@@ -7,21 +7,27 @@ import httpx
 from httpx._utils import get_environment_proxies
 
 
-def _enable_keepalive(sock: socket.socket) -> None:
-    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
-    idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
-    if idle is not None:
-        options.append((socket.IPPROTO_TCP, idle, 30))
-    for name, value in (("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
-        option = getattr(socket, name, None)
-        if option is not None:
-            options.append((socket.IPPROTO_TCP, option, value))
-    for level, option, value in options:
-        with suppress(OSError):
-            sock.setsockopt(level, option, value)
-
-
 class _DirectTransport(httpx.AsyncHTTPTransport):
+    _KEEPALIVE_IDLE_SECONDS = 30
+    _KEEPALIVE_PROBE_INTERVAL_SECONDS = 10
+    _KEEPALIVE_PROBE_COUNT = 3
+
+    def _enable_keepalive(self, sock: socket.socket) -> None:
+        options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+        idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
+        if idle is not None:
+            options.append((socket.IPPROTO_TCP, idle, self._KEEPALIVE_IDLE_SECONDS))
+        for name, value in (
+            ("TCP_KEEPINTVL", self._KEEPALIVE_PROBE_INTERVAL_SECONDS),
+            ("TCP_KEEPCNT", self._KEEPALIVE_PROBE_COUNT),
+        ):
+            option = getattr(socket, name, None)
+            if option is not None:
+                options.append((socket.IPPROTO_TCP, option, value))
+        for level, option, value in options:
+            with suppress(OSError):
+                sock.setsockopt(level, option, value)
+
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         extensions = request.extensions
         previous = extensions.get("trace")
@@ -30,7 +36,7 @@ class _DirectTransport(httpx.AsyncHTTPTransport):
             if event == "connection.connect_tcp.complete":
                 sock = info["return_value"].get_extra_info("socket")
                 if sock is not None:
-                    _enable_keepalive(sock)
+                    self._enable_keepalive(sock)
             if previous is not None:
                 await previous(event, info)
 
