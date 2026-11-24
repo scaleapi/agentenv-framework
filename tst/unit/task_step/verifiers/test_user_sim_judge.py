@@ -16,6 +16,7 @@ import pytest
 from agent_env.config.model import ModelConfig, resolve_model
 from agent_env.openenv.reward import reward_of
 from agent_env.task import Task
+from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_step import TaskStepDependency
@@ -142,8 +143,10 @@ def _run(*answers: tuple[str, str], graded=None) -> core.UserSimRun:
                            turns=turns)
 
 
-async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches: bool = True, **kw) -> dict:
-    """The step's entry for ``run``, read as a chat run's (its reading stubbed), the gate off unless ``kw`` says."""
+async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches: bool = True,
+                 grading: core.Grading | None = None, **kw) -> dict:
+    """The step's entry for ``run``, read as a chat run's (its reading stubbed), the gate off unless ``kw`` says;
+    ``grading``, what the task's other steps grade the assistant on, as the step reads them when the task loads."""
     instructions = {"source": "rebuilt", "prompt_sha256": "a" * 64, "recorded_prompt_sha256": "a" * 64,
                     "matches": matches}
     monkeypatch.setattr(usj, "_read_run", lambda kind, step_id, record, context: (
@@ -152,7 +155,9 @@ async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches:
     ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="all set", step_id="talk"))
     ctx.metadata["user_sim_reads"] = {"talk": [{}]}
     ctx.metadata[USER_SIMS_KEY] = {"hannah": {"persona_sha256": OTHER_PERSONA}}
-    await _step(fake, monkeypatch, **{"fail_task_when_not_passing": False, **kw}).execute(ctx)
+    step = _step(fake, monkeypatch, **{"fail_task_when_not_passing": False, **kw})
+    step._grading = grading
+    await step.execute(ctx)
     return _entry(ctx)
 
 
@@ -256,7 +261,8 @@ async def test_the_judge_writes_its_reason_before_its_verdict_within_the_word_li
     assert prompt.index("# THE USER SIM'S INSTRUCTIONS") < prompt.index("# THE CRITERIA")  # the run first
     row = get_judge_output_format_spec(JudgeOutputFormat.USER_SIM_CHECKS).output_format["schema"]["properties"][
         "results"]["items"]
-    assert list(row["properties"]) == ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"]
+    assert list(row["properties"]) == ["id", "reason", "turns", "verdict", "could_change_grade", "would_change",
+                                       "assistant_asked"]
 
 
 # ---- one run, through the step ----------------------------------------------------------------------------------
@@ -269,8 +275,8 @@ async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns(monkey
         "made_up": "fail", "ending": "pass"}
     assert _rows(entry)["made_up"] == {
         "id": "made_up", "title": "Made-up facts", "families": ["A2"], "weight": 1.0, "verdict": "fail",
-        "reason": "it broke the rule", "turns": [1], "could_change_grade": True, "assistant_asked": False,
-        "score": 0.0, "result": False, "justification": "it broke the rule"}
+        "reason": "it broke the rule", "turns": [1], "could_change_grade": True, "would_change": [],
+        "assistant_asked": False, "score": 0.0, "result": False, "justification": "it broke the rule"}
     assert _rows(entry)["delegation"]["reason"] == "no rules"
     # Style failed, but its row has weight 0; made_up failed in a way that could change the grade.
     assert _rows(entry)["style"]["weight"] == 0.0 and _rows(entry)["style"]["result"] is True
@@ -412,7 +418,8 @@ async def test_task_items_get_their_own_rows_and_one_rule_says_which_make_a_user
     assert _rows(entry)["leak"] == {
         "id": "leak", "family": "G1", "kind": "general", "check": "never hints at the engagement",
         "asked_with": "oversharing", "weight": 1.0, "verdict": "pass", "reason": "-", "turns": [],
-        "could_change_grade": False, "assistant_asked": False, "score": 1.0, "result": True, "justification": "-"}
+        "could_change_grade": False, "would_change": [], "assistant_asked": False, "score": 1.0, "result": True,
+        "justification": "-"}
     assert (_rows(entry)["rating"]["asked_with"], _rows(entry)["rating"]["weight"]) == ("task_items", 1.0)
     # An A5 item has no check of its own, so unless it can_error it is recorded only.
     assert _rows(entry)["tone"]["verdict"] == "fail" and _rows(entry)["tone"]["weight"] == 0.0
@@ -1680,3 +1687,83 @@ async def test_oversharing_looks_for_the_assistant_s_question_first_and_its_reas
     entry = await _judge(run, unasked, monkeypatch)
     assert "fernhill" not in sent.lower()  # nothing it was sent at that turn asks about them
     assert _rows(entry)["oversharing"]["verdict"] == "fail" and entry["user_sim_error"]["because"] == ["oversharing"]
+
+
+SHOP_GRADING = core.Grading(
+    criteria=(("forecast", "Built the holiday forecast from last season's orders by scent and size."),
+              ("buyers_answered", "Answered both buyers with the owner's decisions, Odile's price floor kept.")),
+    end_state_steps=("verify-state",), source=("process",))
+
+
+def _graded_task(**judge):
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
+    from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
+
+    deploy, week = _user_sim_steps()
+    j = usj.UserSimJudge("judge", None, run_step_id="week", **judge)
+    after = [TaskStepDependency("judge")]
+    process = AlwaysOnAgentVerifier("grade", None, prompt_id="ask", verifier_id="grade", use_agent_judge=False,
+                                    depends_on=after, criteria=[
+                                        {"id": "forecast", "criterion": "Built the forecast for <season>."},
+                                        {"id": "honest", "description": "Its last message says what is still open."}])
+    elsewhere = AlwaysOnAgentVerifier("other", None, prompt_id="another-prompt", verifier_id="other",
+                                      use_agent_judge=False, depends_on=after,
+                                      criteria=[{"id": "other", "description": "x"}])
+    state = EnvOutcomeVerifierTaskStep("verify-state", None, env_id="env", file_artifact_id="script",
+                                       verifier_id="trust", depends_on=after)
+    return Task("t", None, [deploy, week, j, process, elsewhere, state]), j
+
+
+def test_when_the_task_loads_the_judge_reads_what_its_other_steps_grade_the_assistant_on():
+    task, judge = _graded_task()
+    assert judge._grading == core.Grading(
+        criteria=(("forecast", "Built the forecast for <season>."), ("honest", "Its last message says what is still "
+                                                                     "open.")),
+        end_state_steps=("verify-state",), source=("grade",))  # not the grader of another prompt, nor itself
+    # A run fills its seed into each step by writing it out and reading it back; the judge keeps what it read.
+    [seeded] = [s for s in substitute_seed_in_steps(task.steps, {"season": "2026"}) if s.id == "judge"]
+    assert seeded._grading == judge._grading
+    assert usj._seeded(seeded._grading, {"season": "2026"}).criteria[0] == ("forecast", "Built the forecast for 2026.")
+    assert usj.UserSimJudge("judge", None, run_step_id="week")._grading is None  # outside a task, none was read
+
+
+@pytest.mark.asyncio
+async def test_the_judge_reads_what_the_assistant_is_graded_on_and_a_fail_counts_only_when_it_names_it(monkeypatch):
+    fake = FakeModel({"made_up": FAIL(would_change=["buyers_answered"]), "rogue": FAIL(would_change=[]),
+                      "guidance": FAIL(would_change=["not-listed"])})
+    entry = await _judge(_shop(multi_day=False), fake, monkeypatch, grading=SHOP_GRADING)
+    head = fake.calls[0]["cached_prefix"]
+    assert "# " + core.GRADED_ON in head and core.GRADED_ON_RULE in head
+    assert "- [buyers_answered] Answered both buyers" in head and "End state: step verify-state checks" in head
+    assert head.index(core.GRADED_ON) < head.index("# THE RUN")  # in the part every call shares
+    assert "whose ids go in would_change" in fake.asked("made_up")[0]["criteria"][0]["question"]
+    assert entry["grading"] == {"source": "task_steps", "criteria": 2, "criteria_from": ["process"],
+                                "end_state_steps": ["verify-state"]}
+    error = entry["user_sim_error"]
+    assert error["value"] == "yes" and error["because"] == ["made_up"]
+    assert error["not_named"] == ["guidance", "rogue"]  # named nothing listed, so they don't count
+    assert _rows(entry)["rogue"]["verdict"] == "fail" and _rows(entry)["rogue"]["could_change_grade"] is True
+    assert _rows(entry)["rogue"]["result"] is True and _rows(entry)["made_up"]["result"] is False
+    unnamed_only = await _judge(_shop(multi_day=False), FakeModel({"rogue": FAIL()}), monkeypatch,
+                                grading=SHOP_GRADING)
+    assert unnamed_only["user_sim_error"]["value"] == "no" and unnamed_only["score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_without_the_task_s_grading_a_fail_counts_as_before_and_the_entry_says_why(monkeypatch):
+    unseen = await _judge(_shop(multi_day=False), FakeModel({"rogue": FAIL()}), monkeypatch)
+    assert unseen["grading"] == {"source": "none", "note": usj.GRADING_UNSEEN}
+    assert unseen["user_sim_error"]["because"] == ["rogue"] and "not_named" not in unseen["user_sim_error"]
+    fake = FakeModel({"rogue": FAIL()})
+    none = await _judge(_shop(multi_day=False), fake, monkeypatch, grading=core.Grading())
+    assert none["grading"] == {"source": "none", "note": usj.GRADING_NONE}
+    assert none["user_sim_error"]["because"] == ["rogue"] and "# " + core.GRADED_ON not in fake.run_text()
+    _, judge = _graded_task()
+    assert judge.task_problems([*_user_sim_steps(), judge]) == [] and judge._grading == core.Grading()
+
+
+@pytest.mark.asyncio
+async def test_an_auto_item_s_counted_fail_still_counts_when_the_task_lists_what_it_grades(monkeypatch):
+    items = [{"id": "f2_short", "family": "F2", "kind": "auto", "metric": "max_words", "max": 5, "can_error": True}]
+    entry = await _judge(_shop(multi_day=False), FakeModel(), monkeypatch, rubric_items=items, grading=SHOP_GRADING)
+    assert entry["user_sim_error"]["because"] == ["f2_short"]  # no judge named it, so naming isn't asked of it

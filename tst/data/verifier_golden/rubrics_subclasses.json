@@ -15,6 +15,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -32,6 +33,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -48,6 +50,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -67,6 +70,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -84,6 +88,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -100,6 +105,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -116,6 +122,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -147,6 +154,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1
@@ -195,6 +206,7 @@
        1
       ],
       "could_change_grade": true,
+      "would_change": [],
       "assistant_asked": false,
       "score": 0.0,
       "result": false,
@@ -212,6 +224,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -228,6 +241,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -247,6 +261,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -264,6 +279,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -280,6 +296,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -296,6 +313,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -314,6 +332,7 @@
        1
       ],
       "could_change_grade": true,
+      "would_change": [],
       "assistant_asked": false,
       "score": 0.0,
       "result": false,
@@ -345,6 +364,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1
@@ -396,6 +419,7 @@
        1
       ],
       "could_change_grade": true,
+      "would_change": [],
       "assistant_asked": false,
       "score": 0.0,
       "result": false,
@@ -413,6 +437,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -429,6 +454,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -448,6 +474,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -465,6 +492,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -481,6 +509,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -497,6 +526,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -528,6 +558,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": false
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1
@@ -578,6 +612,10 @@
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
     },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
+    },
     "graded_turns": [],
     "turns": 1,
     "notes": [],
@@ -608,6 +646,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -625,6 +664,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -641,6 +681,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -660,6 +701,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -677,6 +719,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -693,6 +736,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -709,6 +753,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -740,6 +785,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "rubric_persona": {
      "rubric": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -792,6 +841,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -809,6 +859,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -825,6 +876,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -844,6 +896,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -861,6 +914,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -877,6 +931,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -893,6 +948,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -940,6 +996,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "rubric_persona": {
      "rubric": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -995,6 +1055,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1012,6 +1073,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1028,6 +1090,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1047,6 +1110,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1080,6 +1144,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1096,6 +1161,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1127,6 +1193,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1
@@ -1309,6 +1379,10 @@
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
     },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
+    },
     "graded_turns": [
      1
     ],
@@ -1364,6 +1438,7 @@
        1
       ],
       "could_change_grade": true,
+      "would_change": [],
       "assistant_asked": false,
       "score": 0.0,
       "result": false,
@@ -1381,6 +1456,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1397,6 +1473,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1416,6 +1493,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1433,6 +1511,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1449,6 +1528,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1465,6 +1545,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1511,6 +1592,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1
@@ -1560,6 +1645,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1577,6 +1663,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1593,6 +1680,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1612,6 +1700,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1629,6 +1718,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1645,6 +1735,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1661,6 +1752,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1714,6 +1806,10 @@
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
     },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
+    },
     "graded_turns": [
      1
     ],
@@ -1762,6 +1858,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1779,6 +1876,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1795,6 +1893,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1814,6 +1913,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1831,6 +1931,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1847,6 +1948,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1863,6 +1965,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -1895,6 +1998,10 @@
      "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "recorded_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1
@@ -1997,6 +2104,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2016,6 +2124,7 @@
        1
       ],
       "could_change_grade": true,
+      "would_change": [],
       "assistant_asked": false,
       "score": 0.0,
       "result": false,
@@ -2032,6 +2141,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2051,6 +2161,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2068,6 +2179,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2084,6 +2196,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2100,6 +2213,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2131,6 +2245,10 @@
      "prompt_sha256": "40243a6be42eadd882c5e9f09542938219bb53f6383dde1badd5e922681ba11a",
      "recorded_prompt_sha256": "40243a6be42eadd882c5e9f09542938219bb53f6383dde1badd5e922681ba11a",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1,
@@ -2188,6 +2306,7 @@
        2
       ],
       "could_change_grade": true,
+      "would_change": [],
       "assistant_asked": false,
       "score": 0.0,
       "result": false,
@@ -2205,6 +2324,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2221,6 +2341,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2240,6 +2361,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2257,6 +2379,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2273,6 +2396,7 @@
       "reason": "fine",
       "turns": [],
       "could_change_grade": false,
+      "would_change": [],
       "assistant_asked": false,
       "score": 1.0,
       "result": true,
@@ -2319,6 +2443,10 @@
      "prompt_sha256": "7172e450e74d2c140ba06e2303c544549430f63e2b758e534b64f93a319d43a3",
      "recorded_prompt_sha256": "7172e450e74d2c140ba06e2303c544549430f63e2b758e534b64f93a319d43a3",
      "matches": true
+    },
+    "grading": {
+     "source": "none",
+     "note": "the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as before"
     },
     "graded_turns": [
      1,

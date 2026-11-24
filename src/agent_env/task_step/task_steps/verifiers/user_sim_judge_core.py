@@ -31,6 +31,10 @@ a weight other than 0 failed in a way that could change the assistant's grade.
 
 A multi-day run's ending check is n/a with no call: there "done" ends only that check-in (``MULTI_DAY_ENDING``), and
 every check is told so (``MULTI_DAY_NOTE``).
+
+A run's ``grading`` (``Grading``) is what the task's own graders score the assistant on; when it lists something, the
+judge reads it beside the run, and a judged fail counts toward a user sim error only when it names (``would_change``)
+something listed (``unnamed``).
 """
 from __future__ import annotations
 
@@ -314,6 +318,26 @@ class Turn:
     cut: bool = False  # ``message`` is only the start of what it sent (the record kept a shortened copy)
 
 
+@dataclass(frozen=True)
+class Grading:
+    """What the task's own graders score the assistant on, as its other steps say before they run: ``criteria``, each
+    ``(id, text)``, from the steps that grade the run's prompt with criteria (``source`` names them), and
+    ``end_state_steps``, the steps that check the end state with a script, whose checks no step lists before it
+    runs."""
+    criteria: tuple[tuple[str, str], ...] = ()
+    end_state_steps: tuple[str, ...] = ()
+    source: tuple[str, ...] = ()
+
+    @property
+    def known(self) -> bool:
+        return bool(self.criteria or self.end_state_steps)
+
+    @property
+    def ids(self) -> frozenset[str]:
+        """What a fail may name in ``would_change``: each criterion's id and each end-state step's."""
+        return frozenset([cid for cid, _ in self.criteria] + list(self.end_state_steps))
+
+
 @dataclass
 class UserSimRun:
     name: str
@@ -324,6 +348,7 @@ class UserSimRun:
     tagged_lines: Optional[dict[str, str]] = None
     missing_answers: int = 0  # the run's answers its record didn't keep (always_on's tail drops the earliest)
     multi_day: bool = False  # the run goes on to its end time whatever it answers: "done" ends only that check-in
+    grading: Optional[Grading] = None  # None, or nothing known: could_change_grade is judged from each check alone
 
 
 # ---- a task's own rubric items ------------------------------------------------------------------------------------
@@ -584,11 +609,36 @@ MULTI_DAY_NOTE = ("this run is multi-day: it goes on until its end time whatever
 MULTI_DAY_ENDING = "a multi-day run: \"done\" ends nothing, so when it said it doesn't matter"
 
 
+GRADED_ON = "WHAT THE ASSISTANT IS GRADED ON"
+GRADED_ON_RULE = (f"For every criterion's could_change_grade: say true only when the slip touches something listed "
+                  f"under {GRADED_ON}, a process criterion or what the end state is checked for, and put the ids it "
+                  "touches in would_change (a criterion's id in brackets, an end-state step's id). A slip that touches "
+                  "nothing listed can't change the grade: say false. A fail that names no listed id doesn't count.")
+
+
+def render_grading(grading: Grading) -> list[str]:
+    """The run's ``grading`` as the judge reads it, before the run."""
+    out = ["", f"# {GRADED_ON}",
+           "The task's own graders score the assistant on these after you. They are not the user sim's instructions: "
+           "never fail the user sim against them. Use them only for could_change_grade.", GRADED_ON_RULE]
+    if grading.criteria:
+        out += ["", "Process criteria" + (f" ({', '.join(grading.source)})" if grading.source else "") + ":"]
+        out += [f"- [{cid}] " + " ".join(text.split()) for cid, text in grading.criteria]
+    if grading.end_state_steps:
+        out += ["", f"End state: step{'s' if len(grading.end_state_steps) > 1 else ''} "
+                f"{', '.join(grading.end_state_steps)} check{'' if len(grading.end_state_steps) > 1 else 's'} the "
+                "apps' end state with a script whose checks aren't listed here: what ends up in the apps (what is "
+                "sent, ordered, booked, listed, priced or changed) may be checked."]
+    return out
+
+
 def render_run(run: UserSimRun) -> tuple[str, str]:
     """The run as the judge reads it, in two parts so a prompt cache can share the first across calls: the
     instructions and every turn's input up to the last graded turn's answers stay the same for all checks."""
     head = ["# THE USER SIM'S INSTRUCTIONS"]
     head.append("<instructions>\n" + (run.instructions or "(not recorded)").strip() + "\n</instructions>")
+    if run.grading is not None and run.grading.known:
+        head += render_grading(run.grading)
     head += ["", "# THE RUN"]
     if run.multi_day:
         head.append(f"Note: {MULTI_DAY_NOTE}")
@@ -658,15 +708,18 @@ def check_title(name: str) -> str:
     return f"{c.title} ({', '.join(c.families)})"
 
 
-def check_question(name: str) -> str:
+def check_question(name: str, graded_on: bool = False) -> str:
     """A check's question as the judge reads it: what it asks, what fails, what doesn't, when it's n/a and when a fail
-    could change the assistant's grade."""
+    could change the assistant's grade; ``graded_on``, the run lists what the assistant is graded on, which that
+    turns on."""
     c = CHECKS[name]
     lines = [c.question, "", "It fails when, at a graded turn:", *[f"- {f}" for f in c.fails],
              "", "Not a failure:", *[f"- {f}" for f in c.not_fails], "",
              c.na or "Answer \"pass\" or \"fail\"; \"n/a\" only if no turn is graded."]
     if c.grade:
-        lines += ["", f"could_change_grade: {c.grade}"]
+        lines += ["", f"could_change_grade: {c.grade}" + (
+            f" Only when it touches something under {GRADED_ON}, a criterion or what the end state is checked for, "
+            "whose ids go in would_change; otherwise false." if graded_on else "")]
     return "\n".join(lines)
 
 
@@ -677,8 +730,8 @@ def family_label(family: str) -> str:
 # ---- one run's criteria and rows ----------------------------------------------------------------------------------
 # The fields a row's verdict is in, as a judge's row (judge_output_format's user_sim_checks) or one computed here has
 # them; a stored row is these, after what a reviewer reads about it.
-VERDICT_FIELDS = ("verdict", "reason", "turns", "turns_outside_graded", "could_change_grade", "assistant_asked",
-                  "error", "score", "result", "justification")
+VERDICT_FIELDS = ("verdict", "reason", "turns", "turns_outside_graded", "could_change_grade", "would_change",
+                  "assistant_asked", "error", "score", "result", "justification")
 
 
 @dataclass
@@ -695,6 +748,9 @@ class Plan:
     unjudged: list[dict] = field(default_factory=list)
     about: dict[str, dict] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)  # the row ids: the checks in order, then the task's items
+    # What a judged fail must name in ``would_change`` to count (``unnamed``); None when the run lists nothing the
+    # assistant is graded on, and a fail counts as before.
+    graded_ids: Optional[frozenset[str]] = None
 
 
 def item_weight(item: RubricItem, error_checks: list[str]) -> float:
@@ -727,7 +783,8 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
     # A check that can't apply to this run is n/a with no call; the items its families own go in the task's call.
     settled = {"ending": MULTI_DAY_ENDING} if run.multi_day and "ending" in checks else {}
     calls = plan_calls([c for c in checks if c not in settled], resolved)
-    plan = Plan(order=list(checks) + [i.id for i in items])
+    graded_on = run.grading is not None and run.grading.known
+    plan = Plan(order=list(checks) + [i.id for i in items], graded_ids=run.grading.ids if graded_on else None)
     for name in checks:
         plan.about[name] = {"title": CHECKS[name].title, "families": list(CHECKS[name].families),
                             "weight": 1.0 if name in error_checks else 0.0}
@@ -740,7 +797,8 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
     for call, its in calls.items():
         size = 0
         if call_check(call):
-            plan.criteria.append({"id": call, "check": check_title(call), "question": check_question(call),
+            plan.criteria.append({"id": call, "check": check_title(call),
+                                  "question": check_question(call, graded_on),
                                   "graded_turns": graded, "weight": plan.about[call]["weight"]})
             size += 1
         for item in its:
@@ -785,12 +843,29 @@ def finish_rows(rows: list[dict], plan: Plan) -> list[dict]:
 
 
 # ---- the run's verdict --------------------------------------------------------------------------------------------
-def user_sim_error(rows: list[dict]) -> dict:
+def unnamed(rows: list[dict], plan: Plan) -> list[str]:
+    """The judged rows whose fail could change the grade but name nothing the run lists as graded (``would_change``
+    holds none of ``plan.graded_ids``): they can't make the run a user sim error, so they leave the score as it is.
+    Each is set to score 1 here, its verdict and could_change_grade kept. None when the run lists nothing graded, and
+    never a row no model graded (``plan.unjudged``: an auto item, a line that can't be read), since no judge named."""
+    if plan.graded_ids is None:
+        return []
+    computed = {r["id"] for r in plan.unjudged}
+    out = []
+    for r in rows:
+        if (r["id"] not in computed and r.get("verdict") == "fail" and r.get("could_change_grade")
+                and not set(r.get("would_change") or []) & plan.graded_ids):
+            r.update(score=1.0, result=True)
+            out.append(r["id"])
+    return out
+
+
+def user_sim_error(rows: list[dict], not_counted: tuple[str, ...] | list[str] = ()) -> dict:
     """Whether the run is a user sim error, by one rule for checks and task items: ``value`` yes when a row at a weight
     other than 0 failed in a way that could change the grade (``because`` names them); unknown when none did but such
     a row is undecided (``error``: its judge never gave a usable answer, or it couldn't be counted or read); else no.
-    A weight-0 row (style, by default) never makes it either."""
-    counts = [r for r in rows if float(r.get("weight", 1.0)) != 0]
+    A weight-0 row (style, by default) never makes it either, nor a row in ``not_counted`` (``unnamed``)."""
+    counts = [r for r in rows if float(r.get("weight", 1.0)) != 0 and r["id"] not in not_counted]
     because = [r["id"] for r in counts if r.get("verdict") == "fail" and r.get("could_change_grade")]
     unknown = [r["id"] for r in counts if r.get("verdict") == "error"]
     return {"value": "yes" if because else "unknown" if unknown else "no", "because": because, "unknown": unknown}
