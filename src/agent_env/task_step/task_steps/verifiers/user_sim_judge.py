@@ -45,15 +45,16 @@ always_on run (its record's ``multi_day``) "done" ends nothing, so the ending ch
 check is told so.
 
 What the assistant is graded on (``grading_of``): when the task is put together (``task_problems``, which every runner
-calls with the task's steps) the judge reads the criteria of each rubrics_verifier or always_on_agent_verifier that
-grades the run's prompt, and the ids of its env_outcome_verifier steps, whose checks are in their scripts and aren't
-listed before they run; a run's seed is filled into the criteria as the graders get it, and ``seeded_from`` keeps them
-across the seed's rendering. The judge reads them before the run, and a fail could change the grade only when it
-touches one: each judged row names the ids it would change (``would_change``), and a judged fail that names none of
-them can't make the run a user sim error (``user_sim_error.not_named``), its score left at 1. A row no model graded (an
-auto item, a line that can't be read) names nothing and counts as before. A task with no such steps, or a judge that
-wasn't given the task's steps (built outside a task, or a hub worker that renders the seed without ``seeded_from``),
-judges could_change_grade as before, and the entry's ``grading`` says which.
+calls with the task's steps) the judge finds each rubrics_verifier or always_on_agent_verifier that grades the run's
+prompt, and its env_outcome_verifier steps, whose checks are in their scripts and aren't listed before they run. On each
+run it reads each grader's criteria as that grader resolves them (``_resolved_criteria``: a run's
+``user_overrides.step_params`` criteria replace the stored ones), with the run's seed filled in as the graders get it;
+``seeded_from`` keeps the graders across the seed's rendering. The judge reads them before the run, and a fail could
+change the grade only when it touches one: each judged row names the ids it would change (``would_change``), and a
+judged fail that names none of them can't make the run a user sim error (``user_sim_error.not_named``), its score left
+at 1. A row no model graded (an auto item, a line that can't be read) names nothing and counts as before. A task with no
+such steps, or a judge that wasn't given the task's steps (built outside a task, or a hub worker that renders the seed
+without ``seeded_from``), judges could_change_grade as before, and the entry's ``grading`` says which.
 
 A rubric item is the shape of a criterion in a task's ``usersim.yaml`` (psi-benchmark-tasks), which that repo turns
 into this step's settings; this step reads no file:
@@ -276,7 +277,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
         self._run: Optional[_ThisRun] = None
         # What the task's other steps grade the assistant on, read when the task is put together (task_problems);
         # None until then, as for a step built outside a task.
-        self._grading: Optional[core.Grading] = None
+        self._grading: Optional[Graders] = None
 
     def seeded_from(self, written: "UserSimJudge") -> None:
         """This step is ``written`` with the run's seed filled in (``substitute_seed_in_steps``): keep what the task
@@ -378,9 +379,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
             skipped = "the user sim never read: the run has no user_sim_reads"
         else:
             run, about = await asyncio.to_thread(_read_run, kind, step_id, record, context)
-            run.grading = _seeded(self._grading, context.metadata.get("seed") or {})
+            grading = self._grading.in_run(context) if self._grading is not None else None
+            run.grading = _seeded(grading, context.metadata.get("seed") or {})
             entry.update(user_sim=about["user_sim"], instructions=about["instructions"],
-                         grading=_grading_entry(self._grading))
+                         grading=_grading_entry(grading))
             if self.rubric_persona_sha256 is not None and items:
                 us = (context.metadata.get(USER_SIMS_KEY) or {}).get(about["user_sim"]) or {}
                 entry["rubric_persona"] = _rubric_persona(self.rubric_persona_sha256, us.get("persona_sha256"))
@@ -609,23 +611,36 @@ GRADING_NONE = ("the task has no step that grades the assistant with criteria or
                 "could_change_grade is judged from each check alone, as before")
 
 
-def grading_of(run: TaskStep, steps: list[TaskStep]) -> core.Grading:
-    """What the task's steps grade the assistant on in ``run``: the criteria of each rubrics_verifier (an
-    always_on_agent_verifier among them, never a user sim judge) that grades ``run``'s prompt, or names none, and each
-    env_outcome_verifier, whose checks are in its script, unread until it runs."""
-    prompt = getattr(run, "prompt_id", None)
-    criteria, source, end_state = [], [], []
-    for step in steps:
-        if step.type == END_STATE_TYPE:
-            end_state.append(step.id)
-        elif isinstance(step, RubricsVerifierTaskStep) and not isinstance(step, UserSimJudge):
-            if prompt is not None and step.prompt_id not in (None, prompt):
-                continue
-            texts = [t for i, c in enumerate(step.criteria or [], 1) if (t := _criterion(step.id, i, c))[1].strip()]
+@dataclass(frozen=True)
+class Graders:
+    """The task's graders of a run, as the judge found them when the task loaded (``grading_of``): the steps that grade
+    its prompt with criteria, and the env_outcome_verifier steps. ``in_run`` reads them for one run."""
+    criteria_steps: tuple[RubricsVerifierTaskStep, ...] = ()
+    end_state_steps: tuple[str, ...] = ()
+
+    def in_run(self, context: TaskStepContext) -> core.Grading:
+        """What they grade the assistant on in this run: each grader's criteria as it resolves them itself
+        (``_resolved_criteria``, which applies the run's ``user_overrides.step_params``), so the judge reads what the
+        graders will."""
+        criteria, source = [], []
+        for step in self.criteria_steps:
+            texts = [t for i, c in enumerate(step._resolved_criteria(context) or [], 1)
+                     if (t := _criterion(step.id, i, c))[1].strip()]
             if texts:
                 criteria += texts
                 source.append(step.id)
-    return core.Grading(criteria=tuple(criteria), end_state_steps=tuple(end_state), source=tuple(source))
+        return core.Grading(criteria=tuple(criteria), end_state_steps=self.end_state_steps, source=tuple(source))
+
+
+def grading_of(run: TaskStep, steps: list[TaskStep]) -> Graders:
+    """The task's graders of ``run``: each rubrics_verifier (an always_on_agent_verifier among them, never a user sim
+    judge) that grades ``run``'s prompt, or names none, and each env_outcome_verifier, whose checks are in its script,
+    unread until it runs."""
+    prompt = getattr(run, "prompt_id", None)
+    graders = [s for s in steps if isinstance(s, RubricsVerifierTaskStep) and not isinstance(s, UserSimJudge)
+               and (prompt is None or s.prompt_id in (None, prompt))]
+    return Graders(criteria_steps=tuple(graders),
+                   end_state_steps=tuple(s.id for s in steps if s.type == END_STATE_TYPE))
 
 
 def _criterion(step_id: str, n: int, criterion: Any) -> tuple[str, str]:

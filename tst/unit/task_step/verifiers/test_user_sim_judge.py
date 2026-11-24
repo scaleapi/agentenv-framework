@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
 from dataclasses import replace
 
 import httpx
@@ -156,7 +157,7 @@ async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches:
     ctx.metadata["user_sim_reads"] = {"talk": [{}]}
     ctx.metadata[USER_SIMS_KEY] = {"hannah": {"persona_sha256": OTHER_PERSONA}}
     step = _step(fake, monkeypatch, **{"fail_task_when_not_passing": False, **kw})
-    step._grading = grading
+    step._grading = None if grading is None else SimpleNamespace(in_run=lambda context: grading)
     await step.execute(ctx)
     return _entry(ctx)
 
@@ -1720,14 +1721,15 @@ def _graded_task(**judge):
 
 def test_when_the_task_loads_the_judge_reads_what_its_other_steps_grade_the_assistant_on():
     task, judge = _graded_task()
-    assert judge._grading == core.Grading(
+    assert judge._grading.in_run(TaskStepContext()) == core.Grading(
         criteria=(("forecast", "Built the forecast for <season>."), ("honest", "Its last message says what is still "
                                                                      "open.")),
         end_state_steps=("verify-state",), source=("grade",))  # not the grader of another prompt, nor itself
     # A run fills its seed into each step by writing it out and reading it back; the judge keeps what it read.
     [seeded] = [s for s in substitute_seed_in_steps(task.steps, {"season": "2026"}) if s.id == "judge"]
     assert seeded._grading == judge._grading
-    assert usj._seeded(seeded._grading, {"season": "2026"}).criteria[0] == ("forecast", "Built the forecast for 2026.")
+    grading = seeded._grading.in_run(TaskStepContext())
+    assert usj._seeded(grading, {"season": "2026"}).criteria[0] == ("forecast", "Built the forecast for 2026.")
     assert usj.UserSimJudge("judge", None, run_step_id="week")._grading is None  # outside a task, none was read
 
 
@@ -1763,7 +1765,8 @@ async def test_without_the_task_s_grading_a_fail_counts_as_before_and_the_entry_
     assert none["grading"] == {"source": "none", "note": usj.GRADING_NONE}
     assert none["user_sim_error"]["because"] == ["rogue"] and "# " + core.GRADED_ON not in fake.run_text()
     _, judge = _graded_task()
-    assert judge.task_problems([*_user_sim_steps(), judge]) == [] and judge._grading == core.Grading()
+    assert judge.task_problems([*_user_sim_steps(), judge]) == []
+    assert judge._grading.in_run(TaskStepContext()) == core.Grading()
 
 
 @pytest.mark.asyncio
@@ -1771,3 +1774,25 @@ async def test_an_auto_item_s_counted_fail_still_counts_when_the_task_lists_what
     items = [{"id": "f2_short", "family": "F2", "kind": "auto", "metric": "max_words", "max": 5, "can_error": True}]
     entry = await _judge(_shop(multi_day=False), FakeModel(), monkeypatch, rubric_items=items, grading=SHOP_GRADING)
     assert entry["user_sim_error"]["because"] == ["f2_short"]  # no judge named it, so naming isn't asked of it
+
+
+@pytest.mark.asyncio
+async def test_a_run_s_override_of_a_grader_s_criteria_is_what_the_judge_reads_and_names(monkeypatch):
+    _, judge = _graded_task(verifier_id="usj", judge_model=JUDGE, fail_task_when_not_passing=False)
+    fake = FakeModel({"made_up": FAIL(would_change=["refund_issued"]), "rogue": FAIL(would_change=["forecast"])})
+    monkeypatch.setattr(RubricsVerifierTaskStep, "_prompt_llm_judge", fake)
+    monkeypatch.setattr(usj, "_read_run", lambda kind, step_id, record, context: (_shop(multi_day=False), {
+        "user_sim": "mara", "instructions": {"source": "rebuilt", "matches": True}}))
+    ctx = TaskStepContext()
+    ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="all set", step_id="week"))
+    ctx.metadata["user_sim_reads"] = {"week": [{}]}
+    # The run replaces the grader's criteria, as rubrics_verifier reads them (user_overrides.step_params).
+    ctx.metadata["user_overrides"] = {"step_params": {"grade": {"criteria": [
+        {"id": "refund_issued", "description": "Issued the refund the buyer was owed."}]}}}
+    await judge.execute(ctx)
+    head = fake.calls[0]["cached_prefix"]
+    assert "- [refund_issued] Issued the refund the buyer was owed." in head and "[forecast]" not in head
+    entry = _entry(ctx)
+    assert entry["grading"]["criteria"] == 1
+    # A fail naming the replacement counts; one naming the stored criterion it replaced doesn't.
+    assert entry["user_sim_error"]["because"] == ["made_up"] and entry["user_sim_error"]["not_named"] == ["rogue"]
