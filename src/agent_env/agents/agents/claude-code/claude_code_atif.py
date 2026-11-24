@@ -101,6 +101,8 @@ class ClaudeCodeAtif(Adapter):
         self._summary_next = False
         self._summary_trigger: str | None = None
         self._task_counts: dict[str, int] = {}
+        #: The model the root agent's latest call named, as the API answered: a compaction's summary call is its call too.
+        self._root_model: str | None = None
         #: The task's model calls written so far, by step key: those not in ``_stamped`` have no counts yet.
         self._task_calls: set[str] = set()
 
@@ -317,6 +319,8 @@ class ClaudeCodeAtif(Adapter):
             turn.step(key=key, model_name=model, time=when, agent=agent, **(usage or {}))
         if agent is None:
             self._attempt_step = key
+            if model is not None and not synthetic:
+                self._root_model = model
 
     def _block(self, block: dict[str, Any], key: str, agent: str | None, when: Any, turn: Any) -> None:
         kind = block.get("type")
@@ -351,7 +355,7 @@ class ClaudeCodeAtif(Adapter):
                 key = f"compaction-{entry.uuid or entry.seq}"
                 turn.message(step=key, text=text, time=when)
                 turn.compaction(step=key, written_by="assistant", trigger=entry.trigger)
-                turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
+                turn.step(key=key, model_name=self._root_model or entry.model, time=when, **(entry.usage or {}))
                 entry.summary = False
             else:
                 turn.system_message(text=text, time=when)

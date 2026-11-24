@@ -431,6 +431,18 @@ def test_two_compactions_in_one_turn_have_no_usage_since_the_turns_remainder_can
     assert all("metrics" not in step for step in compactions)
 
 
+def test_a_compaction_names_its_model_as_the_agents_own_calls_do_else_as_the_turn_counted_it():
+    """The turn's tally keys a model by the name it was called as; the agent's steps name it as the API answered."""
+    counted = {**COUNTED_TURN, "model": "gateway/" + MODEL}
+    after_a_call = run(_compacting_feed({name: value for name, value in counted.items() if name != "type"}))
+    summary = _summary("u3", "The summary.")
+    alone = run(Feed().out(_boundary("b1")).out(summary).transcript(summary, "2026-11-22T02:01:01.000Z")
+                .aux("turn", counted))
+    named = [next(step for step in kit.document["steps"] if "compaction" in profile_of(step))["model_name"]
+             for kit in (after_a_call, alone)]
+    assert named == [MODEL, "gateway/" + MODEL]
+
+
 def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts():
     """A call whose transcript record never came has no counts, which the turn's remainder would hold too."""
     uncounted, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u4", text("done"))
