@@ -522,6 +522,32 @@ async def test_a_reply_rewritten_into_a_done_no_longer_counts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_built_in_user_sim_is_sent_its_saved_tool_settings_again_and_nothing_else(monkeypatch):
+    # deploy_user_sim_agent set her model and format; her own tools and peer tools, stamped on her card by deploy, go
+    # again, so a user sim that restarted since doesn't get its tools back.
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("glad to help")], USER: [said("done", "perfect")]})
+    ctx = await _context(monkeypatch)
+    hannah = next(a for a in ctx.deployed_agents if a.agent_name == "hannah")
+    card = json.loads(json.dumps(_CONFIG_CARD))
+    card["capabilities"]["extensions"][0]["params"]["methods"]["set"]["request"]["supported"] += [
+        "builtin_tools", "peer_tools"]
+    hannah.a2a_card = {**card, "builtin_tools": {"disable": "*"}, "peer_tools": False}
+    posted = []
+
+    async def post_agent_config(url, payload, timeout_seconds=60, *, headers=None):
+        posted.append((url, payload))
+
+    # _context's deploy step left its own recorder in place of post_agent_config; record this run's posts instead.
+    monkeypatch.setattr("agent_env.a2a_agent.protocol.post_agent_config", post_agent_config)
+
+    await _step().execute(ctx)
+
+    assert [p for url, p in posted if url == f"{USER}/ext/agent-config"] == [
+        {"builtin_tools": {"disable": "*"}, "peer_tools": False}]
+    assert all(not url.startswith(USER) or set(p) == {"builtin_tools", "peer_tools"} for url, p in posted)
+
+
+@pytest.mark.asyncio
 async def test_a_hook_note_is_in_the_users_read_after_the_reply_and_never_reaches_the_agent(monkeypatch):
     from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
     hook = _hook("notes", """

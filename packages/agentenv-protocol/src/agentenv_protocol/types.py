@@ -185,6 +185,8 @@ class EnvironmentTool(BaseModel):
     name: str
     description: Optional[str] = None
     inputSchema: Optional[dict] = None
+    # {"call", "report_as"}: the tools of the same server that the calls its replies declare make and are reported as.
+    defers: Optional[dict] = None
 
 
 class EnvironmentCapabilities(BaseModel):

@@ -228,6 +228,18 @@ async def _sub_agent_grows(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskRes
     return TaskResult.text(f"{tag}: two files")
 
 
+@_scenario("running")
+async def _sub_agent_runs(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
+    """Spawns a sub-agent that writes its steps while its call waits for a result, holding after each."""
+    _append(log, [*_spawning(tag), {"type": "say", "step": f"{tag}-s2", "text": "sub: still listing", "agent": f"{tag}-sub"}])
+    await hold.wait()
+    _append(log, [{"type": "say", "step": f"{tag}-s3", "text": "sub: two files", "agent": f"{tag}-sub"}])
+    await hold.wait()
+    _append(log, [{"type": "result", "id": f"{tag}-task", "out": "two files"},
+                  {"type": "say", "step": f"{tag}-2", "text": f"{tag}: the explorer found two files"}])
+    return TaskResult.text(f"{tag}: the explorer found two files")
+
+
 @_scenario("orphan")
 async def _spawn_never_answered(log: TrajectoryLog, tag: str, hold: _Hold) -> TaskResult:
     """Spawns a sub-agent and holds before its call's result, for a test to cancel it."""
@@ -608,6 +620,88 @@ def test_a_reader_following_the_cursor_gets_the_steps_a_sub_agent_writes_after_i
     assert [len(steps) for steps in early][-1] == 1
     assert [len(sub["steps"]) for sub in pages[-1]["subagents"]] == [3]
     assert _rebuild(pages) == document
+
+
+def _held(page: dict[str, Any], held: dict[str, Any]) -> dict[str, Any]:
+    """The read that follows ``page`` for a reader holding ``held`` (its header and digest, and each sub-agent's), which
+    takes in what ``page`` served."""
+    if "header" in page:
+        held["header"] = page["header"]
+    held["digest"] = page.get("header_digest", "")
+    for sub in page["subagents"]:
+        mine = held["subs"].setdefault(sub["trajectory_id"], {"steps": []})
+        mine.update({key: value for key, value in sub.items() if key != "steps"})
+        mine["steps"] = mine["steps"] + sub["steps"]
+    held["digests"] = page.get("subagent_header_digests", {})
+    held["steps"] = held["steps"] + page["events"]
+    return {"after": page["next"], "header_digest": held["digest"], "subagent_cursors": {
+        sub_id: {"after": sub["steps"][-1]["step_id"] if sub["steps"] else 0, "header_digest": held["digests"][sub_id]}
+        for sub_id, sub in held["subs"].items()}}
+
+
+def test_a_cursor_read_serves_a_running_sub_agents_new_steps_while_the_call_that_started_it_waits() -> None:
+    hold = _Hold()
+    held: dict[str, Any] = {"subs": {}, "steps": []}
+    with _serving(_toy(hold)) as client:
+        task_id = _send(client, "running t1", "m-1")
+        hold.reached()
+        first = _atif(client, task_id=task_id, after=0, header_digest="", subagent_cursors={})
+        plain = _atif(client, task_id=task_id, after=0)
+        follow = _held(first, held)
+        hold.resume.set()
+        hold.reached(2)
+        second = _atif(client, task_id=task_id, **follow)
+        plain_second = _atif(client, task_id=task_id, after=plain["next"])
+        again = _atif(client, task_id=task_id, **_held(second, held))
+        hold.resume.set()
+        _ended(client, task_id)
+    [sub] = first["subagents"]
+    assert [step["step_id"] for step in sub["steps"]] == [1] and sub["agent"]["name"] == "explorer"
+    assert first["subagent_header_digests"] == {"t1-sub": first["subagent_header_digests"]["t1-sub"]}
+    # The call that started it still waits: today's read serves nothing of it, a cursor read its new step alone.
+    assert second["events"] == [] and plain_second["events"] == [] and plain_second["subagents"] == []
+    assert [(s["trajectory_id"], [step["step_id"] for step in s["steps"]], "agent" in s) for s in second["subagents"]] \
+        == [("t1-sub", [2], False)]
+    assert again["subagents"] == [] and "header" not in again
+
+
+def test_a_read_naming_its_headers_digest_gets_the_header_only_when_it_changed() -> None:
+    hold = _Hold()
+    with _serving(_toy(hold)) as client:
+        task_id = _send(client, "grow t1", "m-1")
+        hold.reached()
+        first = _atif(client, task_id=task_id, after=0, header_digest="")
+        same = _atif(client, task_id=task_id, after=first["next"], header_digest=first["header_digest"])
+        plain = _atif(client, task_id=task_id, after=0)
+        hold.resume.set()
+        _ended(client, task_id)
+        ended = _atif(client, task_id=task_id, after=same["next"], header_digest=first["header_digest"])
+    assert first["header"] == plain["header"] and first["header_digest"].startswith("sha256:")
+    assert "header" not in same and same["header_digest"] == first["header_digest"]
+    # The task's end gives the header its final metrics, so it's served again under another digest.
+    assert ended["header"]["final_metrics"] and ended["header_digest"] != first["header_digest"]
+    assert "header_digest" not in plain and "subagent_header_digests" not in plain
+
+
+def test_a_reader_following_with_cursors_rebuilds_the_tasks_document() -> None:
+    hold = _Hold()
+    held: dict[str, Any] = {"subs": {}, "steps": []}
+    with _serving(_toy(hold)) as client:
+        task_id = _send(client, "running t1", "m-1")
+        follow = {"after": 0, "header_digest": "", "subagent_cursors": {}}
+        for _ in range(2):
+            hold.reached(_ + 1)
+            follow = _held(_atif(client, task_id=task_id, **follow), held)
+            hold.resume.set()
+        _ended(client, task_id)
+        while True:
+            page = _atif(client, task_id=task_id, **follow)
+            follow = _held(page, held)
+            if not page["has_more"] and page["state"] == "completed":
+                break
+        document = _atif(client, task_id=task_id)["trajectory"]
+    rebuilt = {**held["header"], "steps": held["steps"], "subagent_trajectories": list(held["subs"].values())}
+    assert rebuilt == document
 
 
 def test_a_spawn_its_task_ended_without_answering_keeps_its_sub_agent_referenced() -> None:
