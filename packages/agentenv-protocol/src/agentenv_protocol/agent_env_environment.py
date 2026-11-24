@@ -1942,7 +1942,8 @@ def _collecting() -> Iterator[list]:
 
 
 def _with_declared(result: Any, declared: list) -> Any:
-    """A tool's reply with the calls it declared under ``DEFERRED_CALLS_META_KEY``, beside any ``_meta`` it has. mcp's
+    """A tool's reply with the calls it declared under ``DEFERRED_CALLS_META_KEY``, after any it declared itself and
+    beside any other ``_meta`` it has. mcp's
     FastMCP replies with content and structured content, content alone, or a ``CallToolResult``; fastmcp with its
     ``ToolResult``."""
     if not declared:
@@ -1951,4 +1952,7 @@ def _with_declared(result: Any, declared: list) -> Any:
         from mcp.types import CallToolResult
         content, structured = result if isinstance(result, tuple) else (result, None)
         result = CallToolResult(content=list(content), structuredContent=structured)
-    return result.model_copy(update={"meta": {**(result.meta or {}), DEFERRED_CALLS_META_KEY: declared}})
+    meta = result.meta or {}
+    own = meta.get(DEFERRED_CALLS_META_KEY)
+    calls = [*own, *declared] if isinstance(own, list) else declared
+    return result.model_copy(update={"meta": {**meta, DEFERRED_CALLS_META_KEY: calls}})

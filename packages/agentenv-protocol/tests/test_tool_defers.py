@@ -144,6 +144,24 @@ async def test_a_call_tool_result_keeps_its_meta_and_gains_the_declaration(backe
     assert env.seen == [({"event_id": "e2"}, structured)]
 
 
+class _SelfDeclared(_Reminders):
+    @tool(defers=_REMINDER)
+    async def schedule_result(self, event_id: str) -> CallToolResult:
+        own = {"key": "own-1", "at": AT, "call": {"tool": "deliver_reminder", "arguments": {"reminder_id": "own-1"}},
+               "report_as": {"tool": "send_notification", "arguments": {"event_id": event_id}}}
+        return CallToolResult(content=[TextContent(type="text", text="scheduled")],
+                              structuredContent={"ok": True, "reminder_id": f"r-{event_id}", "remind_at": AT},
+                              _meta={DEFERRED_CALLS_META_KEY: [own], "agentenv.io/group": "reminders"})
+
+
+@_BACKENDS
+@pytest.mark.asyncio
+async def test_calls_a_call_tool_result_declares_itself_are_kept_before_the_decorators(backend):
+    _, _, meta = await _called(_SelfDeclared(), backend, "schedule_result", {"event_id": "e3"})
+    assert [entry["key"] for entry in meta[DEFERRED_CALLS_META_KEY]] == ["own-1", "r-e3"]
+    assert meta["agentenv.io/group"] == "reminders"
+
+
 @pytest.mark.parametrize("at, expected", [
     (int(_MOMENT.timestamp()), AT),
     (_MOMENT.timestamp() + 0.5, "2026-07-06T19:03:00.500000Z"),
