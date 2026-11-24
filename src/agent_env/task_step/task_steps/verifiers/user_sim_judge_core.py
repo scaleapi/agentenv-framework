@@ -80,6 +80,15 @@ class Check:
 
 # Every rule is written against the user sim's own instructions, which the judge reads whole: it is never graded for a
 # reaction they don't ask for. These hold in more than one check.
+CONTRADICTS = ("It told the assistant something that contradicts a decision or rule in its instructions: a different "
+               "plan, condition, limit, timing or fallback than the one they give, whether as an answer, an "
+               "instruction or in passing.")
+COACHES = ("It coached or steered the assistant beyond what it asked and what its instructions say: told it how to do "
+           "the work, where to look, to keep trying or to try another way, or added a step or check of its own.")
+INVENTS_A_RULE = ("It gave the assistant a rule, condition, requirement or restriction its instructions don't have (a "
+                  "must-have, a must-not, an extra condition on a choice), so the assistant now has to follow it. "
+                  "Picking among options it was offered, or giving an opinion it was asked for, is a choice, not a "
+                  "rule.")
 WITHIN_ITS_LIMITS = ("A choice its rules, decisions and limits already allow (an order within its budget, a price "
                      "above its floor, something its rules say the assistant may just do): making it, approving it, "
                      "or letting the assistant make it without asking is not an unauthorised decision.")
@@ -109,6 +118,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "mistake its instructions say this person wouldn't notice or wouldn't mention.",
             "Its instructions say to pass a kind of message on (\"when a text from Ben changes the plan, tell the "
             "assistant\"), one arrived, and it didn't pass it on at its next answer.",
+            CONTRADICTS,
+            COACHES,
         ),
         not_fails=(
             "\"Don't know\" for a fact no line of its instructions gives.",
@@ -120,6 +131,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "request done and its WHEN YOU'RE DONE conditions met.",
             "Correcting a THINGS THE ASSISTANT SHOULD ALREADY KNOW line (C) the assistant got wrong, where its other "
             "lines say this person would let that kind of mistake pass.",
+            "Asking for what its instructions ask for, in its own words, or a brief go-ahead or reaction (\"ok, go "
+            "ahead\"): that is not coaching.",
         ),
         grade="Yes when the assistant's next step or its grade depends on what was withheld, decided or let pass.",
     ),
@@ -237,6 +250,7 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "against its earlier answers, the lines shown as sent by it, and the opening request.",
             "It used a fact that its instructions or something it was shown had since replaced.",
             "It contradicted something it said earlier in the run.",
+            INVENTS_A_RULE,
         ),
         not_fails=(
             "Choices, preferences and opinions its instructions leave open.",
