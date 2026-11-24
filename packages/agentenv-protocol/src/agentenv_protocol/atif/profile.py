@@ -28,6 +28,13 @@ COST_SOURCES = ("harness", "provider")
 SUMMARY_WRITERS = ("assistant", "harness")
 #: What set a compaction off: something asked for it (a command), or the harness on its own. Added in 1.1.
 COMPACTION_TRIGGERS = ("manual", "auto")
+
+
+def is_token_count(value: Any) -> bool:
+    """Whether ``value`` counts tokens, as a compaction's ``tokens_before`` and ``tokens_after`` do: a whole number,
+    not a bool, not negative."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
 VOCABULARIES = {
     "StepProfile.state": TASK_STATES,
     "ObservationResultProfile.status": RESULT_STATUSES,

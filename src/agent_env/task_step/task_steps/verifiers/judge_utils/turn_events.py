@@ -14,7 +14,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from agentenv_protocol.atif import FORMAT as ATIF, profile_of
+from agentenv_protocol.atif import (
+    COMPACTION_TRIGGERS,
+    FORMAT as ATIF,
+    SUMMARY_WRITERS,
+    is_token_count,
+    profile_of,
+)
 
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
     SubAgents,
@@ -168,8 +174,6 @@ _AGENT = "gen_ai.agent.name"
 _MAIN_AGENT = "gen_ai.main_agent.name"
 _OUTPUT_MESSAGES = "gen_ai.output.messages"
 _COMPACTION = "harness.compaction"
-# Who wrote a compaction's summary (``harness.compaction.written_by``): the assistant's own model, or the harness.
-SUMMARY_WRITERS = ("assistant", "harness")
 _MESSAGE = "harness.message"
 _SAVE = "pre_compaction_save"
 _AFTER = "after_compaction"
@@ -228,7 +232,7 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             timed.append((start, i, {**call, **tag}))
             continue
         if span.get("name") == _COMPACTION:
-            facts = _compaction_facts(attrs)
+            facts = _span_compaction_facts(attrs)
             timed.append((str(span.get("end_time") or start), i,
                           {"type": "note", "text": _compaction_note(attrs, facts), "compaction": facts}))
             continue
@@ -312,32 +316,30 @@ def _parts(attrs: dict, kind: str) -> list[str]:
             for p in m.get("parts") or [] if isinstance(p, dict) and p.get("type") == kind]
 
 
-def facts_of_compaction(written_by: Any, trigger: Any = None, tokens_before: Any = None,
-                        tokens_after: Any = None) -> dict:
-    """A compaction's facts as every reader names them: who wrote its summary (one of ``SUMMARY_WRITERS``), what set it
-    off (``manual`` or ``auto``), and the tokens of the history before and after it, each when known. Raises
-    ``TrajectoryFormatError`` when who wrote the summary isn't known."""
+def compaction_facts(written_by: Any, trigger: Any = None, tokens_before: Any = None, tokens_after: Any = None, *,
+                     said: str = "its compaction says written_by") -> dict:
+    """A compaction's facts as every reader names them: who wrote its summary (one of atif/1's ``SUMMARY_WRITERS``),
+    what set it off (one of its ``COMPACTION_TRIGGERS``), and the tokens of the history before and after it, each when
+    known. Raises ``TrajectoryFormatError``, beginning with ``said``, when who wrote the summary isn't known."""
     if written_by not in SUMMARY_WRITERS:
-        raise TrajectoryFormatError(f"its compaction says written_by={written_by!r}, not one of "
-                                    f"{list(SUMMARY_WRITERS)}, so who wrote the compaction summary isn't known")
+        raise TrajectoryFormatError(f"{said}={written_by!r}, not one of {list(SUMMARY_WRITERS)}, so who wrote the "
+                                    "compaction summary isn't known")
     counts = {name: value for name, value in (("tokens_before", tokens_before), ("tokens_after", tokens_after))
-              if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
-    return {"written_by": written_by, **({"trigger": trigger} if trigger in _TRIGGER_WORDS else {}), **counts}
+              if is_token_count(value)}
+    return {"written_by": written_by, **({"trigger": trigger} if trigger in COMPACTION_TRIGGERS else {}), **counts}
 
 
-def _compaction_facts(attrs: dict) -> dict:
+def _span_compaction_facts(attrs: dict) -> dict:
     """What a ``harness.compaction`` span recorded: who wrote the summary (``written_by``: "assistant", its own model,
     or "harness"), the wakes it summarized and kept (the harness's wake numbers, from the first kept one), how late
     (real seconds) the wake it came before started (``waited_s``, the span's ``next_wake_waited_s``), and a failed save
     turn's or compaction's error. Raises ``TrajectoryFormatError`` for a span that doesn't say who wrote the summary."""
-    written_by = attrs.get(f"{_COMPACTION}.written_by")
-    if written_by not in SUMMARY_WRITERS:
-        raise TrajectoryFormatError(f"its {_COMPACTION} span has {_COMPACTION}.written_by={written_by!r}, not one of "
-                                    f"{list(SUMMARY_WRITERS)}, so who wrote the compaction summary isn't known")
+    facts = compaction_facts(attrs.get(f"{_COMPACTION}.written_by"),
+                             said=f"its {_COMPACTION} span has {_COMPACTION}.written_by")
     named = {"wakes_summarized": "wakes_summarized", "wakes_kept": "wakes_kept", "first_kept_wake": "first_kept_wake",
              "waited_s": "next_wake_waited_s", "save_error": "save_error", "error": "error"}
-    return {"written_by": written_by, **{key: attrs[f"{_COMPACTION}.{attr}"] for key, attr in named.items()
-                                         if attrs.get(f"{_COMPACTION}.{attr}") is not None}}
+    return {**facts, **{key: attrs[f"{_COMPACTION}.{attr}"] for key, attr in named.items()
+                        if attrs.get(f"{_COMPACTION}.{attr}") is not None}}
 
 
 def _wakes(first: int, last: int) -> str:
@@ -365,7 +367,7 @@ def compaction_words(facts: dict) -> list[str]:
         words.append(f"the save turn before it failed: {facts['save_error']}")
     if facts.get("waited_s") is not None:
         words.append(f"this wake started {facts['waited_s']} s late (real time) waiting for it")
-    if facts.get("trigger") in _TRIGGER_WORDS:
+    if facts.get("trigger") in COMPACTION_TRIGGERS:
         words.append(_TRIGGER_WORDS[facts["trigger"]])
     before, after = facts.get("tokens_before"), facts.get("tokens_after")
     if before is not None and after is not None:
@@ -457,8 +459,8 @@ def _claude_code_events(items: list[dict]) -> list[dict]:
         tag = {"subagent": parent} if parent else {}
         if kind == "system" and item.get("subtype") == "compact_boundary" and not parent:
             metadata = item.get("compact_metadata") if isinstance(item.get("compact_metadata"), dict) else {}
-            compaction = facts_of_compaction("assistant", metadata.get("trigger"), metadata.get("pre_tokens"),
-                                             metadata.get("post_tokens"))
+            compaction = compaction_facts("assistant", metadata.get("trigger"), metadata.get("pre_tokens"),
+                                          metadata.get("post_tokens"))
             continue
         if kind == "user" and compaction is not None and not parent:
             content = message.get("content")
@@ -515,8 +517,8 @@ def atif_turn_events(view: Mapping[str, Any]) -> TurnEvents:
         for step in steps_of(trajectory):
             if step.get("source") == "agent" and is_compaction(step):
                 own = profile_of(step).get("compaction") or {}
-                facts = facts_of_compaction(own.get("written_by"), own.get("trigger"), own.get("tokens_before"),
-                                            own.get("tokens_after"))
+                facts = compaction_facts(own.get("written_by"), own.get("trigger"), own.get("tokens_before"),
+                                         own.get("tokens_after"))
                 events.append({"type": "note", "text": compaction_note(facts, content_text(step.get("message"))),
                                "compaction": facts, **tag})
                 continue

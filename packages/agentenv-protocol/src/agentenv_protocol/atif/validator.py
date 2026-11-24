@@ -25,6 +25,7 @@ from .profile import (
     MediaInfo,
     ReasoningBlock,
     StepError,
+    is_token_count,
     profile_of,
 )
 from .reader import MEDIA_PATH, _resolver, _trajectories, is_prefix, media_refs, tasks
@@ -300,7 +301,7 @@ def _profiles(objects: list[tuple[str, str, Mapping[str, Any]]], found: _Finding
                     _vocabulary(f"Compaction.{name}", f"{at}.compaction.{name}", compaction[name], found)
             for name in ("tokens_before", "tokens_after"):
                 count = compaction.get(name)
-                if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 0):
+                if count is not None and not is_token_count(count):
                     found.add("compaction", f"{at}.compaction.{name}",
                               f"{name} counts tokens, a whole number that isn't negative, not {count!r}")
         if kind == "Trajectory" and where == "" and not _known_version(profile.get("version")):

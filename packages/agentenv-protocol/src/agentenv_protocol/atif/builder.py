@@ -32,6 +32,7 @@ from .profile import (
     TASK_STATES,
     VISIBILITIES,
     AtifError,
+    is_token_count,
 )
 
 #: Media types ATIF has a part type for; any other medium is written as a text note naming its file.
@@ -927,7 +928,7 @@ class AtifTurn:
         if trigger is not None and trigger not in COMPACTION_TRIGGERS:
             raise AtifError(f"trigger {trigger!r} isn't one of {', '.join(COMPACTION_TRIGGERS)}")
         for name, count in (("tokens_before", tokens_before), ("tokens_after", tokens_after)):
-            if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 0):
+            if count is not None and not is_token_count(count):
                 raise AtifError(f"{name} {count!r} isn't a count of tokens")
         target = self._doc.step_for(_key(step), agent)
         target.profile["compaction"] = {key: value for key, value in (
