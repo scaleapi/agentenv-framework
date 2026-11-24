@@ -20,6 +20,7 @@ from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepCo
 
 if TYPE_CHECKING:
     from agent_env.a2a_agent.protocol import TerminalResponse
+    from agent_env.config.model_call import ModelReply
 
 STEP_USAGE_KEY = "step_usage"
 _COUNTERS = ("tool_call_count", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
@@ -87,7 +88,8 @@ class UsageEntry(CostFields):
 @dataclass
 class RoleUsage:
     """One role's turns in one step: the model it ran, the host of the endpoint it called, the attempt epoch the step
-    ran under, and each turn's usage, None for a turn that reported none."""
+    ran under, and each turn's usage, None for a turn that reported none. ``call_costs`` are the costs of calls core
+    made itself (``StepUsage.reply``), each costed when it was made; a role with them is costed from them alone."""
 
     role: str
     model: Optional[str] = None
@@ -95,6 +97,7 @@ class RoleUsage:
     attempt: Optional[int] = field(default_factory=ATTEMPT_EPOCH.get)
     turns: list[Optional[Usage]] = field(default_factory=list)
     unparsed: list[dict] = field(default_factory=list)
+    call_costs: list[Cost] = field(default_factory=list)
     # Whose figure a turn's ``cost_usd`` is: an agent's own (the price map wins over it), or an endpoint's bill (it
     # wins over the map).
     reported_by: ReportedBy = ReportedBy.HARNESS
@@ -123,9 +126,14 @@ class RoleUsage:
         partial = (0 < len(counted) < len(self.turns) or bool(unreported)
                    or any(usage.provider_details.get("unreported") for usage in reported))
         figures = [usage.cost_usd if usage is not None else None for usage in self.turns]
-        models = self._by_model(counted, prices) if any(usage.models for usage in counted) else None
-        cost = (_cost_of(_tokens(counted), figures, model=self.model, prices=prices, reported_by=self.reported_by)
-                if models is None else _summed([cost for _, cost in models], _total(reported, "cost_usd")))
+        models = (self._by_model(counted, prices)
+                  if not self.call_costs and any(usage.models for usage in counted) else None)
+        if self.call_costs:
+            cost = _combined(self.call_costs)
+        elif models is None:
+            cost = _cost_of(_tokens(counted), figures, model=self.model, prices=prices, reported_by=self.reported_by)
+        else:
+            cost = _summed([cost for _, cost in models], _total(reported, "cost_usd"))
         entry = UsageEntry(role=self.role, model=self.model, endpoint_host=self.endpoint_host, attempt=self.attempt,
                            turns=len(self.turns), **{name: _total(reported, name) for name in _COUNTERS},
                            input_includes_cache=_agreed(counted), **cost.fields(), partial=partial)
@@ -200,6 +208,26 @@ def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
     return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed)
 
 
+def _combined(costs: list[Cost]) -> Cost:
+    """Calls' costs summed: billed (``reported``) only when every costed call was billed, otherwise ``priced``, an
+    estimate, with the source of the priced calls, the assumptions any made, and the bills kept in ``reported_usd``.
+    Unpriced when none was costed; a call with no cost is left out of the sum, which ``partial`` marks."""
+    costed = [c for c in costs if c.usd is not None]
+    if not costed:
+        return Cost(None, CostStatus.UNPRICED, None, None, unpriced=costs[-1].unpriced)
+    status = CostStatus.REPORTED if all(c.status is CostStatus.REPORTED for c in costed) else CostStatus.PRICED
+    sources = {c.source for c in costed if c.status is status}
+    bills = [c.reported_usd for c in costs if c.reported_usd is not None]
+    assumed = tuple(dict.fromkeys(a for c in costed for a in c.assumed))
+    priced = [c for c in costed if c.status is CostStatus.PRICED]
+    uncached = [c.uncached_input for c in priced]
+    rates = {repr(c.unit_prices): c.unit_prices for c in priced}
+    return Cost(sum(c.usd for c in costed), status, sources.pop() if len(sources) == 1 else None,
+                sum(bills) if bills else None,
+                uncached_input=sum(uncached) if priced and None not in uncached else None,
+                unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed)
+
+
 def _unreported() -> Usage:
     """A turn or call whose usage never came back."""
     return Usage(provider_details={"unreported": True})
@@ -244,6 +272,26 @@ class StepUsage:
         ``cost_usd`` is, and the role keeps its first call's."""
         self._add_call(role, usage, model, endpoint_host, reported_by)
 
+    def reply(self, role: ModelRole, reply: ModelReply) -> None:
+        """One model call the step made itself as ``role`` through ``model_call`` (a user-sim gate's judge), written
+        at once. Its cost is kept as the call was costed (``_combined`` sums them); one with no cost leaves the entry a
+        lower bound, as ``cut_off`` does."""
+        usage = self._role_for_call(role, reply.model, reply.endpoint_host, ReportedBy.HARNESS)
+        counts = Usage.from_model_response(reply.usage) if reply.usage else Usage()
+        if reply.cost.usd is None:
+            counts = replace(counts, provider_details={**counts.provider_details, "unreported": True})
+        usage.call_costs.append(reply.cost)
+        usage.add(counts)
+        self.entries()
+
+    def _role_for_call(self, role: ModelRole, model: Optional[str], endpoint_host: Optional[str],
+                       reported_by: ReportedBy) -> RoleUsage:
+        """The role a call is counted under, started at its first call."""
+        if role not in self._roles:
+            self._context.record_model_endpoint(role.value, self._step_id, model, endpoint_host)
+            self._roles[role] = RoleUsage(role.value, model, endpoint_host, reported_by=reported_by)
+        return self._roles[role]
+
     def cut_off(self, role: ModelRole) -> None:
         """A turn of ``role`` that was sent but never replied: cut off by a time limit, by a cancel, or by its agent no
         longer answering (``AgentUnreachableError``, a ``TimeoutError``). Its calls are billed but their usage is
@@ -263,10 +311,7 @@ class StepUsage:
 
     def _add_call(self, role: ModelRole, usage: Optional[Usage], model: Optional[str], endpoint_host: Optional[str],
                   reported_by: ReportedBy) -> None:
-        if role not in self._roles:
-            self._context.record_model_endpoint(role.value, self._step_id, model, endpoint_host)
-            self._roles[role] = RoleUsage(role.value, model, endpoint_host, reported_by=reported_by)
-        self._roles[role].add(usage)
+        self._role_for_call(role, model, endpoint_host, reported_by).add(usage)
         self.entries()
 
     def entries(self) -> Optional[list[UsageEntry]]:

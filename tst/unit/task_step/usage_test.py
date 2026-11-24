@@ -5,7 +5,8 @@ from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config.model import ModelRole
-from agent_env.config.model_pricing import ModelPrice, PriceTable, ReportedBy
+from agent_env.config.model_call import ModelReply
+from agent_env.config.model_pricing import Assumed, Cost, CostStatus, ModelPrice, PriceTable, ReportedBy, Unpriced
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 from agent_env.task_step import usage as usage_module
 from agent_env.task_step.usage import RoleUsage, StepUsage
@@ -63,6 +64,55 @@ def test_a_step_records_each_started_role_as_each_turn_ends_and_skips_one_never_
     [entry] = context.metadata["step_usage"]["solve"]
     assert (entry["role"], entry["model"], entry["endpoint_host"], entry["input_tokens"]) == ("solver", "m", "gw:443", 3)
     assert context.metadata["model_endpoints"] == {"solver": {"solve": {"model": "m", "endpoint_host": "gw:443"}}}
+
+
+def test_a_judge_call_the_step_made_itself_is_its_own_entry_costed_as_its_endpoint_billed_it():
+    context = TaskStepContext()
+    usage = StepUsage(context, "talk")
+    billed = Cost(0.002, CostStatus.REPORTED, "provider", 0.002)
+
+    for _ in range(2):
+        usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", "gw:443", {"prompt_tokens": 50, "completion_tokens": 5},
+                                               billed))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["role"], entry["model"], entry["endpoint_host"], entry["turns"]) == ("judge", "judge-m", "gw:443", 2)
+    assert (entry["input_tokens"], entry["output_tokens"]) == (100, 10)
+    assert (entry["cost_usd"], entry["cost_status"], entry["cost_source"]) == (pytest.approx(0.004), "reported",
+                                                                              "provider")
+
+def test_judge_calls_billed_and_priced_sum_as_an_estimate_that_keeps_the_bills_and_assumptions_apart():
+    context = TaskStepContext()
+    usage = StepUsage(context, "talk")
+    tokens = {"prompt_tokens": 50, "completion_tokens": 5}
+    rates = {"input": 1.0, "output": 2.0}
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(0.002, CostStatus.REPORTED, "provider",
+                                                                               0.002)))
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(
+        0.001, CostStatus.PRICED, "litellm@1", None, uncached_input=50, unit_prices=rates,
+        assumed=(Assumed.CACHE_READ_RATE,))))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["turns"], entry["cost_usd"], entry["partial"]) == (2, pytest.approx(0.003), False)
+    assert (entry["cost_status"], entry["cost_source"], entry["reported_cost_usd"]) == ("priced", "litellm@1", 0.002)
+    assert (entry["cost_assumed"], entry["uncached_input_tokens"], entry["unit_prices"]) == (["cache_read_rate"], 50,
+                                                                                          rates)
+
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, tokens, Cost(None, CostStatus.UNPRICED, None, None)))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["turns"], entry["cost_usd"], entry["partial"]) == (3, pytest.approx(0.003), True)
+
+
+def test_judge_calls_none_of_which_was_costed_leave_the_entry_unpriced():
+    context = TaskStepContext()
+    usage = StepUsage(context, "talk")
+    usage.reply(ModelRole.JUDGE, ModelReply("{}", "judge-m", None, None, Cost(None, CostStatus.UNPRICED, None, None,
+                                                                             unpriced=Unpriced.NO_PRICE)))
+
+    [entry] = context.metadata["step_usage"]["talk"]
+    assert (entry["cost_usd"], entry["cost_status"], entry["unpriced_reason"], entry["partial"]) == (
+        None, "unpriced", "no_price", True)
 
 
 def test_a_turn_cut_off_before_its_reply_is_a_turn_of_unknown_usage():
