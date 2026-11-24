@@ -276,11 +276,25 @@ class TrajectoryState(str, Enum):
 MAX_TRAJECTORY_READ_EVENTS = 1_000
 
 
+class SubagentCursor(ExtensionRequest):
+    """How far a live atif/1 reader holds one sub-agent: its last step's ``step_id``, and its header's digest."""
+
+    after: StrictInt = Field(ge=0)
+    header_digest: str = ""
+
+
 class TaskEventsTrajectoryRequest(ExtensionRequest):
+    """A cursor read of a task's trajectory from event ``after``. An atif/1 read may also name the digest of the header
+    the reader holds (``header_digest``, "" for none), which the answer then leaves out while it's unchanged, and how
+    far it holds each sub-agent (``subagent_cursors``, {} at first), which has the answer serve each of the task's
+    sub-agents by its new closed steps alone, whether or not the step that started it has closed."""
+
     task_id: str
     after: StrictInt = Field(ge=0)
     limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
     format: TrajectoryFormat | None = None
+    header_digest: str | None = None
+    subagent_cursors: dict[str, SubagentCursor] | None = None
 
 
 class ContextEventsTrajectoryRequest(ExtensionRequest):
@@ -309,7 +323,13 @@ class AtifEventsResponse(ExtensionResponse):
     ``subagents`` the embedded sub-agent trajectories of the
     tasks these steps belong to, as far as each is served, so the page stands alone. A sub-agent can gain steps while
     its task runs; a reader keeps each sub-agent's latest copy, and the page that serves a task's last step carries
-    them whole. The last page's header with every page's steps and the latest sub-agents is the document."""
+    them whole. The last page's header with every page's steps and the latest sub-agents is the document.
+
+    A read that named ``header_digest`` gets the header's digest, and the header only when it differs from the one the
+    reader holds. A read that named ``subagent_cursors`` gets each of its task's sub-agents with only the closed steps
+    past its cursor, and its header (the trajectory without its steps) only when that changed; ``subagent_header_digests``
+    then names each one's header digest. The reader's latest header, with every page's steps and each sub-agent's
+    latest header and steps, is the document."""
 
     context_id: str
     task_id: str
@@ -322,6 +342,8 @@ class AtifEventsResponse(ExtensionResponse):
     events: list[Any]
     next: int
     has_more: bool
+    header_digest: str | None = None
+    subagent_header_digests: dict[str, str] | None = None
 
 
 def _opaque_snapshot_objects(

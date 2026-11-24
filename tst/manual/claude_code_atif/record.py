@@ -9,9 +9,10 @@ It builds the agent's image from the checkout as a release builds it (``infra_bu
 container of it with atif/1 prescribed, through a model endpoint serving Anthropic's Messages API. For each turn it
 writes the native final read, the atif/1 final read (document, aux log and turn context), the atif/1 pages read live
 every second, and the CLI's transcripts after. The scenarios: two coding turns of one conversation, an Agent call, a
-browser's screenshots through Playwright MCP beside the agent, a thinking model, the endpoint refusing every call, and
-a stalled call that the bridge resumes, the last two through ``fault_proxy.py`` in a container of their own. They
-cost about a dollar. Needs Docker; ``mcr.microsoft.com/playwright/mcp`` is pulled for the browser scenario.
+browser's screenshots through Playwright MCP beside the agent, a thinking model, a conversation compacted between its
+turns (``/compact``), the endpoint refusing every call, and a stalled call that the bridge resumes, the last two through
+``fault_proxy.py`` in a container of their own. They cost about a dollar. Needs Docker;
+``mcr.microsoft.com/playwright/mcp`` is pulled for the browser scenario.
 
 The key is never written: every text is checked for it, and a transcript holding it is dropped. Then
 ``make_fixtures.py`` writes the fixtures, keeping each request shape's tools once under ``tools/``, and running the
@@ -63,6 +64,10 @@ def scenarios(thinking_model: str) -> dict[str, dict]:
         "retried": {"faults": "stall", "env": {"CLAUDE_API_ERROR_RETRIES": "1", "API_TIMEOUT_MS": "15000"},
                     "prompts": ["Run `echo first` with your Bash tool, then run `echo second` with it, then reply "
                                 "with both outputs on one line."]},
+        "compacted": {"prompts": [
+            "Create notes.txt holding three lines, alpha, beta and gamma, with your Bash tool, then reply with only ok.",
+            "/compact",
+            "Read notes.txt with your tools and reply with only its second line."]},
     }
 
 

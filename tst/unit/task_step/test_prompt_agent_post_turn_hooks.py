@@ -658,3 +658,30 @@ async def test_a_note_after_an_agent_trigger_answered_the_turn_has_no_one_to_rea
     answer = _Answer(ask_user, fired)
     assert await answer.user_triggers() == {"message": text("nudge from a trigger")}
     assert await answer.ask_user(note="the sheet has no total") == {"message": text("nudge from a trigger")}
+
+
+@pytest.mark.asyncio
+async def test_with_a_user_sim_gate_the_note_goes_with_the_first_send_only_and_the_judge_is_shown_it(monkeypatch):
+    from agent_env.task_step.task_steps import user_sim_gate
+    from tst.unit.task_step.test_prompt_agent_user_side import _SWAP
+
+    shown = []
+
+    async def judge(self, candidate, history, call_config, user_note=None, **_):
+        shown.append(user_note)
+        return {"in_role": not candidate.startswith("Done."), "reason": "judged"}
+
+    monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", lambda model, **kw: None)
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim(_SWAP), sim("add a total?")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("notes", NOTES), turns=2,
+                user_sim_gate={"patterns": True, "judge_model": "judge-model"}).execute(ctx)
+
+    to_user = [r[2]["params"]["message"]["parts"] for r in peers.requests(ctx)
+               if r[1] == f"{USER}/a2a" and r[2] and r[2].get("method") == "message/send"]
+    assert [len(parts) for parts in to_user] == [2, 1]        # the reply and the note; then the rewrite request alone
+    assert "the sheet has no total" in to_user[0][1]["text"]
+    assert "the sheet has no total" not in json.dumps(to_user[1])
+    assert shown == ["the sheet has no total (turn 1)"] * 2   # the judge is shown it for the message and its rewrite

@@ -83,6 +83,7 @@ from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
 from .clock_followers import ClockFollowers, parse_wait
 from .console_session import ConsoleSession, LinkRedaction, without_session_cookie
+from .deferred_calls import DeferredCalls
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
     ROLE_HEADER_BYTES,
@@ -261,6 +262,7 @@ class Gateway:
         self._mcp.settings.port = port
         self._mcp.settings.transport_security.enable_dns_rebinding_protection = False
         self._trigger_engine = TriggerEngine(self)
+        self._deferred = DeferredCalls(self)
         if self.website_urls:
             @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
             async def list_website_urls() -> list[str]:
@@ -383,7 +385,7 @@ class Gateway:
 
         @self._mcp.custom_route("/triggers/state", methods=["GET"])
         async def triggers_state(request: Request) -> Response:
-            return self._json_response(self._trigger_engine.state(), 200)
+            return self._json_response(self._deferred.in_state(self._trigger_engine.state()), 200)
 
         @self._mcp.custom_route("/clock/set-time", methods=["PUT"])
         async def clock_set_time(request: Request) -> Response:
@@ -721,7 +723,8 @@ class Gateway:
 
     def _process_lifespan(self, mcp_lifespan):
         """Once per process (uvicorn's lifespan), outer to the MCP session manager's: at shutdown the MCP sessions end
-        first, then the driver stops and the scheduled trigger actions are cancelled, then the child sessions close."""
+        first, then the driver stops, the deferred calls and then the scheduled trigger actions are cancelled, and the
+        child sessions close."""
         @asynccontextmanager
         async def lifespan(app):
             try:
@@ -738,6 +741,7 @@ class Gateway:
             finally:
                 self._sessions.closing = True
                 await self._trigger_engine.stop_driver()
+                await self._deferred.cancel()
                 await self._trigger_engine.cancel_scheduled()
                 await self._close_child_sessions()
 
@@ -805,8 +809,9 @@ class Gateway:
     def _fire_triggers(self, role: str, name: str, arguments: dict | None,
                        result: Any) -> tuple[list[asyncio.Task], float | None]:
         """Feed a completed external tool call to the trigger engine (fail-open). Hooked at every
-        external boundary (MCP filter + both `/step` handlers); the engine's `_internal_call` reads
-        bypass these, so internal reads never re-trigger (no recursion). Only watched roles fire."""
+        external boundary (MCP filter + both `/step` handlers) and for each deferred call an external call declared,
+        once made, as the call it stands for; the engine's `_internal_call` reads, and the calls they declare, bypass
+        these, so internal reads never re-trigger (no recursion). Only watched roles fire."""
         try:
             return self._trigger_engine.on_tool_call(role, name, arguments or {}, result)
         except Exception:
@@ -1230,13 +1235,18 @@ class Gateway:
         await self._sessions.close()
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
-                               caller: Caller | None = None) -> CallToolResult:
-        """Every child tools/call (MCP proxy, /step, trigger engine), with the caller's `_meta` stamp (none for an
-        unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
-        reconnect; the registered proxies look their child up by URL."""
+                               caller: Caller | None = None, report: bool) -> CallToolResult:
+        """Every child tools/call (MCP proxy, /step, trigger engine, deferred calls), with the caller's `_meta` stamp
+        (none for an unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone
+        on a reconnect; the registered proxies look their child up by URL. The deferred calls a result declares are taken
+        off it here, before anyone sees it, and scheduled as the caller's role, reported to the triggers once made unless
+        ``report`` is False (the trigger engine's own calls). It has no default: a trigger action's call that left it
+        out would have the calls it defers provoke triggers again."""
         meta = caller.meta() if caller is not None else None
-        self._drive(caller.role if caller is not None else DEFAULT_ROLE, tool_name)
-        return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
+        role = caller.role if caller is not None else DEFAULT_ROLE
+        self._drive(role, tool_name)
+        result = await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
+        return self._deferred.take(result, server_url, role, report=report)
 
     async def _ensure_tools_discovered(self) -> None:
         """Idempotent discovery over the process's child sessions (startup, MCP session start, /step, /state, triggers)."""
@@ -1423,7 +1433,8 @@ class Gateway:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
                 try:
-                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role),
+                                                         report=True)
                 except Exception as e:
                     await self._log_failed_call(tool_call_event_id, changelog_before, e, **source)
                     raise
@@ -1648,7 +1659,7 @@ class Gateway:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
                 try:
-                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller, report=True)
                 except Exception as e:
                     await self._log_failed_call(tool_call_event_id, changelog_before, e)
                     raise

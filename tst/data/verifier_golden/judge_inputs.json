@@ -2544,5 +2544,38 @@
     ]
    }
   ]
+ },
+ "always_on_atif_staged": {
+  "prompt": {
+   "sha256": "01b234920c6523077035db1f203b512a546e605e4b0b52f8e842c63d32d761fe",
+   "chars": 11549
+  },
+  "files": {
+   "/tmp/always_on_run/<run>/events.jsonl": {
+    "sha256": "be8a4ac97567a6f7b1d58d3964bbd402b43fd0c45ba0da8eb9f92756ff4c83e9",
+    "chars": 26443
+   },
+   "/tmp/always_on_run/<run>/index.md": {
+    "sha256": "e298b71fca2c39c8bb0a2b6664e3797ee47059d822001ea8c025fc3e5347195e",
+    "chars": 4947
+   },
+   "/tmp/always_on_run/<run>/triggers.jsonl": "",
+   "/tmp/always_on_run/<run>/wakes/wake_001.jsonl": {
+    "sha256": "4e945af581d31bd58c2ed2dd0933e2586f0ff334c3424de3aa8a061e27ed0f16",
+    "chars": 8124
+   },
+   "/tmp/always_on_run/<run>/wakes/wake_002.jsonl": {
+    "sha256": "a3ebf15e5662533572cfe8cd26a2c1b4c6bf8da844cafc3613c4a3b33e0c013d",
+    "chars": 8078
+   },
+   "/tmp/always_on_run/<run>/wakes/wake_003.jsonl": {
+    "sha256": "25f3022c96a010b21d2e50f9ce15341e5fc0f4fb88a5e10ec8f42a33e8e76141",
+    "chars": 4890
+   },
+   "/tmp/always_on_run/<run>/wakes/wake_004.jsonl": {
+    "sha256": "19afb8bc30fb6b487712fa44601a0471571e4eb0b48f1bfe4ac79a439ebf0f84",
+    "chars": 4831
+   }
+  }
  }
 }

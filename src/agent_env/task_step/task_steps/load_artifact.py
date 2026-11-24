@@ -10,7 +10,7 @@ import posixpath
 import shlex
 import uuid
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
 from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
@@ -26,6 +26,18 @@ from agent_env.store.base import NotFoundError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.deploy_agent import bound_deployment
 from agent_env.utils.paths import validate_relative_filename
+
+#: What each load records in ``context.metadata``, one entry per load naming its target (``agent_name``, ``env_id``, ...).
+LOADED_FILE_UNIVERSES = "loaded_file_artifact_universes"
+LOADED_ENVIRONMENT_ARTIFACTS = "loaded_environment_artifacts"
+LOADED_URLS = "loaded_urls"
+
+
+def loads_into(context: TaskStepContext, agent_name: str) -> list[dict[str, Any]]:
+    """Each load the run recorded into ``agent_name``'s sandbox, as recorded, with the key it's recorded under as
+    ``record``."""
+    return [{"record": key, **entry} for key in (LOADED_FILE_UNIVERSES, LOADED_ENVIRONMENT_ARTIFACTS, LOADED_URLS)
+            for entry in context.metadata.get(key) or [] if entry.get("agent_name") == agent_name]
 
 logger = logging.getLogger(__name__)
 
@@ -487,7 +499,7 @@ class LoadArtifactTaskStep(TaskStep):
                         files = await _load_universe_onto_vm(target_sandbox, artifact, destination)
                     else:
                         files = await _load_universe_into_sandbox_container(target_sandbox, artifact, destination)
-                    context.metadata.setdefault("loaded_file_artifact_universes", []).append({
+                    context.metadata.setdefault(LOADED_FILE_UNIVERSES, []).append({
                         "id": artifact.id,
                         "version": artifact.version,
                         "artifact_type": artifact.type,
@@ -510,7 +522,7 @@ class LoadArtifactTaskStep(TaskStep):
                         env_obj = Env.get(deployed.env_id, deployed.env_version)
                         env = await type(env_obj).from_deployed_env(deployed)
                     result = await env.load_file_artifact_universe(artifact, destination_path=destination_path)
-                    context.metadata.setdefault("loaded_file_artifact_universes", []).append({
+                    context.metadata.setdefault(LOADED_FILE_UNIVERSES, []).append({
                         "id": artifact.id,
                         "version": artifact.version,
                         "artifact_type": artifact.type,
@@ -527,7 +539,7 @@ class LoadArtifactTaskStep(TaskStep):
                     destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
                     files = await A2AAgent.load_file_artifact_universe(
                         deployed_agent, artifact, destination, **_agent_files(agent))
-                    context.metadata.setdefault("loaded_file_artifact_universes", []).append({
+                    context.metadata.setdefault(LOADED_FILE_UNIVERSES, []).append({
                         "id": artifact.id,
                         "version": artifact.version,
                         "artifact_type": artifact.type,
@@ -574,7 +586,7 @@ class LoadArtifactTaskStep(TaskStep):
                     files = await _stage_environment_payload_into_container(
                         sandbox, container, artifact, destination,
                     )
-                    context.metadata.setdefault("loaded_environment_artifacts", []).append({
+                    context.metadata.setdefault(LOADED_ENVIRONMENT_ARTIFACTS, []).append({
                         "id": artifact.id,
                         "version": artifact.version,
                         "service_name": artifact.environment_name,
@@ -671,7 +683,7 @@ class LoadArtifactTaskStep(TaskStep):
                     logger.info(f"Loaded URL into {target_desc}: {url} -> {dest}")
 
             await asyncio.gather(*(_load_one(u, f) for u, f in downloads))
-            context.metadata.setdefault("loaded_urls", []).append({
+            context.metadata.setdefault(LOADED_URLS, []).append({
                 "step_id": self.id,
                 "agent_name": None if self.sandbox_name is not None else self.agent_name,
                 "sandbox_name": self.sandbox_name,

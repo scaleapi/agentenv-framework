@@ -1450,7 +1450,8 @@ class TriggerEngine:
 
     async def _internal_call(self, tool_name: str, arguments: dict, role: str | None = None) -> CallToolResult:
         """A child call stamped as `role` when one is given (a tool action's `as`); the pin otherwise. Gateway-native
-        tools have no child and no identity, so the role is ignored there."""
+        tools have no child and no identity, so the role is ignored there. A call its result defers is made but, as this
+        call itself, reported to no trigger."""
         gw = self._gw
         await gw._ensure_tools_discovered()
         server_url = gw._tool_server_urls.get(tool_name)
@@ -1464,7 +1465,7 @@ class TriggerEngine:
             text = result if isinstance(result, str) else json.dumps(result, default=str)
             return CallToolResult(content=[TextContent(type="text", text=text)], isError=False)
         caller = Caller(role=role) if role is not None else None
-        return await gw._call_child_tool(server_url, tool_name, arguments, caller=caller)
+        return await gw._call_child_tool(server_url, tool_name, arguments, caller=caller, report=False)
 
     async def _fire(self, tid: str, trig: dict, ctx: dict, since: float, ticket: dict) -> None:
         """Run the actions for one provoking call, then drain any calls queued while firing (repeat

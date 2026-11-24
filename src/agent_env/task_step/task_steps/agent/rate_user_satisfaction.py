@@ -59,6 +59,7 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
 from agent_env.task_step.task_steps.agent.user_sim_common import SATISFACTION_KEY, iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import ended_turn_error
 from agent_env.task_step.task_steps.always_on import (
     ALWAYS_ON_KEY,
     ERROR_ENDS,
@@ -263,7 +264,7 @@ class RateUserSatisfactionTaskStep(TaskStep):
         term = turn.reply
         usage.turn(ModelRole.USER_SIMULATOR, term)
         if turn.state != TaskState.completed and str(turn.state) != "completed":
-            return {"text": None, "structured": None, "error": f"state {turn.state}"}
+            return {"text": None, "structured": None, "error": ended_turn_error(turn.state, term)}
         raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output if isinstance(term.structured_output, dict) else None
         return {"text": raw, "structured": structured,

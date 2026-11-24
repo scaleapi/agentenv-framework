@@ -385,12 +385,77 @@ def _count(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _check_counts(record: Any, names: Iterable[str]) -> None:
+    for name in names:
+        value = getattr(record, name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"{name} must be a non-negative integer")
+    if record.input_includes_cache is not None and not isinstance(record.input_includes_cache, bool):
+        raise ValueError("input_includes_cache must be true, false or null")
+    if record.cost_usd is not None and (
+        isinstance(record.cost_usd, bool) or not isinstance(record.cost_usd, (int, float)) or record.cost_usd < 0
+    ):
+        raise ValueError("cost_usd cannot be negative")
+
+
+_MODEL_COUNTERS = ("calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelUsage:
+    """One model's share of a turn's usage: the calls the turn made to ``model``, as it was called, and their counts,
+    read as ``Usage``'s are, with the agent's own cost for them when it has one."""
+
+    model: str
+    calls: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    input_includes_cache: bool | None = None
+    cost_usd: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, str) or not self.model:
+            raise ValueError("a model's usage must name the model")
+        _check_counts(self, _MODEL_COUNTERS)
+
+    @classmethod
+    def of(cls, model: str, usages: Iterable["Usage"]) -> "ModelUsage":
+        """``model``'s row from the usages of its calls, one each: each count summed over the calls that gave it, None
+        when none did; their cost only when every call reported one, since a sum of some isn't the model's cost; and
+        the includes-cache flag the calls that gave input counts agree on, else None."""
+        usages = list(usages)
+
+        def total(name: str) -> Any:
+            values = [value for usage in usages if (value := getattr(usage, name)) is not None]
+            return sum(values) if values else None
+
+        costs = [usage.cost_usd for usage in usages]
+        flags = {usage.input_includes_cache for usage in usages if usage.input_tokens is not None}
+        return cls(model=model, calls=len(usages), **{name: total(name) for name in _MODEL_COUNTERS[1:]},
+                   input_includes_cache=flags.pop() if len(flags) == 1 else None,
+                   cost_usd=sum(costs) if costs and None not in costs else None)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ModelUsage":
+        """The model's usage ``to_dict`` wrote; a key this version doesn't know is ignored."""
+        if not isinstance(data, Mapping):
+            raise TypeError("a model's usage must be a mapping")
+        return cls(**{f.name: data[f.name] for f in fields(cls) if data.get(f.name) is not None})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: value for f in fields(self) if (value := getattr(self, f.name)) is not None}
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Usage:
     """Common execution metrics plus runtime-specific, JSON-shaped details. ``cache_read_tokens`` and
     ``cache_write_tokens`` count the prompt tokens read from and written to the provider's prompt cache;
     ``input_includes_cache`` says whether ``input_tokens`` counts both of them (True), neither (False), or is unknown
-    (None), which a price needs to read the counts."""
+    (None), which a price needs to read the counts. ``models`` is the counts by model, from an agent that knows each
+    call's model: it covers every call the turn counted, so a price can charge each model at its own rate. A count
+    the turn leaves out that every row gives is the rows' sum, and so is the includes-cache flag the rows agree on."""
 
     tool_call_count: int | None = None
     input_tokens: int | None = None
@@ -400,25 +465,22 @@ class Usage:
     cache_write_tokens: int | None = None
     input_includes_cache: bool | None = None
     cost_usd: float | None = None
+    models: tuple[ModelUsage, ...] = ()
     provider_details: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in _USAGE_COUNTERS:
-            value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
-                raise ValueError(f"{name} must be a non-negative integer")
-        if self.input_includes_cache is not None and not isinstance(
-            self.input_includes_cache, bool
-        ):
-            raise ValueError("input_includes_cache must be true, false or null")
-        if self.cost_usd is not None and (
-            isinstance(self.cost_usd, bool)
-            or not isinstance(self.cost_usd, (int, float))
-            or self.cost_usd < 0
-        ):
-            raise ValueError("cost_usd cannot be negative")
+        _check_counts(self, _USAGE_COUNTERS)
+        if isinstance(self.models, (str, bytes, Mapping)) or not isinstance(self.models, Iterable):
+            raise TypeError("models must be a list of each model's usage")
+        object.__setattr__(self, "models", tuple(
+            model if isinstance(model, ModelUsage) else ModelUsage.from_dict(model) for model in self.models))
+        for name in _MODEL_COUNTERS[1:]:
+            values = [getattr(model, name) for model in self.models]
+            if getattr(self, name) is None and values and None not in values:
+                object.__setattr__(self, name, sum(values))
+        flags = {model.input_includes_cache for model in self.models}
+        if self.input_includes_cache is None and len(flags) == 1:
+            object.__setattr__(self, "input_includes_cache", flags.pop())
         if not isinstance(self.provider_details, Mapping):
             raise TypeError("provider_details must be a mapping")
         object.__setattr__(
@@ -434,8 +496,10 @@ class Usage:
         known = {
             f.name: data[f.name]
             for f in fields(cls)
-            if f.name != "provider_details" and data.get(f.name) is not None
+            if f.name not in ("provider_details", "models") and data.get(f.name) is not None
         }
+        if data.get("models") is not None:
+            known["models"] = data["models"]
         details = data.get("provider_details")
         return cls(**known, provider_details={} if details is None else details)
 
@@ -481,17 +545,20 @@ class Usage:
 
     @property
     def is_empty(self) -> bool:
-        return all(value is None for value in self._values().values()) and not self.provider_details
+        return (all(value is None for value in self._values().values()) and not self.models
+                and not self.provider_details)
 
     def to_dict(self) -> dict[str, Any]:
         result = {name: value for name, value in self._values().items() if value is not None}
+        if self.models:
+            result["models"] = [model.to_dict() for model in self.models]
         if self.provider_details:
             result["provider_details"] = _thaw(self.provider_details)
         return result
 
     def _values(self) -> dict[str, Any]:
-        """Every field but ``provider_details``, by name, in declaration order."""
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "provider_details"}
+        """Every field but ``models`` and ``provider_details``, by name, in declaration order."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("models", "provider_details")}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

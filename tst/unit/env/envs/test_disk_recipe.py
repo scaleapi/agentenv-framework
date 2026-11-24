@@ -6,6 +6,7 @@ settings and size, and exporting one, compressed, once."""
 
 import asyncio
 import base64
+import csv
 import hashlib
 import importlib.util
 import json
@@ -533,9 +534,12 @@ def _seed_environment(folder: Path, exported: dict[str, str] | None = None) -> t
 
 
 @pytest.fixture
-def launched(monkeypatch):
+def launched(monkeypatch, tmp_path):
     """The ``docker`` commands the local provider runs for a disk, with the launcher image it builds faked."""
     ran = []
+    device = tmp_path / "kvm"
+    device.touch()
+    monkeypatch.setattr(local_sandbox, "KVM", str(device))
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
     monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(local_sandbox, "machine_for", AsyncMock(return_value=local_disk.Machine("agentenv-vm:0123")))
@@ -560,13 +564,54 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
 
     first, reset = launched
     assert first == ("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-                     "-p", "127.0.0.1:20001:18765", *local_disk.launcher_args([18765], {"ENVIRONMENT_NAME": "desk"},
-                                                                               2, 4096), "agentenv-vm:0123")
+                     "-p", "127.0.0.1:20001:18765",
+                     "--mount", f"type=bind,src={sandbox.work_dir}/vm-state,dst=/var/lib/agentenv-vm",
+                     "--user", f"{os.getuid()}:{os.getgid()}", "--group-add", str(os.getgid()),
+                     *local_disk.launcher_args([18765], {"ENVIRONMENT_NAME": "desk"}, 2, 4096), "agentenv-vm:0123")
     assert reset == ("exec", "-i", sandbox.container_name, *RESET, "VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n",
                      local_sandbox._RESET_SECONDS)
     assert local_sandbox._RESET_SECONDS > 60
     LocalSandbox.pull_images.assert_awaited_once_with(["localhost:5000/disk@sha256:" + "a" * 64])
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"} and rebuilt.owns_container
+    state = sandbox.work_dir / "vm-state"
+    assert state.is_dir() and state.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_disks_keep_state_in_separate_sandbox_work_folders(launched):
+    provider = LocalSandboxProvider()
+    first = await provider.create_vm(image="disk", exposed_ports=[18765], env={})
+    second = await provider.create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert first.work_dir != second.work_dir
+    for sandbox, command in zip((first, second), launched):
+        state = sandbox.work_dir / "vm-state"
+        assert str(state) in command[command.index("--mount") + 1]
+        assert state.stat().st_uid == os.getuid()
+        (state / "boot").mkdir()
+        (state / "boot" / "disk.qcow2").write_bytes(b"owned overlay")
+    local_sandbox.remove_local_work_dir(first.sandbox_id)
+
+    assert not first.work_dir.exists()
+    assert (second.work_dir / "vm-state" / "boot" / "disk.qcow2").read_bytes() == b"owned overlay"
+
+
+@pytest.mark.asyncio
+async def test_a_disk_refuses_an_existing_state_symlink_before_starting(launched, tmp_path):
+    sandbox = LocalSandbox()
+    (sandbox.work_dir / local_sandbox._VM_SIZE_FILE).write_text('{"cpu":2,"memory":4096}')
+    other = tmp_path / "external"
+    other.mkdir()
+    (other / "keep").write_text("unrelated")
+    (sandbox.work_dir / "vm-state").symlink_to(other, target_is_directory=True)
+
+    with pytest.raises(FileExistsError):
+        await LocalSandboxProvider()._boot_disk(sandbox, image="disk", env={})
+
+    assert launched == []
+    assert not (sandbox.work_dir / local_sandbox._CONTAINER_MODE_MARKER).exists()
+    local_sandbox.remove_local_work_dir(sandbox.sandbox_id)
+    assert (other / "keep").read_text() == "unrelated"
 
 
 @pytest.mark.asyncio
@@ -583,7 +628,10 @@ async def test_a_disk_gets_this_processs_grant_port_and_the_trust_and_a_reconnec
     run, forward = launched
     hosts = [arg for entry in local_sandbox._EXTRA_HOSTS for arg in ("--add-host", entry)]
     assert run == ("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-                   "-p", "127.0.0.1:20001:18765", *local_disk.launcher_args([18765], {}, 2, 4096), *hosts,
+                   "-p", "127.0.0.1:20001:18765",
+                   "--mount", f"type=bind,src={sandbox.work_dir}/vm-state,dst=/var/lib/agentenv-vm",
+                   "--user", f"{os.getuid()}:{os.getgid()}", "--group-add", str(os.getgid()),
+                   *local_disk.launcher_args([18765], {}, 2, 4096), *hosts,
                    "--mount", "type=bind,src=/state/tls/trust/ca,dst=/agentenv-trust,readonly",
                    "-e", "VM_HOST_PORTS=41234", "-e", "VM_TRUST=/agentenv-trust", "agentenv-vm:0123")
     assert forward == ("exec", "-d", sandbox.container_name, *disk_launcher.forward(52345))
@@ -640,6 +688,182 @@ async def test_a_boot_cancelled_while_docker_starts_the_launcher_waits_for_it_th
     with pytest.raises(asyncio.CancelledError):
         await booting
     assert order == ["run", "terminate"]
+
+
+@pytest.mark.asyncio
+async def test_a_disk_start_can_outlast_a_query_and_records_ownership_before_launching(launched, monkeypatch):
+    def docker(*args, timeout=None):
+        name = args[args.index("--name") + 1]
+        folder = LocalSandbox.find_work_dir(name.removeprefix("agent-"))
+        assert (folder / local_sandbox._CONTAINER_MODE_MARKER).read_text() == name
+        assert (folder / local_sandbox._CONTAINER_START_MARKER).exists()
+        if timeout < 45:
+            raise subprocess.TimeoutExpired(["docker", "run"], timeout)
+        return ""
+
+    monkeypatch.setattr(local_sandbox, "docker", docker)
+
+    sandbox = await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert sandbox.owns_container
+    assert not (sandbox.work_dir / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert local_sandbox._DOCKER_QUERY_SECONDS < 45
+
+
+@pytest.fixture
+def uncertain_disk(launched, monkeypatch):
+    state = SimpleNamespace(visible=False, daemon="up", remove_error=None, folder=None, sandbox_id=None,
+                            owned_at_start=False, lookups=[], removals=[], entered=threading.Event(), release=None,
+                            start_error=None)
+
+    def docker(*args, timeout=None):
+        name = args[args.index("--name") + 1]
+        state.sandbox_id = name.removeprefix("agent-")
+        state.folder = LocalSandbox.find_work_dir(state.sandbox_id)
+        (state.folder / "vm-state" / "retained").write_text("pending disk state")
+        state.owned_at_start = (state.folder / local_sandbox._CONTAINER_MODE_MARKER).exists()
+        state.entered.set()
+        if state.release is not None:
+            assert state.release.wait(5)
+        raise state.start_error or subprocess.TimeoutExpired(["docker", "run"], timeout)
+
+    async def exec_with_output(sandbox, *args):
+        if args[:2] == ("docker", "version"):
+            if state.daemon == "missing":
+                raise FileNotFoundError(2, "No such file or directory", "docker")
+            return (0, "29.1.4", "") if state.daemon == "up" else (1, "", "Cannot connect to the Docker daemon")
+        assert args[:2] == ("docker", "ps")
+        state.lookups.append(sandbox.container_name)
+        return 0, sandbox.container_name if state.visible else "", ""
+
+    async def exec_script(sandbox, script, **kwargs):
+        state.removals.append(script)
+        if state.remove_error is not None:
+            raise state.remove_error
+        state.visible = False
+        return ""
+
+    monkeypatch.setattr(local_sandbox, "docker", docker)
+    monkeypatch.setattr(local_sandbox, "_stop_marked", AsyncMock(return_value=True))
+    monkeypatch.setattr(local_sandbox, "_remove_staged", lambda sandbox_id: None)
+    monkeypatch.setattr(LocalSandbox, "exec_with_output", exec_with_output)
+    monkeypatch.setattr(LocalSandbox, "exec_script", exec_script)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_create_keeps_ownership_until_a_late_container_is_removed(uncertain_disk):
+    provider = LocalSandboxProvider()
+    with pytest.raises(subprocess.TimeoutExpired) as failure:
+        await provider.create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert uncertain_disk.owned_at_start
+    assert uncertain_disk.folder.is_dir()
+    assert (uncertain_disk.folder / "vm-state" / "retained").read_text() == "pending disk state"
+    assert len(uncertain_disk.lookups) == 1 and uncertain_disk.removals == []
+    assert any("creation" in note and "not confirmed" in note for note in failure.value.__notes__)
+    rebuilt = await provider.get_sandbox(uncertain_disk.sandbox_id)
+    assert rebuilt.owns_container
+    with pytest.raises(RuntimeError, match="creation.*not confirmed"):
+        await provider.terminate_sandbox(uncertain_disk.sandbox_id)
+
+    uncertain_disk.visible = True
+    await provider.terminate_sandbox(uncertain_disk.sandbox_id)
+
+    assert uncertain_disk.removals == [f"docker rm -f {rebuilt.container_name} >/dev/null"]
+    assert not (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert local_sandbox.remove_local_work_dir(uncertain_disk.sandbox_id) == uncertain_disk.folder
+
+
+@pytest.mark.parametrize("folder", ["plain", "with,comma", 'with"quote'])
+def test_a_bind_mount_names_its_folder_as_docker_reads_it(folder):
+    """Docker reads --mount as one CSV row: a folder whose name holds a comma or a quote still names that folder."""
+    src = Path("/sandboxes") / folder
+    fields = next(csv.reader([local_sandbox._bind(src, "/var/lib/agentenv-vm", "readonly")]))
+
+    assert fields == ["type=bind", f"src={src}", "dst=/var/lib/agentenv-vm", "readonly"]
+    if folder == "plain":
+        assert local_sandbox._bind(src, "/in") == f"type=bind,src={src},dst=/in"
+
+
+@pytest.mark.asyncio
+async def test_a_launch_docker_refused_is_cleaned_up_with_nothing_left_to_retry(uncertain_disk):
+    """The daemon unreachable for the launch, as when it can't pass /dev/kvm: no container, now or later."""
+    uncertain_disk.start_error = DockerFailed("docker run failed: Cannot connect to the Docker daemon", 125)
+
+    with pytest.raises(DockerFailed):
+        await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert uncertain_disk.owned_at_start
+    assert not uncertain_disk.folder.exists()
+    assert len(uncertain_disk.lookups) == 1 and uncertain_disk.removals == []
+
+
+@pytest.mark.asyncio
+async def test_a_launch_whose_docker_a_signal_killed_stays_unconfirmed(uncertain_disk):
+    uncertain_disk.start_error = DockerFailed("docker run failed: ", -2)
+
+    with pytest.raises(DockerFailed) as failure:
+        await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert any("creation" in note and "not confirmed" in note for note in failure.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_launch_settles_once_its_container_can_no_longer_appear(uncertain_disk):
+    provider = LocalSandboxProvider()
+    with pytest.raises(subprocess.TimeoutExpired):
+        await provider.create_vm(image="disk", exposed_ports=[18765], env={})
+    pending = uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER
+    launched_at = time.time() - local_sandbox._UNCONFIRMED_START_SECONDS - 1
+    os.utime(pending, (launched_at, launched_at))
+
+    await provider.terminate_sandbox(uncertain_disk.sandbox_id)
+
+    assert not pending.exists() and uncertain_disk.removals == []
+    assert local_sandbox.remove_local_work_dir(uncertain_disk.sandbox_id) == uncertain_disk.folder
+    assert not uncertain_disk.folder.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup", ["unreachable", "missing-cli", "remove-failed"])
+async def test_a_start_failure_keeps_its_error_and_folder_when_cleanup_fails(uncertain_disk, cleanup, caplog):
+    if cleanup == "remove-failed":
+        uncertain_disk.visible = True
+        uncertain_disk.remove_error = RuntimeError("container removal failed")
+    else:
+        uncertain_disk.daemon = "missing" if cleanup == "missing-cli" else "down"
+
+    with pytest.raises(subprocess.TimeoutExpired) as failure:
+        await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
+
+    assert uncertain_disk.folder.is_dir()
+    assert (uncertain_disk.folder / "vm-state" / "retained").read_text() == "pending disk state"
+    assert (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert any("Cleanup of sandbox" in note for note in failure.value.__notes__)
+    assert "Cleanup of sandbox" in caplog.text
+    assert ("container removal failed" if cleanup == "remove-failed" else "Docker can't be reached") in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_a_start_that_times_out_preserves_the_unknown_creation(uncertain_disk):
+    uncertain_disk.release = threading.Event()
+    booting = asyncio.create_task(LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={}))
+    try:
+        assert await asyncio.to_thread(uncertain_disk.entered.wait, 5)
+        booting.cancel()
+    finally:
+        uncertain_disk.release.set()
+
+    with pytest.raises(asyncio.CancelledError) as failure:
+        await booting
+
+    assert uncertain_disk.folder.is_dir()
+    assert (uncertain_disk.folder / "vm-state" / "retained").read_text() == "pending disk state"
+    assert (uncertain_disk.folder / local_sandbox._CONTAINER_START_MARKER).exists()
+    assert any("TimeoutExpired" in note for note in failure.value.__notes__)
+    assert any("Cleanup of sandbox" in note for note in failure.value.__notes__)
 
 
 @pytest.mark.asyncio

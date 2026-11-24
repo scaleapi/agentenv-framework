@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.store import local_state
+from tst.util.published_image import hold_registry
 
 #: The locks that guard this machine's Docker and image registry, by the start of their ids: a run's tests keep stores
 #: and state roots of their own, but all of them, on every pytest worker, use the one Docker and registry.
@@ -30,3 +31,10 @@ def machine_locks_shared_by_the_runs_workers():
                   lambda id: folder / per_test(id).name if id.startswith(MACHINE_LOCKS) else per_test(id))
     yield
     patch.undo()
+
+
+@pytest.fixture(autouse=True)
+def registry_held_still_for_each_test(monkeypatch):
+    """A test that runs a bundle twice expects the second run to plan what the first did, which a release publishing one
+    of its images between the two would change: each test sees the registry as its first lookup of each image did."""
+    hold_registry(monkeypatch)

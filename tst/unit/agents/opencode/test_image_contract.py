@@ -74,7 +74,7 @@ def test_the_requirements_are_the_protocol_floor_the_output_format_validator_and
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.597", "jsonschema>=4.18,<5", "aiohttp>=3.9,<4"]
+    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.643", "jsonschema>=4.18,<5", "aiohttp>=3.9,<4"]
 
 
 def test_node_is_pinned_by_version_and_checksum_for_the_image_and_an_install():

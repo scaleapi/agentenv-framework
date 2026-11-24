@@ -217,6 +217,17 @@ def recorded_person(us: dict, seed: dict, multi_day: Optional[bool] = None) -> d
                   us["multi_day"] if us.get("multi_day") is not None else multi_day)
 
 
+def recorded_instructions(us: dict, seed: dict, multi_day: Optional[bool] = None) -> Optional[str]:
+    """The user sim's system prompt, rebuilt from its ``metadata["user_sims"]`` record as this step wrote it; None when
+    the record can't be rebuilt."""
+    try:
+        return user_sim_versions.setup(us.get("user_version") or user_sim_versions.VERSION,
+                                       recorded_person(us, seed, multi_day))["system_prompt"]
+    except Exception as e:
+        logger.warning(f"user sim {us.get('name')!r}: its instructions could not be rebuilt ({type(e).__name__}: {e})")
+        return None
+
+
 _USER_SIM_MODEL_SOURCES = {ModelSource.STEP_PARAMS: "user_sim_step_params", ModelSource.RUN: "run_user_model"}
 
 

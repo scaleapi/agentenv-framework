@@ -4,10 +4,11 @@ its turn context, replayed through the adapter kit as the SDK ran it live. Each 
 under ``tools/``, and named where they were fed.
 
 The scenarios: ``coding`` (two turns of one conversation), ``subagent`` (an Agent call), ``browser`` (screenshots from a
-browser's MCP tools), ``thinking`` (a thinking model), ``api-error`` (the endpoint refusing every call) and ``retried``
-(a stalled call that the bridge resumed). Regenerate the expected documents after an intended change with:
-python tst/unit/agents/claude_code/test_claude_code_atif_recorded.py. Record the runs again, as a bump of the pinned CLI
-asks, with ``tst/manual/claude_code_atif/record.py``, whose docstring has the steps."""
+browser's MCP tools), ``thinking`` (a thinking model), ``compacted`` (a conversation compacted between its turns),
+``api-error`` (the endpoint refusing every call) and ``retried`` (a stalled call that the bridge resumed). Regenerate
+the expected documents after an intended change with: python
+tst/unit/agents/claude_code/test_claude_code_atif_recorded.py. Record the runs again, as a bump of the pinned CLI asks,
+with ``tst/manual/claude_code_atif/record.py``, whose docstring has the steps."""
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (  #
     transcript_from_atif,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter  # noqa: E402
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import atif_turn_events, turn_events  # noqa: E402
 from tst.unit.agents.claude_code.agent import claude_code_atif  # noqa: E402
 
 FIXTURES = REPO / "tst" / "data" / "claude_code_atif"
@@ -48,6 +50,13 @@ def recorded(scenario: str) -> tuple[list[RecordedTask], list[dict | None]]:
         tasks.append(RecordedTask.from_served(turn["turn"], turn["native"], aux))
         usage.append(turn["usage"])
     return tasks, usage
+
+
+def compacted_turns(scenario: str) -> set[int]:
+    """The turns whose native stdout compacts the conversation (a ``compact_boundary``)."""
+    data = json.loads((FIXTURES / f"{scenario}.json").read_text())
+    return {index for index, turn in enumerate(data["turns"])
+            if any(item.get("subtype") == "compact_boundary" for item in turn["native"] if isinstance(item, dict))}
 
 
 def _trajectories(document: dict) -> list[dict]:
@@ -84,12 +93,15 @@ def test_a_recorded_run_replays_to_its_document_under_the_live_rule(scenario):
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_a_recorded_runs_steps_sum_to_the_usage_each_turn_reported(scenario):
+    """The copy's totals are the turns' reported usage. Its token counts leave out a turn that compacts the conversation:
+    the copy has no step for the call that wrote its summary yet, though its cost counts it."""
     _, usage = recorded(scenario)
     final = replay(scenario).document["final_metrics"]
+    compacted = compacted_turns(scenario)
     reported = [turn or {} for turn in usage]
     for metric, field in (("total_prompt_tokens", "input_tokens"), ("total_completion_tokens", "output_tokens"),
                           ("total_cached_tokens", "cache_read_tokens")):
-        total = sum(turn.get(field) or 0 for turn in reported)
+        total = sum(turn.get(field) or 0 for index, turn in enumerate(reported) if index not in compacted)
         assert final.get(metric, 0) == total, (metric, final.get(metric), total)
     if all(turn.get("cost_usd") is not None for turn in reported):
         assert math.isclose(final["total_cost_usd"], sum(turn["cost_usd"] for turn in reported))
@@ -113,6 +125,7 @@ def test_the_recordings_cover_what_the_adapter_maps():
     assert any(step.get("extra", {}).get("agentenv", {}).get("attempt") == 2 for step in retried)
     assert any("error" in step.get("extra", {}).get("agentenv", {}) for step in documents["api-error"]["steps"])
     assert any(step.get("extra", {}).get("agentenv", {}).get("reasoning") for step in documents["thinking"]["steps"])
+    assert compacted_turns("compacted") == {1}
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -139,6 +152,32 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
         assert images and frames
     if scenario == "subagent":
         assert [event["tool"] for event in events if event["type"] == "tool_call" and event.get("subagent")] == ["Bash"]
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_a_recorded_turns_copy_gives_a_judge_the_events_its_native_trajectory_does(scenario):
+    """always_on's judge stages each wake from its events. A copy gives the native turn's, but for a sub-agent's prompt,
+    which only native stdout carries (as a note), and its closing text, which only its transcript, so the copy, has; and
+    for a turn that compacts the conversation, whose summary and "Compacted" only native stdout carries (as notes) until
+    the copy has a compaction step."""
+    data = json.loads((FIXTURES / f"{scenario}.json").read_text())
+    document = replay(scenario).document
+    compacted = compacted_turns(scenario)
+    for index, turn in enumerate(data["turns"]):
+        native = turn_events(json.dumps(turn["native"])).events
+        copied = atif_turn_events(task_document(document, [turn["turn"]["task_id"]])).events
+        if index in compacted:
+            notes = [e["text"] for e in native if e["type"] == "note"]
+            assert len(notes) == 2 and notes[0].startswith("This session is being continued") and "Compacted" in notes[1]
+            assert [e for e in native if e["type"] != "note"] == [{"type": "final", "text": "", "error": False}]
+            assert copied == [{"type": "final", "text": None, "error": False}]
+            continue
+        if scenario == "subagent":
+            assert [e["type"] for e in native if e.get("subagent")] == ["note", "tool_call"]
+            assert [e["type"] for e in copied if e.get("subagent")] == ["tool_call", "text"]
+            native = [e for e in native if not (e["type"] == "note" and e.get("subagent"))]
+            copied = [e for e in copied if not (e["type"] == "text" and e.get("subagent"))]
+        assert copied == native
 
 
 def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():

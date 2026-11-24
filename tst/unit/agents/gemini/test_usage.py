@@ -163,10 +163,22 @@ def test_a_turns_usage_sums_its_calls_with_each_model_kept_apart():
 
     assert usage.to_dict() == {
         "tool_call_count": 2, "input_tokens": 18400, "output_tokens": 65, "total_tokens": 18465,
-        "cache_read_tokens": 16900, "input_includes_cache": True,
-        "provider_details": {"model_calls": 3, "reasoning_tokens": 12, "models": {
-            "gemini-2.5-flash": {"calls": 2, "input_tokens": 18100, "output_tokens": 60, "cache_read_tokens": 16900},
-            "gemini-2.5-flash-lite": {"calls": 1, "input_tokens": 300, "output_tokens": 5, "cache_read_tokens": 0}}}}
+        "cache_read_tokens": 16900, "input_includes_cache": True, "models": [
+            {"model": "gemini-2.5-flash", "calls": 2, "input_tokens": 18100, "output_tokens": 60,
+             "cache_read_tokens": 16900, "input_includes_cache": True},
+            {"model": "gemini-2.5-flash-lite", "calls": 1, "input_tokens": 300, "output_tokens": 5,
+             "cache_read_tokens": 0, "input_includes_cache": True}],
+        "provider_details": {"model_calls": 3, "reasoning_tokens": 12}}
+
+
+def test_a_call_that_named_no_model_counts_as_the_configured_models():
+    calls = _calls(_answered("gemini-2.5-flash-lite", 300, 5), {**_answered("unused", 900, 9), "model": None})
+
+    usage = a2a_server._turn_usage(calls, 0, [], "gemini-2.5-pro")
+
+    assert [(row.model, row.calls, row.input_tokens) for row in usage.models] == [
+        ("gemini-2.5-flash-lite", 1, 300), ("gemini-2.5-pro", 1, 900)]
+    assert a2a_server._turn_usage(calls, 0, []).models == ()
 
 
 def test_calls_without_counts_or_still_running_are_unreported():

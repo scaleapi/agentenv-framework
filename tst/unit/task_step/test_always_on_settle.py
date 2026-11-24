@@ -4,6 +4,7 @@ by side, and replies still in progress at the end are recorded."""
 
 from __future__ import annotations
 
+import asyncio
 import random
 from datetime import timedelta
 
@@ -173,6 +174,24 @@ async def test_contact_replies_still_in_progress_at_the_end_are_recorded(monkeyp
     [trigger] = env["triggers"]
     assert trigger["id"] == "crew-dm" and trigger["running"] == 1
     assert trigger["waits"] == [{"resumes_at": "2026-11-09T14:30:58.882035Z"}]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_call_the_clock_has_reached_is_waited_for_and_one_that_never_goes_gets_the_settle_timeout(
+        monkeypatch, tmp_path):
+    """The gateway's ``due`` says a call is under way, however the step's own read of the clock compares with its
+    time."""
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    call = {"key": "m1", "server": "http://chat/mcp", "at": rig.now(), "tool": "chat_deliver", "role": "default",
+            "status": "pending", "attempts": 1, "due": True}
+    monkeypatch.setattr(rig.gw._deferred, "state", lambda: [call])  # due, never made
+    ctx = await asyncio.wait_for(rig.run(rig.step(settle_timeout_seconds=0.2)), 10)
+
+    [timeout] = rig.events(ctx, "settle_timeout")
+    [env] = timeout["still_at_work"]
+    assert env["deferred_calls_due"] == ["m1"] and "due_not_going" not in env
+    assert 0.2 <= timeout["settle"]["seconds"] < 10  # this step's 0.2 s timeout, not the 300 s default
 
 
 def test_the_contact_setting_survives_a_round_trip_and_the_step_sets_no_contact_time_limit():
