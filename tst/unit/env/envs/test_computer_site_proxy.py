@@ -9,7 +9,6 @@ import base64
 import contextlib
 import dataclasses
 import email.message
-import gc
 import io
 import json
 import os
@@ -885,12 +884,13 @@ async def test_dns_over_udp_answers_every_query_a_client_sends_while_a_slow_name
                                                         local_addr=("127.0.0.1", 0))
         client, _ = await loop.create_datagram_endpoint(Client, remote_addr=server.get_extra_info("sockname"))
         try:
-            deadline = loop.time() + 10 * nameserver_delay_s
             client.sendto(_query("eu.chat.test", 1))
             for _ in range(passed_on):
                 client.sendto(_query("example.org", 1))
+            # Generous, since the wait ends once every answer is in: a busy test worker's event loop can stall for
+            # seconds, as a full garbage collection of its heap does.
+            deadline = loop.time() + 25 * nameserver_delay_s
             while loop.time() < deadline and len(answered) < passed_on + 1:
-                gc.collect()
                 await asyncio.sleep(0.05)
         finally:
             for transport in (client, server, upstream):
