@@ -6,7 +6,7 @@ criterion with fixed outcomes), with every sample's score, verdict and justifica
 
 ``min_judge_agreement`` is how many of the samples must give the kept row's verdict, as a share: 1.0 by default, so a
 criterion the samples split on fails the grade (``JudgeDisagreementError``) rather than being decided by the median.
-The share is kept to two places, so 0.67 is two samples of three."""
+The share is kept to two places, so 0.67 is two samples of three, and is 1.0 only when every sample agrees."""
 
 from __future__ import annotations
 
@@ -38,6 +38,11 @@ def validated_agreement(value: Any) -> Optional[float]:
     return float(value)
 
 
+def _share(agreeing: int, total: int) -> float:
+    """``agreeing`` of ``total`` to two places, 1.0 only when all agree, so no split reads as unanimous."""
+    return 1.0 if agreeing == total else min(round(agreeing / total, 2), 0.99)
+
+
 def median_rows(sampled: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     """Each criterion's row across ``sampled``, one list of rows per sample, each with every criterion: the first
     sample's row that scored the low median, with its ``agreement``, the share of samples whose verdict (``result``)
@@ -50,7 +55,7 @@ def median_rows(sampled: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
         chosen = next(each for each in rows if each["score"] == median)
         verdict = chosen.get("result") is True
         agreeing = sum(1 for each in rows if (each.get("result") is True) == verdict)
-        merged.append({**chosen, "agreement": round(agreeing / len(rows), 2),
+        merged.append({**chosen, "agreement": _share(agreeing, len(rows)),
                        "samples": [{"score": each["score"], "passed": each.get("result") is True,
                                     "justification": each.get("justification")} for each in rows]})
     return merged

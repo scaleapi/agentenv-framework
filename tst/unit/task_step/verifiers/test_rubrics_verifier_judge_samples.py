@@ -101,7 +101,8 @@ def test_an_agreement_bar_is_a_number_from_0_to_1():
 
 
 @pytest.mark.parametrize("scores, agreement", [([1.0, 1.0, 0.0], 0.67), ([1.0, 0.0], 0.5), ([0.75, 0.7], 1.0),
-                                               ([0.4, 0.6], 0.5), ([1.0, 1.0, 1.0, 0.0, 1.0], 0.8)])
+                                               ([0.4, 0.6], 0.5), ([1.0, 1.0, 1.0, 0.0, 1.0], 0.8),
+                                               ([1.0] * 200 + [0.0], 0.99)])
 def test_a_rows_agreement_is_the_share_of_samples_giving_its_verdict_not_its_score(scores, agreement):
     sampled = [[{"id": "a", "score": score, "result": score >= 0.5}] for score in scores]
 
