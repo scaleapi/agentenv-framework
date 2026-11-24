@@ -59,10 +59,12 @@ def tally(paths: list[str]) -> dict[str, dict]:
     out: dict[str, dict] = defaultdict(lambda: {"judged": 0, "discarded": 0, "unknown": 0, "checks": Counter()})
     seen = set()
     for _, ctx in records(paths):
-        key = ctx.get("instance_id") or (ctx.get("metadata") or {}).get("instance_id") or id(ctx)
-        if key in seen:  # the same run exported twice
-            continue
-        seen.add(key)
+        # The same run exported twice counts once; a record with no run id can't be told apart, so each counts.
+        key = ctx.get("instance_id") or (ctx.get("metadata") or {}).get("instance_id")
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
         for model, entry in judged_runs(ctx):
             error = entry.get("user_sim_error") or {}
             row = out[model]

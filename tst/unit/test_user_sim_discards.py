@@ -47,3 +47,13 @@ def test_it_prints_a_row_per_model(tmp_path):
                          check=True).stdout
     [opus] = [line for line in out.splitlines() if line.startswith("claude-opus-5-5")]
     assert opus.split()[1:5] == ["2", "1", "0", "50%"] and opus.endswith("ending 1")
+
+
+def test_records_without_a_run_id_each_count(tmp_path):
+    run = _instance(1, "claude-opus-5-5", "yes", ["rogue"])
+    for ctx in (run["context"], run):
+        ctx.pop("instance_id", None)
+        ctx.get("metadata", {}).pop("instance_id", None)
+    (tmp_path / "a.json").write_text(json.dumps(run))
+    (tmp_path / "b.json").write_text(json.dumps([run, run]))  # three records, none with a run id
+    assert discards.tally([str(tmp_path)])["claude-opus-5-5"]["judged"] == 3
