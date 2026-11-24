@@ -762,6 +762,57 @@ def _media_part_to_openai(part: dict) -> dict | None:
     return None
 
 
+_SIGNATURE_IN_ID = "__thought__"
+_NO_RESULT = json.dumps({"error": "No result was recorded for this tool call."})
+
+
+def _response_text(fr: dict) -> str:
+    resp = fr.get("response")
+    return resp if isinstance(resp, str) else json.dumps(resp)
+
+
+def _response_media(fr: dict) -> list[dict]:
+    return [m for m in (_media_part_to_openai(p) for p in fr.get("parts") or [] if isinstance(p, dict)) if m]
+
+
+def _tool_message(fr: dict, call_id: str) -> dict:
+    """A functionResponse as a tool message. Media nested in ``functionResponse.parts`` (gemini-cli nests a
+    binary read for models that take multimodal function responses) goes in the tool message's content list,
+    which LiteLLM puts back into ``functionResponse.parts``."""
+    text = _response_text(fr)
+    media = _response_media(fr)
+    return {"role": "tool", "tool_call_id": call_id,
+            "content": [{"type": "text", "text": text}, *media] if media else text}
+
+
+def _pair_responses(responses: list[dict], open_calls: list[dict]) -> list[str | None]:
+    """The call id each functionResponse answers, taken from ``open_calls``: by the response's ``id`` first, then
+    by name where either side has no id. None for a response that answers none of them."""
+    paired: list[str | None] = [None] * len(responses)
+    for i, fr in enumerate(responses):
+        rid = fr.get("id")
+        call = next((c for c in open_calls if rid and c["source_id"] == rid), None)
+        if call:
+            open_calls.remove(call)
+            paired[i] = call["id"]
+    for i, fr in enumerate(responses):
+        if paired[i] is None:
+            rid = fr.get("id")
+            call = next((c for c in open_calls
+                         if c["name"] == fr.get("name") and not (rid and c["source_id"])), None)
+            if call:
+                open_calls.remove(call)
+                paired[i] = call["id"]
+    return paired
+
+
+def _close_open_calls(messages: list[dict], open_calls: list[dict]) -> None:
+    """Answer each call no functionResponse answered, since the chat API refuses a tool call left without one."""
+    for call in open_calls:
+        messages.append({"role": "tool", "tool_call_id": call["id"], "content": _NO_RESULT})
+    open_calls.clear()
+
+
 def gemini_request_to_openai(greq: dict, model: str) -> dict:
     """Translate a native Gemini generateContent request body into an OpenAI
     chat/completions body. Handles system instruction, multi-turn text, inline
@@ -774,14 +825,15 @@ def gemini_request_to_openai(greq: dict, model: str) -> dict:
         if stext:
             messages.append({"role": "system", "content": stext})
 
-    # Gemini functionResponse carries the tool name but no call id; synthesize
-    # ids and match them positionally by name so multi-turn tool use threads.
-    pending_ids: dict[str, list[str]] = {}
+    # A tool message must answer a call of the assistant message just before it (LiteLLM looks no further back),
+    # so responses pair only with the latest model turn's calls. A call without an id gets a synthesized one.
+    open_calls: list[dict] = []
     counter = 0
     for content in greq.get("contents", []) or []:
         role = content.get("role", "user")
         parts = content.get("parts", []) or []
         if role == "model":
+            _close_open_calls(messages, open_calls)
             text_bits: list[str] = []
             tool_calls: list[dict] = []
             for p in parts:
@@ -789,9 +841,13 @@ def gemini_request_to_openai(greq: dict, model: str) -> dict:
                     text_bits.append(p["text"])
                 fc = p.get("functionCall") or p.get("function_call")
                 if fc:
-                    cid = f"call_{counter}"
-                    counter += 1
-                    pending_ids.setdefault(fc.get("name"), []).append(cid)
+                    source_id = fc.get("id") or None
+                    if source_id:
+                        cid = source_id
+                    else:
+                        cid = f"call_{counter}"
+                        counter += 1
+                    open_calls.append({"id": cid, "source_id": source_id, "name": fc.get("name")})
                     tool_call: dict = {
                         "id": cid, "type": "function",
                         "function": {
@@ -814,18 +870,22 @@ def gemini_request_to_openai(greq: dict, model: str) -> dict:
             # items in order; emit a plain string when text-only (keeps the
             # common path byte-identical) or an OpenAI content-list when media is
             # present, so images/audio/PDF are not silently dropped on Vertex.
+            # A functionResponse whose call isn't in the latest model turn (a history gemini-cli trimmed or
+            # resumed) can't be a tool message, so it reaches the model as user content instead.
+            responses = [fr for p in parts if (fr := p.get("functionResponse") or p.get("function_response"))]
+            paired = iter(_pair_responses(responses, open_calls))
             content_items: list[dict] = []
             for p in parts:
                 fr = p.get("functionResponse") or p.get("function_response")
                 if fr:
-                    name = fr.get("name")
-                    ids = pending_ids.get(name)
-                    cid = ids.pop(0) if ids else f"call_{name}"
-                    resp = fr.get("response")
-                    messages.append({
-                        "role": "tool", "tool_call_id": cid,
-                        "content": resp if isinstance(resp, str) else json.dumps(resp),
-                    })
+                    cid = next(paired)
+                    if cid is not None:
+                        messages.append(_tool_message(fr, cid))
+                    else:
+                        content_items.append({"type": "text", "text": (
+                            f"Result of a {fr.get('name')} tool call missing from this conversation:\n"
+                            f"{_response_text(fr)}")})
+                        content_items.extend(_response_media(fr))
                     continue
                 if p.get("text"):
                     content_items.append({"type": "text", "text": p["text"]})
@@ -839,12 +899,14 @@ def gemini_request_to_openai(greq: dict, model: str) -> dict:
                         "vertex bridge: unhandled Gemini part %s dropped from user turn",
                         list(p.keys()),
                     )
+            _close_open_calls(messages, open_calls)
             if content_items:
                 if all(it["type"] == "text" for it in content_items):
                     messages.append({"role": "user",
                                      "content": "\n".join(it["text"] for it in content_items)})
                 else:
                     messages.append({"role": "user", "content": content_items})
+    _close_open_calls(messages, open_calls)
 
     oai: dict = {"model": model, "messages": messages}
     gc = greq.get("generationConfig") or greq.get("generation_config") or {}
@@ -898,6 +960,11 @@ def openai_response_to_gemini(oai: dict) -> dict:
         except (json.JSONDecodeError, TypeError):
             args = {}
         fcpart: dict = {"functionCall": {"name": fn.get("name"), "args": args}}
+        # gemini-cli keeps the id on the call in its history and echoes it on the functionResponse, so the next
+        # request pairs them by id. The signature LiteLLM appends to it also travels as thoughtSignature.
+        call_id = (tc.get("id") or "").split(_SIGNATURE_IN_ID, 1)[0]
+        if call_id:
+            fcpart["functionCall"]["id"] = call_id
         # Gemini signs only the first call of a parallel batch, and bills each replayed copy.
         sig = _thought_signature(tc, msg) if i == 0 else _thought_signature(tc)
         if sig:

@@ -38,7 +38,8 @@ def test_the_image_installs_the_protocol_alone_from_its_requirements():
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.623"]
+    assert len(requirements) == 1, requirements
+    assert re.fullmatch(r"agentenv-framework-protocol\[agent\]>=\d+\.\d+\.\d+", requirements[0]), requirements
 
 
 def test_the_image_gives_the_model_node_alone_from_a_pinned_image():

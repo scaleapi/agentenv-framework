@@ -64,8 +64,8 @@ def profile_dir(context_id: str) -> Path:
 
 @dataclass
 class CallCounts:
-    """Model calls' counts as their post_api_request events give them, with ``input_tokens`` counting the cache; a call
-    whose event carried no usage is counted in ``unreported``."""
+    """Model calls' counts as their post_api_request events give them, with ``input_tokens`` counting the cache, and the
+    models they named; a call whose event carried no usage is counted in ``unreported``."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -73,9 +73,12 @@ class CallCounts:
     cache_write_tokens: int = 0
     calls: int = 0
     unreported: int = 0
+    models: set[str] = field(default_factory=set)
 
-    def add(self, usage: object) -> None:
+    def add(self, usage: object, model: object = None) -> None:
         self.calls += 1
+        if isinstance(model, str) and model:
+            self.models.add(model)
         if not isinstance(usage, dict) or not (usage.get("prompt_tokens") or usage.get("output_tokens")):
             self.unreported += 1
             return
@@ -494,9 +497,9 @@ class _EventParser:
         if isinstance(event.get("session_id"), str) and event["session_id"] and not theirs:
             self.session_id = event["session_id"]
         if kind == "post_api_request":
-            self.all_calls.add(event.get("usage"))
+            self.all_calls.add(event.get("usage"), event.get("model"))
             if theirs:
-                self.side_calls.add(event.get("usage"))
+                self.side_calls.add(event.get("usage"), event.get("model"))
         if kind == "pre_tool_call":
             self.tool_calls.add(str(event.get("tool_call_id") or f"tool-{len(self.tool_calls)}"))
         elif kind == "post_llm_call" and isinstance(event.get("assistant_response"), str):

@@ -1,0 +1,211 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-compacted",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-5-5",
+  "tool_definitions": {
+   "shared": "tools/a2f232fa81dcec06.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-23T22:10:47.698919Z",
+   "source": "user",
+   "message": "Create notes.txt holding three lines, alpha, beta and gamma, with your Bash tool, then reply with only ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-compacted",
+     "task_id": "3187814c-b5cc-427e-8aff-fa89353ae7b6",
+     "message_id": "73c2fd7665cf4d22a39088941aeedb47",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-23T22:10:49.899Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01Xn4XjSuqNpg2nosKGRtEK2",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "printf 'alpha\\nbeta\\ngamma\\n' > /app/notes.txt",
+      "description": "Create notes.txt with three lines"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01Xn4XjSuqNpg2nosKGRtEK2",
+      "content": "(Bash completed with no output)"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 28509,
+    "cached_tokens": 0,
+    "completion_tokens": 106,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 28507
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-23T22:10:50.839Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "ok",
+   "metrics": {
+    "prompt_tokens": 28630,
+    "cached_tokens": 28507,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 121
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-23T22:10:51.735809Z",
+   "source": "user",
+   "message": "/compact",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-compacted",
+     "task_id": "93db87a5-3825-461b-85a2-636e23b45eaa",
+     "message_id": "8ec3fe03a9e342ea9ca816e236111e4a",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-23T22:10:57.292647Z",
+   "source": "agent",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-23T22:10:57.789981Z",
+   "source": "user",
+   "message": "Read notes.txt with your tools and reply with only its second line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-compacted",
+     "task_id": "d98aa508-6da7-4c5d-8e18-fd76b9184490",
+     "message_id": "63535bbb2b3445e78152cb9bc8d5b185",
+     "turn": 2
+    }
+   }
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-23T22:10:59.101Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01TpvkxZzmH9NnvxvZjawAsM",
+     "function_name": "Read",
+     "arguments": {
+      "file_path": "/app/notes.txt"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01TpvkxZzmH9NnvxvZjawAsM",
+      "content": "1\talpha\n2\tbeta\n3\tgamma\n4\t"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 29427,
+    "cached_tokens": 25110,
+    "completion_tokens": 55,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 4315
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-23T22:10:59.930Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "beta",
+   "metrics": {
+    "prompt_tokens": 29506,
+    "cached_tokens": 29425,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 79
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 116072,
+  "total_completion_tokens": 169,
+  "total_cached_tokens": 83042,
+  "total_cost_usd": 0.1066379,
+  "total_steps": 8,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 33022
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.0",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   },
+   "unmatched": {
+    "system": 3
+   }
+  }
+ }
+}

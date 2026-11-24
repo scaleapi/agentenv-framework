@@ -90,6 +90,59 @@ step names it. Steps that name it show and hide it as they do any tool. Steps fo
 that role's earlier named steps, and a full reset (`role: "*", tools: "*"`) clears all of them, so
 grant a hidden tool after such steps. Trigger tool actions call it as usual.
 
+A tool's successful result can ask the gateway to call the same server later, for something the
+server does at a time of its own (a scheduled message posted at its time) that no tool call would
+otherwise mark. Its `_meta` `"agentenv.io/deferredCalls"` (`DEFERRED_CALLS_META_KEY`) is a list of
+`{"key", "at", "call", "report_as"}`: `at` an RFC 3339 instant with an offset, `call` and
+`report_as` each `{"tool", "arguments"}`. The gateway takes the key off the result, so no caller sees
+it, and schedules each entry once per server and `key` (one its server declares again while pending
+or done is ignored). When the gateway clock reaches `at` (its virtual time while armed, wall UTC
+while not) it calls `call.tool` as the role that made the declaring call, as it makes a live call
+(under the consistent mode's lock, its write attributed to it). After a transport failure it calls
+again: five attempts in all, 1, 2, 4 and 8 s apart, each of which first reopens the server's session
+if it must (retrying the connection for about ten seconds), so against a server that stays down the
+call fails about 51 s after its first attempt (as observed). So make that tool idempotent (and
+`hidden_by_default`, as plumbing). Unless the result is an error, the gateway hands its triggers that
+result as that role's call of `report_as.tool` with `report_as.arguments`; a trigger action's own
+call provokes no trigger, and neither does one it declares. `GET /triggers/state` lists each under
+`deferred_calls` (`due` marks one the clock has reached that is still to make, which settle checks
+wait for), and counts the earliest still to make in `next_event_at`. Behind no gateway, or one that
+ignores the key, nothing calls it, so a server still acts by itself once the time has passed (on its
+next read, say).
+
+`@tool(..., defers=Defers(call=..., report_as=..., using=...))` builds that declaration for you, and
+the tool returns its reply as before:
+
+```python
+from agentenv_protocol import DeferredCall, Defers, tool
+
+@tool(hidden_by_default=True)
+def deliver_reminder(self, reminder_id: str) -> str: ...
+
+@tool(defers=Defers(call="deliver_reminder", report_as="send_notification", using="_reminder_delivery"))
+def schedule_reminder(self, event_id: str, remind_at: str) -> str: ...
+
+def _reminder_delivery(self, arguments: dict, result) -> DeferredCall | list[DeferredCall] | None:
+    if not result.get("ok"):
+        return None
+    return DeferredCall(key=result["reminder_id"], at=result["remind_at"],
+                        arguments={"reminder_id": result["reminder_id"]},
+                        report_arguments={"event_id": arguments["event_id"]})
+```
+
+After each successful call of the registered tool, the SDK calls `self.<using>(arguments, result)`
+with the call's arguments and the tool's result: a JSON text reply parsed to its dict or list, a dict
+as is, a `CallToolResult`'s `structuredContent` or else its text so parsed, anything else as it is.
+Each `DeferredCall` it returns becomes one entry, with the named tools as its `call` and `report_as`;
+`at` is an aware datetime, epoch seconds or an RFC 3339 string with an offset, declared in UTC. The
+reply's content and structured content are unchanged, and the entries join any `_meta` it has. An
+error reply declares nothing, and a declaration that fails (`using` raises, or returns a wrong type,
+an empty key or an `at` without an offset) is logged and left out rather than breaking the reply.
+The method called in process still returns its plain value. The mount raises unless `call` is a
+`hidden_by_default` tool and `report_as` a tool the environment serves (by served name,
+`{environment_name}` resolved), and `using` a plain method; the card lists both tools under the
+tool's `defers`.
+
 `@tool(..., annotations={"readOnlyHint": True}, structured_output=True, meta={...})` lists the tool
 with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and on fastmcp alike.
 `structured_output` follows mcp's FastMCP (None derives an output schema from the return annotation
@@ -1319,8 +1372,12 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a
   reader's earlier page is always a prefix of a later one. A step is rendered once a page serves it and kept, so a
   read costs one parse of the document, not a render of every step.
-- **Readers** (`load`, `tasks`, `media_paths`, `strip_profile`, `is_prefix`) take any valid ATIF document, with or
-  without the profile, such as a Harbor task's trajectory.json.
+- **Readers** (`load`, `tasks`, `task_document`, `media_paths`, `media_refs`, `strip_profile`, `is_prefix`) take any
+  valid ATIF document, with or without the profile, such as a Harbor task's trajectory.json. `task_document` cuts A2A
+  tasks out of a conversation's document as a document of their own (`tasks_document` for tasks found without ids), as a
+  reader showing one turn shows it. `media_refs` names each place a media
+  file is named, with the profile's details for it; `validate(document, media=StoredMedia(sizes))` checks those
+  details against files stored beside the document without reading their bytes.
 
 ## A2A agent framework
 
@@ -1426,6 +1483,15 @@ in `provider_details`, but cache counts go in their own fields. `Usage.from_dict
 reads what `to_dict` wrote under any protocol version, a field it leaves out
 being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
 usage=...)` carries usage on a failure as `success` does.
+
+An agent that knows each call's model gives a turn's counts by model in
+`Usage.models`, on every turn: one `ModelUsage` per model, with the model's
+name as called, its `calls`, its token and cache counts read as `Usage`'s are,
+and the agent's own `cost_usd` for them when it has one. That prices a
+subagent on a smaller model, a side call for a title, or a whole turn a CLI
+ran on another model at that model's own rate. The rows cover every call the
+turn counted; a call the agent can't name goes under the model it was
+configured with. A turn without rows is priced at its role's model.
 
 Whoever makes a model call knows what its counts hold, so an agent builds its own
 `Usage`. `Usage.from_model_response(usage)` is the default reader for a model
@@ -1690,6 +1756,23 @@ included:
   served. A sub-agent can gain steps while its task runs, so keep each one's
   latest copy; the page that serves a task's last step, which closes only as the
   task ends, carries them whole.
+- A task's cursor read may also say what the reader holds, and get only what it
+  lacks:
+  - `header_digest` is the digest of the header it holds (`""` for none). The
+    answer names the header's `header_digest` and leaves `header` out while the
+    two match.
+  - `subagent_cursors` maps each sub-agent's `trajectory_id` to
+    `{after, header_digest}`, the last `step_id` the reader holds of it and its
+    header's digest (`{}` at first). The answer then carries each of the task's
+    sub-agents by its closed steps past its cursor, whether or not the step that
+    started it has closed, and its header, the trajectory without `steps`, only
+    when that changed. A sub-agent with neither is left out, and
+    `subagent_header_digests` names each one's header digest.
+
+  The card lists both fields on the task cursor read. Detect them with
+  `card_request_accepts(get_request, {"task_id", "after", "format",
+  "header_digest", "subagent_cursors"})`, and send them only to a card that
+  takes them. A read naming neither gets the page above.
 
 Every `atif/1` answer names `schema_version` and `profile_version` beside
 `format`. An adapter that raises stops its context's copy, never the turn: the

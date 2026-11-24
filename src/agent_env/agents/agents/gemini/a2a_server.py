@@ -52,6 +52,7 @@ from agentenv_protocol.a2a_agent import (
     TaskRequest,
     TaskResult,
     TextPart,
+    ModelUsage,
     Usage,
     a2a_agent,
     enable,
@@ -241,10 +242,25 @@ async def _settled(calls: _Calls) -> None:
         await asyncio.sleep(_IN_FLIGHT_POLL_S)
 
 
-def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage:
+def _by_model(calls: _Calls, model: str | None) -> tuple[ModelUsage, ...]:
+    """The answered calls' counts by the model each named, one that named none counted as ``model``'s; none when a
+    call named none and no model is configured."""
+    by_model: dict[str, list[Usage]] = {}
+    for record in calls.records:
+        if record["outcome"] != "answered":
+            continue
+        if not (name := record["model"] or model):
+            return ()
+        by_model.setdefault(name, []).append(Usage(**{count: record["usage"].get(count) for count in _COUNTS[:4]},
+                                                   input_includes_cache=True))
+    return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
+
+
+def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict], model: str | None = None) -> Usage:
     """The turn's usage from the model calls its proxy forwarded, which are every call the CLI made through its base
     URL: the main loop's, its subagents', routing, loop and next-speaker checks, compression, web tools and answered
-    retries. A call answered without counts, or still running when the turn ended, is counted in
+    retries, by the model each call named (``models``, a call that named none counted as ``model``'s, the one the turn
+    was configured with). A call answered without counts, or still running when the turn ended, is counted in
     ``unreported_calls``. When the proxy saw no call but the CLI's own stats name tokens, the CLI went around the
     proxy, and those stats, short of the thoughts, are the turn's, marked a lower bound."""
     answered = [record["usage"] for record in calls.records if record["outcome"] == "answered"]
@@ -262,22 +278,18 @@ def _turn_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage
     if not answered:
         return Usage(tool_call_count=tool_calls, provider_details=details)
 
-    def total(name: str, of: list[dict] = answered) -> int | None:
-        values = [counts[name] for counts in of if counts.get(name) is not None]
+    def total(name: str) -> int | None:
+        values = [counts[name] for counts in answered if counts.get(name) is not None]
         return sum(values) if values else None
 
     if total("reasoning_tokens"):
         details["reasoning_tokens"] = total("reasoning_tokens")
-    models: dict[str, list[dict]] = {}
-    for record in calls.records:
-        if record["outcome"] == "answered":
-            models.setdefault(record["model"] or "unknown", []).append(record["usage"])
-    details["models"] = {model: {"calls": len(of), **{name: total(name, of) for name in _COUNTS[:3]}}
-                         for model, of in models.items()}
+    models = _by_model(calls, model)
     inputs, output = total("input_tokens"), total("output_tokens")
     return Usage(tool_call_count=tool_calls, input_tokens=inputs, output_tokens=output,
                  total_tokens=(inputs or 0) + (output or 0), cache_read_tokens=total("cache_read_tokens"),
-                 cache_write_tokens=total("cache_write_tokens"), input_includes_cache=True, provider_details=details)
+                 cache_write_tokens=total("cache_write_tokens"), input_includes_cache=True, models=models,
+                 provider_details=details)
 
 
 # install.sh, from the build context install_agent unpacks, brings Node, the Gemini CLI and a Python of the agent's
@@ -676,13 +688,13 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                           .failed("infra_error", str(e)[:_ERROR_MESSAGE_LIMIT], error_type="infra_error")
                           .add_text(str(e)))
                 if route.calls.records or route.calls.running:
-                    failed.usage(await self._calls_usage(route.calls, 0, []))
+                    failed.usage(await self._calls_usage(route.calls, 0, [], route.model))
                 return failed.build()
             finally:
                 self._routes.pop(token, None)
                 self._active_contexts.discard(context_id)
 
-        usage = await self._calls_usage(route.calls, result.tool_call_count, result.trajectory)
+        usage = await self._calls_usage(route.calls, result.tool_call_count, result.trajectory, route.model)
 
         if result.session_id:
             self.set_session_ref_for_context(context_id, result.session_id)
@@ -703,10 +715,10 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
         )
 
     @staticmethod
-    async def _calls_usage(calls: _Calls, tool_calls: int, trajectory: list[dict]) -> Usage:
+    async def _calls_usage(calls: _Calls, tool_calls: int, trajectory: list[dict], model: str | None) -> Usage:
         """The turn's usage, once its calls have settled."""
         await _settled(calls)
-        return _turn_usage(calls, tool_calls, trajectory)
+        return _turn_usage(calls, tool_calls, trajectory, model)
 
     def _on_event(self, event: dict, request: TaskRequest[GeminiConfig]) -> None:
         if event.get("type") == "init" and event.get("session_id"):

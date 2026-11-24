@@ -72,6 +72,15 @@ def test_overlapping_calls_both_name_a_row_written_between_them():
         ["event_2", "event_1"], ["event_2", "event_1"], ["event_1"]]
 
 
+def test_a_row_a_deferred_call_wrote_is_attributed_to_it():
+    changes = ChangeAttribution()
+    changes.observe({"event_type": "deferred_call", "event_id": "event_4", "key": "m1", "tool": "chat_deliver",
+                     "role": "alice", "ok": True, "changelog_id_before": 3, "changelog_id_after": 7,
+                     "changelog_windows": [[3, 4], [6, 7]]})
+    actor = {"kind": "deferred_call", "event_id": "event_4", "key": "m1", "tool": "chat_deliver", "role": "alice"}
+    assert changes.actors([4, 5, 7]) == [[actor], [], [actor]]
+
+
 def test_calls_without_a_write_window_attribute_nothing():
     changes = ChangeAttribution()
     for event in (

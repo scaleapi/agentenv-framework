@@ -61,13 +61,19 @@ def test_every_field_round_trips_through_the_stored_form():
               "model": "m", "error_type": "agent_error", "error_code": "c", "error_message": "e",
               "agent_session_id": "s", "a2a_context_id": "ctx", "agent_name": "solver", "step_id": "solve",
               "structured_output": {"a": 1}, "usage": [{"role": "solver", "turns": 2}],
-              "target_agent_per_turn_trajectories": [{"native_format": "echo/1", "atif": None},
-                                                     {"native_format": None, "atif": None}]}
+              "target_agent_per_turn_trajectories": [{"format": "echo/1", "atif": None},
+                                                     {"format": None, "atif": None}]}
     response = dataclasses.replace(_neutral(), **values)
     unset = [f.name for f in dataclasses.fields(PromptResponse)
              if getattr(response, f.name) == (f.default if f.default is not dataclasses.MISSING else None)]
     assert unset == []
     assert PromptResponse.from_dict(response.to_dict()) == response
+
+
+def test_a_turn_record_stored_before_its_label_was_named_format_reads_as_its_format():
+    response = PromptResponse.from_dict({"prompt_id": "p1", "response": "done", "target_agent_per_turn_trajectories": [
+        {"native_format": "echo/1", "atif": None}]})
+    assert response.target_agent_per_turn_trajectories == [{"format": "echo/1", "atif": None}]
 
 
 def test_the_legacy_key_wins_when_the_two_disagree():

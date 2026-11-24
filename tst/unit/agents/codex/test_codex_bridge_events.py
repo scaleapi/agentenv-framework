@@ -284,13 +284,13 @@ def test_usage_is_incremental_from_existing_rollout(
     }
     monkeypatch.setattr(
         codex_bridge,
-        "read_rollout_usage",
-        lambda _: {
+        "read_rollout",
+        lambda _: codex_bridge.Rollout(usage={
             "input_tokens": 100,
             "cached_input_tokens": 60,
             "cache_write_input_tokens": 10,
             "output_tokens": 10,
-        },
+        }),
     )
     spawn(ndjson(agent_message("x"), completed))
     result = asyncio.run(
@@ -329,7 +329,7 @@ def test_native_rollout_usage_is_read_for_snapshot_resume(monkeypatch, tmp_path)
         + "\n"
     )
     monkeypatch.setattr(codex_bridge, "find_rollout_path", lambda _: rollout)
-    assert codex_bridge.read_rollout_usage("thread-1") == {
+    assert codex_bridge.read_rollout("thread-1").usage == {
         "input_tokens": 100,
         "cached_input_tokens": 60,
         "cache_write_input_tokens": 20,
@@ -337,7 +337,8 @@ def test_native_rollout_usage_is_read_for_snapshot_resume(monkeypatch, tmp_path)
     }
 
 
-def test_the_rollout_counts_a_model_request_per_token_count_that_raised_the_total(monkeypatch, tmp_path):
+def test_the_rollout_counts_a_model_request_per_token_count_that_raised_the_total_and_names_its_last_model(
+        monkeypatch, tmp_path):
     def token_count(total):
         info = None if total is None else {"total_token_usage": {"input_tokens": total, "total_tokens": total}}
         return {"type": "event_msg", "payload": {"type": "token_count", "info": info}}
@@ -345,11 +346,15 @@ def test_the_rollout_counts_a_model_request_per_token_count_that_raised_the_tota
     rollout = tmp_path / "rollout.jsonl"
     rollout.write_text("".join(json.dumps(record) + "\n" for record in (
         {"type": "session_meta", "payload": {"id": "thread-1"}},
+        {"type": "turn_context", "payload": {"model": "gpt-5.3-codex"}},
         token_count(None), token_count(100), token_count(100),
+        {"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}},
         {"type": "response_item", "payload": {"type": "function_call"}}, token_count(250))))
     monkeypatch.setattr(codex_bridge, "find_rollout_path", lambda _: rollout)
 
-    assert codex_bridge.read_rollout_requests("thread-1") == 2
+    read = codex_bridge.read_rollout("thread-1")
+
+    assert (read.requests, read.model, read.usage["input_tokens"]) == (2, "gpt-5.6-sol", 250)
 
 
 class _OpenStream(_FakeStream):

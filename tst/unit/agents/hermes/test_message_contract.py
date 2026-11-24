@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from agentenv_protocol.a2a_agent import Uploaded
+from agentenv_protocol.a2a_agent import ModelUsage, Uploaded
 
 from tst.unit.agents.hermes.agent import a2a_server, hermes_bridge, hermes_kit
 from tst.unit.agents.hermes.conftest import result
@@ -290,8 +290,8 @@ def _events(*events):
     return parser
 
 
-def _call(turn, session, prompt, output):
-    return {"type": "post_api_request", "turn_id": turn, "session_id": session,
+def _call(turn, session, prompt, output, model=None):
+    return {"type": "post_api_request", "turn_id": turn, "session_id": session, "model": model,
             "usage": {"input_tokens": prompt, "prompt_tokens": prompt, "output_tokens": output,
                       "cache_read_tokens": 0, "cache_write_tokens": 0}}
 
@@ -355,6 +355,45 @@ def test_a_killed_turn_keeps_the_calls_it_made_as_a_lower_bound():
 
     assert (usage.input_tokens, usage.output_tokens, usage.input_includes_cache) == (26229, 134, True)
     assert usage.provider_details == {"api_calls": 2, "unreported_calls": 1}
+
+
+def test_a_turns_counts_are_its_models_its_title_call_and_childs_included():
+    """Every call a turn makes runs on its model: the title call routes to the main model and a child inherits it."""
+    haiku = "claude-haiku-4-5"
+    parser = _events(_call("A", "parent", 13081, 82, haiku), _call("B", "child", 9161, 60, haiku),
+                     _call("A", "parent", 13535, 4, haiku))
+    report = {"model": "claude-haiku-4-5", "input_tokens": 26616, "output_tokens": 86, "total_tokens": 26702,
+              "cache_read_tokens": 0, "cache_write_tokens": 0, "api_calls": 2, "estimated_cost_usd": 0.0271,
+              "cost_status": "estimated",
+              "auxiliary": {"api_calls": 1, "input_tokens": 456, "output_tokens": 17, "cache_read_tokens": 0,
+                            "cache_write_tokens": 0, "total_tokens": 473},
+              "total_including_auxiliary": {"api_calls": 3, "estimated_cost_usd": 0.0275}}
+
+    alone = a2a_server._usage(result(usage=report))
+    delegated = a2a_server._usage(parser.result(b"", b"", 0, report))
+
+    assert alone.models == (ModelUsage(model="claude-haiku-4-5", calls=3, input_tokens=26616 + 456,
+                                       output_tokens=86 + 17, cache_read_tokens=0, cache_write_tokens=0,
+                                       input_includes_cache=True, cost_usd=0.0275),)
+    (row,) = delegated.models
+    assert (row.calls, row.input_tokens, row.output_tokens, row.cost_usd) == (4, 26616 + 456 + 9161, 86 + 17 + 60, None)
+
+
+def test_a_turn_whose_calls_named_several_models_gives_no_rows():
+    parser = _events(_call("A", "parent", 13081, 82, "claude-haiku-4-5"), _call("B", "child", 9161, 60, "gpt-4.1-mini"))
+    report = {"model": "claude-haiku-4-5", "input_tokens": 13081, "output_tokens": 82, "total_tokens": 13163,
+              "cache_read_tokens": 0, "cache_write_tokens": 0, "api_calls": 1}
+
+    assert a2a_server._usage(parser.result(b"", b"", 0, report)).models == ()
+    assert a2a_server._usage(result(usage={k: v for k, v in report.items() if k != "model"})).models == ()
+
+
+def test_a_killed_turns_counts_are_the_model_its_calls_named():
+    parser = _events(_call("A", "s", 13073, 53, "claude-haiku-4-5"), _call("A", "s", 13156, 81, "claude-haiku-4-5"))
+
+    (row,) = a2a_server._usage(result(usage={}, killed_calls=parser.all_calls)).models
+
+    assert (row.model, row.calls, row.input_tokens, row.output_tokens) == ("claude-haiku-4-5", 2, 26229, 134)
 
 
 def test_the_profile_turns_hermes_review_fork_off():

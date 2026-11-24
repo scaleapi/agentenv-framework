@@ -7,6 +7,7 @@ import logging
 import re
 
 import pytest
+from agentenv_protocol.a2a_agent import Usage
 from click.testing import CliRunner
 
 import agent_env.bundle.run as run_module
@@ -24,9 +25,14 @@ from agent_env.config.runtime import Config
 from agent_env.entity.refs import EntityRef
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
+from agent_env.a2a_agent.protocol import TerminalResponse
+from agent_env.config.model import ModelRole
+from agent_env.config.model_pricing import ModelPrice, PriceTable
 from agent_env.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step import usage as usage_module
+from agent_env.task_step.usage import StepUsage
 from tst.unit.bundle._support import fake_plugins, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
@@ -78,6 +84,36 @@ class _Cancelled(_Scored):
 
     async def execute(self, context):
         raise asyncio.CancelledError
+
+
+class _Spends(_Scored):
+    """Records a solver turn of 1,000 input and 10 output tokens on gpt-4.1-mini and a judge call of 500 and 20 on
+    judge-1, as a prompt step and a judge record theirs."""
+
+    type = "spends_run_test"
+
+    async def execute(self, context):
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, "gpt-4.1-mini", None)
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
+            input_tokens=1000, output_tokens=10, input_includes_cache=True)))
+        usage.call(ModelRole.JUDGE, Usage(input_tokens=500, output_tokens=20, input_includes_cache=True),
+                   model="judge-1", endpoint_host=None)
+        return context
+
+
+class _ReadsCache(_Scored):
+    """Records a solver turn of 1,000 input tokens, 600 of them read from the cache, on gpt-4.1-mini, whose price here
+    gives no cache read rate."""
+
+    type = "reads_cache_run_test"
+
+    async def execute(self, context):
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, "gpt-4.1-mini", None)
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
+            input_tokens=1000, output_tokens=10, cache_read_tokens=600, input_includes_cache=True)))
+        return context
 
 
 class _RecordsModels(_Scored):
@@ -137,7 +173,8 @@ LAYOUT = {
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(),
-             **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels)}}
+             **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels, _Spends,
+                                                         _ReadsCache)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     fake_plugins(monkeypatch)  # no installed package ships these classes
     monkeypatch.setattr(_Scored, "seen", [])
@@ -481,6 +518,62 @@ def test_the_cli_runs_each_role_on_its_model_names_them_and_a_rerun_on_others_wr
     assert ("    models: solver the agent's default; user simulator the agent's default; judge k"
             in second.output.splitlines())
     assert (bundle_dir / "tasks" / "models.json").read_text() == written
+
+
+@pytest.fixture
+def prices(monkeypatch):
+    """gpt-4.1-mini at $0.40 and $1.60 per million input and output tokens, judge-1 at $3 and $15."""
+    monkeypatch.setattr(usage_module, "litellm_prices", lambda: PriceTable({
+        "gpt-4.1-mini": ModelPrice(input=0.4, output=1.6), "judge-1": ModelPrice(input=3.0, output=15.0)},
+        "litellm@test"))
+
+
+def test_a_runs_usage_is_its_ledger_split_by_role_and_model(bundle_dir, prices):
+    layout(bundle_dir, {"tasks/spends.json": json.dumps([{"id": "spend", "type": "spends_run_test"}])})
+
+    (run,) = run_bundle(bundle_dir, tasks=["spends"]).runs
+
+    assert {(entry["role"], entry["model"]) for entry in run.usage} == {
+        ("solver", "gpt-4.1-mini"), ("judge", "judge-1")}
+    summary = run.usage_summary
+    assert [(share.role, share.model, share.input_tokens, share.output_tokens) for share in summary.shares] == [
+        ("solver", "gpt-4.1-mini", 1000, 10), ("judge", "judge-1", 500, 20)]
+    assert summary.cost_usd == pytest.approx(0.000416 + 0.0018) and not summary.lower_bound
+    assert summary.sources == ("litellm@test",)
+
+
+def test_a_usage_read_that_fails_leaves_the_run_and_its_result_without_a_cost(bundle_dir, prices, monkeypatch):
+    layout(bundle_dir, {"tasks/spends.json": json.dumps([{"id": "spend", "type": "spends_run_test"}])})
+    monkeypatch.setattr(run_module, "find_task_instance", lambda instance_id: (_ for _ in ()).throw(
+        ConnectionError("store unreachable")))
+
+    (run,) = run_bundle(bundle_dir, tasks=["spends"]).runs
+
+    assert run.error is None and not run.cancelled and run.usage == () and run.usage_summary is None
+
+
+def test_the_cli_prints_a_cost_priced_on_an_assumed_cache_rate_as_at_most(bundle_dir, prices, quiet_logs):
+    layout(bundle_dir, {"tasks/cached.json": json.dumps([{"id": "read", "type": "reads_cache_run_test"}])})
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "cached"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "    cost: at most $0.0004 (solver gpt-4.1-mini at most $0.0004, 1.0k in, 10 out)" in lines
+
+
+def test_the_cli_prints_each_runs_cost_by_role_and_model_and_an_evals_total(bundle_dir, prices, quiet_logs):
+    layout(bundle_dir, {"tasks/spends.json": json.dumps([{"id": "spend", "type": "spends_run_test"}]),
+                        "evals/spending.toml": 'tasks = ["spends", "a"]\n'})
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--eval", "spending"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    cost = ("cost: $0.0022 (solver gpt-4.1-mini $0.0004, 1.0k in, 10 out; judge judge-1 $0.0018, 500 in, 20 out)")
+    assert f"    {cost}" in lines
+    assert f"    {cost.replace('cost:', 'cost over 2 runs:')}" in lines
+    assert lines[-1] == "Costs priced from LiteLLM's price map, litellm@test."
 
 
 def test_the_cli_exits_0_when_no_run_failed_even_if_one_scored_below_1(bundle_dir, quiet_logs):

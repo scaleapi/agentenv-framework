@@ -54,7 +54,9 @@ def test_the_requirements_are_the_protocol_floor_the_config_writer_and_the_ca_bu
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
 
-    assert requirements == ["agentenv-framework-protocol[agent]>=0.1.597", "tomli-w==1.2.0", "certifi"]
+    protocol, *others = requirements
+    assert re.fullmatch(r"agentenv-framework-protocol\[agent\]>=\d+\.\d+\.\d+", protocol), requirements
+    assert others == ["tomli-w==1.2.0", "certifi"], requirements
 
 
 def test_the_image_gives_the_models_python_the_document_libraries():

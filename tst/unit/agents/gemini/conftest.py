@@ -11,7 +11,7 @@ import pytest
 from agentenv_protocol import transfers as protocol_transfers
 from starlette.testclient import TestClient
 
-from tst.unit.agents.gemini.agent import a2a_server, gemini_bridge
+from tst.unit.agents.gemini.agent import a2a_server, gemini_bridge, gemini_config
 from tst.unit.agents.gemini.support import FakeStore, Staging
 
 
@@ -34,6 +34,7 @@ def home(monkeypatch, tmp_path) -> Path:
     monkeypatch.setattr(a2a_server, "GEMINI_CWD", cwd)
     monkeypatch.setattr(a2a_server, "SKILLS_DIR", gemini_home / "skills")
     monkeypatch.setattr(a2a_server, "INPUTS_DIR", Path(cwd) / "inputs")
+    monkeypatch.setattr(gemini_config, "TASK_DIRS", ())
     return root
 
 

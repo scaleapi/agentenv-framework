@@ -36,8 +36,8 @@ SOLVER_DEFAULT = {"none": None, "sdk_prod": None, "default_only": "D", "every_ro
                   "user_role": None, "judge_role": None}
 USER_CONFIG = {"none": None, "sdk_prod": None, "default_only": None, "every_role": "U", "agent_role": None,
                "user_role": "U", "judge_role": None}
-JUDGE = {"none": "claude-sonnet-4-6", "sdk_prod": "claude-sonnet-4-6", "default_only": "D", "every_role": "J",
-         "agent_role": "D", "user_role": "claude-sonnet-4-6", "judge_role": "J"}
+JUDGE = {"none": "claude-sonnet-5-5", "sdk_prod": "claude-sonnet-5-5", "default_only": "D", "every_role": "J",
+         "agent_role": "D", "user_role": "claude-sonnet-5-5", "judge_role": "J"}
 
 
 @pytest.fixture

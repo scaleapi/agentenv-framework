@@ -19,6 +19,7 @@ from agent_env.runner import local_runner
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunHandle, Runner, RunRecord, RunStatus
 from agent_env.task import Task
+from agent_env.task.store import get_task_instance_store, register_task_instance
 from agent_env.task.teardown import TeardownReport
 from agent_env.task_step.context import TaskStepContext
 
@@ -186,3 +187,41 @@ def test_an_error_cancelling_after_ctrl_c_still_stops_the_runner(monkeypatch, lo
 
     assert isinstance(result.exception, RuntimeError)
     assert runner.stopped
+
+
+class _Spends(_Task):
+    """Leaves one solver entry in its run's ledger, as a running step's write does."""
+
+    async def run(self, context, **kwargs):
+        register_task_instance(self.id, self.version, 0, instance_id=kwargs["instance_id"])
+        get_task_instance_store().record_running_usage_sync(kwargs["instance_id"], [{
+            "attempt": 0, "step_id": "ask", "role": "solver", "model": "gpt-4.1-mini", "turns": 1, "input_tokens": 1000,
+            "output_tokens": 10, "cost_usd": 0.0004, "cost_status": "priced", "cost_source": "litellm@test"}])
+        return await super().run(context, **kwargs)
+
+
+SPENT = "at least $0.0004 (solver gpt-4.1-mini at least $0.0004, 1.0k in, 10 out, partial)"
+
+
+def test_an_eval_prints_each_runs_cost_and_their_total_from_the_ledgers(monkeypatch, tmp_path, torn_down):
+    """Two versions of one task, whose runs share a tag, each count."""
+    monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: types.SimpleNamespace(
+        id="e", version=1, tasks=[types.SimpleNamespace(task_id="t", task_version=1),
+                                  types.SimpleNamespace(task_id="t", task_version=2)])))
+
+    result = _invoke(monkeypatch, _Spends(), "eval", "run", "--id", "e")
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines.count(f"    cost: {SPENT}") == 2
+    assert ("Cost over 2 runs: at least $0.0008 (solver gpt-4.1-mini at least $0.0008, 2.0k in, 20 out, partial)"
+            in lines)
+    assert lines[-1] == "Costs priced from LiteLLM's price map, litellm@test."
+
+
+def test_a_task_run_prints_its_cost_from_the_ledger(monkeypatch, tmp_path, torn_down):
+    result = _invoke(monkeypatch, _Spends(), "task", "run", "--id", "t", "--output-dir", str(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert f"cost: {SPENT}" in result.output.splitlines()
+    assert result.output.splitlines()[-1] == "Costs priced from LiteLLM's price map, litellm@test."

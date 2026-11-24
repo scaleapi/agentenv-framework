@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -48,7 +49,7 @@ def gateway(tmp_path, monkeypatch):
     gw._tool_server_urls = {"items_add_item": "http://items/mcp"}
     gw.calls = []
 
-    async def call_child_tool(server_url, tool_name, arguments, *, caller=None):
+    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report):
         gw.calls.append((arguments["item"], gw._clock.read()["virtual_time"]))
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
@@ -148,9 +149,9 @@ async def test_a_recurring_trigger_whose_action_outlasts_its_interval_still_move
 async def test_a_fire_the_agents_turn_set_off_lands_before_the_clock_jumps(hook, gateway, monkeypatch):
     real = gateway._call_child_tool
 
-    async def slow(server_url, tool_name, arguments, *, caller=None):
+    async def slow(server_url, tool_name, arguments, *, caller=None, report):
         await asyncio.sleep(0.3)
-        return await real(server_url, tool_name, arguments, caller=caller)
+        return await real(server_url, tool_name, arguments, caller=caller, report=report)
 
     gateway._call_child_tool = slow
     _register(gateway, {"id": "ack", "when": {"type": "action", "tool": "send_email"}, "actions": _add("ack")},
@@ -161,6 +162,34 @@ async def test_a_fire_the_agents_turn_set_off_lands_before_the_clock_jumps(hook,
 
     assert decisions[0] == _nudge("2026-03-03T09:00:00Z")
     assert gateway.calls == [("ack", MONDAY), ("tue", "2026-03-03T09:00:00Z")]
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_server_deferred_gets_a_wake_at_its_time_and_the_reply_it_provokes_lands_first(hook, gateway):
+    """A message an agent scheduled is an env event: the clock jumps to its time, not past it, and the agent wakes once
+    the trigger its posting set off has run."""
+    _register(gateway, {"id": "ack", "when": {"type": "action", "tool": "items_post"}, "actions": _add("ack")},
+              {"id": "wed", "when": {"type": "time", "at": "2026-03-04T09:00:00Z"}, "actions": _add("wed")})
+    gateway._deferred.take(CallToolResult(content=[], isError=False, _meta={"agentenv.io/deferredCalls": [
+        {"key": "m1", "at": "2026-03-03T09:00:00Z", "call": {"tool": "items_add_item", "arguments": {"item": "posted"}},
+         "report_as": {"tool": "items_post", "arguments": {}}}]}), "http://items/mcp", "default")
+
+    decisions = await _turns(hook, _context())
+
+    assert decisions == [_nudge("2026-03-03T09:00:00Z"), _nudge("2026-03-04T09:00:00Z"), {"end": "no_pending_events"}]
+    assert gateway.calls == [("posted", "2026-03-03T09:00:00Z"), ("ack", "2026-03-03T09:00:00Z"),
+                             ("wed", "2026-03-04T09:00:00Z")]
+
+
+@pytest.mark.asyncio
+async def test_settling_waits_for_a_deferred_call_the_gateway_says_is_due_and_not_for_one_still_to_come(hook):
+    """A running clock may reach a call's time between the hook's clock read and its state read, so the gateway's
+    ``due``, not the hook's reading of the time, says the call is under way."""
+    turn = SimpleNamespace(heartbeat=lambda: None)
+    due = _StateEnv(hook, due_reads=2)
+    assert await hook._settle(turn, [(due, None, None)], 5) == [True] and due.reads == 3
+    later = _StateEnv(hook, due_reads=0)
+    assert await hook._settle(turn, [(later, None, None)], 5) == [True] and later.reads == 1
 
 
 @pytest.mark.asyncio
@@ -264,3 +293,26 @@ async def test_params_the_hook_cannot_use_are_refused(hook, gateway, params, fra
     with pytest.raises(ValueError) as e:
         await _turns(hook, _context(), params)
     assert fragment in str(e.value)
+
+
+class _StateEnv:
+    """An env whose clock reads 09:00:00 while its gateway, a moment on, lists a deferred call at 09:00:01: due and still
+    to make for the first ``due_reads`` reads of its triggers state, made after; never due when ``due_reads`` is 0."""
+
+    env_id = "items"
+
+    def __init__(self, hook, due_reads: int):
+        self.hook, self.due_reads, self.reads = hook, due_reads, 0
+
+    def supports(self, uri, op):
+        return True
+
+    async def invoke(self, uri, op, args=None):
+        assert op == "state", op
+        if uri == self.hook.CLOCK:
+            return {"armed": True, "virtual_time": "2026-03-03T09:00:00Z"}
+        self.reads += 1
+        due = self.reads <= self.due_reads
+        made = self.due_reads and not due
+        return {"triggers": [], "next_event_at": None if made else "2026-03-03T09:00:01Z", "deferred_calls": [
+            {"key": "m1", "at": "2026-03-03T09:00:01Z", "status": "done" if made else "pending", "due": due}]}
