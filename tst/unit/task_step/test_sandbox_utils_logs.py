@@ -104,6 +104,13 @@ async def test_max_chars_widens_each_stream(install):
 
 
 @pytest.mark.asyncio
+async def test_max_chars_zero_keeps_nothing(install):
+    sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("x" * 50, "y" * 50)})
+
+    assert await fetch_container_logs(install(sandbox), max_chars=0) is None
+
+
+@pytest.mark.asyncio
 async def test_no_docker_is_none_after_one_exec(install):
     sandbox = FakeSandbox(docker_ok=False)
 

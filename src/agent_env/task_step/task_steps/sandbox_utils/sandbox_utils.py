@@ -34,6 +34,11 @@ def ended_turn_error(state: Any, reply: TerminalResponse) -> str:
     return ": ".join(part for part in (f"state {state}", detail, text) if part)
 
 
+def _last_chars(text: str, limit: int) -> str:
+    """The last ``limit`` characters of ``text``; none for a limit of zero or less, where ``text[-0:]`` would keep all."""
+    return text[len(text) - max(limit, 0):]
+
+
 async def fetch_container_logs(
     agent, tail: int = 500, *, max_chars: int = _STREAM_TAIL_CHARS
 ) -> Optional[str]:
@@ -75,8 +80,8 @@ async def fetch_container_logs(
                     "sudo", "docker", "logs", "--tail", str(tail), cid,
                 )
                 parts = []
-                out_tail = (out or "").strip()[-max_chars:]
-                err_tail = (err or "").strip()[-max_chars:]
+                out_tail = _last_chars((out or "").strip(), max_chars)
+                err_tail = _last_chars((err or "").strip(), max_chars)
                 if out_tail:
                     parts.append(f"[stdout]\n{out_tail}")
                 if err_tail:
