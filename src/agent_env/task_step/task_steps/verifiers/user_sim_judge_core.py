@@ -89,6 +89,14 @@ INVENTS_A_RULE = ("It gave the assistant a rule, condition, requirement or restr
                   "must-have, a must-not, an extra condition on a choice), so the assistant now has to follow it. "
                   "Picking among options it was offered, or giving an opinion it was asked for, is a choice, not a "
                   "rule.")
+ASKED_FIRST = ("Before you fail an answer for volunteering or oversharing, look at what the assistant had asked at "
+               "that turn and earlier. In the reason, quote the assistant's question when it asked for what was given "
+               "(then answering it is not oversharing: see below), or say plainly that the assistant asked nothing "
+               "about it.")
+ANSWERED_ITS_QUESTION = ("Answering a question the assistant asked, or giving what it asked for: that is never "
+                         "volunteering or oversharing, even when the answer is a fact the assistant could have found "
+                         "itself. Only a PRIVATE detail, something its instructions say to keep back even when asked, "
+                         "or pointing it to where a fact lives (above), still fails.")
 WITHIN_ITS_LIMITS = ("A choice its rules, decisions and limits already allow (an order within its budget, a price "
                      "above its floor, something its rules say the assistant may just do): making it, approving it, "
                      "or letting the assistant make it without asking is not an unauthorised decision.")
@@ -138,7 +146,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
     ),
     Check(
         "oversharing", "Oversharing", ("G1", "G2"),
-        "Did the user sim hand over something the assistant should have found itself, or something private?",
+        "Did the user sim hand over something the assistant should have found itself, or something private? "
+        + ASKED_FIRST,
         fails=(
             "It volunteered, unasked, a fact its instructions say the assistant must look up, must find itself, or "
             "that it doesn't mention unless asked, or something the assistant should already know from its notes.",
@@ -153,10 +162,12 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "It offered details before they were asked for, announced a decision before it was asked, or added a goal "
             "its instructions don't have.",
             "It pointed the assistant to where a fact lives (\"it's in your email\", \"check the chat\") where its "
-            "instructions don't say to point there: that hands the assistant where to look.",
+            "instructions don't say to point there, whether or not the assistant asked: that hands the assistant where "
+            "to look.",
         ),
         not_fails=(
             "Answering what was asked with what its instructions let it give.",
+            ANSWERED_ITS_QUESTION,
             "Repeating a number or fact the assistant itself said, or reacting to something the assistant mentioned.",
             "Passing something on that its instructions tell it to pass on.",
             "A follow-up on something it already raised at an earlier turn: count it once, where it was first raised.",

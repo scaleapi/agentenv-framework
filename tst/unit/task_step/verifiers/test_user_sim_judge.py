@@ -1649,3 +1649,34 @@ def test_contradicting_its_instructions_inventing_a_rule_and_coaching_fail_and_t
                  "A small in-character detail nothing depends on (mention it in the reason, but pass)."):
         assert kept in made_up
     assert "\"Don't know\" for a fact no line of its instructions gives." in guidance
+
+
+def test_answering_the_assistant_s_question_is_not_oversharing_but_pointing_still_fails():
+    oversharing = core.check_question("oversharing")
+    assert oversharing.startswith(core.CHECKS["oversharing"].question) and core.ASKED_FIRST in oversharing
+    assert core.ANSWERED_ITS_QUESTION in oversharing.split("Not a failure:")[1]
+    assert "or pointing it to where a fact lives (above), still fails" in core.ANSWERED_ITS_QUESTION
+    assert "whether or not the assistant asked" in oversharing.split("Not a failure:")[0]
+
+
+@pytest.mark.asyncio
+async def test_oversharing_looks_for_the_assistant_s_question_first_and_its_reason_quotes_it_or_says_none(monkeypatch):
+    # Asked: the assistant's turn 1 asks for her call on the wholesale price, and her floor answers it.
+    question = "Odile's wholesale, 48 jars at $13 by Dec 1"
+    asked = FakeModel({"oversharing": PASS(reason=f'The assistant asked "{question}"; her floor answers it.',
+                                           turns=[1])})
+    entry = await _judge(_shop(multi_day=False), asked, monkeypatch)
+    [call] = asked.asked("oversharing")
+    assert core.ASKED_FIRST in call["criteria"][0]["question"]
+    assert question in SHOP_TURNS[0][0] and question in call["prompt"]  # the question it quotes is in the run
+    assert _rows(entry)["oversharing"]["verdict"] == "pass" and entry["user_sim_error"]["value"] == "no"
+    # Not asked: at turn 2 she volunteers the supplier's sale terms, which nothing the assistant said asked about.
+    sent, _, _ = SHOP_TURNS[1]
+    run = _shop(multi_day=False)
+    run.turns[1] = core.Turn(n=2, outcome="reply", input=sent,
+                             message="thanks. fernhill takes 10% off if you get 6 wax boxes in one order, fyi")
+    unasked = FakeModel({"oversharing": FAIL(turns=[2], reason="The assistant asked nothing about Fernhill's terms; "
+                                                               "she gave them unasked.")})
+    entry = await _judge(run, unasked, monkeypatch)
+    assert "fernhill" not in sent.lower()  # nothing it was sent at that turn asks about them
+    assert _rows(entry)["oversharing"]["verdict"] == "fail" and entry["user_sim_error"]["because"] == ["oversharing"]
