@@ -58,18 +58,6 @@ def parse_follower_range(value) -> FollowerRange:
     return held
 
 
-def check_arm(virtual_time: str, rate=1.0, time_zone: str | None = None) -> tuple[datetime, float]:
-    """``virtual_time`` and ``rate`` as the clock arms at them, in ``time_zone`` if one, or the ClockError it refuses
-    them with whatever its followers, as sync_env_clock checks them before anything deploys."""
-    t0 = _parse_rfc3339(virtual_time)
-    r = _parse_rate(1.0 if rate is None else rate)
-    if time_zone is not None and _zone(time_zone) is None:
-        raise ClockError(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as 'America/New_York'")
-    if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
-        raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
-    return t0, r
-
-
 def _check_range(what: str, name: str, held: FollowerRange, t: datetime, rate: float | None) -> None:
     """Refuse ``t`` outside the range follower ``name`` holds, or, run at ``rate``, one it would pass the end of that
     range from within a real hour."""
@@ -241,7 +229,12 @@ class Clock:
     def set_time(self, virtual_time: str, rate=1.0, time_zone: str | None = None) -> dict:
         """Arm/re-arm: anchor t0=virtual_time to now, advancing at `rate` virtual s per real s, in the universe's
         `time_zone` (its users' IANA zone), or none."""
-        t0, r = check_arm(virtual_time, rate, time_zone)
+        t0 = _parse_rfc3339(virtual_time)
+        r = _parse_rate(1.0 if rate is None else rate)
+        if time_zone is not None and _zone(time_zone) is None:
+            raise ClockError(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as 'America/New_York'")
+        if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+            raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         self._check_followers(f"virtual_time {virtual_time!r}", t0, r)
         with self._lock:
             self._bank(t0)
@@ -266,7 +259,7 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return
-            now, rate = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead), self._rate
+            (now, _), rate = self._current(), self._rate
         _check_range(f"the clock, at {_iso(now)},", name, held, now, rate)
 
     def set_rate(self, rate) -> dict:
@@ -297,7 +290,7 @@ class Clock:
             if target > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
                 raise ClockError(f"virtual_time {virtual_time!r} at rate {self._rate:g} would overflow datetime near the max")
             self._check_followers(f"virtual_time {virtual_time!r}", target, None)
-            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+            current, _ = self._current()
             jump = (target - current).total_seconds()
             if jump < 0:
                 raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
@@ -328,8 +321,7 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return None
-            elapsed = self._now() - self._anchor
-            return _advance(self._t0, elapsed * self._rate + self._ahead)
+            return self._current()[0]
 
     @property
     def time_zone(self) -> str | None:
@@ -355,10 +347,17 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return {"armed": False, "version": self.version}
-            elapsed = self._now() - self._anchor
-            return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
-                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
+            current, at_end = self._current()
+            return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": 0.0 if at_end else self._rate,
+                    "virtual_time": _iso(current),
                     **({"time_zone": self._time_zone} if self._time_zone else {}), "version": self.version}
+
+    def _current(self) -> tuple[datetime, bool]:
+        """The current arm's time now, and whether it stands at the end of the narrowest range a follower holds: a clock
+        doesn't run past what a follower of it can show, so the gateway's tools and the follower agree. Lock held."""
+        current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+        end = min((held.latest for held in self._follower_ranges().values()), default=None)
+        return (end, True) if end is not None and current >= end else (current, False)
 
     def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""

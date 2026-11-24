@@ -147,3 +147,20 @@ def test_a_range_that_doesnt_parse_is_refused_naming_the_end_of_it_that_doesnt(h
     with pytest.raises(ClockError, match=said) as refused:
         parse_follower_range(held)
     assert "virtual_time" not in str(refused.value)
+
+
+def test_a_clock_that_runs_into_a_followers_end_stands_there_at_rate_0_and_one_with_none_runs_on():
+    """As the computer's page stands at the end of its range, so does the gateway's clock while it has the computer, so
+    the gateway's tools and the computer's programs agree; with no follower that holds a range it runs on as before."""
+    ranged, _, now = _clock({"desktop": HELD})
+    ranged.set_time("2262-04-11T22:47:16Z")
+    now.tick(3601)
+    assert ranged.read()["virtual_time"] == "2262-04-11T23:47:16Z"
+    state = ranged.state()
+    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
+
+    free, _, now = _clock()
+    free.set_time("2262-04-11T22:47:16Z")
+    now.tick(3601)
+    assert free.read()["virtual_time"] == "2262-04-11T23:47:17Z"
+    assert free.state()["virtual_seconds_per_real_second"] == 1.0
