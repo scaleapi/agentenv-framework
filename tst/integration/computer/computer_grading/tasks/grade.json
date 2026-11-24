@@ -7,7 +7,7 @@
    "prompt": "Write ~/Desktop/budget.csv with rent 1200 and food 300 and their total, and leave a note in ~/notes.txt stating the total."},
   {"id": "work", "type": "computer_exec", "env_id": "office", "depends_on": ["env"],
    "command": "mkdir -p Desktop && printf 'item,amount\\nrent,1200\\nfood,300\\ntotal,1500\\n' > Desktop/budget.csv && echo 'Budget done.' > notes.txt"},
-  {"id": "snapshot", "type": "snapshot_computer_env", "env_id": "office", "computer": "desk", "depends_on": ["work"],
+  {"id": "snapshot", "type": "snapshot_computer_env", "env_id": "office", "computer_name": "desk", "depends_on": ["work"],
    "file_paths": ["Desktop/budget.csv", "notes.txt"]},
   {"id": "result", "type": "load_artifact", "artifact_from_step_id": "snapshot", "agent_name": "judge",
    "destination_path": "/tmp/grading/result", "depends_on": ["snapshot", "judge"]},

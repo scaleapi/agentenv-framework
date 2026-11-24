@@ -86,14 +86,14 @@ def _kept(desktop: EnvironmentArtifact) -> dict[str, bytes]:
 
 
 def test_its_fields_round_trip_and_its_type_is_registered():
-    step = SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="office", computer="desk",
+    step = SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="office", computer_name="desk",
                                        file_paths=["Documents", "Desktop/a.pdf"], export_timeout_seconds=60)
 
     data = step.to_dict()
     restored = get_task_step_registry()["snapshot_computer_env"].from_dict(data)
 
     assert isinstance(restored, SnapshotComputerEnvTaskStep) and data["type"] == "snapshot_computer_env"
-    assert (restored.env_id, restored.computer, restored.file_paths, restored.export_timeout_seconds) == (
+    assert (restored.env_id, restored.computer_name, restored.file_paths, restored.export_timeout_seconds) == (
         "office", "desk", ["Documents", "Desktop/a.pdf"], 60)
     assert not {"gateway_url", "include_env_trajectory", "include_env_changes"} & set(data)
 
@@ -109,11 +109,11 @@ def test_file_paths_not_relative_to_the_home_are_refused_before_a_run(paths):
 @pytest.mark.parametrize("stored, computer, problem", [
     (_Mail(), None, "env 'mail' is no computer env, nor a multi env with one"),
     (_Desk(), None, None),
-    (_Desk(), "desktop", "env 'desk' is a computer env, so it takes no computer name"),
+    (_Desk(), "desktop", "env 'desk' is a computer env, so it takes no computer_name"),
     (_stored_multi("desk"), None, None),
     (_stored_multi("desk", "laptop"), "laptop", None),
     (_stored_multi("desk", "laptop"), None,
-     "env 'office' has 2 computers: name one as computer, of ['desk', 'laptop']"),
+     "env 'office' has 2 computers: name one as computer_name, of ['desk', 'laptop']"),
     (_stored_multi("desk"), "kiosk", "env 'office' has no computer named 'kiosk' (it has ['desk'])"),
 ], ids=["mcp-server", "computer", "computer-named", "multi-only-computer", "multi-named", "multi-two-unnamed",
         "multi-unknown-name"])
@@ -121,7 +121,8 @@ def test_an_env_that_isnt_a_computer_nor_a_multi_env_with_the_one_named_is_refus
         monkeypatch, stored, computer, problem):
     monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: stored))
 
-    problems = SnapshotComputerEnvTaskStep(id="snap", version=None, env_id=stored.id, computer=computer).preflight()
+    problems = SnapshotComputerEnvTaskStep(id="snap", version=None, env_id=stored.id,
+                                           computer_name=computer).preflight()
 
     assert problems == ([] if problem is None else [f"snapshot_computer_env 'snap': {problem}"])
 
@@ -161,7 +162,7 @@ async def test_a_multi_envs_computer_is_kept_beside_its_other_environments_with_
     monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Office()))
     context = _ctx(_office(*computers))
 
-    await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="office", computer=computer,
+    await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="office", computer_name=computer,
                                       file_paths=["notes.txt"]).execute(context)
 
     snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
@@ -174,7 +175,7 @@ async def test_a_multi_envs_computer_is_kept_beside_its_other_environments_with_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("computers, computer, refused", [
-    (("desk", "laptop"), None, r"env 'office' has 2 computers serving .* run: name one as computer"),
+    (("desk", "laptop"), None, r"env 'office' has 2 computers serving .* run: name one as computer_name"),
     (("desk",), "kiosk", r"env 'office' has no computer named 'kiosk' \(it has \['desk'\]\)"),
 ], ids=["two-unnamed", "an-unknown-name"])
 async def test_a_multi_env_without_the_computer_named_is_refused(local_stores, monkeypatch, computers, computer,
@@ -183,7 +184,7 @@ async def test_a_multi_env_without_the_computer_named_is_refused(local_stores, m
     monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Office()))
 
     with pytest.raises(RuntimeError, match=refused):
-        await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="office", computer=computer,
+        await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="office", computer_name=computer,
                                           file_paths=["notes.txt"]).execute(_ctx(_office(*computers)))
     assert sent == []
 

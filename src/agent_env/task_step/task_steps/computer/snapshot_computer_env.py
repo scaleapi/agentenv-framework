@@ -28,8 +28,9 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
     each file under its path relative to the session user's home in the computer's environment artifact: those under
     ``file_paths``, by default the folders its card declares, leaving out each app's paths. Each app that exports is
     kept beside it in an environment artifact under the app's name. The computer is a computer env, or the one
-    ``computer`` names in a multi env (its only one when unnamed), whose other environments are kept beside it as
-    ``snapshot_env`` keeps them. ``load_artifact`` loads the snapshot back into a computer, through ``data/add``, or
+    ``computer_name`` names in a multi env by its environment name there (its key in the deploy's ``child_envs``, not
+    its env id; the env's only computer when unnamed), whose other environments are kept beside it as ``snapshot_env``
+    keeps them. ``load_artifact`` loads the snapshot back into a computer, through ``data/add``, or
     stages it as files in an agent, a judge's sandbox for one.
 
     Output: ``context.metadata["env_snapshotted_universes"][self.id]`` = ``{"id", "version"}``."""
@@ -48,7 +49,7 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         env_instance_id: Optional[str] = None,
         env_step_id: Optional[str] = None,
         snapshot_id: Optional[str] = None,
-        computer: Optional[str] = None,
+        computer_name: Optional[str] = None,
         file_paths: Optional[list[str]] = None,
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         depends_on: Optional[list[TaskStepDependency]] = None,
@@ -57,12 +58,12 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         super().__init__(id, version, env_id=env_id, env_instance_id=env_instance_id, env_step_id=env_step_id,
                          snapshot_id=snapshot_id, export_timeout_seconds=export_timeout_seconds,
                          depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.computer = computer
+        self.computer_name = computer_name
         self.file_paths = file_paths
 
     def to_dict(self) -> dict:
         return {**TaskStep.to_dict(self), "env_id": self.env_id, "env_instance_id": self.env_instance_id,
-                "env_step_id": self.env_step_id, "snapshot_id": self.snapshot_id, "computer": self.computer,
+                "env_step_id": self.env_step_id, "snapshot_id": self.snapshot_id, "computer_name": self.computer_name,
                 "file_paths": self.file_paths,
                 "export_timeout_seconds": self.export_timeout_seconds}
 
@@ -70,7 +71,7 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
     def from_dict(cls, data: dict) -> SnapshotComputerEnvTaskStep:
         return cls(**cls._base_from_dict(data), env_id=data.get("env_id"), env_instance_id=data.get("env_instance_id"),
                    env_step_id=data.get("env_step_id"), snapshot_id=data.get("snapshot_id"),
-                   computer=data.get("computer"), file_paths=data.get("file_paths"),
+                   computer_name=data.get("computer_name"), file_paths=data.get("file_paths"),
                    export_timeout_seconds=data.get("export_timeout_seconds", DEFAULT_EXPORT_TIMEOUT_SECONDS))
 
     def config_problems(self) -> list[str]:
@@ -84,15 +85,15 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         return problems
 
     def preflight(self) -> list[str]:
-        """The env this step names when it isn't a computer env, nor a multi env with the computer ``computer``
-        picks."""
+        """The env this step names when it isn't a computer env, nor a multi env with the computer
+        ``computer_name`` picks."""
         problems = super().preflight()
         if self.env_id is None:
             return problems
         env = stored_env(self.env_id)
         if env is None:  # what the run reports
             return problems
-        problem = computer_problem(env, self.computer)
+        problem = computer_problem(env, self.computer_name)
         return [*problems, f"snapshot_computer_env {self.id!r}: {problem}"] if problem else problems
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -102,8 +103,8 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         deployed = self._resolve_deployed_env(context)
         env = await asyncio.to_thread(Env.get, deployed.env_id, deployed.env_version)
         if isinstance(env, MultiEnv):
-            name = child_computer(deployed, self.computer)[0]
-        elif problem := computer_problem(env, self.computer):
+            name = child_computer(deployed, self.computer_name)[0]
+        elif problem := computer_problem(env, self.computer_name):
             raise RuntimeError(f"snapshot_computer_env {self.id!r}: {problem}")
         else:
             name = env.computer_name
