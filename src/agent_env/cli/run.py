@@ -209,6 +209,9 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))
         if models := _models(run):
             click.echo(f"    models: {models}")
+        if run.splits:
+            click.echo("    samples split: " + "; ".join(f"{step_id} on {', '.join(rows)}"
+                                                        for step_id, rows in run.splits.items()))
     if result.evals:
         click.echo("Evals:")
     for eval_run in result.evals:

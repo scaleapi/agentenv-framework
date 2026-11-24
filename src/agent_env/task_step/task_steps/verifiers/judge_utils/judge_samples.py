@@ -4,16 +4,17 @@ negative criterion's is inverted), so a tie fails: two samples pass only togethe
 criterion an odd count is the majority vote. The row kept is that sample's (its justification, and its outcome on a
 criterion with fixed outcomes), with every sample's score, verdict and justification beside it.
 
-``min_judge_agreement`` is how many of the samples must give the kept row's verdict, as a share: 1.0 by default, so a
-criterion the samples split on fails the grade (``JudgeDisagreementError``) rather than being decided by the median.
-The share is kept to two places, so 0.67 is two samples of three, and is 1.0 only when every sample agrees."""
+``min_judge_agreement`` is how many of the samples must give the kept row's verdict, as a share, or the grade fails
+(``JudgeDisagreementError``). It is 0.5 by default, which the kept verdict always meets, so the median decides every
+row unless a task or run asks for more: 1.0 fails any split. The share is kept to two places, so 0.67 is two samples
+of three, and is 1.0 only when every sample agrees."""
 
 from __future__ import annotations
 
 import statistics
 from typing import Any, Optional
 
-DEFAULT_MIN_AGREEMENT = 1.0
+DEFAULT_MIN_AGREEMENT = 0.5
 
 
 class JudgeDisagreementError(RuntimeError):
@@ -64,6 +65,12 @@ def median_rows(sampled: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
 def disagreeing(rows: list[dict[str, Any]], bar: float) -> list[dict[str, Any]]:
     """The sampled rows whose ``agreement`` is under ``bar``."""
     return [row for row in rows if "agreement" in row and row["agreement"] < bar]
+
+
+def splits(rows: list[dict[str, Any]]) -> list[str]:
+    """Each sampled row its samples didn't all agree on, as ``<id> (<passes> of <samples> pass)``."""
+    return [f"{row.get('id')} ({sum(1 for s in row['samples'] if s.get('passed'))} of {len(row['samples'])} pass)"
+            for row in rows if row.get("samples") and row.get("agreement", 1.0) < 1.0]
 
 
 def disagreement(verifier_id: str, rows: list[dict[str, Any]], bar: float) -> str:

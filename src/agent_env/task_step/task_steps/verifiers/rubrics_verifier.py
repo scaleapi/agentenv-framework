@@ -640,7 +640,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         # score kept.
         self.judge_samples = judge_samples_rule.validated(judge_samples)
         # The share of samples that must give each criterion's kept verdict, else the grade fails; None is the
-        # default, 1.0, so a split fails rather than being decided by the median.
+        # default, 0.5, which never fails, so the median decides; 1.0 fails any split.
         self.min_judge_agreement = judge_samples_rule.validated_agreement(min_judge_agreement)
         # An agent judge call (a batch's, with batches) that runs out of judge_timeout_seconds is tried again this many
         # times, and the timed-out attempt's trajectory is kept; None keeps the first timeout fatal, as it always was.

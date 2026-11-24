@@ -30,6 +30,7 @@ from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples as judge_samples_rule
+from agent_env.task_step.task_steps.verifiers.verifier import GRADES_KEY
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.store import record_task_cancelled
@@ -93,6 +94,13 @@ class TaskRun:
         """Every score the run recorded, by the id of the step that recorded it, or by its verification's key
         when that isn't a step's verifier id."""
         return recorded_scores(self.task.steps, self.context)
+
+    @property
+    def splits(self) -> dict[str, list[str]]:
+        """The criteria a sampled judge's samples split on in a grade that stood, by step id, each with its passes."""
+        grades = self.context.metadata.get(GRADES_KEY) or {}
+        return {step_id: split for step_id, grade in grades.items() if grade.get("verifier_status") == "graded"
+                and (split := judge_samples_rule.splits(grade.get("verifier_criteria") or []))}
 
     @property
     def models(self) -> dict[str, dict[str, str | None]]:

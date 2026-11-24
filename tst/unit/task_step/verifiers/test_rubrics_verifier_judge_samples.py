@@ -1,7 +1,7 @@
 """judge_samples: a rubric_binary or rubric_partial judge grades each criterion that many times and keeps its median, the
 lower middle score on a tie, so a tie fails, the row of the first sample that scored it with every sample's score,
-verdict and justification beside it and its agreement; a split under min_judge_agreement (1.0 by default) fails the
-grade, its rows kept, then the step, and so the task unless the step tolerates it; each
+verdict and justification beside it and its agreement; a split under min_judge_agreement (0.5 by default, which never
+fails) fails the grade, its rows kept, then the step, and so the task unless the step tolerates it; each
 call's record names its sample; the samples share the judge's concurrency; one that fails fails the grade; a judge the
 verifier deploys gets one of its own per sample, while the task's own judge takes every sample; a run's count reaches
 every judge that can take it, and one that can't grades once and records it as not sent."""
@@ -308,12 +308,24 @@ def test_the_run_flags_set_the_runs_count_and_bar_and_refuse_bad_ones(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_by_default_a_split_fails_the_grade_keeping_each_row_and_its_samples_then_fails_the_step(monkeypatch):
+async def test_by_default_the_median_decides_a_split_and_each_row_says_how_much_its_samples_agreed(monkeypatch):
+    _sampled_llm(monkeypatch, _two_to_one)
+
+    grade = await _grade(G._step(default_model="gpt-4o-mini", judge_samples=3), G._context())
+
+    assert (grade["verifier_status"], grade["score"]) == ("graded", 1.0)
+    assert [row["agreement"] for row in grade["verifier_criteria"]] == [0.67, 0.67]
+    assert grade["verifier_settings"]["min_judge_agreement"] == 0.5
+    assert judge_samples.splits(grade["verifier_criteria"]) == ["table-reserved (2 of 3 pass)", "party-size (2 of 3 pass)"]
+
+
+@pytest.mark.asyncio
+async def test_a_bar_of_1_fails_a_split_grade_keeping_each_row_and_its_samples_then_fails_the_step(monkeypatch):
     _sampled_llm(monkeypatch, _two_to_one)
     context = G._context()
 
     with pytest.raises(JudgeDisagreementError) as raised:
-        await G._step(default_model="gpt-4o-mini", judge_samples=3).execute(context)
+        await G._step(default_model="gpt-4o-mini", judge_samples=3, min_judge_agreement=1.0).execute(context)
 
     assert str(raised.value) == (
         "Verifier 'vid': its judge samples split on 2 criteria, under min_judge_agreement 1: table-reserved (2 of 3 "
@@ -340,7 +352,8 @@ async def test_samples_that_agree_grade_as_before_with_the_default_bar_recorded(
 
     assert (grade["verifier_status"], grade["score"]) == ("graded", 1.0)
     assert all(row["agreement"] == 1.0 for row in grade["verifier_criteria"])
-    assert grade["verifier_settings"]["min_judge_agreement"] == 1.0
+    assert grade["verifier_settings"]["min_judge_agreement"] == 0.5
+    assert judge_samples.splits(grade["verifier_criteria"]) == []
 
 
 @pytest.mark.asyncio
@@ -377,7 +390,8 @@ async def test_partial_scores_agree_on_their_verdict_so_close_scores_pass_and_a_
     context = G._context()
 
     with pytest.raises(JudgeDisagreementError, match=r"split on a criterion, .*: party-size \(2 of 3 samples pass it\)"):
-        await G._step(default_model="gpt-4o-mini", judge_samples=3, output_format="rubric_partial").execute(context)
+        await G._step(default_model="gpt-4o-mini", judge_samples=3, output_format="rubric_partial",
+                      min_judge_agreement=1.0).execute(context)
 
     rows = {row["id"]: row for row in context.metadata["grades"]["verify"]["verifier_criteria"]}
     assert (rows["table-reserved"]["score"], rows["table-reserved"]["agreement"]) == (0.75, 1.0)
@@ -390,7 +404,7 @@ async def test_partial_scores_agree_on_their_verdict_so_close_scores_pass_and_a_
 async def test_a_split_fails_the_task_or_is_tolerated_as_the_steps_fail_task_on_error_says(monkeypatch, fatal):
     _sampled_llm(monkeypatch, _two_to_one)
     task = Task(id="t", version=1, steps=[G._step(default_model="gpt-4o-mini", judge_samples=3,
-                                                  fail_task_on_error=fatal)])
+                                                  min_judge_agreement=1.0, fail_task_on_error=fatal)])
     context = G._context()
 
     if fatal:

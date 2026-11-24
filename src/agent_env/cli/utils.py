@@ -89,8 +89,8 @@ def min_judge_agreement_option(f):
     return click.option(
         "--min-judge-agreement", type=float, default=None, callback=_min_judge_agreement, metavar="SHARE",
         help="The share of a sampled judge's samples that must give each criterion's kept verdict, else its grade "
-             "fails (1.0 by default, so any split fails; 0.67 is two of three), in every judge that samples, "
-             "whatever the tasks say.")(f)
+             "fails, in every judge that samples, whatever the tasks say: 1.0 fails any split, 0.67 is two of "
+             "three, and 0.5, the default, never fails, so the median decides.")(f)
 
 
 def refuse_unwritable_ids(*ids: str) -> None:
