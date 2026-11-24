@@ -279,6 +279,18 @@ async def test_a_running_clock_makes_it_at_its_time_holds_it_at_rate_0_and_resum
 
 
 @pytest.mark.asyncio
+async def test_clearing_the_clock_moves_a_waiting_call_onto_wall_time(tmp_path, monkeypatch):
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        await _schedule(gw, chat, _declared())  # due in three virtual minutes, months before the wall clock
+        await asyncio.sleep(0.2)
+        assert chat.made(DELIVER) == []
+        await _request(gw, "POST", "/clock/clear")
+        await _until(lambda: chat.made(DELIVER))
+        assert chat.made(DELIVER)[0]["virtual"] is None
+
+
+@pytest.mark.asyncio
 async def test_an_unarmed_clock_makes_it_at_its_wall_time(tmp_path, monkeypatch):
     async with _chat(tmp_path, monkeypatch) as (gw, chat):
         soon = datetime.now(timezone.utc) + timedelta(seconds=0.3)
