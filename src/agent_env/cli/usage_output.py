@@ -61,7 +61,9 @@ def _cost(of: UsageSummary | Share) -> str:
 def _dollars(usd: float) -> str:
     if usd == 0:
         return "$0"
-    return f"${usd:.{_DOLLAR_PLACES}f}" if usd >= _SMALLEST_DOLLARS else f"under ${_SMALLEST_DOLLARS:.{_DOLLAR_PLACES}f}"
+    if usd < _SMALLEST_DOLLARS:
+        return f"under ${_SMALLEST_DOLLARS:.{_DOLLAR_PLACES}f}"
+    return f"${usd:.{_DOLLAR_PLACES}f}"
 
 
 def _count(n: int) -> str:
