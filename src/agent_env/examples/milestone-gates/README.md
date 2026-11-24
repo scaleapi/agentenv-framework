@@ -73,8 +73,10 @@ A gate is `{id, nudge, check}`. The check kinds, by the gate types of a multitur
 
 A call is `{tool, args?, path?, where?, number?}`: `path` is a dotted path into the tool's JSON result, `where` keeps
 list items whose fields contain the given text, `number` reads a count the tool reports. An artifact is
-`{find: call + {pick?: "first" | "last"}, read?: {tool, args, extract?}}`: `read` args may use `"{field}"` from the
-item `find` picked, and `extract: "gmail"` turns a Gmail API message into its headers and plain-text body.
+`{find: call + {pick?: "first" | "last"}, read?: {tool, args, extract?}, field?}`: `read` args may use `"{field}"`
+from the item `find` picked, and `extract: "gmail"` turns a Gmail API message into its headers and plain-text body.
+Without `read`, `field` (a dotted path) takes that field of the picked item as the artifact's text, such as a draft's
+`body`; otherwise the text is the whole item as JSON, where a format check would count escaped line breaks.
 
 The params are checked when the step loads the hook, before the first message (the hook's `check_params`): unknown
 keys on a milestone or gate, a check that isn't exactly one kind or lacks what its kind needs, an artifact a milestone

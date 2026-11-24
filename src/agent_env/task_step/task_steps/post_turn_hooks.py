@@ -223,6 +223,7 @@ class Turn:
         self.envs = [HookEnv(d, hook.artifact_id) for d in context.deployed_envs]
         self._context = context
         self._step_id = step_id
+        self.step_id = step_id  # the prompt_agent step this turn is in: turn numbers restart in each
         self._hook = hook
         self._answer = answer
 

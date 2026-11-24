@@ -148,7 +148,7 @@ async def test_all_gates_passing_opens_the_next_milestone_and_takes_its_baseline
     t2 = Turn(env, records, 2)
     await post_turn(t2, PARAMS)
     assert t2.notes == ["M1 is done. Open M2 now: send its line."]
-    assert records[-1]["decision"] == "passed" and records[-1]["baselines"] == {"M2:0": 0}
+    assert records[-1]["decision"] == "passed" and records[-1]["baselines"] == {"M2:m2-quiet:0": 0}
 
     # M2: an email now is new against the baseline taken when M2 opened
     w["gmail_sent"] = {"messages": [{"id": "x"}]}
@@ -316,7 +316,7 @@ async def test_when_the_sim_sends_a_later_line_the_hook_follows_it_before_the_ag
     await post_turn(t, LINED)
     r = records[-1]
     assert r["decision"] == "nudge" and r["followed_sim"] == "M2" and r["next_index"] == 1
-    assert r["baselines"] == {"M2:0": 2}  # taken now, before the agent works on M2
+    assert r["baselines"] == {"M2:m2-quiet:0": 2}  # taken now, before the agent works on M2
     t2 = Turn(env, records, 2)
     await post_turn(t2, LINED)  # M2 is checked now, against its own baseline: no comment yet
     assert records[-1]["milestone"] == "M2" and t2.notes == ["Did the comment go on the card?"]
@@ -617,3 +617,122 @@ async def test_a_gates_declared_type_is_the_summarys_even_when_a_judge_checks_it
 
     assert turn.summary["milestones"][0]["gates"] == {"m1-sheet": {"passed": True, "type": "action"}}
     assert turn.summary["milestones"][1]["gates"] == {"m2-linear": {"passed": True, "type": "content"}}  # no type given: from its check
+
+
+class ErrEnv(Env):
+    """Env whose ``failing`` tools answer with a tool error."""
+
+    def __init__(self, state, failing=()):
+        super().__init__(state)
+        self.failing = set(failing)
+
+    async def call_tool(self, tool, args, role):
+        if tool in self.failing:
+            self.calls.append((tool, args, role))
+            return {"isError": True, "content": [{"type": "text", "text": "rate limited"}]}
+        return await super().call_tool(tool, args, role)
+
+
+def _two_counts(first_open=True):
+    """M1 passes at once; M2 watches two tools with different starting counts."""
+    return {"role": "r", "milestones": [
+        {"id": "M1", "gates": [{"id": "m1", "nudge": "n", "check": {"call": {"tool": "ok"}, "expect": "exists"}}]},
+        {"id": "M2", "line": "next", "skip_if_done": False, "gates": [
+            {"id": "q-a", "nudge": "n", "check": {"no_new": [{"tool": "a", "path": "items"}]}},
+            {"id": "q-b", "nudge": "n", "check": {"no_new": [{"tool": "b", "path": "items"}]}}]}]}
+
+
+@pytest.mark.asyncio
+async def test_two_no_new_gates_keep_their_own_baselines():
+    state = {"ok": "yes", "a": {"items": []}, "b": {"items": list(range(10))}}
+    records = []
+    await post_turn(Turn(Env(state), records, 1), _two_counts())  # M1 passes; M2's baselines: a 0, b 10
+    assert records[-1]["baselines"] == {"M2:q-a:0": 0, "M2:q-b:0": 10}
+    state["a"] = {"items": [1, 2]}  # two added where b's count would have hidden them
+    await post_turn(Turn(Env(state), records, 2), _two_counts())
+    assert {g["id"]: g["passed"] for g in records[-1]["gates"]} == {"q-a": False, "q-b": True}
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_that_cant_be_read_leaves_its_gate_unknown_and_the_step_running():
+    state = {"ok": "yes", "a": {"items": []}, "b": {"items": []}}
+    records = []
+    await post_turn(Turn(ErrEnv(state, failing={"b"}), records, 1), _two_counts())
+    assert records[-1]["baselines"] == {"M2:q-a:0": 0}
+    await post_turn(Turn(Env(state), records, 2), _two_counts())
+    verdicts = {g["id"]: (g["passed"], g["why"][:20]) for g in records[-1]["gates"]}
+    assert verdicts["q-a"][0] is True and verdicts["q-b"] == (None, "unknown: no baseline")
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_read_that_errors_is_not_the_artifacts_text():
+    params = {"role": "r", "milestones": [{"id": "M1", "artifacts": {"doc": {
+        "find": {"tool": "docs", "path": "files"}, "read": {"tool": "doc_read", "args": {"id": "{id}"}}}},
+        "gates": [{"id": "g", "nudge": "n", "check": {"artifact": "doc", "expect": "exists"}}]}]}
+    records = []
+    await post_turn(Turn(ErrEnv({"docs": {"files": [{"id": "d1"}]}}, failing={"doc_read"}), records, 1), params)
+    gate = records[-1]["gates"][0]
+    assert gate["passed"] is False and "tool error reading 'doc'" in gate["why"]
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_that_passes_on_the_final_turn_is_passed_in_the_summary():
+    params = {"role": "r", "milestones": [
+        {"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"call": {"tool": "ok"}, "expect": "exists"}}]}]}
+    turn = Turn(Env({"ok": "yes"}), [], 1, last=True)
+    await post_turn(turn, params)
+    row = turn.summary["milestones"][0]
+    assert (row["status"], row["closed_turn"]) == ("passed", 1)
+
+
+@pytest.mark.parametrize("check, problem", [
+    ({"artifact": "x", "format": {"max_paragraphs": "2"}}, "whole number"),
+    ({"artifact": "x", "format": {"contains_all": "robert"}}, "list of text"),
+    ({"call": {"tool": "t"}, "expect": {"count": {"min": "1"}}}, "whole number"),
+    ({"call": {"tool": "t"}, "expect": {"contains": 3}}, "must be text"),
+    ({"no_new": [{"tool": "t", "baseline_count": "0"}]}, "whole number"),
+])
+def test_a_value_of_the_wrong_type_is_refused_at_load(check, problem):
+    params = {"role": "r", "milestones": [{"id": "M1", "artifacts": {"x": {"find": {"tool": "f"}}},
+                                           "gates": [{"id": "g", "nudge": "n", "check": check}]}]}
+    with pytest.raises(ValueError, match=problem):
+        mg.check_params(params)
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_in_a_format_the_hook_cant_read_leaves_the_gate_unknown(monkeypatch):
+    mg._RENDERED.clear()
+    called = []
+
+    async def judge(*a, **k):
+        called.append(a)
+        return True, "x"
+
+    monkeypatch.setattr(mg, "_judge", judge)
+    other = {"s3://t/g1.json": [{"type": "tool_use", "tool_name": "sheets_create", "parameters": {}},
+                                {"type": "message", "role": "assistant", "content": "Done."}]}
+    turn = Turn(Env(world()), [], 1, trajectories=other)
+    await post_turn(turn, TRAJ_PARAMS)
+    gate = turn._records[-1]["gates"][0]
+    assert gate["passed"] is None and "format this hook reads" in gate["why"] and not called
+
+
+def test_a_turns_sim_fields_are_read_from_its_own_step_only():
+    turn = Turn(Env(world()), [], 1)
+    turn.step_id = "now"
+    turn.metadata = {"usersim_turn_outputs": {"earlier": [{"turn": 1, "fields": {"milestone": "M3"}}],
+                                              "now": [{"turn": 1, "fields": {"milestone": "M1"}}]}}
+    assert mg._sim_field(turn, "milestone") == "M1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field, passed", [("body", False), (None, True)])
+async def test_a_field_artifact_counts_the_fields_own_paragraphs(field, passed):
+    draft = {"id": 1, "to": "a@x", "body": "Para one.\n\nPara two.\n\nPara three."}
+    artifact = {"find": {"tool": "list_drafts", "pick": "last"}, **({"field": field} if field else {})}
+    params = {"role": "r", "milestones": [{"id": "M1", "artifacts": {"draft": artifact}, "gates": [
+        {"id": "short", "nudge": "n", "check": {"artifact": "draft", "format": {"max_paragraphs": 2}}}]}]}
+    records = []
+    await post_turn(Turn(Env({"list_drafts": [draft]}), records, 1), params)
+    # As JSON the body's blank lines are escaped, so the whole item reads as one paragraph and passes wrongly.
+    assert records[-1]["gates"][0]["passed"] is passed

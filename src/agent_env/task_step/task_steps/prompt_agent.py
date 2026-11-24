@@ -676,6 +676,7 @@ class PromptAgentTaskStep(TaskStep):
         conversation_tool_call_count: Optional[int] = None
         final_task_id = ""
         per_turn_trajectory_urls: list[str | None] = []
+        hook_trajectory_urls: list[str | None] = []  # what post-turn hooks read: native while the run's copies wait
         per_turn_trajectories: list[TurnTrajectory] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
@@ -772,12 +773,22 @@ class PromptAgentTaskStep(TaskStep):
                         target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type, headers=agent.control_headers,
                     )
                     stored = StoredTrajectory()
+                    hook_url = None
                     if not atif_copies.replaces_native:  # the run's copy, read off the turn's path, replaces native
                         try:
                             stored = await read_native()
                         except Exception as e:
                             logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
+                        hook_url = stored.url
+                    elif hooks is not None:
+                        # The run's copies arrive after the conversation; hooks judge this turn's work now, so they get
+                        # its native trajectory. The step's record keeps the copies.
+                        try:
+                            hook_url = (await read_native()).url
+                        except Exception as e:
+                            logger.warning(f"Turn {turn+1} trajectory fetch for post-turn hooks failed (continuing): {e}")
                     per_turn_trajectory_urls.append(stored.url)
+                    hook_trajectory_urls.append(hook_url)
                     turn_record = TurnTrajectory(format=stored.format, atif=None)
                     per_turn_trajectories.append(turn_record)
                     atif_copies.turn(len(per_turn_trajectory_urls) - 1, sent_task_id, target_a2a_task_id, turn_record,
@@ -815,7 +826,7 @@ class PromptAgentTaskStep(TaskStep):
                         agent_parts=agent_response_parts,
                         ask_user=functools.partial(user_side.ask, turn + 1, reply, agent_response_parts),
                         user_triggers=functools.partial(user_side.triggers, turn + 1, reply),
-                        trajectory_urls=per_turn_trajectory_urls,
+                        trajectory_urls=hook_trajectory_urls,
                     )
                 if answer is None and not last:
                     answer = await user_side.ask(turn + 1, final_terminal.response_text, agent_response_parts)
@@ -1244,11 +1255,14 @@ class _UserSide:
                 self._record("user_side_notes", {"turn": number, "note": note})
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
                                               note=note)
-            if note is not None and self._built_in.person.get("preset") == "milestone":
+            keep = note is not None and self._built_in.person.get("preset") == "milestone"
+            if keep:
                 answer = await self._keep_replying(number, answer)
             if self._gate is not None and "message" in answer:
                 async def rewrite_built_in(why: str) -> dict:  # the gate's request alone: the hook's note went once
-                    return await self._built_in.rewrite(number, why, self._ask_built_in)
+                    got = await self._built_in.rewrite(number, why, self._ask_built_in)
+                    # A rewrite is still a turn with the note in play: a milestone user doesn't leave by no_reply here.
+                    return await self._keep_replying(number, got) if keep else got
 
                 answer = await self._gated(number, answer, rewrite_built_in, hook_note=note)
             self._end_after = answer.get("end_after")

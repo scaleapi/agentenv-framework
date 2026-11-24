@@ -54,9 +54,10 @@ A call is {tool, args?, path?, where?, number?}: ``path`` is a dotted path into 
 keeps the list items whose fields contain the given text, and ``number`` reads a count the tool reports (that field of
 the first item) instead of counting the list. ``expect`` is "exists", or {"count": {"eq"|"min"|"max": n}},
 {"contains": text} or {"equals": value}.
-An artifact is {find: call + {pick?: "first"|"last"}, read?: {tool, args, extract?}}: ``read`` args may use
+An artifact is {find: call + {pick?: "first"|"last"}, read?: {tool, args, extract?}, field?}: ``read`` args may use
 "{field}" from the item ``find`` picked, and ``extract: "gmail"`` turns a Gmail API message into its headers and
-plain-text body; without ``read`` the artifact's text is the picked item itself.
+plain-text body; without ``read``, ``field`` (a dotted path) takes that field of the picked item as its text, else the
+artifact's text is the picked item itself, as JSON.
 """
 from __future__ import annotations
 
@@ -117,10 +118,11 @@ async def _post_turn(turn, spec):
     gates = await _run_gates(turn, spec, env, m, state)
     failed = [g for g in gates if g["passed"] is False]
     entry = {"milestone": m["id"], "gates": gates}
-    if turn.last:  # nothing more can be asked: record where it stood
-        turn.record({**entry, "decision": "last_turn", "nudges": state["nudges"]})
-        return None
     unchecked = bool(gates) and all(g["passed"] is None for g in gates)
+    if turn.last:  # nothing more can be asked: record where it stood, passed if its gates passed on this turn
+        turn.record({**entry, "decision": "last_turn", "nudges": state["nudges"],
+                     "passed": not failed and not unchecked})
+        return None
     if not failed and not unchecked:
         return await _advance(turn, spec, env, state, entry, "passed")
     if state["nudges"] >= m["max_nudges"]:
@@ -212,6 +214,8 @@ def _summary(spec: dict, records: list[dict]) -> dict:
                 row["nudges"] = r.get("nudges", row["nudges"])
             elif decision in ("passed", "gave_up"):
                 row.update(status=decision, closed_turn=turn)
+            elif decision == "last_turn" and r.get("passed"):  # done on the final turn, with nothing left to ask
+                row.update(status="passed", closed_turn=turn)
             elif decision == "end" and r.get("end", "").startswith("gate_never_passed"):
                 row.update(status="derailed", closed_turn=turn, nudges=r.get("nudges", row["nudges"]))
         for s in r.get("skipped") or []:
@@ -283,7 +287,8 @@ async def _advance(turn, spec, env, state, entry, how):
 def _sim_field(turn, name) -> Any:
     """The peer sim's own field for this turn (prompt_agent records extra JSON fields), or None."""
     outputs = (turn.metadata.get("usersim_turn_outputs") or {})
-    for entries in outputs.values():
+    step_id = getattr(turn, "step_id", None)  # turn numbers restart in each prompt_agent step
+    for entries in ([outputs.get(step_id) or []] if step_id is not None else outputs.values()):
         for e in entries:
             if e.get("turn") == turn.number and name in (e.get("fields") or {}):
                 value = e["fields"][name]
@@ -353,7 +358,7 @@ async def _gate(turn, spec, env, m, state, g, artifacts) -> dict:
         elif "call" in check:
             passed, why = _expect(await _call(env, spec["role"], check["call"]), check["expect"])
         elif "no_new" in check:
-            passed, why = await _no_new(env, spec["role"], m, state, check["no_new"])
+            passed, why = await _no_new(env, spec["role"], m, state, check["no_new"], g["id"])
         else:
             text = await _artifact(env, spec["role"], m, check["artifact"], artifacts)
             if text is None:
@@ -435,25 +440,34 @@ def _expect(value: Any, expect: Any) -> tuple[bool, str]:
     raise ValueError(f"unknown expect {expect!r}")
 
 
-async def _no_new(env, role, m, state, calls) -> tuple[bool, str]:
+def _baseline_key(m: dict, gate_id: str, i: int) -> str:
+    return f"{m['id']}:{gate_id}:{i}"
+
+
+async def _no_new(env, role, m, state, calls, gate_id: str) -> tuple[Optional[bool], str]:
+    """Nothing added since the milestone opened. Unknown (None) when a baseline couldn't be read then: comparing
+    against nothing would be a guess."""
     added = []
     for i, call in enumerate(calls):
-        value = await _call(env, role, call)
-        n = _size(value)
-        base = state["baselines"].get(f"{m['id']}:{i}", call.get("baseline_count"))
+        base = state["baselines"].get(_baseline_key(m, gate_id, i), call.get("baseline_count"))
         if base is None:
-            raise ValueError(f"no baseline for {call['tool']} in {m['id']}")
+            return None, f"unknown: no baseline for {call['tool']} (it couldn't be read when {m['id']} opened)"
+        n = _size(await _call(env, role, call))
         if n > base:
             added.append(f"{call['tool']} +{n - base}")
     return (not added), ("nothing new" if not added else "new: " + ", ".join(added))
 
 
 async def _baselines(env, spec, m) -> dict:
+    """Each no_new call's count when ``m`` opens, keyed by gate and call. A read that fails leaves its baseline
+    missing (its gate is then unknown), rather than failing the step over a temporary tool error."""
     out = {}
     for g in m["gates"]:
         for i, call in enumerate(g["check"].get("no_new") or []):
-            value = await _call(env, spec["role"], call)
-            out[f"{m['id']}:{i}"] = _size(value)
+            try:
+                out[_baseline_key(m, g["id"], i)] = _size(await _call(env, spec["role"], call))
+            except Exception:  # noqa: BLE001 - a missing baseline makes only this gate unknown
+                continue
     return out
 
 
@@ -470,9 +484,15 @@ async def _artifact(env, role, m, name, cache) -> Optional[str]:
     if a.get("read"):
         args = {k: (v.format(**item) if isinstance(v, str) and isinstance(item, dict) else v)
                 for k, v in (a["read"].get("args") or {}).items()}
-        text = _text(await env.call_tool(a["read"]["tool"], args, role))
+        resp = await env.call_tool(a["read"]["tool"], args, role)
+        if isinstance(resp, dict) and resp.get("isError"):  # a failed read is not the artifact's text
+            raise RuntimeError(f"tool error reading {name!r}: {_text(resp)[:200]}")
+        text = _text(resp)
         if a["read"].get("extract") == "gmail":
             text = _gmail_text(text)
+    elif a.get("field") and isinstance(item, dict):  # one field of the item, as its text (a draft's body)
+        value = _dig(item, a["field"])
+        text = None if value is None else (value if isinstance(value, str) else json.dumps(value, indent=1))
     else:
         text = item if isinstance(item, str) else json.dumps(item, indent=1)
     cache[name] = text
@@ -594,6 +614,9 @@ async def _trajectory_gate(turn, spec, state, statement: str) -> tuple[Optional[
         if url not in _RENDERED:
             raw = await turn.read_trajectory(n)
             _RENDERED[url] = render_trajectory(json.loads(raw)) if raw else "(empty trajectory)"
+        if n in step and not _RENDERED[url].strip():
+            # Work in a format this renderer doesn't read (not claude-code's stream-json) would show as nothing.
+            return None, f"unknown: turn {n}'s trajectory isn't in a format this hook reads"
         texts.append((n, _RENDERED[url]))
     log = _evidence(texts, step, spec["trajectory_max_chars"])
     return await _judge(spec, statement, log, model=spec["trajectory_judge_model"], system=TRAJECTORY_JUDGE_SYSTEM,
@@ -612,7 +635,8 @@ def _evidence(texts: list[tuple[int, str]], step: range, max_chars: int) -> str:
     return out if len(out) <= max_chars else out[-max_chars:]
 
 
-TRAJ_WRITE_CHARS, TRAJ_READ_CHARS, TRAJ_TEXT_CHARS = 3000, 160, 1500
+# Writes in full (they are what a gate judges); reads and the agent's text shortened. trajectory_max_chars bounds it all.
+TRAJ_WRITE_CHARS, TRAJ_READ_CHARS, TRAJ_TEXT_CHARS = None, 160, 1500
 _WRITE_VERBS = re.compile(r"(create|update|add|send|reply|post|comment|delete|remove|trash|write|batch|append|set_|"
                           r"share|move|rename|edit|insert|archive|label|assign|draft|upload|invite|cancel|close)", re.I)
 _READ_VERBS = re.compile(r"^(\w+_)?(get|list|search|read|find|query|fetch|view|describe|lookup|download|export|count)"
@@ -626,10 +650,10 @@ def is_write(tool: str) -> bool:
     return not _READ_VERBS.match(name) and bool(_WRITE_VERBS.search(name))
 
 
-def _cut(value, limit: int) -> str:
+def _cut(value, limit: Optional[int]) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     text = re.sub(r"\s+", " ", text).strip()
-    return text if len(text) <= limit else text[:limit] + f"... [+{len(text) - limit} chars]"
+    return text if limit is None or len(text) <= limit else text[:limit] + f"... [+{len(text) - limit} chars]"
 
 
 def _result_text(content) -> str:
@@ -640,7 +664,8 @@ def _result_text(content) -> str:
 
 def render_trajectory(messages: list) -> str:
     """One claude-code turn trajectory (stream-json messages) as text: each tool call in order with its result,
-    writes up to TRAJ_WRITE_CHARS, reads up to TRAJ_READ_CHARS, and the agent's text."""
+    writes in full, reads up to TRAJ_READ_CHARS, and the agent's text. Empty for a trajectory in another format,
+    which the trajectory gate then treats as unreadable."""
     results: dict = {}
     for m in messages:
         if isinstance(m, dict) and m.get("type") == "user":
@@ -721,7 +746,8 @@ def _check_problem(check: dict) -> Optional[str]:
         calls = check["no_new"]
         if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) and c.get("tool") for c in calls):
             return "no_new needs a list of calls, each with a tool"
-        return None
+        bad = [c["baseline_count"] for c in calls if c.get("baseline_count") is not None and not _whole(c["baseline_count"])]
+        return f"no_new baseline_count must be a whole number, got {bad[0]!r}" if bad else None
     how = [k for k in ("expect", "format", "judge") if k in check]
     if len(how) != 1:
         return f"an artifact check needs exactly one of expect, format, judge; got {how or 'none'}"
@@ -731,6 +757,13 @@ def _check_problem(check: dict) -> Optional[str]:
         fmt = check["format"]
         if not isinstance(fmt, dict) or not fmt or set(fmt) - FORMAT_KEYS:
             return f"format needs one or more of {sorted(FORMAT_KEYS)}"
+        for key in ("max_paragraphs", "max_sentences"):
+            if key in fmt and not _whole(fmt[key]):
+                return f"format.{key} must be a whole number, got {fmt[key]!r}"
+        for key in ("contains_all", "contains_none"):
+            if key in fmt and not (isinstance(fmt[key], list) and fmt[key]
+                                   and all(isinstance(t, str) and t for t in fmt[key])):
+                return f"format.{key} must be a list of text, got {fmt[key]!r}"
     if how == ["judge"] and not (isinstance(check["judge"], str) and check["judge"].strip()):
         return "judge needs a statement"
     return None
@@ -742,9 +775,16 @@ def _expect_problem(expect: Any) -> Optional[str]:
     if not isinstance(expect, dict) or len(expect) != 1 or not set(expect) <= {"count", "contains", "equals"}:
         return 'expect must be "exists" or one of {count}, {contains}, {equals}'
     if "count" in expect and (not isinstance(expect["count"], dict) or not expect["count"]
-                              or set(expect["count"]) - {"eq", "min", "max"}):
-        return "expect.count needs eq, min or max"
+                              or set(expect["count"]) - {"eq", "min", "max"}
+                              or not all(_whole(v) for v in expect["count"].values())):
+        return "expect.count needs eq, min or max, each a whole number"
+    if "contains" in expect and not (isinstance(expect["contains"], str) and expect["contains"]):
+        return "expect.contains must be text"
     return None
+
+
+def _whole(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _spec(params: dict) -> dict:

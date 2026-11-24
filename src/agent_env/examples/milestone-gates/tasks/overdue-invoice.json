@@ -16,7 +16,7 @@
      "role": "default", "idle_end": 2,
      "milestones": [
        {"id": "M1", "max_nudges": 2, "show": "draft",
-        "artifacts": {"draft": {"find": {"tool": "list_drafts", "pick": "last"}}},
+        "artifacts": {"draft": {"find": {"tool": "list_drafts", "pick": "last"}, "field": "body"}},
         "gates": [
           {"id": "m1-draft", "nudge": "I don't see a draft yet.", "check": {"artifact": "draft", "expect": "exists"}},
           {"id": "m1-not-sent", "nudge": "Don't send anything yet, I want to see it first.",

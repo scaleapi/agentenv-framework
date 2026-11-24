@@ -625,3 +625,22 @@ async def test_without_the_milestone_preset_a_no_reply_to_a_note_still_ends_the_
 
     assert _to_agent(peers, ctx) == ["plan my parents' visit"]
     assert "user_sim_note_retries" not in ctx.metadata and result.prompt_responses[-1].error_type is None
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_users_gate_rewrite_that_comes_back_as_no_reply_is_asked_again(monkeypatch):
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard."), text("Added Arthur."), text("ok")],
+                                USER: [said("reply", _SWAP), said("no_reply"), said("reply", "who else should be on it?"),
+                                       said("reply", "thanks")]})
+    ctx = await _context(monkeypatch, preset="milestone")
+    hook = _hook("noted-gated", NOTE_HOOK)
+
+    step = _step(turns=3, user_sim_gate={"patterns": True, "judge_model": "judge"},
+                 post_turn_hooks=[{"file_artifact_id": hook, "params": {}}])
+    result = await step.execute(ctx)
+
+    # The gate held the swap back; its rewrite came back as no_reply and was asked again, so the turn went on.
+    assert _to_agent(peers, ctx)[:2] == ["plan my parents' visit", "who else should be on it?"]
+    assert ctx.metadata["user_sim_note_retries"]["talk"] == [{"turn": 1}]
+    assert "user_sim_invalid" not in ctx.metadata and result.prompt_responses[-1].error_type is None
