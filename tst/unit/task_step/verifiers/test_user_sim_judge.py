@@ -1632,3 +1632,8 @@ def test_done_isn_t_premature_because_someone_else_hasn_t_replied():
     assert "an approval only the user can give" in q and "its own WHEN YOU'RE DONE conditions" in q
     assert "another person's or a business's silence never makes \"done\" premature" in q
     assert "an answer it needed from the user" in q
+
+
+def test_a_choice_its_rules_decisions_and_limits_allow_is_not_unauthorised():
+    for check in ("delegation", "rogue"):
+        assert core.WITHIN_ITS_LIMITS in core.check_question(check).split("Not a failure:")[1], check

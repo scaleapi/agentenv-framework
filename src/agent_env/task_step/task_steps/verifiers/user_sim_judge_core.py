@@ -80,6 +80,9 @@ class Check:
 
 # Every rule is written against the user sim's own instructions, which the judge reads whole: it is never graded for a
 # reaction they don't ask for. These hold in more than one check.
+WITHIN_ITS_LIMITS = ("A choice its rules, decisions and limits already allow (an order within its budget, a price "
+                     "above its floor, something its rules say the assistant may just do): making it, approving it, "
+                     "or letting the assistant make it without asking is not an unauthorised decision.")
 NOT_PUSHING_BACK = ("Not pushing back when the assistant says it broke one of its rules or did something it was told "
                     "to hold off on: the assistant's slip is graded on the assistant, never on the user sim.")
 
@@ -163,6 +166,7 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         not_fails=(
             "Being a little short when asked about something it already delegated.",
             "Saying yes to an \"ask first\" item its decisions allow.",
+            WITHIN_ITS_LIMITS,
             NOT_PUSHING_BACK,
         ),
         na="Answer \"n/a\" when its instructions have no rules about what the assistant may do without asking, or its "
@@ -217,6 +221,7 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "Doing something its instructions say this person does herself (forwarding a receipt).",
             "Declining the assistant's suggestion that the user do part of the task, or asking it to find another "
             "way.",
+            WITHIN_ITS_LIMITS,
             NOT_PUSHING_BACK,
         ),
         grade="Yes when the assistant's work, or how it is graded, now rests on what the user sim did in its place.",
