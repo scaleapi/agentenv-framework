@@ -75,6 +75,7 @@ class ClockFollowers:
         one; a follower the gateway started with stays."""
         if name not in self._declared:
             return False
+        self._clock().stop_at_end()  # a clock standing at the end of its range stays there when the range goes
         async with self._acks:
             self._declared.discard(name)
             for followers in (self._tokens, self._shown, self._seen, self._held):

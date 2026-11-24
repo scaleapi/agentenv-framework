@@ -164,3 +164,25 @@ def test_a_clock_that_runs_into_a_followers_end_stands_there_at_rate_0_and_one_w
     now.tick(3601)
     assert free.read()["virtual_time"] == "2262-04-11T23:47:17Z"
     assert free.state()["virtual_seconds_per_real_second"] == 1.0
+
+
+def test_a_clock_stopped_at_a_followers_end_stops_its_delays_keeps_still_when_the_follower_goes_and_takes_one_more():
+    """Stopped there, not only read there: a delay counts no further (elapsed and at_elapsed agree with the time shown),
+    retiring the follower leaves the clock where it stands rather than jumping it to where it would have run, and a
+    follower declared while it stands is taken, since the clock runs no further."""
+    clock, followers, now = _clock()
+    clock.set_time("2262-04-11T22:47:16Z")
+    followers.declare("agent-solver", "token", HELD)
+    now.tick(3600 * 5)
+    elapsed = clock.elapsed()
+    now.tick(600)
+    assert clock.elapsed() == elapsed and clock.at_elapsed(clock.elapsed()) == HELD.latest
+
+    followers.declare("agent-late", "token", HELD)
+    assert asyncio.run(followers.retire("agent-solver")) and asyncio.run(followers.retire("agent-late"))
+    now.tick(600)
+    state = clock.state()
+    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
+    assert clock.set_rate(1)["virtual_seconds_per_real_second"] == 1.0
+    now.tick(1)
+    assert clock.read()["virtual_time"] == "2262-04-11T23:47:17Z"

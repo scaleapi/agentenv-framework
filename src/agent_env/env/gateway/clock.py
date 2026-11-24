@@ -237,6 +237,7 @@ class Clock:
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         self._check_followers(f"virtual_time {virtual_time!r}", t0, r)
         with self._lock:
+            self._stop_at_end()
             self._bank(t0)
             self._t0 = t0
             self._rate = r
@@ -259,7 +260,8 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return
-            (now, _), rate = self._current(), self._rate
+            self._stop_at_end()
+            now, rate = self._current(), self._rate
         _check_range(f"the clock, at {_iso(now)},", name, held, now, rate)
 
     def set_rate(self, rate) -> dict:
@@ -270,6 +272,7 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 raise ClockError("clock is not armed")
+            self._stop_at_end()
             now = self._now()
             ran = (now - self._anchor) * self._rate
             if _advance(self._t0, ran + self._ahead) > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
@@ -290,7 +293,8 @@ class Clock:
             if target > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
                 raise ClockError(f"virtual_time {virtual_time!r} at rate {self._rate:g} would overflow datetime near the max")
             self._check_followers(f"virtual_time {virtual_time!r}", target, None)
-            current, _ = self._current()
+            self._stop_at_end()
+            current = self._current()
             jump = (target - current).total_seconds()
             if jump < 0:
                 raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
@@ -302,6 +306,7 @@ class Clock:
     def clear(self) -> dict:
         """Disarm (idempotent). Afterwards reads 404."""
         with self._lock:
+            self._stop_at_end()
             self._bank()
             self._armed = False
             self._t0 = None
@@ -315,13 +320,15 @@ class Clock:
     def elapsed(self) -> float:
         """Virtual seconds run so far: real time at each arm's rate (1 unarmed), plus each forward re-arm or advance."""
         with self._lock:
+            self._stop_at_end()
             return self._lived + (self._now() - self._anchor) * self._rate
 
     def now(self) -> datetime | None:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return None
-            return self._current()[0]
+            self._stop_at_end()
+            return self._current()
 
     @property
     def time_zone(self) -> str | None:
@@ -334,6 +341,7 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return None
+            self._stop_at_end()
             return _advance(self._t0, elapsed - self._lived + self._ahead)
 
     def read(self) -> dict:
@@ -347,17 +355,37 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return {"armed": False, "version": self.version}
-            current, at_end = self._current()
-            return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": 0.0 if at_end else self._rate,
-                    "virtual_time": _iso(current),
+            self._stop_at_end()
+            return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
+                    "virtual_time": _iso(self._current()),
                     **({"time_zone": self._time_zone} if self._time_zone else {}), "version": self.version}
 
-    def _current(self) -> tuple[datetime, bool]:
-        """The current arm's time now, and whether it stands at the end of the narrowest range a follower holds: a clock
-        doesn't run past what a follower of it can show, so the gateway's tools and the follower agree. Lock held."""
-        current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+    def _current(self) -> datetime:
+        """The current arm's time now. Lock held."""
+        return _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+
+    def stop_at_end(self) -> None:
+        """``_stop_at_end``, taking the lock: before a follower's range stops applying, as when it retires."""
+        with self._lock:
+            self._stop_at_end()
+
+    def _stop_at_end(self) -> None:
+        """Once the clock has run to the end of the narrowest range a follower holds, stop it there, frozen (rate 0) from
+        the moment it got there, as the follower's page stands there: its reads, delays and marks agree with what the
+        follower shows, and it stays there until a write moves it. Lock held."""
+        if not self._armed or self._t0 is None or self._rate <= 0:
+            return
         end = min((held.latest for held in self._follower_ranges().values()), default=None)
-        return (end, True) if end is not None and current >= end else (current, False)
+        if end is None:
+            return
+        now = self._now()
+        to_end = max(0.0, (end - _advance(self._t0, self._ahead)).total_seconds())
+        if (now - self._anchor) * self._rate < to_end:
+            return
+        self._lived += to_end
+        self._ahead += to_end
+        self._anchor = now
+        self._rate = 0.0
 
     def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
