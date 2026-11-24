@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
+
 from agent_env.env.gateway import TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
 from agent_env.env.gateway.constants import EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
@@ -68,7 +70,8 @@ class ModifyEnvToolAccessStep(TaskStep):
         deployed = bound_deployment(context, self.env_id, env_step_id=self.env_step_id, step_id=self.id)
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        body = await deployed.invoke(_TOOL_ACCESS_URIS[self.action], self.action, {"role": self.role, "tools": self.tools})
+        with protocol_v1.retry_extension_connections():
+            body = await deployed.invoke(_TOOL_ACCESS_URIS[self.action], self.action, {"role": self.role, "tools": self.tools})
         logger.info(f"{self.action} role={self.role!r} tools={self.tools} on env={self.env_id}: {body}")
         context.metadata.setdefault("tool_access_changes", []).append({
             "step_id": self.id,

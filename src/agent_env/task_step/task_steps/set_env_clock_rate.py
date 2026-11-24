@@ -12,6 +12,7 @@ import logging
 from typing import ClassVar, Optional
 
 import httpx
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.entity.refs import EntityRef
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
@@ -80,9 +81,10 @@ class SetEnvClockRateTaskStep(TaskStep):
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
-            state = await deployed.invoke(EXT_CLOCK_URI, "set_rate",
-                                          {"virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},
-                                          timeout=self.timeout_seconds)
+            with protocol_v1.retry_extension_connections():
+                state = await deployed.invoke(EXT_CLOCK_URI, "set_rate",
+                                              {"virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},
+                                              timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock rate change failed (HTTP {e.response.status_code}): {_gateway_error(e.response)}") from e
         context.metadata.setdefault("clock_configurations", []).append({

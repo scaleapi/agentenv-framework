@@ -218,13 +218,18 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
-Data-plane RPCs, card and manifest lookups, and extension calls retry TCP or TLS connection failures
-before sending the request. Up to three attempts share the connection budget from `timeout`, including
-backoffs of 0.5 and 1 second when time permits. After connecting, `timeout` keeps its HTTPX meaning
-for each read and write. A transfer can continue while it makes progress. For a wall-clock limit
-across retries and the entire reply, pass `total_timeout` in seconds, for example
-`await client.add_data(url, parts, timeout=30, total_timeout=120)`. Expiring that limit raises
-`httpx.TimeoutException`. Read and write errors retain their HTTPX exception types.
+An extension call makes one connection attempt by default. Wrap a call in
+`client.retry_extension_connections()` to retry a transient connection failure before sending.
+
+```python
+with client.retry_extension_connections():
+    state = await client.invoke_extension(url, card, "urn:agentenv:clock/v1", {}, method="state")
+```
+
+TCP and TLS share the connection budget from `timeout`, including waits of 0.5 and 1 second if
+there is time for a second or third attempt. Once the request starts sending, read and write
+errors propagate with HTTPX's usual inactivity timeouts. The framework opts in when setting up
+the environment clock and tool access.
 
 An extension with several methods is served by giving each handler an `op`. Handlers sharing a URI
 merge into one card entry, each method under `params.methods.<op>` with its own verb and endpoint,
@@ -446,9 +451,9 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     call, and a stateless server has no session to lose, so neither restart raises anything.
   - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
     (600 s by default, the gateway's own limit on a tool call).
-  - MCP POSTs use the same connection retries. The session's `timeout` covers attempts, waits and the
-    reply to each MCP request. After sending, a failed call may still have run on the server. Read the
-    state back with `data/get` or end the episode before trying again.
+  - `ToolSession` retries nothing. A call that raised may still have run on the server, or may yet run: a request
+    stalled on a bad link can arrive after the client has given up. So after any failed call the env's state is
+    unknown; read it back (`data/get`) or end the episode.
 - **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
   `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
 

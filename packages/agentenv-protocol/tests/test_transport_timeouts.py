@@ -12,6 +12,14 @@ import pytest
 from agentenv_protocol import client
 
 
+_CARD = {"capabilities": {"extensions": [{"uri": "urn:example:setup", "params": {"endpoint": "/setup"}}]}}
+
+
+async def call(url, timeout):
+    with client.retry_extension_connections():
+        return await client.invoke_extension(url, _CARD, "urn:example:setup", {}, timeout=timeout)
+
+
 @asynccontextmanager
 async def listen(handler):
     writers, tasks = [], []
@@ -30,7 +38,7 @@ async def listen(handler):
 
 
 @pytest.mark.asyncio
-async def test_asyncio_card_lookup_without_sniffio(monkeypatch):
+async def test_asyncio_extension_without_sniffio(monkeypatch):
     monkeypatch.setenv("no_proxy", "*")
     probe = dedent("""
         import asyncio
@@ -46,7 +54,10 @@ async def test_asyncio_card_lookup_without_sniffio(monkeypatch):
             raise
 
         from agentenv_protocol import client
-        assert asyncio.run(client.get_card(sys.argv[1], timeout=3)) == {"name": "items"}
+        card = {"capabilities": {"extensions": [{"uri": "urn:example:setup", "params": {"endpoint": "/setup"}}]}}
+        with client.retry_extension_connections():
+            result = asyncio.run(client.invoke_extension(sys.argv[1], card, "urn:example:setup", {}, timeout=3))
+        assert result == {"name": "items"}
     """)
 
     async def reply(reader, writer):
@@ -82,7 +93,7 @@ async def test_stalled_tcp_connect_leaves_time_to_retry(monkeypatch):
 
     monkeypatch.setattr(anyio, "connect_tcp", stall_first)
     async with listen(reply) as address:
-        assert await client.get_card(f"http://{address}", timeout=2) == {}
+        assert await call(f"http://{address}", timeout=2) == {}
     assert len(attempts) == 2 and len(requests) == 1
 
 
@@ -101,12 +112,12 @@ async def test_stalled_tls_closes_each_connection(monkeypatch, cancel):
         peer_closed.set()
 
     async with listen(hold) as address:
-        call = asyncio.create_task(client.get_card(f"https://{address}", timeout=1.5))
+        task = asyncio.create_task(call(f"https://{address}", timeout=1.5))
         if cancel:
             await asyncio.wait_for(hellos.wait(), 2)
-            call.cancel()
+            task.cancel()
         with pytest.raises(asyncio.CancelledError if cancel else httpx.ConnectTimeout):
-            await call
+            await task
         assert len(closed) == (1 if cancel else 2)
         await asyncio.wait_for(asyncio.gather(*(peer.wait() for peer in closed)), 1)
 
@@ -129,7 +140,7 @@ async def test_buffered_reply_keeps_its_read_inactivity_timeout(monkeypatch, pro
 
     async with listen(reply) as address:
         if progress:
-            assert await client.get_card(f"http://{address}", timeout=0.3) == {}
+            assert await call(f"http://{address}", timeout=0.3) == {}
         else:
             with pytest.raises(httpx.ReadTimeout):
-                await client.get_card(f"http://{address}", timeout=0.3)
+                await call(f"http://{address}", timeout=0.3)

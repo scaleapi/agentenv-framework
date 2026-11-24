@@ -157,10 +157,11 @@ class SyncEnvClockTaskStep(TaskStep):
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
-            await deployed.invoke(EXT_CLOCK_URI, "set_time",
-                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
-                                   **({"time_zone": self.timezone} if self.timezone else {})},
-                                  timeout=self.timeout_seconds)
+            with protocol_v1.retry_extension_connections():
+                await deployed.invoke(EXT_CLOCK_URI, "set_time",
+                                      {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
+                                       **({"time_zone": self.timezone} if self.timezone else {})},
+                                      timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock arm failed (HTTP {e.response.status_code}): {e.response.text}") from e
         except EnvCapabilityUnsupported as e:
@@ -170,7 +171,8 @@ class SyncEnvClockTaskStep(TaskStep):
             raise StepContextError(f"env '{self.env_id}' has no clock to arm: its card offers no {EXT_CLOCK_URI} "
                                    "set_time, which a gateway serves. A computer deployed alone follows no clock; "
                                    "deploy it in a multi env, whose gateway it follows") from e
-        state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)
+        with protocol_v1.retry_extension_connections():
+            state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)
         env_get_time_url = state.get("env_get_time_url")
         if self.timezone is not None and state.get("time_zone") != self.timezone:
             logger.warning(f"sync_env_clock env={self.env_id}: its gateway's clock didn't take time zone "
@@ -244,8 +246,7 @@ class SyncEnvClockTaskStep(TaskStep):
                 raise StepContextError(f"{service} advertises {EXT_CLOCK_URI} but its sync_time takes no timezone; "
                                    f"rebuild its image or drop timezone={self.timezone!r} from the task")
             params["timezone"] = self.timezone
-        result = await protocol_v1.invoke_extension(base_url, card, EXT_CLOCK_URI,
-                                                    params=params,
-                                                    timeout=self.timeout_seconds,
-                                                    headers=deployed.control_headers)
+        with protocol_v1.retry_extension_connections():
+            result = await protocol_v1.invoke_extension(base_url, card, EXT_CLOCK_URI, params=params,
+                                                        timeout=self.timeout_seconds, headers=deployed.control_headers)
         return {"synced": True, "result": result}

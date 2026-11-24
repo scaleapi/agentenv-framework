@@ -1557,8 +1557,7 @@ async def test_export_of_a_website_whose_card_read_fails_raises_rather_than_skip
 
     with pytest.raises(httpx.HTTPError):
         await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "shop", str(tmp_path / "out"), 30, mcp=False)
-    attempts = 3 if isinstance(card_response, httpx.ConnectError) else 1
-    assert [str(r.url) for r in sent] == [f"https://gw-1/svc/shop{WELL_KNOWN_PATH}"] * attempts
+    assert [str(r.url) for r in sent] == [f"https://gw-1/svc/shop{WELL_KNOWN_PATH}"]
 
 
 @pytest.mark.asyncio

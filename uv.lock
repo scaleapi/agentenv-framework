@@ -294,8 +294,6 @@ name = "agentenv-framework-protocol"
 version = "0.1.636"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
-    { name = "anyio", version = "4.14.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.14'" },
-    { name = "anyio", version = "4.15.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.14'" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "starlette" },
@@ -356,7 +354,6 @@ x11 = [
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'agent'", specifier = ">=0.3.26,<0.4" },
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'dev'", specifier = ">=0.3.26,<0.4" },
-    { name = "anyio", specifier = ">=3.6.2" },
     { name = "av", marker = "extra == 'computer'", specifier = ">=17" },
     { name = "av", marker = "extra == 'dev'", specifier = ">=17" },
     { name = "brotli", marker = "extra == 'app'", specifier = ">=1.2" },
