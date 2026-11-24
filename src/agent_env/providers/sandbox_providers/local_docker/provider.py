@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import csv
 import errno
 import functools
 import glob
+import io
 import json
 import logging
 import os
@@ -25,6 +27,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import time
 from ipaddress import ip_address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
@@ -39,10 +42,11 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
+from agent_env.providers.sandbox_providers.host_images import (build_here, built_here, host_platform, named_if_held,
+                                                               present, pull_here)
 from agent_env.providers.sandbox_providers.disk_launcher import RESET, UNRESETTABLE, forward, reset_input, unresettable
 from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed, docker
-from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_for
+from agent_env.providers.sandbox_providers.local_docker.disk import KVM, kvm_platforms, launcher_args, machine_for
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -117,6 +121,9 @@ LOCAL_TRUST_ENV = trust_env(LOCAL_TRUST_DIR)
 # Marker dropped in the work dir when this sandbox runs a container, so a later get_sandbox()
 # (post-run teardown reconstructs the sandbox from disk) knows it owns that container.
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
+# A launch whose outcome is unknown (its docker timed out or was killed) can leave the daemon still creating this
+# container, so a lookup that finds none confirms nothing until _UNCONFIRMED_START_SECONDS have passed.
+_CONTAINER_START_MARKER = ".container-start-pending"
 # The sandbox's container port -> host port map, so a sandbox rebuilt from its id publishes and finds the same ports.
 _PORT_MAP_FILE = ".port-map.json"
 # The internal network a container with no network runs on, so a sandbox rebuilt from its id removes it and its relay.
@@ -269,9 +276,10 @@ class LocalSandbox(VmSandbox):
                                           and present(image_name))
 
     async def pull_published(self, artifacts: list) -> list:
-        """Pull each published image but one this machine's Docker already holds under its name, so a run after the
-        first needs no registry."""
-        held = await asyncio.gather(*(asyncio.to_thread(present, artifact.image_name) for artifact in artifacts))
+        """Pull each published image but one this machine's Docker already holds as its digest names it
+        (``named_if_held``), so a run after the first needs no registry; one whose name holds another image is pulled
+        over it."""
+        held = await asyncio.gather(*(asyncio.to_thread(named_if_held, artifact) for artifact in artifacts))
         return await super().pull_published([artifact for artifact, here in zip(artifacts, held) if not here])
 
     def host_port(self, port: int) -> int:
@@ -379,9 +387,8 @@ class LocalSandbox(VmSandbox):
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
         Processes its commands left running on this machine are stopped first (on Linux; see ``_marked_pids``),
-        then, once none is left to run from it, what its steps staged in /tmp is removed. With no Docker installed,
-        nothing of it can have been started; with Docker unreachable, the teardown fails only for a sandbox whose folder
-        records Docker objects of its own.
+        then, once none is left to run from it, what its steps staged in /tmp is removed. Unavailable Docker fails
+        teardown for a sandbox whose folder records Docker objects of its own, even if its CLI is now missing.
         """
         failures: list[Exception] = []
         try:
@@ -392,19 +399,18 @@ class LocalSandbox(VmSandbox):
             failures.append(error)
         try:
             code, _, stderr = await self.exec_with_output("docker", "version", "--format", "{{.Server.Version}}")
-        except FileNotFoundError:
-            code, stderr = None, ""
+        except FileNotFoundError as error:
+            code, stderr = None, str(error)
         if code == 0:
             await self._remove_docker_objects(failures)
-        elif code is not None:
+        elif self._made_docker_objects:
             reason = stderr.strip()[-_ERROR_TAIL_CHARS:]
-            if self._made_docker_objects:
-                failures.append(RuntimeError(f"Docker can't be reached to remove sandbox {self.sandbox_id}'s container, "
-                                             f"compose stack or network: {reason}"))
-            else:
-                logger.warning("Could not reach Docker (%s); anything sandbox %s's steps started with it is still there. "
-                               "Remove it with: docker rm -f $(docker ps -aq --filter label=%s=%s)",
-                               reason, self.sandbox_id, SANDBOX_LABEL, self.sandbox_id)
+            failures.append(RuntimeError(f"Docker can't be reached to remove sandbox {self.sandbox_id}'s container, "
+                                         f"compose stack or network: {reason}"))
+        elif code is not None:
+            logger.warning("Could not reach Docker (%s); anything sandbox %s's steps started with it is still there. "
+                           "Remove it with: docker rm -f $(docker ps -aq --filter label=%s=%s)",
+                           stderr.strip()[-_ERROR_TAIL_CHARS:], self.sandbox_id, SANDBOX_LABEL, self.sandbox_id)
         if failures:
             raise RuntimeError("Local sandbox teardown incomplete: " + "; ".join(str(error) for error in failures)) from failures[0]
 
@@ -434,14 +440,22 @@ class LocalSandbox(VmSandbox):
                 failures.append(error)
 
     async def _remove_own_container(self) -> None:
-        """Remove this sandbox's named container, or verify that it is absent."""
+        """Remove its named container; an unconfirmed start may still create one after an empty lookup."""
         name = f"name=^{re.escape(self.container_name)}$"
         code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", name)
         if code != 0:
             raise RuntimeError(f"Could not list sandbox {self.sandbox_id}'s container: "
                                f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+        pending = self._work_dir / _CONTAINER_START_MARKER
         if containers := stdout.split():
             await self.exec_script(f"docker rm -f {shlex.join(containers)} >/dev/null")
+            pending.unlink(missing_ok=True)
+        elif pending.exists():
+            if time.time() - pending.stat().st_mtime < _UNCONFIRMED_START_SECONDS:
+                raise RuntimeError(f"Container creation for sandbox {self.sandbox_id} is not confirmed; retain "
+                                   f"{self.work_dir} and retry teardown, which finds it settled "
+                                   f"{_UNCONFIRMED_START_SECONDS // 60} min after its launch")
+            pending.unlink()
 
     async def _remove_labeled(self) -> None:
         """Remove labeled containers and networks; images can still be shared and are best-effort."""
@@ -821,11 +835,14 @@ class LocalSandboxProvider(SandboxProvider):
             (sandbox.work_dir / _VM_SIZE_FILE).write_text(json.dumps({"cpu": cpu, "memory": memory}))
             try:
                 await self._boot_disk(sandbox, image=image, env=env or {})
-                (sandbox.work_dir / _CONTAINER_MODE_MARKER).write_text(sandbox.container_name)
-            except BaseException:
-                with contextlib.suppress(Exception):
+            except BaseException as error:
+                try:
                     await sandbox.terminate()
                     await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
+                except Exception as cleanup_error:
+                    note = f"Cleanup of sandbox {sandbox.sandbox_id} incomplete; retained {sandbox.work_dir}: {cleanup_error}"
+                    error.add_note(note)
+                    logger.warning("%s", note)
                 raise
         return sandbox
 
@@ -849,15 +866,36 @@ class LocalSandboxProvider(SandboxProvider):
         publish = [arg for port in ports for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port)
                    for arg in ("-p", spec)]
         grants = await asyncio.to_thread(local_grants)
-        running = asyncio.ensure_future(asyncio.to_thread(
-            docker, "run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-            *publish, *machine.args, *launcher_args(ports, env, size["cpu"], size["memory"]),
-            *(_grant_args(*grants) if grants else ()), machine.image, timeout=_DOCKER_QUERY_SECONDS))
+        state = sandbox.work_dir / "vm-state"
+        state.mkdir(mode=0o700)
+        # The launcher owns its files as this user, so teardown needs no privileged recursive cleanup.
+        state_args = ("--mount", _bind(state, "/var/lib/agentenv-vm"),
+                      "--user", f"{os.getuid()}:{os.getgid()}", "--group-add", str(os.stat(KVM).st_gid))
+        (sandbox.work_dir / _CONTAINER_MODE_MARKER).write_text(sandbox.container_name)
+        pending = sandbox.work_dir / _CONTAINER_START_MARKER
+        pending.write_text(sandbox.container_name)
+
+        def start() -> None:
+            try:
+                docker("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
+                       *publish, *machine.args, *state_args, *launcher_args(ports, env, size["cpu"], size["memory"]),
+                       *(_grant_args(*grants) if grants else ()), machine.image, timeout=_DOCKER_START_SECONDS)
+            except DockerFailed as failed:
+                # A docker that exited with an error made the container already or never will; one a signal killed
+                # may have left the daemon creating it.
+                if failed.returncode > 0:
+                    pending.unlink(missing_ok=True)
+                raise
+            pending.unlink(missing_ok=True)
+
+        running = asyncio.ensure_future(asyncio.to_thread(start))
         try:
             await asyncio.shield(running)
-        except asyncio.CancelledError:  # the container docker is still starting must exist before teardown removes it
-            with contextlib.suppress(Exception):
+        except asyncio.CancelledError as cancelled:
+            try:
                 await running
+            except Exception as error:
+                cancelled.add_note(f"Docker launcher failed during cancellation: {type(error).__name__}")
             raise
 
     async def create_container(
@@ -1089,8 +1127,16 @@ def _grant_args(port: int, trust: Path) -> list[str]:
     finds ``host.docker.internal`` at QEMU's address for the launcher, where the launcher forwards the grant server's
     ``port`` to this machine, and trusts the local transfer CA, whose ``trust`` files the launcher puts in its seed."""
     return [*(arg for entry in _EXTRA_HOSTS for arg in ("--add-host", entry)),
-            "--mount", f"type=bind,src={trust},dst={_LAUNCHER_TRUST},readonly",
+            "--mount", _bind(trust, _LAUNCHER_TRUST, "readonly"),
             "-e", f"VM_HOST_PORTS={port}", "-e", f"VM_TRUST={_LAUNCHER_TRUST}"]
+
+
+def _bind(src: Path, dst: str, *options: str) -> str:
+    """``--mount``'s value binding ``src`` at ``dst``: Docker reads it as one CSV row, so a field holding a comma, as a
+    folder's name may, is quoted."""
+    row = io.StringIO()
+    csv.writer(row, lineterminator="").writerow(["type=bind", f"src={src}", f"dst={dst}", *options])
+    return row.getvalue()
 
 
 def _found(sandbox_id: str) -> LocalSandbox:
@@ -1122,6 +1168,11 @@ def _forward_grants(container: str, port: int) -> None:
 
 
 _DOCKER_QUERY_SECONDS = 30
+# Starting a disk container also mounts its image; give creation its own bounded budget.
+_DOCKER_START_SECONDS = 120
+# How long after a launch its docker gave up on a container the daemon may still create it: past it, a lookup that
+# finds none confirms there is none.
+_UNCONFIRMED_START_SECONDS = 600
 #: How long a reset may take: longer than the minute the launcher's reset waits for the computer to start again.
 _RESET_SECONDS = 90
 #: Where a disk's launcher finds the local transfer CA's trust files.

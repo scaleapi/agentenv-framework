@@ -63,11 +63,15 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format im
     JudgeOutputFormatSpec,
     get_judge_output_format_spec,
 )
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import AtifDocuments, TurnSource
+from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import turns as turn_sources
 from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (
     TrajectoryFormatError,
     TurnEvents,
+    atif_turn_events,
     turn_events,
 )
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     RUN_CONTEXT_PARTS,
     RubricsVerdict,
@@ -335,6 +339,9 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                 out["agent_card"] = card
         urls = [u for u in (response.target_agent_per_turn_trajectory_object_urls or []) if u]
         url = urls[-1] if urls else response.agent_trajectory_object_url
+        stored = [source for source in turn_sources(response) if source is not None]
+        if stored and stored[-1].atif:  # an atif/1 copy carries no harness trace, so there are no settings to read
+            url = None
         if staged and url:
             try:
                 reported = harness_usage(await asyncio.to_thread(self._read_trajectory_text, url))
@@ -392,9 +399,10 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         by_position = timeline is None
         if timeline is None:
             timeline = turns_by_position(prompt_response)
+        timeline, atif = _keyed_by_turn(timeline, prompt_response, by_position=by_position)
         urls = list(dict.fromkeys(e["trajectory_url"] for e in timeline
                                   if e.get("event") in ("agent_turn_end", "nudge") and e.get("trajectory_url")))
-        turns = await self._read_turns(urls, _turn_names(timeline, by_position=by_position))
+        turns = await self._read_turns(urls, _turn_names(timeline, by_position=by_position), atif)
         run = run_context or await load_run_context(context, prompt_response)
         # A run staged by position has no app changes to fill in.
         values = await self._change_values(context) if self.full_app_changes and not by_position else None
@@ -405,18 +413,30 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
         await self._write_files(sandbox, {f"{path}/{name}": text for name, text in staged.files.items()}, container)
         self._log_staging(staged)
+        if (judge := judge_usage.current()) is not None:
+            # Its turns carry no labels: each trajectory's format is the one its shape reads as.
+            judge.read([{"format": fmt, "trajectories": count, "guessed": True}
+                        for fmt, count in (staged.record.get("formats") or {}).items()])
         return StagedTrajectory(path=path, prompt_note=_files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get()),
                                 record=staged.record)
 
-    async def _read_turns(self, urls: list[str], names: dict[str, str]) -> dict[str, Optional[TurnEvents]]:
-        """Each trajectory's events, by url; None for one that couldn't be read. One that breaks the harness labels it
-        carries raises ``UngradableRunError`` naming its wake (``names``)."""
+    async def _read_turns(self, urls: list[str], names: dict[str, str],
+                          atif: dict[str, TurnSource]) -> dict[str, Optional[TurnEvents]]:
+        """Each trajectory's events, by url, an atif/1 turn's (``atif``, by its key) from its view; None for one that
+        couldn't be read. One that breaks the harness labels it carries raises ``UngradableRunError`` naming its wake
+        (``names``)."""
         gate = asyncio.Semaphore(STAGING_CONCURRENCY)
+        documents = AtifDocuments()
+
+        def events(url: str) -> TurnEvents:
+            if url in atif:
+                return atif_turn_events(documents.view(atif[url]))
+            return turn_events(self._read_trajectory_text(url))
 
         async def read(url: str) -> Optional[TurnEvents]:
             async with gate:
                 try:
-                    return await asyncio.to_thread(lambda: turn_events(self._read_trajectory_text(url)))
+                    return await asyncio.to_thread(events, url)
                 except TrajectoryFormatError as e:
                     raise UngradableRunError(
                         f"Verifier '{self.verifier_id}': {names.get(url, 'a turn')}'s trajectory ({url}) can't be "
@@ -557,6 +577,28 @@ def turns_by_position(prompt_response: PromptResponse) -> list[dict]:
         timeline += [{"event": "wake", "n": n, "parts_text": text},
                      {"event": "agent_turn_end", "n": n, "trajectory_url": url}]
     return timeline
+
+
+def _keyed_by_turn(timeline: list[dict], prompt_response: PromptResponse, *,
+                   by_position: bool) -> tuple[list[dict], dict[str, TurnSource]]:
+    """The timeline with each atif/1 turn's ``trajectory_url`` made a key of its own, ``<document url>#<task id>``
+    (a conversation's turns share one document), and the source of each such key. A turn is found by its index among
+    the per-turn trajectories: the ``turn`` the always_on step logged, or, by position, its place. A run with no atif/1
+    turn is returned as it is."""
+    sources = turn_sources(prompt_response)
+    if not any(source is not None and source.atif for source in sources):
+        return timeline, {}
+    keyed: list[dict] = []
+    found: dict[str, TurnSource] = {}
+    for event in timeline:
+        index = (event.get("n") - 1 if isinstance(event.get("n"), int) else None) if by_position else event.get("turn")
+        source = sources[index] if isinstance(index, int) and 0 <= index < len(sources) else None
+        if event.get("event") in ("agent_turn_end", "nudge") and source is not None and source.atif:
+            key = f"{source.url}#{source.task_id}"
+            found[key] = source
+            event = {**event, "trajectory_url": key}
+        keyed.append(event)
+    return keyed, found
 
 
 def _turn_names(timeline: list[dict], *, by_position: bool) -> dict[str, str]:

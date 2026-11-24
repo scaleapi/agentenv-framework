@@ -75,7 +75,7 @@ def agent_ctx(monkeypatch):
 def _deployed_env(env_id: str = "multi-slack-email") -> DeployedEnv:
     return DeployedGatewayEnv(
         env_id=env_id, env_version=7, gateway_url="http://gw", mcp_url="http://gw/mcp",
-        db_web_url=None, sandbox_id="sb-env", instance_id="env-inst-1",
+        sandbox_id="sb-env", instance_id="env-inst-1",
     )
 
 

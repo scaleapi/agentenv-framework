@@ -30,7 +30,6 @@ def _fake_env_deploying_to(mcp_url: str, sandbox_id: str):
             env_version=1,
             gateway_url=f"https://gw-{sandbox_id}",
             mcp_url=mcp_url,
-            db_web_url=None,
             sandbox_id=sandbox_id,
         )
 

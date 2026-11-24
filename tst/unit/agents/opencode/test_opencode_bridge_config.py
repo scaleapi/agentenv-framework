@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.opencode.agent import model_relay, opencode_bridge
+from tst.unit.agents.opencode.agent import a2a_server, model_relay, opencode_bridge
 from tst.unit.agents.opencode.fake_cli import FakeCLI
 
 _build_config = opencode_bridge._build_config
@@ -167,6 +167,17 @@ def test_the_system_prompt_reaches_the_model_as_instructions_and_the_output_form
     assert Path(instructions).read_text() == "be brief"
 
 
+@pytest.mark.parametrize("armed", [False, True])
+def test_on_an_armed_clock_only_the_endpoint_the_relay_dates_is_enabled(monkeypatch, spawned, armed):
+    """A provider a project's opencode.json adds, as for a subagent's model, would reach a model with the real date."""
+    monkeypatch.setattr(opencode_bridge, "clock_armed", lambda: armed)
+
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+
+    ((_argv, env),) = spawned
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]).get("enabled_providers") == (["litellm"] if armed else None)
+
+
 def test_a_turn_with_no_system_prompt_names_no_instructions(spawned):
     asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
 
@@ -214,4 +225,41 @@ def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_
     assert result.usage.to_dict() == {
         "tool_call_count": 0, "input_tokens": 19489, "output_tokens": 105, "total_tokens": 19594,
         "cache_read_tokens": 9342, "cache_write_tokens": 9539, "input_includes_cache": True,
+        "models": [{"model": "m", "calls": 3, "input_tokens": 19489, "output_tokens": 105, "cache_read_tokens": 9342,
+                    "cache_write_tokens": 9539, "input_includes_cache": True}],
         "provider_details": {"model_calls": 3}}
+
+
+def test_max_output_tokens_sets_the_models_output_limit_alone():
+    entry = _model_entry(_build_config(MODEL, None, {}, None, max_output_tokens=64000))
+    # No context limit, which would turn on OpenCode's auto-compaction.
+    assert entry["limit"] == {"output": 64000}
+
+
+def test_no_max_output_tokens_omits_the_limit():
+    assert "limit" not in _model_entry(_build_config(MODEL, None, {}, None))
+
+
+def test_max_output_tokens_also_reaches_the_cli_as_its_output_cap(spawned):
+    """OpenCode caps a step at min(limit.output, the variable), so the limit alone can't raise it past 32,000."""
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m", max_output_tokens=64000))
+
+    ((_argv, env),) = spawned
+    assert env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "64000"
+    assert _model_entry(json.loads(env["OPENCODE_CONFIG_CONTENT"]), "m")["limit"] == {"output": 64000}
+
+
+def test_a_turn_with_no_max_output_tokens_sets_no_output_cap(monkeypatch, spawned):
+    monkeypatch.delenv("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", raising=False)
+
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m"))
+
+    ((_argv, env),) = spawned
+    assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX" not in env
+    assert "limit" not in _model_entry(json.loads(env["OPENCODE_CONFIG_CONTENT"]), "m")
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_the_config_refuses_a_max_output_tokens_that_is_not_positive(value):
+    with pytest.raises(ValueError):
+        a2a_server.OpenCodeConfig(max_output_tokens=value)

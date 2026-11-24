@@ -8,7 +8,8 @@ a subagent writes two `result` events; ``modelUsage`` counts every call, the sub
 
 import asyncio
 
-from agentenv_protocol.a2a_agent import Usage
+import pytest
+from agentenv_protocol.a2a_agent import ModelUsage, Usage
 
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
 from tst.unit.agents.claude_code.support import FakeCLI
@@ -67,7 +68,24 @@ def test_a_new_sessions_turn_counts_every_call_its_subagents_included():
     assert _counts(usage) == _truth(TURN_1)
     assert usage.input_includes_cache is True and usage.cost_usd == 0.0452852
     assert "unreported_calls" not in usage.provider_details
-    assert usage.provider_details["models"] == {HAIKU: {**_truth(TURN_1), "cost_usd": 0.0452852}}
+    assert usage.models == (ModelUsage(model=HAIKU, **_truth(TURN_1), input_includes_cache=True, cost_usd=0.0452852),)
+    assert "models" not in usage.provider_details
+
+
+def test_a_turn_whose_subagent_ran_on_another_model_gives_each_models_counts_and_cost():
+    sonnet = "claude-sonnet-4-6"
+    tally = {sonnet: {"inputTokens": 20, "outputTokens": 300, "cacheReadInputTokens": 60000,
+                      "cacheCreationInputTokens": 4000, "costUSD": 0.05},
+             **_tally(10, 90, 20000, 2000, 0.004)}
+
+    usage = a2a_server._usage(_result(run_usage=[], model_usage=tally, session_base={}))
+
+    assert usage.models == (
+        ModelUsage(model=sonnet, input_tokens=64020, output_tokens=300, cache_read_tokens=60000,
+                   cache_write_tokens=4000, input_includes_cache=True, cost_usd=0.05),
+        ModelUsage(model=HAIKU, input_tokens=22010, output_tokens=90, cache_read_tokens=20000,
+                   cache_write_tokens=2000, input_includes_cache=True, cost_usd=0.004))
+    assert usage.cost_usd == pytest.approx(0.054) and usage.input_tokens == 64020 + 22010
 
 
 def test_a_resumed_turn_counts_its_own_calls_not_the_sessions():

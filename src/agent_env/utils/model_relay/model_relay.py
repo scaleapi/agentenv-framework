@@ -6,14 +6,17 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from agentenv_protocol.a2a_agent import Usage
+from agentenv_protocol.a2a_agent import ModelUsage, Usage
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
+
+logger = logging.getLogger(__name__)
 
 # The routes whose POSTs are model calls: Chat Completions, Responses and Anthropic's Messages.
 _CALL_ROUTES = ("/chat/completions", "/responses", "/messages")
@@ -27,29 +30,35 @@ _SHUTDOWN_S = 5.0
 _COUNTS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
 
 
+class Refusal(Exception):
+    """A model call the relay answers itself, with this reason, rather than forward."""
+
+
 @dataclass
 class Calls:
-    """The model calls a relay forwarded: each answered call's usage, read as ``Usage.from_model_response`` reads one,
-    and how many were answered without usage or refused. A refused call (an error status, or none at all) counts
-    nothing."""
+    """The model calls a relay forwarded: each answered call's model, as its request named it, and usage, read as
+    ``Usage.from_model_response`` reads one, and how many were answered without usage or refused. A refused call (an
+    error status, or none at all) counts nothing."""
 
-    answered: list[Usage] = field(default_factory=list)
+    answered: list[tuple[str | None, Usage]] = field(default_factory=list)
     unreported: int = 0
     refused: int = 0
 
-    def add(self, status: int | None, usage: Usage | None) -> None:
-        """A call that ended with ``status`` (None when it had none), and the usage its answer carried."""
+    def add(self, status: int | None, usage: Usage | None, model: str | None = None) -> None:
+        """A call that ended with ``status`` (None when it had none), the usage its answer carried and the model its
+        request named."""
         if status is None or status >= 400:
             self.refused += 1
             return
         if usage is None:
             self.unreported += 1
         else:
-            self.answered.append(usage)
+            self.answered.append((model, usage))
 
-    def usage(self, tool_call_count: int) -> Usage:
+    def usage(self, tool_call_count: int, model: str | None = None) -> Usage:
         """The calls' usage summed, with ``input_tokens`` counting the cache, and the calls without usage counted in
-        ``unreported_calls``; no counts when no call had any."""
+        ``unreported_calls``; no counts when no call had any. ``models`` holds them by the model each named, a call
+        that named none counted as ``model``'s, the one the turn was configured with."""
         details: dict[str, Any] = {}
         if self.answered or self.unreported:
             details["model_calls"] = len(self.answered) + self.unreported
@@ -57,14 +66,25 @@ class Calls:
             details["unreported_calls"] = self.unreported
         if not self.answered:
             return Usage(tool_call_count=tool_call_count, provider_details=details)
+        usages = [usage for _, usage in self.answered]
 
         def total(name: str) -> int | None:
-            values = [getattr(usage, name) for usage in self.answered if getattr(usage, name) is not None]
+            values = [getattr(usage, name) for usage in usages if getattr(usage, name) is not None]
             return sum(values) if values else None
 
-        flags = {usage.input_includes_cache for usage in self.answered}
+        flags = {usage.input_includes_cache for usage in usages}
         return Usage(tool_call_count=tool_call_count, **{name: total(name) for name in _COUNTS},
-                     input_includes_cache=flags.pop() if len(flags) == 1 else None, provider_details=details)
+                     input_includes_cache=flags.pop() if len(flags) == 1 else None, models=self._by_model(model),
+                     provider_details=details)
+
+    def _by_model(self, configured: str | None) -> tuple[ModelUsage, ...]:
+        """The answered calls' counts by model; none when a call named no model and the turn has none configured."""
+        by_model: dict[str, list[Usage]] = {}
+        for named, usage in self.answered:
+            if (name := named or configured) is None:
+                return ()
+            by_model.setdefault(name, []).append(usage)
+        return tuple(ModelUsage.of(name, of) for name, of in by_model.items())
 
 
 class AnswerReader:
@@ -129,6 +149,15 @@ class AnswerReader:
         return read if any(getattr(read, name) for name in _COUNTS) else None
 
 
+def _request_model(body: bytes) -> str | None:
+    """The model a call's request body names, as its JSON's ``model``; None for a body that names none."""
+    try:
+        model = json.loads(body).get("model")
+    except (ValueError, AttributeError):
+        return None
+    return model if isinstance(model, str) and model else None
+
+
 def answer_usage(answer: bytes) -> Usage | None:
     """The usage a whole answer carried, as ``AnswerReader`` reads it."""
     reader = AnswerReader()
@@ -138,13 +167,16 @@ def answer_usage(answer: bytes) -> Usage | None:
 
 @asynccontextmanager
 async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str] | None = None,
-                      models: list[str] | None = None) -> AsyncIterator[str]:
+                      models: list[str] | None = None,
+                      rewrite: Callable[[bytes], Awaitable[bytes]] | None = None) -> AsyncIterator[str]:
     """Serve a relay to ``upstream``, the endpoint's API root, on loopback, and yield its root, which takes the
     endpoint's paths after it (``<root>/v1/chat/completions``). Its path names a token of its own, so a process left
     from another turn reaches no other turn's relay. Each model call it forwards is added to ``calls`` once its answer
     has ended, read to its end even when the CLI hung up. ``headers`` replace the CLI's own on every request, so the
     endpoint's credentials need never reach the CLI; without them, the CLI's are forwarded. ``models`` is the list a
-    ``GET .../models`` is answered with, sparing a CLI that lists them the endpoint's whole catalog."""
+    ``GET .../models`` is answered with, sparing a CLI that lists them the endpoint's whole catalog. ``rewrite`` takes
+    each model call's request body and gives the one to forward; what it raises is the call's answer, a 400 with a
+    ``Refusal``'s reason or the error's name, which no CLI retries as it would a 500, and the call goes no further."""
     token = secrets.token_hex(16)
     async with ClientSession(timeout=ClientTimeout(total=None)) as client:
         async def forward(request: web.Request) -> web.StreamResponse:
@@ -159,10 +191,20 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
             # Answered as sent, so its usage can be read.
             outgoing["accept-encoding"] = "identity"
             call = request.method == "POST" and path.rstrip("/").endswith(_CALL_ROUTES)
-            status, reader = None, AnswerReader()
+            status, reader, body = None, AnswerReader(), b""
             try:
+                body = await request.read()
+                if call and rewrite is not None:
+                    try:
+                        body = await rewrite(body)
+                    except Exception as exc:
+                        status = 400
+                        reason = str(exc) if isinstance(exc, Refusal) else f"model relay: {type(exc).__name__}: {exc}"
+                        logger.warning("model relay refused a call: %s", reason)
+                        return web.json_response({"error": {"message": reason, "type": "invalid_request_error"}},
+                                                 status=status)
                 async with client.request(request.method, f"{upstream}/{path}", params=request.query,
-                                          data=await request.read(), headers=outgoing) as answer:
+                                          data=body, headers=outgoing) as answer:
                     status = answer.status
                     reader = AnswerReader(stream=answer.content_type == "text/event-stream")
                     response = web.StreamResponse(status=answer.status, headers={
@@ -191,7 +233,7 @@ async def model_relay(upstream: str, calls: Calls, *, headers: Mapping[str, str]
                 raise
             finally:
                 if call:
-                    calls.add(status, reader.usage())
+                    calls.add(status, reader.usage(), _request_model(body))
 
         app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
         app.router.add_route("*", "/{token}/{path:.*}", forward)

@@ -2,9 +2,10 @@
 
 `~/.gemini/settings.json` holds what every run shares, the changelog's hook. Each run
 gets settings of its own as the CLI's system settings, which override the user's: the
-task's MCP servers with the turn's role header, and the turn's system prompt as a
-context file named by its content. So turns running at once never share a role, and a
-system prompt keeps one path from turn to turn.
+task's MCP servers with the turn's role header, the task directories that exist as
+included directories, and the turn's system prompt as a context file named by its content.
+So turns running at once never share a role, and a system prompt keeps one path from turn
+to turn.
 """
 from __future__ import annotations
 
@@ -28,6 +29,10 @@ SYSTEM_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 _DEFAULT_SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
 # The CLI's context file in a workspace, which a run with a system prompt still loads beside its own.
 _WORKSPACE_CONTEXT_FILE = "GEMINI.md"
+# Where tasks put files for the agent outside its workspace: /tmp/file_artifacts is load_artifact's default for an
+# agent. The CLI's file tools refuse paths outside the workspace and its included directories, and it fails to start
+# when an included directory is missing.
+TASK_DIRS = ("/app", "/tmp/data", "/tmp/file_artifacts")
 _prompt_files: Counter[Path] = Counter()
 _prompt_files_lock = threading.Lock()
 
@@ -83,13 +88,14 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
         **(settings.get("mcpServers") if isinstance(settings.get("mcpServers"), dict) else {}),
         **{settings_name(name): _server_entry(info["url"], info.get("headers"), role) for name, info in servers.items()},
     }
+    context = dict(settings["context"]) if isinstance(settings.get("context"), dict) else {}
+    if task_dirs := [d for d in TASK_DIRS if os.path.isdir(d)]:
+        context["includeDirectories"] = list(dict.fromkeys([*(context.get("includeDirectories") or []), *task_dirs]))
     with ExitStack() as stack:
         if system_prompt:
-            context = stack.enter_context(_prompt_file(home, system_prompt))
-            settings["context"] = {
-                **(settings.get("context") if isinstance(settings.get("context"), dict) else {}),
-                "fileName": [_WORKSPACE_CONTEXT_FILE, context.name],
-            }
+            context["fileName"] = [_WORKSPACE_CONTEXT_FILE, stack.enter_context(_prompt_file(home, system_prompt)).name]
+        if context:
+            settings["context"] = context
         path = runs / f"{token}.json"
         # It carries the MCP servers' headers.
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:

@@ -150,7 +150,7 @@ async def test_a_dead_session_is_reopened_once_and_the_call_retried_without_redi
     try:
         await gw._ensure_tools_discovered()
         first_owner, proxy = _owner(gw), gw._mcp._tool_manager._tools["svc_thing"]
-        result = await gw._call_child_tool(URL, "svc_thing", {})
+        result = await gw._call_child_tool(URL, "svc_thing", {}, report=True)
         assert not result.isError and session.calls == ["svc_thing", "svc_thing"]
         assert opener.opened == 2 and first_owner.done()
         assert _owner(gw) is not first_owner and not _owner(gw).done()
@@ -169,11 +169,11 @@ async def test_a_call_lost_in_flight_retires_the_session_but_is_not_retried():
         await gw._ensure_child_sessions()
         first_owner = _owner(gw)
         with pytest.raises(McpError, match="Connection closed"):
-            await gw._call_child_tool(URL, "svc_thing", {})
+            await gw._call_child_tool(URL, "svc_thing", {}, report=True)
         assert session.calls == ["svc_thing"]  # the child may already have written; a retry could write twice
         await asyncio.gather(*gw._sessions.retirements)
         assert first_owner.done() and URL not in gw._sessions.current and opener.opened == 1
-        assert not (await gw._call_child_tool(URL, "svc_thing", {})).isError  # the next call reopens
+        assert not (await gw._call_child_tool(URL, "svc_thing", {}, report=True)).isError  # the next call reopens
         assert opener.opened == 2 and session.calls == ["svc_thing", "svc_thing"]
     finally:
         await gw._close_child_sessions()
@@ -187,7 +187,7 @@ async def test_any_other_error_is_the_caller_s_and_keeps_the_session():
     gw = _gateway(opener)
     try:
         with pytest.raises(McpError, match="Invalid params"):
-            await gw._call_child_tool(URL, "svc_thing", {})
+            await gw._call_child_tool(URL, "svc_thing", {}, report=True)
         assert session.calls == ["svc_thing"] and opener.opened == 1 and not _owner(gw).done()
     finally:
         await gw._close_child_sessions()
@@ -207,7 +207,8 @@ async def test_concurrent_dead_session_errors_reopen_the_session_once():
 
     session.call_tool = call_tool
     try:
-        results = await asyncio.gather(gw._call_child_tool(URL, "a", {}), gw._call_child_tool(URL, "b", {}))
+        results = await asyncio.gather(gw._call_child_tool(URL, "a", {}, report=True),
+                                       gw._call_child_tool(URL, "b", {}, report=True))
         assert all(not r.isError for r in results) and opener.opened == 2
     finally:
         await gw._close_child_sessions()
@@ -399,7 +400,7 @@ async def test_shutdown_cancels_scheduled_actions_and_nothing_reopens_the_child_
     async def late_action():  # a trigger action still waiting when the process shuts down
         try:
             await asyncio.sleep(60)
-            await gw._call_child_tool(URL, "svc_thing", {})
+            await gw._call_child_tool(URL, "svc_thing", {}, report=True)
         except asyncio.CancelledError:
             outcome.append("cancelled")
             raise
@@ -464,7 +465,7 @@ async def test_a_session_the_child_rejects_is_replaced_and_each_call_already_sen
     try:
         old = await gw._sessions.ensure(URL)
         opener.session = second
-        calls = [asyncio.create_task(gw._call_child_tool(URL, f"t{i}", {})) for i in range(5)]
+        calls = [asyncio.create_task(gw._call_child_tool(URL, f"t{i}", {}, report=True)) for i in range(5)]
         while len(first.calls) < 5:
             await asyncio.sleep(0)
         rejected.set()
@@ -500,12 +501,12 @@ async def test_one_child_s_dead_session_leaves_another_child_s_calls_alone():
                  internal_mcp_servers=[InternalMCPServer("svc", URL), InternalMCPServer("other", OTHER)])
     gw._sessions.open_session = opener  # type: ignore[method-assign]
     try:
-        in_flight = asyncio.create_task(gw._call_child_tool(OTHER, "other_thing", {}))
+        in_flight = asyncio.create_task(gw._call_child_tool(OTHER, "other_thing", {}, report=True))
         while not slow.calls:
             await asyncio.sleep(0)
         other_owner = _owner(gw, OTHER)
         with pytest.raises(McpError, match="Connection closed"):
-            await gw._call_child_tool(URL, "svc_thing", {})
+            await gw._call_child_tool(URL, "svc_thing", {}, report=True)
         release.set()
         assert not (await in_flight).isError
         await asyncio.gather(*gw._sessions.retirements)
@@ -531,7 +532,7 @@ async def test_a_replaced_session_whose_transport_then_fails_fails_the_calls_sti
     gw = _gateway(opener)
     try:
         old = await gw._sessions.ensure(URL)
-        pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}))
+        pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}, report=True))
         while not session.calls:
             await asyncio.sleep(0)
         await gw._sessions.replace(old)  # as a call the child answered 404 does
@@ -563,7 +564,7 @@ async def test_a_replaced_session_whose_transport_fails_while_the_next_one_opens
     opening = None
     try:
         old = await gw._sessions.ensure(URL)
-        pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}))
+        pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}, report=True))
         while not session.calls:
             await asyncio.sleep(0)
         await gw._sessions.replace(old)

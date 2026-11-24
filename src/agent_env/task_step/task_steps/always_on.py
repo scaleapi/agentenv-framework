@@ -48,7 +48,7 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
 - End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
-  user_sim_error, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
+  user_sim_error, user_sim_invalid, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
   loop's docstring), so a recurring trigger that never wakes the agent can't move the clock forever. What was still pending is recorded (``pending_at_end``): replies held, messages the user
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
@@ -57,6 +57,17 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   own messages and the agent's message_user texts, then the user's last word that never reached the agent and an end
   marker with the end reason. An agent turn that doesn't complete (failed, canceled, rejected, timed out) ends the run
   and sets the response's ``error_type`` (as prompt_agent does for a failed one), so verifiers skip the run.
+- With ``continue_after_wake_limit`` on, a turn (a wake's, or its nudge's) that reaches its time limit
+  (``timeout_seconds``) or its tool-call limit (``max_turns``) ends only that wake: what it did stands, its messages to
+  the user are taken as any wake's are, and the run goes on to its next event, still bounded by ``max_wakes`` and the
+  time budget. A turn cut off at its time limit is first canceled (A2A tasks/cancel); once the agent reports it
+  canceled, the step waits ``CUT_OFF_GRACE_SECONDS`` more, the task's clock frozen, before it reads the turn's app
+  changes and takes its messages, so a tool call the turn still had under way counts in the cut-off wake. An agent
+  reports a task canceled before its cleanup ends, so a call landing after the grace is not stopped. A turn the agent
+  can't confirm canceled ends the run as before. The next wake opens with a note that the last turn was cut off
+  (``CUT_OFF_TEXT``). Each cut-off is in the timeline (``wake_cut_off``, and ``cut_off`` on the turn's end), the run's
+  record (``cut_off_wakes``) and what the judge reads. A turn that fails for any other reason (an agent crash, a
+  protocol error) still ends the run.
 - Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
@@ -64,6 +75,18 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   being when the reply reached the agent, so checks built on those records grade the run instead of skipping it. A
   reply that never reached it (her last read's, or one still held at the end) has ``delivered`` false and no
   ``user_reads_at``.
+- ``user_sim_gate`` (user_sim_gate.py) checks each answer the user sim would send before the agent gets it. One that
+  reads as the assistant's is held back and the user sim, told why in its session, answers again, up to the gate's
+  ``max_rewrites``; each read's event records the checks (``user_sim_gate``: verdicts, rewrites, the first message).
+  Only the gate's judge, which reads the user sim's own instructions, holds an answer back; its pattern matches are
+  recorded. An answer that still fails is never delivered and ends the run (recorded in
+  ``metadata["user_sim_invalid"][step_id]``): with ``on_fail`` "fail" as a failed user sim, ``user_sim_error`` for both
+  the end reason and ``error_type``, so the run is redone; "end" ends it plainly (user_sim_invalid); "send" delivers it
+  anyway. A rewrite with nothing to send (a no_reply, an empty reply)
+  holds the message back for good too. Her last read's answer, never delivered, isn't checked. The gate's judge calls
+  are in the step's usage, role ``judge``. Turning the gate on reserves each read's worst case out of the run's time
+  budget whether or not it ever fires: ``max_rewrites`` more user sim turns, each up to ``user_timeout_seconds`` plus its
+  grace and trajectory fetch, and with a judge ``max_rewrites + 1`` judge timeouts (``read_budget_seconds``).
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``. Its ``user_sim`` names the user
   sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over.
@@ -79,6 +102,7 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.util
 import json
 import logging
@@ -94,6 +118,7 @@ from typing import Any, ClassVar, Optional
 from zoneinfo import ZoneInfo
 
 from a2a.types import TaskState
+from agentenv_protocol.atif import FORMAT as ATIF_FORMAT
 
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
 from agent_env.a2a_agent.object_transfer import AgentTurn, send_and_wait
@@ -109,20 +134,25 @@ from agent_env.env.gateway.constants import (
     EXT_STATE_URI,
     EXT_TRIGGERS_URI,
     EXT_USER_CHAT_URI,
+    due_deferred_calls,
 )
 from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
-from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, TurnTrajectory
+from agent_env.task_step.snapshot_utils.atif_copies import AtifCopies
 from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, user_sim_model
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, recorded_instructions, user_sim_model
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
+from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import ended_turn_error
 from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     fetch_native_trajectory,
     prescribe_formats,
+    prescribed_formats,
 )
+from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
@@ -169,6 +199,24 @@ LEFTOVER_TAKE_SECONDS = 60.0
 FINAL_DEFAULT_TEXT = "Time's up on this job. Send {first} a short wrap-up: what's done, and anything still open."
 NOTHING_CAN_WAKE = "nothing_can_wake_the_agent"  # until finish() tells finished_nothing_pending from stuck
 ERROR_ENDS = ("agent_turn_failed", "agent_turn_timeout", "user_sim_error", "step_error")
+# A turn's limits, which continue_after_wake_limit lets end only the wake, and how the agent and the judge are told.
+TIME_LIMIT, TOOL_CALL_LIMIT = "time_limit", "tool_call_limit"
+LIMIT_WORDS = {TIME_LIMIT: "time limit", TOOL_CALL_LIMIT: "tool-call limit"}
+CUT_OFF_TEXT = ("(Your last turn was cut off at its {limit} before you finished. What you did before then stands; "
+                "anything you were in the middle of did not finish.)")
+# A harness reports a turn it ended at the step's limits as a failed turn; no A2A field names the limit. At the
+# tool-call limit every harness says Claude Code's words. At its time limit a harness gives an error code ending in
+# ".timeout" (Pi, Pydantic AI, OpenHands, browser-use), or says "<harness> timed out after <n>s" first in its error
+# (the CLI harnesses).
+TOOL_CALL_LIMIT_PATTERN = re.compile(r"Reached maximum number of turns")
+TIME_LIMIT_PATTERN = re.compile(r"[\w .-]{1,40} timed out after \d")
+TIME_LIMIT_CODE_SUFFIX = ".timeout"
+# How long the step gives the agent to cancel a turn cut off at its time limit and report it ended.
+STOP_TURN_SECONDS = 30
+# After that, how long the step still waits, the task's clock frozen, before it reads the turn's app changes and takes
+# its messages: an agent reports a canceled task canceled before its cleanup ends, so a tool call already under way can
+# land meanwhile, and is the cut-off wake's. One that lands later is not caught.
+CUT_OFF_GRACE_SECONDS = 10
 # What each end reason means, for the end marker in the graded conversation; {wakes} and {first} are filled in.
 END_NOTES = {
     "end_time": "The run reached its end time.",
@@ -180,6 +228,7 @@ END_NOTES = {
     "agent_turn_failed": "The assistant's turn failed.",
     "agent_turn_timeout": "The assistant's turn timed out.",
     "user_sim_error": "The user simulator failed.",
+    "user_sim_invalid": "The user simulator's answer still read as the assistant's after its rewrites.",
     "step_error": "The run stopped on an error.",
 }
 # The run's metadata keeps a summary; the full timeline goes to the object store. When storing fails, the summary keeps
@@ -212,6 +261,8 @@ TURN_TEXT_TOTAL_CHARS = 400_000
 # ==================================================================================================================
 class AlwaysOnTaskStep(PromptAgentTaskStep):
     type: ClassVar[str] = "always_on"
+    # Its own loop checks each user-sim answer before the agent gets it (_Run._gate, with user_sim_gate.run_gate).
+    USER_SIM_GATE_SUPPORTED: ClassVar[Optional[bool]] = True
     entity_refs = ()
     field_scopes = {k: v for k, v in PromptAgentTaskStep.field_scopes.items() if k != "user_model"}
 
@@ -222,9 +273,10 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  wake_reminder: bool = False, wake_reminder_text: str = WAKE_REMINDER_TEXT,
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
                  contact_replies_in_parallel: bool = True, time_budget_seconds: Optional[float] = None,
+                 continue_after_wake_limit: bool = False,
                  model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
-                 max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
-                 trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
+                 max_thinking_tokens: Optional[int] = None, max_output_tokens: Optional[int] = None,
+                 harness: Optional[str] = None, trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
             prompt_fields.pop(unsupported, None)
@@ -237,7 +289,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         prompt_fields["prompt"] = ""  # for prompt_agent's check; unset again below
         super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), model=model,
                          model_params=model_params, effort=effort, max_thinking_tokens=max_thinking_tokens,
-                         harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
+                         max_output_tokens=max_output_tokens, harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
         self.prompt = None
         if not user_sim:
             raise ValueError("always_on needs user_sim, the agent_name of a deploy_user_sim_agent step")
@@ -259,14 +311,19 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         self.scheduled_check_min_interval = scheduled_check_min_interval
         self.contact_replies_in_parallel = bool(contact_replies_in_parallel)
         self.time_budget_seconds = None if time_budget_seconds is None else float(time_budget_seconds)
+        # Off (the default), a wake's turn that reaches its time limit (timeout_seconds) or tool-call limit (max_turns)
+        # ends the run as an error, which verifiers skip. On, it ends only that wake: the run goes on, and the agent is
+        # told at its next wake that its last turn was cut off (see the module's docstring).
+        self.continue_after_wake_limit = bool(continue_after_wake_limit)
         self.effective_time_budget()  # validates
 
     _OWN = ("user_sim", "end_time", "final", "max_wakes", "settle_timeout_seconds", "user_timeout_seconds",
             "final_reminder", "stay_quiet", "nudge", "nudge_text", "wake_reminder", "wake_reminder_text",
-            "scheduled_checks", "scheduled_check_min_interval", "contact_replies_in_parallel", "time_budget_seconds")
+            "scheduled_checks", "scheduled_check_min_interval", "contact_replies_in_parallel", "time_budget_seconds",
+            "continue_after_wake_limit")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
-                      "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
+                      "max_output_tokens", "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
 
     def settle_cap_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one settle waits, whatever is still at work (queued fires, nl actions in a row): the longest
@@ -276,17 +333,27 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
 
     def read_cap_seconds(self) -> float:
         """The longest one read's answer may take: READ_ASKS user sim turns, each with its grace and trajectory
-        fetch; an ask past it is refused, and an answer past it ends the read as a user sim error."""
-        return READ_ASKS * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS)
+        fetch, and with a user_sim_gate one more turn per rewrite and a judge call per check (every message, the
+        first and each rewrite); an ask past it is refused, and an answer past it ends the read as a user sim error."""
+        asks, judging = READ_ASKS, 0.0
+        gate = self.user_sim_gate
+        if gate is not None:
+            asks += gate.max_rewrites
+            if gate.judge_model:
+                judging = (gate.max_rewrites + 1) * gate.judge_timeout_seconds
+        return asks * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS) + judging
 
     def wake_reserve_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one turn of the loop, or the run's closing, can take, each part hard-capped: a clock jump's
         settle (settle_cap_seconds), then a wake (the agent's turn and, with nudges on, its nudge turn, each at most
-        timeout_seconds + TURN_GRACE_SECONDS plus a trajectory fetch; one settle; GATEWAY_ALLOWANCE_SECONDS of the
-        step's own calls), then a read (read_cap_seconds and GATEWAY_ALLOWANCE_SECONDS). The loop cuts off a turn of
-        its own that runs past this (a step error), so it is a real bound. ``contact_seconds`` is the longest contact
-        time limit, as for settle_cap_seconds."""
+        timeout_seconds + TURN_GRACE_SECONDS plus a trajectory fetch, and with continue_after_wake_limit on,
+        STOP_TURN_SECONDS and CUT_OFF_GRACE_SECONDS to stop one cut off at its time limit; one settle;
+        GATEWAY_ALLOWANCE_SECONDS of the step's own calls), then a read (read_cap_seconds and
+        GATEWAY_ALLOWANCE_SECONDS). The loop cuts off a turn of its own that runs past this (a step error), so it is a
+        real bound. ``contact_seconds`` is the longest contact time limit, as for settle_cap_seconds."""
         turn = self.timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS
+        if self.continue_after_wake_limit:
+            turn += STOP_TURN_SECONDS + CUT_OFF_GRACE_SECONDS
         settle = self.settle_cap_seconds(contact_seconds)
         wake = turn * (2 if self.nudge else 1) + settle + GATEWAY_ALLOWANCE_SECONDS
         return settle + wake + self.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
@@ -326,12 +393,16 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
             base[k] = getattr(self, k)
         for k in self._OWN:
             base[k] = getattr(self, k)
+        if self.user_sim_gate is not None:
+            base["user_sim_gate"] = self.user_sim_gate.to_dict()
         return base
 
     @classmethod
     def from_dict(cls, data: dict) -> AlwaysOnTaskStep:
         fields = {k: data[k] for k in cls._PROMPT_FIELDS if k in data and data[k] is not None}
         own = {k: data[k] for k in cls._OWN if k in data and data[k] is not None}
+        if data.get("user_sim_gate") is not None:
+            fields["user_sim_gate"] = data["user_sim_gate"]
         return cls(**cls._base_from_dict(data), retry_config=data.get("retry_config"), **fields, **own)
 
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
@@ -376,11 +447,17 @@ class _Run:
         self.held: list[dict] = []            # user replies held for their response time: {deliver_at, text}
         self.you_sent: list[dict] = []        # the user's own lines since their last read: {at, text}
         self.history: list[dict] = []         # every read and its answer, for the plug-in
+        # The conversation as the user-sim gate reads it, (role, text); and the gate's judge settings, set up once.
+        self.gate_history: list[tuple[str, str]] = []
+        self.gate_call_config = None
+        self.user_sim_prompt: Optional[str] = None  # its system prompt, as the gate's judge reads it
         self.replies = 0
         self.gave_up = False
         self.final_sent = False
         self.last_reply_at: Optional[datetime] = None
         self.per_turn_trajectory_urls: list[Optional[str]] = []
+        self.per_turn_trajectories: list[TurnTrajectory] = []
+        self.copies: Optional[AtifCopies] = None
         self.per_turn_parts: list[Optional[list[dict]]] = []
         self.tool_calls: Optional[int] = None
         # Each role's turns' usage, recorded as each turn ends.
@@ -417,6 +494,10 @@ class _Run:
         self.clock_rates: list[tuple[Any, float]] = []  # (env, the task's rate) for each clock the step freezes
         self.undo: list[tuple[str, Any]] = []  # (what, coroutine function): the gateway settings to put back at the end
         self.rules_in_system_prompt = False   # whether the agent took the rules in its system prompt
+        self.turn_task_id: Optional[str] = None  # the agent's A2A task for the turn in progress, once it accepted it
+        self.max_turns: Optional[int] = None     # the tool-call limit the agent was given, when the step set one
+        self.cut_offs: list[dict] = []           # turns that ended at a limit with continue_after_wake_limit on
+        self.cut_off_notice: Optional[dict] = None  # the last of them, until the next wake tells the agent
 
     async def restore(self) -> None:
         """Put back what the step changed on the gateways, latest first, so later steps of the task see the settings
@@ -436,6 +517,8 @@ class _Run:
         self.undo.append((f"{what} on {env.env_id}", put_back))
 
     def close(self) -> None:
+        if self.copies is not None:
+            self.copies.cancel()
         for p in self._plugin_paths:
             if os.path.exists(p):
                 os.unlink(p)
@@ -476,6 +559,11 @@ class _Run:
             raise StepContextError(f"always_on: the user sim agent '{us['agent_name']}' is not deployed")
         self.user_url = self.user_agent.a2a_url or self.user_agent.api_url
         self.plugin = await self._load_plugin(us.get("plugin"))
+        if self.step.user_sim_gate is not None and not callable(getattr(self.plugin, "parse", None)):
+            # A rewrite is the user sim's answer again, in the plugin's own format: without its parse, a rewrite
+            # would read as nothing and never reach the agent.
+            raise ValueError(f"always_on: user_sim_gate needs the user sim's plugin to define parse(raw), which reads "
+                             f"one of its answers as answer() does; plugin {us.get('plugin')!r} has none")
         self.tz = ZoneInfo(self.zone)
 
         self.clock_envs = [d for d in ctx.deployed_envs if d.supports(EXT_CLOCK_URI, "state")]
@@ -589,10 +677,12 @@ class _Run:
                    "harness": ctx.agent_harness or step.harness,
                    "max_turns": overrides.get("agent_max_turns") or step.max_turns,
                    "max_thinking_tokens": overrides.get("agent_max_thinking_tokens") or step.max_thinking_tokens,
+                   "max_output_tokens": overrides.get("agent_max_output_tokens") or step.max_output_tokens,
                    "output_format": step.output_format, "timeout_seconds": step.timeout_seconds,
                    "task_id": ctx.metadata.get("task_id"), "agentenv_tools": step.agentenv_tools,
                    "builtin_tools": card.get("builtin_tools")}
         desired = {k: v for k, v in desired.items() if v is not None}
+        self.max_turns = desired.get("max_turns")
         model_params = get_config().get_model_params(step.model_params)
         if model_params:
             desired["model_params"] = model_params
@@ -600,7 +690,10 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
                                              headers=self.agent.control_headers)
-        await prescribe_formats(ctx, step.id, self.agent, self.target_url, formats=())  # native until it reads atif/1
+        await prescribe_formats(ctx, step.id, self.agent, self.target_url)
+        self.copies = AtifCopies(ctx, self.agent, self.target_url,
+                                 A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY),
+                                 prescribed=ATIF_FORMAT in prescribed_formats(ctx))
         solver_model = negotiated.fields.get("model") if negotiated else None
         ctx.record_model(ModelRole.SOLVER.record_key, step.id, solver_model)
         self.usage.start(ModelRole.SOLVER, solver_model, self.agent)
@@ -614,8 +707,11 @@ class _Run:
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
             self.user_setup = dict(self.us["setup"])
             self.usage.start(ModelRole.USER_SIMULATOR, self.user_model, self.user_agent)
+            if step.user_sim_gate is not None and step.user_sim_gate.judge_model:
+                self.user_sim_prompt = recorded_instructions(self.us, ctx.metadata.get("seed") or {}, self.multi_day)
             return
         setup = self.plugin.setup(self.version, self.person)
+        self.user_sim_prompt = setup.get("system_prompt")
         self.user_model, self.user_model_from = self._user_model()
         user_config = {"model": self.user_model, "system_prompt": setup.get("system_prompt"),
                        "output_format": setup.get("output_format")}
@@ -667,15 +763,22 @@ class _Run:
 
     async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> AgentTurn:
         """One turn of the agent on ``parts``: the task's clock runs at its rate while the agent works, and is frozen
-        again after. The turn's usage is recorded as its reply arrives, before the clock is frozen."""
+        again after. The turn's usage is recorded as its reply arrives, before the clock is frozen. The agent's task id
+        for the turn is ``turn_task_id`` once it accepts the message."""
         step = self.step
+        self.turn_task_id = None
+
+        def accepted(task_id: str) -> None:
+            self.turn_task_id = task_id
+
         await self._clock_runs(True)
         try:
             # Cut off past its limit and grace, whatever send_and_wait's own retries do: a TimeoutError, as its own.
             turn = await asyncio.wait_for(
                 send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
                               context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
-                              poll_interval_seconds=step.poll_interval_seconds, before_send=record),
+                              poll_interval_seconds=step.poll_interval_seconds, before_send=record,
+                              on_sent=accepted),
                 step.timeout_seconds + TURN_GRACE_SECONDS)
         except (TimeoutError, asyncio.CancelledError):
             self.usage.cut_off(ModelRole.SOLVER)
@@ -685,6 +788,79 @@ class _Run:
             return turn
         finally:
             await self._clock_runs(False)
+
+    async def _stopped_at_time_limit(self, error: TimeoutError) -> Optional[dict]:
+        """A turn that ran out of time, with continue_after_wake_limit on: its A2A task as the agent confirms it ended
+        (``_stop_turn``), once CUT_OFF_GRACE_SECONDS more have passed, so what the turn still had under way lands
+        before the wake reads its changes and messages. None, so the run ends as an error, with the setting off, for
+        an agent that stopped answering (its sandbox died, which is not the time limit), or when the stop can't be
+        confirmed."""
+        if not self.step.continue_after_wake_limit or isinstance(error, protocol.AgentUnreachableError):
+            return None
+        ended = await self._stop_turn()
+        if ended is not None:
+            await asyncio.sleep(CUT_OFF_GRACE_SECONDS)  # the task's clock stays frozen, as between any two turns
+        return ended
+
+    async def _stop_turn(self) -> Optional[dict]:
+        """Stop a turn cut off at its time limit before the run goes on: ask the agent to cancel its task (A2A
+        tasks/cancel) and wait, up to STOP_TURN_SECONDS, for the agent to report the task ended. The task as it ended
+        (canceled, or failed or completed when it ended on its own just then); None when that can't be confirmed: no
+        task was ever accepted, or the agent doesn't answer in time."""
+        task_id = self.turn_task_id
+        if task_id is None:
+            return None
+        try:
+            async with asyncio.timeout(STOP_TURN_SECONDS):
+                await protocol.cancel_a2a_task(self.target_url, task_id)
+                ended = await protocol.poll_a2a_task(self.target_url, task_id, STOP_TURN_SECONDS, 1)
+        except Exception as e:
+            logger.warning(f"always_on: wake {self.wakes}: could not confirm the agent stopped its cut-off turn "
+                           f"(task {task_id}): {type(e).__name__}: {e}")
+            return None
+        return ended or {}
+
+    def _stopped_turn(self, ended: dict, error: str) -> tuple[AgentTurn, Optional[str]]:
+        """The turn a time-limit cut-off left once stopped, and the state it stopped in when that state is what the
+        time limit made it. One the agent canceled, or that completed just then, stands for the time limit
+        (``_timed_out``). One that failed (or was rejected) meanwhile is taken as it ended, with no stopped state, so
+        its own error says whether a limit ended it (``_limit_reached``); any other failure still ends the run."""
+        state = _state_name((ended.get("status") or {}).get("state"))
+        if state in ("canceled", "completed"):
+            return _timed_out(self.turn_task_id, error), state
+        message = (ended.get("status") or {}).get("message") or {}
+        return AgentTurn(task_id=self.turn_task_id or "", task=ended,
+                         reply=protocol.TerminalResponse.from_message(message)), None
+
+    def _limit_reached(self, state: Any, term: protocol.TerminalResponse) -> Optional[str]:
+        """With continue_after_wake_limit on, the limit (TIME_LIMIT or TOOL_CALL_LIMIT) at which the agent's harness
+        ended a failed turn, from its own account of it; None for any other failure, or with the setting off."""
+        if not self.step.continue_after_wake_limit or _state_name(state) != "failed":
+            return None
+        text = term.error_message or term.response_text or ""
+        if TOOL_CALL_LIMIT_PATTERN.search(text):
+            return TOOL_CALL_LIMIT
+        if (term.error_code or "").endswith(TIME_LIMIT_CODE_SUFFIX) or TIME_LIMIT_PATTERN.match(text):
+            return TIME_LIMIT
+        return None
+
+    def _cut_off(self, limit: str, turn: str, error: str, stopped: Optional[str] = None) -> dict:
+        """A turn (``turn``: "wake" or "nudge") ended at ``limit``: the wake ends there and the run goes on; the next
+        wake tells the agent (``cut_off_notice``)."""
+        entry = {"wake": self.wakes, "turn": turn, "limit": limit, "error": (error or "")[:300],
+                 **({"stopped": stopped} if stopped else {})}
+        self.log("wake_cut_off", **entry)
+        self.cut_offs.append(entry)
+        self.cut_off_notice = entry
+        return entry
+
+    def _cut_off_text(self, limit: str) -> str:
+        """The note the next wake opens with, in plain words: which limit, and how much it was."""
+        if limit == TIME_LIMIT:
+            words = f"time limit of {_duration(self.step.timeout_seconds)}"
+        else:
+            words = f"limit of {self.max_turns} tool calls" if self.max_turns else LIMIT_WORDS[limit]
+        return CUT_OFF_TEXT.format(limit=words)
 
     async def _configure_contacts(self) -> None:
         """On each env with triggers, let one trigger's replies run side by side (``contact_replies_in_parallel``; a
@@ -819,7 +995,8 @@ class _Run:
             f["last_still_at_work"] = stuck
 
     async def settle(self) -> list[dict]:
-        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time. A contact's
+        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time, and no
+        deferred call the clock has reached still to make. A contact's
         reply (a call to a trigger's executor) counts as in progress until it ends or its time limit passes (plus
         ``CONTACT_GRACE_SECONDS``); any other work, an event due that an advance to now doesn't set going among it,
         gets ``settle_timeout_seconds``, from the start or from the last contact call seen. A gateway that reports no
@@ -848,13 +1025,15 @@ class _Run:
                                                  + max(c["seconds_left"] for c in live))
                 busy = [row for row in rows if _busy(row, now)]
                 due = state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now
+                calls = [c["key"] for c in due_deferred_calls(state)]
                 limit = min(cap, max(track["contact_until"],
                                      track["live_call_seen"] + self.step.settle_timeout_seconds))
-                if not due and not busy:
+                if not due and not busy and not calls:
                     waiting.pop(i)
                 elif mono >= limit:  # a due event that won't go, like other work, gets settle_timeout_seconds
                     stuck.append({"env_id": env.env_id, "triggers": [_at_work(row) for row in busy],
-                                  **({"due_not_going": state["next_event_at"]} if due else {})})
+                                  **({"due_not_going": state["next_event_at"]} if due else {}),
+                                  **({"deferred_calls_due": calls} if calls else {})})
                     waiting.pop(i)
                 elif due:  # an event already due: an advance to now sets it going
                     try:
@@ -1020,6 +1199,8 @@ class _Run:
     async def _open(self) -> None:
         """The opening wake: the user's request, with what came due for the agent."""
         self.you_sent.append(dict(self.opening))
+        if self.opening.get("text"):
+            self.gate_history.append(("user", self.opening["text"]))
         opened_at = _utc(self.opening["at"])
         await self._chat_user(self._opening_parts(lambda text: self._chat_part(opened_at, text, kind="opening")))
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
@@ -1257,6 +1438,11 @@ class _Run:
         sent_at = await self.now()
         if self.wakes == 0 and not self.rules_in_system_prompt:  # no system prompt took them: the first wake does
             parts = [_step_part(self.rules(), "rules"), *parts]
+        told = self.cut_off_notice
+        if told is not None:  # the last turn was cut off at a limit: this wake opens by saying so
+            parts = [_step_part(self._cut_off_text(told["limit"]), "cut_off_notice"), *parts]
+            told["told_in_wake"] = self.wakes + 1
+            self.cut_off_notice = None
         last = last or self.wakes + 1 >= step.max_wakes
         if last and step.final_reminder:
             parts.append(_step_part(step.final_reminder.format(first=self.person["first"]), "final_reminder"))
@@ -1276,31 +1462,27 @@ class _Run:
                  for p in parts if p.get("kind") == "file"]
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
                  last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"),
-                 **({"files": files} if files else {}))
+                 **({"files": files} if files else {}),
+                 **({"cut_off_notice": {"wake": told["wake"], "limit": told["limit"]}} if told else {}))
         t = time.time()
         try:
             turn = await self._agent_turn(parts, msg_id, record)
+            stopped = None
         except TimeoutError as e:
-            self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
-            self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
-            return
+            ended = await self._stopped_at_time_limit(e)
+            if ended is None:
+                self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
+                self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1),
+                         **({"stop": "unconfirmed"} if step.continue_after_wake_limit else {}))
+                return
+            turn, stopped = self._stopped_turn(ended, f"agent turn timed out after {step.timeout_seconds}s: {e}")
         task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
+        cut_off = TIME_LIMIT if stopped is not None else self._limit_reached(state, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("turn")
-        traj = None
-        card = self.agent.a2a_card or {}
-        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
-        if traj_ext:
-            try:
-                traj = (await asyncio.wait_for(
-                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                            card=card, sandbox_type=self.agent.sandbox_type,
-                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
-            except Exception as e:
-                logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
-        self.per_turn_trajectory_urls.append(traj)
+        traj, which = await self._trajectory(task_id, msg_id, f"wake {self.wakes}")
         self.final_task_id = task_id
         ended = await self.now()
         plain = term.response_text or ""
@@ -1308,20 +1490,68 @@ class _Run:
         self.log("agent_turn_end", n=self.wakes, state=str(state), virtual_time=_iso(ended),
                  virtual_seconds=round((ended - sent_at).total_seconds()), real_seconds=round(time.time() - t, 1),
                  tool_calls=term.tool_call_count, plain_reply=plain, messages_to_user=len(messages),
-                 trajectory_url=traj, **extra)
+                 trajectory_url=traj, **which, **extra, **({"cut_off": cut_off} if cut_off else {}))
         self._sent(messages)
-        if not _completed(state):  # failed, canceled or rejected: the turn didn't run to its end
+        if cut_off:  # the wake ends here; the run goes on
+            self._cut_off(cut_off, "wake", term.error_message or term.response_text, stopped)
+        elif not _completed(state):  # failed, canceled or rejected: the turn didn't run to its end
             self._failed(term.error_type or f"agent_turn_{_state_name(state)}",
                          term.error_message or term.response_text or f"agent turn {_state_name(state)}",
                          term.error_code)
             return
-        if step.nudge and not messages and not quiet and _closing_text(plain):
+        elif step.nudge and not messages and not quiet and _closing_text(plain):
             await self._nudge(plain)
         stuck = await self.settle()
         if stuck:
             self.log("settle_timeout", wake=self.wakes, still_at_work=stuck, settle=self.last_settle)
         await self._read_changes("after_turn")
         await self._schedule_read()
+
+    async def _trajectory(self, task_id: str, msg_id: str, turn: str) -> tuple[Optional[str], dict]:
+        """The agent turn's trajectory, its url and record joining the run's per-turn lists. When the run prescribes
+        atif/1 and the agent offers it, the turn's copy is read off the turn's path, and its url and record are filled
+        in when the run ends (``_settle_copies``); otherwise its native one is read within one fetch cap
+        (TRAJECTORY_FETCH_SECONDS). Returns the url read, and for a copied turn, whose url the run's turns share, the
+        timeline field that says which turn it is."""
+        step, card = self.step, self.agent.a2a_card or {}
+        extension = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        record = TurnTrajectory(format=None, atif=None)
+        native = functools.partial(fetch_native_trajectory, self.target_url, extension, task_id,
+                                   step._trajectory_prefix(), msg_id, card=card, sandbox_type=self.agent.sandbox_type,
+                                   headers=self.agent.control_headers) if extension else _no_trajectory
+        index = len(self.per_turn_trajectory_urls)
+        self.per_turn_trajectories.append(record)
+        self.copies.turn(index, task_id, msg_id, record, native=native)
+        if self.copies.replaces_native:
+            self.per_turn_trajectory_urls.append(None)
+            return None, {"turn": index}
+        url = None
+        try:
+            url, record["format"] = await asyncio.wait_for(native(), TRAJECTORY_FETCH_SECONDS)
+        except Exception as e:
+            logger.warning(f"{turn}: trajectory fetch failed (continuing): {e}")
+        self.per_turn_trajectory_urls.append(url)
+        return url, {}
+
+    async def _settle_copies(self) -> None:
+        """Each copied turn's url and record, and its timeline events' too, once its copy is stored: the copies still
+        going get one fetch cap more (TRAJECTORY_FETCH_SECONDS), none when the step is being cancelled, and one still
+        going then has no url."""
+        if self.copies is None:
+            return
+        task = asyncio.current_task()
+        try:
+            urls = await self.copies.join(timeout=0 if task is not None and task.cancelling()
+                                          else TRAJECTORY_FETCH_SECONDS)
+        except Exception as e:  # the record matters more than this part of it
+            logger.warning(f"always_on: the agent's atif/1 copies could not be joined: {type(e).__name__}: {e}")
+            urls = {}
+        for index, url in urls.items():
+            self.per_turn_trajectory_urls[index] = url
+        for event in self.timeline:
+            if event.get("event") in ("agent_turn_end", "nudge") and "turn" in event:
+                event["trajectory_url"] = self.per_turn_trajectory_urls[event["turn"]]
+                event["trajectory_format"] = self.per_turn_trajectories[event["turn"]]["format"]
 
     def _kept_parts(self, parts: list[dict]) -> list[dict]:
         """What the prompt response keeps of one wake's parts: TURN_TEXT_CHARS of each text, until
@@ -1357,37 +1587,34 @@ class _Run:
         t = time.time()
         try:
             turn = await self._agent_turn(parts, msg_id, record)
+            stopped = None
         except TimeoutError as e:
-            self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
-            self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
-                     state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1))
-            return
+            ended = await self._stopped_at_time_limit(e)
+            if ended is None:
+                self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
+                self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
+                         state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1),
+                         **({"stop": "unconfirmed"} if step.continue_after_wake_limit else {}))
+                return
+            turn, stopped = self._stopped_turn(ended, f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
         task_id, state, term = turn.task_id, turn.state, turn.reply
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
+        cut_off = TIME_LIMIT if stopped is not None else self._limit_reached(state, term)
         messages, quiet = await self._take_messages()
         await self._read_changes("nudge")
-        traj = None
-        card = self.agent.a2a_card or {}
-        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
-        if traj_ext:
-            try:
-                traj = (await asyncio.wait_for(
-                    fetch_native_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                            card=card, sandbox_type=self.agent.sandbox_type,
-                                            headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)).url
-            except Exception as e:
-                logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
-        self.per_turn_trajectory_urls.append(traj)
+        traj, which = await self._trajectory(task_id, msg_id, f"nudge after wake {self.wakes}")
         self.final_task_id = task_id
         plain = term.response_text or ""
         outcome = "message_user" if messages else "stay_quiet" if quiet else "neither"
         self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
                  state=str(state), outcome=outcome, messages_to_user=len(messages), stay_quiet_calls=len(quiet),
                  plain_reply_after=plain, tool_calls=term.tool_call_count, real_seconds=round(time.time() - t, 1),
-                 trajectory_url=traj)
+                 trajectory_url=traj, **which, **({"cut_off": cut_off} if cut_off else {}))
         self._sent(messages, after_nudge=True)
-        if not _completed(state):
+        if cut_off:  # the wake ends here; the run goes on
+            self._cut_off(cut_off, "nudge", term.error_message or term.response_text, stopped)
+        elif not _completed(state):
             self._failed(term.error_type or f"agent_turn_{_state_name(state)}",
                          term.error_message or term.response_text or f"agent nudge turn {_state_name(state)}",
                          term.error_code)
@@ -1505,6 +1732,13 @@ class _Run:
         except TimeoutError:  # the plug-in ran past the read's cap: a user sim error, as a failed ask is
             ans = {"outcome": "no_reply", "message": ""}
             calls.append({"text": None, "structured": None, "error": f"the read ran past its cap ({cap:.0f}s)"})
+        self.gate_history += [("assistant", m["text"]) for m in seen]
+        gate_record = None
+        if (self.step.user_sim_gate is not None and not last and ans.get("outcome") in ("reply", "done")
+                and (ans.get("message") or "").strip() and not (calls and calls[-1].get("error"))):
+            ans, gate_record = await self._gate(ans, ask)
+        if ans.get("outcome") in ("reply", "done") and (ans.get("message") or "").strip():
+            self.gate_history.append(("user", ans["message"]))
         self.history.append({"read": read, "answer": ans})
         mode = self.read_mode
         latency = self._latency(mode)
@@ -1519,7 +1753,11 @@ class _Run:
                          user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls],
                          user_sim_turns=ans.get("turns", len(calls)), shown=ans.get("shown"),
                          past_turn_cap=ans.get("past_turn_cap"), last_read=last,
-                         retried=ans.get("retried"), first_answer=ans.get("first_answer"))
+                         retried=ans.get("retried"), first_answer=ans.get("first_answer"),
+                         **({"user_sim_gate": gate_record} if gate_record else {}),
+                         # as prompt_agent's read: what reached the agent is ``message``, what she first wrote this
+                         **({"first_message": gate_record["first_message"]}
+                            if gate_record and "first_message" in gate_record else {}))
         outcome = ans.get("outcome")
         said = (ans.get("message") or "").strip()
         hook = {"hook": HOOK_NAME, "turn": self.wakes, "read_at": _iso(now),
@@ -1555,6 +1793,63 @@ class _Run:
         if calls and calls[-1].get("error") and not last:
             self.end_reason = self.end_reason or "user_sim_error"
 
+    async def _gate(self, ans: dict, ask) -> tuple[dict, dict]:
+        """The user sim's answer after the user-sim gate (user_sim_gate.py): each failing message is held back and the
+        user sim, told why through ``ask`` in its session, answers again, up to the gate's limit. Returns the answer to
+        use and the gate's record for the read. A message that still fails is never delivered: the answer becomes a
+        no_reply, and the run ends: as a failed user sim (``user_sim_error``) when ``on_fail`` is "fail", plainly
+        ("user_sim_invalid") when it is "end"; "send" sends it."""
+        gate = self.step.user_sim_gate
+        if self.gate_call_config is None and gate.judge_model:  # a judge that can't be set up fails the step
+            self.gate_call_config = judge_call_config(gate, self.ctx.metadata.get("user_overrides", {}))
+        latest = {"ans": ans, "dropped": False}
+        verdicts: list[dict] = []
+        rewrites: list[dict] = []
+
+        async def rewrite(note: str) -> Optional[str]:
+            got = await ask(note)
+            # The plugin's own parse: a plugin with another answer format reads its rewrite as it reads its answers.
+            new = self.plugin.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
+            rewrites.append({**{k: new.get(k) for k in ("outcome", "message", "used", "schema_errors")},
+                             "user_sim_error": got.get("error")})
+            if got.get("error"):  # read() ends the run on it (user_sim_error), as on any failed ask
+                latest["ans"] = {**ans, "outcome": "no_reply", "message": "", "used": None}
+                return None
+            latest["ans"] = {**ans, **new}
+            said = (new.get("message") or "").strip()
+            if new.get("outcome") in ("reply", "done") and said:
+                return said
+            # A rewrite with nothing to send in place of the held message, a no_reply or an empty reply, holds it back
+            # for good, as a failed one does; a done without a message ends the run as the user's own end.
+            latest["dropped"] = new.get("outcome") != "done"
+            return None
+
+        def on_verdict(attempt: int, text: str, verdict) -> None:
+            verdicts.append({"attempt": attempt, "chars": len(text), **verdict.to_dict()})
+            if not verdict.passed:
+                logger.warning(f"always_on wake {self.wakes}: user-sim answer failed the gate (attempt {attempt + 1}/"
+                               f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
+
+        outcome = await run_gate(gate, ans["message"], self.gate_history, rewrite, call_config=self.gate_call_config,
+                                 instructions=self.user_sim_prompt, on_verdict=on_verdict,
+                                 on_call=lambda reply: self.usage.reply(ModelRole.JUDGE, reply))
+        if latest["dropped"] and gate.on_fail != "send":
+            outcome.invalid = True
+        record = {"verdicts": verdicts, "rewrites": rewrites, "invalid": outcome.invalid}
+        if rewrites:
+            record["first_message"] = ans["message"]
+        if not outcome.invalid:
+            return latest["ans"], record
+        reasons = outcome.reasons() + (["its rewrite sent nothing in its place"] if latest["dropped"] else [])
+        self.ctx.metadata.setdefault("user_sim_invalid", {})[self.step.id] = {"wake": self.wakes, "reasons": reasons}
+        if gate.on_fail == "fail":
+            self.error = (f"user-sim answer at wake {self.wakes} still reads as the assistant's after "
+                          f"{gate.max_rewrites} rewrite(s): {'; '.join(reasons)[:500]}")
+            self.error_type = "user_sim_error"  # a failed user sim: the run is redone
+            self.end_reason = self.end_reason or "user_sim_error"
+        self.end_reason = self.end_reason or "user_sim_invalid"
+        return {**latest["ans"], "outcome": "no_reply", "message": "", "used": None}, record
+
     async def _ask_user_sim(self, text: str, deadline: float) -> dict:
         """One user sim turn on ``text``, cut off at its time limit and grace or at the read's ``deadline``
         (time.monotonic()), whichever comes first."""
@@ -1577,7 +1872,7 @@ class _Run:
         user_task_id, term = turn.task_id, turn.reply
         self.usage.turn(ModelRole.USER_SIMULATOR, term)
         if turn.state != TaskState.completed and str(turn.state) != "completed":
-            return {"text": None, "structured": None, "error": f"state {turn.state}"}
+            return {"text": None, "structured": None, "error": ended_turn_error(turn.state, term)}
         raw = next((p["text"] for p in turn.message.get("parts") or [] if p.get("kind") == "text"), term.response_text)
         structured = term.structured_output
         if structured is None:
@@ -1657,6 +1952,7 @@ class _Run:
         except Exception as e:  # the record matters more than this part of it
             logger.warning(f"always_on: could not read what was pending at the end: {e}")
             self.pending = {"error": [{"error": f"{type(e).__name__}: {str(e)[:200]}"}]}
+        await self._settle_copies()
         if self.end_reason == NOTHING_CAN_WAKE:
             # Scheduled checks would have woken the agent, so they aren't what makes a run stuck.
             stuck = any(items for kind, items in self.pending.items() if kind != "scheduled_checks_not_due")
@@ -1703,6 +1999,8 @@ class _Run:
         if step.stay_quiet:
             counts["stay_quiet_wakes"] = sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                              and e.get("stay_quiet_calls"))
+        if step.continue_after_wake_limit:
+            counts["cut_off_wakes"] = len(self.cut_offs)
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
                   "error_type": self.error_type, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version,
@@ -1717,6 +2015,11 @@ class _Run:
                               "scheduled_checks": self.checks, "contacts": self.contacts,
                               "time_budget_seconds": self.time_budget,
                               "wake_reserve_seconds": step.wake_reserve_seconds(self.contact_seconds)}
+        if step.continue_after_wake_limit:
+            # Each wake whose turn ended at its time or tool-call limit, and the wake that told the agent so (none
+            # when it was the run's last).
+            record["settings"]["continue_after_wake_limit"] = True
+            record["cut_off_wakes"] = [dict(c) for c in self.cut_offs]
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         # The graded response is the user's whole chat from the agent, each message with its pretend time; never its
@@ -1750,6 +2053,7 @@ class _Run:
             prompt_id=step.prompt_id, response=final_text, prompt_text=self._effective_prompt(),
             agent_trajectory_object_url=traj, agent_trajectory_object_prefix=step._trajectory_prefix(),
             target_agent_per_turn_trajectory_object_urls=self.per_turn_trajectory_urls or None,
+            target_agent_per_turn_trajectories=self.per_turn_trajectories or None,
             source_agent_per_turn_prompt_parts=self.per_turn_parts or None, tool_call_count=self.tool_calls,
             model=self.model, error_type=self.error_type, error_code=self.error_code, error_message=self.error,
             agent_session_id=self.final_task_id,
@@ -1815,6 +2119,10 @@ def render_for_judge(record: dict) -> str:
         calls = f" · {turn['tool_calls']} tool calls" if turn.get("tool_calls") is not None else ""
         state = f" · its turn {turn['state']}" if turn.get("state") not in (None, "completed", "TaskState.completed") \
             else ""
+        cut = turn.get("cut_off") or nudges.get(n, {}).get("cut_off")
+        if cut:
+            which = "its nudge turn" if not turn.get("cut_off") else "its turn"
+            state = f" · {which} was cut off at its {LIMIT_WORDS.get(cut, cut)} and the run went on"
         lines.append(f"- Wake {n} · {label_time(wake.get('virtual_time'), zone)} · woken by "
                      f"{woke_by_text(wake.get('woke_by'))} · sent the user {sent} message{'s' if sent != 1 else ''}"
                      f"{calls}{state}")
@@ -1882,6 +2190,11 @@ def _task_zone(us: dict, clocks: list[dict]) -> str:
     return task_zone(us, clocks, "always_on")
 
 
+async def _no_trajectory() -> tuple[None, None]:
+    """The native read of an agent whose card has no trajectory extension: nothing to read."""
+    return None, None
+
+
 def _step_part(text: str, source: str) -> dict:
     """A line the step adds to a wake, marked so a reader can tell it from what the user or the world sent."""
     return {"kind": "text", "text": text, "metadata": {"agentenv": {"source": source}}}
@@ -1894,6 +2207,22 @@ def _state_name(state: Any) -> str:
 
 def _completed(state: Any) -> bool:
     return state == TaskState.completed or _state_name(state) == "completed"
+
+
+def _timed_out(task_id: Optional[str], error: str) -> AgentTurn:
+    """What stands for agent task ``task_id``'s turn when the step cut it off at its time limit: state "timeout", no
+    reply, and ``error`` as its error message. Its usage was already counted as unknown (``_agent_turn``)."""
+    message = {"parts": [{"kind": "data", "data": {"error_message": error}}]}
+    return AgentTurn(task_id=task_id or "", task={"status": {"state": "timeout", "message": message}},
+                     reply=protocol.TerminalResponse.from_message(message))
+
+
+def _duration(seconds: float) -> str:
+    """``seconds`` in plain words: whole minutes as minutes ("60 minutes"), else seconds."""
+    s = int(round(seconds))
+    if s >= 60 and s % 60 == 0:
+        return f"{s // 60} minute{'s' if s != 60 else ''}"
+    return f"{s} second{'s' if s != 1 else ''}"
 
 
 def _closing_text(plain: str) -> str:

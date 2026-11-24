@@ -536,13 +536,28 @@ async def test_after_a_prompt_agent_chat_a_malformed_answer_gets_one_retry(monke
 
 @pytest.mark.asyncio
 async def test_a_prompt_agent_chat_the_user_sim_broke_is_not_rated(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", said("reply", "x"))]})
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [("failed", [{"kind": "data", "data": {"error_message": "the model was refused"}}])]})
     ctx = await _context(monkeypatch)
     await _step().execute(ctx)
     await _hannah_rater().execute(ctx)
     assert len(_user_asks(peers)) == 1
     rating = ctx.metadata[SATISFACTION_KEY]["talk"]
-    assert rating["skipped"] == "the user sim failed: state failed" and rating["score"] is None
+    assert rating["skipped"] == "the user sim failed: state failed: the model was refused" and rating["score"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_agent_chat_the_user_sim_gate_cut_off_is_not_rated_and_the_agent_isnt_blamed(monkeypatch):
+    from agent_env.task_step.context import PromptResponse
+
+    ctx = await _context(monkeypatch)
+    ctx.metadata.setdefault("a2a_conversations", {})["talk"] = None
+    ctx.prompt_responses.append(PromptResponse(
+        prompt_id="p", response="draft", error_type="user_sim_error",
+        error_message="The user simulator failed: user_sim_gate: user-sim message at turn 1 ...", step_id="talk"))
+    await _hannah_rater().execute(ctx)
+    rating = ctx.metadata[SATISFACTION_KEY]["talk"]
+    assert rating["skipped"] == "the user sim failed: user_sim_gate: user-sim message at turn 1 ..."
+    assert rating["score"] is None
 
 
 @pytest.mark.asyncio
@@ -553,3 +568,14 @@ async def test_a_prompt_agent_chat_whose_agent_turn_failed_is_not_rated(monkeypa
         await _step().execute(ctx)
     await _hannah_rater().execute(ctx)
     assert ctx.metadata[SATISFACTION_KEY]["talk"]["skipped"] == "the agent's turn failed"
+
+
+
+@pytest.mark.parametrize("record, skipped", [
+    ({"end_reason": "user_sim_error", "error_type": "user_sim_error"}, "the run ended on user_sim_error"),
+    ({"end_reason": "user_sim_invalid"}, None),   # on_fail "end": no error, so the run is rated as one that ended
+], ids=["on_fail fail", "on_fail end"])
+def test_an_always_on_run_the_gate_failed_as_an_error_is_not_rated(record, skipped):
+    from agent_env.task_step.task_steps.agent import rate_user_satisfaction as rus
+
+    assert rus._always_on_session({"user_sim": {"name": "linda"}, **record}).skipped == skipped

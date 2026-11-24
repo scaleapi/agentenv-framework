@@ -51,7 +51,7 @@ class _CustomEnv(Env):
             env_id=self.id, env_version=self.version or 1,
             gateway_url=f"https://gw.example/{self.id}",
             mcp_url=f"https://mcp.example/{self.id}",
-            db_web_url=None, sandbox_id=f"sbx-{self.id}",
+            sandbox_id=f"sbx-{self.id}",
             metadata={"deployed_by": type(self).__name__, "flavor": self.flavor},
         )
 

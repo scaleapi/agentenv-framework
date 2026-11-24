@@ -68,11 +68,13 @@ class _GradeFields(TypedDict):
 class Grade(_GradeFields, total=False):
     """A verifier step's named grade, as ``context.metadata["grades"][<step id>]`` holds it. ``verifier_status`` is a
     ``VerifierStatus`` value, and ``score`` is None unless it is ``graded``; each ``verifier_criteria`` row has ``id``,
-    ``score``, ``passed``, ``weight`` and ``skipped``, besides any other keys the verifier gave it. The two fields here
-    are written only for a large output."""
+    ``score``, ``passed``, ``weight`` and ``skipped``, besides any other keys the verifier gave it. The two
+    ``verifier_output`` fields here are written only for a large output; ``judge_calls``, a judge's record of each model
+    call it made, only by a judge (``grade_fields``)."""
 
     verifier_output_ref: dict[str, Any]
     verifier_output_offload_error: str
+    judge_calls: list[dict[str, Any]]
 
 
 @dataclass
@@ -129,6 +131,7 @@ class VerifierTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         try:
             verification = await self.verify(context)
+            await self.settle(context)
             score = self._score(verification)
             status = (VerifierStatus.SKIPPED if verification.skipped is not None
                       else VerifierStatus.FAILED if verification.error is not None else VerifierStatus.GRADED)
@@ -137,6 +140,7 @@ class VerifierTaskStep(TaskStep):
                                 skip=verification.skipped)
             grade.update(await self._output(context, verification.output))
         except Exception as exc:
+            await self.settle(context)
             self._write_grade(context, self._grade(context, VerifierStatus.FAILED, None, [],
                                                    error=_capped(f"{type(exc).__name__}: {exc}")))
             raise
@@ -158,6 +162,15 @@ class VerifierTaskStep(TaskStep):
         as its sha256 and size."""
         fields = {k: v for k, v in self.to_dict().items() if k not in _NOT_SETTINGS}
         return {**fields, "score_aggregator": self.score_aggregator.value}
+
+    def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
+        """Fields of the grade beside the base's, written whether the step graded, skipped or failed, so they say what
+        a failed run did too, as a judge's ``judge_calls``. None by default."""
+        return {}
+
+    async def settle(self, context: TaskStepContext) -> None:
+        """Work ``verify`` left running that ``grade_fields`` reports, as a judge's uploads, finished before the grade is
+        written, whether the step graded or failed. Nothing by default; it must not raise."""
 
     def criterion_rows(self) -> Optional[int]:
         """How many criterion rows a run of this verifier grades, when its config alone says, for lint to weigh a
@@ -210,6 +223,7 @@ class VerifierTaskStep(TaskStep):
             verifier_type=self.type,
             verifier_version=_providing_version(type(self).__module__),
             verifier_settings=self._settings(context),
+            **self.grade_fields(context),
         )
 
     def _score(self, verification: Verification) -> Optional[float]:

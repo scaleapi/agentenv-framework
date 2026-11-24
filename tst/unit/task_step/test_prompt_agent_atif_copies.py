@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -34,6 +35,8 @@ from tst.util.granting_object_store import GRANT_ORIGIN, GrantingObjectStore
 from tst.util.images import png
 
 NATIVE = "shots/1"
+#: How long the agent holds a gated turn open for its ``gate`` at most, so a test that never sets it still ends.
+_GATE_SECONDS = 30
 _PREFIX = "prompt_agent_trajectories/prompt_id=solve/"
 
 
@@ -48,19 +51,28 @@ class _Shots(Adapter):
         turn.step(key=f"s{record['n']}", llm_call_count=1)
 
 
-def _app(*, atif: bool = True):
-    """An agent that, each turn, appends one shot, a new screenshot each time, and answers."""
+def _app(*, atif: bool = True, live: bool = False, gate: asyncio.Event | None = None):
+    """An agent that, each turn, appends one shot, a new screenshot each time, and answers; with ``gate``, a second
+    shot, then a third once ``gate`` is set (at most ``_GATE_SECONDS`` on), so a live reader sees the first closed
+    while the turn runs (a step closes when the next begins)."""
     shots = iter(range(1, 1000))
 
     @a2a_agent(
         identity=AgentIdentity(name="solver", description="test", version="1"),
-        extensions=(enable(TRAJECTORY_V1, live=False, native=NATIVE, **({"atif": _Shots} if atif else {})),),
+        extensions=(enable(TRAJECTORY_V1, live=live, native=NATIVE, **({"atif": _Shots} if atif else {})),),
     )
     class Agent(AgentEnvAgent):
         async def run(self, request: TaskRequest) -> TaskResult:
             request.trajectory.set_format(NATIVE)
             n = next(shots)
             request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
+            if gate is not None:
+                for held in (False, True):
+                    if held:
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(gate.wait(), _GATE_SECONDS)
+                    n = next(shots)
+                    request.trajectory.append({"type": "shot", "n": n, "png": base64.b64encode(png(n, 1)).decode()})
             return TaskResult.text(f"shot {n}")
 
     return Agent().create_app()
@@ -70,9 +82,10 @@ class _Wire(httpx.AsyncBaseTransport):
     """The agent at ``http://agent.test``, served in-process, and the store's grant URLs, which write into the store.
     A test can hold the agent's atif/1 reads until it lets them go, rewrite their answers, or rewrite any answer."""
 
-    def __init__(self, store: GrantingObjectStore, *, atif: bool) -> None:
+    def __init__(self, store: GrantingObjectStore, *, atif: bool, live: bool = False,
+                 gate: asyncio.Event | None = None) -> None:
         self.store = store
-        self._atif = atif
+        self._atif, self._live, self._gate = atif, live, gate
         self.restart()
         self.atif_reads: list[dict] = []
         self.native_reads: list[dict] = []
@@ -88,7 +101,7 @@ class _Wire(httpx.AsyncBaseTransport):
         self.unreachable: set[str] = set()
 
     def restart(self) -> None:
-        self.app = _app(atif=self._atif)
+        self.app = _app(atif=self._atif, live=self._live, gate=self._gate)
         self._agent = httpx.ASGITransport(app=self.app)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -125,13 +138,14 @@ class _Wire(httpx.AsyncBaseTransport):
 
 
 class _Run:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, atif: bool = True) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, atif: bool = True, live: bool = False,
+                 gate: asyncio.Event | None = None) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
         self.root = tmp_path / "store"
         self.store = GrantingObjectStore(str(self.root), reaches=True)
         configure(object_store=self.store)
         quiet_conversations(monkeypatch)
-        self.wire = _Wire(self.store, atif=atif)
+        self.wire = _Wire(self.store, atif=atif, live=live, gate=gate)
         self.asked: list[int] = []
         route_clients(monkeypatch, self.wire)
 

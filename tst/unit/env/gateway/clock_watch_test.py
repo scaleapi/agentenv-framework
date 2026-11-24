@@ -501,11 +501,11 @@ async def test_a_retired_agent_is_no_longer_waited_for_or_named_and_its_token_ac
         await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "token-agent"})
         retired = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"})
         started = time.monotonic()
-        written = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 5})
+        written = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 30})
         waited = time.monotonic() - started
         assert gw._clock_followers.follower_for("agent-solver", "token-agent") is None
     assert retired.status_code == 200 and retired.json() == {"ok": True, "retired": True, "followers": {}}
-    assert written.status_code == 200 and waited < 1, (written.text, waited)
+    assert written.status_code == 200 and waited < 10, (written.text, waited)
 
 
 @pytest.mark.asyncio

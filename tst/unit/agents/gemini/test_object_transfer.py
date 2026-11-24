@@ -61,7 +61,7 @@ def test_card_offers_every_object_form_and_no_s3_form(app):
             {"required": ["task_id", "objects"]},
             {"required": ["context_id"]},
             {"required": ["context_id", "objects"]},
-            {"required": ["task_id", "after"], "optional": ["limit"]},
+            {"required": ["task_id", "after"], "optional": ["limit", "header_digest", "subagent_cursors"]},
             {"required": ["context_id", "after"], "optional": ["limit"]},
         ],
     }

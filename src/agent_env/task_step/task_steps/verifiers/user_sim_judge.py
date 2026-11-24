@@ -147,7 +147,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 from agent_env.config import model_call
@@ -155,6 +155,7 @@ from agent_env.task_step.context import PromptResponse, StepContextError, TaskSt
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers import user_sim_judge_core as core
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerdict, RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 from agent_env.task_step.task_steps.verifiers.verifier import Verification
@@ -200,16 +201,12 @@ LINE_UNCHECKED = ("the run recorded no persona fingerprint, so its tags can't be
 
 @dataclass
 class _ThisRun:
-    """One run's judging: what it asks and what its calls cost. Held by the run's own copy of the step, never by the
-    step a task shares across runs."""
+    """One run's judging: what it asks, and how its first call went. Held by the run's own copy of the step, never by
+    the step a task shares across runs."""
     plan: core.Plan
     text: str  # the run as the judge reads it
     first: Optional[asyncio.Event] = None  # set once the run's first call is over
     first_error: Optional[BaseException] = None  # what the first call raised, if it did
-    calls: int = 0
-    usage: list[Any] = field(default_factory=list)
-    cost: float = 0.0  # the calls' costs that have a figure
-    unpriced: int = 0  # the calls whose cost has none
 
 
 class UserSimJudge(RubricsVerifierTaskStep):
@@ -390,8 +387,9 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 error["not_failing"] = NOT_FAILING_UNCONFIRMED
             else:
                 error["fails_task"] = True
-        output = {**judged.output, **entry, "user_sim_error": error, "calls": this.calls,
-                  "usage": core.usage_total(this.usage), **_cost(this)}
+        answered = [call for call in judge_usage.calls() if call["outcome"] == "answered"]
+        output = {**judged.output, **entry, "user_sim_error": error, "calls": len(answered),
+                  "usage": _usage(answered), **_cost(answered)}
         if error["value"] == "unknown":
             checks = [r for r in rows if r["id"] in core.CHECKS]
             output["flag"] = FLAG_NONE_DECIDED if checks and all(r["verdict"] == "error" for r in checks) \
@@ -450,16 +448,9 @@ class UserSimJudge(RubricsVerifierTaskStep):
         head = eval_prompt[:end + len(this.text)] if end >= 0 else None
 
         async def call() -> dict:
-            got = await super(UserSimJudge, self)._prompt_llm_judge(
+            return await super(UserSimJudge, self)._prompt_llm_judge(
                 eval_prompt, model=model, context=context, image_blocks=image_blocks, system=SYSTEM,
                 cached_prefix=head)
-            this.calls += 1
-            this.usage.append(got.get("usage"))
-            if got.get("cost_usd") is None:
-                this.unpriced += 1
-            else:
-                this.cost += got["cost_usd"]
-            return got
 
         if this.first is None:
             this.first = asyncio.Event()
@@ -519,12 +510,23 @@ def _setup_error(e: BaseException) -> Optional[BaseException]:
     return next((x for x in _chain(e) if isinstance(x, setup)), None)
 
 
-def _cost(this: _ThisRun) -> dict[str, Any]:
-    """The run's ``cost``: its calls' costs summed, None when no call's cost has a figure, and ``unpriced_calls``, the
-    calls left out of the sum, when there are some."""
-    priced = this.calls - this.unpriced
-    total = round(this.cost, COST_DECIMALS) if priced or not this.calls else None
-    return {"cost": total, **({"unpriced_calls": this.unpriced} if this.unpriced else {})}
+def _cost(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """The run's ``cost``: its answered calls' costs summed, None when no call's cost has a figure, and
+    ``unpriced_calls``, the calls left out of the sum, when there are some."""
+    priced = [call["cost_usd"] for call in calls if call.get("cost_usd") is not None]
+    unpriced = len(calls) - len(priced)
+    total = round(float(sum(priced)), COST_DECIMALS) if priced or not calls else None
+    return {"cost": total, **({"unpriced_calls": unpriced} if unpriced else {})}
+
+
+def _usage(calls: list[dict[str, Any]]) -> dict[str, int]:
+    """The answered calls' token counts summed, as core reads each call's usage (``Usage``), input counting the cache."""
+    keys = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens")
+    total = dict.fromkeys(keys, 0)
+    for call in calls:
+        for key in keys:
+            total[key] += (call.get("usage") or {}).get(key) or 0
+    return total
 
 
 def _problems(model: Any, items: Any, gate: Any, rubric_persona: Any = None) -> list[str]:

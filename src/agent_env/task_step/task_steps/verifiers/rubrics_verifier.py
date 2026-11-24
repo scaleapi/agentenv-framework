@@ -24,7 +24,7 @@ from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.config import model_call
 from agent_env.config.model import ModelRole, no_key_for
-from agent_env.config.model_pricing import ReportedBy
+from agent_env.config.model_pricing import Cost, ReportedBy
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -61,7 +61,11 @@ from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
 )
+from agent_env.task_step.task_steps.load_artifact import LOADED_FILE_UNIVERSES, loads_into
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
+from agent_env.task_step.task_steps.verifiers.judge_utils.judge_usage import JudgeUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
+    ATIF,
     AtifDocuments,
     TurnSource,
     atif_turns,
@@ -89,6 +93,8 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
 logger = logging.getLogger(__name__)
 # How a judge sent to a URL other than the configured endpoint is given that URL's key.
 _JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
+# The judge settings a call carries, besides its model.
+_JUDGE_SETTINGS = ("effort", "max_thinking_tokens")
 
 
 # The judge echoes each criterion's id back and results are matched by exact string.
@@ -293,6 +299,55 @@ def _caches_prompts(model: str) -> bool:
     return "claude" in model.lower()
 
 
+def _direct_settings(route: model_call.ModelRoute, run: Mapping[str, Any]
+                     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The LiteLLM params a direct judge call carries for the run's effort and thinking budget, where the route takes
+    them (``model_call.takes``), over the config's ``[model.params]``; the settings the request then sends, read from
+    the two merged, with any ``temperature`` and ``seed``; and the run's settings the route doesn't take, left out."""
+    params: dict[str, Any] = {}
+    not_sent: dict[str, Any] = {}
+    for setting, param, value in (("effort", "reasoning_effort", run["effort"]),
+                                  ("max_thinking_tokens", "thinking", run["max_thinking_tokens"])):
+        if value is None:
+            continue
+        if not model_call.takes(route, param):
+            not_sent[setting] = value
+            continue
+        params[param] = value if param == "reasoning_effort" else {"type": "enabled", "budget_tokens": value}
+    if not_sent:
+        logger.warning("%s takes no %s; the judge grades without them", route.model, sorted(not_sent))
+    request = model_call.sent_params(route, params)
+    thinking = request.get("thinking")
+    sent = {"effort": request.get("reasoning_effort"),
+            "max_thinking_tokens": thinking.get("budget_tokens") if isinstance(thinking, Mapping) else None,
+            **{key: request[key] for key in ("temperature", "seed") if key in request}}
+    return params, {key: value for key, value in sent.items() if value is not None}, not_sent
+
+
+def _record_failed_call(judge: JudgeUsage, exc: BaseException, *, model: str, endpoint_host: Optional[str],
+                        sent: Optional[Mapping[str, Any]]) -> None:
+    """A direct judge request that got no answer, in the run's record with what it was sent: cut off by a time limit
+    (maybe billed, so a call of unknown usage in the step's usage too), or refused, costing nothing."""
+    if model_call.cut_off(exc):
+        judge.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=endpoint_host, reported_by=ReportedBy.PROVIDER,
+                           sent=sent)
+    else:
+        judge.refused_call(model=model, endpoint_host=endpoint_host, error=f"{type(exc).__name__}: {exc}", sent=sent)
+
+
+def _trajectory_sources(prompt_response: PromptResponse) -> list[dict[str, Any]]:
+    """Each turn of ``prompt_response`` the judge reads, by its stored label: the turn, its format, and an ATIF copy's
+    adapter version."""
+    sources = []
+    for turn, record in enumerate(prompt_response.target_agent_per_turn_trajectories or [], 1):
+        record = record or {}
+        fmt = record.get("format")
+        atif = (record.get("atif") or {}) if fmt == ATIF else None
+        sources.append({"turn": turn, "format": fmt,
+                        **({"adapter_version": atif.get("adapter_version")} if atif is not None else {})})
+    return sources
+
+
 def _image_url_block(frame: ImageFrame) -> dict:
     """Adapt a neutral trajectory image to LiteLLM's image block shape."""
     return {
@@ -360,6 +415,11 @@ class JudgeTimeoutError(TimeoutError):
     def __init__(self, message: str, trajectory_object_url: Optional[str]):
         super().__init__(message)
         self.trajectory_object_url = trajectory_object_url
+
+
+class JudgeSettingRefused(RuntimeError):
+    """A direct judge's model refused a value of one of its settings, as GPT-5 refuses ``reasoning_effort="xhigh"``:
+    raised at once, not retried, so the grade fails with the refusal."""
 
 
 # With timeout retries on, the judge is allowed this much longer than the poll waits, so it never stops itself first:
@@ -774,8 +834,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         """Each setting a run's ``step_params`` or ``user_overrides`` can change, by the step's own field name, at the
         value this run judges with: the judge reads these and ``verifier_settings`` records them, so the two can't
         disagree. Unvalidated; the judge checks them as it reads them. Never mutates ``self``, which concurrent runs
-        share. A ``step_params`` ``criteria`` replaces on presence, so ``[]`` replaces too; effort and the thinking
-        budget reach only an agent judge, and the agent sandbox only a judge the step deploys."""
+        share. A ``step_params`` ``criteria`` replaces on presence, so ``[]`` replaces too; the run's effort and thinking
+        budget reach every judge, and the agent sandbox only a judge the step deploys."""
         step_params = self.step_param_overrides(context)
         overrides = context.metadata.get("user_overrides") or {}
         use_agent_judge = self.use_agent_judge if overrides.get("use_agent_judge") is None else overrides["use_agent_judge"]
@@ -789,9 +849,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             else self.grade_up_to_turn,
             "use_agent_judge": use_agent_judge,
             "trajectory_filter": trajectory_filter,
-            "effort": (overrides.get("judge_effort") or self.effort) if use_agent_judge else self.effort,
-            "max_thinking_tokens": (overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens)
-            if use_agent_judge else self.max_thinking_tokens,
+            "effort": overrides.get("judge_effort") or self.effort,
+            "max_thinking_tokens": overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens,
             "judge_batch_size": _override_or(overrides, "judge_batch_size", self.judge_batch_size),
             "judge_batch_concurrency": _override_or(overrides, "judge_batch_concurrency", self.judge_batch_concurrency),
             "judge_sandbox_type": (overrides.get("agent_sandbox") or self.judge_sandbox_type)
@@ -808,7 +867,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     def verifier_settings(self, context: TaskStepContext) -> dict[str, Any]:
         """The step's fields as this run judges with them (``_recorded_values`` in place of the stored ones), the judge
         model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys one, and
-        ``overridden``, the settings this run's overrides changed. Never a key, header or base URL."""
+        ``overridden``, the settings this run's overrides changed. Once the judge has called, its effort and thinking
+        budget are those its calls carried, ``not_sent`` those it couldn't send, with ``judge_endpoint_host`` and any
+        ``temperature`` and ``seed`` the config gave a direct call. Never a key, header or base URL."""
         settings = super().verifier_settings(context)
         settings.pop("default_model_api_base", None)
         values, stored = self._recorded_values(context), self._recorded_values(TaskStepContext())
@@ -821,7 +882,34 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             settings["judge_a2a_agent_id"] = get_config().get_default_a2a_agent_id()
         recorded = (context.metadata.get("models") or {}).get(ModelRole.JUDGE.record_key) or {}
         settings["judge_model"] = recorded[self.id] if self.id in recorded else self._judge_model(context)
+        if (judge := judge_usage.current()) is not None and judge.sent is not None:
+            for key in _JUDGE_SETTINGS:
+                if key in settings or key in judge.sent or key in judge.not_sent:
+                    settings[key] = judge.sent.get(key)
+            settings.update({key: value for key, value in judge.sent.items() if key not in _JUDGE_SETTINGS})
+            if judge.not_sent:
+                settings["not_sent"] = dict(judge.not_sent)
+            if judge.endpoint_host:
+                settings["judge_endpoint_host"] = judge.endpoint_host
+        if judge is not None and judge.sources:
+            settings["trajectory_sources"] = list(judge.sources)
         return {**settings, "overridden": overridden}
+
+    def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
+        """``judge_calls``, the record of each model call the run's judge made, when it made any."""
+        calls = judge_usage.calls()
+        return {"judge_calls": calls} if calls else {}
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        """The base's, with this run's judge record scoped to it, so a grade reads only its own run's calls."""
+        with judge_usage.scope():
+            return await super().execute(context)
+
+    async def settle(self, context: TaskStepContext) -> None:
+        """The run's judge inputs stored before the grade says what each call was sent (``JudgeUsage.settle``)."""
+        judge = judge_usage.current()
+        if judge is not None:
+            await judge.settle()
 
     async def verify(self, context: TaskStepContext) -> Verification:
         verdict = self._gated(await self._judged(context))
@@ -846,6 +934,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         run = self._run_values(context)
+        judge = judge_usage.start(context, self.id)
+        if run["use_agent_judge"] and self.agent_name:
+            judge.loaded = loads_into(context, self.agent_name)
         grade_up_to_turn = _validated_turn(run["grade_up_to_turn"])
         as_of = _as_of_turn(prompt_response, grade_up_to_turn)
         if as_of is not prompt_response and not self.use_trajectory:
@@ -872,6 +963,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise RuntimeError(f"No trajectory available for prompt_id='{self.prompt_id}'")
         # A run whose turns are atif/1 copies reads each turn by its label; one with none keeps the native path.
         atif = atif_turns(prompt_response) if self.use_trajectory else None
+        if self.use_trajectory:
+            judge.read(_trajectory_sources(prompt_response))
         documents = AtifDocuments()
 
         overrides = context.metadata.get("user_overrides", {})
@@ -1009,7 +1102,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
                     judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
                     provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
-                    sandbox = await provider.get_sandbox(judge_sandbox_id)
+                    sandbox = judge.recording(await provider.get_sandbox(judge_sandbox_id))
                     staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
                     if staged is None and atif is not None:
                         media = await self._stage_atif_turns(
@@ -1040,7 +1133,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             loaded_for_judge: list[dict] = []
             if use_agent_judge and self.agent_name is not None:
                 loaded_for_judge = [
-                    e for e in (context.metadata.get("loaded_file_artifact_universes") or [])
+                    e for e in (context.metadata.get(LOADED_FILE_UNIVERSES) or [])
                     if e.get("agent_name") == self.agent_name
                 ]
             context_facts = (resolve_context_facts(self.context_facts_for_judge, context.metadata)
@@ -1130,9 +1223,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
                                    f"output_format={self.output_format.value} is graded in one judge call.")
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
-            usage = StepUsage(context, self.id)
+            usage = judge
 
-            async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
+            async def grade(batch: list[dict], number: Optional[int] = None
+                            ) -> tuple[list[dict], int, list[dict], Optional[str]]:
+                judge_usage.batch(number)
                 prompt = eval_prompt_for(batch)
                 if len(batches) > 1:
                     prompt += self._BATCH_NOTE.format(
@@ -1160,7 +1255,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             else:
                 try:
                     async with asyncio.TaskGroup() as group:
-                        graded = [group.create_task(grade(batch)) for batch in batches]
+                        graded = [group.create_task(grade(batch, number)) for number, batch in enumerate(batches, 1)]
                 except ExceptionGroup as failed:
                     # The first batch's error, as an unbatched judge would raise it; the group cancels the rest.
                     raise failed.exceptions[0] from failed
@@ -1516,10 +1611,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         cached_prefix: Optional[str] = None,
     ) -> dict:
         """Direct judge — no agent boot, no tools — through core's one model call (``config.model_call``). Returns
-        ``response`` and ``trajectory_object_url`` (None), and the call's record, which the step keeps in its usage
-        (``_record_direct_call``): its ``usage`` as the response carried it, the ``model`` called, the
-        ``endpoint_host`` it reached, and its cost's keys, ``cost_usd`` what the endpoint billed or else LiteLLM's
-        price map's figure.
+        ``response`` and ``trajectory_object_url`` (None), and the call's record: its ``usage`` as the response carried
+        it, the ``model`` called, the ``endpoint_host`` it reached, its cost's keys, ``cost_usd`` what the endpoint
+        billed or else LiteLLM's price map's figure, and under the run's judge record ``judge_input``, the reference to
+        what it was sent. A request that got no answer goes in that record here (``_record_failed_call``); the answered
+        one the step records from what this returns (``_record_direct_call``), so an override that answers itself
+        is recorded too.
 
         When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
         a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
@@ -1549,18 +1646,36 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 "strict": True,
             },
         }
+        params, sent, not_sent = _direct_settings(route, self._run_values(context))
+        judge = judge_usage.current()
+        if judge is not None:
+            judge.carried(sent, not_sent, route.endpoint_host)
         # Some endpoints reject json_schema with images. Fall back once on that exact
         # error shape; malformed JSON is handled by the outer output-retry loop.
         use_response_format = True
 
         last_exc: Exception | None = None
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
+            judge_input = None if judge is None else await judge.input({
+                "messages": messages, "response_format": response_format if use_response_format else None,
+                "settings": model_call.sent_params(route, params)})
             try:
                 reply = await model_call.complete(route, messages, timeout=self.judge_timeout_seconds,
-                                                  response_format=response_format if use_response_format else None)
-                return {"response": reply.content, "trajectory_object_url": None, **reply.fields()}
+                                                  response_format=response_format if use_response_format else None,
+                                                  settings=params)
+                return {"response": reply.content, "trajectory_object_url": None, "judge_input": judge_input,
+                        **reply.fields()}
+            except asyncio.CancelledError as exc:
+                if judge is not None:
+                    _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host, sent=judge_input)
+                raise
             except Exception as exc:
                 last_exc = exc
+                if judge is not None:
+                    _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host, sent=judge_input)
+                if params and model_call.refused_setting(exc):
+                    raise JudgeSettingRefused(f"{model} refused the judge's "
+                                              f"{sorted(key for key in _JUDGE_SETTINGS if key in sent)}: {exc}") from exc
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
                     logger.warning(
                         f"Multimodal judge call with json_schema failed for verifier "
@@ -1586,9 +1701,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         judge_max_thinking_tokens: Optional[int],
         context: TaskStepContext,
         headers: Mapping[str, str],
+        endpoint_host: Optional[str] = None,
     ) -> Optional[str]:
         """Configure the judge agent through its agent-config extension; the model it took, None for one that runs its
-        own."""
+        own. An effort or thinking budget its card doesn't take is left out and the run's judge record says so; a value
+        it refuses fails the post, so the grade."""
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent import protocol
 
@@ -1616,6 +1733,13 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 endpoint = (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
                 await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload, headers=headers)
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
+        sent = {k: config_payload[k] for k in _JUDGE_SETTINGS if k in config_payload}
+        not_sent = {k: desired_config[k] for k in _JUDGE_SETTINGS if k in desired_config and k not in config_payload}
+        if not_sent:
+            logger.warning("Verifier '%s': the judge agent doesn't take %s; it grades without them",
+                           self.verifier_id, sorted(not_sent))
+        if (judge := judge_usage.current()) is not None:
+            judge.carried(sent, not_sent, endpoint_host)
         # What the judge agent took; one that doesn't accept a model grades on its own.
         context.record_model(ModelRole.JUDGE.record_key, self.id, config_payload.get("model"))
         return config_payload.get("model")
@@ -1636,6 +1760,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         from agent_env.a2a_agent import protocol
 
         host = getattr(judge_agent, "model_endpoint_host", None)
+        sent = {"sent": usage.agent_input(eval_prompt)} if isinstance(usage, JudgeUsage) else {}
         try:
             task_id, _ = await protocol.send_a2a_message(
                 judge_a2a_url,
@@ -1646,7 +1771,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             )
         except (TimeoutError, asyncio.CancelledError):
             # The judge may have taken the message before its task id came back; with no id, it can't be cancelled.
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             raise
         try:
             result = await protocol.poll_a2a_task(
@@ -1657,22 +1782,22 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 sandbox_id=getattr(judge_agent, "sandbox_id", None),
             )
         except asyncio.CancelledError:
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
             await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             raise
         except protocol.AgentUnreachableError:
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             raise
         except TimeoutError as e:
-            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host)
+            usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=host, **sent)
             if self.judge_timeout_retries is None:
                 raise
             raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
-        usage.call(ModelRole.JUDGE, tr.usage, model=model, endpoint_host=host)
+        usage.call(ModelRole.JUDGE, tr.usage, model=model, endpoint_host=host, **sent)
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1807,14 +1932,15 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     async def _judge_directly(self, prompt: str, *, model: str, context: TaskStepContext,
                               image_blocks: Optional[list[dict]], usage: StepUsage) -> dict:
         """One direct judge call, its usage in ``usage``: what it answered, or, when a cancel or a time limit stopped
-        it, a call of unknown usage."""
+        it, a call of unknown usage. Under a judge's record (``JudgeUsage``), each request that failed or was cancelled
+        is already in it, with what it was sent, from ``_prompt_llm_judge`` itself."""
         try:
             if image_blocks:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context, image_blocks=image_blocks)
             else:
                 data = await self._prompt_llm_judge(prompt, model=model, context=context)
         except BaseException as exc:
-            if model_call.cut_off(exc):
+            if not isinstance(usage, JudgeUsage) and model_call.cut_off(exc):
                 usage.cut_off_call(ModelRole.JUDGE, model=model, endpoint_host=None, reported_by=ReportedBy.PROVIDER)
             raise
         self._record_direct_call(usage, data, model=model)
@@ -1823,12 +1949,14 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     @staticmethod
     def _record_direct_call(usage: StepUsage, data: dict, *, model: str) -> None:
         """One direct judge call's usage in the step's ``judge`` entry, as the response carried it, the endpoint's
-        bill its cost when it sent one, with or without token counts."""
+        bill its cost when it sent one, with or without token counts; in a judge's record, with what it was sent."""
         read = Usage.from_model_response(data["usage"]) if data.get("usage") else None
         if data.get("reported_cost_usd") is not None:
             read = replace(read or Usage(), cost_usd=data["reported_cost_usd"])
+        extra = ({"cost": {key: data[key] for key in Cost.KEYS if key in data}, "sent": data.get("judge_input")}
+                 if isinstance(usage, JudgeUsage) else {})
         usage.call(ModelRole.JUDGE, read, model=data.get("model") or model, endpoint_host=data.get("endpoint_host"),
-                   reported_by=ReportedBy.PROVIDER)
+                   reported_by=ReportedBy.PROVIDER, **extra)
 
     async def _run_judge_with_output_retries(
         self,
@@ -1870,9 +1998,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 judge_max_thinking_tokens=judge_max_thinking_tokens,
                 context=context,
                 headers=judge_agent.control_headers,
+                endpoint_host=getattr(judge_agent, "model_endpoint_host", None),
             )
 
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
+            judge_usage.attempt(attempt)
             if use_agent_judge:
                 data = await self._invoke_judge_retrying_timeouts(
                     discrepancy_log=discrepancy_log,

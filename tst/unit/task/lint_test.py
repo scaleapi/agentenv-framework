@@ -321,6 +321,47 @@ def test_sources_given_as_objects_are_a_config_error_not_a_crash(sources):
     assert ("error", "step-config", f"step 'final': sources must be a list of step ids, not {sources!r}") in found
 
 
+SOLVER = {"id": "solver", "type": "deploy_agent", "agent_name": "default-agent"}
+JUDGE_AGENT = {"id": "judge-agent", "type": "deploy_agent", "agent_name": "judge"}
+ASK = {"id": "ask", "type": "prompt_agent", "prompt": "Help Linda.", "prompt_id": "ask", "user_agent_name": "linda"}
+VERIFY = {"id": "verify", "type": "rubrics_verifier", "prompt_id": "ask", "verifier_id": "verify",
+          "criteria": [{"criterion": "helps"}]}
+
+
+def _judging(**fields) -> list[tuple[str, str, str]]:
+    found = _found(_task(SOLVER, JUDGE_AGENT, ASK, {**VERIFY, **fields}, headline_verifiers=["verify"]))
+    return [finding for finding in found if finding[1] == "judge-as-solver"]
+
+
+def test_an_agent_judge_in_the_agent_under_test_is_a_warning_naming_a_judge_of_its_own():
+    assert _judging(agent_name="default-agent") == [(
+        "warning", "judge-as-solver", "step 'verify': its judge runs in 'default-agent', the agent under test, so the "
+                                      "solver grades its own work; for a judge of its own, deploy a judge agent, load "
+                                      "the files it grades into it (load_artifact with artifact_from_step_id) and name "
+                                      "it in agent_name")]
+
+
+@pytest.mark.parametrize("fields", [
+    {},
+    {"agent_name": "judge"},
+    {"agent_name": "linda"},
+    {"agent_name": "default-agent", "use_agent_judge": False},
+])
+def test_a_judge_of_its_own_in_the_user_simulator_or_calling_its_model_directly_is_not_the_solver(fields):
+    assert _judging(**fields) == []
+
+
+@pytest.mark.parametrize(("ask", "judge"), [
+    ({}, {"agent_name": ["default-agent"]}),
+    ({"agent_name": ["default-agent"]}, {"agent_name": "default-agent"}),
+    ({"user_agent_name": {}}, {"agent_name": {}}),
+])
+def test_an_agent_name_that_isnt_a_string_names_no_agent_and_lint_still_answers(ask, judge):
+    task = _task(SOLVER, {**ASK, **ask}, {**VERIFY, **judge}, headline_verifiers=["verify"])
+
+    assert not [finding for finding in lint(task) if finding.rule == "judge-as-solver"]
+
+
 def test_with_no_headline_an_aggregate_naming_every_other_verifier_by_step_id_is_the_one_to_name():
     found = _found(_task(BOX, TESTS, MORE, _combined(combine="weighted_mean", sources=["tests"], gates=["more"])))
 
@@ -571,6 +612,17 @@ def test_a_run_of_a_bundle_with_a_lint_error_is_refused_unless_it_skips_lint_but
     assert config.exit_code != 0
     assert "tasks/u.json: step 'tests': criterion #0: probe_file_exists needs paths" in config.output
     assert "--skip-lint" not in config.output
+
+
+def test_a_run_of_a_bundle_whose_judge_is_its_solver_says_so_and_runs(bundle_dir):
+    _write(bundle_dir, "j", {"headline_verifiers": ["verify"],
+                             "steps": [SOLVER, ASK, {**VERIFY, "agent_name": "default-agent"}]})
+
+    ran = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "j", "--dry-run"])
+
+    assert ran.exit_code == 0, ran.output
+    assert "warning: step 'verify': its judge runs in 'default-agent', the agent under test" in ran.output
+    assert "Would run:\n  tasks/j.json v1\n" in ran.output
 
 
 def test_bundle_register_with_skip_lint_registers_a_task_lint_refuses_saying_why_once(bundle_dir):

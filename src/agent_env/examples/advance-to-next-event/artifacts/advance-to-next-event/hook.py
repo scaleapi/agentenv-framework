@@ -8,6 +8,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from agent_env.env.gateway.constants import due_deferred_calls
 from agent_env.task_step.task_steps.notification_delivery import label_time
 
 CLOCK = "urn:agentenv:clock/v1"
@@ -152,8 +153,9 @@ async def _advance(env, target):
 
 
 async def _settle(turn, envs, timeout):
-    """Wait until no trigger still fires (bar one waiting for a later time), so what an event set off has landed.
-    Returns the ids of the envs still firing when ``timeout`` ran out, empty when all settled."""
+    """Wait until no trigger still fires (bar one waiting for a later time) and no deferred call the clock has reached
+    is still to make, so what an event set off has landed. Returns the ids of the envs still firing when ``timeout``
+    ran out, empty when all settled."""
     deadline = time.monotonic() + timeout
     waiting = {i for i, env in enumerate(envs) if env.supports(TRIGGERS, "state")}
     while waiting and time.monotonic() < deadline:
@@ -163,7 +165,7 @@ async def _settle(turn, envs, timeout):
             now = _utc(clock["virtual_time"])
             if state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now:
                 await _advance(env, now)
-            elif not any(_busy(row, now) for row in state["triggers"]):
+            elif not any(_busy(row, now) for row in state["triggers"]) and not due_deferred_calls(state):
                 waiting.discard(i)
         if waiting:
             turn.heartbeat()

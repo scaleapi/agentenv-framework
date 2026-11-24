@@ -400,6 +400,20 @@ async def test_a_staged_always_on_judges_prompt_and_files_are_pinned(monkeypatch
     await _pinned("always_on_staged", judged)
 
 
+@pytest.mark.asyncio
+async def test_a_staged_always_on_judges_prompt_and_files_on_atif_wakes_are_pinned(monkeypatch):
+    run, sandbox, sources = A._staged_run(monkeypatch, atif_wakes=2)
+
+    async def judged(form):
+        sandbox.files.clear()
+        verifier = A._verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+        captured = A._agent_judge(monkeypatch, verifier, sources)
+        await verifier.execute(form(copy.deepcopy(run)))
+        return {**captured, "files": dict(sorted(sandbox.files.items()))}
+
+    await _pinned_atif("always_on_atif_staged", judged)
+
+
 def _user_sim_calls(fake: T.FakeModel) -> list[dict]:
     """What each of the user-sim judge's checks was sent, in an order its concurrency can't change."""
     return sorted(({k: v for k, v in call.items() if k != "alongside"} for call in fake.calls),
