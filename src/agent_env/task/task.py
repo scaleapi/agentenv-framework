@@ -207,6 +207,18 @@ def _dependents_closure(root: str, dependents: dict[str, list[str]]) -> set[str]
     return seen
 
 
+_RETRY_REASON_CHARS = 300
+
+
+def _brief(error: BaseException) -> str:
+    """``error``'s type and message on one line, cut to ``_RETRY_REASON_CHARS``: a retry's log line names why without
+    carrying a response body some steps put in their errors; the run record keeps the whole error."""
+    text = " ".join(str(error).split())
+    if len(text) > _RETRY_REASON_CHARS:
+        text = text[:_RETRY_REASON_CHARS] + "…"
+    return f"{type(error).__name__}: {text}"
+
+
 async def _roll_back_span(
     context: TaskStepContext,
     instance_id: str | None,
@@ -253,7 +265,7 @@ async def _roll_back_span(
     rollback_ids = span_ids | cancelled_ids
     logger.warning(
         "%sStep %s failed%s; rolling back span %s and re-dispatching from %s (attempt %d).",
-        log_prefix, failed_id, f" ({type(error).__name__}: {error})" if error is not None else "", span_order,
+        log_prefix, failed_id, f" ({_brief(error)})" if error is not None else "", span_order,
         resume_from, attempt,
     )
     if not instance_id:
