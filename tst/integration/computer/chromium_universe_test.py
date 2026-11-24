@@ -32,7 +32,7 @@ DAY = 86400
 #: as a site refuses CI's runners for a while now and then (gnu.org did). None is behind a bot challenge, as
 #: Cloudflare's "Just a moment..." meets CI's browsers at example.com now. Each date is outside any certificate valid
 #: today, whose life is at most 398 days, so the egress proxy re-signs every site.
-STOPS = [(-400, [("https://www.python.org/", "Welcome to Python.org"),
+STOPS = [(-400, [("https://unreachable.invalid/", "never loads"), ("https://www.python.org/", "Welcome to Python.org"),
                  ("https://www.postgresql.org/", "PostgreSQL: The world's most advanced open source database")]),
          (730, [("https://www.openbsd.org/", "OpenBSD"), ("https://www.netbsd.org/", "The NetBSD Project")]),
          (6 * 365, [("https://www.kernel.org/", "The Linux Kernel Archives"),
