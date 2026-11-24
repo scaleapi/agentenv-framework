@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -181,6 +182,17 @@ async def test_a_call_a_server_deferred_gets_a_wake_at_its_time_and_the_reply_it
 
 
 @pytest.mark.asyncio
+async def test_settling_waits_for_a_deferred_call_the_gateway_says_is_due_and_not_for_one_still_to_come(hook):
+    """A running clock may reach a call's time between the hook's clock read and its state read, so the gateway's
+    ``due``, not the hook's reading of the time, says the call is under way."""
+    turn = SimpleNamespace(heartbeat=lambda: None)
+    due = _StateEnv(hook, due_reads=2)
+    assert await hook._settle(turn, [(due, None, None)], 5) == [True] and due.reads == 3
+    later = _StateEnv(hook, due_reads=0)
+    assert await hook._settle(turn, [(later, None, None)], 5) == [True] and later.reads == 1
+
+
+@pytest.mark.asyncio
 async def test_a_state_check_the_agents_turn_set_off_finishes_before_the_clock_jumps(hook, gateway, monkeypatch):
     async def slow_check(check, ctx=None, role=None):
         await asyncio.sleep(0.3)
@@ -281,3 +293,26 @@ async def test_params_the_hook_cannot_use_are_refused(hook, gateway, params, fra
     with pytest.raises(ValueError) as e:
         await _turns(hook, _context(), params)
     assert fragment in str(e.value)
+
+
+class _StateEnv:
+    """An env whose clock reads 09:00:00 while its gateway, a moment on, lists a deferred call at 09:00:01: due and still
+    to make for the first ``due_reads`` reads of its triggers state, made after; never due when ``due_reads`` is 0."""
+
+    env_id = "items"
+
+    def __init__(self, hook, due_reads: int):
+        self.hook, self.due_reads, self.reads = hook, due_reads, 0
+
+    def supports(self, uri, op):
+        return True
+
+    async def invoke(self, uri, op, args=None):
+        assert op == "state", op
+        if uri == self.hook.CLOCK:
+            return {"armed": True, "virtual_time": "2026-03-03T09:00:00Z"}
+        self.reads += 1
+        due = self.reads <= self.due_reads
+        made = self.due_reads and not due
+        return {"triggers": [], "next_event_at": None if made else "2026-03-03T09:00:01Z", "deferred_calls": [
+            {"key": "m1", "at": "2026-03-03T09:00:01Z", "status": "done" if made else "pending", "due": due}]}

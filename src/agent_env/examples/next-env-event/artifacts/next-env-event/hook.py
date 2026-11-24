@@ -93,7 +93,8 @@ async def _advance(env, target):
 
 
 async def _settle(turn, envs, timeout):
-    """Wait until no trigger on each env still fires, bar one waiting for later; whether each settled in time."""
+    """Wait until no trigger on each env still fires, bar one waiting for later, and no deferred call the env's clock
+    has reached is still to make; whether each settled in time."""
     deadline = time.monotonic() + timeout
     waiting = set(range(len(envs)))
     while True:
@@ -103,7 +104,7 @@ async def _settle(turn, envs, timeout):
             now = _utc(clock["virtual_time"])
             if state["next_event_at"] is not None and _utc(state["next_event_at"]) <= now:
                 await _advance(env, now)  # an event already reached waits for the time check, so run it now
-            elif not any(_busy(row, now) for row in state["triggers"]):
+            elif not any(_busy(row, now) for row in state["triggers"]) and not _due_calls(state):
                 waiting.discard(i)
         if not waiting or time.monotonic() >= deadline:
             break
@@ -160,3 +161,8 @@ def _utc(text):
 
 def _iso(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _due_calls(state):
+    """The deferred calls whose time the env's clock has reached and that the gateway is still to make."""
+    return [call for call in state.get("deferred_calls", []) if call.get("due")]

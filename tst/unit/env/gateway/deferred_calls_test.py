@@ -22,7 +22,7 @@ from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_META_KEY
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.clock import _iso
-from agent_env.env.gateway.constants import AGENT_ENV_DEFERRED_CALLS_META_KEY, TRIGGER_IN_FLIGHT_STATUSES, GatewayMode
+from agent_env.env.gateway.constants import AGENT_ENV_DEFERRED_CALLS_META_KEY, GatewayMode
 from agent_env.env.gateway.deferred_calls import DeferredCalls
 from agent_env.env.gateway.gateway import Gateway
 from agent_env.env.gateway.triggers import _ECHO_DIGEST_CHARS
@@ -483,7 +483,8 @@ async def test_state_lists_each_deferred_call_and_prompt_agent_does_not_wait_for
 
 
 @pytest.mark.asyncio
-async def test_a_call_the_clock_has_reached_is_due_until_it_is_made(tmp_path, monkeypatch):
+async def test_a_call_the_clock_has_reached_is_due_and_prompt_agent_waits_for_it_until_it_is_made(
+        tmp_path, monkeypatch):
     """The gateway says which calls its clock has reached and are still to make, so a client needs no clock of its own
     to wait for them."""
     async with _chat(tmp_path, monkeypatch) as (gw, chat):
@@ -501,11 +502,13 @@ async def test_a_call_the_clock_has_reached_is_due_until_it_is_made(tmp_path, mo
         await _request(gw, "PUT", "/clock/advance", json={"virtual_time": AT})
         state = (await _request(gw, "GET", "/triggers/state")).json()
         assert [(c["status"], c["due"]) for c in state["deferred_calls"]] == [("pending", True)]
+        assert PromptAgentTaskStep._is_settling(state) is True
 
         released.set()
         await _until(lambda: _events(tmp_path, "deferred_call"))
         state = (await _request(gw, "GET", "/triggers/state")).json()
         assert [(c["status"], c["due"]) for c in state["deferred_calls"]] == [("done", False)]
+        assert PromptAgentTaskStep._is_settling(state) is False
 
 
 @pytest.mark.asyncio
@@ -529,8 +532,8 @@ async def test_next_event_at_counts_the_earliest_call_still_to_make(tmp_path, mo
 @pytest.mark.asyncio
 async def test_no_state_reads_settled_between_an_advance_that_makes_a_call_due_and_the_fire_it_provokes(
         tmp_path, monkeypatch):
-    """From the advance until the reply has fired, every state read shows the call due or the trigger it provoked at
-    work, however long the call's trajectory event takes to write."""
+    """From the advance until the reply has fired, every state read is still settling: the call due, then the trigger it
+    provoked at work, however long the call's trajectory event takes to write."""
     async with _chat(tmp_path, monkeypatch) as (gw, chat):
         await _arm(gw)
         await _request(gw, "POST", "/triggers/register", json=_reply_trigger())
@@ -550,7 +553,7 @@ async def test_no_state_reads_settled_between_an_advance_that_makes_a_call_due_a
             [reply] = state["triggers"]
             if reply["fire_count"]:
                 break
-            assert any(c["due"] for c in state["deferred_calls"]) or reply["status"] in TRIGGER_IN_FLIGHT_STATUSES, state
+            assert PromptAgentTaskStep._is_settling(state), state
             assert time.monotonic() < deadline, "the reply never fired"
             await asyncio.sleep(0.005)
 

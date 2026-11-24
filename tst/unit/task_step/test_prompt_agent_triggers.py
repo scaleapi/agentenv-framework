@@ -485,11 +485,33 @@ def test_settle_poll_does_not_wait_out_a_delay_or_working_hours():
 
 
 def test_settle_poll_does_not_wait_for_a_deferred_call_the_gateway_has_yet_to_make():
-    """A server's deferred call may be due hours of virtual time on, so only triggers can keep the capture waiting."""
+    """A server's deferred call may be due hours of virtual time on, so until the clock reaches it it keeps the capture
+    waiting no more than an armed trigger does."""
     state = {"triggers": [{"id": "t", "type": "action", "status": "armed", "when": {"type": "action", "tool": "x"}}],
              "deferred_calls": [{"key": "m1", "at": "2026-07-06T19:03:00Z", "tool": "deliver", "role": "default",
-                                 "status": "pending", "attempts": 0}]}
+                                 "status": "pending", "attempts": 0, "due": False}]}
     assert PromptAgentTaskStep._is_settling(state) is False
+
+
+def test_settle_poll_waits_for_a_deferred_call_the_clock_has_reached_until_the_gateway_makes_it():
+    """Once due, the call and the triggers it provokes are under way, as a trigger firing is."""
+    call = {"key": "m1", "at": "2026-07-06T19:03:00Z", "tool": "deliver", "role": "default", "status": "pending",
+            "attempts": 1, "due": True}
+    rows = [{"id": "t", "type": "action", "status": "armed", "when": {"type": "action", "tool": "x"}}]
+    assert PromptAgentTaskStep._is_settling({"triggers": rows, "deferred_calls": [call]}) is True
+    assert PromptAgentTaskStep._is_settling(
+        {"triggers": rows, "deferred_calls": [{**call, "status": "done", "due": False}]}) is False
+
+
+def test_a_deferred_call_still_to_make_keeps_the_capture_from_being_final():
+    """Settling aside, the call and any trigger it provokes will still change the record."""
+    rows = [{"id": "t", "type": "action", "status": "armed", "when": {"type": "action", "tool": "x"}}]
+    pending = {"key": "m1", "at": "2026-07-06T19:03:00Z", "tool": "deliver", "role": "default", "status": "pending",
+               "attempts": 0}
+    assert PromptAgentTaskStep._capture_is_final({"triggers": rows, "deferred_calls": [pending]}) is False
+    assert PromptAgentTaskStep._capture_is_final(
+        {"triggers": rows, "deferred_calls": [{**pending, "status": "done"}, {**pending, "status": "failed"}]}) is True
+    assert PromptAgentTaskStep._capture_is_final({"triggers": rows}) is True
 
 
 @pytest.mark.asyncio

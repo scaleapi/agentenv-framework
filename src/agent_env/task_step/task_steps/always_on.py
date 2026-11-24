@@ -994,7 +994,8 @@ class _Run:
             f["last_still_at_work"] = stuck
 
     async def settle(self) -> list[dict]:
-        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time. A contact's
+        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time, and no
+        deferred call the clock has reached still to make. A contact's
         reply (a call to a trigger's executor) counts as in progress until it ends or its time limit passes (plus
         ``CONTACT_GRACE_SECONDS``); any other work, an event due that an advance to now doesn't set going among it,
         gets ``settle_timeout_seconds``, from the start or from the last contact call seen. A gateway that reports no
@@ -1023,13 +1024,15 @@ class _Run:
                                                  + max(c["seconds_left"] for c in live))
                 busy = [row for row in rows if _busy(row, now)]
                 due = state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now
+                calls = [c["key"] for c in state.get("deferred_calls", []) if c.get("due")]  # reached, still to make
                 limit = min(cap, max(track["contact_until"],
                                      track["live_call_seen"] + self.step.settle_timeout_seconds))
-                if not due and not busy:
+                if not due and not busy and not calls:
                     waiting.pop(i)
                 elif mono >= limit:  # a due event that won't go, like other work, gets settle_timeout_seconds
                     stuck.append({"env_id": env.env_id, "triggers": [_at_work(row) for row in busy],
-                                  **({"due_not_going": state["next_event_at"]} if due else {})})
+                                  **({"due_not_going": state["next_event_at"]} if due else {}),
+                                  **({"deferred_calls_due": calls} if calls else {})})
                     waiting.pop(i)
                 elif due:  # an event already due: an advance to now sets it going
                     try:
