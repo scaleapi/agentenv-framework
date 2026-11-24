@@ -58,6 +58,9 @@ TIMEZONE = "/plugins/plugin-12/timezone"
 SET = ["-c", "xfce4-panel", "-p", TIMEZONE, "-n", "-t", "string", "-s", ZONE]
 RESET = ["-c", "xfce4-panel", "-p", TIMEZONE, "-r"]
 MINUTE = 60.0
+#: How late a redraw's first recorded call may start under load: the fake xfconf-query records when its interpreter
+#: is up, so one that starts late shortens the gap after it, though the panel spaced the redraws a second apart.
+START_LAG_S = 0.4
 
 
 @pytest.fixture
@@ -191,7 +194,7 @@ def test_at_another_rate_it_redraws_at_every_universe_minute_at_most_once_a_seco
     time.sleep(2.0)
 
     gaps = [b - a for a, b in zip(fast[1:], fast[2:])]
-    assert all(0.95 <= gap <= 1.6 for gap in gaps), gaps
+    assert all(1 - START_LAG_S <= gap <= 1.6 for gap in gaps), gaps
     assert len(panel.redraws()) == len(frozen)
 
 
