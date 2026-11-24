@@ -106,8 +106,9 @@ class DeferredCalls:
     async def _make(self, key: str, record: _Call, server_url: str) -> None:
         """Wait for the call's time and make it, again after a transport failure, each attempt under the tool-call lock
         as a live call is, with a changelog window of its own read under that lock, so a write made between attempts is
-        not the call's; report it to the trigger engine when it went through, then log it. An error result is final, and so is anything unexpected. A
-        call finished leaves the calls to make for the latest finished, its key kept for good once made."""
+        not the call's; report it to the trigger engine when it went through, then log it. An error result is final,
+        and so is anything unexpected. A call finished leaves the calls to make for the latest finished, its key kept
+        for good once made."""
         try:
             await self._until(record.at)
             result, error, windows = None, None, []
