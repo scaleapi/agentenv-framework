@@ -6,6 +6,7 @@ such a follower the clock is as it always was."""
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 import pytest
 from agentenv_protocol.computer.clock import RANGE
@@ -186,3 +187,18 @@ def test_a_clock_stopped_at_a_followers_end_stops_its_delays_keeps_still_when_th
     assert clock.set_rate(1)["virtual_seconds_per_real_second"] == 1.0
     now.tick(1)
     assert clock.read()["virtual_time"] == "2262-04-11T23:47:17Z"
+
+
+def test_a_reading_that_crosses_a_followers_end_mid_operation_never_shows_a_time_past_it_or_steps_back():
+    """Each locked operation reads real time once, so its stop at the end and the time it gives agree even when the
+    clock crosses the end between two of its reads of real time: here every read of real time is 0.3 s later."""
+    ticks = iter(range(10**6))
+    followers: ClockFollowers | None = None
+    clock = Clock(now_fn=lambda: 1000.0 + 0.3 * next(ticks), follower_ranges=lambda: followers.held())
+    followers = ClockFollowers(lambda: clock, {"desktop": "token"}, {"desktop": HELD})
+    clock.set_time("2262-04-11T23:47:14.300000Z", rate=0)
+    clock.set_rate(1)
+    readings = [datetime.fromisoformat(clock.state()["virtual_time"].replace("Z", "+00:00")) for _ in range(12)]
+    readings += [clock.now() for _ in range(4)] + [clock.at_elapsed(clock.elapsed())]
+    assert all(t <= HELD.latest for t in readings) and readings == sorted(readings), readings
+    assert readings[-1] == HELD.latest
