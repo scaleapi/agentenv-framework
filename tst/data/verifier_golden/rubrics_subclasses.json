@@ -2242,8 +2242,8 @@
     "user_sim": "hannah",
     "instructions": {
      "source": "rebuilt",
-     "prompt_sha256": "40243a6be42eadd882c5e9f09542938219bb53f6383dde1badd5e922681ba11a",
-     "recorded_prompt_sha256": "40243a6be42eadd882c5e9f09542938219bb53f6383dde1badd5e922681ba11a",
+     "prompt_sha256": "e65da2a16bb7b08e013b1e673b3c0a4ca3a40751725495693486c27b0ed7bc87",
+     "recorded_prompt_sha256": "e65da2a16bb7b08e013b1e673b3c0a4ca3a40751725495693486c27b0ed7bc87",
      "matches": true
     },
     "grading": {
@@ -2440,8 +2440,8 @@
     "user_sim": "user-sim",
     "instructions": {
      "source": "rebuilt",
-     "prompt_sha256": "7172e450e74d2c140ba06e2303c544549430f63e2b758e534b64f93a319d43a3",
-     "recorded_prompt_sha256": "7172e450e74d2c140ba06e2303c544549430f63e2b758e534b64f93a319d43a3",
+     "prompt_sha256": "cdc79968feb329aa753ce4d3971d451fb5045973459ccf38194ba1da7aa35bd5",
+     "recorded_prompt_sha256": "cdc79968feb329aa753ce4d3971d451fb5045973459ccf38194ba1da7aa35bd5",
      "matches": true
     },
     "grading": {
