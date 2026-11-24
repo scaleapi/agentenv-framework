@@ -9,7 +9,6 @@ import importlib.metadata
 import json
 import logging
 import math
-import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -23,8 +22,6 @@ LITELLM = "litellm"
 _MAP_FILE = "litellm/model_prices_and_context_window_backup.json"
 _MAP_KEYS = {"input": "input_cost_per_token", "output": "output_cost_per_token",
              "cache_read": "cache_read_input_token_cost", "cache_write": "cache_creation_input_token_cost"}
-# A tag a harness adds to a model's name, such as Claude Code's context-window pick ``[1m]``.
-_TRAILING_TAG = re.compile(r"\[[^\[\]]*\]$")
 
 
 class CostStatus(StrEnum):
@@ -90,19 +87,12 @@ class PriceTable:
         return cls(entries, source)
 
     def lookup(self, model: str) -> Optional[ModelPrice]:
-        """``model``'s prices: the entry named as called, else without its leading ``/`` segments, dropped one at a time
-        (``vertex_ai/global/<model>``), then each again without a trailing bracketed tag (``claude-opus-5-5[1m]``); None,
-        never a zero price, when there's none. No name in the map carries a bracket, so a tag never hides an entry."""
-        for name in (*_route_drops(model), *_route_drops(_TRAILING_TAG.sub("", model))):
-            if name in self.entries:
-                return self.entries[name]
-        return None
-
-
-def _route_drops(model: str) -> list[str]:
-    """``model``, then it without each of its leading ``/`` segments in turn, the routes gateways read."""
-    parts = model.split("/")
-    return ["/".join(parts[i:]) for i in range(len(parts))]
+        """``model``'s prices: the entry named as called, else the one named without its first ``/`` segment, so
+        ``openai/gpt-4o-mini`` finds ``gpt-4o-mini``; None, never a zero price, when there's neither."""
+        if model in self.entries:
+            return self.entries[model]
+        _, slash, name = model.partition("/")
+        return self.entries.get(name) if slash else None
 
 
 @functools.cache

@@ -85,33 +85,9 @@ def test_a_map_that_cant_be_read_prices_nothing_and_says_why(monkeypatch, caplog
     assert "Usage stays unpriced, since LiteLLM's price map can't be read" in caplog.text
 
 
-def test_each_leading_route_segment_is_dropped_in_turn_to_find_a_model():
+def test_a_routing_prefix_is_stripped_to_find_a_model():
     assert TABLE.lookup("openai/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini") is not None
-    assert TABLE.lookup("vertex_ai/global/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini")
-    assert TABLE.lookup("openrouter/openai/gpt-4o-mini") is TABLE.lookup("gpt-4o-mini")
-    assert TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b") is TABLE.lookup("meta-llama/Llama-3-70b") is not None
-    assert TABLE.lookup("bedrock/converse/meta-llama/Llama-3-70b") is TABLE.lookup("meta-llama/Llama-3-70b")
-    assert _judge(USAGE, "vertex_ai/global/gpt-4o-mini").usd == _judge(USAGE).usd is not None
-
-
-def test_the_nearest_route_with_an_entry_wins():
-    table = PriceTable.from_cost_map({"org/model": COST_MAP["gpt-4o-mini"], "model": COST_MAP["my-finetune"]}, "t")
-
-    assert table.lookup("gateway/org/model") is table.entries["org/model"]
-    assert table.lookup("gateway/other/model") is table.entries["model"]
-
-
-def test_a_trailing_bracketed_tag_such_as_a_context_window_pick_is_stripped_to_find_a_model():
-    assert TABLE.lookup("gpt-4o-mini[1m]") is TABLE.lookup("openai/gpt-4o-mini[1m]") is TABLE.lookup("gpt-4o-mini")
-    assert TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b[1m]") is TABLE.lookup("meta-llama/Llama-3-70b")
-    assert _agent(USAGE, "gpt-4o-mini[1m]").usd == _agent(USAGE).usd is not None
-    assert _judge(USAGE, "openai/gpt-4o-mini[1m]").usd == _judge(USAGE).usd
-
-
-def test_a_tagged_name_is_unpriced_for_what_its_base_model_lacks():
-    assert TABLE.lookup("someprovider/model-x[1m]") is None
-    assert _agent(USAGE, "someprovider/model-x[1m]").unpriced is Unpriced.NO_PRICE
-    assert _agent({**USAGE, "input_tokens": None}, "gpt-4o-mini[1m]").unpriced is Unpriced.NO_TOKENS
+    assert TABLE.lookup("meta-llama/Llama-3-70b") is TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b") is not None
 
 
 @pytest.mark.parametrize("model", ["gpt-4o", "openai/gpt-4o", "Llama-3-70b", "dall-e-3", "broken", "half", ""])

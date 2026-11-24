@@ -86,8 +86,7 @@ or one of them only where it is used.
   unit-test verifier. On `sail_vm` with `inject_model_key`, Sail sets them at egress like the key.
 - Usage is priced from the price map the installed LiteLLM bundles (`config/model_pricing.py`), read without
   importing LiteLLM, which would fetch a newer map from the network; there is no price config. A model is found by its
-  name as called or without its leading route segments, dropped one at a time (`vertex_ai/global/<model>`), and each
-  again without a trailing bracketed tag such as Claude Code's `[1m]`, wherever its calls went. A prompt step prices each role's usage entry as
+  name as called or without its routing prefix, wherever its calls went. A prompt step prices each role's usage entry as
   it records it: `cost_usd` with its `cost_status` (`priced`, `reported`, `unpriced`) and `cost_source`
   (`litellm@<version>`, `harness` or `provider`), the `uncached_input_tokens` and `unit_prices` it was charged at, any
   `cost_assumed` that makes it an upper bound, and the agent's own figure, always, in `reported_cost_usd`. A turn

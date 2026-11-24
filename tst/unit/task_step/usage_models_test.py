@@ -47,16 +47,6 @@ def test_a_turns_models_are_each_priced_at_their_own_rate(monkeypatch):
     assert (entry["model"], entry["input_tokens"], entry["output_tokens"]) == (SONNET, 12000, 490)
 
 
-def test_a_row_named_with_a_context_window_tag_is_priced_at_its_base_model_and_keeps_its_name(monkeypatch):
-    tagged = Usage(input_tokens=3000, output_tokens=90, input_includes_cache=True,
-                   models=(ModelUsage(model=f"{HAIKU}[1m]", calls=1, input_tokens=3000, output_tokens=90,
-                                      input_includes_cache=True),))
-
-    [row] = _entry(monkeypatch, tagged)["models"]
-
-    assert (row["model"], row["cost_status"], row["cost_usd"]) == (f"{HAIKU}[1m]", "priced", pytest.approx(0.00345))
-
-
 def test_a_turn_without_models_beside_one_with_them_counts_as_the_roles_model(monkeypatch):
     plain = Usage(input_tokens=1000, output_tokens=10, input_includes_cache=True)
 
