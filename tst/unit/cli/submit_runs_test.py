@@ -200,7 +200,7 @@ class _Spends(_Task):
         return await super().run(context, **kwargs)
 
 
-SPENT = "at least $0.0004 (solver gpt-4.1-mini $0.0004, 1.0k in, 10 out, partial)"
+SPENT = "at least $0.0004 (solver gpt-4.1-mini at least $0.0004, 1.0k in, 10 out, partial)"
 
 
 def test_an_eval_prints_each_runs_cost_and_their_total_from_the_ledgers(monkeypatch, tmp_path, torn_down):
@@ -214,7 +214,8 @@ def test_an_eval_prints_each_runs_cost_and_their_total_from_the_ledgers(monkeypa
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
     assert lines.count(f"    cost: {SPENT}") == 2
-    assert "Cost over 2 runs: at least $0.0008 (solver gpt-4.1-mini $0.0008, 2.0k in, 20 out, partial)" in lines
+    assert ("Cost over 2 runs: at least $0.0008 (solver gpt-4.1-mini at least $0.0008, 2.0k in, 20 out, partial)"
+            in lines)
     assert lines[-1] == "Costs priced from LiteLLM's price map, litellm@test."
 
 

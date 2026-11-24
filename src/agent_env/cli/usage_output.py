@@ -37,7 +37,8 @@ def sources_line(summaries: Iterable[UsageSummary | None]) -> str | None:
 
 
 def _share(share: Share) -> str:
-    cost = "unpriced" if share.cost_usd is None else _bounded(share.cost_usd, share.unpriced, share.assumed)
+    cost = "unpriced" if share.cost_usd is None else _bounded(share.cost_usd, share.unpriced or share.partial,
+                                                              share.assumed)
     words = [f"{_ROLE_NAMES.get(share.role, share.role)} {share.model or 'an unnamed model'} {cost}"]
     if share.input_tokens is not None:
         words.append(f"{_count(share.input_tokens)} in")

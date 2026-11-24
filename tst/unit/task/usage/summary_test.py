@@ -72,6 +72,8 @@ def test_a_cost_priced_on_an_assumed_rate_is_at_most_and_with_uncounted_usage_an
     assert cost_line(summarize([assumed, _entry("solver", "gpt-4.1-mini", 100, 1, None)])) == (
         "cost: estimated $0.0004 (solver gpt-4.1-mini estimated $0.0004, 1.1k in, 11 out)")
     assert combine([summarize([_entry("judge", "j", 1, 1, 0.1)]), summarize([assumed])]).upper_bound
+    assert cost_line(summarize([assumed, _entry("solver", "gpt-4.1-mini", 100, 1, 0.0001, running=True)])) == (
+        "cost: estimated $0.0005 (solver gpt-4.1-mini estimated $0.0005, 1.1k in, 11 out, partial)")
 
 
 def test_a_per_model_row_priced_on_an_assumed_rate_bounds_its_own_share():
@@ -89,7 +91,8 @@ def test_a_partial_or_running_entry_makes_its_share_partial_and_the_total_a_lowe
     for mark in ({"partial": True}, {"running": True}):
         summary = summarize([_entry("solver", "gpt-4.1-mini", 1000, 10, 0.0004, **mark)])
         assert summary.lower_bound and summary.shares[0].partial
-        assert cost_line(summary) == "cost: at least $0.0004 (solver gpt-4.1-mini $0.0004, 1.0k in, 10 out, partial)"
+        assert cost_line(summary) == ("cost: at least $0.0004 (solver gpt-4.1-mini at least $0.0004, 1.0k in, 10 out, "
+                                      "partial)")
 
 
 def test_every_attempt_counts_and_is_named_when_there_were_more_than_one():
