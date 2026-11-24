@@ -277,13 +277,14 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
 
         config = get_config()
         command, extra_env = self._resolve_command(context)
+        user_overrides = context.metadata.get("user_overrides") or {}
         if self.env_id is not None:
             target = self._computer(context)
-            target.env = self._merged_env(config, target.deployed.sandbox_type, extra_env)
+            target.env = self._merged_env(config, target.deployed.sandbox_type, extra_env, user_overrides)
             exit_code, stdout, stderr, extracted_files = await self._run_in_computer(target, command)
         else:
             sandbox = await self._container_sandbox(context)
-            merged_env = self._merged_env(config, sandbox.type, extra_env)
+            merged_env = self._merged_env(config, sandbox.type, extra_env, user_overrides)
             exit_code, stdout, stderr, extracted_files = await self._run_in_container(sandbox, merged_env, command)
         timed_out = exit_code in (124, 137)
         logger.info(
@@ -386,21 +387,43 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
                 return f"{url_name}: {no_key_for(url, f'{key_name} in the env_vars of the step or its step_params')}"
         return None
 
-    def _merged_env(self, config, sandbox_type: Optional[str], extra_env: dict[str, str]) -> dict[str, str]:
-        """The commands' environment: the model endpoint's key and URL from agent-env's config, every sandbox
-        provider's container env, ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as
-        ``sandbox_type``'s containers reach it. A URL other than the configured endpoint needs its key beside it."""
+    def _merged_env(
+        self, config, sandbox_type: Optional[str], extra_env: dict[str, str],
+        user_overrides: Optional[dict[str, Any]] = None,
+    ) -> dict[str, str]:
+        """The commands' environment: the model endpoint's key and URL, every sandbox provider's container env,
+        ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as ``sandbox_type``'s
+        containers reach it. The key and URL are the run's own (``user_overrides`` ``litellm_api_key`` /
+        ``litellm_base_url``, as ``deploy_agent`` takes them; ``judge_litellm_api_key`` / ``judge_litellm_base_url``
+        first, as ``rubrics_verifier``)
+        when it names them, else agent-env's config: a run
+        launched on a caller's key grades on that key and bills it, not the platform's. The run's URL is taken only
+        with the run's own key, so agent-env's key never goes to an endpoint a run chose. A URL among ``env_vars``
+        and ``extra_env`` other than the configured endpoint needs its key beside it."""
         if problem := self.model_key_problem(extra_env):
             raise ConfigError(f"{self.type} '{self.id}': {problem}")
+        overrides = user_overrides or {}
         merged_env: dict[str, str] = {}
+        # as rubrics_verifier: a judge key and its URL, when the run names one, then the run's own key and URL
+        judge_key = overrides.get("judge_litellm_api_key")
+        run_key = judge_key or overrides.get("litellm_api_key")
+        run_url = (
+            (overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url"))
+            if judge_key
+            else overrides.get("litellm_base_url")
+        )
         try:
-            litellm_key = config.get_litellm_api_key()
+            litellm_key = config.resolve_reference(run_key) if run_key else config.get_litellm_api_key()
             merged_env["LITELLM_API_KEY"] = litellm_key
             merged_env["ANTHROPIC_API_KEY"] = litellm_key
         except (KeyError, ConfigError):
-            logger.warning("LITELLM_API_KEY unavailable; verifier won't have LLM creds")
+            if run_key:
+                # never agent-env's key instead: the run named its own, and would be billed for none of it
+                logger.warning("this run's LiteLLM key could not be resolved; verifier won't have LLM creds")
+            else:
+                logger.warning("LITELLM_API_KEY unavailable; verifier won't have LLM creds")
         try:
-            litellm_url = config.get_litellm_base_url()
+            litellm_url = (run_url if run_key else None) or config.get_litellm_base_url()
             merged_env["LITELLM_BASE_URL"] = litellm_url
             merged_env["ANTHROPIC_BASE_URL"] = api_root(litellm_url)
         except (KeyError, ConfigError):
