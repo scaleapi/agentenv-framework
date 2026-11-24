@@ -1796,3 +1796,12 @@ async def test_a_run_s_override_of_a_grader_s_criteria_is_what_the_judge_reads_a
     assert entry["grading"]["criteria"] == 1
     # A fail naming the replacement counts; one naming the stored criterion it replaced doesn't.
     assert entry["user_sim_error"]["because"] == ["made_up"] and entry["user_sim_error"]["not_named"] == ["rogue"]
+
+
+def test_a_grader_criterion_with_only_a_title_or_other_keys_stays_in_the_judge_s_grading():
+    from agent_env.task_step.task_steps.verifiers.user_sim_judge import _criterion
+
+    assert _criterion("g", 1, {"id": "refund", "title": "Refund issued in full"}) == ("refund", "Refund issued in full")
+    cid, text = _criterion("g", 2, {"points": 2, "must_include": "dates"})
+    assert cid == "g#2" and "must_include" in text and "dates" in text
+    assert _criterion("g", 3, {"id": "x"}) == ("x", "")

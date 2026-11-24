@@ -604,7 +604,7 @@ def _rubric_persona(rubric: str, run: Optional[str]) -> dict:
 
 # ---- what the assistant is graded on --------------------------------------------------------------------------------
 END_STATE_TYPE = "env_outcome_verifier"  # env_outcome_verifier.EnvOutcomeVerifierTaskStep.type
-CRITERION_TEXT_KEYS = ("criterion", "description", "text", "question")  # where a grader's criterion keeps its text
+CRITERION_TEXT_KEYS = ("criterion", "description", "text", "question", "title")  # where a grader's criterion keeps its text
 GRADING_UNSEEN = ("the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as "
                   "before")
 GRADING_NONE = ("the task has no step that grades the assistant with criteria or checks its end state, so "
@@ -644,11 +644,16 @@ def grading_of(run: TaskStep, steps: list[TaskStep]) -> Graders:
 
 
 def _criterion(step_id: str, n: int, criterion: Any) -> tuple[str, str]:
-    """A grader's criterion as ``(id, text)``: its own id, else its step's and its place."""
+    """A grader's criterion as ``(id, text)``: its own id, else its step's and its place. An entry with none of the
+    usual text keys is kept whole, as the grader sends it to its judge."""
     if not isinstance(criterion, dict):
         return f"{step_id}#{n}", str(criterion)
+    cid = str(criterion.get("id") or f"{step_id}#{n}")
     text = next((criterion[k] for k in CRITERION_TEXT_KEYS if isinstance(criterion.get(k), str)), "")
-    return str(criterion.get("id") or f"{step_id}#{n}"), text
+    if not text.strip():
+        rest = {k: v for k, v in criterion.items() if k != "id"}
+        text = json.dumps(rest, ensure_ascii=False, sort_keys=True) if rest else ""
+    return cid, text
 
 
 def _seeded(grading: Optional[core.Grading], seed: dict) -> Optional[core.Grading]:
