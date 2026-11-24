@@ -126,3 +126,7 @@ def test_a_frozen_clocks_timers_expire_once_tell_all_the_time_left_and_tick_agai
     r = gate("frozen_timers")
     assert r["periodic_count"] == 1 and abs(r["far_left_s"] - (9223368436 + 9223286400)) < 1, r
     assert 2 <= r["resumed_count"] <= 3, r
+
+
+def test_a_periodic_timer_ticking_into_the_end_stops_there_with_no_page_written(gate):
+    assert gate("end_periodic") == {"expirations": 4, "now": 9223372036000000000}

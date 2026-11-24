@@ -313,7 +313,7 @@ static int ft_timer_arm(struct ft_timer *t, const struct ft_clock_page *s, bool 
   {
     real.it_value = ft_ts(at);
     if (real.it_value.tv_sec == 0 && real.it_value.tv_nsec == 0) real.it_value.tv_nsec = 1;
-    if (t->interval > 0 && rate > 0)
+    if (t->interval > 0 && rate > 0 && ft_page_rt(s, ft_real_rt()) < FT_END)
     {
       int64_t iv = (int64_t) ((double) t->interval / rate);
       real.it_interval = ft_ts(iv < 1 ? 1 : iv);
@@ -425,16 +425,36 @@ static bool ft_on_change(const struct ft_clock_page *s, bool rebroadcast)
   return pending;
 }
 
+/* the clock reached the end of its range on page ``s`` at real realtime ``end`` before any page said so: its periodic
+   timers stop there, as its reads do, rather than tick on until the follower writes the page that stands at the end. */
+static void ft_at_end(const struct ft_clock_page *s, int64_t end)
+{
+  struct ft_clock_page stood = *s;
+  sigset_t old;
+  stood.universe_ns = FT_END;
+  stood.anchor_ns = end;
+  stood.rate = 0;
+  ft_tab_lock(&old);
+  for (int i = 0; i < ft_timers_top; i++)
+  {
+    struct ft_timer *t = &ft_timers[i];
+    if (t->kind != 0 && t->tracked && t->interval > 0) ft_timer_arm(t, &stood, false);
+  }
+  ft_tab_unlock(&old);
+}
+
 static void *ft_helper_main(void *arg)
 {
   struct ft_clock_page s;
   uint64_t gen = UINT64_MAX;   /* the first pass catches a change made while it started */
+  uint64_t ended = UINT64_MAX; /* the generation whose run to the end of the range ft_at_end has handled */
   int backoff_ms = 0;
   (void) arg;
   for (;;)
   {
     uint32_t seq32 = ft_seq32();
     bool pending = false;
+    int64_t end = FT_NEVER;
     if (ft_snap(&s))
     {
       if (s.generation != gen)
@@ -448,11 +468,22 @@ static void *ft_helper_main(void *arg)
         pending = ft_on_change(&s, true);
         backoff_ms = pending ? (backoff_ms < 64 ? backoff_ms * 2 : 100) : 0;
       }
+      if (s.armed && s.rate > 0 && s.universe_ns < FT_END && s.generation != ended) end = ft_real_of(&s, FT_END);
     }
     if (backoff_ms > 0)
     {
       struct timespec ts = {0, (long) backoff_ms * 1000000L};
       ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT, (long) seq32, (long) &ts, 0, 0);
+    }
+    else if (end != FT_NEVER)
+    {
+      struct timespec ts = ft_ts(end);
+      if (ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME, (long) seq32,
+                          (long) &ts, 0, FUTEX_BITSET_MATCH_ANY) == -1 && errno == ETIMEDOUT && ft_seq32() == seq32)
+      {
+        ft_at_end(&s, end);
+        ended = s.generation;
+      }
     }
     else
       ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT, (long) seq32, 0, 0, 0);

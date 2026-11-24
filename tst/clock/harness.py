@@ -331,6 +331,18 @@ def frozen_timers():
     return {**frozen, **json.loads(resumed)}
 
 
+def end_periodic():
+    """A periodic timer ticking into the end of the clock's range, with no page written after the clock was set running
+    toward it: it stops at the end, as reads do (tfdend.py)."""
+    preload()
+    fresh_page()
+    set_clock(9223372034.5, 1)
+    r = subprocess.run(user_cmd(["python3", f"{PROGRAMS}/tfdend.py"]), capture_output=True, text=True, cwd="/tmp",
+                       timeout=30)
+    preload(None)
+    return json.loads(r.stdout)
+
+
 def _with_page_changes(p) -> int:
     """+10 min every 0.5 s while ``p`` runs; how many."""
     n = 0
@@ -756,9 +768,9 @@ def probe():
     return {"futex_waitv_errno": ctypes.get_errno() if r == -1 else 0}
 
 
-GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, frozen_timers, condstress, semstress,
-                                 stall, torn, deadwriter, end, end_waits, span, marker, identity, envrace, forklock,
-                                 chromium, tls, probe)}
+GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, frozen_timers, end_periodic, condstress,
+                                 semstress, stall, torn, deadwriter, end, end_waits, span, marker, identity, envrace,
+                                 forklock, chromium, tls, probe)}
 
 if __name__ == "__main__":
     gate = GATES[sys.argv[1]]

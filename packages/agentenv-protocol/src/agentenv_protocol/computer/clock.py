@@ -27,6 +27,9 @@ STATUS = "/run/agentenv-clock/status.json"
 #: The follower's clock file, replaced whole at each write: ``@<universe s> x<rate> ^<anchor s>`` while the clock is
 #: armed (the universe at real time ``anchor``, running at ``rate``), ``+0 x1`` on real time.
 CLOCK_FILE = "/run/agentenv-clock/clock"
+#: The end of the env clock's range, 2262-04-11T23:47:16Z in epoch seconds: a clock that runs to it stands there, as the
+#: gateway's and the computers' do, before the follower writes it standing.
+END = 9223372036.0
 #: What a disk form's guest has, made from the computer's container image: core's root channel reaches its launcher,
 #: not the guest, so it can't configure a follower there, and a disk computer stays on real time for now.
 DISK_GUEST = "/etc/agentenv/vm/image.env"
@@ -53,7 +56,7 @@ def session_time() -> float:
     if not spec[0].startswith("@"):
         return now
     universe, rate, anchor = float(spec[0][1:]), float(spec[1][1:]), float(spec[2][1:])
-    return universe if rate == 0 or now <= anchor else universe + (now - anchor) * rate
+    return universe if rate == 0 or now <= anchor else min(universe + (now - anchor) * rate, END)
 
 
 def session_zone() -> str:

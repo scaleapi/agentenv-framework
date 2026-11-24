@@ -198,6 +198,7 @@ def test_a_server_starting_without_a_saved_zone_keeps_its_own(image, monkeypatch
     ("@1748768400.000000000 x2 ^{past}\n", 1748768400.0 + 20),
     ("@1748768400.000000000 x1 ^{future}\n", 1748768400.0),
     ("@1748768400.000000000 x0 ^{past}\n", 1748768400.0),
+    ("@9223372030.000000000 x1 ^{past}\n", 9223372036.0),
 ])
 def test_the_session_time_is_the_universe_while_the_clock_is_armed_and_real_time_otherwise(
         tmp_path, monkeypatch, spec, expected):
