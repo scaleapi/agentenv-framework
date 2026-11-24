@@ -36,7 +36,7 @@ from agent_env.task.store import (
     TaskInstanceStore,
     set_task_instance_store,
 )
-from agent_env.task.task import Task, _brief, _rolled_back_sandboxes
+from agent_env.task.task import Task, _rolled_back_sandboxes
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, PromptResponse, TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig
@@ -189,12 +189,6 @@ async def test_retry_rolls_back_span_and_redispatches_on_fresh_world(store):
     assert {e["step_id"] for e in _rows(store, ctx.instance_id)} == {_SEED_STEP_ID, _SCHEDULER_STEP_ID, "s0", "s1"}
 
 
-def test_a_retrys_reason_is_one_line_cut_short_so_a_response_body_stays_out_of_the_log():
-    body = "upstream said:\n" + "x" * 5000
-    assert _brief(RuntimeError(body)) == "RuntimeError: upstream said: " + "x" * 285 + "…"
-    assert _brief(ValueError("flaky boom")) == "ValueError: flaky boom"
-
-
 @pytest.mark.asyncio
 async def test_custom_metadata_and_lists_written_by_the_span_are_rolled_back(store):
     # No allowlist, no stamp: the journal knows what the span wrote. The dict keyed by the
@@ -260,7 +254,8 @@ async def test_self_retry_reruns_only_the_failed_step_and_says_why(store, caplog
     with caplog.at_level(logging.WARNING, logger="agent_env.task.task"):
         result = await task.run(context=ctx)
 
-    assert "Step s1 failed (RuntimeError: flaky boom); rolling back span ['s1']" in caplog.text
+    assert "Step s1 failed (RuntimeError); rolling back span ['s1']" in caplog.text
+    assert "flaky boom" not in caplog.text
 
     assert deploy.deploy_calls == ["s0"]  # deploy NOT re-run
     assert flaky.attempts == 2
