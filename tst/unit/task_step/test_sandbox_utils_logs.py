@@ -104,6 +104,15 @@ async def test_max_chars_widens_each_stream(install):
 
 
 @pytest.mark.asyncio
+async def test_a_stream_shorter_than_max_chars_is_kept_whole(install):
+    sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("", "z" * 499)})
+
+    out = await fetch_container_logs(install(sandbox))
+
+    assert out.count("z") == 499
+
+
+@pytest.mark.asyncio
 async def test_max_chars_zero_keeps_nothing(install):
     sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("x" * 50, "y" * 50)})
 

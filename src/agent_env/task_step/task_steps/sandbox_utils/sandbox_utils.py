@@ -36,7 +36,7 @@ def ended_turn_error(state: Any, reply: TerminalResponse) -> str:
 
 def _last_chars(text: str, limit: int) -> str:
     """The last ``limit`` characters of ``text``; none for a limit of zero or less, where ``text[-0:]`` would keep all."""
-    return text[len(text) - max(limit, 0):]
+    return text[max(len(text) - max(limit, 0), 0):]
 
 
 async def fetch_container_logs(
