@@ -95,7 +95,7 @@ server does at a time of its own (a scheduled message posted at its time) that n
 otherwise mark. Its `_meta` `"agentenv.io/deferredCalls"` is a list of `{"key", "at", "call",
 "report_as"}`: `at` an RFC 3339 instant with an offset, `call` and `report_as` each `{"tool",
 "arguments"}`. The gateway takes the key off the result, so no caller sees it, and schedules each
-entry once per `key` (one declared again while pending or done is ignored). When the gateway clock
+entry once per server and `key` (one its server declares again while pending or done is ignored). When the gateway clock
 reaches `at` (its virtual time while armed, wall UTC while not) it calls `call.tool` as the role
 that made the declaring call, and again after a transport failure, so make that tool idempotent
 (and `hidden_by_default`, as plumbing). Unless the result is an error, the gateway hands its

@@ -19,15 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class DeferredCalls:
-    """The calls servers declared, by key. One is kept once made, so the key declared again is ignored; one that failed
-    may be declared afresh."""
+    """The calls servers declared, by server and key. One is kept once made, so its server declaring the key again is
+    ignored; one that failed may be declared afresh."""
 
     RETRY_ATTEMPTS = 5  # a call a transport failure stopped is made again, so the tool a server defers is idempotent
     RETRY_BACKOFF_S = 1.0  # real seconds before the second attempt, doubled before each later one
+    ERROR_TEXT_LIMIT = 300  # characters of a failed call's error kept in the log and the trajectory
 
     def __init__(self, gateway):
         self._gw = gateway
-        self._calls: dict[str, dict] = {}
+        self._calls: dict[tuple[str, str], dict] = {}
         self._tasks: set[asyncio.Task] = set()
 
     def take(self, result: CallToolResult, server_url: str, role: str) -> CallToolResult:
@@ -50,8 +51,8 @@ class DeferredCalls:
 
     def state(self) -> list[dict]:
         """Each call declared, for GET /triggers/state; nothing that waits for the triggers to settle reads it."""
-        return [{"key": key, "at": _iso(call["at"]), "tool": call["tool"], "role": call["role"],
-                 "status": call["status"], "attempts": call["attempts"]} for key, call in self._calls.items()]
+        return [{"key": key, "server": server, "at": _iso(call["at"]), "tool": call["tool"], "role": call["role"],
+                 "status": call["status"], "attempts": call["attempts"]} for (server, key), call in self._calls.items()]
 
     async def cancel(self) -> None:
         """Cancel the calls still pending and wait for them to exit; the gateway's process lifespan calls it at
@@ -68,11 +69,11 @@ class DeferredCalls:
         except ValueError as e:
             logger.warning(f"ignoring a deferred call declared by {server_url}: {e}")
             return
-        known = self._calls.get(key)
+        known = self._calls.get((server_url, key))
         if known is not None and known["status"] != "failed":
             return
         record = {"at": at, **call, "report_as": report_as, "role": role, "status": "pending", "attempts": 0}
-        self._calls[key] = record
+        self._calls[(server_url, key)] = record
         task = asyncio.get_running_loop().create_task(self._make(key, record, server_url))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -90,11 +91,11 @@ class DeferredCalls:
                 result = await self._gw._call_child_tool(server_url, record["tool"], record["arguments"],
                                                          caller=Caller(role=record["role"]))
             except Exception as e:
-                error = (str(e) or type(e).__name__)[:300]
+                error = (str(e) or type(e).__name__)[:self.ERROR_TEXT_LIMIT]
                 logger.warning(f"deferred call {key!r} ({record['tool']}) attempt {record['attempts']} failed: {error}")
         ok = result is not None and not result.isError
         if result is not None and not ok:
-            error = _result_text(result)[:300]
+            error = _result_text(result)[:self.ERROR_TEXT_LIMIT]
         record["status"] = "done" if ok else "failed"
         await self._gw._log_event({"event_type": "deferred_call", "key": key, "tool": record["tool"],
                                    "role": record["role"], "ok": ok, "attempts": record["attempts"],

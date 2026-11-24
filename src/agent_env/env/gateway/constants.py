@@ -196,9 +196,9 @@ AGENT_ENV_SESSION_META_KEY = "agentenv.io/session"
 # MCP tools/list `_meta` key marking a tool hidden from every role until a rule names it; "*"-tool rules skip it.
 AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
 # MCP tools/call result `_meta` key by which a server declares calls on itself for the gateway to make later: a list of
-# {key, at (RFC 3339), call {tool, arguments}, report_as {tool, arguments}}, each made once per key when the gateway
-# clock reaches `at`, as the declaring call's role, and reported to the triggers as that role's call `report_as`. The
-# gateway takes it off the result, so no caller sees it.
+# {key, at (RFC 3339), call {tool, arguments}, report_as {tool, arguments}}, each made once per server and key when
+# the gateway clock reaches `at`, as the declaring call's role, and reported to the triggers as that role's call
+# `report_as`. The gateway takes it off the result, so no caller sees it.
 AGENT_ENV_DEFERRED_CALLS_META_KEY = "agentenv.io/deferredCalls"
 DEFAULT_ROLE = "default"
 WILDCARD = "*"

@@ -25,6 +25,7 @@ from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 DEFERRED = "agentenv.io/deferredCalls"
 URL = "http://chat/mcp"
+OTHER_URL = "http://other-chat/mcp"
 SEND, SCHEDULE, DELIVER, NOTE = "chat_send", "chat_schedule", "chat_deliver", "chat_note"
 T0 = "2026-07-06T19:00:00Z"
 AT = "2026-07-06T19:03:00Z"
@@ -213,6 +214,16 @@ async def test_each_key_is_scheduled_once_while_pending_and_once_done(tmp_path, 
         await asyncio.sleep(0.1)
         assert len(chat.made(DELIVER)) == 1
         assert [(c["key"], c["status"]) for c in await _deferred(gw)] == [("m1", "done")]
+
+
+@pytest.mark.asyncio
+async def test_the_same_key_from_two_servers_is_two_calls(tmp_path, monkeypatch):
+    async with _chat(tmp_path, monkeypatch) as (gw, chat):
+        await _arm(gw)
+        await _schedule(gw, chat, _declared("m1"))
+        gw._deferred.take(_json({"ok": True}, meta={DEFERRED: [_declared("m1")]}), OTHER_URL, "alice")
+        assert [(c["server"], c["key"], c["status"]) for c in await _deferred(gw)] == [
+            (URL, "m1", "pending"), (OTHER_URL, "m1", "pending")]
 
 
 @pytest.mark.asyncio
@@ -409,7 +420,8 @@ async def test_state_lists_each_deferred_call_and_prompt_agent_does_not_wait_for
         await _schedule(gw, chat, _declared())
         state = (await _request(gw, "GET", "/triggers/state")).json()
         assert state["deferred_calls"] == [
-            {"key": "m1", "at": AT, "tool": DELIVER, "role": "alice", "status": "pending", "attempts": 0}]
+            {"key": "m1", "server": URL, "at": AT, "tool": DELIVER, "role": "alice", "status": "pending",
+             "attempts": 0}]
         assert state["triggers"] == [] and state["next_event_at"] is None
         assert PromptAgentTaskStep._is_settling(state) is False
 
