@@ -403,3 +403,40 @@ def test_a_compaction_whose_turn_never_reported_is_written_as_its_task_ends():
     kit = run(_compacting_feed())
     sources = [(step["source"], "compaction" in profile_of(step)) for step in kit.document["steps"]]
     assert sources[2:5] == [("agent", True), ("system", False), ("agent", False)]
+
+
+def _summary(uuid, text_value):
+    return {"type": "user", "uuid": uuid, "parent_tool_use_id": None, "session_id": "s",
+            "message": {"role": "user", "content": text_value}}
+
+
+def _boundary(uuid):
+    return {"type": "system", "subtype": "compact_boundary", "session_id": "s", "uuid": uuid,
+            "compact_metadata": {"trigger": "auto"}}
+
+
+COUNTED_TURN = {"type": "turn", "cost_usd": 0.5, "input_tokens": 9000, "output_tokens": 900,
+                "cache_read_tokens": 200000, "cache_write_tokens": 2000}
+
+
+def test_two_compactions_in_one_turn_have_no_usage_since_the_turns_remainder_cant_be_split_between_them():
+    first, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u6", text("done"))
+    one, two = _summary("u3", "The first summary."), _summary("u5", "The second summary.")
+    feed = Feed().out(first).transcript(first, "2026-11-22T02:01:00.000Z").out(_boundary("b1")).out(one)
+    feed.transcript(one, "2026-11-22T02:01:01.000Z").out(_boundary("b2")).out(two)
+    feed.transcript(two, "2026-11-22T02:01:02.000Z").out(done).transcript(done, "2026-11-22T02:01:03.000Z")
+    kit = run(feed.aux("turn", COUNTED_TURN))
+    compactions = [step for step in kit.document["steps"] if "compaction" in profile_of(step)]
+    assert [step["message"] for step in compactions] == ["The first summary.", "The second summary."]
+    assert all("metrics" not in step for step in compactions)
+
+
+def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts():
+    """A call whose transcript record never came has no counts, which the turn's remainder would hold too."""
+    uncounted, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u4", text("done"))
+    summary = _summary("u3", "The summary.")
+    feed = Feed().out(uncounted).out(_boundary("b1")).out(summary).transcript(summary, "2026-11-22T02:01:01.000Z")
+    feed.out(done).transcript(done, "2026-11-22T02:01:03.000Z")
+    kit = run(feed.aux("turn", COUNTED_TURN))
+    [compaction] = [step for step in kit.document["steps"] if "compaction" in profile_of(step)]
+    assert "metrics" not in compaction and compaction["message"] == "The summary."

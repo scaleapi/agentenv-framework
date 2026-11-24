@@ -101,6 +101,8 @@ class ClaudeCodeAtif(Adapter):
         self._summary_next = False
         self._summary_trigger: str | None = None
         self._task_counts: dict[str, int] = {}
+        #: The task's model calls written so far, by step key: those not in ``_stamped`` have no counts yet.
+        self._task_calls: set[str] = set()
 
     # Records
 
@@ -180,10 +182,11 @@ class ClaudeCodeAtif(Adapter):
         cost = record.get("cost_usd")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             turn.task_cost(float(cost), source="harness")
-        for entry in self._queue:
-            if entry.held:
-                entry.usage, entry.held = self._left_over(record), False
-                entry.model = record.get("model") if isinstance(record.get("model"), str) else None
+        held = [entry for entry in self._queue if entry.held]
+        left = self._left_over(record) if len(held) == 1 else None
+        for entry in held:
+            entry.usage, entry.held = left, False
+            entry.model = record.get("model") if isinstance(record.get("model"), str) else None
         self._flush(turn)
 
     @finish
@@ -199,6 +202,7 @@ class ClaudeCodeAtif(Adapter):
         self._attempt_step = None
         self._summary_next = False
         self._task_counts = {}
+        self._task_calls = set()
         self._task += 1
 
     # The queue: records in the order they came, each written once its session record is in
@@ -304,6 +308,7 @@ class ClaudeCodeAtif(Adapter):
             text = "".join(b.get("text", "") for b in _blocks(record) if b.get("type") == "text")
             turn.error(message=text or "the CLI reported an error", kind="infra_error", step=key, agent=agent)
         elif key not in self._stamped:
+            self._task_calls.add(key)
             usage = self._usage(session)
             if usage is not None:
                 self._stamped.add(key)
@@ -352,17 +357,23 @@ class ClaudeCodeAtif(Adapter):
                 turn.system_message(text=text, time=when)
 
     def _left_over(self, record: dict[str, Any]) -> dict[str, int] | None:
-        """What the turn reported beyond its steps written or still queued: the call no session record counts, the
-        summary's. None when the turn gave no counts, or counted less than its steps, a lower bound."""
+        """What the turn reported beyond its model calls written or still queued: the one call no session record
+        counts, the summary's. None when the turn gave no counts, counted less than its calls (a lower bound), or one of
+        its calls has no counts, whose tokens the remainder would hold too."""
         reported = {name: record.get(name) for name in _COUNTS}
         if not all(isinstance(value, int) and not isinstance(value, bool) for value in reported.values()):
+            return None
+        if self._task_calls - self._stamped:
             return None
         counted, seen = dict(self._task_counts), set(self._stamped)
         for queued in self._queue:
             key = _message_key(queued.record) if queued.record.get("type") == "assistant" else None
-            usage = self._usage(self._session.get(queued.uuid)) if queued.uuid is not None else None
-            if key is None or key in seen or usage is None:
+            message = queued.record.get("message") if _is_mapping(queued.record.get("message")) else {}
+            if key is None or key in seen or message.get("model") == _SYNTHETIC_MODEL:
                 continue
+            usage = self._usage(self._session.get(queued.uuid)) if queued.uuid is not None else None
+            if usage is None:
+                return None
             seen.add(key)
             for name, value in usage.items():
                 counted[name] = counted.get(name, 0) + value
