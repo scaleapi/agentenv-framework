@@ -1,7 +1,8 @@
 """judge_samples: a rubric_binary or rubric_partial judge grades each criterion that many times, an odd count, and keeps
 its median, the row of the first sample that scored it with every sample's score and justification beside it; each
-call's record names its sample; the samples share the judge's concurrency; one that fails fails the grade; a run's
-count reaches every judge that can take it, and one that can't grades once and records it as not sent."""
+call's record names its sample; the samples share the judge's concurrency; one that fails fails the grade; a judge the
+verifier deploys gets one of its own per sample, while the task's own judge takes every sample; a run's count reaches
+every judge that can take it, and one that can't grades once and records it as not sent."""
 
 from __future__ import annotations
 
@@ -13,11 +14,14 @@ import litellm
 import pytest
 from click.testing import CliRunner
 
-from agent_env.a2a_agent import protocol
+from agent_env.a2a_agent import A2AAgent, protocol
 from agent_env.bundle.run import _overrides, run_bundle
 from agent_env.cli.run import run as run_command
+from agent_env.config import get_config
+from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.task_step.context import DeployedAgent
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples, judge_usage
+from agent_env.task_step.task_steps.verifiers import rubrics_verifier as rv
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.user_sim_judge import UserSimJudge
 from tst.unit.task_step.verifiers import test_rubrics_verifier_golden as G
@@ -193,11 +197,11 @@ async def test_a_runs_even_count_fails_the_grade_saying_why(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_agent_judge_takes_each_sample_in_a_conversation_of_its_own(monkeypatch):
+async def test_the_tasks_own_agent_judge_takes_every_sample_each_in_a_conversation_of_its_own(monkeypatch):
     sent: list[dict] = []
 
     async def send(url, **kwargs):
-        sent.append({"context_id": kwargs.get("context_id"), "sample": judge_usage._SAMPLE.get()})
+        sent.append({"url": url, "context_id": kwargs.get("context_id"), "sample": judge_usage._SAMPLE.get()})
         return f"task-{len(sent)}", None
 
     async def poll(url, task_id, **kwargs):
@@ -218,6 +222,7 @@ async def test_an_agent_judge_takes_each_sample_in_a_conversation_of_its_own(mon
     grade = await _grade(step, context)
 
     assert sorted(s["sample"] for s in sent) == [1, 2, 3] and {s["context_id"] for s in sent} == {None}
+    assert {s["url"] for s in sent} == {"http://judge.test"}
     assert [row["score"] for row in grade["verifier_criteria"]] == [1.0, 1.0]
     assert sorted(c["sample"] for c in grade["judge_calls"]) == [1, 2, 3]
 
@@ -230,3 +235,108 @@ def test_the_run_flag_sets_the_runs_count_and_refuses_an_even_one_or_none_at_all
             run_bundle(tmp_path, judge_samples=bad)
     result = CliRunner().invoke(run_command, ["some-bundle", "--judge-samples", "2"])
     assert result.exit_code != 0 and "use 1 or 3" in result.output
+
+
+class _Fleet:
+    """Judge agents the verifier deploys, each with a sandbox of its own: what each was sent, what was staged in each,
+    and which were terminated; the ``failing`` deploy (1-based) raises."""
+
+    def __init__(self, failing=None):
+        self.failing, self.deployed, self.files, self.terminated, self.sent = failing, [], {}, [], []
+        fleet = self
+
+        class Sandbox:
+            def __init__(self, sandbox_id):
+                self.sandbox_id = sandbox_id
+
+            async def write_file_from_object(self, object_url, path, **kwargs):
+                fleet.files.setdefault(self.sandbox_id, []).append(path)
+
+            async def write_file_from_text(self, text, path, **kwargs):
+                fleet.files.setdefault(self.sandbox_id, []).append(path)
+
+            async def terminate(self):
+                fleet.terminated.append(self.sandbox_id)
+
+        class Provider:
+            async def get_sandbox(self, sandbox_id):
+                return Sandbox(sandbox_id)
+
+        class Agent:
+            async def deploy(self, **kwargs):
+                n = len(fleet.deployed) + 1
+                fleet.deployed.append(f"sb-{n}")
+                if n == fleet.failing:
+                    fleet.deployed.pop()
+                    raise ConnectionError(f"deploy {n} dropped")
+                await asyncio.sleep(0)
+                return SimpleNamespace(a2a_url=f"http://judge-{n}.test", sandbox_id=f"sb-{n}", agent_card={},
+                                       sandbox_type=None, control_headers={}, model_endpoint_host=None)
+
+        self.provider, self.agent = Provider(), Agent()
+
+    def install(self, monkeypatch) -> None:
+        monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda agent_id: self.agent))
+        monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", lambda: self.provider)
+
+        async def send(url, **kwargs):
+            self.sent.append((judge_usage._SAMPLE.get(), url))
+            return f"task-{len(self.sent)}", None
+
+        async def poll(url, task_id, **kwargs):
+            sample = judge_usage._SAMPLE.get()
+            text = _verdicts(_two_to_one(sample, ["c1", "c2"]), sample)
+            return {"status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": text}]}}}
+
+        monkeypatch.setattr(protocol, "send_a2a_message", send)
+        monkeypatch.setattr(protocol, "poll_a2a_task", poll)
+
+
+def _deployed_judge_step(**kw) -> RubricsVerifierTaskStep:
+    step = G._step(use_agent_judge=True, use_trajectory=True, judge_a2a_agent_id="judge-agent", judge_samples=3, **kw)
+
+    async def configured(**kwargs):
+        return None
+
+    step._configure_judge_a2a = configured
+    step._compact_trajectory = lambda *a, **k: rv._CompactedTrajectory.for_screenshot(
+        None, [], container_object_url="mem://traj/raw.json")
+    return step
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("local_stores")
+async def test_a_judge_the_verifier_deploys_gets_one_of_its_own_per_sample_each_staged_and_terminated(monkeypatch):
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="configured-key")
+    fleet = _Fleet()
+    fleet.install(monkeypatch)
+
+    grade = await _grade(_deployed_judge_step(), G._context())
+
+    assert fleet.deployed == ["sb-1", "sb-2", "sb-3"] and sorted(fleet.terminated) == fleet.deployed
+    assert {sandbox: len(paths) for sandbox, paths in fleet.files.items()} == {"sb-1": 1, "sb-2": 1, "sb-3": 1}
+    by_sample = {}
+    for sample, url in fleet.sent:
+        by_sample.setdefault(sample, set()).add(url)
+    assert sorted(by_sample) == [1, 2, 3] and all(len(urls) == 1 for urls in by_sample.values())
+    assert len(set().union(*by_sample.values())) == 3
+    assert [row["score"] for row in grade["verifier_criteria"]] == [1.0, 1.0]
+    store = get_config().get_object_store()
+    for call in grade["judge_calls"]:
+        assert len(json.loads(store.get(call["input"]["object_url"]))["files"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("local_stores")
+async def test_a_judge_that_fails_to_deploy_for_one_sample_fails_the_grade_and_every_deployed_one_is_terminated(
+        monkeypatch):
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="configured-key")
+    fleet = _Fleet(failing=2)
+    fleet.install(monkeypatch)
+    context = G._context()
+
+    with pytest.raises(ConnectionError, match="deploy 2 dropped"):
+        await _deployed_judge_step().execute(context)
+
+    assert sorted(fleet.terminated) == sorted(fleet.deployed) and fleet.sent == []
+    assert context.metadata["grades"]["verify"]["verifier_status"] == "failed"
