@@ -142,7 +142,9 @@ or one of them only where it is used.
   (`turn_events.atif_turn_events`), each such wake's end naming its turn in the step's timeline, since the turns share
   one url. A prompt step that follows its turns live (`live_trajectory`) follows the copy too
   (`snapshot_utils/live_trajectory.py`): each poll's new closed steps a page under `<turn>/live/`, the header beside the
-  page where it changed, each sub-agent's under `sub/<id>/`, and the media its steps name pulled between polls; a turn
+  page where it changed, each sub-agent's under `sub/<id>/`, and the media its steps name pulled between polls. To an
+  agent whose card takes them (`live_reads_take_cursors`), each read names the header's digest and each sub-agent's
+  cursor, so the agent sends the header only when it changed and a running sub-agent's steps as they close; a turn
   the agent won't serve atif/1 is followed natively, and one it stops serving partway ends naming why (`end.json`
   `stopped`). So prescribing atif/1 changes what a run's judges read and can move its scores.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
