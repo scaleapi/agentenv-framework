@@ -73,10 +73,10 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", url)])
     try:
         await gw._ensure_tools_discovered()
-        assert _text(await gw._call_child_tool(url, "fast", {})) == "ok"
+        assert _text(await gw._call_child_tool(url, "fast", {}, report=True)) == "ok"
         first_session = gw._sessions.current[url]
 
-        in_flight = asyncio.create_task(gw._call_child_tool(url, "slow", {}))
+        in_flight = asyncio.create_task(gw._call_child_tool(url, "slow", {}, report=True))
         await asyncio.wait_for(slow_started.wait(), 10)  # the child holds the call
         assert not in_flight.done()
 
@@ -90,7 +90,7 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
         assert url not in gw._sessions.current, "the session was retired"
 
         server = await _serve(_child(asyncio.Event()), _bind(port))  # the child is back on the same address
-        assert _text(await gw._call_child_tool(url, "fast", {})) == "ok", "the next call reopens"
+        assert _text(await gw._call_child_tool(url, "fast", {}, report=True)) == "ok", "the next call reopens"
         assert gw._sessions.current[url] is not first_session
     finally:
         await gw._close_child_sessions()
@@ -116,11 +116,11 @@ async def test_a_call_arriving_while_the_child_is_still_down_waits_for_the_recon
         await gw._ensure_tools_discovered()
         await server.shutdown()
         with pytest.raises(McpError) as info:  # the call that finds the child gone retires its session
-            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}), timeout=10)
+            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}, report=True), timeout=10)
         assert info.value.error.code == CONNECTION_CLOSED
 
         started = time.monotonic()
-        during = asyncio.create_task(gw._call_child_tool(url, "fast", {}))  # reconnects; refused until the child is back
+        during = asyncio.create_task(gw._call_child_tool(url, "fast", {}, report=True))  # reconnects; refused until the child is back
         await asyncio.sleep(1.2)
         assert not during.done()
         server = await _serve(_child(asyncio.Event()), _bind(port))
@@ -129,13 +129,13 @@ async def test_a_call_arriving_while_the_child_is_still_down_waits_for_the_recon
 
         await server.shutdown()
         with pytest.raises(McpError):
-            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}), timeout=10)
+            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}, report=True), timeout=10)
         started = time.monotonic()
         with pytest.raises(RuntimeError, match="could not open a session"):  # the child stays down: 4 refused attempts
-            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}), timeout=20)
+            await asyncio.wait_for(gw._call_child_tool(url, "fast", {}, report=True), timeout=20)
         assert time.monotonic() - started < 10
         server = await _serve(_child(asyncio.Event()), _bind(port))
-        assert _text(await gw._call_child_tool(url, "fast", {})) == "ok"
+        assert _text(await gw._call_child_tool(url, "fast", {}, report=True)) == "ok"
     finally:
         await gw._close_child_sessions()
         await server.shutdown()
@@ -176,10 +176,10 @@ async def test_after_a_child_restarts_a_burst_of_calls_to_it_succeeds_and_anothe
         b_session = gw._sessions.current[urls["b"]]
         await servers["a"].shutdown()
         servers["a"] = await _serve(_counting_child("a", writes["a"]), _bind(ports["a"]))  # back, its sessions gone
-        slow = asyncio.create_task(gw._call_child_tool(urls["b"], "b_slow_place", {"item": "slow"}))
+        slow = asyncio.create_task(gw._call_child_tool(urls["b"], "b_slow_place", {"item": "slow"}, report=True))
         results = await asyncio.gather(
-            *(gw._call_child_tool(urls["a"], "a_place", {"item": f"a{i}"}) for i in range(20)),
-            *(gw._call_child_tool(urls["b"], "b_place", {"item": f"b{i}"}) for i in range(10)))
+            *(gw._call_child_tool(urls["a"], "a_place", {"item": f"a{i}"}, report=True) for i in range(20)),
+            *(gw._call_child_tool(urls["b"], "b_place", {"item": f"b{i}"}, report=True) for i in range(10)))
         assert all(not result.isError for result in results)
         assert not (await slow).isError
         assert sorted(writes["a"]) == sorted(f"a{i}" for i in range(20))

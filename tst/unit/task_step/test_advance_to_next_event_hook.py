@@ -46,7 +46,7 @@ def gateway(tmp_path, monkeypatch):
     gw._tool_server_urls = {"items_add_item": "http://items/mcp"}
     gw.calls = []
 
-    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report=True):
+    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report):
         gw.calls.append((arguments["item"], gw._clock.read()["virtual_time"]))
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 

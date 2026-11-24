@@ -1235,12 +1235,13 @@ class Gateway:
         await self._sessions.close()
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
-                               caller: Caller | None = None, report: bool = True) -> CallToolResult:
+                               caller: Caller | None = None, report: bool) -> CallToolResult:
         """Every child tools/call (MCP proxy, /step, trigger engine, deferred calls), with the caller's `_meta` stamp
         (none for an unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone
         on a reconnect; the registered proxies look their child up by URL. The deferred calls a result declares are taken
         off it here, before anyone sees it, and scheduled as the caller's role, reported to the triggers once made unless
-        ``report`` is False (the trigger engine's own calls)."""
+        ``report`` is False (the trigger engine's own calls). It has no default: a trigger action's call that left it
+        out would have the calls it defers provoke triggers again."""
         meta = caller.meta() if caller is not None else None
         role = caller.role if caller is not None else DEFAULT_ROLE
         self._drive(role, tool_name)
@@ -1432,7 +1433,8 @@ class Gateway:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
                 try:
-                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role),
+                                                         report=True)
                 except Exception as e:
                     await self._log_failed_call(tool_call_event_id, changelog_before, e, **source)
                     raise
@@ -1657,7 +1659,7 @@ class Gateway:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
                 try:
-                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller, report=True)
                 except Exception as e:
                     await self._log_failed_call(tool_call_event_id, changelog_before, e)
                     raise

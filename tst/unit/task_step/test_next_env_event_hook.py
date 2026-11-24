@@ -49,7 +49,7 @@ def gateway(tmp_path, monkeypatch):
     gw._tool_server_urls = {"items_add_item": "http://items/mcp"}
     gw.calls = []
 
-    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report=True):
+    async def call_child_tool(server_url, tool_name, arguments, *, caller=None, report):
         gw.calls.append((arguments["item"], gw._clock.read()["virtual_time"]))
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
@@ -149,7 +149,7 @@ async def test_a_recurring_trigger_whose_action_outlasts_its_interval_still_move
 async def test_a_fire_the_agents_turn_set_off_lands_before_the_clock_jumps(hook, gateway, monkeypatch):
     real = gateway._call_child_tool
 
-    async def slow(server_url, tool_name, arguments, *, caller=None, report=True):
+    async def slow(server_url, tool_name, arguments, *, caller=None, report):
         await asyncio.sleep(0.3)
         return await real(server_url, tool_name, arguments, caller=caller, report=report)
 
