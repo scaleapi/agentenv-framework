@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -22,6 +23,8 @@ LITELLM = "litellm"
 _MAP_FILE = "litellm/model_prices_and_context_window_backup.json"
 _MAP_KEYS = {"input": "input_cost_per_token", "output": "output_cost_per_token",
              "cache_read": "cache_read_input_token_cost", "cache_write": "cache_creation_input_token_cost"}
+# A tag a harness adds to a model's name, such as Claude Code's context-window pick ``[1m]``.
+_TRAILING_TAG = re.compile(r"\[[^\[\]]*\]$")
 
 
 class CostStatus(StrEnum):
@@ -88,11 +91,20 @@ class PriceTable:
 
     def lookup(self, model: str) -> Optional[ModelPrice]:
         """``model``'s prices: the entry named as called, else the one named without its first ``/`` segment, so
-        ``openai/gpt-4o-mini`` finds ``gpt-4o-mini``; None, never a zero price, when there's neither."""
-        if model in self.entries:
-            return self.entries[model]
-        _, slash, name = model.partition("/")
-        return self.entries.get(name) if slash else None
+        ``openai/gpt-4o-mini`` finds ``gpt-4o-mini``, and each of those again without a trailing bracketed tag, so a
+        context-window pick such as ``claude-opus-5-5[1m]`` finds ``claude-opus-5-5``; None, never a zero price, when
+        there's none. No name in the map carries a bracket, so the tag never hides an entry."""
+        untagged = _TRAILING_TAG.sub("", model)
+        for name in (model, _unrouted(model), untagged, _unrouted(untagged)):
+            if name in self.entries:
+                return self.entries[name]
+        return None
+
+
+def _unrouted(model: str) -> str:
+    """``model`` without its first ``/`` segment, the route a gateway reads; itself when it has none."""
+    _, slash, name = model.partition("/")
+    return name if slash else model
 
 
 @functools.cache

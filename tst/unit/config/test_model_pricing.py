@@ -90,6 +90,19 @@ def test_a_routing_prefix_is_stripped_to_find_a_model():
     assert TABLE.lookup("meta-llama/Llama-3-70b") is TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b") is not None
 
 
+def test_a_trailing_bracketed_tag_such_as_a_context_window_pick_is_stripped_to_find_a_model():
+    assert TABLE.lookup("gpt-4o-mini[1m]") is TABLE.lookup("openai/gpt-4o-mini[1m]") is TABLE.lookup("gpt-4o-mini")
+    assert TABLE.lookup("hosted_vllm/meta-llama/Llama-3-70b[1m]") is TABLE.lookup("meta-llama/Llama-3-70b")
+    assert _agent(USAGE, "gpt-4o-mini[1m]").usd == _agent(USAGE).usd is not None
+    assert _judge(USAGE, "openai/gpt-4o-mini[1m]").usd == _judge(USAGE).usd
+
+
+def test_a_tagged_name_is_unpriced_for_what_its_base_model_lacks():
+    assert TABLE.lookup("someprovider/model-x[1m]") is None
+    assert _agent(USAGE, "someprovider/model-x[1m]").unpriced is Unpriced.NO_PRICE
+    assert _agent({**USAGE, "input_tokens": None}, "gpt-4o-mini[1m]").unpriced is Unpriced.NO_TOKENS
+
+
 @pytest.mark.parametrize("model", ["gpt-4o", "openai/gpt-4o", "Llama-3-70b", "dall-e-3", "broken", "half", ""])
 def test_a_model_the_map_cant_price_has_no_price_never_a_zero_one(model):
     assert TABLE.lookup(model) is None
