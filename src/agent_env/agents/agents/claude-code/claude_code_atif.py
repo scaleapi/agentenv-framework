@@ -101,8 +101,10 @@ class ClaudeCodeAtif(Adapter):
         self._summary_next = False
         self._summary_trigger: str | None = None
         self._task_counts: dict[str, int] = {}
-        #: The model the root agent's latest call named, as the API answered: a compaction's summary call is its call too.
-        self._root_model: str | None = None
+        #: The model the task's latest root call named, as the API answered, and each model the turn's tally named as
+        #: called (a gateway route prefixes it) by the name its calls answered as: a compaction is named as they are.
+        self._task_model: str | None = None
+        self._answered_as: dict[str, str] = {}
         #: The task's model calls written so far, by step key: those not in ``_stamped`` have no counts yet.
         self._task_calls: set[str] = set()
 
@@ -186,9 +188,12 @@ class ClaudeCodeAtif(Adapter):
             turn.task_cost(float(cost), source="harness")
         held = [entry for entry in self._queue if entry.held]
         left = self._left_over(record) if len(held) == 1 else None
+        called = record.get("model") if isinstance(record.get("model"), str) else None
+        if called is not None and self._task_model is not None:
+            self._answered_as[called] = self._task_model
+        model = self._answered_as.get(called, called) if called is not None else self._task_model
         for entry in held:
-            entry.usage, entry.held = left, False
-            entry.model = record.get("model") if isinstance(record.get("model"), str) else None
+            entry.usage, entry.held, entry.model = left, False, model
         self._flush(turn)
 
     @finish
@@ -203,6 +208,7 @@ class ClaudeCodeAtif(Adapter):
         self._inits = 0
         self._attempt_step = None
         self._summary_next = False
+        self._task_model = None
         self._task_counts = {}
         self._task_calls = set()
         self._task += 1
@@ -320,7 +326,7 @@ class ClaudeCodeAtif(Adapter):
         if agent is None:
             self._attempt_step = key
             if model is not None and not synthetic:
-                self._root_model = model
+                self._task_model = model
 
     def _block(self, block: dict[str, Any], key: str, agent: str | None, when: Any, turn: Any) -> None:
         kind = block.get("type")
@@ -355,7 +361,7 @@ class ClaudeCodeAtif(Adapter):
                 key = f"compaction-{entry.uuid or entry.seq}"
                 turn.message(step=key, text=text, time=when)
                 turn.compaction(step=key, written_by="assistant", trigger=entry.trigger)
-                turn.step(key=key, model_name=self._root_model or entry.model, time=when, **(entry.usage or {}))
+                turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
                 entry.summary = False
             else:
                 turn.system_message(text=text, time=when)

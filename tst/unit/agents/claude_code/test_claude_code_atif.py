@@ -431,16 +431,33 @@ def test_two_compactions_in_one_turn_have_no_usage_since_the_turns_remainder_can
     assert all("metrics" not in step for step in compactions)
 
 
-def test_a_compaction_names_its_model_as_the_agents_own_calls_do_else_as_the_turn_counted_it():
-    """The turn's tally keys a model by the name it was called as; the agent's steps name it as the API answered."""
-    counted = {**COUNTED_TURN, "model": "gateway/" + MODEL}
-    after_a_call = run(_compacting_feed({name: value for name, value in counted.items() if name != "type"}))
-    summary = _summary("u3", "The summary.")
-    alone = run(Feed().out(_boundary("b1")).out(summary).transcript(summary, "2026-11-22T02:01:01.000Z")
-                .aux("turn", counted))
-    named = [next(step for step in kit.document["steps"] if "compaction" in profile_of(step))["model_name"]
-             for kit in (after_a_call, alone)]
-    assert named == [MODEL, "gateway/" + MODEL]
+def _named(kit):
+    return next(step for step in kit.document["steps"] if "compaction" in profile_of(step))["model_name"]
+
+
+def _compacting_only(called):
+    summary = _summary("u9", "The summary.")
+    feed = Feed().out(_boundary("b9")).out(summary).transcript(summary, "2026-11-22T02:02:01.000Z")
+    return feed.aux("turn", {**COUNTED_TURN, "model": called})
+
+
+def test_a_compaction_names_its_model_as_the_agents_calls_answered_it_and_never_names_another():
+    """The turn's tally keys a model by the name it was called as, a gateway's route prefixing it; the agent's steps
+    name it as the API answered. A compaction is named as its model's calls answered, or as called when none has."""
+    called = "gateway/" + MODEL
+    mid_turn = run(_compacting_feed({name: value for name, value in {**COUNTED_TURN, "model": called}.items()
+                                     if name != "type"}))
+    working = assistant("msg-1", "u1", text("working"))
+    earlier = Feed().out(working).transcript(working, "2026-11-22T02:01:00.000Z")
+    earlier.aux("turn", {**COUNTED_TURN, "model": called})
+    same_model = run(earlier, _compacting_only(called))
+    working = assistant("msg-1", "u1", text("working"))
+    earlier = Feed().out(working).transcript(working, "2026-11-22T02:01:00.000Z")
+    earlier.aux("turn", {**COUNTED_TURN, "model": called})
+    another_model = run(earlier, _compacting_only("gateway/another-model"))
+    alone = run(_compacting_only(called))
+    assert [_named(kit) for kit in (mid_turn, same_model, another_model, alone)] == [
+        MODEL, MODEL, "gateway/another-model", called]
 
 
 def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts():
