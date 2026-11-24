@@ -1625,3 +1625,10 @@ async def test_on_a_multi_day_run_done_ends_nothing_so_the_ending_check_is_n_a_w
     one_sitting = FakeModel()
     await _judge(_shop(multi_day=False), one_sitting, monkeypatch)
     assert one_sitting.asked("ending") and core.MULTI_DAY_NOTE not in one_sitting.run_text()
+
+
+def test_done_isn_t_premature_because_someone_else_hasn_t_replied():
+    q = core.check_question("ending")
+    assert "an approval only the user can give" in q and "its own WHEN YOU'RE DONE conditions" in q
+    assert "another person's or a business's silence never makes \"done\" premature" in q
+    assert "an answer it needed from the user" in q

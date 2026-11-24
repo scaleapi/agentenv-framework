@@ -246,17 +246,22 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         "ending", "Ending", ("G4",),
         "Did the user sim end the conversation at the right time?",
         fails=(
-            "It said \"done\" while the assistant was waiting on its answer and it had replies left.",
-            "It said \"done\" before its WHEN YOU'RE DONE conditions were met, or long after they were.",
+            "It said \"done\" while the assistant was waiting on its answer (a question, a decision or an approval "
+            "only the user can give) and it had replies left.",
+            "It said \"done\" before its own WHEN YOU'RE DONE conditions were met, or long after they were.",
         ),
         not_fails=(
             "A short sign-off when its reply limit is reached.",
             "Ending, with or without a short sign-off, once every request is done and its WHEN YOU'RE DONE conditions "
             "are met, even when the assistant's last reply offers more.",
+            "Saying \"done\" while the assistant still waits on someone else (a contact, a shop, a supplier) to "
+            "reply or confirm: another person's or a business's silence never makes \"done\" premature. Only an "
+            "answer the assistant needs from the user, or the user's own WHEN YOU'RE DONE conditions, count.",
         ),
         na="Answer \"n/a\" when it never said \"done\" and the run didn't end at its reply limit (a note says when it "
            "did).",
-        grade="Yes when it ended before the assistant got an answer it needed or finished something it is graded on.",
+        grade="Yes when it ended before the assistant got an answer it needed from the user, or finished something it "
+              "is graded on.",
     ),
 )}
 CHECK_NAMES = tuple(CHECKS)

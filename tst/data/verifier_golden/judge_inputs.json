@@ -1614,8 +1614,8 @@
      "id": "c7",
      "check": "Ending (G4)",
      "question": {
-      "sha256": "bff0b986e70c8803c1bbef9fcf30c44d9ae16fbbac71c1b00db2e1316070f854",
-      "chars": 735
+      "sha256": "2e0e227aa518b9bebe8412237a1ba0686bbe85d639e9ab1d22e8f832236000fe",
+      "chars": 1109
      },
      "graded_turns": [
       1,
@@ -1625,8 +1625,8 @@
     }
    ],
    "prompt": {
-    "sha256": "3632e37c04061c6675ca4e78e2eedb2fbf8ab769b1e65ec66eee458636fa1a95",
-    "chars": 14292
+    "sha256": "26c4cc4c2312a08b0c01148487200602cc93a8c6b6a54db1f9aa1482ef6d8ef6",
+    "chars": 14671
    },
    "system": "You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You grade the user sim, never the assistant.",
    "cached_prefix": {
