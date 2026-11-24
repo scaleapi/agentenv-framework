@@ -130,6 +130,12 @@ _DISK_HOST_MEMORY_MB = 2048
 _DISK_IDLE_TIMEOUT_S = 30 * 60
 
 
+#: The most bytes of arguments an exec sends as argv; Modal rejects one past ~48 KB. A longer one goes over stdin.
+_MAX_EXEC_ARG_BYTES = 32 * 1024
+#: Reads a NUL-separated argv from stdin and runs it, with no input of its own.
+_FROM_STDIN = 'mapfile -d "" -t a && exec "${a[@]}" </dev/null'
+
+
 class ModalVmSandbox(VmSandbox):
     """A Modal VM sandbox (runtime="vm") presented through the VmSandbox contract.
 
@@ -172,7 +178,18 @@ class ModalVmSandbox(VmSandbox):
         # helpers prefix commands with "sudo" (sandbox.py). Strip it, exactly like
         # LocalSandbox.exec does, so those helpers work unchanged.
         cmd = [c for c in command if c != "sudo"]
-        process = await self._sb.exec.aio(*cmd, text=False)
+        if sum(len(c.encode()) + 1 for c in cmd) <= _MAX_EXEC_ARG_BYTES:
+            process = await self._sb.exec.aio(*cmd, text=False)
+            return _ModalProcessAdapter(process)
+        # Past Modal's exec limit (a parallel load of many signed image URLs, say), the argv goes over stdin and the
+        # sandbox reads it back, as kosa8 does through a file.
+        process = await self._sb.exec.aio("bash", "-c", _FROM_STDIN, text=False)
+        argv = b"".join(c.encode() + b"\0" for c in cmd)
+        for i in range(0, len(argv), _MAX_EXEC_ARG_BYTES):
+            process.stdin.write(argv[i:i + _MAX_EXEC_ARG_BYTES])
+            await process.stdin.drain.aio()
+        process.stdin.write_eof()
+        await process.stdin.drain.aio()
         return _ModalProcessAdapter(process)
 
     async def _exec_with_stdin(self, script: str, stdin: AsyncIterator[bytes]) -> tuple[int, str, str]:

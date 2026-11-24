@@ -54,6 +54,47 @@ async def test_exec_strips_sudo():
 
 
 @pytest.mark.asyncio
+async def test_exec_past_modals_arg_limit_sends_the_argv_over_stdin():
+    # A parallel load of many signed image URLs runs past Modal's exec limit; the argv goes over stdin instead.
+    sb = MagicMock()
+    sb.object_id = "sb-test"
+    captured: dict = {}
+    process = MagicMock()
+    process.stdin.drain.aio = AsyncMock()
+
+    async def fake_exec(*cmd, text=False):
+        captured["cmd"] = cmd
+        return process
+
+    sb.exec.aio = fake_exec
+    script = " & ".join(f"(curl -fsSL 'https://b/img{i}?{'x' * 2400}' | docker load)" for i in range(36)) + " & wait"
+    await ModalVmSandbox(sb, {}).exec("sudo", "bash", "-c", script)
+
+    assert captured["cmd"] == ("bash", "-c", mvs._FROM_STDIN)
+    sent = b"".join(call.args[0] for call in process.stdin.write.call_args_list)
+    assert sent == b"bash\0-c\0" + script.encode() + b"\0"
+    assert all(len(call.args[0]) <= mvs._MAX_EXEC_ARG_BYTES for call in process.stdin.write.call_args_list)
+    process.stdin.write_eof.assert_called_once()
+
+
+def _bash_has_mapfile_d() -> bool:
+    import subprocess
+
+    return subprocess.run(["bash", "-c", 'mapfile -d "" a </dev/null'], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _bash_has_mapfile_d(), reason="needs bash 4.4+ (mapfile -d), as the VM has")
+def test_from_stdin_runs_a_nul_separated_argv():
+    # The wrapper reads the argv back intact: quotes, spaces, newlines and all.
+    import subprocess
+
+    argv = ["bash", "-c", 'printf "%s|" "$@"', "_", "a b", "it's", "x\ny"]
+    out = subprocess.run(["bash", "-c", mvs._FROM_STDIN], input=b"".join(a.encode() + b"\0" for a in argv),
+                         capture_output=True, check=True)
+    assert out.stdout == b"a b|it's|x\ny|"
+
+
+@pytest.mark.asyncio
 async def test_setup_starts_dockerd_polls_until_ready_and_skips_iptables():
     s = _sandbox()
     s._VM_READY_POLL_INTERVAL = 0  # don't actually sleep between polls

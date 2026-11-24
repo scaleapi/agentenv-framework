@@ -53,28 +53,6 @@ CURL_RETRY_FLAGS = "--retry 5 --retry-all-errors --retry-delay 1"
 # sandbox id, so a sandbox that shares its host (the local one) can remove its own when it terminates.
 SANDBOX_LABEL = "agentenv.sandbox"
 
-# The most bytes one image-load script may hold. A load is a curl of a signed URL (about 2.4 KB with a session token)
-# per image, run in parallel in one `bash -c` script, and a provider caps one exec's arguments: Modal's VM sandbox at
-# 65536 bytes (ARG_MAX). A MultiEnv with many images (14 MCP servers and 11 websites, two images each) passes that, so
-# the loads go in batches under this size, each batch in parallel and the batches one after another.
-_MAX_LOAD_SCRIPT_BYTES = 60_000
-
-
-def _load_scripts(load_commands: list[str], limit: int = _MAX_LOAD_SCRIPT_BYTES) -> list[str]:
-    """``load_commands`` as `bash -c` scripts that each run their commands in parallel and wait, each at most ``limit``
-    bytes. A command too long to fit with any other gets a script of its own."""
-    scripts: list[str] = []
-    batch: list[str] = []
-    for command in load_commands:
-        if batch and len((" & ".join([*batch, command]) + " & wait").encode()) > limit:
-            scripts.append(" & ".join(batch) + " & wait")
-            batch = []
-        batch.append(command)
-    if batch:
-        scripts.append(" & ".join(batch) + " & wait")
-    return scripts
-
-
 # At most this many image signs in flight per event loop: each holds a worker thread, for up to a
 # remote signer's whole retry window, and a connection from its session's pool.
 _CONCURRENT_SIGNS = 8
@@ -542,8 +520,7 @@ class VmSandbox(Sandbox):
                     f"(gunzip -c {shlex.quote(tmp_tar)} | docker load && rm -f {shlex.quote(tmp_tar)})"
                 )
             logger.info(f"  Queued: {artifact.image_name}")
-        for script in _load_scripts(load_commands):
-            await self.exec_script(script, max_retries=2)
+        await self.exec_script(" & ".join(load_commands) + " & wait", max_retries=2)
 
         logger.info("Verifying Docker images...")
         exit_code, stdout, stderr = await self.exec_with_output("sudo", "docker", "images")
