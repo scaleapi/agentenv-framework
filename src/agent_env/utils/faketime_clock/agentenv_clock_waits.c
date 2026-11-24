@@ -426,7 +426,10 @@ static bool ft_on_change(const struct ft_clock_page *s, bool rebroadcast)
 }
 
 /* the clock reached the end of its range on page ``s`` at real realtime ``end`` before any page said so: its periodic
-   timers stop there, as its reads do, rather than tick on until the follower writes the page that stands at the end. */
+   timers stop there, as its reads do, rather than tick on until the follower writes the page that stands at the end.
+   Stopping one drops the expirations a timerfd holds unread, as every clock change's re-arm does and as the follower's
+   page would a moment later: timerfd_settime zeroes them, and nothing restores them without racing the program's own
+   reads. */
 static void ft_at_end(const struct ft_clock_page *s, int64_t end)
 {
   struct ft_clock_page stood = *s;
