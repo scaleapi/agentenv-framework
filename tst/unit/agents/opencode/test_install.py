@@ -79,6 +79,14 @@ def test_an_installed_agent_runs_its_own_cli_and_its_node_and_python_only_where_
     assert "node_modules/opencode-ai/bin/opencode.exe" in install_sh
 
 
+def test_an_installed_agent_on_a_target_with_no_ca_bundle_trusts_certifis_unless_the_trust_lines_name_one():
+    install_sh = (AGENT_DIR / "install.sh").read_text()
+
+    assert "certifi=$root/venv/lib/python$PYTHON_VERSION/site-packages/certifi/cacert.pem" in install_sh
+    assert "case ${AGENT_TRUST_ENV:-} in *SSL_CERT_FILE=*) needs_cas= ;; esac" in install_sh
+    assert "[ -z \"$needs_cas\" ] || printf 'SSL_CERT_FILE=%s\\n' \"$(quoted \"$certifi\")\"" in install_sh
+
+
 def test_an_installed_agent_keeps_opencodes_state_and_its_workspace_where_the_install_says():
     install_sh = (AGENT_DIR / "install.sh").read_text()
 
