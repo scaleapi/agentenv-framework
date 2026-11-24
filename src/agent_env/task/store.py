@@ -28,7 +28,7 @@ from agent_env.task.step_journal import (
     commit_ordered,
     replay_context,
 )
-from agent_env.task.usage_ledger import LEDGER_KEY, TOTAL_KEY, ahead, entries_of, ledger_fields, total
+from agent_env.task.usage.ledger import LEDGER_KEY, TOTAL_KEY, ahead, entries_of, ledger_fields, total
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps
 from agent_env.task_step.usage import STEP_USAGE_KEY
@@ -186,7 +186,7 @@ class TaskInstance:
     # carries the epoch it was dispatched under and no-ops when older than the stored one,
     # fencing a writer from a rolled-back attempt. Missing (pre-field docs) reads as 0.
     attempt_epoch: int = 0
-    # The run's usage ledger (``usage_ledger``): every attempt's usage entries and their total, outside ``context``.
+    # The run's usage ledger (``usage.ledger``): every attempt's usage entries and their total, outside ``context``.
     usage: list[dict] = field(default_factory=list)
     usage_total: dict | None = None
 

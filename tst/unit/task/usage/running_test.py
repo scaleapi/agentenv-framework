@@ -13,7 +13,7 @@ from agent_env.a2a_agent.protocol import TerminalResponse
 from agent_env.config import set_document_store
 from agent_env.config.model import ModelRole
 from agent_env.store import LocalSqliteDocumentStore
-from agent_env.task import running_usage as running
+from agent_env.task.usage import running
 from agent_env.task.store import TaskInstanceStore, get_task_instance_store, set_task_instance_store
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
