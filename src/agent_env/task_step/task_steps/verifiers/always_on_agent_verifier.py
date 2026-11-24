@@ -71,6 +71,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (
     atif_turn_events,
     turn_events,
 )
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     RUN_CONTEXT_PARTS,
     RubricsVerdict,
@@ -412,6 +413,10 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
         await self._write_files(sandbox, {f"{path}/{name}": text for name, text in staged.files.items()}, container)
         self._log_staging(staged)
+        if (judge := judge_usage.current()) is not None:
+            # Its turns carry no labels: each trajectory's format is the one its shape reads as.
+            judge.read([{"format": fmt, "trajectories": count, "guessed": True}
+                        for fmt, count in (staged.record.get("formats") or {}).items()])
         return StagedTrajectory(path=path, prompt_note=_files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get()),
                                 record=staged.record)
 

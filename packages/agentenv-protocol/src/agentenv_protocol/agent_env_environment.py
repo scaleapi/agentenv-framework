@@ -1,6 +1,9 @@
 """Server SDK: decorate a handler's methods with @reset_data/@add_data/@get_data (JSON-RPC data plane at /agentenv; each optional, advertised as capabilities.operations), @extension (card-advertised REST routes), and @tool (MCP tools; FastMCP-backed apps only; a parameter annotated ToolContext receives the caller and is never advertised). Mount onto a FastMCP, Starlette, or FastAPI app via a per-framework AgentEnvApplication subclass — or subclass AgentEnvEnvironment, configure its card with @environment_card(...), and serve() it."""
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import dataclasses
 import datetime
 import decimal
 import enum
@@ -15,8 +18,8 @@ import sys
 import types
 import uuid
 from abc import ABC, abstractmethod
-from typing import (Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Optional, Union, get_args, get_origin,
-                    get_type_hints)
+from typing import (Annotated, Any, Callable, ClassVar, Iterator, Literal, NamedTuple, Optional, Union, get_args,
+                    get_origin, get_type_hints)
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
@@ -39,6 +42,7 @@ _EXT_ROUTE_ATTR = "_aee_ext_route"
 _EXT_OP_ATTR = "_aee_ext_op"
 _TOOL_ATTR = "_aee_tool"
 _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
+_DEFERS_ATTR = "_aee_defers"
 _TOOL_OPTIONS_ATTR = "_aee_tool_options"
 _FORWARDED_ATTR = "_aee_forwarded"
 _INSTRUCTIONS_ATTR = "_aee_instructions"
@@ -49,6 +53,8 @@ _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
 
 #: MCP tools/list ``_meta`` key marking a tool a gateway hides from every role until a tool-access step names it.
 HIDDEN_BY_DEFAULT_META_KEY = "agentenv.io/hiddenByDefault"
+#: MCP tools/call result ``_meta`` key by which a server declares calls on itself for a gateway to make later.
+DEFERRED_CALLS_META_KEY = "agentenv.io/deferredCalls"
 
 OP_RESET_DATA = "reset_data"
 OP_ADD_DATA = "add_data"
@@ -195,7 +201,8 @@ def _extension_slug(uri: str) -> str:
 
 
 def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False,
-         annotations: dict | None = None, structured_output: bool | None = None, meta: dict | None = None) -> Callable:
+         annotations: dict | None = None, structured_output: bool | None = None, meta: dict | None = None,
+         defers: Defers | None = None) -> Callable:
     """Mark a handler method as an MCP tool.
 
     At mount the bound method is registered as a real MCP tool on the server app and advertised
@@ -224,9 +231,23 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
     where it can, True requires one, False lists none; on a fastmcp app it is fastmcp's own inference, off with
     False. A tool returning ``Annotated[CallToolResult, Model]`` sends its result as is on either, listed with
     ``Model``'s schema.
+
+    ``defers=Defers(call, report_as, using)`` has each successful reply declare, under ``DEFERRED_CALLS_META_KEY``, the
+    calls a gateway is to make on this server later. After the tool returns, the SDK calls
+    ``self.<using>(arguments, result)`` with the call's arguments as a dict and the tool's result: a JSON text reply
+    parsed to its dict or list, a dict as is, a ``CallToolResult``'s structured content or else its text so parsed,
+    anything else as it is. It returns a ``DeferredCall``, a list of them, or None for none; each declares a call of
+    ``call``, reported to the gateway's triggers as a call of ``report_as``. The reply is otherwise what the tool
+    returns, and an error reply declares nothing. A declaration that fails (``using`` raises or returns something
+    invalid) is logged and left out, so the reply never breaks. Only the registered tool declares: the method called in
+    process returns its plain value. ``call`` must be a ``hidden_by_default`` tool and ``report_as`` a tool this
+    environment serves, by their served names (``{environment_name}`` resolved), and ``using`` a plain method, or the
+    mount raises. The card lists them under the tool's ``defers``.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")
+    if defers is not None and not isinstance(defers, Defers):
+        raise TypeError(f"defers takes a Defers, not a {type(defers).__name__}")
 
     def deco(fn: Callable) -> Callable:
         setattr(fn, _TOOL_ATTR, EnvironmentTool(
@@ -236,6 +257,8 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
         ))
         if hidden_by_default:
             setattr(fn, _HIDDEN_BY_DEFAULT_ATTR, True)
+        if defers is not None:
+            setattr(fn, _DEFERS_ATTR, defers)
         setattr(fn, _TOOL_OPTIONS_ATTR, _ToolOptions(annotations, structured_output, meta))
         return fn
 
@@ -261,6 +284,29 @@ class ForwardedTool(NamedTuple):
         return cls(EnvironmentTool(name=tool["name"], description=tool.get("description"),
                                    inputSchema=tool["inputSchema"]),
                    call, tool.get("annotations"), tool.get("outputSchema"), hidden_by_default)
+
+
+@dataclasses.dataclass(frozen=True)
+class Defers:
+    """What a ``@tool(defers=...)`` defers: ``call``, the hidden tool a gateway calls on this server at each declared
+    call's time, ``report_as``, the tool its triggers see that call as, and ``using``, the name of the environment's
+    method that builds the calls from each reply (see ``tool``)."""
+
+    call: str
+    report_as: str
+    using: str
+
+
+@dataclasses.dataclass(frozen=True)
+class DeferredCall:
+    """One call a ``Defers`` method declares. ``key`` names it on its server, which declaring it again does not
+    change; ``at`` is when, as an aware datetime, epoch seconds or an RFC 3339 string with an offset, declared as a UTC
+    instant; ``arguments`` are the ``call`` tool's and ``report_arguments`` the ``report_as`` tool's."""
+
+    key: str
+    at: datetime.datetime | int | float | str
+    arguments: dict = dataclasses.field(default_factory=dict)
+    report_arguments: dict = dataclasses.field(default_factory=dict)
 
 
 class _ResourceMarker(NamedTuple):
@@ -323,11 +369,12 @@ class AgentEnvApplication(ABC):
             handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler)))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
+        self._defers = _resolved_defers(handler, tool_handlers, environment_card.name)
         self._resources = _discover_resources(handler)
         if self._resources and not self.supports_tools:
             raise ValueError(f"@resource methods require a FastMCP-backed application; {type(self).__name__} cannot "
                              "serve MCP resources")
-        environment_card = _merge_tools(environment_card, tool_handlers)
+        environment_card = _merge_defers(_merge_tools(environment_card, tool_handlers), self._defers)
         self._tool_access = (
             ToolAccess(descriptor.name for descriptor, fn in tool_handlers if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False))
             if self.supports_tools and getattr(handler, "tool_access", False) else None
@@ -439,6 +486,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         elif options.structured_output is False:
             extra["output_schema"] = None
         registered = injecting(fn)
+        if (declares := self._defers.get(descriptor.name)) is not None:
+            registered = _declaring(registered, declares)
         if fastmcp and _returns_call_tool_result(fn):
             registered, schema = _fastmcp_returning(registered)
             extra["output_schema"] = None if options.structured_output is False else schema
@@ -502,7 +551,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
                 raise RuntimeError("this FastMCP app already carries an AgentEnv tool dispatch; mount one handler per app")
             self._binding = "dispatch"
             return
-        readers = [descriptor.name for descriptor, fn in self._tools if _tool_context_slot(fn)]
+        readers = [descriptor.name for descriptor, fn in self._tools
+                   if _tool_context_slot(fn) or descriptor.name in self._defers]
         readers += ["on_tool_call"] if self._hook is not None else []
         readers += ["tool_access"] if self._tool_access is not None else []
         if readers:
@@ -545,7 +595,7 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             if manager.get_tool(name) is None:
                 return await inner(name, arguments, *args, **kwargs)
             context = kwargs.get("context", args[0] if args else None)
-            with bound(context_from_mcp(context, name, arguments)) as tool_context:
+            with bound(context_from_mcp(context, name, arguments)) as tool_context, _collecting() as declared:
                 try:
                     if access is not None:
                         access.check_call(tool_context)
@@ -554,7 +604,9 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
                         if answer is not None:
                             _check_call_tool_result(answer)
                             return answer
-                    return await inner(name, arguments, *args, **kwargs)
+                    result = await inner(name, arguments, *args, **kwargs)
+                    # an unconverted result is the tool's raw value, which has nowhere to carry a declaration
+                    return _with_declared(result, declared) if kwargs.get("convert_result") else result
                 except Exception as e:
                     error = _agentenv_error(e)
                     if error is None:
@@ -967,7 +1019,8 @@ def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = 
         async def on_call_tool(self, context: Any, call_next: Callable) -> Any:
             message = context.message
             arguments = dict(getattr(message, "arguments", None) or {})
-            with bound(context_from_mcp(context.fastmcp_context, message.name, arguments)) as tool_context:
+            with (bound(context_from_mcp(context.fastmcp_context, message.name, arguments)) as tool_context,
+                  _collecting() as declared):
                 try:
                     if access is not None:
                         access.check_call(tool_context)
@@ -976,7 +1029,7 @@ def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = 
                         if answer is not None:
                             _check_call_tool_result(answer)
                             return _fastmcp_tool_result(answer)
-                    return await call_next(context)
+                    return _with_declared(await call_next(context), declared)
                 except Exception as e:
                     error = _agentenv_error(e)
                     if error is None:
@@ -1726,3 +1779,180 @@ async def _maybe_await(result: Any) -> Any:
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+class _Declares(NamedTuple):
+    """A served tool's ``Defers`` as its replies declare it: the tool, the served names it defers, the bound method."""
+
+    tool: str
+    call: str
+    report_as: str
+    using: Callable
+
+
+def _resolved_defers(handler: Any, tool_handlers: list, environment_name: str) -> dict[str, _Declares]:
+    """Each served tool's ``Defers`` by tool name, its names resolved as tool names are; one naming a tool the
+    environment does not serve, a ``call`` that is not hidden, or a ``using`` that is not a plain method raises."""
+    served = {descriptor.name: fn for descriptor, fn in tool_handlers}
+    resolved = {}
+    for name, fn in served.items():
+        defers = getattr(fn, _DEFERS_ATTR, None)
+        if defers is None:
+            continue
+        call, report_as = (n.replace(_ENV_NAME_TOKEN, environment_name) for n in (defers.call, defers.report_as))
+        if call not in served:
+            raise ValueError(f"@tool {name!r} defers {call!r}, which is not a tool {environment_name} serves")
+        if not getattr(served[call], _HIDDEN_BY_DEFAULT_ATTR, False):
+            raise ValueError(f"@tool {name!r} defers {call!r}, which is not hidden_by_default: a deferred call is "
+                             "plumbing the agent must not see")
+        if report_as not in served:
+            raise ValueError(f"@tool {name!r} reports its deferred calls as {report_as!r}, which is not a tool "
+                             f"{environment_name} serves")
+        using = getattr(handler, defers.using, None)
+        if not callable(using):
+            raise ValueError(f"@tool {name!r} builds its deferred calls with {defers.using!r}, which is not a method of "
+                             f"{type(handler).__name__}")
+        if inspect.iscoroutinefunction(using):
+            raise ValueError(f"@tool {name!r} builds its deferred calls with {defers.using!r}, a coroutine; it must be "
+                             "a plain method")
+        resolved[name] = _Declares(name, call, report_as, using)
+    return resolved
+
+
+def _merge_defers(card: EnvironmentCard, declares: dict[str, _Declares]) -> EnvironmentCard:
+    """List what each tool defers under its card entry's ``defers``."""
+    if not declares:
+        return card
+    caps = card.capabilities
+    tools = [t.model_copy(update={"defers": {"call": d.call, "report_as": d.report_as}}) if (d := declares.get(t.name))
+             else t for t in caps.tools or []]
+    return card.model_copy(update={"capabilities": caps.model_copy(update={"tools": tools})})
+
+
+def _declaring(fn: Callable, declares: _Declares) -> Callable:
+    """``fn`` as registered for a tool that defers: a twin of the same name, doc, sync/async nature, signature and
+    annotations (resolved, since the registry reads them verbatim) that hands each result to ``_declare``."""
+    signature, annotations = _reduced_signature(fn, "")
+    if inspect.iscoroutinefunction(fn):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            result = await fn(*args, **kwargs)
+            _declare(declares, result)
+            return result
+    else:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            result = fn(*args, **kwargs)
+            _declare(declares, result)
+            return result
+    functools.update_wrapper(wrapper, fn)
+    wrapper.__signature__, wrapper.__annotations__ = signature, annotations
+    return wrapper
+
+
+def _declare(declares: _Declares, result: Any) -> None:
+    """Collect the calls ``declares.using`` builds from a tool's result for the dispatch to put on its reply. An error
+    result declares none, and a declaration that fails is logged and left out, so the reply never breaks."""
+    collected = _declared.get()
+    result_type = getattr(sys.modules.get("mcp.types"), "CallToolResult", None)
+    if collected is None or (result_type is not None and isinstance(result, result_type) and result.isError):
+        return
+    try:
+        built = declares.using(dict(ToolContext.current().arguments), _replied(result))
+        entries = [_declared_entry(declares, call) for call in ([] if built is None else
+                                                                built if isinstance(built, list) else [built])]
+    except Exception as e:
+        logger.warning("@tool %r declares no deferred call: %s", declares.tool, e)
+        return
+    collected.extend(entries)
+
+
+def _replied(result: Any) -> Any:
+    """A tool's result as its ``using`` receives it: a JSON text reply parsed to its dict or list, a dict as is, a
+    ``CallToolResult``'s structured content or else its text so parsed, anything else as it is."""
+    if isinstance(result, str):
+        return _json_container(result, result)
+    result_type = getattr(sys.modules.get("mcp.types"), "CallToolResult", None)
+    if result_type is not None and isinstance(result, result_type):
+        if result.structuredContent is not None:
+            return result.structuredContent
+        return _json_container("\n".join(c.text for c in result.content if getattr(c, "type", None) == "text"), result)
+    return result
+
+
+def _json_container(text: str, otherwise: Any) -> Any:
+    """``text`` parsed when it is a JSON object or array, else ``otherwise``."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return otherwise
+    return parsed if isinstance(parsed, (dict, list)) else otherwise
+
+
+def _declared_entry(declares: _Declares, call: Any) -> dict:
+    """One ``DeferredCall`` as the declaration's contract entry, or the error naming what in it breaks the contract."""
+    if not isinstance(call, DeferredCall):
+        raise TypeError(f"using returned a {type(call).__name__}, not a DeferredCall")
+    if not isinstance(call.key, str) or not call.key:
+        raise ValueError(f"a deferred call needs a non-empty string key, not {call.key!r}")
+    if not isinstance(call.arguments, dict) or not isinstance(call.report_arguments, dict):
+        raise TypeError(f"deferred call {call.key!r}: arguments and report_arguments must be dicts")
+    entry = {"key": call.key, "at": _utc_instant(call.at),
+             "call": {"tool": declares.call, "arguments": call.arguments},
+             "report_as": {"tool": declares.report_as, "arguments": call.report_arguments}}
+    try:
+        json.dumps(entry)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"deferred call {call.key!r} is not JSON: {e}") from None
+    return entry
+
+
+def _utc_instant(at: Any) -> str:
+    """``at`` as the UTC RFC 3339 instant a declaration carries (``...Z``): an aware datetime, epoch seconds, or an RFC
+    3339 string with an offset, in the grammar a gateway parses; a naive datetime or a string without one is refused."""
+    if isinstance(at, datetime.datetime):
+        if at.utcoffset() is None:
+            raise ValueError(f"at {at.isoformat()!r} has no UTC offset")
+        moment = at
+    elif isinstance(at, (int, float)) and not isinstance(at, bool):
+        moment = datetime.datetime.fromtimestamp(at, datetime.timezone.utc)
+    elif isinstance(at, str):
+        if not _RFC3339_INSTANT.match(at):
+            raise ValueError(f"at {at!r} is not an RFC 3339 instant with an offset (YYYY-MM-DDThh:mm:ss[.fff](Z|+hh:mm))")
+        moment = datetime.datetime.fromisoformat(at[:-1] + "+00:00" if at[-1] in "Zz" else at)
+    else:
+        raise TypeError(f"at {at!r} is not a time: give an aware datetime, epoch seconds or an RFC 3339 string")
+    return moment.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# The grammar a gateway's clock parses: fromisoformat alone is looser than RFC 3339.
+_RFC3339_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$")
+
+#: The calls the tool of the current dispatch declared, collected for its reply; None outside a dispatch.
+_declared: contextvars.ContextVar[list | None] = contextvars.ContextVar("agentenv_protocol.declared_calls", default=None)
+
+
+@contextlib.contextmanager
+def _collecting() -> Iterator[list]:
+    """Collect the calls the tool of this dispatch declares, in the list it yields."""
+    collected: list = []
+    token = _declared.set(collected)
+    try:
+        yield collected
+    finally:
+        _declared.reset(token)
+
+
+def _with_declared(result: Any, declared: list) -> Any:
+    """A tool's reply with the calls it declared under ``DEFERRED_CALLS_META_KEY``, after any it declared itself and
+    beside any other ``_meta`` it has. mcp's
+    FastMCP replies with content and structured content, content alone, or a ``CallToolResult``; fastmcp with its
+    ``ToolResult``."""
+    if not declared:
+        return result
+    if isinstance(result, (tuple, list)):
+        from mcp.types import CallToolResult
+        content, structured = result if isinstance(result, tuple) else (result, None)
+        result = CallToolResult(content=list(content), structuredContent=structured)
+    meta = result.meta or {}
+    own = meta.get(DEFERRED_CALLS_META_KEY)
+    calls = [*own, *declared] if isinstance(own, list) else declared
+    return result.model_copy(update={"meta": {**meta, DEFERRED_CALLS_META_KEY: calls}})

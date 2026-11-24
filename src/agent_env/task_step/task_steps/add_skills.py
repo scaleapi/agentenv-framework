@@ -19,6 +19,7 @@ from agent_env.task_step.context import DeployedAgent, StepContextError, TaskSte
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.load_artifact import LOADED_FILE_UNIVERSES
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,7 @@ class AddSkillsTaskStep(TaskStep):
 
         loaded_universes_by_id: dict[str, dict] = {
             e["id"]: e
-            for e in (context.metadata.get("loaded_file_artifact_universes") or [])
+            for e in (context.metadata.get(LOADED_FILE_UNIVERSES) or [])
             if e.get("agent_name") == self.agent_name
         }
         for fau_id in self.file_artifact_universe_ids:

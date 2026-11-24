@@ -43,16 +43,23 @@ def merged(ledger: list[dict], entries: list[dict]) -> list[dict]:
     return out
 
 
+def ahead(ledger: list[dict], entries: list[dict]) -> list[dict]:
+    """The entries with more turns than ``ledger``'s entry of their attempt, step and role, or with none there. A
+    role's turns only grow, so a snapshot of a running step written late never takes back a newer entry."""
+    turns = {_key(entry): entry.get("turns") or 0 for entry in ledger}
+    return [entry for entry in entries if (entry.get("turns") or 0) > turns.get(_key(entry), -1)]
+
+
 def total(ledger: list[dict]) -> dict[str, Any]:
     """The ledger summed, as a budget reads it: the cost and the token counts, each None when no entry has one, never
-    0; ``partial`` when an entry's counts are a lower bound; ``unpriced_entries`` the entries with no cost, which
-    make the cost a lower bound too."""
+    0; ``partial`` when an entry's counts are a lower bound, its own or a running step's (``running``), which lacks the
+    turn in flight; ``unpriced_entries`` the entries with no cost, which make the cost a lower bound too."""
     def sum_of(name: str) -> Any:
         values = [v for e in ledger if isinstance(v := e.get(name), (int, float)) and not isinstance(v, bool)]
         return sum(values) if values else None
 
     return {"entries": len(ledger), "cost_usd": sum_of("cost_usd"), **{name: sum_of(name) for name in _COUNTS},
-            "partial": any(bool(e.get("partial")) for e in ledger),
+            "partial": any(bool(e.get("partial")) or bool(e.get("running")) for e in ledger),
             "unpriced_entries": sum(1 for e in ledger if e.get("cost_usd") is None)}
 
 

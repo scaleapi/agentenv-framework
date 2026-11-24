@@ -33,7 +33,7 @@ def test_agent_card_advertises_one_get_trajectory_method_beside_the_sdks_atif_me
                     {"required": ["task_id", "objects"]},
                     {"required": ["context_id"]},
                     {"required": ["context_id", "objects"]},
-                    {"required": ["task_id", "after"], "optional": ["limit"]},
+                    {"required": ["task_id", "after"], "optional": ["limit", "header_digest", "subagent_cursors"]},
                     {"required": ["context_id", "after"], "optional": ["limit"]},
                 ],
             },
