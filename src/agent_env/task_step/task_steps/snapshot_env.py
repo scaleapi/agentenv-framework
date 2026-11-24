@@ -536,7 +536,7 @@ class SnapshotEnvTaskStep(TaskStep):
         if base_url is None and not mcp:
             return None
         if base_url is not None:
-            headers = (deployed.control_headers_for(base_url) or None) if deployed is not None else None
+            headers = deployed.control_headers_or_grant(base_url) if deployed is not None else None
             if returns_file_tree(card or {}):
                 upload = await asyncio.to_thread(_snapshot_upload, card or {}, timeout_seconds,
                                                  getattr(deployed, "sandbox_type", None), FILE_TREE_LIMITS)
@@ -604,7 +604,7 @@ class SnapshotEnvTaskStep(TaskStep):
             return ".json"
 
         legacy_url = f"{legacy_protocol.environment_base_url(gateway_url, environment_name, mcp=True)}/export-state"
-        legacy_headers = (deployed.control_headers_for(legacy_url) or None) if deployed is not None else None
+        legacy_headers = deployed.control_headers_or_grant(legacy_url) if deployed is not None else None
         async with httpx.AsyncClient() as client:
             async with client.stream(
                 "GET",
