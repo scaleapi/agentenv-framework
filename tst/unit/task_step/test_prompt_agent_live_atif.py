@@ -182,6 +182,36 @@ async def test_a_follow_with_cursors_stores_a_running_sub_agents_steps_before_th
 
 
 @pytest.mark.asyncio
+async def test_an_agent_whose_card_declares_cursors_but_whose_answers_dont_carry_them_is_followed_as_before(tmp_path):
+    """Its own handler answers in today's shape, whole sub-agents and no digests: each sub-agent is still stored."""
+    store = GrantingObjectStore(str(tmp_path / "store"), reaches=True)
+    sink = LiveTrajectoryChunks(store, "p/", "turn-1")
+    sub = {"trajectory_id": "toolu_1", "agent": {"name": "explorer"}}
+    step = lambda n, text: {"step_id": n, "source": "agent", "message": text}  # noqa: E731
+    answers = [("running", [step(1, "r1")], 1, [step(1, "s1")]), ("completed", [step(2, "r2")], 2,
+                                                                    [step(1, "s1"), step(2, "s2")])]
+    named = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        named.append("subagent_cursors" in json.loads(request.content))
+        state, events, nxt, sub_steps = answers.pop(0)
+        return httpx.Response(200, json={"context_id": "c", "task_id": "t", "state": state, "format": ATIF,
+                                         "schema_version": "ATIF-v1.8", "profile_version": "1.0", "has_more": False,
+                                         "header": {"session_id": "c", "trajectory_id": "d"}, "events": events,
+                                         "next": nxt, "subagents": [{**sub, "steps": sub_steps}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        await follow_trajectory("http://agent.test/ext/trajectory", "t", sink, poll_interval_seconds=0,
+                                stop=asyncio.Event(), client=client, format=ATIF, fallback_format=NATIVE, cursors=True)
+
+    names = sorted(key[len("p/turn-1/live/"):] for key in store.list("p/turn-1/live/") if "/sub/" in key)
+    assert named == [True, True]
+    assert names == ["sub/toolu_1/00000000-00000001.0001.header.json", "sub/toolu_1/00000000-00000001.jsonl",
+                     "sub/toolu_1/00000001-00000002.jsonl"]
+    assert json.loads(store.read("p/turn-1/live/sub/toolu_1/00000000-00000001.0001.header.json")) == sub
+
+
+@pytest.mark.asyncio
 async def test_a_turn_whose_atif_read_is_refused_is_followed_natively(monkeypatch, tmp_path):
     run = _Run(monkeypatch, tmp_path, live=True)
     run.wire.unreachable.add("/ext/trajectory/prescribe")

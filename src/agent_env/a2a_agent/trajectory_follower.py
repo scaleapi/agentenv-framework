@@ -80,10 +80,15 @@ class _Held:
             sub_id: {"after": sub["after"], "header_digest": sub["digest"]} for sub_id, sub in self.subs.items()}}
 
     def take(self, page: AtifEventsResponse) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """The page's latest header and its sub-agents, each with its header. An answer with no sub-agent digests is in
+        today's shape, from an agent whose card declares the fields but whose own handler doesn't take them, and its
+        whole sub-agents pass as they are."""
         if page.header is not None:
             self.header = page.header
         self.digest = page.header_digest or self.digest
-        digests = page.subagent_header_digests or {}
+        if page.subagent_header_digests is None:
+            return self.header, page.subagents
+        digests = page.subagent_header_digests
         served = []
         for entry in page.subagents:
             sub = self.subs.setdefault(entry["trajectory_id"], {"head": {}, "digest": "", "after": 0})
