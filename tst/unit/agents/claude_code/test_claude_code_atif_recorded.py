@@ -180,18 +180,22 @@ def test_a_recorded_turns_copy_gives_a_judge_the_events_its_native_trajectory_do
         assert copied == native
 
 
-def test_a_recorded_compaction_reaches_a_judge_as_one_note_with_its_facts_natively_and_from_its_copy():
-    data = json.loads((FIXTURES / "compacted.json").read_text())
-    turn = data["turns"][1]
-    native = turn_events(json.dumps(turn["native"])).events
-    copied = atif_turn_events(task_document(replay("compacted").document, [turn["turn"]["task_id"]])).events
+@pytest.mark.parametrize(("scenario", "turn", "facts", "said"), [
+    ("compacted", 1, {"written_by": "assistant", "trigger": "manual", "tokens_before": 28634, "tokens_after": 2839},
+     "it was set off on request, such as by a command (manual); the history went from 28,634 tokens to 2,839"),
+    ("autocompacted", 0, {"written_by": "assistant", "trigger": "auto", "tokens_before": 58741, "tokens_after": 32484},
+     "the harness set it off on its own (auto); the history went from 58,741 tokens to 32,484")])
+def test_a_recorded_compaction_reaches_a_judge_as_one_note_with_its_facts_natively_and_from_its_copy(scenario, turn,
+                                                                                                     facts, said):
+    """/compact between turns, and an auto-compaction partway through one as the history filled."""
+    recorded = json.loads((FIXTURES / f"{scenario}.json").read_text())["turns"][turn]
+    native = turn_events(json.dumps(recorded["native"])).events
+    copied = atif_turn_events(task_document(replay(scenario).document, [recorded["turn"]["task_id"]])).events
     [compaction] = [event for event in native if event.get("compaction")]
-    assert compaction["compaction"] == {"written_by": "assistant", "trigger": "manual", "tokens_before": 28634,
-                                        "tokens_after": 2839}
+    assert compaction["compaction"] == facts
     assert compaction["text"].startswith(
         "Compaction summary (written by the assistant's own model, in a summary turn the harness asked for; it replaces "
-        "the older history the assistant sees; it was set off on request, such as by a command (manual); the history "
-        "went from 28,634 tokens to 2,839):\nThis session is being continued from a previous conversation")
+        f"the older history the assistant sees; {said}):\nThis session is being continued from a previous conversation")
     assert [event for event in copied if event.get("compaction")] == [compaction]
 
 
