@@ -192,7 +192,8 @@ def persona_problems(persona: Any) -> list[str]:
     return out
 
 
-def person(key: str, persona: dict, opening: list[dict], seed: dict, multi_day: Optional[bool]) -> dict:
+def person(key: str, persona: dict, opening: list[dict], seed: dict, multi_day: Optional[bool],
+           preset: Optional[str] = None) -> dict:
     """The user as the built-in user sim's ``setup`` takes them: ``persona``'s fields, the ``opening`` parts with the
     run's ``<seed>`` placeholders filled in (as always_on fills them), and the done line ``multi_day`` picks. The step
     writes its prompt from this, and user_sim_judge rebuilds that prompt from the step's record (``recorded_person``)."""
@@ -205,7 +206,7 @@ def person(key: str, persona: dict, opening: list[dict], seed: dict, multi_day: 
             "description": persona.get("description"), "permissions": persona.get("permissions"),
             "keep_private": persona.get("keep_private"),
             "opening": {"text": text, **({"files": files} if files else {})} if text else None,
-            "done_ends_run": not multi_day}
+            "done_ends_run": not multi_day, **({"preset": preset} if preset else {})}
 
 
 def recorded_person(us: dict, seed: dict, multi_day: Optional[bool] = None) -> dict:
@@ -214,7 +215,7 @@ def recorded_person(us: dict, seed: dict, multi_day: Optional[bool] = None) -> d
     persona = {**{k: us.get(k) for k in PERSONA_KEYS},
                "display_name": us.get("display_name") or us.get("name") or "the user"}
     return person(us.get("name"), persona, recorded_opening(us), seed,
-                  us["multi_day"] if us.get("multi_day") is not None else multi_day)
+                  us["multi_day"] if us.get("multi_day") is not None else multi_day, us.get("preset"))
 
 
 def recorded_instructions(us: dict, seed: dict, multi_day: Optional[bool] = None) -> Optional[str]:
@@ -250,7 +251,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
                     "a2a_agent_version": FieldScope.TASK}
 
     def __init__(self, id: str, version: Optional[int], *, persona: Optional[dict] = None, model: Optional[str] = None,
-                 multi_day: Optional[bool] = None, opening_prompt: Optional[str | list[dict]] = None, **deploy: Any):
+                 multi_day: Optional[bool] = None, opening_prompt: Optional[str | list[dict]] = None,
+                 preset: Optional[str] = None, **deploy: Any):
         if deploy.get("system_prompt") is not None:
             raise ValueError(f"{self.type} '{id}': system_prompt is written from the persona and opening_prompt; don't set it")
         deploy.pop("system_prompt", None)
@@ -268,16 +270,21 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         # Required: always_on starts the run from it, and refuses a user sim without one only after the deploy.
         found += opening_problems(opening_prompt)
         found += persona_problems(persona)
+        if preset is not None and preset not in user_sim_versions.PRESETS:
+            found.append(f"preset {preset!r} is not one of {list(user_sim_versions.PRESETS)}")
+        elif preset in ("chat", "milestone") and multi_day:
+            found.append(f"preset {preset!r} is one conversation: multi_day must be false")
         if found:
             raise ValueError(f"{self.type} '{self.agent_name}': " + "; ".join(found))
         self.persona = persona
         self.model = model
         self.multi_day = multi_day
         self.opening_prompt = opening_prompt
+        self.preset = preset
         # Who the user is as the task writes it, the seed not filled in: what the judge's rubric_persona_sha256 is.
         self.persona_sha256 = persona_fingerprint(persona, opening_prompt)
 
-    _OWN = ("persona", "model", "multi_day", "opening_prompt")
+    _OWN = ("persona", "model", "multi_day", "opening_prompt", "preset")
 
     def seeded_from(self, written: "DeployUserSimAgentTaskStep") -> None:
         """This step is ``written`` with the run's seed filled in (``substitute_seed_in_steps``): keep the fingerprint
@@ -308,7 +315,24 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
     def person(self, context: TaskStepContext) -> dict:
         """The user as the built-in user sim's ``setup`` takes them, as always_on hands them over."""
         return person(self.agent_name, self.persona, opening_parts(self.opening_prompt),
-                      context.metadata.get("seed") or {}, self.multi_day)
+                      context.metadata.get("seed") or {}, self.multi_day, self.preset)
+
+    def task_problems(self, steps: list) -> list[str]:
+        """A preset names the steps this user goes with: a milestone user talks to a prompt_agent with a post-turn
+        hook (the hook's notes are what it moves on), and a chat or milestone user is never always_on's."""
+        if self.preset is None:
+            return []
+        out = []
+        talks = [s for s in steps if s.type == "prompt_agent" and getattr(s, "user_agent_name", None) == self.agent_name]
+        if self.preset == "milestone":
+            if not talks:
+                out.append(f"user '{self.agent_name}' has preset milestone, but no prompt_agent step talks to it")
+            out += [f"user '{self.agent_name}' has preset milestone, but prompt_agent '{s.id}' has no post_turn_hooks "
+                    "to check its milestones" for s in talks if not getattr(s, "post_turn_hooks", None)]
+        if self.preset in ("chat", "milestone"):
+            out += [f"user '{self.agent_name}' has preset {self.preset}, one conversation, but always_on '{s.id}' "
+                    "plays it" for s in steps if s.type == "always_on" and getattr(s, "user_sim", None) == self.agent_name]
+        return out
 
     def _setup(self, context: TaskStepContext) -> dict:
         return user_sim_versions.setup(user_sim_versions.VERSION, self.person(context))
@@ -365,6 +389,9 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
             # Each tag the prompt shows with its line, so an answer's ``used`` ("D9") names what this run saw.
             "tagged_lines": user_sim_versions.tagged_lines(self.person(context)),
             "multi_day": self.multi_day,
+            # The preset as written (None: chat or always_on by multi_day), and what a judge's rules may depend on.
+            "preset": self.preset,
+            "features": sorted(user_sim_versions.features(self.person(context))),
             # The run record's user sim settings, as always_on wrote them when it set the agent up itself.
             "setup": {"model": model, "model_from": source, "user_sim_step_model": self.model, "model_set": True,
                       "system_prompt_chars": len(prompt), "output_format": setup.get("output_format"),
