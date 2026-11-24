@@ -124,6 +124,11 @@ class DeployedEnv:
         address or under it, as a step's grant gives them, and none anywhere else, an override's address say."""
         return protocol_v1.granted_headers(url, {self.environment_url: self.control_headers})
 
+    def control_headers_or_grant(self, url: str) -> Optional[dict[str, str]]:
+        """``control_headers_for(url)``, or None when the record gives ``url`` no token, which leaves the call to
+        a run's grant (``protocol_v1.request_headers``)."""
+        return self.control_headers_for(url) or None
+
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
         return protocol_v1.find_extension_method(self.environment_card or {}, uri, method) is not None

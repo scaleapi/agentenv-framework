@@ -96,6 +96,25 @@ async def test_a_child_env_missing_from_the_card_takes_the_legacy_path(sent):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("token, sent_as", [("s3cret", "Bearer s3cret"), (None, None)], ids=["token", "no-token"])
+async def test_the_legacy_path_sends_its_records_control_token_when_it_has_one(sent, token, sent_as):
+    # Neither email nor shop serves a card, so the gateway's card, read at its own address, lists neither.
+    deployed = DeployedGatewayEnv(
+        env_id="multi", env_version=1, gateway_url=_GW, mcp_url=f"{_GW}/mcp", db_web_url=None, sandbox_id="sb-1",
+        environment_card_url=f"{_GW}{WELL_KNOWN_PATH}", environment_card=await _card("mcp-slack"), control_token=token)
+    web = _website()
+    web._sandbox, web._gateway_url, web._deployed = MagicMock(), _GW, deployed
+    web._copy_artifact_into_container = AsyncMock(return_value="/tmp/data/shop.json")
+    web._env_provider = MagicMock(spec=EnvironmentGatewayProvider, install_changelog_triggers=AsyncMock())
+
+    await _mcp(deployed).load_environment_artifact(_artifact("email"))
+    await web.load_environment_artifact(_artifact("shop"))
+
+    assert [(r.url.path, r.headers.get("authorization")) for r in sent] == [
+        ("/svc/mcp-email/api/reset", sent_as), ("/svc/shop/api/reset", sent_as), ("/svc/shop/api/add", sent_as)]
+
+
+@pytest.mark.asyncio
 async def test_the_legacy_path_refuses_an_environment_of_several_files_before_sending_anything(sent):
     several = SimpleNamespace(environment_name="email", id="mail-seed", file_artifact_refs={"a.json": None, "b.json": None})
 
