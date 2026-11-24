@@ -132,7 +132,7 @@ class JudgeUsage(StepUsage):
                          reported_by=reported_by).fields()
         record = {"outcome": outcome, "model": model, "endpoint_host": endpoint_host,
                   "usage": usage.to_dict() if usage is not None else None, **cost,
-                  "batch": _BATCH.get(), "attempt": _ATTEMPT.get(),
+                  "batch": _BATCH.get(), "sample": _SAMPLE.get(), "attempt": _ATTEMPT.get(),
                   **({"input": dict(sent)} if isinstance(sent, Mapping) else {}),
                   **({"error": error} if error is not None else {})}
         self.calls.append(record)
@@ -142,6 +142,7 @@ class JudgeUsage(StepUsage):
 
 _RUN: ContextVar[Optional[JudgeUsage]] = ContextVar("judge_run", default=None)
 _BATCH: ContextVar[Optional[int]] = ContextVar("judge_batch", default=None)
+_SAMPLE: ContextVar[Optional[int]] = ContextVar("judge_sample", default=None)
 _ATTEMPT: ContextVar[Optional[int]] = ContextVar("judge_attempt", default=None)
 
 
@@ -177,6 +178,11 @@ def calls() -> list[dict[str, Any]]:
 def batch(number: Optional[int]) -> None:
     """The judge batch the calls made from here in this task belong to (None for a run in one batch)."""
     _BATCH.set(number)
+
+
+def sample(number: Optional[int]) -> None:
+    """The judge sample the calls made from here in this task belong to (None for a run that takes one)."""
+    _SAMPLE.set(number)
 
 
 def attempt(number: int) -> None:

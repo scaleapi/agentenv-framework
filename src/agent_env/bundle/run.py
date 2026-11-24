@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
@@ -218,6 +219,7 @@ def run_bundle(
     model: str | None = None,
     user_model: str | None = None,
     judge_model: str | None = None,
+    judge_samples: int | None = None,
     agent: str | None = None,
     sandbox: str | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -230,8 +232,8 @@ def run_bundle(
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
-    user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
-    tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
+    user simulator and the judges run on, ``judge_samples`` how many times each judge that can grades each criterion,
+    and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
     pick the forms a computer env composes, on the env's default provider, this machine unless the config names
     another; that compose emulates an arch no link of it runs natively unless ``emulate`` is False, which leaves it
     skipped. ``on_progress`` is given a line of text
@@ -270,7 +272,7 @@ def run_bundle(
                             variant=variant, skip_lint=skip_lint)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
-            overrides = _overrides(sandbox, user_model, judge_model)
+            overrides = _overrides(sandbox, user_model, judge_model, judge_samples)
             runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, overrides,
                                            solver_params(plan, prepared.materialization), keep, say, interrupts,
                                            source))
@@ -534,15 +536,17 @@ def solver_params(plan: Plan, materialization: Materialization) -> dict[str, dic
     return {task_id: {step_id: dict(choice) for step_id in steps} for task_id, steps in plan.agent.steps.items()}
 
 
-def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None) -> dict[str, str]:
-    """The run's ``user_overrides``: where everything deploys, and the models the user simulator and judges run on."""
+def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None,
+               judge_samples: int | None = None) -> dict[str, Any]:
+    """The run's ``user_overrides``: where everything deploys, the models the user simulator and judges run on, and
+    how many samples the judges take."""
     overrides = sandbox_overrides(sandbox) if sandbox else {}
-    return {**overrides, **{key: value for key, value in (("user_model", user_model), ("judge_model", judge_model))
-                            if value}}
+    return {**overrides, **{key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
+                                                          ("judge_samples", judge_samples)) if value}}
 
 
 async def _run_all(
-    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, str],
+    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, Any],
     step_params: Mapping[str, dict], keep: bool, say: Callable[[str], None], interrupts: Interrupts,
     source: HubSource | None,
 ) -> tuple[TaskRun, ...]:

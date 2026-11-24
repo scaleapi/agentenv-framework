@@ -1600,6 +1600,9 @@ class JudgeOutputFormatSpec:
     # Batched rows are checked for bulk verdicts (shared or short justifications) and retried with a correction. A
     # format whose rows may rightly share a short reason turns it off.
     checks_bulk_verdicts: bool = True
+    # Each row is one criterion's score and justification and nothing else, so judge_samples may grade it several
+    # times and keep its median (``judge_samples``); a format with frames, a per-call block or verdicts leaves it off.
+    samplable: bool = False
 
 
 JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
@@ -1612,6 +1615,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         diagnose_response=diagnose_rubric_binary_response,
         format_correction_prompt=format_judge_correction_prompt,
         batchable=True,
+        samplable=True,
     ),
     JudgeOutputFormat.RUBRIC_PARTIAL: JudgeOutputFormatSpec(
         output_format=_rubric_score_output_format(),
@@ -1622,6 +1626,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         diagnose_response=diagnose_rubric_partial_response,
         format_correction_prompt=format_partial_judge_correction_prompt,
         batchable=True,
+        samplable=True,
     ),
     JudgeOutputFormat.RUBRIC_EVIDENCE: JudgeOutputFormatSpec(
         output_format=_rubric_evidence_output_format(),

@@ -12,6 +12,7 @@ from agent_env.env import Env
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.store.base import NotFoundError
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples
 from agent_env.utils.docker.metadata import detect_base_metadata, detect_env_metadata  # noqa: F401  re-exported for the put commands
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 
@@ -58,6 +59,21 @@ def build_platform_option(f):
             "Apple Silicon; pass an empty string to omit --platform entirely."
         ),
     )(f)
+
+
+def _judge_samples(ctx: click.Context, param: click.Parameter, value: int | None) -> int | None:
+    try:
+        return judge_samples.validated(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
+def judge_samples_option(f):
+    """``--judge-samples N``, the run's ``judge_samples``: an odd count, refused at once otherwise."""
+    return click.option(
+        "--judge-samples", type=int, default=None, callback=_judge_samples, metavar="N",
+        help="Grade each criterion N times, an odd number, and keep its median, in every judge that can (a "
+             "rubric_binary or rubric_partial one), whatever the tasks say; each sample's score is kept.")(f)
 
 
 def refuse_unwritable_ids(*ids: str) -> None:
