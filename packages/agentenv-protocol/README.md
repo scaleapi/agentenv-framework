@@ -1703,6 +1703,23 @@ included:
   served. A sub-agent can gain steps while its task runs, so keep each one's
   latest copy; the page that serves a task's last step, which closes only as the
   task ends, carries them whole.
+- A task's cursor read may also say what the reader holds, and get only what it
+  lacks:
+  - `header_digest` is the digest of the header it holds (`""` for none). The
+    answer names the header's `header_digest` and leaves `header` out while the
+    two match.
+  - `subagent_cursors` maps each sub-agent's `trajectory_id` to
+    `{after, header_digest}`, the last `step_id` the reader holds of it and its
+    header's digest (`{}` at first). The answer then carries each of the task's
+    sub-agents by its closed steps past its cursor, whether or not the step that
+    started it has closed, and its header, the trajectory without `steps`, only
+    when that changed. A sub-agent with neither is left out, and
+    `subagent_header_digests` names each one's header digest.
+
+  The card lists both fields on the task cursor read. Detect them with
+  `card_request_accepts(get_request, {"task_id", "after", "format",
+  "header_digest", "subagent_cursors"})`, and send them only to a card that
+  takes them. A read naming neither gets the page above.
 
 Every `atif/1` answer names `schema_version` and `profile_version` beside
 `format`. An adapter that raises stops its context's copy, never the turn: the

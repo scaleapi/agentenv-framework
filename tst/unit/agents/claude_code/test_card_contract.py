@@ -86,7 +86,7 @@ def test_request_and_response_contracts(app):
             {"required": ["task_id", "objects"]},
             {"required": ["context_id"]},
             {"required": ["context_id", "objects"]},
-            {"required": ["task_id", "after"], "optional": ["limit"]},
+            {"required": ["task_id", "after"], "optional": ["limit", "header_digest", "subagent_cursors"]},
             {"required": ["context_id", "after"], "optional": ["limit"]},
         ],
     }
