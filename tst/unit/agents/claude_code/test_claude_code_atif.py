@@ -382,7 +382,8 @@ def test_an_auto_compaction_is_the_step_of_its_summary_call_holding_what_the_tur
     kit = run(feed)
     user_step, first, compaction, notice, done = kit.document["steps"][:5]
     assert (compaction["source"], compaction["message"]) == ("agent", "The summary of the conversation so far.")
-    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "auto"}
+    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "auto", "tokens_before": 90000,
+                                                    "tokens_after": 3000}
     assert compaction["metrics"] == {"prompt_tokens": 500 + 1000 + 20, "cached_tokens": 1000, "completion_tokens": 300,
                                      "extra": {"agentenv": {"cache_write_tokens": 20}}}
     assert (notice["source"], notice["message"]) == ("system", "<local-command-stdout>Compacted</local-command-stdout>")

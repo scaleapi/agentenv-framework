@@ -41,16 +41,22 @@ class _Entry:
     agent: str | None
     from_stdout: bool
     ready: bool = False
-    #: A compaction's summary, held until the turn's count gives its call's usage, and what set it off.
+    #: A compaction's summary, held until the turn's count gives its call's usage, what set it off, and the tokens of
+    #: the conversation before and after it.
     summary: bool = False
     held: bool = False
     trigger: str | None = None
+    tokens: tuple[int | None, int | None] = (None, None)
     usage: dict[str, int] | None = None
     model: str | None = None
 
 
 def _is_mapping(value: Any) -> bool:
     return isinstance(value, dict)
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _blocks(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -100,6 +106,7 @@ class ClaudeCodeAtif(Adapter):
         self._attempt_step: str | None = None
         self._summary_next = False
         self._summary_trigger: str | None = None
+        self._summary_tokens: tuple[int | None, int | None] = (None, None)
         self._task_counts: dict[str, int] = {}
         #: The model the task's latest root call named, as the API answered, and each model the turn's tally named as
         #: called (a gateway route prefixes it) by the name its calls answered as: a compaction is named as they are.
@@ -121,7 +128,8 @@ class ClaudeCodeAtif(Adapter):
             self._link(uuid)
         entry = self._enqueue(record, uuid, agent, from_stdout=True)
         if self._summary_next and agent is None and record.get("type") == "user" and _texts(record):
-            entry.summary, entry.held, entry.trigger = True, True, self._summary_trigger
+            entry.summary, entry.held = True, True
+            entry.trigger, entry.tokens = self._summary_trigger, self._summary_tokens
             self._summary_next = False
         if uuid is not None and uuid in self._session:
             self._match(entry)
@@ -133,6 +141,7 @@ class ClaudeCodeAtif(Adapter):
         metadata = record.get("compact_metadata") if _is_mapping(record.get("compact_metadata")) else {}
         self._summary_next = True
         self._summary_trigger = metadata.get("trigger") if metadata.get("trigger") in ("manual", "auto") else None
+        self._summary_tokens = (_count(metadata.get("pre_tokens")), _count(metadata.get("post_tokens")))
 
     @native(type="system", where={"subtype": "init"})
     def init(self, record: dict[str, Any], turn: Any) -> None:
@@ -360,7 +369,8 @@ class ClaudeCodeAtif(Adapter):
             if entry.summary:
                 key = f"compaction-{entry.uuid or entry.seq}"
                 turn.message(step=key, text=text, time=when)
-                turn.compaction(step=key, written_by="assistant", trigger=entry.trigger)
+                turn.compaction(step=key, written_by="assistant", trigger=entry.trigger, tokens_before=entry.tokens[0],
+                                tokens_after=entry.tokens[1])
                 turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
                 entry.summary = False
             else:

@@ -312,6 +312,19 @@ def _parts(attrs: dict, kind: str) -> list[str]:
             for p in m.get("parts") or [] if isinstance(p, dict) and p.get("type") == kind]
 
 
+def facts_of_compaction(written_by: Any, trigger: Any = None, tokens_before: Any = None,
+                        tokens_after: Any = None) -> dict:
+    """A compaction's facts as every reader names them: who wrote its summary (one of ``SUMMARY_WRITERS``), what set it
+    off (``manual`` or ``auto``), and the tokens of the history before and after it, each when known. Raises
+    ``TrajectoryFormatError`` when who wrote the summary isn't known."""
+    if written_by not in SUMMARY_WRITERS:
+        raise TrajectoryFormatError(f"its compaction says written_by={written_by!r}, not one of "
+                                    f"{list(SUMMARY_WRITERS)}, so who wrote the compaction summary isn't known")
+    counts = {name: value for name, value in (("tokens_before", tokens_before), ("tokens_after", tokens_after))
+              if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+    return {"written_by": written_by, **({"trigger": trigger} if trigger in _TRIGGER_WORDS else {}), **counts}
+
+
 def _compaction_facts(attrs: dict) -> dict:
     """What a ``harness.compaction`` span recorded: who wrote the summary (``written_by``: "assistant", its own model,
     or "harness"), the wakes it summarized and kept (the harness's wake numbers, from the first kept one), how late
@@ -352,7 +365,21 @@ def compaction_words(facts: dict) -> list[str]:
         words.append(f"the save turn before it failed: {facts['save_error']}")
     if facts.get("waited_s") is not None:
         words.append(f"this wake started {facts['waited_s']} s late (real time) waiting for it")
+    if facts.get("trigger") in _TRIGGER_WORDS:
+        words.append(_TRIGGER_WORDS[facts["trigger"]])
+    before, after = facts.get("tokens_before"), facts.get("tokens_after")
+    if before is not None and after is not None:
+        words.append(f"the history went from {before:,} tokens to {after:,}")
+    elif before is not None:
+        words.append(f"the history was {before:,} tokens before it")
+    elif after is not None:
+        words.append(f"the history is {after:,} tokens after it")
     return words
+
+
+# What set a compaction off, as its note says it.
+_TRIGGER_WORDS = {"manual": "it was set off on request, such as by a command (manual)",
+                  "auto": "the harness set it off on its own (auto)"}
 
 
 # Who wrote a compaction's summary, as its note says it.
@@ -363,9 +390,15 @@ _WRITTEN_BY = {"assistant": "written by the assistant's own model, in a summary 
 def _compaction_note(attrs: dict, facts: dict) -> str:
     """A ``harness.compaction`` span as a note: who wrote the summary, which wakes it summarized, how late it made this
     wake, and the summary (its ``compaction`` part)."""
+    return compaction_note(facts, "\n".join(_parts(attrs, "compaction")))
+
+
+def compaction_note(facts: dict, summary: str) -> str:
+    """A compaction's note, the same from every reader: who wrote the summary and what the compaction did
+    (``compaction_words``), then the summary."""
     head = (f"Compaction summary ({_WRITTEN_BY[facts['written_by']]}; it replaces the older history the assistant "
             "sees" + "".join(f"; {w}" for w in compaction_words(facts)) + ")")
-    summary = "\n".join(_parts(attrs, "compaction")).strip()
+    summary = summary.strip()
     return f"{head}:\n{summary}" if summary else f"{head}: no summary recorded"
 
 
@@ -410,15 +443,32 @@ def _span_thinking(attrs: dict) -> str:
 # ---- Claude Code stream-json -----------------------------------------------------------------------------------------
 def _claude_code_events(items: list[dict]) -> list[dict]:
     """Assistant text, its thinking (when the CLI recorded any; a block with only a signature has none) and tool calls
-    paired with their results by ``tool_use_id``; the init event's tool list, thinking signatures, token counts and ``tool_use_result`` (a copy of the result) are left out. A subagent's events
-    carry ``subagent`` (the tool call that started it)."""
+    paired with their results by ``tool_use_id``; the init event's tool list, thinking signatures, token counts and
+    ``tool_use_result`` (a copy of the result) are left out. A subagent's events carry ``subagent`` (the tool call that
+    started it). A message the CLI put in is a note; a compaction (a ``compact_boundary``, then its summary, the next
+    root message) is one note with its facts, its summary written by the assistant's own model."""
     events: list[dict] = []
     calls: dict[str, dict] = {}
+    compaction: Optional[dict] = None
     for item in items:
         kind = item.get("type")
         message = item.get("message") if isinstance(item.get("message"), dict) else {}
         parent = item.get("parent_tool_use_id")
         tag = {"subagent": parent} if parent else {}
+        if kind == "system" and item.get("subtype") == "compact_boundary" and not parent:
+            metadata = item.get("compact_metadata") if isinstance(item.get("compact_metadata"), dict) else {}
+            compaction = facts_of_compaction("assistant", metadata.get("trigger"), metadata.get("pre_tokens"),
+                                             metadata.get("post_tokens"))
+            continue
+        if kind == "user" and compaction is not None and not parent:
+            content = message.get("content")
+            texts = [content] if isinstance(content, str) else [
+                b.get("text") or "" for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]
+            if any(text.strip() for text in texts):
+                events.append({"type": "note", "text": compaction_note(compaction, "\n".join(texts)),
+                               "compaction": compaction})
+                compaction = None
+                continue
         if kind == "assistant":
             for block in message.get("content") or []:
                 if not isinstance(block, dict):
@@ -454,15 +504,23 @@ def atif_turn_events(view: Mapping[str, Any]) -> TurnEvents:
     ``atif_turns.AtifDocuments.view`` gives it), in the shapes a native Claude Code turn's take: each agent step's
     thinking and text, then its tool calls with their results; a sub-agent's events after the result that started it,
     each naming it as ``subagent`` (the call that started it, as its ``parent_tool_use_id`` is natively); a message the
-    harness put in (a system step) and a compaction's summary as notes, as a native turn's user-shaped messages are;
-    and the final, the closing message ("" for none, as the CLI's result gives it), an error when the turn's task didn't
-    complete."""
+    harness put in (a system step) as a note, as a native turn's user-shaped messages are, and a compaction's step as
+    its note with its facts, as a native turn's compaction is; and the final, the closing message ("" for none, as the
+    CLI's result gives it), an error when the turn's task didn't complete. A compaction that doesn't say who wrote its
+    summary raises ``TrajectoryFormatError``."""
     events: list[dict] = []
     subagents = SubAgents(view)
 
     def walk(trajectory: Mapping[str, Any], tag: dict) -> None:
         for step in steps_of(trajectory):
-            if step.get("source") == "system" or (step.get("source") == "agent" and is_compaction(step)):
+            if step.get("source") == "agent" and is_compaction(step):
+                own = profile_of(step).get("compaction") or {}
+                facts = facts_of_compaction(own.get("written_by"), own.get("trigger"), own.get("tokens_before"),
+                                            own.get("tokens_after"))
+                events.append({"type": "note", "text": compaction_note(facts, content_text(step.get("message"))),
+                               "compaction": facts, **tag})
+                continue
+            if step.get("source") == "system":
                 text = content_text(step.get("message"))
                 if text.strip():
                     events.append({"type": "note", "text": text, **tag})

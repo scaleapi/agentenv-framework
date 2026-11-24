@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 FORMAT = "atif/1"
 #: The key under each ``extra`` that holds the profile.
 PROFILE_KEY = "agentenv"
-PROFILE_VERSION = "1.1"
+PROFILE_VERSION = "1.2"
 #: The ATIF version producers write: the oldest that holds the fields they use.
 SCHEMA_VERSION = "ATIF-v1.8"
 #: The only key outside ``extra.agentenv`` a producer writes: Harbor's, on a ToolCall whose input wasn't an object.
@@ -85,10 +85,13 @@ class StepError(_Profile):
 
 class Compaction(_Profile):
     """A step whose message is a summary that replaced the conversation before it, in what the agent sees from then on:
-    who wrote it, and what set it off. Added in 1.1."""
+    who wrote it, and what set it off; added in 1.1. With the tokens of the conversation the agent sees just before it
+    and just after it, when the harness counts them; added in 1.2."""
 
     written_by: str | None = None
     trigger: str | None = None
+    tokens_before: int | None = None
+    tokens_after: int | None = None
 
 
 class Arrival(_Profile):

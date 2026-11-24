@@ -1370,7 +1370,8 @@ the profile's spec, and `fixtures/` holds its canonical examples. The package ne
   command's output, is `turn.system_message(text=...)`, a `source: system` step of its own. A compaction, a summary
   that replaced the conversation in what the agent sees, is the message of the step of the call that wrote it,
   marked by `turn.compaction(step=..., written_by="assistant" | "harness", trigger="manual" | "auto")`, its usage
-  that call's (profile 1.1).
+  that call's (profile 1.1), with the conversation's `tokens_before` and `tokens_after` when the harness counts them
+  (1.2).
 - **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
   time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
   terminal state on its last step. Its `page()` is the live view, built when it's read: closed steps only, so a

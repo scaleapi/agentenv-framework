@@ -671,6 +671,38 @@ async def test_a_run_without_agent_labels_gets_no_context_loss_question_schema_o
                                                          prompt_id="ask")._spec().output_format
 
 
+COMPACTED = Path(__file__).resolve().parents[2] / "data" / "claude_code_atif" / "compacted.json"
+
+
+@pytest.mark.asyncio
+async def test_a_claude_code_run_that_compacts_gets_the_compaction_reading_and_the_context_loss_question(monkeypatch):
+    """No harness labels, but a wake whose Claude Code turn compacted: its judge is told the summary is the assistant's
+    own, as a labelled run's is, and asked about context loss; the lines only a labelled harness writes aren't told."""
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    del sources[ctx.prompt_responses[0].agent_trajectory_object_url]
+    compacting = json.loads(COMPACTED.read_text())["turns"][1]["native"]
+    sources[ctx.prompt_responses[0].target_agent_per_turn_trajectory_object_urls[1]] = json.dumps(compacting)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _judging(monkeypatch, verifier, sources, {"score": 0.0, "justification": "Booked without asking.",
+                                                         "context_loss": False, "context_loss_evidence": ""})
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert entry["context_loss"] == {"failed_criteria": 1, "caused_by_compaction": 0, "ids": []}
+    staged = next(text for path, text in sandbox.files.items() if path.endswith("/wakes/wake_002.jsonl"))
+    [note] = [line for line in map(json.loads, staged.splitlines()) if line.get("compaction")]
+    assert note["event"] == "harness_note" and note["compaction"]["written_by"] == "assistant"
+    for told in ('"harness_note" lines are from the harness that runs the assistant',
+                 'Harness notes have no "at": read them in file order',
+                 "the assistant is responsible for what follows",
+                 'For each criterion you fail, also return "context_loss"'):
+        assert told in captured["prompt"]
+    assert "pre_compaction_save" not in captured["prompt"] and '"internal"' not in captured["prompt"]
+    items = captured["schema"]["schema"]["properties"]["results"]["items"]
+    assert items["properties"]["context_loss"] == {"type": "boolean"}
+
+
 @pytest.mark.asyncio
 async def test_the_entry_discloses_the_assistant_s_harness_from_a_v7_trace(monkeypatch):
     ctx, _, sources = _v7_staged_run(monkeypatch)

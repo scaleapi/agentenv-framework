@@ -527,6 +527,28 @@ def test_the_index_has_a_line_for_a_compaction_naming_its_wakes_and_pointing_at_
         "written_by": "assistant", "wakes_summarized": 3, "wakes_kept": 2, "first_kept_wake": 4}
 
 
+def test_the_index_says_a_compaction_came_partway_through_the_turn_when_the_assistant_had_acted(run):
+    """Claude Code compacts inside a turn, once the history fills; a harness's save turn before its compaction isn't
+    the assistant's own turn, so the v7 wake's stays before it."""
+    timeline, turns = run
+    turns[_url(timeline, 2)] = turn_events(json.dumps([
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking at the inbox."}]}},
+        {"type": "system", "subtype": "compact_boundary",
+         "compact_metadata": {"trigger": "auto", "pre_tokens": 90000, "post_tokens": 3000}},
+        {"type": "user", "message": {"role": "user", "content": "The summary so far."}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Booked."}]}},
+        {"type": "result", "result": "Booked.", "is_error": False}]))
+    index = stage_run(timeline, turns).files[INDEX_FILE]
+
+    wake2 = index[index.index("## Wake 2 "):index.index("## Wake 3 ")]
+    [line] = [line for line in wake2.splitlines() if line.startswith("- compaction")]
+    assert line.startswith("- compaction by the harness, partway through this wake's turn, its summary written by the "
+                           "assistant's own model: the harness set it off on its own (auto); the history went from "
+                           "90,000 tokens to 3,000 (")
+    wake4 = index[index.index("## Wake 4 "):]
+    assert "- compaction by the harness, before this wake's turn" in wake4
+
+
 def test_judge_reads_counts_no_wake_0_from_a_glob_over_the_wake_files():
     # Two real judge calls (Tree Removal, Silent Week, Nov 13 re-grade): globs whose prefix "wake_0" names no wake.
     judge = turn_events(json.dumps(_judge(
