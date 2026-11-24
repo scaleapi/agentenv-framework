@@ -94,6 +94,21 @@ def test_from_stdin_runs_a_nul_separated_argv():
     assert out.stdout == b"a b|it's|x\ny|"
 
 
+@pytest.mark.skipif(not _bash_has_mapfile_d(), reason="needs bash 4.4+ (mapfile -d), as the VM has")
+def test_from_stdin_runs_a_script_past_linuxs_128_kib_argument_limit(tmp_path):
+    # One argument past MAX_ARG_STRLEN can't be exec'd; the -c script runs from a file, with its $0 and $@, and the
+    # file is gone after.
+    import os
+    import subprocess
+
+    script = "# " + "x" * (200 * 1024) + '\nprintf "%s|" "$0" "$@"'
+    argv = ["bash", "-c", script, "name", "a b", "c"]
+    out = subprocess.run(["bash", "-c", mvs._FROM_STDIN], input=b"".join(a.encode() + b"\0" for a in argv),
+                         capture_output=True, check=True, env={**os.environ, "TMPDIR": str(tmp_path)})
+    assert out.stdout == b"name|a b|c|"
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.asyncio
 async def test_setup_starts_dockerd_polls_until_ready_and_skips_iptables():
     s = _sandbox()
