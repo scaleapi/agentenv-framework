@@ -76,6 +76,12 @@ list items whose fields contain the given text, `number` reads a count the tool 
 `{find: call + {pick?: "first" | "last"}, read?: {tool, args, extract?}}`: `read` args may use `"{field}"` from the
 item `find` picked, and `extract: "gmail"` turns a Gmail API message into its headers and plain-text body.
 
+The params are checked when the step loads the hook, before the first message (the hook's `check_params`): unknown
+keys on a milestone or gate, a check that isn't exactly one kind or lacks what its kind needs, an artifact a milestone
+doesn't define, a gate `type` outside format, action and content, repeated gate or milestone ids, and a judge gate
+with no judge model each fail the step there. Without this, a malformed check would fail as a gate on every turn and
+nudge the agent about nothing.
+
 After every turn the hook also sets its summary of where the conversation got to, for a verifier or the hub to read
 without going through its records (`turn.summarize`), at
 `metadata["post_turn_hook_summaries"][step_id]["<this hook's artifact id>"]`:

@@ -153,6 +153,46 @@ async def test_a_hook_that_is_not_an_async_post_turn_fails_the_step_before_the_a
     assert peers.raw == []
 
 
+CHECKS_PARAMS = """
+    def check_params(params):
+        if "role" not in params:
+            raise ValueError("needs role")
+
+    async def post_turn(turn, params):
+        turn.record({"role": params["role"]})
+        return None
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_hook_that_refuses_its_params_fails_the_step_before_the_agent_is_prompted(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: []})
+
+    with pytest.raises(ValueError, match="post-turn hook 'checks' refused its params: needs role"):
+        await _step(_hook("checks", CHECKS_PARAMS)).execute(_context())
+
+    assert peers.raw == []
+
+
+@pytest.mark.asyncio
+async def test_a_hook_whose_params_pass_its_check_runs(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("done")]})
+    ctx = _context()
+
+    await _step(_hook("checks", CHECKS_PARAMS), turns=1, params={"role": "r"}).execute(ctx)
+
+    assert [r["role"] for r in _recorded(ctx)] == ["r"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_params_that_is_async_fails_the_step(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: []})
+    source = "async def check_params(params):\n    pass\n\nasync def post_turn(turn, params):\n    return None\n"
+
+    with pytest.raises(ValueError, match="check_params must be `def check_params"):
+        await _step(_hook("async-check", source)).execute(_context())
+
+
 @pytest.mark.asyncio
 async def test_a_hook_with_a_dataclass_and_postponed_annotations_loads_and_close_unregisters_it():
     source = """

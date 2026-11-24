@@ -247,10 +247,32 @@ async def test_on_the_last_turn_it_records_where_it_stood_and_asks_nothing():
                                                            "check": {"trajectory_judge": "it did"}}]}]},
      "needs trajectory_judge_model"),
     ({**PARAMS, "enabled": "no"}, "enabled must be true or false"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"judge": "it did"}}]}]}, "exactly one of trajectory_judge"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"trajectory_judge": "x", "call": {"tool": "t"}}}]}]}, "exactly one of trajectory_judge"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"call": {}, "expect": "exists"}}]}]}, "needs a tool"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"call": {"tool": "t"}}}]}]}, "expect must be"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"no_new": []}}]}]}, "no_new needs a list"),
+    ({"role": "a", "milestones": [{"id": "M1", "artifacts": {"x": {}}, "gates": [
+        {"id": "g", "nudge": "n", "check": {"artifact": "x"}}]}]}, "exactly one of expect, format, judge"),
+    ({"role": "a", "milestones": [{"id": "M1", "artifacts": {"x": {}}, "gates": [
+        {"id": "g", "nudge": "n", "check": {"artifact": "x", "format": {"max_words": 3}}}]}]}, "format needs"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [
+        {"id": "g", "nudge": "n", "nudges": 2, "check": {"call": {"tool": "t"}, "expect": "exists"}}]}]},
+     "unknown keys"),
+    ({"role": "a", "milestones": [{"id": "M1", "gates": [
+        {"id": "g", "nudge": "n", "type": "style", "check": {"call": {"tool": "t"}, "expect": "exists"}}]}]},
+     "is not one of"),
+    ({"role": "a", "milestones": [
+        {"id": "M1", "gates": [{"id": "g", "nudge": "n", "check": {"call": {"tool": "t"}, "expect": "exists"}}]},
+        {"id": "M2", "line": "next", "gates": [
+            {"id": "g", "nudge": "n", "check": {"call": {"tool": "t"}, "expect": "exists"}}]}]},
+     "gate ids must be unique"),
 ])
 def test_a_bad_spec_is_refused(bad, fragment):
     with pytest.raises(ValueError, match=fragment):
         mg._spec(bad)
+    with pytest.raises(ValueError, match=fragment):  # and when the framework loads the hook, before any turn
+        mg.check_params(bad)
 
 
 @pytest.mark.asyncio

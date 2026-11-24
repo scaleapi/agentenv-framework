@@ -71,7 +71,9 @@ class PostTurnHook:
 
 
 class PostTurnHooks:
-    """The hooks of one step run, each loaded once; ``close`` removes their scripts' temporary files."""
+    """The hooks of one step run, each loaded once when the step starts; ``close`` removes their scripts' temporary
+    files. A hook's script defines ``async def post_turn(turn, params)`` and may define ``def check_params(params)``,
+    called at load, which raises ValueError for params it can't run with."""
 
     def __init__(self) -> None:
         self.hooks: list[PostTurnHook] = []
@@ -107,6 +109,17 @@ class PostTurnHooks:
         if not inspect.iscoroutinefunction(post_turn):
             raise ValueError(f"post-turn hook '{spec['file_artifact_id']}' must define "
                              "`async def post_turn(turn, params)`: steps and runs share one event loop")
+        # A hook may check its params when it loads, before the conversation starts, so a bad one fails the step
+        # before the first message instead of after the agent's first turn.
+        check_params = getattr(module, "check_params", None)
+        if check_params is not None:
+            if not callable(check_params) or inspect.iscoroutinefunction(check_params):
+                raise ValueError(f"post-turn hook '{spec['file_artifact_id']}': check_params must be "
+                                 "`def check_params(params)`")
+            try:
+                check_params(spec.get("params") or {})
+            except ValueError as e:
+                raise ValueError(f"post-turn hook '{spec['file_artifact_id']}' refused its params: {e}") from e
         return PostTurnHook(spec["file_artifact_id"], spec.get("file_artifact_version"), spec.get("params") or {},
                             post_turn)
 

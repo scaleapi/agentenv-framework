@@ -85,6 +85,12 @@ JUDGE_FORMAT = {"type": "json_schema", "json_schema": {"name": "gate", "strict":
     "properties": {"passed": {"type": "boolean"}, "why": {"type": "string"}}}}}
 
 
+def check_params(params):
+    """Called by the framework when the hook loads, before the conversation starts: refuse params the hook can't run
+    with, so the step fails before the first message instead of after the agent's first turn."""
+    _spec(params)
+
+
 async def post_turn(turn, params):
     spec = _spec(params)
     answer = await _post_turn(turn, spec)
@@ -694,6 +700,53 @@ def _env(turn, spec):
     return envs[0]
 
 
+GATE_KEYS = {"id", "nudge", "check", "type"}
+GATE_TYPES = ("format", "action", "content")
+FORMAT_KEYS = {"max_paragraphs", "max_sentences", "contains_all", "contains_none"}
+
+
+def _check_problem(check: dict) -> Optional[str]:
+    """What's wrong with a gate's check, or None: exactly one kind, with what that kind needs."""
+    kinds = [k for k in ("trajectory_judge", "call", "no_new", "artifact") if k in check]
+    if len(kinds) != 1:
+        return f"check needs exactly one of trajectory_judge, call, no_new, artifact; got {sorted(check)}"
+    kind = kinds[0]
+    if kind == "trajectory_judge":
+        return None if isinstance(check[kind], str) and check[kind].strip() else "trajectory_judge needs a statement"
+    if kind == "call":
+        if not isinstance(check["call"], dict) or not check["call"].get("tool"):
+            return "call needs a tool"
+        return _expect_problem(check.get("expect"))
+    if kind == "no_new":
+        calls = check["no_new"]
+        if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) and c.get("tool") for c in calls):
+            return "no_new needs a list of calls, each with a tool"
+        return None
+    how = [k for k in ("expect", "format", "judge") if k in check]
+    if len(how) != 1:
+        return f"an artifact check needs exactly one of expect, format, judge; got {how or 'none'}"
+    if how == ["expect"] and check["expect"] != "exists":
+        return "an artifact's expect can only be \"exists\""
+    if how == ["format"]:
+        fmt = check["format"]
+        if not isinstance(fmt, dict) or not fmt or set(fmt) - FORMAT_KEYS:
+            return f"format needs one or more of {sorted(FORMAT_KEYS)}"
+    if how == ["judge"] and not (isinstance(check["judge"], str) and check["judge"].strip()):
+        return "judge needs a statement"
+    return None
+
+
+def _expect_problem(expect: Any) -> Optional[str]:
+    if expect == "exists":
+        return None
+    if not isinstance(expect, dict) or len(expect) != 1 or not set(expect) <= {"count", "contains", "equals"}:
+        return 'expect must be "exists" or one of {count}, {contains}, {equals}'
+    if "count" in expect and (not isinstance(expect["count"], dict) or not expect["count"]
+                              or set(expect["count"]) - {"eq", "min", "max"}):
+        return "expect.count needs eq, min or max"
+    return None
+
+
 def _spec(params: dict) -> dict:
     if not isinstance(params.get("enabled", True), bool):
         raise ValueError("milestone-gates enabled must be true or false")
@@ -713,9 +766,17 @@ def _spec(params: dict) -> dict:
         for g in gates:
             if not g.get("id") or not g.get("nudge") or not isinstance(g.get("check"), dict):
                 raise ValueError(f"milestone {m.get('id', i)}: each gate needs id, nudge and check")
+            unknown_gate = set(g) - GATE_KEYS
+            if unknown_gate:
+                raise ValueError(f"gate {g['id']} has unknown keys {sorted(unknown_gate)}")
+            if g.get("type") is not None and g["type"] not in GATE_TYPES:
+                raise ValueError(f"gate {g['id']}: type {g['type']!r} is not one of {list(GATE_TYPES)}")
             art = g["check"].get("artifact")
             if art is not None and art not in (m.get("artifacts") or {}):
                 raise ValueError(f"gate {g['id']} names artifact {art!r}, not in its milestone's artifacts")
+            problem = _check_problem(g["check"])
+            if problem:
+                raise ValueError(f"gate {g['id']}: {problem}")
             if i == 0:
                 for call in g["check"].get("no_new") or []:
                     if call.get("baseline_count") is None:
@@ -724,6 +785,13 @@ def _spec(params: dict) -> dict:
                     "max_nudges": int(m.get("max_nudges", 3)), "show": m.get("show"),
                     "type": m.get("type"), "skip_if_done": bool(m.get("skip_if_done", True)),
                     "artifacts": m.get("artifacts") or {}, "gates": gates})
+    ids = [g["id"] for m in out for g in m["gates"]]
+    repeated = sorted({gid for gid in ids if ids.count(gid) > 1})
+    if repeated:
+        raise ValueError(f"gate ids must be unique; repeated: {repeated}")
+    milestone_ids = [m["id"] for m in out]
+    if len(set(milestone_ids)) != len(milestone_ids):
+        raise ValueError(f"milestone ids must be unique: {milestone_ids}")
     checks = [g["check"] for m in out for g in m["gates"]]
     for key, kind in (("judge_model", "judge"), ("trajectory_judge_model", "trajectory_judge")):
         if any(kind in c for c in checks) and not (isinstance(params.get(key), str) and params[key].strip()):
