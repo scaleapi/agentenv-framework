@@ -7,6 +7,7 @@ a subagent writes two `result` events; ``modelUsage`` counts every call, the sub
 ``modelUsage`` starts from the session's tally so far, which the CLI restores, so a turn's own tally is the difference."""
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from agentenv_protocol.a2a_agent import ModelUsage, Usage
@@ -237,3 +238,17 @@ def test_a_run_that_hangs_after_its_result_keeps_the_usage_it_reported(monkeypat
     after, before = results
     assert after.error and (after.run_usage, after.model_usage, after.unreported_calls) == (RESULTS_2, TALLY_2, 0)
     assert before.error and (before.run_usage, before.unreported_calls) == ([], 1)
+
+
+def test_the_atif_turn_record_counts_the_turn_apart_from_its_cache_and_not_at_all_when_its_a_lower_bound():
+    """What the atif/1 adapter gives a compaction's step from: the turn's counts as a session record counts a call's."""
+    counted = Usage(input_tokens=1000, output_tokens=50, cache_read_tokens=600, cache_write_tokens=100,
+                    input_includes_cache=True, cost_usd=0.2, models=(ModelUsage(model=HAIKU),))
+    assert a2a_server._turn_record(counted) == {
+        "type": "turn", "cost_usd": 0.2, "input_tokens": 300, "output_tokens": 50, "cache_read_tokens": 600,
+        "cache_write_tokens": 100, "model": HAIKU}
+    two_models = replace(counted, models=(ModelUsage(model=HAIKU), ModelUsage(model="claude-sonnet-5-5")))
+    assert "model" not in a2a_server._turn_record(two_models)
+    lower_bound = replace(counted, provider_details={"unreported_calls": 2})
+    assert a2a_server._turn_record(lower_bound) == {"type": "turn", "cost_usd": 0.2}
+
