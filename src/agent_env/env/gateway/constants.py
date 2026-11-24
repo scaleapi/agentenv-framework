@@ -72,6 +72,9 @@ CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 # The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
 # it out of logged compose files.
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
+# The times each of those computers holds, when its card declares it holds only a range of them (clock/v1's range), as
+# `name=earliest/latest` (RFC3339), comma-separated; the clock keeps to them.
+CLOCK_FOLLOWER_RANGES_ENV = "CLOCK_FOLLOWER_RANGES"
 # The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
 # The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
@@ -268,7 +271,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); the clock holds 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z, the times 64 bits of nanoseconds since 1970 hold: set_time and advance refuse a time outside it, set_time also one from which its rate would reach the end within a real hour, and a clock that runs to its end stands there, at rate 0; declare_follower adds a follower after the gateway started (an agent the run deploys), with the read token its watches carry, and retire_follower removes one so writes stop waiting for it (an agent the run tears down); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); declare_follower adds a follower after the gateway started (an agent the run deploys), with the read token its watches carry and, for one that holds only a range of times (its card's clock/v1 range), that range, refused when the clock is outside it now; set_time and advance refuse a time outside the range of a follower the clock has, naming it, and set_time one it would run past that range's end from within a real hour; retire_follower removes one so writes stop waiting for it (an agent the run tears down); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, "time_zone": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
@@ -276,7 +279,7 @@ GATEWAY_EXTENSIONS = [
             "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
             "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {**_WAIT_FOLLOWERS}}},
             "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}},
-            "declare_follower": {"method": "PUT", "endpoint": CLOCK_FOLLOWERS_PATH, "request": {"type": "object", "properties": {"name": {"type": "string"}, "read_token": {"type": "string"}}, "required": ["name", "read_token"]}},
+            "declare_follower": {"method": "PUT", "endpoint": CLOCK_FOLLOWERS_PATH, "request": {"type": "object", "properties": {"name": {"type": "string"}, "read_token": {"type": "string"}, "range": {"type": "object", "properties": {"earliest": {"type": "string"}, "latest": {"type": "string"}}, "required": ["earliest", "latest"]}}, "required": ["name", "read_token"]}},
             "retire_follower": {"method": "DELETE", "endpoint": CLOCK_FOLLOWERS_PATH, "request": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
             "watch": {"method": "GET", "endpoint": CLOCK_WATCH_PATH, "hold_s": CLOCK_WATCH_HOLD_S, "request": {"type": "object", "properties": {"after": {"type": "string"}, "follower": {"type": "string"}}}}}},
         "required": False,

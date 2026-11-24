@@ -95,6 +95,7 @@ def test_every_agent_in_an_image_with_the_follower_serves_sync_time(image):
     assert served is not None
     request = served["params"]["methods"]["sync_time"]["request"]
     assert request == {"required": ["env_get_time_url"], "optional": ["timezone", "watch_url", "name", "read_token"]}
+    assert served["params"]["range"] == {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
 
 
 def test_an_agent_in_an_image_without_the_follower_serves_no_clock(image, monkeypatch):

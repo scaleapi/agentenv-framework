@@ -80,7 +80,7 @@ from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
 from .child_sessions import ChildSessions, is_dead_session
-from .clock import Clock, ClockError, _iso
+from .clock import Clock, ClockError, FollowerRange, _iso, parse_follower_range
 from .clock_followers import ClockFollowers, parse_wait
 from .console_session import ConsoleSession, LinkRedaction, without_session_cookie
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
@@ -182,6 +182,7 @@ class Gateway:
         computers: Iterable[str] = (),
         provider_headers: Iterable[str] = (),
         clock_followers: Mapping[str, str] | None = None,
+        clock_follower_ranges: Mapping[str, FollowerRange] | None = None,
         site_names: dict[str, Iterable[str]] | None = None,
         listed_by_name: Iterable[str] = (),
         console_urls: Mapping[str, str] | None = None,
@@ -189,7 +190,8 @@ class Gateway:
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
         which the gateway takes off every request it forwards to a service behind it. `clock_followers` names the
-        followers of its clock, each with the read token its watch carries. `site_names` are each site's names as its
+        followers of its clock, each with the read token its watch carries, and `clock_follower_ranges` the times each
+        that holds only a range of them holds, which the clock keeps to. `site_names` are each site's names as its
         env stores them, the names its card declares standing in for a site's that stores none: a site reached at one
         takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a browser
         computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
@@ -272,8 +274,8 @@ class Gateway:
                     inputSchema={"type": "object", "properties": {}},
                 )
             )
-        self._clock = Clock()
-        self._clock_followers = ClockFollowers(lambda: self._clock, clock_followers or {})
+        self._clock = Clock(follower_ranges=lambda: self._clock_followers.held())
+        self._clock_followers = ClockFollowers(lambda: self._clock, clock_followers or {}, clock_follower_ranges)
         self._notifications = Notifications(lambda: self._clock)
         self._user_chat = UserChat(lambda: self._clock)
         self._env_get_time_url_cache: str | None = None
@@ -433,7 +435,8 @@ class Gateway:
             if not isinstance(body, dict):
                 return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
             try:
-                self._clock_followers.declare(str(body.get("name") or ""), str(body.get("read_token") or ""))
+                held = None if body.get("range") is None else parse_follower_range(body["range"])
+                self._clock_followers.declare(str(body.get("name") or ""), str(body.get("read_token") or ""), held)
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
             return self._json_response({"ok": True, "followers": self._clock_followers.state()}, 200)

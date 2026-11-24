@@ -74,7 +74,11 @@ def build_get_time_tool(clock: Clock, make_arg_model: Callable[[str, dict], Any]
             return _tool_error(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as "
                                "'America/New_York'")
         reading = read_time(clock)
-        local = datetime.fromisoformat(reading["current_time"]).astimezone(zone)
+        try:
+            local = datetime.fromisoformat(reading["current_time"]).astimezone(zone)
+        except OverflowError:
+            return _tool_error(f"the current time {reading['current_time']} can't be shown in time zone "
+                               f"{time_zone!r}: its local date is out of range")
         return {**reading, "time_zone": time_zone, "local_time": local.isoformat()}
 
     return FastMCPTool(

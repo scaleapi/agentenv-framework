@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import ExtensionCallError
 from agentenv_protocol.computer.clock import CONFIG, FOLLOWER_USER
 
@@ -37,6 +38,13 @@ TIME_PATH = "/clock/time"
 def follows(record: DeployedEnv) -> bool:
     """Whether the computer ``record`` deployed follows the universe clock, as its card says."""
     return record.supports(EXT_CLOCK_URI, "sync_time")
+
+
+def held_range(record: DeployedEnv) -> Optional[dict]:
+    """The times the computer ``record`` deployed holds, when its card declares it holds only a range of them
+    (clock/v1's ``range``, ``{"earliest": ..., "latest": ...}``); a card from before it declares none."""
+    held = protocol_v1.extension_params(record.environment_card or {}, EXT_CLOCK_URI).get("range")
+    return held if follows(record) and isinstance(held, dict) and held.get("earliest") and held.get("latest") else None
 
 
 def recorded(record: DeployedEnv) -> Optional[dict]:

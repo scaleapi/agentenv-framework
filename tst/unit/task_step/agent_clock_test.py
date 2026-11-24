@@ -68,6 +68,65 @@ async def test_an_agent_is_declared_a_follower_then_handed_its_config_with_the_s
     assert (agent["agent"], agent["synced"], agent["follower"]) == ("solver", True, "agent-solver")
 
 
+HELD = {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
+
+
+def _ranged_agent() -> DeployedAgent:
+    sync = {"uri": EXT_CLOCK_URI, "params": {"endpoint": "/ext/clock", "methods": {"sync_time": SYNC_TIME}, "range": HELD}}
+    return dataclasses.replace(_agent(), a2a_card={"capabilities": {"extensions": [sync]}})
+
+
+def _refusing_declarations(monkeypatch, error: str) -> list:
+    """Record every request, as _mock_http does, the gateway refusing every declare_follower with ``error``."""
+    import httpx
+
+    sent, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if request.url.path.endswith("/clock/followers") and request.method == "PUT":
+            return httpx.Response(400, json={"ok": False, "error": error})
+        return httpx.Response(200, json={"env_get_time_url": CLOCK_URL} if request.url.path.endswith("/clock/state") else {})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_card_declares_the_times_it_holds_brings_that_range_to_the_gateway(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_ranged_agent())
+
+    await _step().execute(context)
+
+    [declared] = [r for r in sent if r.method == "PUT" and r.url.path.endswith("/clock/followers")]
+    assert json.loads(declared.content)["range"] == HELD
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required", [False, True])
+async def test_an_agent_the_gateway_refuses_for_its_range_is_reported_and_skipped_or_fails_the_step(monkeypatch,
+                                                                                                   required):
+    refusal = ("the clock, at 3026-01-01T00:00:00Z, is outside the times clock follower 'agent-solver' holds, "
+               "1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z")
+    sent = _refusing_declarations(monkeypatch, refusal)
+    _no_servers(monkeypatch)
+    context = await _context(_ranged_agent())
+    step = SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", virtual_time="3026-01-01T00:00:00Z",
+                                agent_clock=True, require_agent_clock=required, depends_on=[])
+
+    if required:
+        with pytest.raises(StepContextError, match="agent 'solver' can't follow the clock of env 'e1': outside_range: "
+                                                   "the clock, at 3026"):
+            await step.execute(context)
+    else:
+        await step.execute(context)
+        [agent] = context.metadata["clock_configurations"][0]["agents"]
+        assert (agent["synced"], agent["reason"]) == (False, f"outside_range: {refusal}")
+    assert not [r for r in sent if r.url.path.endswith("/ext/clock/sync-time")]
+
+
 @pytest.mark.asyncio
 async def test_only_the_agents_registered_with_the_env_follow_its_clock(monkeypatch):
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})

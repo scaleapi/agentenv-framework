@@ -37,6 +37,7 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.console_session import frame_ancestor_problem
 from agent_env.env.gateway.constants import (
+    CLOCK_FOLLOWER_RANGES_ENV,
     CLOCK_FOLLOWERS_ENV,
     COMPUTERS_ENV,
     CONSOLE_FRAME_ANCESTORS_ENV,
@@ -1861,9 +1862,13 @@ def _redact_compose_secrets(compose_content: str) -> str:
 
 
 def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
-    """The gateway's declared clock followers: each child that is one, by the read token its watch carries."""
-    followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children if child.clock_read_token)
-    return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
+    """The gateway's declared clock followers: each child that is one, by the read token its watch carries, and the
+    times each that holds only a range of them holds."""
+    children = [child for child in children if child.clock_read_token]
+    followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children)
+    held = ",".join(f"{child.name}={child.clock_range['earliest']}/{child.clock_range['latest']}"
+                    for child in children if child.clock_range)
+    return {**({CLOCK_FOLLOWERS_ENV: followers} if followers else {}), **({CLOCK_FOLLOWER_RANGES_ENV: held} if held else {})}
 
 
 def control_token_children_environment(children: Iterable[ExternalChild], control_token: str | None) -> dict[str, str]:

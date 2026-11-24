@@ -20,7 +20,6 @@ from agent_env.env.gateway.clock import Clock, ClockError
 from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_DESCRIPTION, GET_TIME_TOOL_NAME
 from agent_env.env.gateway.gateway import Gateway
-from tst.unit.env.gateway.triggers_time_test import FakeNow
 
 T = "2019-06-15T12:00:00Z"
 
@@ -275,22 +274,20 @@ def test_local_time_is_the_same_reading_at_second_precision(gw):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arm, rate, real_s, zone, now", [
-    ("2026-01-01T00:00:00Z", 86400, 1e9, "Asia/Tokyo", "2262-04-11T23:47:16Z"),
-    ("1677-09-21T00:12:44Z", 0, 0, "America/New_York", "1677-09-21T00:12:44Z"),
-], ids=["a-gateway-that-outlives-the-range", "the-start-of-the-range"])
-async def test_every_time_the_clock_holds_shows_in_any_zone(gw, arm, rate, real_s, zone, now):
-    """The clock stays within its range, even on a gateway that outlives it, and every zone's clock shows its ends."""
-    real = FakeNow()
-    gw._clock = Clock(now_fn=real)
-    gw._clock.set_time(arm, rate)
-    real.tick(real_s)
+@pytest.mark.parametrize("now, zone", [
+    ("9999-12-31T20:00:00Z", "Asia/Tokyo"),
+    ("0001-01-01T02:00:00Z", "America/New_York"),
+], ids=["after-the-last-date", "before-the-first-date"])
+async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw, now, zone):
+    gw._clock.set_time(now, 0)
     gw._register_get_time_tool()
+    message = f"the current time {now} can't be shown in time zone {zone!r}: its local date is out of range"
 
-    payload = await _mcp_call(gw, {"time_zone": zone})
-    reading = json.loads(payload["content"][0]["text"])
-    assert reading["current_time"] == now and reading["time_zone"] == zone
-    assert datetime.fromisoformat(reading["local_time"]) == datetime.fromisoformat(now)
+    assert await _mcp_call(gw, {"time_zone": zone}) == {
+        "content": [{"type": "text", "text": message}], "isError": True}
+    status, body = await _step_call(gw, {"time_zone": zone})
+    assert (status, json.loads(body)) == (
+        200, {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None})
 
 
 def test_the_description_keeps_tool_dates_in_utc_and_gives_the_users_clock_when_their_zone_is_known():

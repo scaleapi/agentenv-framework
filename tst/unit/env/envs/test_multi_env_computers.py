@@ -331,6 +331,18 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_wi
         ("gw", "modal_vm"), ("gw", "modal_vm"), ("sb-desktop", "modal_vm"), ("sb-laptop", "modal_vm")]
 
 
+def test_a_computer_whose_card_declares_the_times_it_holds_hands_the_gateway_that_range():
+    from agent_env.env.envs.computer.utils import clock as computer_clock
+
+    held = {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
+    ranged = dataclasses.replace(_record("desktop", clock=True), environment_card={"name": "desktop", "capabilities": {
+        "extensions": [{**CLOCK_CARD["capabilities"]["extensions"][0], "params": {
+            **CLOCK_CARD["capabilities"]["extensions"][0]["params"], "range": held}}]}})
+    assert computer_clock.held_range(ranged) == held
+    assert computer_clock.held_range(_record("old", clock=True)) is None
+    assert computer_clock.held_range(_record("laptop")) is None
+
+
 def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():
     from agent_env.env.envs._multi_computers import _clock_read_token
 

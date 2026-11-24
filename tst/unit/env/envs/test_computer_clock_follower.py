@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 import agent_env
-from agent_env.env.gateway.clock import EARLIEST, LATEST
+from agentenv_protocol.computer.clock import RANGE
 from agentenv_protocol.computer import clock as protocol_clock
 
 CLOCK = Path(agent_env.__file__).parent / "utils" / "faketime_clock"
@@ -147,19 +147,22 @@ def test_the_clock_file_the_follower_writes_reads_as_its_universe_to_a_server_on
     assert protocol_clock.session_time() == pytest.approx(time.time(), abs=1)
 
 
-def test_the_page_holds_the_env_clocks_range():
+def _range_ns(end: str) -> int:
+    return int(datetime.fromisoformat(RANGE[end].replace("Z", "+00:00")).timestamp()) * 10**9
+
+
+def test_the_page_holds_the_range_computers_declare():
     clockpage = _clockpage(Path("/nonexistent"))
-    assert (clockpage.EARLIEST_NS, clockpage.LATEST_NS) == (int(EARLIEST.timestamp()) * 10**9,
-                                                            int(LATEST.timestamp()) * 10**9)
+    assert (clockpage.EARLIEST_NS, clockpage.LATEST_NS) == (_range_ns("earliest"), _range_ns("latest"))
 
 
 def test_a_universe_outside_the_range_is_written_at_its_end_and_the_page_left_whole(tmp_path):
     """As a follower writes the clock of a gateway that outlives its range: a universe given past either end, or one
-    the page has run on past the end to when a re-anchoring continues it, is written at the end, where the gateway's
-    clock stops, and a write never fails halfway with the page left mid-write (seq odd)."""
+    the page has run on past the end to when a re-anchoring continues it, is written at the end, where libfaketime
+    stops too, and a write never fails halfway with the page left mid-write (seq odd)."""
     clockpage = _clockpage(tmp_path / "page")
     clockpage.FILE = str(tmp_path / "clock")
-    end = int(LATEST.timestamp()) * 10**9
+    end = _range_ns("latest")
 
     def page() -> tuple[int, int, float]:
         fields = clockpage.LAYOUT.unpack((tmp_path / "page").read_bytes())
@@ -169,7 +172,7 @@ def test_a_universe_outside_the_range_is_written_at_its_end_and_the_page_left_wh
     seq, universe_ns, _ = page()
     assert (seq % 2, universe_ns) == (0, end)
     clockpage.write(1, -9223372100.0, 1.0, time.time())
-    assert page()[1] == int(EARLIEST.timestamp()) * 10**9
+    assert page()[1] == _range_ns("earliest")
 
     clockpage.write(1, 9223372035.0, 1.0, time.time() - 1.95)
     clockpage.write(1, 9223372036.0, 0.0, time.time())

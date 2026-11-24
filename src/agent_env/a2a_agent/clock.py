@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
+from agentenv_protocol.client import ExtensionCallError
+
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env.env import EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.gateway.constants import CLOCK_WATCH_PATH, EXT_CLOCK_URI
@@ -51,6 +53,13 @@ def follower_name(agent: DeployedAgent) -> str:
     return f"agent-{agent.agent_name}"
 
 
+def held_range(agent: DeployedAgent) -> Optional[dict]:
+    """The times ``agent`` holds, when its card declares it holds only a range of them (clock/v1's ``range``); a card
+    from before it declares none."""
+    held = (A2AAgent.find_extension(agent.a2a_card or {}, EXT_CLOCK_URI) or {}).get("params", {}).get("range")
+    return held if isinstance(held, dict) and held.get("earliest") and held.get("latest") else None
+
+
 def _sync_time(agent: DeployedAgent) -> tuple[Optional[dict], Optional[str]]:
     return A2AAgent.operation(A2AAgent.find_extension(agent.a2a_card or {}, EXT_CLOCK_URI), "sync_time")
 
@@ -72,7 +81,8 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
                  timezone: Optional[str], timeout: float) -> dict:
     """Have ``agent`` follow ``env``'s gateway clock. ``{"synced": False, "reason": ...}`` for an agent that can't:
     its card serves no ``sync_time`` (``not_advertised``) or one without the follower's fields
-    (``no_follower_fields``), or the gateway takes no followers after it starts (``gateway_takes_no_followers``); raises
+    (``no_follower_fields``), the gateway takes no followers after it starts (``gateway_takes_no_followers``), or the
+    clock is outside the range of times the agent's card says it holds (``outside_range: <the gateway's refusal>``); raises
     for one that serves it and fails, having retired the follower it declared, or can't take the task's zone, as for
     a server."""
     method, path = _sync_time(agent)
@@ -85,10 +95,16 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
         raise StepContextError(f"agent '{agent.agent_name}' serves {EXT_CLOCK_URI} sync_time without a timezone; "
                                f"rebuild its image or drop timezone={timezone!r} from the task")
     name, token = follower_name(agent), secrets.token_urlsafe(READ_TOKEN_BYTES)
+    held = held_range(agent)
     try:
-        await env.invoke(EXT_CLOCK_URI, "declare_follower", {"name": name, "read_token": token}, timeout=timeout)
+        await env.invoke(EXT_CLOCK_URI, "declare_follower",
+                         {"name": name, "read_token": token, **({"range": held} if held else {})}, timeout=timeout)
     except EnvCapabilityUnsupported:
         return {"synced": False, "reason": "gateway_takes_no_followers"}
+    except ExtensionCallError as e:
+        if held is None or e.response.status_code != 400:
+            raise
+        return {"synced": False, "reason": f"outside_range: {e.detail}"}
     body = {"env_get_time_url": env_get_time_url or "", "watch_url": watch_url_for(agent, env), "name": name,
             "read_token": token, **({"timezone": timezone} if timezone is not None else {})}
     url = (agent.a2a_url or agent.api_url).rstrip("/") + path

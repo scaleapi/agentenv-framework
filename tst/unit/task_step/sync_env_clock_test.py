@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
-from agent_env.env.gateway.clock import outside_range
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, WELL_KNOWN_PATH
 from agent_env.task import Task
 from agent_env.task.lint import lint
@@ -16,7 +15,6 @@ from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, 
 
 T0 = "2026-01-01T00:00:00Z"
 CLOCK_URL = "http://gateway:9000/clock/time"
-RANGE = "the env clock's range, 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z"
 
 
 def _step(**kw):
@@ -348,17 +346,15 @@ def test_a_time_that_disagrees_with_the_zone_is_refused(virtual_time, zone, matc
 
 @pytest.mark.parametrize("virtual_time, zone", [("0001-01-01T00:00:00", "Asia/Kolkata"),
                                                 ("9999-12-31T23:00:00", "America/Chicago")])
-def test_a_wall_time_whose_instant_no_date_holds_is_refused_naming_the_clocks_range(virtual_time, zone):
-    with pytest.raises(ValueError, match=re.escape(f"virtual_time '{virtual_time}' in {zone} is outside {RANGE}")):
+def test_a_wall_time_whose_instant_no_date_holds_is_refused_saying_so(virtual_time, zone):
+    with pytest.raises(ValueError, match=re.escape(f"virtual_time '{virtual_time}' in {zone} is outside the times a "
+                                                   "datetime holds")):
         _zoned(virtual_time, zone)
 
 
 @pytest.mark.parametrize("kwargs, problem", [
-    ({"virtual_time": "3026-01-01T00:00:00Z"}, f"virtual_time '3026-01-01T00:00:00Z' is outside {RANGE}"),
-    ({"virtual_time": "1677-09-21T05:00:00", "timezone": "Asia/Tokyo"},
-     f"virtual_time '1677-09-21T05:00:00' in Asia/Tokyo is outside {RANGE}"),
-    ({"virtual_time": "2262-04-11T23:00:00Z"},
-     "virtual_time '2262-04-11T23:00:00Z' at rate 1 would pass 2262-04-11T23:47:16Z, the end of the env clock's range"),
+    ({"virtual_time": "9999-12-31T12:00:00Z"},
+     "virtual_time '9999-12-31T12:00:00Z' at rate 1 would overflow datetime near the max"),
     ({"virtual_time": "2026-01-01T12:00:00"}, "invalid RFC3339 virtual_time '2026-01-01T12:00:00'"),
     ({"virtual_time": T0, "virtual_seconds_per_real_second": -1}, "rate must be non-negative"),
 ])
@@ -368,16 +364,17 @@ def test_a_time_or_rate_the_gateway_would_refuse_is_a_problem_before_anything_de
 
 
 def test_lint_names_the_step_of_a_time_the_gateway_would_refuse_once():
-    step = SyncEnvClockTaskStep(id="clock", version=1, env_id="e1", virtual_time="3026-01-01T00:00:00Z", depends_on=[])
+    step = SyncEnvClockTaskStep(id="clock", version=1, env_id="e1", virtual_time="2026-01-01T12:00:00", depends_on=[])
     found = [finding.text for finding in lint(Task(id="t", version=1, steps=[step])) if finding.rule == "step-config"]
-    assert found == ["step 'clock': " + outside_range("virtual_time '3026-01-01T00:00:00Z'")]
+    assert found == ["step 'clock': invalid RFC3339 virtual_time '2026-01-01T12:00:00': expected "
+                     "YYYY-MM-DDThh:mm:ss[.fff](Z|+hh:mm)"]
 
 
 def test_a_time_the_gateway_arms_at_is_no_problem():
     assert _step().config_problems() == []
     assert _step(virtual_seconds_per_real_second=0).config_problems() == []
-    assert SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", virtual_time="2262-04-11T23:47:16Z",
-                                virtual_seconds_per_real_second=0).config_problems() == []
+    for far in ("1600-01-01T00:00:00Z", "3026-01-01T00:00:00Z", "9999-06-01T00:00:00Z"):
+        assert SyncEnvClockTaskStep(id="sync", version=1, env_id="e1", virtual_time=far).config_problems() == []
     assert _zoned("1677-09-21T09:31:43", "Asia/Tokyo").config_problems() == []
 
 

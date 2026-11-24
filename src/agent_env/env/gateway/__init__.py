@@ -31,12 +31,14 @@ class InternalMCPServer:
 class ExternalChild:
     """A child env on a sandbox of its own, which the gateway fronts as it does an MCP server: its name, and its MCP
     endpoint and base URL as the process holding it reaches them. A child that is a clock follower has the read token its
-    clock watch carries, and the gateway's clock writes wait for it."""
+    clock watch carries, and the gateway's clock writes wait for it; one that holds only a range of times has that range
+    (``{"earliest": ..., "latest": ...}``), which the gateway's clock keeps to."""
 
     name: str
     mcp_url: str
     base_url: str
     clock_read_token: str | None = None
+    clock_range: dict | None = None
 
 
 __all__ = [

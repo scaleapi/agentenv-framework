@@ -1,135 +1,116 @@
-"""The env clock's range, the times 64 bits of nanoseconds since 1970 hold, as Python and the computers that follow the
-clock keep time: the gateway arms and runs anywhere in it, before 1970 too and a day per second at today's dates, and
-refuses a time outside it, however it's spelled, or arming the clock where it would run to the end within a real hour,
-up front, naming the range. A clock that runs to the end anyway, on a gateway that outlives it or sped up in its last
-hour, stands there."""
+"""The clock's followers that hold only a range of times (a computer's and a clock-following agent's card declare
+clock/v1's ``range``, what 64 bits of nanoseconds since 1970 hold): while the clock has one, it refuses a set_time or an
+advance outside that range, naming the follower, and a set_time it would run past the range's end from within a real
+hour; a declaration the clock is outside now is refused. Without such a follower the clock is as it always was."""
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
+import asyncio
 
 import pytest
+from agentenv_protocol.computer.clock import RANGE
 
-from agent_env.env.gateway.clock import EARLIEST, LATEST, Clock, ClockError, _iso, check_arm
-from agent_env.env.gateway.constants import EXT_CLOCK_URI, GATEWAY_EXTENSIONS
+from agent_env.env.gateway.clock import Clock, ClockError, parse_follower_range
+from agent_env.env.gateway.clock_followers import ClockFollowers
+from agent_env.env.gateway.entrypoint import parse_clock_follower_ranges
 from tst.unit.env.gateway.triggers_time_test import FakeNow
 
-RANGE = "the env clock's range, 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z"
-END = "would pass 2262-04-11T23:47:16Z, the end of the env clock's range, within a real hour"
+HELD = parse_follower_range(RANGE)
+DESKTOP = "clock follower 'desktop' holds, 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z"
 
 
-def _refused(message: str):
-    return pytest.raises(ClockError, match=re.escape(message))
+def _clock(held: dict | None = None, tokens: dict | None = None) -> tuple[Clock, ClockFollowers, FakeNow]:
+    now = FakeNow()
+    followers: ClockFollowers | None = None
+    clock = Clock(now_fn=now, follower_ranges=lambda: followers.held())
+    followers = ClockFollowers(lambda: clock, tokens if tokens is not None else dict.fromkeys(held or {}, "token"), held)
+    return clock, followers, now
 
 
-def test_the_range_is_the_whole_seconds_64_bits_of_nanoseconds_since_1970_hold():
-    first, last = int(EARLIEST.timestamp()), int(LATEST.timestamp())
+def test_the_range_computers_and_agents_declare_is_what_64_bits_of_nanoseconds_since_1970_hold():
+    first, last = int(HELD.earliest.timestamp()), int(HELD.latest.timestamp())
     assert (first - 1) * 10**9 < -2**63 <= first * 10**9
     assert last * 10**9 <= 2**63 - 1 < (last + 1) * 10**9
 
 
-@pytest.mark.parametrize("virtual_time, rate", [
-    ("1677-09-21T00:12:44Z", 1), ("1900-01-01T00:00:00Z", 60), ("1949-12-31T23:59:59.750000Z", 1),
-    ("2026-11-23T12:00:00Z", 86400), ("2262-04-11T22:47:16Z", 1), ("2262-04-11T23:47:16Z", 0)])
-def test_the_clock_arms_and_runs_anywhere_in_its_range(virtual_time, rate):
-    now = FakeNow()
-    clock = Clock(now_fn=now)
+@pytest.mark.parametrize("virtual_time", ["1600-01-01T00:00:00Z", "2262-04-11T23:47:17Z", "3026-11-23T12:00:00Z",
+                                          "9999-06-01T12:00:00Z"])
+def test_without_a_follower_that_holds_a_range_the_clock_arms_anywhere_a_datetime_holds(virtual_time):
+    for clock in (_clock()[0], _clock(tokens={"desktop": "token"})[0]):
+        assert clock.set_time(virtual_time)["virtual_time"] == virtual_time
 
+
+def test_without_one_the_clock_still_refuses_what_it_always_did():
+    with pytest.raises(ClockError, match="would overflow datetime near the max"):
+        _clock()[0].set_time("9999-12-31T12:00:00Z")
+
+
+@pytest.mark.parametrize("virtual_time", ["0001-01-01T00:00:00Z", "1677-09-21T00:12:43Z", "2262-04-11T23:47:17Z",
+                                          "3026-11-23T12:00:00Z", "9999-06-01T12:00:00Z"])
+def test_a_time_outside_a_followers_range_is_refused_naming_it(virtual_time):
+    clock, _, _ = _clock({"desktop": HELD})
+    with pytest.raises(ClockError, match=f"virtual_time '{virtual_time}' is outside the times {DESKTOP}"):
+        clock.set_time(virtual_time, rate=0)
+    assert not clock.state()["armed"]
+
+
+@pytest.mark.parametrize("virtual_time, rate", [("1677-09-21T00:12:44Z", 1), ("1949-12-31T23:59:59.750000Z", 1),
+                                                ("2026-11-23T12:00:00Z", 86400), ("2262-04-11T22:47:16Z", 1),
+                                                ("2262-04-11T23:47:16Z", 0)])
+def test_the_clock_arms_anywhere_in_a_followers_range(virtual_time, rate):
+    clock, _, now = _clock({"desktop": HELD})
     assert clock.set_time(virtual_time, rate=rate)["virtual_time"] == virtual_time
     now.tick(1)
     assert clock.read()["virtual_time"] >= virtual_time
 
 
-@pytest.mark.parametrize("virtual_time", [
-    "0001-01-01T00:00:00Z", "1600-01-01T00:00:00Z", "1677-09-21T00:12:43Z", "2262-04-11T23:47:17Z",
-    "3026-11-23T12:00:00Z", "9999-12-31T23:59:59Z", "10000-01-01T00:00:00Z", "0000-01-01T00:00:00Z",
-    "0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00", "1677-09-21T00:12:44+00:01"])
-def test_a_time_outside_the_range_is_refused_naming_it_however_its_spelled(virtual_time):
-    with _refused(f"virtual_time '{virtual_time}' is outside {RANGE}"):
-        Clock(now_fn=FakeNow()).set_time(virtual_time, rate=0)
+def test_arming_a_clock_that_would_run_past_a_followers_range_within_a_real_hour_is_refused():
+    clock, _, _ = _clock({"desktop": HELD})
+    with pytest.raises(ClockError, match=f"at rate 1 would pass the end of the times {DESKTOP}, within a real hour"):
+        clock.set_time("2262-04-11T23:00:00Z")
+    with pytest.raises(ClockError, match="at rate 86400 would pass the end"):
+        clock.set_time("2255-01-01T00:00:00Z", rate=86400)
 
 
-@pytest.mark.parametrize("virtual_time", ["10000-junk", "999-01-01T00:00:00Z", "2026-13-01T00:00:00Z"])
-def test_a_string_that_isnt_a_time_is_refused_as_one(virtual_time):
-    with _refused(f"invalid RFC3339 virtual_time '{virtual_time}'"):
-        Clock(now_fn=FakeNow()).set_time(virtual_time, rate=0)
+def test_an_advance_past_a_followers_range_is_refused_and_one_into_its_last_hour_or_a_rate_change_is_not():
+    clock, _, _ = _clock({"desktop": HELD})
+    clock.set_time("2262-04-01T00:00:00Z")
+    with pytest.raises(ClockError, match=f"virtual_time '2262-04-12T00:00:00Z' is outside the times {DESKTOP}"):
+        clock.advance("2262-04-12T00:00:00Z")
+    assert clock.read()["virtual_time"] == "2262-04-01T00:00:00Z"
+    assert clock.advance("2262-04-11T23:00:00Z")["virtual_time"] == "2262-04-11T23:00:00Z"
+    assert clock.set_rate(3600)["virtual_seconds_per_real_second"] == 3600
 
 
-def test_arming_a_clock_that_would_pass_the_end_within_a_real_hour_names_it():
-    with _refused(f"virtual_time '2262-04-11T23:00:00Z' at rate 1 {END}"):
-        Clock(now_fn=FakeNow()).set_time("2262-04-11T23:00:00Z")
+def test_a_declared_agent_brings_its_range_and_takes_it_away_when_retired():
+    clock, followers, _ = _clock()
+    clock.set_time("2026-11-23T12:00:00Z")
+    followers.declare("agent-solver", "token", HELD)
+    assert followers.state()["agent-solver"]["range"] == RANGE
+    with pytest.raises(ClockError, match="is outside the times clock follower 'agent-solver' holds"):
+        clock.set_time("3026-01-01T00:00:00Z")
+    assert asyncio.run(followers.retire("agent-solver"))
+    assert clock.set_time("3026-01-01T00:00:00Z")["virtual_time"] == "3026-01-01T00:00:00Z"
 
 
-def test_however_slow_a_clock_runs_from_the_end_it_would_pass_it():
-    with _refused(f"virtual_time '2262-04-11T23:47:16Z' at rate 1e-10 {END}"):
-        Clock(now_fn=FakeNow()).set_time("2262-04-11T23:47:16Z", rate=1e-10)
+def test_an_agent_whose_range_the_clock_is_outside_now_is_refused_and_one_that_declares_none_is_not():
+    clock, followers, _ = _clock()
+    clock.set_time("3026-01-01T00:00:00Z")
+    with pytest.raises(ClockError, match="the clock, at 3026-01-01T00:00:00Z, is outside the times clock follower "
+                                         "'agent-solver' holds, 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z"):
+        followers.declare("agent-solver", "token", HELD)
+    assert "agent-solver" not in followers.state()
+    followers.declare("agent-old", "token")
+    assert "range" not in followers.state()["agent-old"]
+    assert clock.set_time("9000-01-01T00:00:00Z")["virtual_time"] == "9000-01-01T00:00:00Z"
 
 
-def test_a_clock_frozen_in_its_last_real_hour_starts_again_and_runs_to_the_end():
-    """As always_on runs one: frozen between turns, advanced while frozen to a due event, then run at the task's rate
-    for the next turn."""
-    now = FakeNow()
-    clock = Clock(now_fn=now)
-    clock.set_time("2262-04-11T22:40:00Z")
-    now.tick(60)
-    clock.set_rate(0)
-    clock.advance("2262-04-11T23:00:00Z")
-
-    assert clock.set_rate(1)["virtual_seconds_per_real_second"] == 1
-    now.tick(40 * 60)
-    assert clock.read() == {"virtual_time": "2262-04-11T23:40:00Z"}
-    now.tick(10 * 60)
-    state = clock.state()
-    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
-
-
-def test_in_its_last_real_hour_a_running_clock_takes_any_advance_or_rate_and_stands_at_the_end():
-    now = FakeNow()
-    clock = Clock(now_fn=now)
-    clock.set_time("2262-04-11T22:47:16Z")
-
-    assert clock.advance("2262-04-11T23:30:00Z")["virtual_time"] == "2262-04-11T23:30:00Z"
-    assert clock.set_rate(86400)["virtual_seconds_per_real_second"] == 86400
-    now.tick(1)
-    assert clock.now() == LATEST
-    with _refused(f"virtual_time '2262-04-11T23:47:17Z' is outside {RANGE}"):
-        clock.advance("2262-04-11T23:47:17Z")
-
-
-def test_a_clock_armed_frozen_at_the_end_takes_a_rate_as_one_that_ran_there_does():
-    clock = Clock(now_fn=FakeNow())
-    clock.set_time("2262-04-11T23:47:16Z", rate=0)
-    state = clock.set_rate(1e-10)
-    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
-
-
-def test_a_clock_that_outlives_its_range_stands_at_the_end_and_can_still_be_frozen_or_set_back():
-    """Its reads and state stop at the end, at rate 0, so the computers that follow it stop there too rather than run
-    past what their clock page holds."""
-    now = FakeNow()
-    clock = Clock(now_fn=now)
-    clock.set_time("2262-04-11T22:47:16Z")
-    now.tick(3601)
-    assert clock.read() == {"virtual_time": "2262-04-11T23:47:16Z"}
-    state = clock.state()
-    assert (state["virtual_time"], state["virtual_seconds_per_real_second"]) == ("2262-04-11T23:47:16Z", 0.0)
-    now.tick(10**9)
-    assert clock.now() == LATEST
-
-    assert clock.advance("2262-04-11T23:47:16Z")["virtual_time"] == "2262-04-11T23:47:16Z"
-    assert clock.set_rate(1)["virtual_time"] == "2262-04-11T23:47:16Z"
-    assert clock.set_rate(0)["virtual_time"] == "2262-04-11T23:47:16Z"
-    with _refused("advance only moves forward"):
-        clock.advance("2262-04-11T23:00:00Z")
-    assert clock.set_time("2026-11-23T12:00:00Z")["virtual_time"] == "2026-11-23T12:00:00Z"
-
-
-def test_a_check_names_the_time_as_its_caller_wrote_it():
-    with _refused(f"virtual_time '1677-09-21T05:00:00' in Asia/Tokyo is outside {RANGE}"):
-        check_arm("1677-09-20T19:41:01Z", 0, what="virtual_time '1677-09-21T05:00:00' in Asia/Tokyo")
-    assert check_arm("2026-11-23T12:00:00Z", 60) == (datetime(2026, 11, 23, 12, tzinfo=timezone.utc), 60.0)
-
-
-def test_the_clock_card_states_the_range():
-    clock = next(ext for ext in GATEWAY_EXTENSIONS if ext["uri"] == EXT_CLOCK_URI)
-    assert f"{_iso(EARLIEST)} to {_iso(LATEST)}" in clock["description"]
+def test_the_gateway_reads_each_computers_range_from_its_start_environment():
+    assert parse_clock_follower_ranges(
+        "desktop=1677-09-21T00:12:44Z/2262-04-11T23:47:16Z, browser=1950-01-01T00:00:00Z/2100-01-01T00:00:00Z") == {
+        "desktop": HELD, "browser": parse_follower_range({"earliest": "1950-01-01T00:00:00Z",
+                                                          "latest": "2100-01-01T00:00:00Z"})}
+    assert parse_clock_follower_ranges("") == {}
+    for spec in ("desktop", "desktop=1677-09-21T00:12:44Z", "desktop=2262-04-11T23:47:16Z/1677-09-21T00:12:44Z",
+                 "desktop=yesterday/today"):
+        with pytest.raises(ValueError, match="CLOCK_FOLLOWER_RANGES"):
+            parse_clock_follower_ranges(spec)

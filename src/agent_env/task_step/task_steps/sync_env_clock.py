@@ -28,7 +28,7 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.a2a_agent.clock import follow_agents, on_deployment, torn_down
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
-from agent_env.env.gateway.clock import ClockError, check_arm, outside_range
+from agent_env.env.gateway.clock import ClockError, check_arm
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -68,7 +68,7 @@ def resolve_virtual_time(virtual_time: str, timezone: Optional[str]) -> str:
                              "timezone")
         return parsed.astimezone(_utc_tz.utc).isoformat().replace("+00:00", "Z")
     except OverflowError as e:
-        raise ValueError(outside_range(f"virtual_time {virtual_time!r} in {zone.key}")) from e
+        raise ValueError(f"virtual_time {virtual_time!r} in {zone.key} is outside the times a datetime holds") from e
 
 
 class SyncEnvClockTaskStep(TaskStep):
@@ -119,10 +119,10 @@ class SyncEnvClockTaskStep(TaskStep):
         self.armed_virtual_time = resolve_virtual_time(virtual_time, self.timezone)
 
     def config_problems(self) -> list[str]:
-        """A time or rate the gateway's clock would refuse to arm at, said before anything deploys."""
-        shown = f"virtual_time {self.virtual_time!r}" + (f" in {self.timezone}" if self.timezone else "")
+        """A time or rate the gateway's clock would refuse to arm at whatever its followers, said before anything
+        deploys; a follower that holds only a range of times refuses one outside it when the step runs."""
         try:
-            check_arm(self.armed_virtual_time, self.virtual_seconds_per_real_second, what=shown)
+            check_arm(self.armed_virtual_time, self.virtual_seconds_per_real_second)
         except ClockError as e:
             return [str(e)]
         return []
