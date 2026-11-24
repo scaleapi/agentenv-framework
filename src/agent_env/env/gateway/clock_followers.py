@@ -10,7 +10,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 
-from .clock import Clock, ClockError, FollowerRange, _iso
+from .clock import Clock, ClockError, FollowerRange
 from .constants import CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S
 
 
@@ -52,14 +52,14 @@ class ClockFollowers:
     def declare(self, name: str, token: str, held: FollowerRange | None = None) -> None:
         """Declare ``name`` a follower, with the read token its watch carries and the range of times it holds if it
         holds only some, after the gateway started: an agent the run deploys. Declared again, as a redeploy does, it takes
-        the new token and range and is waited for afresh. One whose range the clock is outside now is refused."""
+        the new token and range and is waited for afresh. One whose range the clock is outside now, or would run past
+        the end of from within a real hour, is refused (``OutsideRange``)."""
         if not name or not token:
             raise ClockError("a follower takes a name and a read token")
         if name in self._tokens and name not in self._declared:
             raise ClockError(f"{name!r} is a follower this gateway started with, which a declaration doesn't replace")
-        if held is not None and (now := self._clock().now()) is not None and not held.earliest <= now <= held.latest:
-            raise ClockError(f"the clock, at {_iso(now)}, is outside the times clock follower {name!r} holds, "
-                             f"{_iso(held.earliest)} to {_iso(held.latest)}")
+        if held is not None:
+            self._clock().check_follower(name, held)
         self._tokens[name] = token
         if held is None:
             self._held.pop(name, None)
@@ -150,6 +150,5 @@ class ClockFollowers:
         now, clock = time.monotonic(), self._clock()
         return {name: {"version": None if shown is None else clock.version_of(shown),
                        "seen_s_ago": round(now - self._seen[name], 3) if name in self._seen else None,
-                       **({"range": {"earliest": _iso(held.earliest), "latest": _iso(held.latest)}}
-                          if (held := self._held.get(name)) else {})}
+                       **({"range": held.as_dict()} if (held := self._held.get(name)) else {})}
                 for name, shown in self._shown.items()}

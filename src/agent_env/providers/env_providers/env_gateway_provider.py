@@ -1866,7 +1866,7 @@ def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, 
     times each that holds only a range of them holds."""
     children = [child for child in children if child.clock_read_token]
     followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children)
-    held = ",".join(f"{child.name}={child.clock_range['earliest']}/{child.clock_range['latest']}"
+    held = ",".join("{name}={earliest}/{latest}".format(name=child.name, **child.clock_range.as_dict())
                     for child in children if child.clock_range)
     return {**({CLOCK_FOLLOWERS_ENV: followers} if followers else {}), **({CLOCK_FOLLOWER_RANGES_ENV: held} if held else {})}
 

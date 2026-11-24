@@ -48,6 +48,7 @@ from .constants import (
     CARD_FETCH_TIMEOUT_S,
     CHANGES_PAGE_DEFAULT,
     CLOCK_FOLLOWERS_PATH,
+    CLOCK_OUTSIDE_RANGE,
     CLOCK_WATCH_PATH,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
@@ -80,7 +81,7 @@ from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
 from .child_sessions import ChildSessions, is_dead_session
-from .clock import Clock, ClockError, FollowerRange, _iso, parse_follower_range
+from .clock import Clock, ClockError, FollowerRange, OutsideRange, _iso, parse_follower_range
 from .clock_followers import ClockFollowers, parse_wait
 from .console_session import ConsoleSession, LinkRedaction, without_session_cookie
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
@@ -437,6 +438,8 @@ class Gateway:
             try:
                 held = None if body.get("range") is None else parse_follower_range(body["range"])
                 self._clock_followers.declare(str(body.get("name") or ""), str(body.get("read_token") or ""), held)
+            except OutsideRange as e:
+                return self._json_response({"ok": False, "error": {"code": CLOCK_OUTSIDE_RANGE, "message": str(e)}}, 400)
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
             return self._json_response({"ok": True, "followers": self._clock_followers.state()}, 200)

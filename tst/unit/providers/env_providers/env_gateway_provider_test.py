@@ -2934,8 +2934,9 @@ def test_compose_declares_the_children_that_follow_the_clock_by_their_read_token
 def test_compose_hands_the_gateway_the_times_each_follower_that_holds_a_range_holds():
     from agent_env.env.envs.service_db import ServiceDBConfig
     from agent_env.env.gateway import ExternalChild
+    from agent_env.env.gateway.clock import parse_follower_range
 
-    held = {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
+    held = parse_follower_range({"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"})
     rendered = EnvironmentGatewayProvider().create_docker_compose(
         mcp_servers=[], gateway_image="agent-gateway",
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),

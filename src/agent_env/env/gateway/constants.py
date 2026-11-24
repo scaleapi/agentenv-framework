@@ -91,6 +91,9 @@ PGWEB_CONSOLE = "pgweb"
 # The route a clock follower long-polls, with its read token.
 CLOCK_WATCH_PATH = "/clock/watch"
 CLOCK_FOLLOWERS_PATH = "/clock/followers"
+# The error code declare_follower refuses a follower with when the clock is outside the range of times it holds, or
+# would run past its end from within a real hour.
+CLOCK_OUTSIDE_RANGE = "outside_range"
 # How long /clock/watch holds a watch naming the current version before answering it unchanged; a follower's request
 # timeout must be longer. The card's watch method advertises it as hold_s.
 CLOCK_WATCH_HOLD_S = 25.0
@@ -271,7 +274,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); declare_follower adds a follower after the gateway started (an agent the run deploys), with the read token its watches carry and, for one that holds only a range of times (its card's clock/v1 range), that range, refused when the clock is outside it now; set_time and advance refuse a time outside the range of a follower the clock has, naming it, and set_time one it would run past that range's end from within a real hour; retire_follower removes one so writes stop waiting for it (an agent the run tears down); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); declare_follower adds a follower after the gateway started (an agent the run deploys), with the read token its watches carry and, for one that holds only a range of times (its card's clock/v1 range), that range, refused with error code outside_range when the clock is outside it now or would run past its end from within a real hour; set_time and advance refuse a time outside the range of a follower the clock has, naming it, and set_time one it would run past that range's end from within a real hour; retire_follower removes one so writes stop waiting for it (an agent the run tears down); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, "time_zone": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},

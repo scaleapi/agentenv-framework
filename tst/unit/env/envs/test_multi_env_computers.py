@@ -331,16 +331,38 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_wi
         ("gw", "modal_vm"), ("gw", "modal_vm"), ("sb-desktop", "modal_vm"), ("sb-laptop", "modal_vm")]
 
 
-def test_a_computer_whose_card_declares_the_times_it_holds_hands_the_gateway_that_range():
-    from agent_env.env.envs.computer.utils import clock as computer_clock
-
-    held = {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
-    ranged = dataclasses.replace(_record("desktop", clock=True), environment_card={"name": "desktop", "capabilities": {
+def _ranged(name: str, held) -> DeployedSandboxEnv:
+    return dataclasses.replace(_record(name, clock=True), environment_card={"name": name, "capabilities": {
         "extensions": [{**CLOCK_CARD["capabilities"]["extensions"][0], "params": {
             **CLOCK_CARD["capabilities"]["extensions"][0]["params"], "range": held}}]}})
-    assert computer_clock.held_range(ranged) == held
+
+
+def test_a_computer_whose_card_declares_the_times_it_holds_hands_the_gateway_that_range():
+    from agent_env.env.envs.computer.utils import clock as computer_clock
+    from agent_env.env.gateway.clock import parse_follower_range
+
+    held = {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
+    assert computer_clock.held_range(_ranged("desktop", held)) == parse_follower_range(held)
+    child = ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk",
+                          computer_clock.held_range(_ranged("desktop", held)))
+    assert {child} == {dataclasses.replace(child)}
     assert computer_clock.held_range(_record("old", clock=True)) is None
     assert computer_clock.held_range(_record("laptop")) is None
+
+
+@pytest.mark.parametrize("held", [{"earliest": "1677-09-21", "latest": "2262-04-11"}, {"earliest": 0, "latest": 1},
+                                  {"latest": "2262-04-11T23:47:16Z"}, "1677/2262"])
+def test_a_computer_whose_card_declares_a_range_that_doesnt_parse_starts_the_gateway_as_if_it_declared_none(held, caplog):
+    from agent_env.env.envs.computer.utils import clock as computer_clock
+    from agent_env.env.gateway.entrypoint import parse_clock_follower_ranges
+
+    child = ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk",
+                          computer_clock.held_range(_ranged("desktop", held)))
+    environment = env_gateway_provider.clock_followers_environment([child])
+
+    assert child.clock_range is None and "CLOCK_FOLLOWER_RANGES" not in environment
+    assert parse_clock_follower_ranges(environment.get("CLOCK_FOLLOWER_RANGES", "")) == {}
+    assert "desktop-computer: its card's clock/v1 range is left out" in caplog.text
 
 
 def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():

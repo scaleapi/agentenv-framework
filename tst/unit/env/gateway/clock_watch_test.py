@@ -482,6 +482,25 @@ async def test_declaring_a_follower_takes_a_name_and_a_read_token(gateway, body)
     assert answer.status_code == 400 and gw._clock_followers.state() == {}
 
 
+HELD = {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
+
+
+@pytest.mark.asyncio
+async def test_a_follower_the_clock_is_outside_the_range_of_is_refused_with_its_own_code_and_a_bad_range_without(
+        gateway):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": "3026-01-01T00:00:00Z"})
+        outside = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t", "range": HELD})
+        malformed = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t",
+                                                               "range": {"earliest": "x", "latest": "y"}})
+    assert outside.status_code == 400 and outside.json()["error"]["code"] == "outside_range"
+    assert "is outside the times clock follower 'agent-solver' holds" in outside.json()["error"]["message"]
+    assert malformed.status_code == 400 and malformed.json()["error"] == (
+        "invalid RFC3339 range earliest 'x': expected YYYY-MM-DDThh:mm:ss[.fff](Z|+hh:mm)")
+    assert gw._clock_followers.state() == {}
+
+
 @pytest.mark.asyncio
 async def test_only_the_envs_control_token_declares_or_retires_a_follower(gateway):
     gw = gateway(followers={}, control_token="control")
