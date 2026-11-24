@@ -102,6 +102,20 @@ class _Spends(_Scored):
         return context
 
 
+class _ReadsCache(_Scored):
+    """Records a solver turn of 1,000 input tokens, 600 of them read from the cache, on gpt-4.1-mini, whose price here
+    gives no cache read rate."""
+
+    type = "reads_cache_run_test"
+
+    async def execute(self, context):
+        usage = StepUsage(context, self.id)
+        usage.start(ModelRole.SOLVER, "gpt-4.1-mini", None)
+        usage.turn(ModelRole.SOLVER, TerminalResponse(response_text="", usage=Usage(
+            input_tokens=1000, output_tokens=10, cache_read_tokens=600, input_includes_cache=True)))
+        return context
+
+
 class _RecordsModels(_Scored):
     """Records the models its solver, user simulator and judge ask for, as the real steps do."""
 
@@ -159,7 +173,8 @@ LAYOUT = {
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(),
-             **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels, _Spends)}}
+             **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels, _Spends,
+                                                         _ReadsCache)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     fake_plugins(monkeypatch)  # no installed package ships these classes
     monkeypatch.setattr(_Scored, "seen", [])
@@ -535,6 +550,16 @@ def test_a_usage_read_that_fails_leaves_the_run_and_its_result_without_a_cost(bu
     (run,) = run_bundle(bundle_dir, tasks=["spends"]).runs
 
     assert run.error is None and not run.cancelled and run.usage == () and run.usage_summary is None
+
+
+def test_the_cli_prints_a_cost_priced_on_an_assumed_cache_rate_as_at_most(bundle_dir, prices, quiet_logs):
+    layout(bundle_dir, {"tasks/cached.json": json.dumps([{"id": "read", "type": "reads_cache_run_test"}])})
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "cached"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "    cost: at most $0.0004 (solver gpt-4.1-mini at most $0.0004, 1.0k in, 10 out)" in lines
 
 
 def test_the_cli_prints_each_runs_cost_by_role_and_model_and_an_evals_total(bundle_dir, prices, quiet_logs):

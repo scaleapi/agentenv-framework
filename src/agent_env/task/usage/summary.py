@@ -1,6 +1,7 @@
 """A run's usage for people to read: its ledger (``ledger``) summed by role, then by model. An entry with per-model rows
 (``models``) splits along them; one without counts under its own model. Usage the map couldn't price is unpriced, never
-$0, and makes the total a lower bound, as a partial or a still running entry does."""
+$0, and makes the total a lower bound, as a partial or a still running entry does; a cost priced on an assumed rate
+(``cost_assumed``) makes it an upper bound."""
 
 from __future__ import annotations
 
@@ -16,8 +17,8 @@ ROLES = tuple(role.value for role in ModelRole)
 @dataclass
 class Share:
     """One role's usage on one model: its tokens, each None when nothing counted it, and the cost of the part that was
-    priced, with ``unpriced`` when some part had no cost and ``partial`` when its counts are a lower bound (a partial or
-    a still running entry)."""
+    priced, with ``unpriced`` when some part had no cost, ``assumed`` when some part's cost is an upper bound
+    (``cost_assumed``), and ``partial`` when its counts are a lower bound (a partial or a still running entry)."""
 
     role: str
     model: str | None
@@ -25,6 +26,7 @@ class Share:
     output_tokens: int | None = None
     cost_usd: float | None = None
     unpriced: bool = False
+    assumed: bool = False
     partial: bool = False
 
     def add(self, part: Mapping) -> None:
@@ -33,6 +35,7 @@ class Share:
         cost = part.get("cost_usd")
         if _number(cost):
             self.cost_usd = (self.cost_usd or 0.0) + cost
+            self.assumed = self.assumed or bool(part.get("cost_assumed"))
         else:
             self.unpriced = True
 
@@ -40,11 +43,13 @@ class Share:
 @dataclass(frozen=True)
 class UsageSummary:
     """A ledger summed: its shares in role order, the cost of everything priced (None when nothing was), whether that
-    cost is a lower bound, how many attempts the ledger holds, and where its costs came from (``cost_source``)."""
+    cost is a lower bound, an upper bound or, both being true, an estimate, how many attempts the ledger holds, and
+    where its costs came from (``cost_source``)."""
 
     shares: tuple[Share, ...]
     cost_usd: float | None
     lower_bound: bool
+    upper_bound: bool
     attempts: int
     sources: tuple[str, ...]
 
@@ -68,6 +73,7 @@ def summarize(ledger: Iterable[Mapping]) -> UsageSummary | None:
     priced = [share.cost_usd for share in ordered if share.cost_usd is not None]
     lower_bound = any(share.unpriced or share.partial for share in ordered)
     return UsageSummary(shares=tuple(ordered), cost_usd=sum(priced) if priced else None, lower_bound=lower_bound,
+                        upper_bound=any(share.assumed for share in ordered),
                         attempts=len({entry.get("attempt") for entry in entries}), sources=tuple(sorted(sources)))
 
 
@@ -85,11 +91,13 @@ def combine(summaries: Iterable[UsageSummary | None]) -> UsageSummary | None:
             if share.cost_usd is not None:
                 total.cost_usd = (total.cost_usd or 0.0) + share.cost_usd
             total.unpriced = total.unpriced or share.unpriced
+            total.assumed = total.assumed or share.assumed
             total.partial = total.partial or share.partial
     ordered = sorted(shares.values(), key=lambda share: (_rank(share.role), share.role, share.model or ""))
     priced = [summary.cost_usd for summary in present if summary.cost_usd is not None]
     return UsageSummary(shares=tuple(ordered), cost_usd=sum(priced) if priced else None,
                         lower_bound=any(summary.lower_bound for summary in present),
+                        upper_bound=any(summary.upper_bound for summary in present),
                         attempts=sum(summary.attempts for summary in present),
                         sources=tuple(sorted({source for summary in present for source in summary.sources})))
 

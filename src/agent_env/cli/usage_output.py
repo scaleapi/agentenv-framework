@@ -14,13 +14,12 @@ _REPORTED = (("provider", "the endpoint's bills"), ("harness", "agents' own figu
 
 
 def cost_line(summary: UsageSummary | None, label: str = "cost", attempts: bool = True) -> str | None:
-    """``cost: $0.0532 (solver gpt-4.1-mini $0.0412, 115k in, 1.2k out; judge ...)``, ``at least`` when the cost is a
-    lower bound and, with ``attempts``, the attempts named when there were more than one; None for no usage."""
+    """``cost: $0.0532 (solver gpt-4.1-mini $0.0412, 115k in, 1.2k out; judge ...)``, the cost bounded as ``_bounded``
+    says and, with ``attempts``, the attempts named when there were more than one; None for no usage."""
     if summary is None:
         return None
-    total = "unpriced" if summary.cost_usd is None else _dollars(summary.cost_usd)
-    if summary.lower_bound and summary.cost_usd is not None:
-        total = f"at least {total}"
+    total = "unpriced" if summary.cost_usd is None else _bounded(summary.cost_usd, summary.lower_bound,
+                                                                 summary.upper_bound)
     parts = [f"{summary.attempts} attempts"] if attempts and summary.attempts > 1 else []
     return f"{label}: {total} ({'; '.join([*parts, *map(_share, summary.shares)])})"
 
@@ -38,9 +37,7 @@ def sources_line(summaries: Iterable[UsageSummary | None]) -> str | None:
 
 
 def _share(share: Share) -> str:
-    cost = "unpriced" if share.cost_usd is None else _dollars(share.cost_usd)
-    if share.unpriced and share.cost_usd is not None:
-        cost = f"at least {cost}"
+    cost = "unpriced" if share.cost_usd is None else _bounded(share.cost_usd, share.unpriced, share.assumed)
     words = [f"{_ROLE_NAMES.get(share.role, share.role)} {share.model or 'an unnamed model'} {cost}"]
     if share.input_tokens is not None:
         words.append(f"{_count(share.input_tokens)} in")
@@ -49,6 +46,13 @@ def _share(share: Share) -> str:
     if share.partial:
         words.append("partial")
     return ", ".join(words)
+
+
+def _bounded(usd: float, lower: bool, upper: bool) -> str:
+    """``usd`` with what it is: ``at least`` when some usage went uncounted, ``at most`` when some was priced on an
+    assumed rate, ``estimated`` when both."""
+    word = "estimated " if lower and upper else "at least " if lower else "at most " if upper else ""
+    return f"{word}{_dollars(usd)}"
 
 
 def _dollars(usd: float) -> str:

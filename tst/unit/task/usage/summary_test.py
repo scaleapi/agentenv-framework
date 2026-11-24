@@ -60,6 +60,31 @@ def test_unpriced_usage_is_counted_apart_never_as_nothing_and_makes_the_total_a_
         "cost: unpriced (judge mystery-1 unpriced, 3.1k in, 90 out)")
 
 
+def test_a_cost_priced_on_an_assumed_rate_is_at_most_and_with_uncounted_usage_an_estimate():
+    assumed = _entry("solver", "gpt-4.1-mini", 1000, 10, 0.0004, cost_assumed=["cache_read_rate"])
+    summary = summarize([assumed, _entry("judge", "j", 100, 1, 0.0001)])
+
+    assert summary.upper_bound and not summary.lower_bound
+    assert cost_line(summary) == ("cost: at most $0.0005 (solver gpt-4.1-mini at most $0.0004, 1.0k in, 10 out; judge "
+                                  "j $0.0001, 100 in, 1 out)")
+    assert cost_line(summarize([assumed, _entry("judge", "mystery-1", 100, 1, None)])).startswith(
+        "cost: estimated $0.0004 (solver gpt-4.1-mini at most $0.0004")
+    assert cost_line(summarize([assumed, _entry("solver", "gpt-4.1-mini", 100, 1, None)])) == (
+        "cost: estimated $0.0004 (solver gpt-4.1-mini estimated $0.0004, 1.1k in, 11 out)")
+    assert combine([summarize([_entry("judge", "j", 1, 1, 0.1)]), summarize([assumed])]).upper_bound
+
+
+def test_a_per_model_row_priced_on_an_assumed_rate_bounds_its_own_share():
+    rows = [{"model": "a", "input_tokens": 9, "output_tokens": 1, "cost_usd": 0.2,
+             "cost_assumed": ["cache_write_rate"]},
+            {"model": "b", "input_tokens": 3, "output_tokens": 1, "cost_usd": 0.1}]
+    summary = summarize([_entry("solver", "a", 12, 2, 0.3, cost_assumed=["cache_write_rate"], models=rows)])
+
+    assert [(share.model, share.assumed) for share in summary.shares] == [("a", True), ("b", False)]
+    assert cost_line(summary) == ("cost: at most $0.3000 (solver a at most $0.2000, 9 in, 1 out; solver b $0.1000, 3 in, "
+                                  "1 out)")
+
+
 def test_a_partial_or_running_entry_makes_its_share_partial_and_the_total_a_lower_bound():
     for mark in ({"partial": True}, {"running": True}):
         summary = summarize([_entry("solver", "gpt-4.1-mini", 1000, 10, 0.0004, **mark)])
