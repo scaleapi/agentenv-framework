@@ -19,6 +19,7 @@ from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBS
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_finish_teardown, echo_teardown, gone
+from agent_env.cli.usage_output import cost_line, sources_line
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
@@ -26,6 +27,7 @@ from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, attempt_epoch, kind, record_teardown, teardown_run
+from agent_env.task.usage.summary import summarize
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.context_ops import build_context_update_ops
@@ -480,12 +482,27 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
             click.echo(click.style("Task completed!" if k == 1 else f"All {k} runs completed!", fg="blue"))
         elif k > 1:
             click.echo(click.style(f"{completed}/{k} runs completed, {k - completed}/{k} failed.", fg="red"))
+        _echo_usage(runs, k)
         if keep:
             _settle_kept(_ended(runs), interrupts, interrupted)
     if interrupted is not None:
         raise SystemExit(128 + interrupted)
     if completed < k or unexported:
         raise SystemExit(1)
+
+
+def _echo_usage(runs, k: int) -> None:
+    """Each run's cost by role and model from its ledger, the runs' total when there were several, and where the costs
+    came from."""
+    ledgers = [(run.tag, run.instance.usage if run.instance else []) for run in runs]
+    for tag, ledger in ledgers:
+        if cost := cost_line(summarize(ledger)):
+            click.echo(f"{tag} {cost}" if tag else cost)
+    total = summarize(entry for _, ledger in ledgers for entry in ledger)
+    if k > 1 and (cost := cost_line(total, f"Cost over {k} runs", attempts=False)):
+        click.echo(cost)
+    if sources := sources_line(total):
+        click.echo(sources)
 
 
 def _runnable(task_id: str, task_version: int | None, metadata: dict):
