@@ -177,8 +177,8 @@ def _state(records: list[dict]) -> dict:
 
 
 def _gate_type(check: dict) -> str:
-    """A gate's type, as a multiturn task names them: format (code over text), action (tool state), content (a
-    judge)."""
+    """A gate's type when the spec doesn't give one, from how it's checked: format (code over text), action (tool
+    state), content (a judge). A spec's ``type`` wins: a trajectory judge can check an action."""
     if "judge" in check or "trajectory_judge" in check:
         return "content"
     return "format" if "format" in check else "action"
@@ -193,7 +193,7 @@ def _summary(spec: dict, records: list[dict]) -> dict:
     if not spec["enabled"]:
         return {"enabled": False}
     milestones = spec["milestones"]
-    types = {g["id"]: _gate_type(g["check"]) for m in milestones for g in m["gates"]}
+    types = {g["id"]: g.get("type") or _gate_type(g["check"]) for m in milestones for g in m["gates"]}
     rows = [{"id": m["id"], "status": "not_reached", "opened_turn": None, "closed_turn": None, "nudges": 0,
              "gates": {}} for m in milestones]
     rows[0].update(status="open", opened_turn=1)

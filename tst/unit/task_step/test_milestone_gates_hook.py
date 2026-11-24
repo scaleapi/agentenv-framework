@@ -1,5 +1,6 @@
 """Offline tests for the milestone-gates example hook: a fake Turn and env, scripted tool results per turn, no network."""
 import json
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -598,3 +599,21 @@ async def test_the_note_that_opens_a_milestone_carries_its_line_so_any_user_sim_
     await post_turn(t, LINED)
     assert t.notes == ["M1 is done. Open M2 now: send this line: Now put what you found on the cut-list card. "
                        "Don't email anyone yet."]
+
+
+@pytest.mark.asyncio
+async def test_a_gates_declared_type_is_the_summarys_even_when_a_judge_checks_it(monkeypatch):
+    # A task's rubric can call a criterion an action and still have it judged on the trajectory.
+    mg._RENDERED.clear()
+
+    async def judge(spec, statement, text, *, model=None, system=mg.JUDGE_SYSTEM, max_chars=40000):
+        return True, "judged on the log"
+
+    monkeypatch.setattr(mg, "_judge", judge)
+    params = copy.deepcopy(TRAJ_PARAMS)
+    params["milestones"][0]["gates"][0]["type"] = "action"
+    turn = Turn(Env(world()), [], 1, trajectories=TRAJ)
+    await post_turn(turn, params)
+
+    assert turn.summary["milestones"][0]["gates"] == {"m1-sheet": {"passed": True, "type": "action"}}
+    assert turn.summary["milestones"][1]["gates"] == {"m2-linear": {"passed": True, "type": "content"}}  # no type given: from its check
