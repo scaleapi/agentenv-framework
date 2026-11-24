@@ -31,6 +31,7 @@ from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
 from agent_env.config.model import MODEL_PARAMS_RESERVED, ModelRole, resolve_model
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
+    DEFERRED_CALL_PENDING,
     EXT_CLOCK_URI,
     EXT_NOTIFICATIONS_URI,
     EXT_TRIGGERS_URI,
@@ -1140,7 +1141,7 @@ class PromptAgentTaskStep(TaskStep):
         rows = state.get("triggers", [])
         if any("type" not in t for t in rows):
             return None
-        if any(c.get("status") == "pending" for c in state.get("deferred_calls", [])):
+        if any(c.get("status") == DEFERRED_CALL_PENDING for c in state.get("deferred_calls", [])):
             return False
         return not any(t.get("status") in TRIGGER_IN_FLIGHT_STATUSES or t.get("pending")
                        or (t["type"] == "time" and t.get("status") == "armed") for t in rows)

@@ -149,6 +149,11 @@ TRIGGER_STATUSES = ("armed", "firing", "queued", "fired", "failed", "cancelled")
 # A fire is in flight; `queued` also has further provoking calls already waiting to be drained.
 TRIGGER_IN_FLIGHT_STATUSES = ("firing", "queued")
 
+# Deferred-call status vocabulary, part of the GET /triggers/state contract (each of `deferred_calls`).
+DEFERRED_CALL_PENDING = "pending"
+DEFERRED_CALL_DONE = "done"
+DEFERRED_CALL_FAILED = "failed"
+
 # What triggers/v1 takes beyond its first release, declared on the card so a client can refuse an older gateway.
 TRIGGER_NAMED_EXECUTORS = "named_executors"
 TRIGGER_PROVOKING_ROLES = "provoking_roles"

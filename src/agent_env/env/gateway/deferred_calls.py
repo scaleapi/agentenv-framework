@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import logging
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,7 +15,7 @@ from mcp.types import CallToolResult
 
 from .caller import Caller
 from .clock import ClockError, _iso, _parse_rfc3339
-from .constants import AGENT_ENV_DEFERRED_CALLS_META_KEY
+from .constants import AGENT_ENV_DEFERRED_CALLS_META_KEY, DEFERRED_CALL_DONE, DEFERRED_CALL_FAILED, DEFERRED_CALL_PENDING
 from .triggers import _ECHO_DIGEST_CHARS, _VIRTUAL_RECHECK_S, _VIRTUAL_RESOLUTION_S, _result_text
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,9 @@ class DeferredCalls:
 
     def __init__(self, gateway):
         self._gw = gateway
-        self._calls: dict[tuple[str, str], dict] = {}  # the calls still to make
+        self._calls: dict[tuple[str, str], _Call] = {}  # the calls still to make
         self._made: set[tuple[str, str]] = set()
-        self._finished: deque[tuple[tuple[str, str], dict]] = deque(maxlen=self.FINISHED_KEPT)
+        self._finished: deque[tuple[tuple[str, str], _Call]] = deque(maxlen=self.FINISHED_KEPT)
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
 
@@ -61,15 +62,15 @@ class DeferredCalls:
         whose time the gateway clock has reached: it, and the triggers it provokes, are under way, so a settle check
         waits for it. One not yet due keeps nothing waiting."""
         now = _now(self._gw._clock)
-        return [{"key": key, "server": server, "at": _iso(call["at"]), "tool": call["tool"], "role": call["role"],
-                 "status": call["status"], "attempts": call["attempts"],
-                 "due": call["status"] == "pending" and (call["at"] - now).total_seconds() < _VIRTUAL_RESOLUTION_S}
+        return [{"key": key, "server": server, "at": _iso(call.at), "tool": call.tool, "role": call.role,
+                 "status": call.status, "attempts": call.attempts,
+                 "due": call.status == DEFERRED_CALL_PENDING and (call.at - now).total_seconds() < _VIRTUAL_RESOLUTION_S}
                 for (server, key), call in [*self._finished, *self._calls.items()]]
 
     def in_state(self, state: dict) -> dict:
         """The trigger engine's ``state`` with the calls listed (GET /triggers/state), and the earliest still to make
         counted in its next_event_at, so a harness that jumps the clock to the next event stops at it."""
-        upcoming = min((call["at"] for call in self._calls.values() if call["status"] == "pending"), default=None)
+        upcoming = min((call.at for call in self._calls.values() if call.status == DEFERRED_CALL_PENDING), default=None)
         if upcoming is not None and state.get("next_event_at") is not None:
             upcoming = min(upcoming, _parse_rfc3339(state["next_event_at"]))
         return {**state, **({"next_event_at": _iso(upcoming)} if upcoming is not None else {}),
@@ -96,56 +97,53 @@ class DeferredCalls:
             return
         if (server_url, key) in self._calls or (server_url, key) in self._made:
             return
-        record = {"at": at, **call, "report_as": report_as, "role": role, "report": report, "status": "pending",
-                  "attempts": 0}
+        record = _Call(at, call["tool"], call["arguments"], report_as, role, report)
         self._calls[(server_url, key)] = record
         task = asyncio.get_running_loop().create_task(self._make(key, record, server_url))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _make(self, key: str, record: dict, server_url: str) -> None:
+    async def _make(self, key: str, record: _Call, server_url: str) -> None:
         """Wait for the call's time and make it, again after a transport failure, each attempt under the tool-call lock
         as a live call is, its changelog window from before the first attempt to after the last; report it to the
         trigger engine when it went through, then log it. An error result is final, and so is anything unexpected. A
         call finished leaves the calls to make for the latest finished, its key kept for good once made."""
         try:
-            await self._until(record["at"])
+            await self._until(record.at)
             result, error, before, after = None, None, None, None
-            while result is None and record["attempts"] < self.RETRY_ATTEMPTS:
-                if record["attempts"]:
-                    await asyncio.sleep(self.RETRY_BACKOFF_S * 2 ** (record["attempts"] - 1))
-                record["attempts"] += 1
+            while result is None and record.attempts < self.RETRY_ATTEMPTS:
+                if record.attempts:
+                    await asyncio.sleep(self.RETRY_BACKOFF_S * 2 ** (record.attempts - 1))
+                record.attempts += 1
                 async with self._gw._tool_call_guard():
-                    if record["attempts"] == 1:
+                    if record.attempts == 1:
                         before = self._gw._query_changelog_id()
                     try:
-                        result = await self._gw._call_child_tool(server_url, record["tool"], record["arguments"],
-                                                                 caller=Caller(role=record["role"]),
-                                                                 report=record["report"])
+                        result = await self._gw._call_child_tool(server_url, record.tool, record.arguments,
+                                                                 caller=Caller(role=record.role), report=record.report)
                     except Exception as e:
                         error = (str(e) or type(e).__name__)[:self.ERROR_TEXT_LIMIT]
-                        logger.warning(f"deferred call {key!r} ({record['tool']}) attempt {record['attempts']} "
-                                       f"failed: {error}")
+                        logger.warning(f"deferred call {key!r} ({record.tool}) attempt {record.attempts} failed: {error}")
                     after = self._gw._query_changelog_id()
             ok = result is not None and not result.isError
             text = None if result is None else _result_text(result)
             if text is not None and not ok:
                 error = text[:self.ERROR_TEXT_LIMIT]
-            report_as = record["report_as"]
-            reported = ok and record["report"]
+            report_as = record.report_as
+            reported = ok and record.report
             if reported:  # before the status, so no state read sees the call made and its trigger not yet at work
-                self._gw._fire_triggers(record["role"], report_as["tool"], report_as["arguments"], result)
-            record["status"] = "done" if ok else "failed"
+                self._gw._fire_triggers(record.role, report_as["tool"], report_as["arguments"], result)
+            record.status = DEFERRED_CALL_DONE if ok else DEFERRED_CALL_FAILED
             await self._gw._log_event({
-                "event_type": "deferred_call", "key": key, "at": _iso(record["at"]), "tool": record["tool"],
-                "report_as": report_as["tool"], "role": record["role"], "ok": ok, "reported": reported,
-                "attempts": record["attempts"], **({} if text is None else {"result_sha256": _digest(text)}),
+                "event_type": "deferred_call", "key": key, "at": _iso(record.at), "tool": record.tool,
+                "report_as": report_as["tool"], "role": record.role, "ok": ok, "reported": reported,
+                "attempts": record.attempts, **({} if text is None else {"result_sha256": _digest(text)}),
                 "changelog_id_before": before, "changelog_id_after": after, **({} if ok else {"error": error})})
         except Exception:
-            logger.exception(f"deferred call {key!r} ({record['tool']}) failed")
-            if record["status"] == "pending":
-                record["status"] = "failed"
-        if record["status"] == "done":
+            logger.exception(f"deferred call {key!r} ({record.tool}) failed")
+            if record.status == DEFERRED_CALL_PENDING:
+                record.status = DEFERRED_CALL_FAILED
+        if record.status == DEFERRED_CALL_DONE:
             self._made.add((server_url, key))
         self._calls.pop((server_url, key), None)
         self._finished.append(((server_url, key), record))
@@ -190,3 +188,18 @@ def _now(clock) -> datetime:
     """The gateway clock's time: virtual while armed, wall UTC while not."""
     now = clock.now()
     return datetime.now(timezone.utc) if now is None else now
+
+
+@dataclass
+class _Call:
+    """One declared call: when, which tool with what, the call its triggers see, as whom, whether its result is
+    reported, and how far it got."""
+
+    at: datetime
+    tool: str
+    arguments: dict
+    report_as: dict
+    role: str
+    report: bool
+    status: str = DEFERRED_CALL_PENDING
+    attempts: int = 0
