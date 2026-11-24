@@ -204,10 +204,12 @@ SPENT = "at least $0.0004 (solver gpt-4.1-mini $0.0004, 1.0k in, 10 out, partial
 
 
 def test_an_eval_prints_each_runs_cost_and_their_total_from_the_ledgers(monkeypatch, tmp_path, torn_down):
+    """Two versions of one task, whose runs share a tag, each count."""
     monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: types.SimpleNamespace(
-        id="e", version=1, tasks=[types.SimpleNamespace(task_id="t", task_version=1)])))
+        id="e", version=1, tasks=[types.SimpleNamespace(task_id="t", task_version=1),
+                                  types.SimpleNamespace(task_id="t", task_version=2)])))
 
-    result = _invoke(monkeypatch, _Spends(), "eval", "run", "--id", "e", "--k", "2")
+    result = _invoke(monkeypatch, _Spends(), "eval", "run", "--id", "e")
 
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()

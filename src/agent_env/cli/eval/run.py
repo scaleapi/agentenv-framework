@@ -99,29 +99,30 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
     # Summarize results
     failures = []
     successes = []
-    usage = {}
+    usage = []
     for run in runs:
         context = run.instance.context if run.instance else None
         if output_dir and context is not None:
             _write_context(TaskStepContext.from_dict(context), run.task.id, output_dir, prefix=f"{run.tag} ")
-        usage[run.tag] = summarize(run.instance.usage) if run.instance else None
+        summary = summarize(run.instance.usage) if run.instance else None
+        usage.append(summary)
         if run.completed:
-            successes.append((run.tag, (context or {}).get("metadata", {}).get("score")))
+            successes.append((run.tag, (context or {}).get("metadata", {}).get("score"), summary))
         else:
-            failures.append((run.tag, run.outcome if run.done else "CANCELLED"))
+            failures.append((run.tag, run.outcome if run.done else "CANCELLED", summary))
 
     if successes:
         click.echo(click.style("Results:", fg="blue"))
-        for tag, score in successes:
+        for tag, score, summary in successes:
             score_str = f" score={score}" if score is not None else ""
             click.echo(click.style(f"  {tag} PASSED{score_str}", fg="green"))
-            if cost := cost_line(usage[tag]):
+            if cost := cost_line(summary):
                 click.echo(f"    {cost}")
 
     if len(successes) < total_runs:
-        for tag, outcome in failures:
+        for tag, outcome, summary in failures:
             click.echo(click.style(f"  {tag} {outcome}", fg="red"))
-            if cost := cost_line(usage[tag]):
+            if cost := cost_line(summary):
                 click.echo(f"    {cost}")
         click.echo(click.style(
             f"\n{len(successes)}/{total_runs} runs completed, {total_runs - len(successes)}/{total_runs} failed.",
@@ -129,9 +130,9 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         ))
     else:
         click.echo(click.style(f"\nAll {total_runs} runs completed!", fg="blue"))
-    if cost := cost_line(combine(usage.values()), f"Cost over {len(runs)} runs", attempts=False):
+    if cost := cost_line(combine(usage), f"Cost over {len(runs)} runs", attempts=False):
         click.echo(cost)
-    if sources := sources_line(usage.values()):
+    if sources := sources_line(usage):
         click.echo(sources)
     if interrupts.count:
         raise SystemExit(128 + interrupts.signum)

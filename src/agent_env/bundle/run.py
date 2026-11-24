@@ -399,12 +399,17 @@ def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
 
 
 def _with_usage(runs: tuple[TaskRun, ...]) -> tuple[TaskRun, ...]:
-    """Each run with its instance's ledger, read once the run's last write has landed."""
+    """Each run with its instance's ledger, read once the run's last write has landed. A read that fails leaves the
+    run without it, logged, since the result and the teardown after it matter more than the cost line."""
     def read(run: TaskRun) -> TaskRun:
         if not run.instance_id:
             return run
-        with run_scope(run.task.id):
-            instance = find_task_instance(run.instance_id)
+        try:
+            with run_scope(run.task.id):
+                instance = find_task_instance(run.instance_id)
+        except Exception as e:
+            logger.warning("usage of %s not read: %r", run.instance_id, e)
+            return run
         return replace(run, usage=tuple(instance.usage)) if instance is not None else run
     return tuple(read(run) for run in runs)
 

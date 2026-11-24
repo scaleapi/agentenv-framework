@@ -7,8 +7,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from agent_env.config.model import ModelRole
+
 # The order roles are shown in; any other comes after them.
-ROLES = ("solver", "user_simulator", "judge")
+ROLES = tuple(role.value for role in ModelRole)
 
 
 @dataclass

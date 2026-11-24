@@ -527,6 +527,16 @@ def test_a_runs_usage_is_its_ledger_split_by_role_and_model(bundle_dir, prices):
     assert summary.sources == ("litellm@test",)
 
 
+def test_a_usage_read_that_fails_leaves_the_run_and_its_result_without_a_cost(bundle_dir, prices, monkeypatch):
+    layout(bundle_dir, {"tasks/spends.json": json.dumps([{"id": "spend", "type": "spends_run_test"}])})
+    monkeypatch.setattr(run_module, "find_task_instance", lambda instance_id: (_ for _ in ()).throw(
+        ConnectionError("store unreachable")))
+
+    (run,) = run_bundle(bundle_dir, tasks=["spends"]).runs
+
+    assert run.error is None and not run.cancelled and run.usage == () and run.usage_summary is None
+
+
 def test_the_cli_prints_each_runs_cost_by_role_and_model_and_an_evals_total(bundle_dir, prices, quiet_logs):
     layout(bundle_dir, {"tasks/spends.json": json.dumps([{"id": "spend", "type": "spends_run_test"}]),
                         "evals/spending.toml": 'tasks = ["spends", "a"]\n'})

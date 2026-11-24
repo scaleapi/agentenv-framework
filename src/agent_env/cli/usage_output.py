@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from agent_env.config.model import ModelRole
 from agent_env.task.usage.summary import Share, UsageSummary
 
-_ROLE_NAMES = {"user_simulator": "user simulator"}
+_ROLE_NAMES = {role.value: role.record_key for role in ModelRole}
 # The cost sources that aren't the price map, as ``cost_source`` names them, in the order they're named.
 _REPORTED = (("provider", "the endpoint's bills"), ("harness", "agents' own figures"))
 
