@@ -87,6 +87,49 @@ def test_a_final_response_the_last_step_lacks_gets_its_own_step_with_no_model_ca
     check(run.document())
 
 
+@atif_adapter(native_format="toy-events/1", version="0.1.0", input_includes_cache=False)
+class Compacting(Adapter):
+    """Toy records with a compaction: the summary a model call wrote, its usage, and the harness's own message."""
+
+    @native(type="say")
+    def say(self, r, turn):
+        turn.message(step=r["step"], text=r["text"])
+
+    @native(type="compact")
+    def compact(self, r, turn):
+        turn.message(step=r["step"], text=r["text"])
+        turn.compaction(step=r["step"], written_by=r.get("by", "assistant"), trigger=r.get("trigger"))
+        turn.step(key=r["step"], input_tokens=100, output_tokens=20)
+
+    @native(type="system")
+    def system(self, r, turn):
+        turn.system_message(text=r["text"])
+
+
+def test_a_compaction_is_the_step_of_the_call_that_wrote_its_summary_and_the_harnesss_message_a_system_step():
+    run, pages = run_task([{"type": "say", "step": "s1", "text": "working"},
+                           {"type": "compact", "step": "c1", "text": "the summary so far", "trigger": "manual"},
+                           {"type": "system", "text": "Compacted"},
+                           {"type": "say", "step": "s2", "text": "after it"}], cls=Compacting)
+    user, before, compaction, system, after = run.document()["steps"]
+    assert (compaction["source"], compaction["message"], compaction["llm_call_count"]) == (
+        "agent", "the summary so far", 1)
+    assert compaction["metrics"] == {"prompt_tokens": 100, "completion_tokens": 20}
+    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "manual"}
+    assert (system["source"], system["message"]) == ("system", "Compacted")
+    assert not {"model_name", "metrics", "llm_call_count", "tool_calls"} & set(system)
+    assert after["message"] == "after it"
+    check(run.document())
+    assert all(is_prefix(a, b) for a, b in zip(pages, pages[1:]) if a is not None)
+
+
+@pytest.mark.parametrize("record", [{"type": "compact", "step": "c1", "text": "x", "by": "someone"},
+                                    {"type": "compact", "step": "c1", "text": "x", "trigger": "now"}])
+def test_a_compaction_names_a_writer_and_trigger_of_its_vocabularies(record):
+    with pytest.raises(AtifError, match="isn't one of"):
+        run_task([record], cls=Compacting)
+
+
 def test_the_terminal_state_is_never_served_before_the_task_ends():
     run, pages = run_task([{"type": "say", "step": "s1", "text": "a"}, {"type": "say", "step": "s2", "text": "b"}])
     for page in pages[:-1]:

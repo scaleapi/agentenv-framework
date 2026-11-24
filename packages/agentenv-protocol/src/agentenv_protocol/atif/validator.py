@@ -1,5 +1,5 @@
 """Checking an ATIF document against ATIF and the agentenv profile: the vendored models, the profile's models, and the
-rules neither checks, each a finding with a rule id PROFILE.md names. A producer is held to profile 1.0; a reader of
+rules neither checks, each a finding with a rule id PROFILE.md names. A producer is held to this profile; a reader of
 someone else's document is warned where a producer would fail, and fails only where agentenv couldn't read it."""
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .profile import (
     VOCABULARIES,
     AdapterRef,
     Arrival,
+    Compaction,
     MediaInfo,
     ReasoningBlock,
     StepError,
@@ -31,6 +32,7 @@ from .reader import MEDIA_PATH, _resolver, _trajectories, is_prefix, media_refs,
 ERROR = "error"
 WARNING = "warning"
 
+_VERSION = re.compile(r"(\d+)\.(\d+)")
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$")
 _COUNTS = (("prompt_tokens", "total_prompt_tokens"), ("completion_tokens", "total_completion_tokens"),
            ("cached_tokens", "total_cached_tokens"))
@@ -38,7 +40,7 @@ _INT = TypeAdapter(int)
 #: A profile field that holds a nested profile object, by its owner and name.
 _NESTED: dict[tuple[str, str], type[BaseModel]] = {
     ("Trajectory", "adapter"): AdapterRef, ("Step", "error"): StepError,
-    ("ObservationResult", "arrived"): Arrival,
+    ("ObservationResult", "arrived"): Arrival, ("Step", "compaction"): Compaction,
 }
 _LISTS: dict[tuple[str, str], type[BaseModel]] = {("Step", "reasoning"): ReasoningBlock}
 _MAPS: dict[tuple[str, str], type[BaseModel]] = {
@@ -65,8 +67,11 @@ RULES: dict[str, Rule] = {rule.id: rule for rule in (
     Rule("json", ERROR, ERROR, "The document is a JSON object: UTF-8, with no NaN or infinity"),
     Rule("atif", ERROR, ERROR, "ATIF's own models, vendored from Harbor, accept it"),
     Rule("profile", ERROR, ERROR, "Each `extra.agentenv` parses with its profile model"),
-    Rule("profile-key", ERROR, WARNING, "Each `extra.agentenv` holds only the fields profile 1.0 defines"),
-    Rule("profile-version", ERROR, WARNING, "The root's `extra.agentenv.version`, when given, is `1.0`"),
+    Rule("profile-key", ERROR, WARNING, "Each `extra.agentenv` holds only the fields this profile defines"),
+    Rule("profile-version", ERROR, WARNING, "The root's `extra.agentenv.version`, when given, is a 1.x this validator "
+                                            "knows: 1.0 or 1.1"),
+    Rule("compaction", ERROR, WARNING, "A step's `compaction` is on a `source: agent` step and names who wrote its "
+                                       "summary"),
     Rule("vocabulary", ERROR, WARNING, "A vocabulary field holds one of its values"),
     Rule("outside-key", ERROR, WARNING, "No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments`"),
     Rule("call-id", ERROR, WARNING, "Each `tool_call_id` is unique across the document and its sub-agents"),
@@ -283,9 +288,28 @@ def _profiles(objects: list[tuple[str, str, Mapping[str, Any]]], found: _Finding
         for n, block in enumerate(profile.get("reasoning") or [] if kind == "Step" else []):
             if isinstance(block, Mapping) and block.get("visibility") is not None:
                 _vocabulary("ReasoningBlock.visibility", f"{at}.reasoning[{n}].visibility", block["visibility"], found)
-        if kind == "Trajectory" and where == "" and profile.get("version") not in (None, PROFILE_VERSION):
+        compaction = profile.get("compaction") if kind == "Step" else None
+        if isinstance(compaction, Mapping):
+            if obj.get("source") != "agent":
+                found.add("compaction", f"{at}.compaction", "a compaction is the step of the call that wrote its "
+                                                            f"summary, a source: agent step, not {obj.get('source')!r}")
+            if compaction.get("written_by") is None:
+                found.add("compaction", f"{at}.compaction.written_by", "a compaction names who wrote its summary")
+            for name in ("written_by", "trigger"):
+                if compaction.get(name) is not None:
+                    _vocabulary(f"Compaction.{name}", f"{at}.compaction.{name}", compaction[name], found)
+        if kind == "Trajectory" and where == "" and not _known_version(profile.get("version")):
             found.add("profile-version", f"{at}.version",
-                      f"this is profile {profile['version']!r}; the validator checks profile {PROFILE_VERSION}")
+                      f"this is profile {profile['version']!r}; the validator checks profile {PROFILE_VERSION} and "
+                      "the minors before it")
+
+
+def _known_version(version: Any) -> bool:
+    """None, or a 1.x no newer than this profile: a minor only adds optional fields, so an older one is read whole."""
+    if version is None:
+        return True
+    got, have = _VERSION.fullmatch(str(version)), _VERSION.fullmatch(PROFILE_VERSION)
+    return got is not None and have is not None and got[1] == have[1] and int(got[2]) <= int(have[2])
 
 
 def _known_keys(kind: str, at: str, profile: Mapping[str, Any], found: _Findings) -> None:

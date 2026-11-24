@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 FORMAT = "atif/1"
 #: The key under each ``extra`` that holds the profile.
 PROFILE_KEY = "agentenv"
-PROFILE_VERSION = "1.0"
+PROFILE_VERSION = "1.1"
 #: The ATIF version producers write: the oldest that holds the fields they use.
 SCHEMA_VERSION = "ATIF-v1.8"
 #: The only key outside ``extra.agentenv`` a producer writes: Harbor's, on a ToolCall whose input wasn't an object.
@@ -24,6 +24,10 @@ RESULT_STATUSES = ("ok", "error", "canceled", "timeout")
 ERROR_KINDS = ("agent_error", "infra_error")
 VISIBILITIES = ("raw", "summary", "omitted", "redacted")
 COST_SOURCES = ("harness", "provider")
+#: Who wrote a compaction's summary: the agent's own model, or the harness. Added in 1.1.
+SUMMARY_WRITERS = ("assistant", "harness")
+#: What set a compaction off: something asked for it (a command), or the harness on its own. Added in 1.1.
+COMPACTION_TRIGGERS = ("manual", "auto")
 VOCABULARIES = {
     "StepProfile.state": TASK_STATES,
     "ObservationResultProfile.status": RESULT_STATUSES,
@@ -31,6 +35,8 @@ VOCABULARIES = {
     "ReasoningBlock.visibility": VISIBILITIES,
     "MetricsProfile.cost_source": COST_SOURCES,
     "FinalMetricsProfile.cost_source": COST_SOURCES,
+    "Compaction.written_by": SUMMARY_WRITERS,
+    "Compaction.trigger": COMPACTION_TRIGGERS,
 }
 
 
@@ -77,6 +83,14 @@ class StepError(_Profile):
     code: str | None = None
 
 
+class Compaction(_Profile):
+    """A step whose message is a summary that replaced the conversation before it, in what the agent sees from then on:
+    who wrote it, and what set it off. Added in 1.1."""
+
+    written_by: str | None = None
+    trigger: str | None = None
+
+
 class Arrival(_Profile):
     """When a result arrived after its call's step had closed: its time, and the step open when it came."""
 
@@ -113,6 +127,7 @@ class StepProfile(_Profile):
     reasoning: list[ReasoningBlock] | None = None
     media: dict[str, MediaInfo] | None = None
     data: list[StepData] | None = None
+    compaction: Compaction | None = None
 
 
 class ToolCallProfile(_Profile):
