@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 from agent_env.config.model import ModelRole
@@ -103,11 +104,11 @@ class UsageSummary:
 
     @property
     def input_tokens(self) -> int | None:
-        return _summed(share.input_tokens for share in self.shares)
+        return reduce(_plus, (share.input_tokens for share in self.shares), None)
 
     @property
     def output_tokens(self) -> int | None:
-        return _summed(share.output_tokens for share in self.shares)
+        return reduce(_plus, (share.output_tokens for share in self.shares), None)
 
     def to_dict(self, attempts: bool = True) -> dict[str, Any]:
         """The summary as JSON: its cost and bound, token counts, attempts (null with ``attempts=False``, for a total
@@ -151,13 +152,6 @@ def _bound(cost_usd: float | None, lower: bool, upper: bool) -> Bound:
     if lower:
         return Bound.AT_LEAST
     return Bound.AT_MOST if upper else Bound.EXACT
-
-
-def _summed(counts: Iterable[int | None]) -> int | None:
-    total = None
-    for count in counts:
-        total = _plus(total, count)
-    return total
 
 
 def _rank(role: str) -> int:
