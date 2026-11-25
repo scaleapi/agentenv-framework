@@ -24,6 +24,8 @@ async def test_a_failed_staging_terminates_the_judge_the_verifier_deployed(monke
     terminated: list[str] = []
 
     class Sandbox:
+        ON_THIS_MACHINE = False
+
         def __init__(self, sandbox_id):
             self.sandbox_id = sandbox_id
 

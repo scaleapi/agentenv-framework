@@ -9,6 +9,7 @@ import click
 
 from agent_env.cli import submitted_runs
 from agent_env.cli.utils import judge_samples_option, min_judge_agreement_option
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples as judge_samples_rule
 from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.usage_output import cost_line, sources_line
@@ -87,10 +88,8 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     client_id = get_agent_env_client_id()
     base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else {}
-    overrides = {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
-                                               ("judge_samples", judge_samples)) if value}
-    if min_judge_agreement is not None:
-        overrides["min_judge_agreement"] = min_judge_agreement
+    overrides = {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model)) if value}
+    overrides.update(judge_samples_rule.overrides(judge_samples, min_judge_agreement))
     if overrides:
         base_metadata["user_overrides"] = overrides
 

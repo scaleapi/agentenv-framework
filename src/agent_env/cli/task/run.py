@@ -18,6 +18,7 @@ from agent_env.cli.task._checks import runnable_task
 from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE
 from agent_env.cli import submitted_runs
 from agent_env.cli.utils import judge_samples_option, min_judge_agreement_option
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples as judge_samples_rule
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_finish_teardown, echo_teardown, gone
 from agent_env.cli.usage_output import cost_line, sources_line
@@ -429,10 +430,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["user_model"] = user_model
     if judge_model:
         initial_context.metadata.setdefault("user_overrides", {})["judge_model"] = judge_model
-    if judge_samples:
-        initial_context.metadata.setdefault("user_overrides", {})["judge_samples"] = judge_samples
-    if min_judge_agreement is not None:
-        initial_context.metadata.setdefault("user_overrides", {})["min_judge_agreement"] = min_judge_agreement
+    if sampled := judge_samples_rule.overrides(judge_samples, min_judge_agreement):
+        initial_context.metadata.setdefault("user_overrides", {}).update(sampled)
     if agent_sandbox:
         initial_context.metadata.setdefault("user_overrides", {})["agent_sandbox"] = agent_sandbox
     if env_sandbox:
