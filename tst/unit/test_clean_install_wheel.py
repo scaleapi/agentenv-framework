@@ -73,6 +73,7 @@ def test_the_gate_checks_the_folder_of_every_shipped_bundle():
                      "desktop": "src/agent_env/examples/desktop", "drivers": "src/agent_env/drivers",
                      "echo-mcp": "src/agent_env/examples/echo-mcp", "hello": "src/agent_env/examples/hello",
                      "mail-mcp": "src/agent_env/examples/mail-mcp",
+                     "milestone-gates": "src/agent_env/examples/milestone-gates",
                      "next-env-event": "src/agent_env/examples/next-env-event"}
 
 
