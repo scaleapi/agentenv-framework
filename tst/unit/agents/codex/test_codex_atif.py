@@ -418,3 +418,17 @@ def test_a_web_search_the_provider_ran_is_answered_with_its_status_so_its_step_i
     assert first["tool_calls"] == [{"tool_call_id": "ws_1", "function_name": "web_search", "arguments": {}}]
     assert first["observation"]["results"] == [{"source_call_id": "ws_1", "content": "completed"}]
     assert any(agent_steps(page) for page in kit.pages[:-1] if page)
+
+
+def test_a_later_tasks_sub_agent_on_a_path_an_earlier_one_used_is_its_own():
+    first = opening().call("fc_1", "call_a", "spawn_agent", {"task_name": "wc"}, namespace="collaboration")
+    first.usage("r1").meta(SUB, MAIN, "/root/wc", "Mendel").spawned("call_a", "/root/wc")
+    first.message("msg_s1", "19", thread=SUB, parent=MAIN).usage("rs1", thread=SUB, parent=MAIN).complete()
+    second = Feed().started().context().user("again").call("fc_2", "call_b", "spawn_agent", {"task_name": "wc"},
+                                                           namespace="collaboration")
+    second.usage("r2").meta("01a2-sub2", MAIN, "/root/wc", "Curie").spawned("call_b", "/root/wc")
+    second.message("msg_s2", "20", thread="01a2-sub2", parent=MAIN).usage("rs2", thread="01a2-sub2", parent=MAIN)
+    document = run(first, second.complete()).document
+
+    assert {thread: [step["message"] for step in agent_steps(sub)] for thread, sub in subagents(document).items()} == {
+        SUB: ["19"], "01a2-sub2": ["20"]}

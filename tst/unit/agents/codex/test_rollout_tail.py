@@ -4,6 +4,7 @@ exited."""
 import asyncio
 import json
 import os
+import threading
 
 import pytest
 
@@ -218,3 +219,37 @@ def test_run_codex_feeds_the_turns_rollout_while_the_cli_runs_and_the_rest_once_
     assert {name for name, _ in fed} == {"rollout"}
     assert texts([record for _, record in fed]) == ["one", "two"]
     assert seen_before_exit == [2]
+
+
+class _SlowTail:
+    """A tail whose second read is still running when the follower is told to stop."""
+
+    def __init__(self):
+        self.reads, self.release, self.reading = 0, threading.Event(), threading.Event()
+
+    def read(self, *, final=False):
+        if final:
+            return [{"type": "final"}]
+        self.reads += 1
+        if self.reads == 2:
+            self.reading.set()
+            self.release.wait(5)
+            return [{"type": "in flight"}]
+        return [{"type": "first"}] if self.reads == 1 else []
+
+
+def test_a_read_in_flight_when_following_stops_is_fed_before_the_final_one():
+    tail, fed = _SlowTail(), []
+
+    async def follow():
+        stopped = asyncio.Event()
+        following = asyncio.create_task(codex_bridge.follow_rollout(tail, lambda name, r: fed.append(r), stopped))
+        await asyncio.to_thread(tail.reading.wait, 5)
+        stopping = asyncio.create_task(codex_bridge.stop_following_rollout(following, stopped))
+        await asyncio.sleep(0.05)
+        tail.release.set()
+        await stopping
+
+    asyncio.run(follow())
+
+    assert [record["type"] for record in fed] == ["first", "in flight", "final"]

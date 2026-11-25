@@ -288,29 +288,29 @@ def _session_meta(path: Path) -> dict | None:
     return payload if isinstance(payload, dict) else {}
 
 
-async def follow_rollout(tail: RolloutTail, feed: Callable[[str, dict], None]) -> None:
-    """Feed ``tail``'s records while the CLI runs."""
-    while True:
+async def follow_rollout(tail: RolloutTail, feed: Callable[[str, dict], None], stopped: asyncio.Event) -> None:
+    """Feed ``tail``'s records while the CLI runs, then, once ``stopped`` is set, what the rollouts gained since. A read
+    in progress when it's set is fed first, since the read has already moved past what it returns."""
+    while not stopped.is_set():
         for record in await asyncio.to_thread(tail.read):
             feed("rollout", record)
-        await asyncio.sleep(ROLLOUT_POLL_S)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stopped.wait(), ROLLOUT_POLL_S)
+    for record in await asyncio.to_thread(tail.read, final=True):
+        feed("rollout", record)
 
 
-async def stop_following_rollout(following: asyncio.Task, tail: RolloutTail,
-                                 feed: Callable[[str, dict], None]) -> None:
-    """Stop following once the CLI has exited, then feed what the rollouts gained since the last read. A follower that
-    failed is logged; the turn goes on without its records."""
-    following.cancel()
+async def stop_following_rollout(following: asyncio.Task, stopped: asyncio.Event) -> None:
+    """Have the follower feed what's left once the CLI has exited, and wait for it. A follower that failed is logged;
+    the turn goes on without its later records."""
+    stopped.set()
     try:
         await following
     except asyncio.CancelledError:
-        if (current := asyncio.current_task()) is not None and current.cancelling():
-            raise
+        following.cancel()
+        raise
     except Exception:
-        logger.warning("following the rollout failed; the ATIF copy lacks its later records", exc_info=True)
-        return
-    for record in await asyncio.to_thread(tail.read, final=True):
-        feed("rollout", record)
+        logger.warning("following the rollouts failed; the ATIF copy lacks its later records", exc_info=True)
 
 
 # LiteLLM attribution-probe state. The codex CLI's config.toml maps
@@ -1237,11 +1237,12 @@ async def run_codex(
         if event_callback is not None:
             event_callback(event)
 
-    following = asyncio.create_task(follow_rollout(tail, aux_callback))
+    stopped = asyncio.Event()
+    following = asyncio.create_task(follow_rollout(tail, aux_callback, stopped))
     try:
         return await attempts(event_callback=on_event)
     finally:
-        await stop_following_rollout(following, tail, aux_callback)
+        await stop_following_rollout(following, stopped)
 
 
 async def _run_codex_attempts(

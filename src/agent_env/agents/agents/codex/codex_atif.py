@@ -58,13 +58,14 @@ def _string(value: Any) -> str | None:
 
 @dataclass
 class _Sub:
-    """A sub-agent's thread: its path and name once its first record gives them, and its records while it isn't
-    declared in this task."""
+    """A sub-agent's thread: its path and name once its first record gives them, its records while it isn't declared
+    in this task, and whether an earlier task saw it, so a spawn now that reuses its path names another thread."""
 
     path: str | None = None
     name: str | None = None
     held: list[dict[str, Any]] = field(default_factory=list)
     declared: bool = False
+    earlier: bool = False
 
 
 @atif_adapter(native_format=NATIVE_FORMAT, version="0.1.0", input_includes_cache=True, tested_with=TESTED_WITH)
@@ -110,13 +111,13 @@ class CodexAtif(Adapter):
             for record in sub.held:
                 turn.unmatched(record)
             sub.held.clear()
-            sub.declared = False
+            sub.declared, sub.earlier = False, True
         self._new_task()
 
     def _meta(self, thread: str, sub: _Sub, payload: dict[str, Any], turn: Any) -> None:
         sub.path = _string(payload.get("agent_path"))
         sub.name = _string(payload.get("agent_nickname")) or sub.path
-        if sub.path in self._held_results:
+        if not sub.earlier and sub.path in self._held_results:
             self._declare(thread, *self._held_results.pop(sub.path), turn)
 
     def _apply(self, record: dict[str, Any], thread: str, turn: Any) -> None:
@@ -181,7 +182,8 @@ class CodexAtif(Adapter):
         if path is None:
             self._result(record, turn)
             return
-        thread = next((t for t, sub in self._subs.items() if sub.path == path and not sub.declared), None)
+        thread = next((t for t, sub in self._subs.items() if sub.path == path and not sub.declared and not sub.earlier),
+                      None)
         if thread is None:
             self._held_results[path] = (call_id, record)
         else:

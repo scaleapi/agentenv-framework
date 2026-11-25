@@ -248,30 +248,29 @@ class SessionTail:
                 self._resumed = False
 
 
-async def follow_session(tail: SessionTail, feed: Callable[[str, dict], None]) -> None:
-    """Feed ``tail``'s messages while the CLI runs."""
-    while True:
+async def follow_session(tail: SessionTail, feed: Callable[[str, dict], None], stopped: asyncio.Event) -> None:
+    """Feed ``tail``'s messages while the CLI runs, then, once ``stopped`` is set, what the transcript gained since. A read
+    in progress when it's set is fed first, since the read has already moved past what it returns."""
+    while not stopped.is_set():
         for record in await asyncio.to_thread(tail.read):
             feed("session", record)
-        await asyncio.sleep(SESSION_POLL_S)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stopped.wait(), SESSION_POLL_S)
+    for record in await asyncio.to_thread(tail.read, final=True):
+        feed("session", record)
 
 
-async def stop_following_session(following: asyncio.Task, tail: SessionTail,
-                                 feed: Callable[[str, dict], None]) -> None:
-    """Stop following once the CLI has exited, then feed what the transcript gained since the last read. A follower
-    that failed is logged; the turn goes on without its messages."""
-    following.cancel()
+async def stop_following_session(following: asyncio.Task, stopped: asyncio.Event) -> None:
+    """Have the follower feed what's left once the CLI has exited, and wait for it. A follower that failed is logged;
+    the turn goes on without its later messages."""
+    stopped.set()
     try:
         await following
     except asyncio.CancelledError:
-        if (current := asyncio.current_task()) is not None and current.cancelling():
-            raise
+        following.cancel()
+        raise
     except Exception:
-        logger.warning("following the session transcript failed; the ATIF copy lacks its later messages",
-                       exc_info=True)
-        return
-    for record in await asyncio.to_thread(tail.read, final=True):
-        feed("session", record)
+        logger.warning("following the transcript failed; the ATIF copy lacks its later messages", exc_info=True)
 
 
 def detect_format(raw: bytes) -> str:
@@ -662,7 +661,8 @@ async def run_gemini(
     response_parts: list[str] = []
     tool_count = 0
     captured_session_id: str | None = session_id
-    following = asyncio.create_task(follow_session(tail, aux_callback)) if tail is not None else None
+    stopped = asyncio.Event()
+    following = asyncio.create_task(follow_session(tail, aux_callback, stopped)) if tail is not None else None
 
     def on_line(line: str) -> None:
         nonlocal tool_count, captured_session_id
@@ -724,7 +724,7 @@ async def run_gemini(
     finally:
         _RUNNING.discard(proc)
         if following is not None:
-            await stop_following_session(following, tail, aux_callback)
+            await stop_following_session(following, stopped)
 
     response = "".join(response_parts)
     err: str | None = None

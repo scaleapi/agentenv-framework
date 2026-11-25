@@ -4,6 +4,7 @@ them while the CLI runs and the rest once it has exited."""
 import asyncio
 import json
 import os
+import threading
 
 import pytest
 
@@ -118,3 +119,38 @@ def test_run_gemini_feeds_the_turns_messages_while_the_cli_runs_and_the_last_onc
     assert seen_while_running == ["g-1"]
     assert fed and {name for name, _ in fed} == {"session"}
     assert ids(record for _, record in fed) == ["g-1", "g-2"]
+
+
+class _SlowTail:
+    """A tail whose second read is still running when the follower is told to stop."""
+
+    def __init__(self):
+        self.reads, self.release, self.reading = 0, threading.Event(), threading.Event()
+
+    def read(self, *, final=False):
+        if final:
+            return [{"id": "final"}]
+        self.reads += 1
+        if self.reads == 2:
+            self.reading.set()
+            self.release.wait(5)
+            return [{"id": "in flight"}]
+        return [{"id": "first"}] if self.reads == 1 else []
+
+
+def test_a_read_in_flight_when_following_stops_is_fed_before_the_final_one(monkeypatch):
+    monkeypatch.setattr(gemini_bridge, "SESSION_POLL_S", 0.01)
+    tail, fed = _SlowTail(), []
+
+    async def follow():
+        stopped = asyncio.Event()
+        following = asyncio.create_task(gemini_bridge.follow_session(tail, lambda name, r: fed.append(r), stopped))
+        await asyncio.to_thread(tail.reading.wait, 5)
+        stopping = asyncio.create_task(gemini_bridge.stop_following_session(following, stopped))
+        await asyncio.sleep(0.05)
+        tail.release.set()
+        await stopping
+
+    asyncio.run(follow())
+
+    assert ids(fed) == ["first", "in flight", "final"]
