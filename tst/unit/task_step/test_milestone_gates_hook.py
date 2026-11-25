@@ -999,3 +999,26 @@ async def test_after_the_wrap_up_an_earlier_milestone_without_revisions_is_check
     assert [g["id"] for g in records[-1]["final_checks"][0]["gates"]] == ["m1-sheet", "m1-cols"]
     assert _status(t3) == [("M1", "undone", 1, 3, 0), ("M2", "passed", 2, 2, 0)]
     assert "reached_revision" not in t3.summary  # a task without revisions keeps its summary's shape
+
+
+def test_a_carrying_revision_that_overrides_one_gate_twice_is_refused_at_load():
+    params = _revised()
+    total = params["milestones"][1]["gates"][1]
+    params["milestones"][1]["gates"].append({**total, "nudge": "Keep the total somewhere."})
+    with pytest.raises(ValueError, match=r"M1-r2: gate ids must be unique within a milestone; repeated: \['m1-total'\]"):
+        mg.check_params(params)
+
+
+@pytest.mark.asyncio
+async def test_each_revisions_row_shows_the_type_of_the_check_it_ran():
+    params = _revised()
+    params["milestones"][0]["gates"][1]["type"] = "content"  # M1's m1-total, overridden in M1-r2 by a format check
+    env, records = Env(report_world()), []
+    t1 = Turn(env, records, 1)
+    await post_turn(t1, params)  # M1 passes; M1-r2 opens
+    m1, r2 = t1.summary["milestones"][0]["revisions"]
+    assert m1["gates"]["m1-total"]["type"] == "content"
+    t2 = Turn(env, records, 2)
+    await post_turn(t2, params)
+    m1, r2 = t2.summary["milestones"][0]["revisions"]
+    assert (m1["gates"]["m1-total"]["type"], r2["gates"]["m1-total"]["type"]) == ("content", "format")

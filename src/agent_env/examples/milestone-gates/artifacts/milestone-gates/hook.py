@@ -235,7 +235,8 @@ def _summary(spec: dict, records: list[dict]) -> dict:
     if not spec["enabled"]:
         return {"enabled": False}
     milestones = spec["milestones"]
-    types = {g["id"]: g.get("type") or _gate_type(g["check"]) for m in milestones for g in m["gates"]}
+    # By milestone entry and gate: a revision may override a gate with another check, and each row shows its own.
+    types = {(m["id"], g["id"]): g.get("type") or _gate_type(g["check"]) for m in milestones for g in m["gates"]}
     rows = [{"id": m["id"], "status": "not_reached", "opened_turn": None, "closed_turn": None, "nudges": 0,
              "gates": {}} for m in milestones]
     rows[0].update(status="open", opened_turn=1)
@@ -243,7 +244,8 @@ def _summary(spec: dict, records: list[dict]) -> dict:
     end = None
 
     def verdicts(row, gates):
-        row["gates"].update({g["id"]: {"passed": g["passed"], "type": types.get(g["id"])} for g in gates})
+        row["gates"].update({g["id"]: {"passed": g["passed"], "type": types.get((row["id"], g["id"]))}
+                             for g in gates})
 
     for r in records:
         turn, row = r.get("turn"), by_id.get(r.get("milestone"))
@@ -931,6 +933,10 @@ def _spec(params: dict) -> dict:
         own = m.get("gates") or []
         if not own:
             raise ValueError(f"milestone {mid} has no gates")
+        own_ids = [g.get("id") for g in own if isinstance(g, dict) and g.get("id")]
+        twice = sorted({gid for gid in own_ids if own_ids.count(gid) > 1})
+        if twice:  # two gates of one id: one override would replace the other, and its check would never run
+            raise ValueError(f"milestone {mid}: gate ids must be unique within a milestone; repeated: {twice}")
         carried = {g["id"]: g for g in prev["gates"]} if carry else {}
         artifacts = {**(prev["artifacts"] if carry else {}), **(m.get("artifacts") or {})}
         for g in own:
