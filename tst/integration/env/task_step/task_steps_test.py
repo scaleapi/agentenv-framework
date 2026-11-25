@@ -520,18 +520,12 @@ async def test_task_steps_e2e(sandbox_provider, multi_env, email_service_artifac
     assert agent.api_url.startswith("http")
     logger.info(f"DeployAgentTaskStep.execute() returned agent api_url={agent.api_url}")
 
-    # 13. Verify agent health and MCP registration
+    # 13. Verify agent health; the prompt in step 15 can only be answered through the env's MCP server
     async with httpx.AsyncClient() as client:
         health = await client.get(f"{agent.api_url}/health", timeout=15)
         health.raise_for_status()
         assert health.json()["status"] == "ok"
         logger.info("Agent health: ok")
-
-        mcps = await client.get(f"{agent.api_url}/mcps", timeout=15)
-        mcps.raise_for_status()
-        mcp_servers = mcps.json()["mcp_servers"]
-        assert len(mcp_servers) == 1, f"Expected 1 MCP server registered, got {len(mcp_servers)}"
-        logger.info(f"Agent MCP servers: {list(mcp_servers.keys())}")
 
     # 14. Put and get PromptAgentTaskStep
     prompt_step = PromptAgentTaskStep.put(
