@@ -113,7 +113,9 @@ class _Followed:
     offset: int
     lines: int
     # A forked sub-agent's rollout begins with the turns of the thread it was forked from, which aren't its own.
-    copied_turns: frozenset[str] = frozenset()
+    forked_from: str | None = None
+    copied_turns: set[str] = field(default_factory=set)
+    own_turns: set[str] = field(default_factory=set)
 
 
 def _turn_of(record: dict) -> str | None:
@@ -195,8 +197,8 @@ class RolloutTail:
             status, lines = path.stat(), _count_lines(path) if from_end else 0
         except OSError:
             return
-        copied = _thread_turns(forked_from) if forked_from else frozenset()
-        self._files[path] = _Followed(thread, parent, status.st_ino, status.st_size if from_end else 0, lines, copied)
+        self._files[path] = _Followed(thread, parent, status.st_ino, status.st_size if from_end else 0, lines,
+                                      forked_from, set(_thread_turns(forked_from)) if forked_from else set())
 
     def _scan(self, *, from_end: bool) -> None:
         """Follow each sub-agent rollout not yet followed whose parent is a thread followed, until none is new. Each
@@ -249,11 +251,19 @@ class RolloutTail:
     @staticmethod
     def _copied(record: dict, followed: _Followed) -> bool:
         """A record a forked sub-agent's rollout copied from the thread it was forked from: that thread's meta, or
-        one of its turns'."""
+        one of its turns', which that thread's rollout is read again for when a turn is new here."""
         payload = record.get("payload")
         if record.get("type") == "session_meta":
             return isinstance(payload, dict) and payload.get("id") != followed.thread
-        return bool(followed.copied_turns) and _turn_of(record) in followed.copied_turns
+        turn = _turn_of(record)
+        if followed.forked_from is None or turn is None or turn in followed.own_turns:
+            return False
+        if turn not in followed.copied_turns:
+            followed.copied_turns |= _thread_turns(followed.forked_from)
+            if turn not in followed.copied_turns:
+                followed.own_turns.add(turn)
+                return False
+        return True
 
 
 def _count_lines(path: Path) -> int:

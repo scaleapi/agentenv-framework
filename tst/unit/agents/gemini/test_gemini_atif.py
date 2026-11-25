@@ -203,7 +203,7 @@ def seeded_session(seed: int) -> tuple[list[Feed], dict]:
     follows it, or all at the task's end. With what the copy must hold."""
     rng = random.Random(seed)
     image = png()
-    want = {"input": 0, "steps": 0, "calls": set(), "messages": []}
+    want = {"input": 0, "steps": 0, "calls": set(), "messages": [], "unreported": 0}
     n = iter(range(10**6))
     feeds = []
     for _ in range(rng.randint(1, 3)):
@@ -220,6 +220,7 @@ def seeded_session(seed: int) -> tuple[list[Feed], dict]:
             inputs, tool_tokens = rng.randint(1000, 9000), rng.choice([0, 0, 40])
             if rng.random() < 0.1:
                 feed.call(outcome="unreported")
+                want["unreported"] += 1
             else:
                 feed.call(inputs=inputs + tool_tokens, output=rng.randint(1, 50), cached=rng.randint(0, inputs))
             want["input"] += inputs + tool_tokens
@@ -256,10 +257,22 @@ def test_a_seeded_sessions_copy_holds_every_response_and_every_call_the_proxy_fo
     feeds, want = seeded_session(seed)
     steps = agent_steps(run(*feeds).document)
 
-    assert len(steps) == want["steps"]
+    # A call the proxy couldn't count whose message an answered call came ahead of is a step of its own, with no usage.
+    surplus = len(steps) - want["steps"]
+    assert 0 <= surplus <= want["unreported"]
+    assert sum(step["llm_call_count"] == 1 and "metrics" not in step for step in steps) >= surplus
     assert sum(step.get("metrics", {}).get("prompt_tokens", 0) for step in steps) == want["input"]
     assert [step["message"] for step in steps if step["message"]] == [text for text in want["messages"] if text]
     calls = [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()]
     results = {result["source_call_id"] for step in steps for result in (step.get("observation") or {}).get(
         "results") or ()}
     assert sorted(calls) == sorted(want["calls"]) and set(calls) <= results
+
+
+def test_a_response_isnt_joined_to_a_call_the_proxy_couldnt_count_past_an_answered_one():
+    feed = Feed().call(inputs=900, output=2).call(outcome="unreported")
+    feed.message("m-1", "ok", tokens={"input": 7338, "output": 77, "thoughts": 105}).result()
+    steps = agent_steps(run(feed).document)
+
+    assert [step["message"] for step in steps] == ["ok", "", ""]
+    assert [step.get("metrics", {}).get("prompt_tokens") for step in steps] == [7338, 900, None]

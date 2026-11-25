@@ -94,10 +94,11 @@ class GeminiAtif(Adapter):
     def message(self, record: dict[str, Any], turn: Any) -> None:
         tokens = record.get("tokens")
         index = self._match(_transcript_inputs(tokens))
-        for call in self._calls[:len(self._calls) if index is None else index]:
-            self._side(call, turn)
-        call = self._calls[index] if index is not None else None
-        self._calls = self._calls[index + 1:] if index is not None else []
+        call = None
+        if index is not None:
+            for side in self._calls[:index]:
+                self._side(side, turn)
+            call, self._calls = self._calls[index], self._calls[index + 1:]
         usage = _usage(call.get("usage")) if call is not None and call.get("outcome") == "answered" \
             else _transcript_usage(tokens)
         key, when = record["id"], record.get("timestamp")
@@ -127,11 +128,20 @@ class GeminiAtif(Adapter):
 
     def _match(self, inputs: int | None) -> int | None:
         """Which of the proxy's calls not yet written made the response counting ``inputs``: the first answered with
-        that input, else the first whose counts the proxy couldn't read; the calls before it wrote no message."""
-        answered = [i for i, call in enumerate(self._calls) if call.get("outcome") == "answered"
-                    and inputs is not None and _usage(call.get("usage")).get("input_tokens") == inputs]
-        unreported = [i for i, call in enumerate(self._calls) if call.get("outcome") == "unreported"]
-        return (answered or unreported or [None])[0]
+        that input, else one whose counts the proxy couldn't read ahead of every answered call, which may be later
+        messages'; the calls before it wrote no message. None when no call did, as for a response the proxy didn't
+        see, and the response takes the transcript's count."""
+        outcomes = [call.get("outcome") for call in self._calls]
+        for index, call in enumerate(self._calls):
+            if outcomes[index] == "answered" and inputs is not None \
+                    and _usage(call.get("usage")).get("input_tokens") == inputs:
+                return index
+        for index, outcome in enumerate(outcomes):
+            if outcome == "answered":
+                return None
+            if outcome == "unreported":
+                return index
+        return None
 
     def _side(self, call: dict[str, Any], turn: Any) -> None:
         """A call the proxy forwarded that wrote no message: its usage alone, or, refused, its error."""
