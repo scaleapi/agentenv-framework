@@ -29,6 +29,7 @@ from pydantic import ValidationError
 
 from ..transfers import NamespaceUploader, WriteNamespaceGrant
 from . import annotate as annotating
+from .dataplane import RECORDINGS_DIR
 from .errors import InvalidArgument, LimitExceeded, Unsupported
 from .frames import to_pil
 from .manifest import ManifestSegment, RecordingManifest
@@ -37,8 +38,6 @@ if TYPE_CHECKING:
     from .runtime import ComputerRuntime
 
 MP4 = "video/mp4; codecs=avc1"
-#: Where segments are written, relative to the session user's home, and kept when there is no grant.
-RECORDINGS_DIR = ".agentenv-recordings"
 SCOPES = ("display", "window")
 REASONS = ("end", "reset", "teardown")
 #: What an ended recording's manifest is uploaded as, under its id beside its segments.

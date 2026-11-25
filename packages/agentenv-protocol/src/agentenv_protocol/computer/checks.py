@@ -45,6 +45,11 @@ def check_features(cls: type) -> None:
         problems.append(f"Settings is ComputerSettings or a subclass of it, got {cls.Settings!r}")
     if cls.screen_kind not in ("desktop", "page"):
         problems.append(f"screen_kind is desktop or page, got {cls.screen_kind!r}")
+    if cls.placement == "provider":
+        problems.append("placement provider, a driver its device's provider serves, isn't supported yet: use inside "
+                        "or beside")
+    elif cls.placement not in ("inside", "beside"):
+        problems.append(f"placement is inside or beside, got {cls.placement!r}")
     if ("set_display" in declared(cls)) != bool(cls.display_modes):
         problems.append("display_modes and @set_display come together")
     problems += check_recording(cls.recording)
