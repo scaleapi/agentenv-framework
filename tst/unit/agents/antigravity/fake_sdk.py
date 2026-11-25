@@ -127,6 +127,8 @@ class ChatResponse:
         hooks = getattr(self._agent.config, "hooks", None) or []
         for kind, value in self._turn.steps:
             if kind == "chunk":
+                # As the SDK does: the conversation has its id, and its store, from the turn's first streamed step.
+                self._agent.conversation_id = self._turn.conversation_id
                 yield value
             elif kind == "call":
                 for hook in hooks:

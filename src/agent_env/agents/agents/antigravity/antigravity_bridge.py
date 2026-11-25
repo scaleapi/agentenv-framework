@@ -34,7 +34,7 @@ from google.antigravity.hooks import policy as ag_policy
 
 from agent_egress import clock_armed, egress_env
 from agentenv_protocol.a2a_agent import BuiltinTools, Usage
-from antigravity_date import EnvTimes, env_time_rewrite
+from antigravity_date import Records, env_time_rewrite, message_digest
 from model_relay import Calls, model_relay
 
 logger = logging.getLogger(__name__)
@@ -50,10 +50,14 @@ _TAGS_HEADER = "x-litellm-tags"
 SDK_VERSION = "0.1.24"
 
 HOME_DIR = Path(os.environ.get("ANTIGRAVITY_HOME") or Path.home() / ".antigravity")
-# The SDK's conversations, one SQLite store per conversation id, and the env times their turns were given.
+# The SDK's conversations, one SQLite store per conversation id, the env times their turns were given and the
+# images their messages carry.
 SAVE_DIR = HOME_DIR / "conversations"
 SKILLS_DIR = HOME_DIR / "skills"
-ENV_TIMES = EnvTimes(SAVE_DIR / "env-times.json")
+ENV_TIMES = Records(SAVE_DIR / "env-times.json")
+TURN_IMAGES = Records(SAVE_DIR / "turn-images.json")
+# The characters of a value the SDK can't serialize that the trajectory keeps.
+_REPR_CHARS = 2000
 
 # MCP calls into a large env can be slow; the SDK's own read timeout is shorter than a first tools/list there takes.
 _MCP_TIMEOUT_S = 60.0
@@ -180,58 +184,86 @@ def conversation_store_exists(conversation_id: str | None) -> bool:
     return bool(conversation_id) and (SAVE_DIR / f"{conversation_id}.db").is_file()
 
 
+def is_image(path: str) -> bool:
+    return (mimetypes.guess_type(path)[0] or "").startswith("image/")
+
+
 def media_part(path: str) -> dict | None:
-    """An image the model sees inline, as a chat-completions image part with a data URL; None for any other file,
-    which the prompt names for the model's own tools to read. The SDK's chat-completions backend drops the media
-    ``chat()`` takes, so the relay adds them to the turn's request (``_with_media``)."""
-    mime = mimetypes.guess_type(path)[0] or ""
-    if not mime.startswith("image/"):
+    """An image the model sees inline, as a chat-completions image part with a data URL; None for any other file, which
+    the prompt names for the model's own tools to read, or one that is gone."""
+    if not is_image(path):
         return None
-    data = base64.b64encode(Path(path).read_bytes()).decode()
-    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+    try:
+        data = base64.b64encode(Path(path).read_bytes()).decode()
+    except OSError:
+        logger.warning(f"image {path} is gone: the model's message goes without it")
+        return None
+    return {"type": "image_url", "image_url": {"url": f"data:{mimetypes.guess_type(path)[0]};base64,{data}"}}
 
 
-def _with_media(request: dict, media: list[dict]) -> bool:
-    """Add ``media`` to the request's last user message, the turn's own, unless they're there already: the harness
-    sends the turn's history again on each call, from a store that never saw them. Whether it changed the request."""
+def _with_images(request: dict, images: list[str], recorded: Records) -> bool:
+    """Every user message's images, which the SDK's chat-completions backend drops: the turn's own go with its message,
+    the last user message, and are recorded by that message's text, so the turns after it, which send it again from a
+    store that never saw them, carry them too. Whether it changed the request."""
     users = [message for message in request.get("messages") or [] if isinstance(message, dict)
              and message.get("role") == "user"]
-    if not users or not media:
+    if not users:
         return False
-    message = users[-1]
+    if images:
+        key = message_digest(_text_of(users[-1]))
+        if recorded.get(key) is None:
+            recorded.put(key, images)
+    changed = False
+    for message in users:
+        paths = recorded.get(message_digest(_text_of(message)))
+        if not paths:
+            continue
+        content = message.get("content")
+        parts = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+        present = {json.dumps(part, sort_keys=True) for part in parts if isinstance(part, dict)}
+        added = [part for part in (media_part(path) for path in paths)
+                 if part is not None and json.dumps(part, sort_keys=True) not in present]
+        if added:
+            message["content"] = [*parts, *added]
+            changed = True
+    return changed
+
+
+def _text_of(message: dict) -> str:
+    """A message's text as the harness wrote it, by which its images are recorded."""
     content = message.get("content")
-    parts = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
-    present = {json.dumps(part, sort_keys=True) for part in parts if isinstance(part, dict)}
-    added = [part for part in media if json.dumps(part, sort_keys=True) not in present]
-    if not added:
-        return False
-    message["content"] = [*parts, *added]
-    return True
+    if isinstance(content, str):
+        return content
+    return "".join(part.get("text") or "" for part in content or [] if isinstance(part, dict)
+                   and part.get("type") == "text")
 
 
-def turn_rewrite(effort: str | None, media: list[dict]) -> Callable[[bytes], Awaitable[bytes]]:
-    """The relay's rewrite for a turn's model calls: the env's time (``antigravity_date``), then the turn's reasoning
-    effort and its images, which the SDK takes no setting for."""
+def turn_rewrite(effort: str | None, images: list[str]) -> Callable[[bytes], Awaitable[bytes]]:
+    """The relay's rewrite for a turn's model calls: its messages' images, the env's time (``antigravity_date``), then
+    the turn's reasoning effort, which the SDK takes no setting for."""
     date_rewrite = env_time_rewrite(ENV_TIMES)
     reasoning = _EFFORTS.get(effort or "")
     if effort and reasoning is None:
         logger.warning(f"effort {effort!r} isn't one chat completions takes; the turn runs without one")
 
     async def rewrite(body: bytes) -> bytes:
+        try:
+            request = json.loads(body)
+        except ValueError:
+            request = None
+        if isinstance(request, dict) and _with_images(request, images, TURN_IMAGES):
+            body = json.dumps(request, separators=(",", ":")).encode()
         body = await date_rewrite(body)
-        if reasoning is None and not media:
+        if reasoning is None:
             return body
         try:
             request = json.loads(body)
         except ValueError:
             return body
-        if not isinstance(request, dict):
+        if not isinstance(request, dict) or request.get("reasoning_effort") == reasoning:
             return body
-        changed = _with_media(request, media)
-        if reasoning is not None and request.get("reasoning_effort") != reasoning:
-            request["reasoning_effort"] = reasoning
-            changed = True
-        return json.dumps(request, separators=(",", ":")).encode() if changed else body
+        request["reasoning_effort"] = reasoning
+        return json.dumps(request, separators=(",", ":")).encode()
 
     return rewrite
 
@@ -332,7 +364,7 @@ def _plain(value: Any) -> dict:
             return json.loads(json.dumps(dump(mode="json", exclude={"exception"}), default=str))
         except Exception:  # noqa: BLE001 - a result's value may be anything
             return {key: str(item) for key, item in dump(warnings=False).items() if key != "exception"}
-    return {"repr": str(value)[:2000]}
+    return {"repr": str(value)[:_REPR_CHARS]}
 
 
 def _hooks(recorder: TrajectoryRecorder) -> list:
@@ -365,14 +397,14 @@ async def run_antigravity(prompt: str, *, model: str | None, project_id: str | N
     attribution, counts every call the harness makes, its subagents' included, and tells the model the env's time on
     an armed clock. The turn's usage is theirs, a call answered without usage counted as unreported."""
     _record_attribution(project_id, task_id)
-    media = [part for part in (media_part(path) for path in attachment_paths or []) if part is not None]
+    images = [path for path in attachment_paths or [] if is_image(path)]
     if attachment_paths:
         prompt = f"{prompt}\n\nAttached files, also on disk for your tools:\n" + "\n".join(
             f"- {path}" for path in attachment_paths)
     calls = Calls()
     headers = endpoint_headers(os.environ, attribution_headers(project_id, task_id))
     async with model_relay(_api_root(os.environ.get("LITELLM_BASE_URL") or ""), calls, headers=headers,
-                           rewrite=turn_rewrite(effort, media)) as relay:
+                           rewrite=turn_rewrite(effort, images)) as relay:
         result = await _turn(prompt, base_url=f"{relay}/v1", model=model or DEFAULT_MODEL, **kwargs)
     result.usage = calls.usage(result.tool_call_count, model or DEFAULT_MODEL)
     return result
@@ -411,25 +443,34 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
             logger.warning(f"conversation {session_id} has no store in {SAVE_DIR}: the turn starts a new one")
             session_id = None
 
+    started: list[Any] = []
+
     async def converse() -> tuple[str | None, Any]:
         async with ag.Agent(ag.LocalOpenAIAgentConfig(**config)) as agent:
+            started.append(agent)
             response = await agent.chat(prompt)
             async for chunk in response.chunks:
                 recorder.chunk(chunk)
             return agent.conversation_id, response.stop_reason
 
+    def kept() -> str | None:
+        """The conversation a failed turn leaves for the next: the one the SDK started, which it names with the turn's
+        first streamed step, once its store is on disk, else the one the turn resumed."""
+        current = getattr(started[0], "conversation_id", None) if started else None
+        return current if conversation_store_exists(current) else session_id
+
     try:
         conversation_id, stop = await asyncio.wait_for(converse(), timeout=timeout_s)
     except TimeoutError:
         recorder.close()
-        return AntigravityResult(session_id=session_id, tool_call_count=recorder.tool_calls, error_code="timeout",
+        return AntigravityResult(session_id=kept(), tool_call_count=recorder.tool_calls, error_code="timeout",
                                  error=f"the turn ran past its {timeout_s} s")
     except agt.AntigravityExecutionError as exc:
         recorder.close()
         text = str(exc)[:ERROR_MESSAGE_LIMIT]
         # A task env's MCP server that fails its initialize fails the harness's start: the run's tools aren't there.
         mcp = "mcp load failed" in text.lower()
-        return AntigravityResult(session_id=session_id, tool_call_count=recorder.tool_calls, error=text,
+        return AntigravityResult(session_id=kept(), tool_call_count=recorder.tool_calls, error=text,
                                  error_code="mcp_load_failed" if mcp else "antigravity_error", infra=mcp)
     recorder.close()
     result = AntigravityResult(response=recorder.response(), session_id=conversation_id or session_id,

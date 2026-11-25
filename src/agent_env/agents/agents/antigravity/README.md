@@ -9,7 +9,8 @@ Each task is one `Agent.chat()` of the SDK in the A2A server's process, in `/app
 `localharness`, a static Go binary that runs the tools and calls the model. A context's first task starts an SDK
 conversation, and each later task resumes it by its id; the SDK keeps each conversation in a SQLite store under
 `$ANTIGRAVITY_HOME/conversations/`. Text parts are the prompt, and file parts are written under `/app/inputs/<task>/`
-and named in it; an image goes to the model inline too, and a PDF as its pages' PNGs, rendered with `pdftoppm`. Turns of
+and named in it; an image goes to the model inline too, with its message in every later turn, and a PDF as its
+pages' PNGs, rendered with `pdftoppm`. Turns of
 different contexts run at once, a context's turns one at a time.
 
 The SDK's `LocalOpenAIAgentConfig` takes a chat-completions `base_url` and nothing else for the endpoint, and its
@@ -20,7 +21,7 @@ shared with other agents), which forwards each call to `$LITELLM_BASE_URL/v1/cha
   `task_id` as `x-litellm-customer-id` and `x-litellm-tags`. The run's tags join an `x-litellm-tags` that
   `[model.headers]` names;
 - the task's `effort` as `reasoning_effort` (`xhigh` and `max` as `high`) and its images, which the SDK has no setting
-  for;
+  for, recorded by the message they came with so the turns after carry them too;
 - the env's time in the harness's "The current local time is" line while the agent follows an armed clock (below).
 
 The relay counts each call from the answer's usage, every subagent's included, so the task's `Usage` is their sum; the
@@ -41,7 +42,7 @@ The rest of each task's config:
 | `mcp-config/v1` | SDK default; each server passed to the task's harness. One that fails to start fails the task with `mcp_load_failed`, an infra error |
 | `skill-config/v1` | inline and bundle skills installed as `$ANTIGRAVITY_HOME/skills/<name>/`, the harness's skills path; an inline `SKILL.md` without frontmatter gets one from the skill's name and description, since the SDK lists a skill by its frontmatter alone |
 | `trajectory/v1` | the SDK's streamed steps, a step's text and thought each as one record, and each tool call's result from the SDK's hooks after it, live while the task runs (format `antigravity-sdk/1`) |
-| `snapshot/v1` | `save` archives the context's conversation store with the env times its turns were given, and `/app`, once no task runs; `load` restores the store under its own id, bound to the target context, and replaces `/app`'s contents. Where `tar` is GNU tar, the changelog too: an incremental archive of its roots after each task, uploaded through the namespace grant, and applied in order; an increment is a whole task's changes, since the harness has no hook this agent can hold a task at |
+| `snapshot/v1` | `save` archives the context's conversation store with the env times its turns were given, and `/app`, once no task runs; `load` restores the store under its own id, which the SDK holds inside it, bound to the target context, and replaces `/app`'s contents; a conversation another context of the same agent holds is refused (409), since the two would share one history. Where `tar` is GNU tar, the changelog too: an incremental archive of its roots after each task, uploaded through the namespace grant, and applied in order; an increment is a whole task's changes, since the harness has no hook this agent can hold a task at |
 | `peer-agents/v1` | SDK default: the harness reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `triggers/v1` | SDK default |
 | `attribution-probe/v1` | the `project_id` and `task_id` the last task sent |

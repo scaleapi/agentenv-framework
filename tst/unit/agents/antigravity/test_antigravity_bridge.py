@@ -311,11 +311,27 @@ def test_a_result_whose_call_never_streamed_is_kept_unlinked():
     assert [(event["id"], event["call_ref"]) for event in events] == [("h9", None), ("h1", None)]
 
 
-def test_a_turn_past_its_time_fails_with_what_it_streamed_kept():
-    result, events = _run(Turn(steps=[("chunk", Text(step_index=0, text="working")), ("sleep", 5)]), timeout_s=0.2)
+def test_a_turn_past_its_time_fails_with_what_it_streamed_kept_and_its_conversation_for_the_next():
+    antigravity_bridge.SAVE_DIR.mkdir(parents=True)
+    (antigravity_bridge.SAVE_DIR / "conv-new.db").write_bytes(b"")
+
+    result, events = _run(Turn(steps=[("chunk", Text(step_index=0, text="working")), ("sleep", 5)],
+                               conversation_id="conv-new"), timeout_s=0.2)
 
     assert (result.error_code, result.error) == ("timeout", "the turn ran past its 0.2 s")
     assert events == [{"type": "Text", "step_index": 0, "text": "working"}]
+    assert result.session_id == "conv-new"
+
+
+@pytest.mark.parametrize("session_id", [None, "conv-1"])
+def test_a_turn_that_fails_before_its_first_step_keeps_the_conversation_it_resumed(session_id):
+    antigravity_bridge.SAVE_DIR.mkdir(parents=True)
+    (antigravity_bridge.SAVE_DIR / "conv-1.db").write_bytes(b"")
+
+    result, _ = _run(Turn(steps=[("raise", fake_sdk.AntigravityExecutionError("harness exited 2"))],
+                          conversation_id="conv-2"), session_id=session_id)
+
+    assert result.session_id == session_id
 
 
 @pytest.mark.parametrize("message, code, infra", [
@@ -348,21 +364,40 @@ def test_the_effort_goes_as_reasoning_effort(effort, sent):
     assert rewritten.get("reasoning_effort") == sent
 
 
-def test_an_image_goes_with_the_turns_own_message_once(tmp_path):
+def _rewritten(rewrite, messages: list[dict]) -> list[dict]:
+    return json.loads(asyncio.run(rewrite(json.dumps({"model": "m", "messages": messages}).encode())))["messages"]
+
+
+def test_an_image_goes_with_its_turns_message_once_and_with_it_in_the_turns_after(tmp_path):
     image = tmp_path / "chart.png"
     image.write_bytes(b"\x89PNG")
     part = antigravity_bridge.media_part(str(image))
-    rewrite = antigravity_bridge.turn_rewrite(None, [part])
-    body = {"model": "m", "messages": [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "ok"},
-                                       {"role": "user", "content": "look"}]}
+    first = antigravity_bridge.turn_rewrite(None, [str(image)])
+    asked = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "ok"},
+             {"role": "user", "content": "look"}]
 
-    once = json.loads(asyncio.run(rewrite(json.dumps(body).encode())))
-    twice = json.loads(asyncio.run(rewrite(json.dumps(once).encode())))
+    once = _rewritten(first, asked)
+    twice = _rewritten(first, once)
+    later = _rewritten(antigravity_bridge.turn_rewrite(None, []), [
+        *asked, {"role": "assistant", "content": "a chart"}, {"role": "user", "content": "its other label?"}])
 
     assert part == {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw=="}}
-    assert once["messages"][0]["content"] == "earlier"
-    assert once["messages"][2]["content"] == [{"type": "text", "text": "look"}, part]
+    assert once[0]["content"] == "earlier"
+    assert once[2]["content"] == [{"type": "text", "text": "look"}, part]
     assert twice == once
+    assert later[2]["content"] == [{"type": "text", "text": "look"}, part]
+    assert later[4]["content"] == "its other label?"
+
+
+def test_an_image_that_is_gone_is_left_out(tmp_path):
+    image = tmp_path / "chart.png"
+    image.write_bytes(b"\x89PNG")
+    _rewritten(antigravity_bridge.turn_rewrite(None, [str(image)]), [{"role": "user", "content": "look"}])
+    image.unlink()
+
+    later = _rewritten(antigravity_bridge.turn_rewrite(None, []), [{"role": "user", "content": "look"}])
+
+    assert later[0]["content"] == "look"
     assert antigravity_bridge.media_part(str(tmp_path / "notes.txt")) is None
 
 

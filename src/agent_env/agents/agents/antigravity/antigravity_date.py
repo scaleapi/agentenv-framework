@@ -4,7 +4,7 @@ commands it starts read the env's time. The model sees the harness's clock in tw
 time is: <RFC 3339>.`` in each turn's user message, and the ``Created At:`` and ``Completed At:`` stamps that head a
 command's result. While this agent follows an armed clock the turn's model relay puts the env's time in the line and
 shifts the stamps by the env's offset from real time when it first sees them, so a command keeps its duration. Each
-keeps what it was first given, recorded in ``EnvTimes`` beside the conversations by the time and the message it is in,
+keeps what it was first given, recorded in ``Records`` beside the conversations by the time and the message it is in,
 which the harness sends again as it stored it, so the earlier turns a resumed conversation sends again keep theirs.
 tst/integration/agent/antigravity_env_date_test.py checks the SDK's model calls hold the machine's date nowhere else."""
 
@@ -20,6 +20,7 @@ import signal
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from agent_egress import clock_armed
 from model_relay import Refusal
@@ -29,40 +30,43 @@ LOCAL_TIME = re.compile(rf"(The current local time is: )({_STAMP})(\.)")
 # The harness's head of a command's result: when the command started and, once it has, when it ended.
 RUN_TIMES = re.compile(rf"^((?:Created|Completed) At: )({_STAMP})$", re.MULTILINE)
 _DATE_TIMEOUT_S = 5
+# The hex digits of a message's digest a key holds.
+_KEY_DIGEST_CHARS = 16
 _SHOWN_CHARS = 200
 
 
-class EnvTimes:
-    """Each turn's local-time line and the env time it was given, and each command result's env and real time when
-    the relay first saw it, in ``path``, keyed by ``line_key``."""
+class Records:
+    """A JSON object of records beside the conversations, in ``path``, written whole by a rename: the env time each
+    turn's local-time line was given and each command result's env and real time when the relay first saw it, keyed by
+    ``line_key``, or the images each turn's message carries."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
 
-    def get(self, line: str) -> str | None:
-        return self._read().get(line)
+    def get(self, key: str) -> Any:
+        return self._read().get(key)
 
-    def all(self) -> dict[str, str]:
+    def all(self) -> dict[str, Any]:
         return self._read()
 
-    def put(self, line: str, env: str) -> None:
+    def put(self, key: str, value: Any) -> None:
         with self._lock:
             times = self._read()
-            times[line] = env
+            times[key] = value
             self.path.parent.mkdir(parents=True, exist_ok=True)
             staged = self.path.with_suffix(".tmp")
             staged.write_text(json.dumps(times))
             staged.replace(self.path)
 
-    def merge(self, other: dict[str, str]) -> None:
+    def merge(self, other: dict[str, Any]) -> None:
         """Add a snapshot's times, its own winning over none."""
         with self._lock:
             times = {**other, **self._read()}
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(times))
 
-    def _read(self) -> dict[str, str]:
+    def _read(self) -> dict[str, Any]:
         try:
             times = json.loads(self.path.read_text())
         except (OSError, ValueError):
@@ -70,13 +74,15 @@ class EnvTimes:
         return times if isinstance(times, dict) else {}
 
 
-def env_time_rewrite(times: EnvTimes):
+def env_time_rewrite(times: Records):
     """The relay's rewrite for a turn: while the agent follows an armed clock, every local-time line of a user message
-    gets the env time recorded for it, and the last one, the turn's own, the env's time now when none is recorded;
+    gets the env time recorded for it, and the last one, the turn's own, the env's time when the turn first sends it;
     every command result's stamps are shifted by the offset recorded for it, a result of the turn's own recording the
     env's offset now. A line or result of an earlier turn with none recorded is left as written: the agent followed no
     clock then. Unchanged otherwise; a call that isn't JSON, or whose env time can't be read, is refused, so the model
     is never told the machine's time instead."""
+
+    given: set[str] = set()
 
     async def rewrite(body: bytes) -> bytes:
         if not clock_armed():
@@ -100,8 +106,9 @@ def env_time_rewrite(times: EnvTimes):
         if lines:
             latest = lines[-1][0][lines[-1][1]]
             current = line_key(latest, LOCAL_TIME.findall(latest)[-1][1])
-            if times.get(current) is None:
+            if current not in given:
                 times.put(current, (await now())[0])
+                given.add(current)
         for holder, key in lines:
             text = holder[key]
             holder[key] = LOCAL_TIME.sub(lambda match: _placed(match, line_key(text, match.group(2)), times), text)
@@ -121,10 +128,14 @@ def env_time_rewrite(times: EnvTimes):
 def line_key(text: str, real: str) -> str:
     """A local-time line's or a command result's key: its time and the message text it is in, so two turns that start
     in one second keep their own env times."""
-    return f"{real}#{hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"
+    return f"{real}#{message_digest(text)}"
 
 
-def _placed(match: re.Match, line: str, times: EnvTimes) -> str:
+def message_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:_KEY_DIGEST_CHARS]
+
+
+def _placed(match: re.Match, line: str, times: Records) -> str:
     env = times.get(line)
     return match.group(0) if env is None else f"{match.group(1)}{env}{match.group(3)}"
 

@@ -71,6 +71,7 @@ from antigravity_bridge import (
     ERROR_MESSAGE_LIMIT,
     SAVE_DIR,
     SKILLS_DIR,
+    TURN_IMAGES,
     AntigravityTool,
     get_last_attribution_snapshot,
     run_antigravity,
@@ -105,6 +106,7 @@ _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 TRAJECTORY_FORMAT = "antigravity-sdk/1"
 _MANIFEST = "manifest.json"
 _ENV_TIMES_MEMBER = "env-times.json"
+_TURN_IMAGES_MEMBER = "turn-images.json"
 
 
 class AntigravityConfig(AgentConfig):
@@ -383,8 +385,8 @@ class AntigravityAgent(DurableSessionRefs, AgentEnvAgent):
 
     @extension(SNAPSHOT_V1.save)
     async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> dict[str, Any]:
-        """The context's conversation, its SDK store whole with the env times its turns were given, and the
-        workspace."""
+        """The context's conversation, its SDK store whole with the env times its turns were given and the images their
+        messages carry, and the workspace."""
         with tempfile.TemporaryDirectory(prefix="antigravity-snapshot-") as directory:
             conversation = Path(directory) / "conversation.tgz"
             workspace = Path(directory) / "workspace.tgz"
@@ -406,7 +408,9 @@ class AntigravityAgent(DurableSessionRefs, AgentEnvAgent):
 
     @extension(SNAPSHOT_V1.load)
     async def load_snapshot(self, request: ObjectSnapshotLoadRequest) -> dict[str, Any]:
-        """The conversation under its own id, which the SDK keys its store by, bound to the target context."""
+        """The conversation under its own id, which the SDK keys its store by and holds inside it, bound to the target
+        context. A conversation another context of this agent is bound to is refused: the two would share one history,
+        and the load would roll the other's back."""
         target_context_id = request.target_context_id or uuid.uuid4().hex
         with tempfile.TemporaryDirectory(prefix="antigravity-restore-") as directory:
             archive = Path(directory) / "conversation.tgz"
@@ -425,6 +429,9 @@ class AntigravityAgent(DurableSessionRefs, AgentEnvAgent):
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
             async with self._workspace.exclusive(), self._turn_lock(target_context_id):
+                if [context for context in self.contexts_bound_to(conversation_id) if context != target_context_id]:
+                    raise HTTPException(status_code=409, detail="the snapshot's conversation is another context's on "
+                                        "this agent: load it into another agent")
                 await asyncio.to_thread(_restore_conversation, staged_conversation, conversation_id)
                 if staged is not None:
                     await asyncio.to_thread(_replace_workspace, staged)
@@ -504,13 +511,13 @@ def _conversation_files(conversation_id: str) -> list[Path]:
 
 
 def _archive_conversation(conversation_id: str, archive: Path) -> None:
-    times = ENV_TIMES.all()
     with tempfile.TemporaryDirectory(prefix="antigravity-conversation-") as directory:
         (Path(directory) / _MANIFEST).write_text(json.dumps({"conversation_id": conversation_id}))
-        (Path(directory) / _ENV_TIMES_MEMBER).write_text(json.dumps(times))
+        (Path(directory) / _ENV_TIMES_MEMBER).write_text(json.dumps(ENV_TIMES.all()))
+        (Path(directory) / _TURN_IMAGES_MEMBER).write_text(json.dumps(TURN_IMAGES.all()))
         with tarfile.open(archive, "w:gz") as tar:
-            tar.add(Path(directory) / _MANIFEST, arcname=_MANIFEST)
-            tar.add(Path(directory) / _ENV_TIMES_MEMBER, arcname=_ENV_TIMES_MEMBER)
+            for member in (_MANIFEST, _ENV_TIMES_MEMBER, _TURN_IMAGES_MEMBER):
+                tar.add(Path(directory) / member, arcname=member)
             for path in _conversation_files(conversation_id):
                 tar.add(path, arcname=f"store/{path.name}")
 
@@ -542,12 +549,13 @@ def _restore_conversation(staged: Path, conversation_id: str) -> None:
     for path in sorted((staged / "store").iterdir()):
         if path.is_file() and path.name.startswith(f"{conversation_id}.db"):
             shutil.copyfile(path, SAVE_DIR / path.name)
-    try:
-        times = json.loads((staged / _ENV_TIMES_MEMBER).read_text())
-    except (OSError, ValueError):
-        times = {}
-    if isinstance(times, dict):
-        ENV_TIMES.merge({str(real): str(env) for real, env in times.items()})
+    for member, records in ((_ENV_TIMES_MEMBER, ENV_TIMES), (_TURN_IMAGES_MEMBER, TURN_IMAGES)):
+        try:
+            restored = json.loads((staged / member).read_text())
+        except (OSError, ValueError):
+            restored = {}
+        if isinstance(restored, dict):
+            records.merge({str(key): value for key, value in restored.items()})
 
 
 def _backup_exclusions() -> list[str]:

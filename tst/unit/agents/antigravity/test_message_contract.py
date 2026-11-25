@@ -261,6 +261,12 @@ def test_a_skill_with_its_own_frontmatter_is_written_as_given():
     written = "---\nname: mine\ndescription: d\n---\nbody"
 
     assert antigravity_kit.with_frontmatter(written, "other", "x") == written
+
+
+@pytest.mark.parametrize("skill_md", ["---\n\n# Report\nSteps.", "---\n\n# Report\n\n---\n\nMore steps."])
+def test_a_skill_that_opens_with_a_horizontal_rule_gets_frontmatter(skill_md):
+    assert antigravity_kit.with_frontmatter(skill_md, "report", "Write it.") == (
+        f'---\nname: "report"\ndescription: "Write it."\n---\n\n{skill_md}')
     assert antigravity_kit.with_frontmatter("body", 'a "quoted" name', None).startswith(
         '---\nname: "a \\"quoted\\" name"\ndescription: "a \\"quoted\\" name"\n---')
 

@@ -71,11 +71,13 @@ def folders(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     conversations = tmp_path / "home" / "conversations"
-    times = antigravity_date.EnvTimes(conversations / "env-times.json")
+    times = antigravity_date.Records(conversations / "env-times.json")
+    images = antigravity_date.Records(conversations / "turn-images.json")
     for module in (a2a_server, antigravity_bridge):
         monkeypatch.setattr(module, "SAVE_DIR", conversations)
         monkeypatch.setattr(module, "SKILLS_DIR", tmp_path / "home" / "skills")
         monkeypatch.setattr(module, "ENV_TIMES", times)
+        monkeypatch.setattr(module, "TURN_IMAGES", images)
     monkeypatch.setattr(a2a_server, "WORKSPACE_DIR", workspace)
     monkeypatch.setattr(a2a_server, "INPUTS_DIR", workspace / "inputs")
     monkeypatch.setattr(a2a_server, "_CHANGELOG_DIR", tmp_path / "changelog")

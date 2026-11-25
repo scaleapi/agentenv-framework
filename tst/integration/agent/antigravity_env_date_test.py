@@ -21,7 +21,9 @@ from tst.util import fake_openai
 
 pytestmark = [pytest.mark.integration]
 
-ENV_TIMES = ("1950-01-01T09:30:00Z", "1950-01-02T08:15:00Z")
+ENV_TIMES = ("1950-01-01T09:30:00Z", "1950-01-02T08:15:00Z", "1950-01-03T07:00:00Z")
+# How long the endpoint holds the stalled turn's second model call: past that turn's 20 s.
+_STALL_S = 40
 # The tools the first turn calls, in order, by a word of the name the model is offered each by: a command, the
 # harness's own skill listing, which its hooks never decide, and the workspace's file.
 TOOLS = ("command", "list_skills", "view_file")
@@ -29,7 +31,8 @@ _DAY_S = 86400
 _PT_INTERP = 3
 
 # Two turns of one conversation through the bridge, on an armed clock whose time is the next of argv's, with the real
-# SDK; their results, trajectories and what the SDK holds, as JSON.
+# SDK, then the first turn of another that runs past its time; their results, trajectories and what the SDK holds, as
+# JSON.
 DRIVER = '''
 import asyncio, json, sys
 from pathlib import Path
@@ -43,19 +46,22 @@ async def env_now():
     return current
 antigravity_date._env_now = env_now
 
-async def turn(prompt, session_id):
+async def turn(prompt, session_id, timeout_s=300):
     events = []
     result = await antigravity_bridge.run_antigravity(
-        prompt, model="m", session_id=session_id, mcp_servers=None, system_prompt=None, timeout_s=300, role=None,
+        prompt, model="m", session_id=session_id, mcp_servers=None, system_prompt=None, timeout_s=timeout_s, role=None,
         builtin_tools=None, max_turns=None, workspace=sys.argv[1], event_callback=events.append)
-    return {"response": result.response, "error": result.error, "session_id": result.session_id,
-            "tool_calls": result.tool_call_count, "usage": result.usage.to_dict(), "events": events}
+    return {"response": result.response, "error": result.error, "error_code": result.error_code,
+            "session_id": result.session_id, "tool_calls": result.tool_call_count, "usage": result.usage.to_dict(),
+            "events": events, "stored": antigravity_bridge.conversation_store_exists(result.session_id)}
 
 current = next(times)
 first = asyncio.run(turn("Run the shell command `echo 42` and reply with what it prints.", None))
 current = next(times)
 second = asyncio.run(turn("Thanks. Reply with the word done.", first["session_id"]))
-print(json.dumps({"turns": [first, second], "tools": sorted(tool.value for tool in agt.BuiltinTools),
+current = next(times)
+stalled = asyncio.run(turn("STALL: run the shell command `echo 42`.", None, timeout_s=20))
+print(json.dumps({"turns": [first, second, stalled], "tools": sorted(tool.value for tool in agt.BuiltinTools),
                   "harness": str(Path(ag.__file__).parent / "bin" / "localharness")}))
 '''
 
@@ -133,6 +139,9 @@ def run(sdk_python, tmp_path_factory) -> tuple[dict, fake_openai.FakeOpenAI]:
         if any("done" in text for text in _user_texts(body)[-1:]):
             return fake_openai.Text("done")
         ran = sum(message.get("role") == "tool" for message in body.get("messages") or [])
+        if ran and any("STALL" in text for text in _user_texts(body)[-1:]):
+            time.sleep(_STALL_S)
+            return fake_openai.Text("late")
         if ran == len(TOOLS):
             return fake_openai.Text("It printed 42.")
         offered = [tool["function"] for tool in body.get("tools") or [] if TOOLS[ran] in tool["function"]["name"]]
@@ -170,7 +179,8 @@ def test_the_sdks_tools_are_the_ones_a_task_selects_and_the_three_it_cant(run):
 def test_on_an_armed_clock_the_model_is_told_the_env_time_and_no_other(run):
     result, endpoint = run
     bodies = [seen.body for seen in endpoint.completions()]
-    first = [body for body in bodies if len(_user_texts(body)) == 1]
+    stalled = [body for body in bodies if any("STALL" in text for text in _user_texts(body))]
+    first = [body for body in bodies if len(_user_texts(body)) == 1 and body not in stalled]
     second = [body for body in bodies if len(_user_texts(body)) >= 2]
 
     assert first and second, [len(_user_texts(body)) for body in bodies]
@@ -180,6 +190,7 @@ def test_on_an_armed_clock_the_model_is_told_the_env_time_and_no_other(run):
         earlier, latest = _user_texts(body)[0], _user_texts(body)[-1]
         assert f"The current local time is: {ENV_TIMES[0]}." in earlier
         assert f"The current local time is: {ENV_TIMES[1]}." in latest
+    assert stalled and all(f"The current local time is: {ENV_TIMES[2]}." in _user_texts(body)[0] for body in stalled)
     machine = _machine_dates()
     for body in bodies:
         written = json.dumps(body)
@@ -188,7 +199,7 @@ def test_on_an_armed_clock_the_model_is_told_the_env_time_and_no_other(run):
 
 
 def test_each_tool_result_is_tied_to_the_call_the_sdk_streamed(run):
-    first, _second = run[0]["turns"]
+    first = run[0]["turns"][0]
 
     assert not first["error"], first["error"]
     calls = [event for event in first["events"] if event.get("type") == "ToolCall"]
@@ -203,10 +214,19 @@ def test_each_tool_result_is_tied_to_the_call_the_sdk_streamed(run):
 def test_the_turns_usage_is_every_model_call_the_harness_made_with_the_endpoints_key(run):
     result, endpoint = run
     completions = endpoint.completions()
-    usage = [turn["usage"] for turn in result["turns"]]
+    usage = [turn["usage"] for turn in result["turns"][:2]]
+    completions = [seen for seen in completions if not any("STALL" in text for text in _user_texts(seen.body))]
 
     assert sum(turn["provider_details"]["model_calls"] for turn in usage) == len(completions)
     assert sum(turn["input_tokens"] for turn in usage) == fake_openai.USAGE["prompt_tokens"] * len(completions)
     assert {seen.headers.get("authorization") for seen in completions} == {"Bearer sk-fake"}
     assert result["turns"][1]["session_id"] == result["turns"][0]["session_id"]
     assert result["turns"][1]["response"] == "done"
+
+
+def test_a_first_turn_past_its_time_leaves_the_conversation_the_sdk_started_for_the_next(run):
+    stalled = run[0]["turns"][2]
+
+    assert stalled["error_code"] == "timeout", stalled
+    assert stalled["session_id"] and stalled["stored"], stalled
+    assert stalled["session_id"] != run[0]["turns"][0]["session_id"]

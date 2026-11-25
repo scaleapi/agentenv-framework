@@ -13,6 +13,7 @@ import pytest
 from agentenv_protocol.a2a_agent import Uploaded
 
 from tst.unit.agents.antigravity.agent import a2a_server, antigravity_bridge
+from tst.unit.agents.antigravity.conftest import Harness
 
 _GRANT = {"expires_at": "2099-01-01T00:00:00Z", "url": "https://objects.example/o"}
 _WRITE = {"media_type": "application/octet-stream", "max_bytes": 1 << 20, "write": {"kind": "http-put", **_GRANT}}
@@ -44,13 +45,14 @@ def _members(archive: bytes) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_and_its_workspace_load_into_another_context(ag, objects, folders):
+async def test_a_conversation_and_its_workspace_load_into_another_agents_context(ag, objects, folders):
     store = antigravity_bridge.SAVE_DIR
     store.mkdir(parents=True)
     (store / "conv-1.db").write_bytes(b"sqlite")
     (store / "conv-1.db-wal").write_bytes(b"wal")
     (store / "conv-2.db").write_bytes(b"another")
     antigravity_bridge.ENV_TIMES.put("2026-11-25T10:00:00-08:00", "2031-03-03T23:06:07-06:00")
+    antigravity_bridge.TURN_IMAGES.put("3f2a", [str(folders / "inputs" / "t1" / "chart.png")])
     (folders / "report.md").write_text("draft")
     ag.agent.set_session_ref_for_context("ctx-source", "conv-1")
 
@@ -59,27 +61,30 @@ async def test_a_conversation_and_its_workspace_load_into_another_context(ag, ob
             "trajectory": _WRITE, "workspace": _WRITE}})
         assert saved.status_code == 200, saved.text
         assert _members(objects["conversation.tgz"]) == ["env-times.json", "manifest.json", "store/conv-1.db",
-                                                         "store/conv-1.db-wal"]
+                                                         "store/conv-1.db-wal", "turn-images.json"]
         for path in store.iterdir():
             path.unlink()
         (folders / "report.md").write_text("changed since")
         (folders / "stray.txt").write_text("stray")
 
+    other = Harness(a2a_server.AntigravityChangelogAgent())
+    async with other.client() as client:
         loaded = await client.put("/ext/snapshot", json={"target_context_id": "ctx-target", "objects": {
             "trajectory": _READ, "workspace": _READ}})
 
     assert loaded.status_code == 200, loaded.text
     assert loaded.json() == {"context_id": "ctx-target"}
-    assert ag.agent.session_ref_for_context("ctx-target") == "conv-1"
+    assert other.agent.session_ref_for_context("ctx-target") == "conv-1"
     assert {path.name: path.read_bytes() for path in store.glob("conv-*")} == {"conv-1.db": b"sqlite",
                                                                               "conv-1.db-wal": b"wal"}
     assert antigravity_bridge.ENV_TIMES.all() == {"2026-11-25T10:00:00-08:00": "2031-03-03T23:06:07-06:00"}
+    assert antigravity_bridge.TURN_IMAGES.all() == {"3f2a": [str(folders / "inputs" / "t1" / "chart.png")]}
     assert sorted(path.name for path in folders.iterdir()) == ["report.md"]
     assert (folders / "report.md").read_text() == "draft"
 
 
 @pytest.mark.asyncio
-async def test_a_loaded_conversation_replaces_a_stale_store_of_its_own(ag, objects):
+async def test_a_context_loaded_with_its_own_conversation_goes_back_to_it(ag, objects):
     store = antigravity_bridge.SAVE_DIR
     store.mkdir(parents=True)
     (store / "conv-1.db").write_bytes(b"saved")
@@ -88,11 +93,29 @@ async def test_a_loaded_conversation_replaces_a_stale_store_of_its_own(ag, objec
         await client.post("/ext/snapshot", json={"context_id": "ctx", "objects": {"trajectory": _WRITE}})
         (store / "conv-1.db").write_bytes(b"later")
         (store / "conv-1.db-shm").write_bytes(b"stale")
-        loaded = await client.put("/ext/snapshot", json={"objects": {"trajectory": _READ}})
+        loaded = await client.put("/ext/snapshot", json={"target_context_id": "ctx", "objects": {"trajectory": _READ}})
 
     assert loaded.status_code == 200, loaded.text
     assert {path.name: path.read_bytes() for path in store.glob("conv-1.db*")} == {"conv-1.db": b"saved"}
-    assert ag.agent.session_ref_for_context(loaded.json()["context_id"]) == "conv-1"
+    assert ag.agent.session_ref_for_context("ctx") == "conv-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [{"target_context_id": "ctx-other"}, {}])
+async def test_a_conversation_another_context_of_the_agent_holds_isnt_loaded_beside_it(ag, objects, target):
+    store = antigravity_bridge.SAVE_DIR
+    store.mkdir(parents=True)
+    (store / "conv-1.db").write_bytes(b"saved")
+    ag.agent.set_session_ref_for_context("ctx", "conv-1")
+    async with ag.client() as client:
+        await client.post("/ext/snapshot", json={"context_id": "ctx", "objects": {"trajectory": _WRITE}})
+        (store / "conv-1.db").write_bytes(b"later")
+        loaded = await client.put("/ext/snapshot", json={**target, "objects": {"trajectory": _READ}})
+
+    assert loaded.status_code == 409, loaded.text
+    assert "load it into another agent" in loaded.json()["detail"]
+    assert (store / "conv-1.db").read_bytes() == b"later"
+    assert ag.agent.contexts_bound_to("conv-1") == ["ctx"]
 
 
 def _archive(members: dict[str, bytes]) -> bytes:

@@ -31,8 +31,8 @@ def _call(*users, parts: bool = False) -> dict:
 
 
 @pytest.fixture
-def times(tmp_path) -> antigravity_date.EnvTimes:
-    return antigravity_date.EnvTimes(tmp_path / "conversations" / "env-times.json")
+def times(tmp_path) -> antigravity_date.Records:
+    return antigravity_date.Records(tmp_path / "conversations" / "env-times.json")
 
 
 @pytest.fixture
@@ -89,15 +89,27 @@ def test_date_runs_on_the_envs_clock_not_the_servers(env_clock, monkeypatch, tim
     assert "AGENTENV_REAL_TIME=" not in (env_clock / "date.env").read_text()
 
 
-def test_a_turns_line_keeps_the_env_time_it_was_first_given(env_clock, monkeypatch, times):
+def test_a_turns_line_keeps_the_env_time_it_was_first_given_for_the_rest_of_the_turn(env_clock, monkeypatch, times):
+    rewrite = antigravity_date.env_time_rewrite(times)
+    call = json.dumps(_call(_line(REAL) + "go")).encode()
     monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:06:07-06:00")
-    first = _rewrite(times, _call(_line(REAL) + "go"))
+    first = asyncio.run(rewrite(call))
     monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:09:00-06:00")
 
-    again = _rewrite(times, _call(_line(REAL) + "go"))
+    again = asyncio.run(rewrite(call))
 
     assert again == first
     assert _runs(env_clock) == 1
+
+
+def test_a_turn_whose_message_matches_an_earlier_ones_to_the_second_gets_the_time_now(env_clock, monkeypatch, times):
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:06:07-06:00")
+    _rewrite(times, _call(_line(REAL) + "go"))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-04T02:00:00-06:00")
+
+    again = _rewrite(times, _call(_line(REAL) + "go"))
+
+    assert again["messages"][1]["content"] == _line("2031-03-04T02:00:00-06:00") + "go"
 
 
 def test_a_resumed_conversations_earlier_turns_keep_their_times_and_the_new_one_gets_now(env_clock, monkeypatch,

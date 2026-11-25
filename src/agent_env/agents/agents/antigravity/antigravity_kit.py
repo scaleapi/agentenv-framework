@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -19,6 +20,9 @@ from starlette.responses import JSONResponse, Response
 logger = logging.getLogger(__name__)
 
 _REFS_ATTR = "_durable_session_refs"
+# A SKILL.md's YAML frontmatter: a block between `---` lines that names the skill or describes it.
+_FRONTMATTER = re.compile(r"\A---[ \t]*\n(?P<block>.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+_FRONTMATTER_KEY = re.compile(r"^(?:name|description)[ \t]*:", re.MULTILINE)
 
 
 class DurableSessionRefs:
@@ -32,6 +36,9 @@ class DurableSessionRefs:
     def set_session_ref_for_context(self, context_id: str, session_ref: str) -> None:
         super().set_session_ref_for_context(context_id, session_ref)
         self.__dict__.setdefault(_REFS_ATTR, {})[context_id] = session_ref
+
+    def contexts_bound_to(self, session_ref: str) -> list[str]:
+        return [context for context, ref in self.__dict__.get(_REFS_ATTR, {}).items() if ref == session_ref]
 
 
 _NO_BODY_STATUSES = frozenset({204, 205, 304})
@@ -78,9 +85,11 @@ async def install_skill(request: InlineSkillRequest | BundleSkillRequest, skills
 
 
 def with_frontmatter(skill_md: str, name: str, description: str | None) -> str:
-    """``skill_md`` as written when it opens with YAML frontmatter, else with a ``name`` and ``description`` one before
-    it: the SDK lists a skill to the model only by its frontmatter, so one without it would never be found."""
-    if skill_md.lstrip().startswith("---"):
+    """``skill_md`` as written when it opens with YAML frontmatter that names or describes it, else with a ``name`` and
+    ``description`` one before it: the SDK lists a skill to the model only by its frontmatter, so one without it, or
+    whose body merely opens with a horizontal rule, would never be found."""
+    block = _FRONTMATTER.match(skill_md.lstrip())
+    if block and _FRONTMATTER_KEY.search(block.group("block")):
         return skill_md
     summary = " ".join((description or name).split())
     return f"---\nname: {json.dumps(name)}\ndescription: {json.dumps(summary)}\n---\n\n{skill_md}"
