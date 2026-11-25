@@ -109,6 +109,20 @@ def test_a_date_outside_an_environment_context_goes_as_written(env_clock, monkey
     assert PROMPT in _texts(_rewrite(_call()))
 
 
+@pytest.mark.parametrize("quoted", [
+    f"Explain this: {CONTEXT}",
+    "The log said <current_time_reminder>Now: 17:34</current_time_reminder>, which is odd.",
+    f"{REMINDER} was in the transcript.",
+])
+def test_a_prompt_quoting_the_clis_date_or_reminder_goes_as_written_and_isnt_refused(env_clock, monkeypatch, quoted):
+    """The CLI writes its environment context and reminder each as a text of its own, between its markers."""
+    monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
+    call = _call()
+    call["input"].append(_message("user", quoted))
+
+    assert _texts(_rewrite(call))[-1] == quoted
+
+
 def test_a_date_the_cli_marked_unavailable_stays_so(env_clock, monkeypatch):
     monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
     gone = '<environment_context>\n  <current_date status="unavailable" />\n</environment_context>'
@@ -230,12 +244,13 @@ def test_a_date_that_cant_be_read_refuses_the_call_rather_than_tell_the_model_re
 
 def test_a_date_that_exits_leaving_a_process_on_its_output_is_refused_and_that_process_killed(env_clock, monkeypatch,
                                                                                               tmp_path):
-    """The date has exited, so only its session's group still reaches what it left holding the pipes."""
-    monkeypatch.setattr(codex_date, "_DATE_TIMEOUT_S", 1)
+    """The date has exited, so only its session's group still reaches what it left holding the pipes. The timeout
+    leaves a loaded machine time to start the stand-in and its child."""
+    monkeypatch.setattr(codex_date, "_DATE_TIMEOUT_S", 3)
     monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
     monkeypatch.setenv("FAKE_DATE_KID", str(tmp_path / "kid"))
 
-    with pytest.raises(codex_date.Refusal, match="date gave no answer within 1 s"):
+    with pytest.raises(codex_date.Refusal, match="date gave no answer within 3 s"):
         _rewrite(_call())
 
     kid, deadline = (tmp_path / "kid").read_text().strip(), time.monotonic() + 5

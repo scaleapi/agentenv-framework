@@ -80,7 +80,8 @@ def test_a_turn_on_an_armed_clock_tells_the_model_the_env_date_and_no_other(code
     dated = [text for body in sent for text in _texts(body) if "<current_date" in text]
     assert dated and all(f"<current_date>{ENV_TODAY}</current_date>" in text for text in dated), (
         f"Codex {VERSION} no longer writes its date where codex_date's _CURRENT_DATE finds it: {dated}")
-    assert all("<environment_context>" in text for text in dated), dated
+    assert all(text.strip().startswith("<environment_context>") and text.strip().endswith("</environment_context>")
+               for text in dated), f"Codex {VERSION} no longer writes its environment context as a text of its own"
     machine = _machine_dates()
     for body in sent:
         found = [date for date in machine if date in json.dumps(body)]

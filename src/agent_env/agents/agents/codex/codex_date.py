@@ -18,11 +18,14 @@ from model_relay import Refusal
 
 # The date line of the environment context the CLI gives the model (codex-rs core/src/context/world_state/
 # environment.rs, from turn_context.rs's local_time_context), and the time reminder it gives a persistent turn
-# (core/src/context/current_time_reminder.rs).
-_ENV_CONTEXT = re.compile(r"<environment_context>.*?</environment_context>", re.DOTALL)
+# (core/src/context/current_time_reminder.rs). The CLI writes each as a text of its own, between its markers, so a
+# text that only quotes one, a task's prompt say, is left as written.
+_CONTEXT_MARKERS = ("<environment_context>", "</environment_context>")
+_REMINDER_MARKERS = ("<current_time_reminder>", "</current_time_reminder>")
 _CURRENT_DATE = re.compile(r"<current_date>[^<]*</current_date>")
 _DATE_UNAVAILABLE = '<current_date status="unavailable" />'
-_TIME_REMINDER = re.compile(r"<current_time_reminder>It is [^<]* UTC\.</current_time_reminder>")
+_REMINDER_TIME = re.compile(r"It is [^<]* UTC\.")
+_TIME_REMINDER = re.compile(r"\s*<current_time_reminder>" + _REMINDER_TIME.pattern + r"</current_time_reminder>\s*")
 _ROLES = ("user", "developer", "system")
 _DATE_TIMEOUT_S = 5
 # How much of what a failing date printed its refusal quotes.
@@ -42,17 +45,24 @@ async def env_date_rewrite(body: bytes) -> bytes:
             from exc
     if not isinstance(request, dict):
         return body
-    texts = [(holder, key) for holder, key in _texts(request)
-             if "<current_date" in holder[key] or "<current_time_reminder>" in holder[key]]
-    if not texts:
+    contexts = [(holder, key) for holder, key in _texts(request)
+                if _between(holder[key], _CONTEXT_MARKERS) and "<current_date" in holder[key]]
+    reminders = [(holder, key) for holder, key in _texts(request) if _between(holder[key], _REMINDER_MARKERS)]
+    if not contexts and not reminders:
         return body
-    for holder, key in texts:
-        _check(holder[key])
+    for holder, key in contexts:
+        context = holder[key]
+        if context.count("<current_date") != len(_CURRENT_DATE.findall(context)) + context.count(_DATE_UNAVAILABLE):
+            raise Refusal("Codex's environment context has a date this agent doesn't know how to place, so the model "
+                          "can't be told the env's date")
+    if any(not _TIME_REMINDER.fullmatch(holder[key]) for holder, key in reminders):
+        raise Refusal("Codex's time reminder has a time this agent doesn't know how to place, so the model can't be "
+                      "told the env's time")
     today, now_utc = await _env_now()
-    for holder, key in texts:
-        holder[key] = _TIME_REMINDER.sub(f"<current_time_reminder>It is {now_utc} UTC.</current_time_reminder>",
-                                         _ENV_CONTEXT.sub(lambda m: _CURRENT_DATE.sub(
-                                             f"<current_date>{today}</current_date>", m.group(0)), holder[key]))
+    for holder, key in contexts:
+        holder[key] = _CURRENT_DATE.sub(f"<current_date>{today}</current_date>", holder[key])
+    for holder, key in reminders:
+        holder[key] = _REMINDER_TIME.sub(f"It is {now_utc} UTC.", holder[key], count=1)
     # Escaped, so a lone surrogate an MCP server's tool sent, which UTF-8 can't encode, goes as it came.
     return json.dumps(request, separators=(",", ":")).encode()
 
@@ -69,15 +79,10 @@ def _texts(request: dict):
             yield from ((part, "text") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
 
 
-def _check(text: str) -> None:
-    """Refuse a text whose date or time the CLI wrote in a form this doesn't rewrite."""
-    for context in _ENV_CONTEXT.findall(text):
-        if context.count("<current_date") != len(_CURRENT_DATE.findall(context)) + context.count(_DATE_UNAVAILABLE):
-            raise Refusal("Codex's environment context has a date this agent doesn't know how to place, so the model "
-                          "can't be told the env's date")
-    if text.count("<current_time_reminder>") != len(_TIME_REMINDER.findall(text)):
-        raise Refusal("Codex's time reminder has a time this agent doesn't know how to place, so the model can't be "
-                      "told the env's time")
+def _between(text: str, markers: tuple[str, str]) -> bool:
+    """Whether ``text`` is one of the CLI's fragments: its whole text between the fragment's markers."""
+    stripped = text.strip()
+    return stripped.startswith(markers[0]) and stripped.endswith(markers[1])
 
 
 async def _env_now() -> tuple[str, str]:

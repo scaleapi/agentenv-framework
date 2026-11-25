@@ -185,12 +185,13 @@ def test_a_date_that_cant_be_read_refuses_the_call_rather_than_tell_the_model_re
 
 def test_a_date_that_exits_leaving_a_process_on_its_output_is_refused_and_that_process_killed(env_clock, monkeypatch,
                                                                                               tmp_path):
-    """The date has exited, so only its session's group still reaches what it left holding the pipes."""
-    monkeypatch.setattr(opencode_date, "_DATE_TIMEOUT_S", 1)
+    """The date has exited, so only its session's group still reaches what it left holding the pipes. The timeout
+    leaves a loaded machine time to start the stand-in and its child."""
+    monkeypatch.setattr(opencode_date, "_DATE_TIMEOUT_S", 3)
     monkeypatch.setenv("FAKE_DATE_OUT", "1801742400 000000000")
     monkeypatch.setenv("FAKE_DATE_KID", str(tmp_path / "kid"))
 
-    with pytest.raises(opencode_date.Refusal, match="date gave no answer within 1 s"):
+    with pytest.raises(opencode_date.Refusal, match="date gave no answer within 3 s"):
         _rewrite(_call())
 
     kid, deadline = (tmp_path / "kid").read_text().strip(), time.monotonic() + 5
