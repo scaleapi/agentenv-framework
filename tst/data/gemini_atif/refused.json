@@ -6,12 +6,12 @@
    "turn": {
     "index": 0,
     "context_id": "ctx-gemini-refused",
-    "task_id": "fa167a96-17dd-4465-8d31-47fceb636228",
-    "message_id": "05569035e705450dacade853251b01a3",
+    "task_id": "a48b74d6-0353-4975-a1b1-1ecaee9547dc",
+    "message_id": "00d065530cc54b05a2a72a36a6488e49",
     "agent_name": "Gemini",
     "agent_version": "1.0.0",
     "agent_model": "gemini-2.5-flash",
-    "started_at": "2026-11-25T17:01:42.412250Z",
+    "started_at": "2026-11-25T17:35:45.463809Z",
     "inbound": [
      "Reply with ok."
     ],
@@ -19,7 +19,7 @@
     "final": [
      "gemini CLI exited with code 144: [API Error: {\"error\":{\"message\":\"refused by the recording proxy\",\"code\":400}}]"
     ],
-    "ended_at": "2026-11-25T17:01:44.048892Z",
+    "ended_at": "2026-11-25T17:35:47.126863Z",
     "data": [
      {
       "data": {
@@ -36,13 +36,13 @@
    "native": [
     {
      "type": "init",
-     "timestamp": "2026-11-25T17:01:43.972Z",
-     "session_id": "281db378-3034-4ee6-a47d-b721f30066c7",
+     "timestamp": "2026-11-25T17:35:47.051Z",
+     "session_id": "03e7e4cd-8638-4fda-a13e-f84aac673f35",
      "model": "gemini-2.5-flash"
     },
     {
      "type": "message",
-     "timestamp": "2026-11-25T17:01:43.973Z",
+     "timestamp": "2026-11-25T17:35:47.051Z",
      "role": "user",
      "content": "Reply with ok."
     },
@@ -52,11 +52,11 @@
      "model": "gemini-2.5-flash",
      "status": 400,
      "outcome": "refused",
-     "timestamp": "2026-11-25T17:01:43.997Z"
+     "timestamp": "2026-11-25T17:35:47.076Z"
     },
     {
      "type": "result",
-     "timestamp": "2026-11-25T17:01:44.021Z",
+     "timestamp": "2026-11-25T17:35:47.100Z",
      "status": "error",
      "error": {
       "type": "unknown",

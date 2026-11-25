@@ -6,20 +6,20 @@
    "turn": {
     "index": 0,
     "context_id": "ctx-gemini-retried",
-    "task_id": "2a8e300b-3954-4303-a896-8532201f078e",
-    "message_id": "aaaf53076a37408980c65916ca8bc3e0",
+    "task_id": "58a376ad-8a81-4351-89da-51e4c9e72a94",
+    "message_id": "1a19396f38214af5a69e2933c64d00c0",
     "agent_name": "Gemini",
     "agent_version": "1.0.0",
     "agent_model": "gemini-2.5-flash",
-    "started_at": "2026-11-25T17:01:45.907573Z",
+    "started_at": "2026-11-25T17:35:48.976245Z",
     "inbound": [
      "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
     ],
     "state": "completed",
     "final": [
-     "first\nsecond"
+     "first second"
     ],
-    "ended_at": "2026-11-25T17:02:04.486935Z",
+    "ended_at": "2026-11-25T17:36:09.041661Z",
     "data": [
      {
       "data": {
@@ -31,13 +31,13 @@
    "native": [
     {
      "type": "init",
-     "timestamp": "2026-11-25T17:01:47.502Z",
-     "session_id": "0b6bdb31-4ca4-4b6d-9b2e-6fadea0fe1f5",
+     "timestamp": "2026-11-25T17:35:50.545Z",
+     "session_id": "cff4bfb5-cedd-4bc1-a99f-a6b9d8c85f39",
      "model": "gemini-2.5-flash"
     },
     {
      "type": "message",
-     "timestamp": "2026-11-25T17:01:47.503Z",
+     "timestamp": "2026-11-25T17:35:50.546Z",
      "role": "user",
      "content": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
     },
@@ -49,25 +49,26 @@
      "outcome": "answered",
      "usage": {
       "input_tokens": 7332,
-      "output_tokens": 71,
+      "output_tokens": 84,
       "cache_read_tokens": 6979,
-      "reasoning_tokens": 54
+      "reasoning_tokens": 53
      },
-     "timestamp": "2026-11-25T17:01:48.930Z"
+     "timestamp": "2026-11-25T17:35:51.976Z"
     },
     {
      "type": "tool_use",
-     "timestamp": "2026-11-25T17:01:48.935Z",
+     "timestamp": "2026-11-25T17:35:51.980Z",
      "tool_name": "run_shell_command",
-     "tool_id": "run_shell_command_1795626108935_0",
+     "tool_id": "run_shell_command_1795628151980_0",
      "parameters": {
-      "command": "echo first"
+      "command": "echo first",
+      "description": "Echoes the word \"first\" to standard output."
      }
     },
     {
      "type": "tool_result",
-     "timestamp": "2026-11-25T17:01:48.970Z",
-     "tool_id": "run_shell_command_1795626108935_0",
+     "timestamp": "2026-11-25T17:35:52.015Z",
+     "tool_id": "run_shell_command_1795628151980_0",
      "status": "success"
     },
     {
@@ -76,7 +77,7 @@
      "model": "gemini-2.5-flash",
      "status": 503,
      "outcome": "refused",
-     "timestamp": "2026-11-25T17:01:48.982Z"
+     "timestamp": "2026-11-25T17:35:52.027Z"
     },
     {
      "type": "agentenv.model_call",
@@ -84,7 +85,7 @@
      "model": "gemini-2.5-flash",
      "status": 503,
      "outcome": "refused",
-     "timestamp": "2026-11-25T17:01:53.003Z"
+     "timestamp": "2026-11-25T17:35:58.495Z"
     },
     {
      "type": "agentenv.model_call",
@@ -93,26 +94,27 @@
      "status": 200,
      "outcome": "answered",
      "usage": {
-      "input_tokens": 7364,
-      "output_tokens": 18,
-      "cache_read_tokens": 0,
-      "reasoning_tokens": 0
+      "input_tokens": 7376,
+      "output_tokens": 75,
+      "cache_read_tokens": 6974,
+      "reasoning_tokens": 43
      },
-     "timestamp": "2026-11-25T17:02:03.657Z"
+     "timestamp": "2026-11-25T17:36:08.227Z"
     },
     {
      "type": "tool_use",
-     "timestamp": "2026-11-25T17:02:03.660Z",
+     "timestamp": "2026-11-25T17:36:08.230Z",
      "tool_name": "run_shell_command",
-     "tool_id": "run_shell_command_1795626123659_0",
+     "tool_id": "run_shell_command_1795628168230_0",
      "parameters": {
-      "command": "echo second"
+      "command": "echo second",
+      "description": "Echoes the word \"second\" to standard output."
      }
     },
     {
      "type": "tool_result",
-     "timestamp": "2026-11-25T17:02:03.676Z",
-     "tool_id": "run_shell_command_1795626123659_0",
+     "timestamp": "2026-11-25T17:36:08.247Z",
+     "tool_id": "run_shell_command_1795628168230_0",
      "status": "success"
     },
     {
@@ -122,39 +124,39 @@
      "status": 200,
      "outcome": "answered",
      "usage": {
-      "input_tokens": 7396,
-      "output_tokens": 3,
-      "cache_read_tokens": 6962,
+      "input_tokens": 7420,
+      "output_tokens": 2,
+      "cache_read_tokens": 6968,
       "reasoning_tokens": 0
      },
-     "timestamp": "2026-11-25T17:02:04.446Z"
+     "timestamp": "2026-11-25T17:36:09.004Z"
     },
     {
      "type": "message",
-     "timestamp": "2026-11-25T17:02:04.449Z",
+     "timestamp": "2026-11-25T17:36:09.007Z",
      "role": "assistant",
-     "content": "first\nsecond",
+     "content": "first second",
      "delta": true
     },
     {
      "type": "result",
-     "timestamp": "2026-11-25T17:02:04.451Z",
+     "timestamp": "2026-11-25T17:36:09.008Z",
      "status": "success",
      "stats": {
-      "total_tokens": 22184,
-      "input_tokens": 22092,
-      "output_tokens": 38,
-      "cached": 13941,
-      "input": 8151,
-      "duration_ms": 16949,
+      "total_tokens": 22289,
+      "input_tokens": 22128,
+      "output_tokens": 65,
+      "cached": 20921,
+      "input": 1207,
+      "duration_ms": 18463,
       "tool_calls": 2,
       "models": {
        "gemini-2.5-flash": {
-        "total_tokens": 22184,
-        "input_tokens": 22092,
-        "output_tokens": 38,
-        "cached": 13941,
-        "input": 8151
+        "total_tokens": 22289,
+        "input_tokens": 22128,
+        "output_tokens": 65,
+        "cached": 20921,
+        "input": 1207
        }
       }
      }
@@ -165,38 +167,39 @@
      "name": "session",
      "record": {
       "type": "gemini",
-      "id": "7de403e5-fb51-4361-9556-946df5c3a205",
-      "timestamp": "2026-11-25T17:01:48.940Z",
+      "id": "137c775b-bcf6-4292-b290-2fd72a28c8ed",
+      "timestamp": "2026-11-25T17:35:51.985Z",
       "model": "gemini-2.5-flash",
       "content": "",
       "thoughts": [
        {
-        "subject": "Executing Sequential Commands",
-        "description": "I'm currently executing the requested shell commands one after another. My focus is on capturing the output from each `echo` operation. Once both commands have finished, I'll be merging their results into a single, consolidated line for you.",
-        "timestamp": "2026-11-25T17:01:48.934Z"
+        "subject": "Executing and Combining Commands",
+        "description": "I'm preparing to execute the two requested shell commands. My plan is to use the `run_shell_command` tool for each `echo` instruction, and then I'll consolidate their outputs into a single, unified response.",
+        "timestamp": "2026-11-25T17:35:51.979Z"
        }
       ],
       "tokens": {
        "input": 7332,
-       "output": 17,
+       "output": 31,
        "cached": 6979,
-       "thoughts": 54,
+       "thoughts": 53,
        "tool": 0,
-       "total": 7403
+       "total": 7416
       },
       "toolCalls": [
        {
-        "id": "run_shell_command_1795626108935_0",
+        "id": "run_shell_command_1795628151980_0",
         "name": "run_shell_command",
         "args": {
-         "command": "echo first"
+         "command": "echo first",
+         "description": "Echoes the word \"first\" to standard output."
         },
         "status": "success",
-        "timestamp": "2026-11-25T17:01:48.970Z",
+        "timestamp": "2026-11-25T17:35:52.016Z",
         "result": [
          {
           "functionResponse": {
-           "id": "run_shell_command_1795626108935_0",
+           "id": "run_shell_command_1795628151980_0",
            "name": "run_shell_command",
            "response": {
             "output": "Output: first\nBackground PIDs: NaN\nProcess Group PGID: 46"
@@ -213,32 +216,39 @@
      "name": "session",
      "record": {
       "type": "gemini",
-      "id": "920a4f21-59ea-4c41-ba62-400eaf78c65d",
-      "timestamp": "2026-11-25T17:02:03.661Z",
+      "id": "721c5add-08da-4713-8562-e2fe25e2369f",
+      "timestamp": "2026-11-25T17:36:08.231Z",
       "model": "gemini-2.5-flash",
       "content": "",
-      "thoughts": [],
+      "thoughts": [
+       {
+        "subject": "Executing and Combining",
+        "description": "I've completed the first `echo` and am now focused on executing the second. My next step is to seamlessly merge their outputs into a single, cohesive line.",
+        "timestamp": "2026-11-25T17:36:08.229Z"
+       }
+      ],
       "tokens": {
-       "input": 7364,
-       "output": 18,
-       "cached": 0,
-       "thoughts": 0,
+       "input": 7376,
+       "output": 32,
+       "cached": 6974,
+       "thoughts": 43,
        "tool": 0,
-       "total": 7382
+       "total": 7451
       },
       "toolCalls": [
        {
-        "id": "run_shell_command_1795626123659_0",
+        "id": "run_shell_command_1795628168230_0",
         "name": "run_shell_command",
         "args": {
-         "command": "echo second"
+         "command": "echo second",
+         "description": "Echoes the word \"second\" to standard output."
         },
         "status": "success",
-        "timestamp": "2026-11-25T17:02:03.676Z",
+        "timestamp": "2026-11-25T17:36:08.247Z",
         "result": [
          {
           "functionResponse": {
-           "id": "run_shell_command_1795626123659_0",
+           "id": "run_shell_command_1795628168230_0",
            "name": "run_shell_command",
            "response": {
             "output": "Output: second\nBackground PIDs: NaN\nProcess Group PGID: 50"
@@ -255,18 +265,18 @@
      "name": "session",
      "record": {
       "type": "gemini",
-      "id": "119a1075-0d08-44fa-88e1-bb58814404c3",
-      "timestamp": "2026-11-25T17:02:04.451Z",
+      "id": "9e734789-3aef-427a-9a48-e85cb015d087",
+      "timestamp": "2026-11-25T17:36:09.008Z",
       "model": "gemini-2.5-flash",
-      "content": "first\nsecond",
+      "content": "first second",
       "thoughts": [],
       "tokens": {
-       "input": 7396,
-       "output": 3,
-       "cached": 6962,
+       "input": 7420,
+       "output": 2,
+       "cached": 6968,
        "thoughts": 0,
        "tool": 0,
-       "total": 7399
+       "total": 7422
       }
      },
      "after": 13
@@ -274,24 +284,24 @@
    ],
    "usage": {
     "tool_call_count": 2,
-    "input_tokens": 22092,
-    "output_tokens": 92,
-    "total_tokens": 22184,
-    "cache_read_tokens": 13941,
+    "input_tokens": 22128,
+    "output_tokens": 161,
+    "total_tokens": 22289,
+    "cache_read_tokens": 20921,
     "input_includes_cache": true,
     "models": [
      {
       "model": "gemini-2.5-flash",
       "calls": 3,
-      "input_tokens": 22092,
-      "output_tokens": 92,
-      "cache_read_tokens": 13941,
+      "input_tokens": 22128,
+      "output_tokens": 161,
+      "cache_read_tokens": 20921,
       "input_includes_cache": true
      }
     ],
     "provider_details": {
      "model_calls": 3,
-     "reasoning_tokens": 54
+     "reasoning_tokens": 96
     }
    }
   }
