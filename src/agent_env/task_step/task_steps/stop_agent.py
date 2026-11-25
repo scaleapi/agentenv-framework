@@ -9,7 +9,8 @@ a verifier that reads an agent's container without one). In order, it:
    background job is when the shell exits; the server is what listens on the agent's A2A port there. Each takes
    SIGTERM, and those left after ``grace_s`` SIGKILL. The server keeps running, so a later step can still prompt it, as
    does everything that started before it and what that starts: a container's init, a task container's own services,
-   the clock and egress programs of an image that runs them;
+   the clock and egress programs of an image that runs them. So do the servers of the other agents in its container,
+   and what they started; an orphan one of them left can't be told from this agent's, and ends too;
 3. removes what is at each of ``clear_paths``, a result file the agent may have written, say.
 
 Its report is ``context.metadata["stop_agent"][step_id]``: each task and whether it was cancelled, the server, each
