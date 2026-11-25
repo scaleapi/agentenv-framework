@@ -78,15 +78,17 @@ def request_headers(url: str, headers: dict[str, str] | None = None) -> dict[str
 
 def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[str, str]:
     """What ``grants``, env addresses and the headers that carry their control tokens, give a call to ``url``: those of
-    the address it resolves to or under, and none anywhere else."""
+    the longest address it resolves to or under, as a child's route under its gateway's, and none anywhere else."""
     where = _resolved(url)
     if where is None:
         return {}
+    longest, granted = -1, {}
     for base, sent in grants.items():
         address = _resolved(base) if base else None
-        if address is not None and where[0] == address[0] and where[1][:len(address[1])] == address[1]:
-            return sent
-    return {}
+        if address is not None and where[0] == address[0] and where[1][:len(address[1])] == address[1] \
+                and len(address[1]) > longest:
+            longest, granted = len(address[1]), sent
+    return granted
 
 
 def _resolved(url: str) -> tuple[tuple[str, str, int | None], list[str]] | None:
