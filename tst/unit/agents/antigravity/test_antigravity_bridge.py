@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.task_step.task_steps.deploy_agent import _check_builtin_tools
 from tst.unit.agents.antigravity import fake_sdk
-from tst.unit.agents.antigravity.agent import AGENT_DIR, a2a_server, antigravity_bridge
+from tst.unit.agents.antigravity.agent import AGENT_DIR, a2a_server, antigravity_bridge, antigravity_date
 from tst.unit.agents.antigravity.fake_sdk import StopReason, Text, Thought, ToolCall, ToolResult, Turn
 
 TOOLS = fake_sdk.BuiltinTools
@@ -388,6 +389,24 @@ def test_an_image_goes_with_its_turns_message_once_and_as_it_was_given_in_the_tu
     assert twice == once
     assert later[2]["content"] == [{"type": "text", "text": "look"}, part]
     assert later[4]["content"] == "its other label?"
+
+
+def test_a_turns_records_are_filed_under_its_conversation(monkeypatch, tmp_path):
+    image = tmp_path / "chart.png"
+    image.write_bytes(b"\x89PNG")
+
+    @asynccontextmanager
+    async def relay(upstream, calls, **kwargs):
+        await kwargs["rewrite"](json.dumps({"model": "m", "messages": [{"role": "user", "content": "look"}]}).encode())
+        yield "http://relay.test/token"
+
+    monkeypatch.setattr(antigravity_bridge, "model_relay", relay)
+    antigravity_bridge.file_records("conv-1", {"earlier#1"}, set())
+
+    _run(Turn(steps=[("chunk", Text(step_index=0, text="ok"))], conversation_id="conv-1"), attachment_paths=[str(image)])
+
+    assert antigravity_bridge.CONVERSATION_RECORDS.get("conv-1") == {
+        "env_times": ["earlier#1"], "turn_images": [antigravity_date.message_digest("look")]}
 
 
 def test_an_image_gone_before_its_turn_sends_it_is_left_out(tmp_path):

@@ -46,7 +46,7 @@ def _members(archive: bytes) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_and_its_workspace_load_into_another_agents_context(ag, objects, folders):
+async def test_a_conversation_its_own_records_and_its_workspace_load_into_another_agents_context(ag, objects, folders):
     store = antigravity_bridge.SAVE_DIR
     store.mkdir(parents=True)
     (store / "conv-1.db").write_bytes(b"sqlite")
@@ -54,9 +54,13 @@ async def test_a_conversation_and_its_workspace_load_into_another_agents_context
     (store / "conv-2.db").write_bytes(b"another")
     antigravity_bridge.ENV_TIMES.put("2026-11-25T10:00:00-08:00", "2031-03-03T23:06:07-06:00")
     antigravity_bridge.TURN_IMAGES.put("3f2a", ["c0ffee.png"])
+    antigravity_bridge.file_records("conv-1", {"2026-11-25T10:00:00-08:00"}, {"3f2a"})
+    antigravity_bridge.ENV_TIMES.put("2026-11-25T11:00:00-08:00", "2031-04-01T00:00:00Z")
+    antigravity_bridge.TURN_IMAGES.put("9b1d", ["0beef.png"])
+    antigravity_bridge.file_records("conv-2", {"2026-11-25T11:00:00-08:00"}, {"9b1d"})
     antigravity_bridge.IMAGES_DIR.mkdir()
-    (antigravity_bridge.IMAGES_DIR / "c0ffee.png").write_bytes(b"\x89PNG")
-    (antigravity_bridge.IMAGES_DIR / "unused.png").write_bytes(b"\x89PNG")
+    for name in ("c0ffee.png", "0beef.png", "unused.png"):
+        (antigravity_bridge.IMAGES_DIR / name).write_bytes(b"\x89PNG")
     (folders / "report.md").write_text("draft")
     ag.agent.set_session_ref_for_context("ctx-source", "conv-1")
 
@@ -84,6 +88,8 @@ async def test_a_conversation_and_its_workspace_load_into_another_agents_context
     assert antigravity_bridge.ENV_TIMES.all() == {"2026-11-25T10:00:00-08:00": "2031-03-03T23:06:07-06:00"}
     assert antigravity_bridge.TURN_IMAGES.all() == {"3f2a": ["c0ffee.png"]}
     assert [path.name for path in antigravity_bridge.IMAGES_DIR.iterdir()] == ["c0ffee.png"]
+    assert antigravity_bridge.CONVERSATION_RECORDS.all() == {
+        "conv-1": {"env_times": ["2026-11-25T10:00:00-08:00"], "turn_images": ["3f2a"]}}
     assert sorted(path.name for path in folders.iterdir()) == ["report.md"]
     assert (folders / "report.md").read_text() == "draft"
 

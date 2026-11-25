@@ -74,7 +74,26 @@ class Records:
         return times if isinstance(times, dict) else {}
 
 
-def env_time_rewrite(times: Records):
+class Tracked:
+    """A turn's view of ``Records``: the keys it read a record by, or wrote, so they can be filed under the turn's
+    conversation."""
+
+    def __init__(self, records: Records) -> None:
+        self.records = records
+        self.keys: set[str] = set()
+
+    def get(self, key: str) -> Any:
+        value = self.records.get(key)
+        if value is not None:
+            self.keys.add(key)
+        return value
+
+    def put(self, key: str, value: Any) -> None:
+        self.records.put(key, value)
+        self.keys.add(key)
+
+
+def env_time_rewrite(times: Records | Tracked):
     """The relay's rewrite for a turn: while the agent follows an armed clock, every local-time line of a user message
     gets the env time recorded for it, and the last one, the turn's own, the env's time when the turn first sends it;
     every command result's stamps are shifted by the offset recorded for it, a result of the turn's own recording the
@@ -135,7 +154,7 @@ def message_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:_KEY_DIGEST_CHARS]
 
 
-def _placed(match: re.Match, line: str, times: Records) -> str:
+def _placed(match: re.Match, line: str, times: Records | Tracked) -> str:
     env = times.get(line)
     return match.group(0) if env is None else f"{match.group(1)}{env}{match.group(3)}"
 

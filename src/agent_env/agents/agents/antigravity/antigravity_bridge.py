@@ -35,7 +35,7 @@ from google.antigravity.hooks import policy as ag_policy
 
 from agent_egress import clock_armed, egress_env
 from agentenv_protocol.a2a_agent import BuiltinTools, Usage
-from antigravity_date import Records, env_time_rewrite, message_digest
+from antigravity_date import Records, Tracked, env_time_rewrite, message_digest
 from model_relay import Calls, model_relay
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,8 @@ SAVE_DIR = HOME_DIR / "conversations"
 SKILLS_DIR = HOME_DIR / "skills"
 ENV_TIMES = Records(SAVE_DIR / "env-times.json")
 TURN_IMAGES = Records(SAVE_DIR / "turn-images.json")
+# Each conversation's keys in those two, its turns' own, so a snapshot of one carries no other's.
+CONVERSATION_RECORDS = Records(SAVE_DIR / "conversation-records.json")
 # Each turn's images as the turn was given them, by their content, so the agent editing an attachment never changes what
 # the user showed the model.
 IMAGES_DIR = SAVE_DIR / "images"
@@ -222,7 +224,7 @@ def kept_image(path: str) -> str | None:
     return name
 
 
-def _with_images(request: dict, images: list[str], recorded: Records) -> bool:
+def _with_images(request: dict, images: list[str], recorded: Records | Tracked) -> bool:
     """Every user message's images, which the SDK's chat-completions backend drops: the turn's own go with its message,
     the last user message, kept as they were (``kept_image``) and recorded by that message's text, so the turns after
     it, which send it again from a store that never saw them, carry them too. Whether it changed the request."""
@@ -259,10 +261,13 @@ def _text_of(message: dict) -> str:
                    and part.get("type") == "text")
 
 
-def turn_rewrite(effort: str | None, images: list[str]) -> Callable[[bytes], Awaitable[bytes]]:
+def turn_rewrite(effort: str | None, images: list[str], times: Records | Tracked | None = None,
+                 turn_images: Records | Tracked | None = None) -> Callable[[bytes], Awaitable[bytes]]:
     """The relay's rewrite for a turn's model calls: its messages' images, the env's time (``antigravity_date``), then
-    the turn's reasoning effort, which the SDK takes no setting for."""
-    date_rewrite = env_time_rewrite(ENV_TIMES)
+    the turn's reasoning effort, which the SDK takes no setting for. ``times`` and ``turn_images`` are the records it
+    reads and writes, ``ENV_TIMES`` and ``TURN_IMAGES`` by default."""
+    turn_images = TURN_IMAGES if turn_images is None else turn_images
+    date_rewrite = env_time_rewrite(ENV_TIMES if times is None else times)
     reasoning = _EFFORTS.get(effort or "")
     if effort and reasoning is None:
         logger.warning(f"effort {effort!r} isn't one chat completions takes; the turn runs without one")
@@ -272,7 +277,7 @@ def turn_rewrite(effort: str | None, images: list[str]) -> Callable[[bytes], Awa
             request = json.loads(body)
         except ValueError:
             request = None
-        if isinstance(request, dict) and _with_images(request, images, TURN_IMAGES):
+        if isinstance(request, dict) and _with_images(request, images, turn_images):
             body = json.dumps(request, separators=(",", ":")).encode()
         body = await date_rewrite(body)
         if reasoning is None:
@@ -424,11 +429,22 @@ async def run_antigravity(prompt: str, *, model: str | None, project_id: str | N
             f"- {path}" for path in attachment_paths)
     calls = Calls()
     headers = endpoint_headers(os.environ, attribution_headers(project_id, task_id))
+    times, turn_images = Tracked(ENV_TIMES), Tracked(TURN_IMAGES)
     async with model_relay(_api_root(os.environ.get("LITELLM_BASE_URL") or ""), calls, headers=headers,
-                           rewrite=turn_rewrite(effort, images)) as relay:
+                           rewrite=turn_rewrite(effort, images, times, turn_images)) as relay:
         result = await _turn(prompt, base_url=f"{relay}/v1", model=model or DEFAULT_MODEL, **kwargs)
     result.usage = calls.usage(result.tool_call_count, model or DEFAULT_MODEL)
+    if result.session_id:
+        file_records(result.session_id, times.keys, turn_images.keys)
     return result
+
+
+def file_records(conversation_id: str, env_times: set[str], turn_images: set[str]) -> None:
+    """File a turn's record keys under its conversation, beside the ones its earlier turns filed."""
+    filed = CONVERSATION_RECORDS.get(conversation_id) or {}
+    CONVERSATION_RECORDS.put(conversation_id, {
+        "env_times": sorted(set(filed.get("env_times") or []) | env_times),
+        "turn_images": sorted(set(filed.get("turn_images") or []) | turn_images)})
 
 
 async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | None,

@@ -67,6 +67,7 @@ from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
 from antigravity_bridge import (
+    CONVERSATION_RECORDS,
     ENV_TIMES,
     ERROR_MESSAGE_LIMIT,
     IMAGES_DIR,
@@ -74,6 +75,7 @@ from antigravity_bridge import (
     SKILLS_DIR,
     TURN_IMAGES,
     AntigravityTool,
+    file_records,
     get_last_attribution_snapshot,
     run_antigravity,
 )
@@ -513,14 +515,18 @@ def _conversation_files(conversation_id: str) -> list[Path]:
 
 
 def _archive_conversation(conversation_id: str, archive: Path) -> None:
+    """The conversation's store, and its own records and images alone: the agent's other contexts' never go with it."""
+    filed = CONVERSATION_RECORDS.get(conversation_id) or {}
+    times = {key: value for key in filed.get("env_times") or [] if (value := ENV_TIMES.get(key)) is not None}
+    images = {key: value for key in filed.get("turn_images") or [] if (value := TURN_IMAGES.get(key)) is not None}
     with tempfile.TemporaryDirectory(prefix="antigravity-conversation-") as directory:
         (Path(directory) / _MANIFEST).write_text(json.dumps({"conversation_id": conversation_id}))
-        (Path(directory) / _ENV_TIMES_MEMBER).write_text(json.dumps(ENV_TIMES.all()))
-        (Path(directory) / _TURN_IMAGES_MEMBER).write_text(json.dumps(TURN_IMAGES.all()))
+        (Path(directory) / _ENV_TIMES_MEMBER).write_text(json.dumps(times))
+        (Path(directory) / _TURN_IMAGES_MEMBER).write_text(json.dumps(images))
         with tarfile.open(archive, "w:gz") as tar:
             for member in (_MANIFEST, _ENV_TIMES_MEMBER, _TURN_IMAGES_MEMBER):
                 tar.add(Path(directory) / member, arcname=member)
-            kept = {name for names in TURN_IMAGES.all().values() if isinstance(names, list) for name in names}
+            kept = {name for names in images.values() if isinstance(names, list) for name in names}
             for name in sorted(kept):
                 if isinstance(name, str) and (IMAGES_DIR / name).is_file():
                     tar.add(IMAGES_DIR / name, arcname=f"{_IMAGES_MEMBER}/{name}")
@@ -555,6 +561,7 @@ def _restore_conversation(staged: Path, conversation_id: str) -> None:
     for path in sorted((staged / "store").iterdir()):
         if path.is_file() and path.name.startswith(f"{conversation_id}.db"):
             shutil.copyfile(path, SAVE_DIR / path.name)
+    keys: dict[str, set[str]] = {}
     for member, records in ((_ENV_TIMES_MEMBER, ENV_TIMES), (_TURN_IMAGES_MEMBER, TURN_IMAGES)):
         try:
             restored = json.loads((staged / member).read_text())
@@ -562,6 +569,8 @@ def _restore_conversation(staged: Path, conversation_id: str) -> None:
             restored = {}
         if isinstance(restored, dict):
             records.merge({str(key): value for key, value in restored.items()})
+            keys[member] = {str(key) for key in restored}
+    file_records(conversation_id, keys.get(_ENV_TIMES_MEMBER, set()), keys.get(_TURN_IMAGES_MEMBER, set()))
     if (staged / _IMAGES_MEMBER).is_dir():
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         for path in (staged / _IMAGES_MEMBER).iterdir():
