@@ -1,0 +1,33 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desk", "sandbox_type": "local"},
+  {"id": "agent", "type": "deploy_agent", "env_ids": ["desk"]},
+  {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "dana", "multi_day": false,
+   "model": "claude-haiku-4-5",
+   "persona": {"display_name": "Dana Reyes", "first_name": "Dana",
+               "description": {"who_you_are": ["You run accounts payable at a small studio."],
+                               "how_you_write": ["Short messages, no greeting."],
+                               "what_you_know": ["Invoice 4417 was approved for payment on Friday."],
+                               "decisions": ["You want to see a reply before anything goes out to a supplier."]},
+               "keep_private": ["Finance approved it only after a second review."]},
+   "opening_prompt": "The supplier chased invoice 4417. Draft a short reply saying we'll pay it Friday, but don't send it yet."},
+  {"id": "talk", "type": "prompt_agent", "user_agent_name": "dana", "max_conversation_turns": 8,
+   "prompt": "The supplier chased invoice 4417. Draft a short reply saying we'll pay it Friday, but don't send it yet.",
+   "post_turn_hooks": [{"file_artifact_id": "milestone-gates", "params": {
+     "role": "default", "idle_end": 2,
+     "milestones": [
+       {"id": "M1", "max_nudges": 2, "show": "draft",
+        "artifacts": {"draft": {"find": {"tool": "list_drafts", "pick": "last"}, "field": "body"}},
+        "gates": [
+          {"id": "m1-draft", "nudge": "I don't see a draft yet.", "check": {"artifact": "draft", "expect": "exists"}},
+          {"id": "m1-not-sent", "nudge": "Don't send anything yet, I want to see it first.",
+           "check": {"no_new": [{"tool": "list_sent", "baseline_count": 0}]}},
+          {"id": "m1-short", "nudge": "Can you make it shorter?",
+           "check": {"artifact": "draft", "format": {"max_paragraphs": 2}}}]},
+       {"id": "M2", "line": "Looks good. Send it to the supplier and copy finance@studio.example.",
+        "artifacts": {"sent": {"find": {"tool": "list_sent", "pick": "last"}}},
+        "gates": [
+          {"id": "m2-sent", "nudge": "Has it gone out?", "check": {"artifact": "sent", "expect": "exists"}},
+          {"id": "m2-recipients", "nudge": "Check who it went to.",
+           "check": {"artifact": "sent", "format": {"contains_all": ["billing@supplier.example",
+                                                                       "finance@studio.example"]}}}]}]}}]}
+]

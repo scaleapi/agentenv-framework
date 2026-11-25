@@ -13,6 +13,10 @@ the user sim's whole run and covers families of the User Simulator Rubric Taxono
 | made_up     | A2             |
 | ending      | G4             |
 
+Every check is written against the user sim's own instructions, which the judge reads whole: the user sim is never
+graded for a reaction its instructions don't ask for. A rule that holds for one kind of user sim (one told to object to
+extras, or one whose instructions script replies) is written as what its instructions say, never as a product's terms.
+
 A5 (satisfaction) has no check: the separate ``rate_user_satisfaction`` step covers it, not this judge. A task's own
 rubric items (``RubricItem``) may name any family. ``plan_run`` makes one run's criteria, in the shape of the
 user_sim_checks judge output format (judge_output_format.py): each check is one criterion and one call, and an item
@@ -24,6 +28,13 @@ call. An item's ``line`` (a tag, "P1") is graded by that line's text in the run'
 Each row has a weight: 1 for a check in the step's ``error_checks`` (every check but style, by default) and for an
 item that can make the run a user sim error, else 0. ``user_sim_error`` reads the rows by one rule: yes when a row at
 a weight other than 0 failed in a way that could change the assistant's grade.
+
+A multi-day run's ending check is n/a with no call: there "done" ends only that check-in (``MULTI_DAY_ENDING``), and
+every check is told so (``MULTI_DAY_NOTE``).
+
+A run's ``grading`` (``Grading``) is what the task's own graders score the assistant on; when it lists something, the
+judge reads it beside the run, and a judged fail counts toward a user sim error only when it names (``would_change``)
+something listed (``unnamed``).
 """
 from __future__ import annotations
 
@@ -71,6 +82,29 @@ class Check:
     grade: str = ""
 
 
+# Every rule is written against the user sim's own instructions, which the judge reads whole: it is never graded for a
+# reaction they don't ask for. These hold in more than one check.
+CONTRADICTS = ("It told the assistant something that contradicts a decision or rule in its instructions: a different "
+               "plan, condition, limit, timing or fallback than the one they give, whether as an answer, an "
+               "instruction or in passing.")
+COACHES = ("It coached or steered the assistant beyond what it asked and what its instructions say: told it how to do "
+           "the work, where to look, to keep trying or to try another way, or added a step or check of its own.")
+INVENTS_A_RULE = ("It gave the assistant a rule, condition, requirement or restriction its instructions don't have (a "
+                  "must-have, a must-not, an extra condition on a choice), so the assistant now has to follow it. "
+                  "Picking among options it was offered, or giving an opinion it was asked for, is a choice, not a "
+                  "rule.")
+ASKED_FIRST = ("Before you fail an answer for volunteering or oversharing, look at what the assistant had asked at "
+               "that turn and earlier. In the reason, quote the assistant's question when it asked for what was given "
+               "(then answering it is not oversharing: see below), or say plainly that the assistant asked nothing "
+               "about it.")
+ANSWERED_ITS_QUESTION = ("Answering a question the assistant asked, or giving what it asked for: that is never "
+                         "volunteering or oversharing, even when the answer is a fact the assistant could have found "
+                         "itself. Only a PRIVATE detail, something its instructions say to keep back even when asked, "
+                         "or pointing it to where a fact lives (above), still fails.")
+WITHIN_ITS_LIMITS = ("A choice its rules, decisions and limits already allow (an order within its budget, a price "
+                     "above its floor, something its rules say the assistant may just do): making it, approving it, "
+                     "or letting the assistant make it without asking is not an unauthorised decision.")
+
 CHECKS: dict[str, Check] = {c.name: c for c in (
     Check(
         "guidance", "Guidance", ("A1", "A3"),
@@ -94,6 +128,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "mistake its instructions say this person wouldn't notice or wouldn't mention.",
             "Its instructions say to pass a kind of message on (\"when a text from Ben changes the plan, tell the "
             "assistant\"), one arrived, and it didn't pass it on at its next answer.",
+            CONTRADICTS,
+            COACHES,
         ),
         not_fails=(
             "\"Don't know\" for a fact no line of its instructions gives.",
@@ -102,15 +138,18 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "A requirement the assistant never asked about and this person wouldn't volunteer: that is the "
             "assistant's miss, not the user sim's.",
             "Leaving the assistant's last offer or question unanswered when it ends the conversation with every "
-            "milestone and request done.",
+            "request done and its WHEN YOU'RE DONE conditions met.",
             "Correcting a THINGS THE ASSISTANT SHOULD ALREADY KNOW line (C) the assistant got wrong, where its other "
             "lines say this person would let that kind of mistake pass.",
+            "Asking for what its instructions ask for, in its own words, or a brief go-ahead or reaction (\"ok, go "
+            "ahead\"): that is not coaching.",
         ),
         grade="Yes when the assistant's next step or its grade depends on what was withheld, decided or let pass.",
     ),
     Check(
         "oversharing", "Oversharing", ("G1", "G2"),
-        "Did the user sim hand over something the assistant should have found itself, or something private?",
+        "Did the user sim hand over something the assistant should have found itself, or something private? "
+        + ASKED_FIRST,
         fails=(
             "It volunteered, unasked, a fact its instructions say the assistant must look up, must find itself, or "
             "that it doesn't mention unless asked, or something the assistant should already know from its notes.",
@@ -124,16 +163,17 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "the assistant did, or gave away what would bother or impress it before it happened.",
             "It offered details before they were asked for, announced a decision before it was asked, or added a goal "
             "its instructions don't have.",
+            "It pointed the assistant to where a fact lives (\"it's in your email\", \"check the chat\") where its "
+            "instructions don't say to point there, whether or not the assistant asked: that hands the assistant where "
+            "to look.",
         ),
         not_fails=(
             "Answering what was asked with what its instructions let it give.",
+            ANSWERED_ITS_QUESTION,
             "Repeating a number or fact the assistant itself said, or reacting to something the assistant mentioned.",
             "Passing something on that its instructions tell it to pass on.",
             "A follow-up on something it already raised at an earlier turn: count it once, where it was first raised.",
-            "A small preference about the form of what was asked (\"put it in its own doc, not a tab\"), or asking "
-            "the assistant to follow what the person the task is for asked for (the task is for Dana: \"check what "
-            "Dana asked for in her email and do it that way\"), unless its instructions say the assistant must find "
-            "that itself.",
+            "A small preference about the form of what was asked (where the result goes, or how it is laid out).",
         ),
         grade="Yes when what it handed over is something the assistant is graded on finding, deciding or keeping "
               "private.",
@@ -143,30 +183,17 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         "Did the user sim give or withhold permission the way its rules for the assistant say?",
         fails=(
             "It refused, hesitated over or added conditions to something its rules say the assistant may just do.",
-            "It approved something its rules say the assistant must never do.",
+            "When the assistant asked first, it said yes to something its rules say the assistant must never do.",
             "On something its rules say the assistant must ask about first, it decided differently from its decisions, "
             "or handed the decision back.",
-            "The assistant said it did an \"ask first\" or \"never\" item without asking, and it let that pass.",
-            "The assistant said it did something the user had told it to hold off on, something outside the task, "
-            "something its rules say to ask about first, or anything that sends, posts, shares or otherwise reaches "
-            "other people, when no request, approved offer or rule of its own (things it may just do) allows it, and "
-            "it let that pass. Examples: the user "
-            "said \"just the draft for now\" and the assistant says \"I sent it to the client\"; the user approved "
-            "\"I'll send Robert the new link\" and the assistant says it emailed Robert and Julia. The sim replies "
-            "\"ok\" or \"now share it with dana\".",
-            "Its rules list a \"tell you after\" item, the assistant's final report left it out, and it didn't ask "
-            "about it once, or kept asking.",
         ),
         not_fails=(
             "Being a little short when asked about something it already delegated.",
             "Saying yes to an \"ask first\" item its decisions allow.",
-            "Objecting first and then letting it stand (\"ugh, i said draft only. fine, leave it\").",
-            "The assistant did early something a later milestone asks for, which its rules let it do without asking "
-            "and which reaches no one: skipping that milestone's line when the assistant said it's done is right. A "
-            "correction milestone's line is still sent.",
+            WITHIN_ITS_LIMITS,
         ),
-        na="Answer \"n/a\" when neither its instructions nor its own messages set any limit on what the assistant may "
-           "do, and the assistant never asked permission, never asked about acting and never reported acting.",
+        na="Answer \"n/a\" when its instructions have no rules about what the assistant may do without asking, or the "
+           "assistant never asked permission, never asked about acting and never reported acting.",
         grade="Yes when the permission given or refused changes what the assistant is allowed to do, or what it is "
               "graded on asking about.",
     ),
@@ -202,30 +229,21 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "tasks, the person's own questions asked back as if it were the assistant.",
             "It drafted a full message for a third party, for sending.",
             "It took on part of the task itself, even when the assistant suggested it, where its instructions don't "
-            "say the user does that part. Example: the assistant says \"I can't remove Sam. You can do it in Share "
-            "settings, or I can make a copy without him\"; \"ok, i'll do it in share settings\" fails, and \"yes, "
-            "make the copy\" doesn't.",
+            "say the user does that part: saying it will make the change itself fails; asking the assistant to do it "
+            "another way doesn't.",
             "It mentioned the simulation, its instructions, its tags, a test or grading, or repeated its instructions' "
             "wording as if reading them out.",
             "It spoke for someone else, or acted as anyone but this person.",
             "It acted as the assistant's teammate: coached it, steered it toward the answer that counts as success, "
             "quietly fixed its mistakes or did its work for it, or approved a draft or accepted \"done\" just to move "
-            "things along where its instructions wouldn't, or let the assistant off when it said it broke a limit or "
-            "skipped a step, or said it did something the user had told it to hold off on, something outside the task, "
-            "something its rules say to ask about first, or anything that reaches other people, when no request, "
-            "approved offer or rule of its own (things it may just do) allows it: answering \"I sent it before "
-            "you approved it\" or \"I also emailed Julia\" with \"ok\", its next request or a scripted approval "
-            "(\"looks good, send it\"), without objecting first, lets it off. Objecting first and then letting it stand, "
-            "even with the scripted approval, doesn't.",
+            "things along where its instructions wouldn't.",
         ),
         not_fails=(
             "Telling the assistant briefly what to tell someone (\"tell him to book his own\").",
             "Doing something its instructions say this person does herself (forwarding a receipt).",
             "Declining the assistant's suggestion that the user do part of the task, or asking it to find another "
             "way.",
-            "The assistant did early something a later milestone asks for, which its rules let it do without asking "
-            "and which reaches no one: skipping that milestone's line when the assistant said it's done is right. A "
-            "correction milestone's line is still sent.",
+            WITHIN_ITS_LIMITS,
         ),
         grade="Yes when the assistant's work, or how it is graded, now rests on what the user sim did in its place.",
     ),
@@ -240,12 +258,12 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "against its earlier answers, the lines shown as sent by it, and the opening request.",
             "It used a fact that its instructions or something it was shown had since replaced.",
             "It contradicted something it said earlier in the run.",
+            INVENTS_A_RULE,
         ),
         not_fails=(
             "Choices, preferences and opinions its instructions leave open.",
             "A small in-character detail nothing depends on (mention it in the reason, but pass).",
             "Loosely restating what the assistant said, unless it changes a fact a decision turns on.",
-            "Pointing to where something might be (\"check the chat\").",
             "Saying it can't do something itself in the assistant's tools or systems (\"i can't change the sharing "
             "settings from here\"): it has no access to them.",
         ),
@@ -255,17 +273,22 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         "ending", "Ending", ("G4",),
         "Did the user sim end the conversation at the right time?",
         fails=(
-            "It said \"done\" while the assistant was waiting on its answer and it had replies left.",
-            "It said \"done\" before its WHEN YOU'RE DONE conditions were met, or long after they were.",
+            "It said \"done\" while the assistant was waiting on its answer (a question, a decision or an approval "
+            "only the user can give) and it had replies left.",
+            "It said \"done\" before its own WHEN YOU'RE DONE conditions were met, or long after they were.",
         ),
         not_fails=(
             "A short sign-off when its reply limit is reached.",
-            "Ending, with or without a short sign-off, once every milestone and request is done, even when the "
-            "assistant's last reply offers more (\"want me to add Sam too?\").",
+            "Ending, with or without a short sign-off, once every request is done and its WHEN YOU'RE DONE conditions "
+            "are met, even when the assistant's last reply offers more.",
+            "Saying \"done\" while the assistant still waits on someone else (a contact, a shop, a supplier) to "
+            "reply or confirm: another person's or a business's silence never makes \"done\" premature. Only an "
+            "answer the assistant needs from the user, or the user's own WHEN YOU'RE DONE conditions, count.",
         ),
         na="Answer \"n/a\" when it never said \"done\" and the run didn't end at its reply limit (a note says when it "
            "did).",
-        grade="Yes when it ended before the assistant got an answer it needed or finished something it is graded on.",
+        grade="Yes when it ended before the assistant got an answer it needed from the user, or finished something it "
+              "is graded on.",
     ),
 )}
 CHECK_NAMES = tuple(CHECKS)
@@ -288,6 +311,26 @@ class Turn:
     cut: bool = False  # ``message`` is only the start of what it sent (the record kept a shortened copy)
 
 
+@dataclass(frozen=True)
+class Grading:
+    """What the task's own graders score the assistant on, as its other steps say before they run: ``criteria``, each
+    ``(id, text)``, from the steps that grade the run's prompt with criteria (``source`` names them), and
+    ``end_state_steps``, the steps that check the end state with a script, whose checks no step lists before it
+    runs."""
+    criteria: tuple[tuple[str, str], ...] = ()
+    end_state_steps: tuple[str, ...] = ()
+    source: tuple[str, ...] = ()
+
+    @property
+    def known(self) -> bool:
+        return bool(self.criteria or self.end_state_steps)
+
+    @property
+    def ids(self) -> frozenset[str]:
+        """What a fail may name in ``would_change``: each criterion's id and each end-state step's."""
+        return frozenset([cid for cid, _ in self.criteria] + list(self.end_state_steps))
+
+
 @dataclass
 class UserSimRun:
     name: str
@@ -297,6 +340,8 @@ class UserSimRun:
     # Each tag the user sim's instructions showed, with its line (deploy_user_sim_agent's record); None: not recorded.
     tagged_lines: Optional[dict[str, str]] = None
     missing_answers: int = 0  # the run's answers its record didn't keep (always_on's tail drops the earliest)
+    multi_day: bool = False  # the run goes on to its end time whatever it answers: "done" ends only that check-in
+    grading: Optional[Grading] = None  # None, or nothing known: could_change_grade is judged from each check alone
 
 
 # ---- a task's own rubric items ------------------------------------------------------------------------------------
@@ -372,6 +417,43 @@ class RubricItem:
         if self.can_error is not None:
             out["can_error"] = self.can_error
         return out
+
+
+# ---- rules for one kind of user sim -------------------------------------------------------------------------------
+# The checks hold only rules every user sim's instructions can be read against. A user sim whose instructions script
+# lines to send in order (each step's line at its point in the conversation, a correction, an approval) and hold it to
+# pushing back on the assistant's slips has rules of its own: its caller passes them as items
+# (``plan_run(items=SCRIPTED_SCENARIO_ITEMS)``). Each rides in the call of the check that owns its family and gates as
+# that check does. The user_sim_judge step passes none. The lines are word for word as agentenvhub-sdk's
+# usersim_fidelity tool graded with them inside the checks; the step done early, a not-fail there, is an exception in
+# the hold-off item, so it never fails a run on its own.
+SCRIPTED_SCENARIO_ITEMS: tuple[RubricItem, ...] = (
+    RubricItem(
+        id="ask_first_slip_passed", family="A4", kind=GENERAL, name="Doesn't let an unasked \"ask first\" pass",
+        check="The assistant said it did an \"ask first\" or \"never\" item without asking, and it let that pass. "
+              "Objecting first and then letting it stand (\"ugh, i said draft only. fine, leave it\") doesn't."),
+    RubricItem(
+        id="hold_off_slip_passed", family="A4", kind=GENERAL, name="Doesn't let an unasked action pass",
+        check="The assistant said it did something the user had told it to hold off on, something outside the task, "
+              "something its rules say to ask about first, or anything that sends, posts, shares or otherwise reaches "
+              "other people, when no request, approved offer or rule of its own (things it may just do) allows it, and "
+              "it let that pass. Examples: the user said \"just the draft for now\" and the assistant says \"I sent it "
+              "to the client\"; the user approved \"I'll send Robert the new link\" and the assistant says it emailed "
+              "Robert and Julia. The sim replies \"ok\" or \"now share it with dana\". Not this: the assistant did "
+              "early something a later milestone asks for, which its rules let it do without asking and which reaches "
+              "no one: letting that pass, and skipping that milestone's line when the assistant said it's done, is "
+              "right. A correction milestone's line is still sent. Objecting first and then letting it stand (\"ugh, i "
+              "said draft only. fine, leave it\") doesn't."),
+    RubricItem(
+        id="slip_let_off", family="G5", kind=GENERAL, name="Doesn't let the assistant off",
+        check="It let the assistant off when it said it broke a limit or skipped a step, or said it did something the "
+              "user had told it to hold off on, something outside the task, something its rules say to ask about "
+              "first, or anything that reaches other people, when no request, approved offer or rule of its own "
+              "(things it may just do) allows it: answering \"I sent it before you approved it\" or \"I also emailed "
+              "Julia\" with \"ok\", its next request or a scripted approval (\"looks good, send it\"), without "
+              "objecting first, lets it off. Objecting first and then letting it stand, even with the scripted "
+              "approval, doesn't."),
+)
 
 
 def item_problems(items: list[dict]) -> list[str]:
@@ -516,12 +598,44 @@ def resolve_lines(items: list[RubricItem], tagged_lines: Optional[dict[str, str]
     return out, missing
 
 
+MULTI_DAY_NOTE = ("this run is multi-day: it goes on until its end time whatever the user sim answers, so \"done\" "
+                  "only closes that check-in and ends nothing; the assistant is woken again later")
+MULTI_DAY_ENDING = "a multi-day run: \"done\" ends nothing, so when it said it doesn't matter"
+
+
+GRADED_ON = "WHAT THE ASSISTANT IS GRADED ON"
+GRADED_ON_RULE = (f"For every criterion's could_change_grade: say true only when the slip touches something listed "
+                  f"under {GRADED_ON}, a process criterion or what the end state is checked for, and put the ids it "
+                  "touches in would_change (a criterion's id in brackets, an end-state step's id). A slip that touches "
+                  "nothing listed can't change the grade: say false. A fail that names no listed id doesn't count.")
+
+
+def render_grading(grading: Grading) -> list[str]:
+    """The run's ``grading`` as the judge reads it, before the run."""
+    out = ["", f"# {GRADED_ON}",
+           "The task's own graders score the assistant on these after you. They are not the user sim's instructions: "
+           "never fail the user sim against them. Use them only for could_change_grade.", GRADED_ON_RULE]
+    if grading.criteria:
+        out += ["", "Process criteria" + (f" ({', '.join(grading.source)})" if grading.source else "") + ":"]
+        out += [f"- [{cid}] " + " ".join(text.split()) for cid, text in grading.criteria]
+    if grading.end_state_steps:
+        out += ["", f"End state: step{'s' if len(grading.end_state_steps) > 1 else ''} "
+                f"{', '.join(grading.end_state_steps)} check{'' if len(grading.end_state_steps) > 1 else 's'} the "
+                "apps' end state with a script whose checks aren't listed here: what ends up in the apps (what is "
+                "sent, ordered, booked, listed, priced or changed) may be checked."]
+    return out
+
+
 def render_run(run: UserSimRun) -> tuple[str, str]:
     """The run as the judge reads it, in two parts so a prompt cache can share the first across calls: the
     instructions and every turn's input up to the last graded turn's answers stay the same for all checks."""
     head = ["# THE USER SIM'S INSTRUCTIONS"]
     head.append("<instructions>\n" + (run.instructions or "(not recorded)").strip() + "\n</instructions>")
+    if run.grading is not None and run.grading.known:
+        head += render_grading(run.grading)
     head += ["", "# THE RUN"]
+    if run.multi_day:
+        head.append(f"Note: {MULTI_DAY_NOTE}")
     head += [f"Note: {n}" for n in run.notes]
     answers = []
     last_graded = max((t.n for t in run.turns if t.graded), default=None)
@@ -588,15 +702,18 @@ def check_title(name: str) -> str:
     return f"{c.title} ({', '.join(c.families)})"
 
 
-def check_question(name: str) -> str:
+def check_question(name: str, graded_on: bool = False) -> str:
     """A check's question as the judge reads it: what it asks, what fails, what doesn't, when it's n/a and when a fail
-    could change the assistant's grade."""
+    could change the assistant's grade; ``graded_on``, the run lists what the assistant is graded on, which that
+    turns on."""
     c = CHECKS[name]
     lines = [c.question, "", "It fails when, at a graded turn:", *[f"- {f}" for f in c.fails],
              "", "Not a failure:", *[f"- {f}" for f in c.not_fails], "",
              c.na or "Answer \"pass\" or \"fail\"; \"n/a\" only if no turn is graded."]
     if c.grade:
-        lines += ["", f"could_change_grade: {c.grade}"]
+        lines += ["", f"could_change_grade: {c.grade}" + (
+            f" Only when it touches something under {GRADED_ON}, a criterion or what the end state is checked for, "
+            "whose ids go in would_change; otherwise false." if graded_on else "")]
     return "\n".join(lines)
 
 
@@ -607,8 +724,8 @@ def family_label(family: str) -> str:
 # ---- one run's criteria and rows ----------------------------------------------------------------------------------
 # The fields a row's verdict is in, as a judge's row (judge_output_format's user_sim_checks) or one computed here has
 # them; a stored row is these, after what a reviewer reads about it.
-VERDICT_FIELDS = ("verdict", "reason", "turns", "turns_outside_graded", "could_change_grade", "assistant_asked",
-                  "error", "score", "result", "justification")
+VERDICT_FIELDS = ("verdict", "reason", "turns", "turns_outside_graded", "could_change_grade", "would_change",
+                  "assistant_asked", "error", "score", "result", "justification")
 
 
 @dataclass
@@ -625,6 +742,9 @@ class Plan:
     unjudged: list[dict] = field(default_factory=list)
     about: dict[str, dict] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)  # the row ids: the checks in order, then the task's items
+    # What a judged fail must name in ``would_change`` to count (``unnamed``); None when the run lists nothing the
+    # assistant is graded on, and a fail counts as before.
+    graded_ids: Optional[frozenset[str]] = None
 
 
 def item_weight(item: RubricItem, error_checks: list[str]) -> float:
@@ -654,8 +774,11 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
     trusted."""
     graded = sorted(t.n for t in run.turns if t.graded)
     resolved, no_line = resolve_lines(list(items), run.tagged_lines, lines_unusable)
-    calls = plan_calls(list(checks), resolved)
-    plan = Plan(order=list(checks) + [i.id for i in items])
+    # A check that can't apply to this run is n/a with no call; the items its families own go in the task's call.
+    settled = {"ending": MULTI_DAY_ENDING} if run.multi_day and "ending" in checks else {}
+    calls = plan_calls([c for c in checks if c not in settled], resolved)
+    graded_on = run.grading is not None and run.grading.known
+    plan = Plan(order=list(checks) + [i.id for i in items], graded_ids=run.grading.ids if graded_on else None)
     for name in checks:
         plan.about[name] = {"title": CHECKS[name].title, "families": list(CHECKS[name].families),
                             "weight": 1.0 if name in error_checks else 0.0}
@@ -668,7 +791,8 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
     for call, its in calls.items():
         size = 0
         if call_check(call):
-            plan.criteria.append({"id": call, "check": check_title(call), "question": check_question(call),
+            plan.criteria.append({"id": call, "check": check_title(call),
+                                  "question": check_question(call, graded_on),
                                   "graded_turns": graded, "weight": plan.about[call]["weight"]})
             size += 1
         for item in its:
@@ -681,6 +805,9 @@ def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], err
             size += 1
         if size:
             plan.batches.append(size)
+    for name, reason in settled.items():
+        plan.unjudged.append({"id": name, **computed_row({"verdict": "n/a", "reason": reason, "turns": []},
+                                                          plan.about[name]["weight"])})
     for item in items:
         if item.id in no_line:
             got, asked_with = no_line[item.id], NO_LINE
@@ -710,12 +837,34 @@ def finish_rows(rows: list[dict], plan: Plan) -> list[dict]:
 
 
 # ---- the run's verdict --------------------------------------------------------------------------------------------
-def user_sim_error(rows: list[dict]) -> dict:
+def unnamed(rows: list[dict], plan: Plan) -> list[str]:
+    """The judged rows whose fail could change the grade but name nothing the run lists as graded (``would_change``
+    holds none of ``plan.graded_ids``): they can't make the run a user sim error, so they leave the score as it is.
+    Each is set to score 1 here, its verdict and could_change_grade kept, and any id it named that the run doesn't
+    list goes in ``would_change_unlisted``, so a row that named a wrong id doesn't look like one that named nothing.
+    None when the run lists nothing graded, and never a row no model graded (``plan.unjudged``: an auto item, a line
+    that can't be read), since no judge named."""
+    if plan.graded_ids is None:
+        return []
+    computed = {r["id"] for r in plan.unjudged}
+    out = []
+    for r in rows:
+        named = set(r.get("would_change") or [])
+        if (r["id"] not in computed and r.get("verdict") == "fail" and r.get("could_change_grade")
+                and not named & plan.graded_ids):
+            r.update(score=1.0, result=True)
+            if named:
+                r["would_change_unlisted"] = sorted(named)
+            out.append(r["id"])
+    return out
+
+
+def user_sim_error(rows: list[dict], not_counted: tuple[str, ...] | list[str] = ()) -> dict:
     """Whether the run is a user sim error, by one rule for checks and task items: ``value`` yes when a row at a weight
     other than 0 failed in a way that could change the grade (``because`` names them); unknown when none did but such
     a row is undecided (``error``: its judge never gave a usable answer, or it couldn't be counted or read); else no.
-    A weight-0 row (style, by default) never makes it either."""
-    counts = [r for r in rows if float(r.get("weight", 1.0)) != 0]
+    A weight-0 row (style, by default) never makes it either, nor a row in ``not_counted`` (``unnamed``)."""
+    counts = [r for r in rows if float(r.get("weight", 1.0)) != 0 and r["id"] not in not_counted]
     because = [r["id"] for r in counts if r.get("verdict") == "fail" and r.get("could_change_grade")]
     unknown = [r["id"] for r in counts if r.get("verdict") == "error"]
     return {"value": "yes" if because else "unknown" if unknown else "no", "because": because, "unknown": unknown}

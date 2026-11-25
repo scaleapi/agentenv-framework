@@ -129,6 +129,20 @@ class _RecordsModels(_Scored):
         return context
 
 
+class _SplitGrade(_Scored):
+    """Records a grade whose judge took 3 samples and they split on one criterion, as a sampled rubrics judge does."""
+
+    type = "split_grade_run_test"
+
+    async def execute(self, context):
+        samples = [{"score": 1.0, "passed": True}, {"score": 1.0, "passed": True}, {"score": 0.0, "passed": False}]
+        context.metadata.setdefault("grades", {})[self.id] = {
+            "verifier_status": "graded", "score": 1.0,
+            "verifier_criteria": [{"id": "c1", "score": 1.0, "agreement": 1.0, "samples": [samples[0]] * 3},
+                                  {"id": "c2", "score": 1.0, "agreement": 0.67, "samples": samples}]}
+        return await super().execute(context)
+
+
 class _NamesAgent(_Scored):
     """Names an agent, so the agent and its image are written, without deploying it."""
 
@@ -174,7 +188,7 @@ LAYOUT = {
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(),
              **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels, _Spends,
-                                                         _ReadsCache)}}
+                                                         _ReadsCache, _SplitGrade)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     fake_plugins(monkeypatch)  # no installed package ships these classes
     monkeypatch.setattr(_Scored, "seen", [])
@@ -518,6 +532,15 @@ def test_the_cli_runs_each_role_on_its_model_names_them_and_a_rerun_on_others_wr
     assert ("    models: solver the agent's default; user simulator the agent's default; judge k"
             in second.output.splitlines())
     assert (bundle_dir / "tasks" / "models.json").read_text() == written
+
+
+def test_the_cli_names_the_criteria_a_sampled_judges_samples_split_on_in_a_grade_that_stood(bundle_dir, quiet_logs):
+    layout(bundle_dir, {"tasks/split.json": json.dumps([{"id": "judge", "type": "split_grade_run_test"}])})
+
+    result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--task", "split"])
+
+    assert result.exit_code == 0, result.output
+    assert "    samples split: judge on c2 (2 of 3 pass)" in result.output.splitlines()
 
 
 @pytest.fixture

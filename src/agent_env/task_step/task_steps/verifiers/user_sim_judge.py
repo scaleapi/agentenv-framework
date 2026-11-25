@@ -40,7 +40,21 @@ The criteria (``user_sim_judge_core.plan_run``): each of the seven checks (``use
 criterion and one call, and a task's ``rubric_items`` ride in the call of the check that owns their family, at most
 ``MAX_ITEMS_PER_CALL`` to a call. Each row has a weight: 1 for every check but style
 (``user_sim_judge_core.DEFAULT_ERROR_CHECKS``) and for an item that can make the run a user sim error (its
-``can_error``, unset as its family's check), else 0. A weight-0 row is recorded and never gates.
+``can_error``, unset as its family's check), else 0. A weight-0 row is recorded and never gates. On a multi-day
+always_on run (its record's ``multi_day``) "done" ends nothing, so the ending check is n/a with no call, and every
+check is told so.
+
+What the assistant is graded on (``grading_of``): when the task is put together (``task_problems``, which every runner
+calls with the task's steps) the judge finds each rubrics_verifier or always_on_agent_verifier that grades the run's
+prompt, and its env_outcome_verifier steps, whose checks are in their scripts and aren't listed before they run. On each
+run it reads each grader's criteria as that grader resolves them (``_resolved_criteria``: a run's
+``user_overrides.step_params`` criteria replace the stored ones), with the run's seed filled in as the graders get it;
+``seeded_from`` keeps the graders across the seed's rendering. The judge reads them before the run, and a fail could
+change the grade only when it touches one: each judged row names the ids it would change (``would_change``), and a
+judged fail that names none of them can't make the run a user sim error (``user_sim_error.not_named``), its score left
+at 1. A row no model graded (an auto item, a line that can't be read) names nothing and counts as before. A task with no
+such steps, or a judge that wasn't given the task's steps (built outside a task, or a hub worker that renders the seed
+without ``seeded_from``), judges could_change_grade as before, and the entry's ``grading`` says which.
 
 A rubric item is the shape of a criterion in a task's ``usersim.yaml`` (psi-benchmark-tasks), which that repo turns
 into this step's settings; this step reads no file:
@@ -94,14 +108,18 @@ What it writes, all in one place, ``metadata["verifications"][verifier_id]``:
   check's name or an item's id); what a reviewer reads (a check's ``title`` and ``families``; an item's ``family``,
   ``kind``, ``check`` or ``line`` and ``line_text``, ``name``, ``short``, ``na_when``, ``asked_with``: the call it
   rode in, or ``computed``, ``static_na``, ``no_line``); its ``weight``; then its ``verdict`` (pass, fail, n/a, or
-  error when undecided), ``reason``, ``turns``, ``could_change_grade``, ``assistant_asked`` (whether the assistant
+  error when undecided), ``reason``, ``turns``, ``could_change_grade``, ``would_change`` (the graded ids a judged
+  fail that could change the grade names; [] otherwise), ``assistant_asked`` (whether the assistant
   asked for or invited what was graded: recorded only, never part of the gate; None on a row no model graded),
   ``score`` and ``result``. A row lowers the score only on a fail that could change the grade at a weight other
   than 0, so ``score`` is 0 when ``user_sim_error`` is yes, else 1. ``can_be_reward`` is False: the score checks the
   run, so it is never the task's reward.
-- ``user_sim_error``: ``value`` yes / no / unknown, ``because`` and ``unknown`` (the row ids), ``fails_task``, and
-  ``not_failing`` (why a yes didn't fail the task). ``flag`` when ``value`` is unknown: "user sim judge undecided", or
+- ``user_sim_error``: ``value`` yes / no / unknown, ``because`` and ``unknown`` (the row ids), ``not_named`` (the
+  judged fails that named nothing graded, when there are some), ``fails_task``, and ``not_failing`` (why a yes didn't
+  fail the task). ``flag`` when ``value`` is unknown: "user sim judge undecided", or
   "the judge couldn't decide any check — check its setup" when every check is undecided.
+- ``grading``: ``source`` task_steps (with ``criteria``, how many; ``criteria_from`` and ``end_state_steps``, the
+  step ids) or none (with ``note``, why could_change_grade was judged as before).
 - ``run_step_id``, ``run_kind``, ``user_sim``, ``judge_model``; ``instructions`` (``source``, ``prompt_sha256``,
   ``recorded_prompt_sha256``, ``matches``); ``rubric_persona`` (when ``rubric_persona_sha256`` is set); ``notes``
   (what the judge was told about gaps in the record); ``graded_turns``, ``turns``; ``calls``, ``usage``, ``cost`` (the
@@ -143,6 +161,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import hashlib
 import json
 import logging
@@ -181,8 +200,8 @@ PINNED: dict[str, Any] = {
     **dict.fromkeys(("criteria", "prompt_id", "default_model", "default_model_api_base", "agent_name",
                      "trajectory_filter", "max_thinking_tokens", "effort", "judge_a2a_agent_id", "judge_sandbox_type",
                      "grading_policy_prompt", "context_facts_for_judge", "grade_up_to_turn", "run_context_for_judge",
-                     "judge_batch_size", "judge_batch_concurrency", "judge_timeout_retries", "judge_max_turns",
-                     "min_passing_score"))}
+                     "judge_batch_size", "judge_batch_concurrency", "judge_samples", "min_judge_agreement", "judge_timeout_retries",
+                     "judge_max_turns", "min_passing_score"))}
 NOT_FAILING_OFF = "fail_task_when_not_passing is off: verdicts are recorded only"
 NOT_FAILING_UNCONFIRMED = ("the judge's copy of the user sim's instructions isn't confirmed to be the one it ran with, "
                            "so it doesn't fail the task")
@@ -256,6 +275,15 @@ class UserSimJudge(RubricsVerifierTaskStep):
         self.rubric_items = list(rubric_items or [])
         self.rubric_persona_sha256 = rubric_persona_sha256
         self._run: Optional[_ThisRun] = None
+        # What the task's other steps grade the assistant on, read when the task is put together (task_problems);
+        # None until then, as for a step built outside a task.
+        self._grading: Optional[Graders] = None
+
+    def seeded_from(self, written: "UserSimJudge") -> None:
+        """This step is ``written`` with the run's seed filled in (``substitute_seed_in_steps``): keep what the task
+        grades the assistant on, which ``written`` read from the task's steps; the seed is filled into it when it's
+        read."""
+        self._grading = written._grading
 
     # ---- settings ----------------------------------------------------------------------------------------------
     def criterion_rows(self) -> Optional[int]:
@@ -275,6 +303,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
         run, found = run_step_of(self, steps, does="judge")
         if run is None:
             return found
+        self._grading = grading_of(run, steps)
         where = f"{self.type} '{self.id}'"
         if steps.index(run) > steps.index(self):
             found.append(f"{where} comes before step '{run.id}', the run it judges; put it after")
@@ -350,7 +379,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
             skipped = "the user sim never read: the run has no user_sim_reads"
         else:
             run, about = await asyncio.to_thread(_read_run, kind, step_id, record, context)
-            entry.update(user_sim=about["user_sim"], instructions=about["instructions"])
+            grading = self._grading.in_run(context) if self._grading is not None else None
+            run.grading = _seeded(grading, context.metadata.get("seed") or {})
+            entry.update(user_sim=about["user_sim"], instructions=about["instructions"],
+                         grading=_grading_entry(grading))
             if self.rubric_persona_sha256 is not None and items:
                 us = (context.metadata.get(USER_SIMS_KEY) or {}).get(about["user_sim"]) or {}
                 entry["rubric_persona"] = _rubric_persona(self.rubric_persona_sha256, us.get("persona_sha256"))
@@ -378,7 +410,10 @@ class UserSimJudge(RubricsVerifierTaskStep):
         """The judge's verdict with its rows in the plan's order and shape, the run's verdict and details, and its
         score: 0 when a row fails, else 1. A slip the gate counts fails the step once recorded."""
         rows = core.finish_rows(judged.criteria, this.plan)
-        error = core.user_sim_error(rows)
+        not_named = core.unnamed(rows, this.plan)
+        error = core.user_sim_error(rows, not_named)
+        if not_named:
+            error["not_named"] = not_named
         error["fails_task"] = False
         if error["value"] == "yes":
             if self.fail_task_when_not_passing is not True:
@@ -567,6 +602,83 @@ def _rubric_persona(rubric: str, run: Optional[str]) -> dict:
     return {**out, "status": "match"}
 
 
+# ---- what the assistant is graded on --------------------------------------------------------------------------------
+END_STATE_TYPE = "env_outcome_verifier"  # env_outcome_verifier.EnvOutcomeVerifierTaskStep.type
+CRITERION_TEXT_KEYS = ("criterion", "description", "text", "question", "title")  # where a grader's criterion keeps its text
+GRADING_UNSEEN = ("the judge wasn't given the task's steps, so could_change_grade is judged from each check alone, as "
+                  "before")
+GRADING_NONE = ("the task has no step that grades the assistant with criteria or checks its end state, so "
+                "could_change_grade is judged from each check alone, as before")
+
+
+@dataclass(frozen=True)
+class Graders:
+    """The task's graders of a run, as the judge found them when the task loaded (``grading_of``): the steps that grade
+    its prompt with criteria, and the env_outcome_verifier steps. ``in_run`` reads them for one run."""
+    criteria_steps: tuple[RubricsVerifierTaskStep, ...] = ()
+    end_state_steps: tuple[str, ...] = ()
+
+    def in_run(self, context: TaskStepContext) -> core.Grading:
+        """What they grade the assistant on in this run: each grader's criteria as it resolves them itself
+        (``_resolved_criteria``, which applies the run's ``user_overrides.step_params``), so the judge reads what the
+        graders will."""
+        criteria, source = [], []
+        for step in self.criteria_steps:
+            texts = [t for i, c in enumerate(step._resolved_criteria(context) or [], 1)
+                     if (t := _criterion(step.id, i, c))[1].strip()]
+            if texts:
+                criteria += texts
+                source.append(step.id)
+        return core.Grading(criteria=tuple(criteria), end_state_steps=self.end_state_steps, source=tuple(source))
+
+
+def grading_of(run: TaskStep, steps: list[TaskStep]) -> Graders:
+    """The task's graders of ``run``: each rubrics_verifier (an always_on_agent_verifier among them, never a user sim
+    judge) that grades ``run``'s prompt, or names none, and each env_outcome_verifier, whose checks are in its script,
+    unread until it runs."""
+    prompt = getattr(run, "prompt_id", None)
+    graders = [s for s in steps if isinstance(s, RubricsVerifierTaskStep) and not isinstance(s, UserSimJudge)
+               and (prompt is None or s.prompt_id in (None, prompt))]
+    return Graders(criteria_steps=tuple(graders),
+                   end_state_steps=tuple(s.id for s in steps if s.type == END_STATE_TYPE))
+
+
+def _criterion(step_id: str, n: int, criterion: Any) -> tuple[str, str]:
+    """A grader's criterion as ``(id, text)``: its own id, else its step's and its place. An entry with none of the
+    usual text keys is kept whole, as the grader sends it to its judge."""
+    if not isinstance(criterion, dict):
+        return f"{step_id}#{n}", str(criterion)
+    cid = str(criterion.get("id") or f"{step_id}#{n}")
+    text = next((criterion[k] for k in CRITERION_TEXT_KEYS if isinstance(criterion.get(k), str)), "")
+    if not text.strip():
+        rest = {k: v for k, v in criterion.items() if k != "id"}
+        text = json.dumps(rest, ensure_ascii=False, sort_keys=True) if rest else ""
+    return cid, text
+
+
+def _seeded(grading: Optional[core.Grading], seed: dict) -> Optional[core.Grading]:
+    """``grading`` with the run's seed in its criteria, as the graders' own copies have it."""
+    if grading is None or not seed:
+        return grading
+
+    def fill(text: str) -> str:
+        for key, value in seed.items():
+            text = text.replace(f"<{key}>", str(value))
+        return text
+
+    return dataclasses.replace(grading, criteria=tuple((cid, fill(text)) for cid, text in grading.criteria))
+
+
+def _grading_entry(grading: Optional[core.Grading]) -> dict:
+    """What the entry records of what the judge was told the assistant is graded on."""
+    if grading is None:
+        return {"source": "none", "note": GRADING_UNSEEN}
+    if not grading.known:
+        return {"source": "none", "note": GRADING_NONE}
+    return {"source": "task_steps", "criteria": len(grading.criteria), "criteria_from": list(grading.source),
+            "end_state_steps": list(grading.end_state_steps)}
+
+
 def _prompt_response(context: TaskStepContext, step_id: str) -> Optional[PromptResponse]:
     return next((p for p in reversed(context.prompt_responses) if p.step_id == step_id), None)
 
@@ -589,7 +701,8 @@ def _read_run(kind: str, step_id: str, record: Optional[dict], context: TaskStep
     turns = [_turn(n, e) for n, e in enumerate(reads, 1)]
     more += _reply_limit_note(turns, (us or {}).get("max_replies"))
     run = core.UserSimRun(name=name or "the user", instructions=instructions, turns=turns, notes=notes + more,
-                          tagged_lines=(us or {}).get("tagged_lines"), missing_answers=missing)
+                          tagged_lines=(us or {}).get("tagged_lines"), missing_answers=missing,
+                          multi_day=multi_day is True)
     return run, {"user_sim": name, "instructions": check}
 
 

@@ -62,6 +62,7 @@ from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     fetch_container_logs,
 )
 from agent_env.task_step.task_steps.load_artifact import LOADED_FILE_UNIVERSES, loads_into
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples as judge_samples_rule
 from agent_env.task_step.task_steps.verifiers.judge_utils import judge_usage
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_usage import JudgeUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
@@ -357,6 +358,22 @@ def _image_url_block(frame: ImageFrame) -> dict:
 
 
 @dataclass
+class _JudgeAgent:
+    """An agent judge the run grades with: where it's reached, its card and record, the container its files go in, the
+    deployment this step made of it (None for the task's own agent), and what was staged in its sandbox."""
+
+    a2a_url: Optional[str]
+    sandbox_id: Optional[str]
+    sandbox_type: Optional[str]
+    card: dict
+    agent: Any
+    container: Optional[str]
+    deployed: Any = None
+    staged: Optional[StagedTrajectory] = None
+    atif_note: str = ""
+
+
+@dataclass
 class _CompactedTrajectory:
     """Every representation the filter produced; the caller picks what its judge consumes."""
 
@@ -482,6 +499,11 @@ def _unbatchable_format_message(output_format: JudgeOutputFormat) -> str:
     return f"judge_batch_size does not apply to output_format={output_format.value}."
 
 
+def _unsamplable_format_message(output_format: JudgeOutputFormat, field: str = "judge_samples") -> str:
+    return (f"{field} does not apply to output_format={output_format.value}: only a rubric_binary or "
+            "rubric_partial judge's rows have one score each to take the median of.")
+
+
 def _override_or(overrides: dict, key: str, stored: Optional[int]) -> Optional[int]:
     """The run's override when present (even an invalid one, so validation reports it), else the stored value."""
     return overrides[key] if overrides.get(key) is not None else stored
@@ -531,7 +553,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
     context_paths = ("context_facts_for_judge{}",)
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
         ("judge_a2a_agent_id", "default_model", "default_model_api_base", "effort", "max_thinking_tokens",
-         "judge_sandbox_type", "judge_batch_size", "judge_batch_concurrency"), FieldScope.USER)}
+         "judge_sandbox_type", "judge_batch_size", "judge_batch_concurrency", "judge_samples", "min_judge_agreement"),
+        FieldScope.USER)}
     DEFAULT_JUDGE_TIMEOUT_SECONDS: ClassVar[int] = 1000
     DEFAULT_JUDGE_BATCH_CONCURRENCY: ClassVar[int] = 4
     _PER_ROW_EVIDENCE_NOTE: ClassVar[str] = (
@@ -588,6 +611,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         run_context_for_judge: Optional[list[str]] = None,
         judge_batch_size: Optional[int] = None,
         judge_batch_concurrency: Optional[int] = None,
+        judge_samples: Optional[int] = None,
+        min_judge_agreement: Optional[float] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
@@ -611,6 +636,12 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         # judge_batch_concurrency at once), and retry a batch whose rows read as bulk verdicts.
         self.judge_batch_size = _validated_batch_option("judge_batch_size", judge_batch_size)
         self.judge_batch_concurrency = _validated_batch_option("judge_batch_concurrency", judge_batch_concurrency)
+        # Grade each criterion this many times and keep its median, the lower middle score on a tie, every sample's
+        # score kept.
+        self.judge_samples = judge_samples_rule.validated(judge_samples)
+        # The share of samples that must give each criterion's kept verdict, else the grade fails; None is the
+        # default, 0.5, which never fails, so the median decides; 1.0 fails any split.
+        self.min_judge_agreement = judge_samples_rule.validated_agreement(min_judge_agreement)
         # An agent judge call (a batch's, with batches) that runs out of judge_timeout_seconds is tried again this many
         # times, and the timed-out attempt's trajectory is kept; None keeps the first timeout fatal, as it always was.
         if judge_timeout_retries is not None and (isinstance(judge_timeout_retries, bool)
@@ -678,6 +709,10 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             )
         if self.judge_batch_size is not None and not self._spec().batchable:
             raise ValueError(_unbatchable_format_message(self.output_format))
+        if (self.judge_samples or 1) > 1 and not self._spec().samplable:
+            raise ValueError(_unsamplable_format_message(self.output_format))
+        if self.min_judge_agreement is not None and not self._spec().samplable:
+            raise ValueError(_unsamplable_format_message(self.output_format, "min_judge_agreement"))
 
     def _spec(self) -> JudgeOutputFormatSpec:
         return get_judge_output_format_spec(self.output_format)
@@ -747,6 +782,10 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             base["judge_batch_size"] = self.judge_batch_size
         if self.judge_batch_concurrency is not None:
             base["judge_batch_concurrency"] = self.judge_batch_concurrency
+        if self.judge_samples is not None:
+            base["judge_samples"] = self.judge_samples
+        if self.min_judge_agreement is not None:
+            base["min_judge_agreement"] = self.min_judge_agreement
         if self.judge_timeout_retries is not None:
             base["judge_timeout_retries"] = self.judge_timeout_retries
         if self.judge_max_turns is not None:
@@ -779,6 +818,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             grade_up_to_turn=data.get("grade_up_to_turn"),
             run_context_for_judge=data.get("run_context_for_judge"),
             judge_batch_size=data.get("judge_batch_size"),
+            judge_samples=data.get("judge_samples"),
+            min_judge_agreement=data.get("min_judge_agreement"),
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
             judge_timeout_retries=data.get("judge_timeout_retries"),
             judge_max_turns=data.get("judge_max_turns"),
@@ -853,6 +894,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             "max_thinking_tokens": overrides.get("judge_max_thinking_tokens") or self.max_thinking_tokens,
             "judge_batch_size": _override_or(overrides, "judge_batch_size", self.judge_batch_size),
             "judge_batch_concurrency": _override_or(overrides, "judge_batch_concurrency", self.judge_batch_concurrency),
+            "judge_samples": _override_or(overrides, "judge_samples", self.judge_samples),
+            "min_judge_agreement": _override_or(overrides, "min_judge_agreement", self.min_judge_agreement),
             "judge_sandbox_type": (overrides.get("agent_sandbox") or self.judge_sandbox_type)
             if use_agent_judge and self.agent_name is None else self.judge_sandbox_type,
         }
@@ -869,7 +912,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys one, and
         ``overridden``, the settings this run's overrides changed. Once the judge has called, its effort and thinking
         budget are those its calls carried, ``not_sent`` those it couldn't send, with ``judge_endpoint_host`` and any
-        ``temperature`` and ``seed`` the config gave a direct call. Never a key, header or base URL."""
+        ``temperature`` and ``seed`` the config gave a direct call; a run's ``judge_samples`` or ``min_judge_agreement``
+        its format can't take is in ``not_sent`` too, and a sampled judge's ``min_judge_agreement`` is the bar it
+        applied, the default included. Never a key, header or base URL."""
         settings = super().verifier_settings(context)
         settings.pop("default_model_api_base", None)
         values, stored = self._recorded_values(context), self._recorded_values(TaskStepContext())
@@ -893,6 +938,18 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 settings["judge_endpoint_host"] = judge.endpoint_host
         if judge is not None and judge.sources:
             settings["trajectory_sources"] = list(judge.sources)
+        asked, bar = values.get("judge_samples"), values.get("min_judge_agreement")
+        if not self._spec().samplable:
+            # A run-wide judge_samples reaches every judge; one whose format can't take it grades once.
+            refused = {**({"judge_samples": asked} if isinstance(asked, int) and asked > 1 else {}),
+                       **({"min_judge_agreement": bar} if bar is not None else {})}
+            if "judge_samples" in refused:
+                settings["judge_samples"] = 1
+            settings.pop("min_judge_agreement", None)
+            if refused:
+                settings["not_sent"] = {**(settings.get("not_sent") or {}), **refused}
+        elif isinstance(asked, int) and asked > 1:
+            settings["min_judge_agreement"] = judge_samples_rule.DEFAULT_MIN_AGREEMENT if bar is None else bar
         return {**settings, "overridden": overridden}
 
     def grade_fields(self, context: TaskStepContext) -> dict[str, Any]:
@@ -920,8 +977,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
     def _gated(self, verdict: RubricsVerdict) -> RubricsVerdict:
         """``verdict``, failing its step once recorded when ``fail_task_when_not_passing`` and it scores under
-        ``min_passing_score``, naming the rows that weren't met."""
-        if not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
+        ``min_passing_score``, naming the rows that weren't met; one that failed already, as a judge whose samples
+        split, keeps its own error."""
+        if verdict.error is not None or not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
             return verdict
         unmet = [str(row.get("id")) for row in verdict.criteria
                  if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
@@ -1041,26 +1099,26 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             raise RuntimeError(f"Verifier '{self.verifier_id}': unjudged_rows gave rows with a criterion's id: "
                                f"{sorted(map(str, clashing))}")
 
-        auto_deployed_judge = None
-        staged: Optional[StagedTrajectory] = None
-        atif_note = ""
-        judge_agent = None
-        judge_a2a_url: Optional[str] = None
-        judge_sandbox_id: Optional[str] = None
-        judge_agent_card: dict = {}
-        judge_container: Optional[str] = None
-        if use_agent_judge:
+        samples = judge_samples_rule.validated(run["judge_samples"]) or 1
+        bar = judge_samples_rule.validated_agreement(run["min_judge_agreement"])
+        if samples > 1 and not self._spec().samplable:
+            logger.warning("Verifier '%s': %s It grades once.", self.verifier_id,
+                           _unsamplable_format_message(self.output_format))
+            samples = 1
+        bar = judge_samples_rule.DEFAULT_MIN_AGREEMENT if bar is None else bar
+
+        async def judge_agent() -> _JudgeAgent:
+            """An agent judge for the run, the trajectory staged in its sandbox: the task's agent, or one this step
+            deploys, which is terminated here too when staging fails."""
             if self.agent_name is not None:
                 agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                 if agent is None:
                     raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
                 if not agent.sandbox_id:
                     raise RuntimeError(f"Agent '{self.agent_name}' has no sandbox_id")
-                judge_a2a_url = agent.a2a_url or agent.api_url
-                judge_sandbox_id = agent.sandbox_id
-                judge_agent_card = agent.a2a_card or {}
-                judge_agent = agent
-                judge_container = agent.installed_container
+                one = _JudgeAgent(a2a_url=agent.a2a_url or agent.api_url, sandbox_id=agent.sandbox_id,
+                                  sandbox_type=agent.sandbox_type, card=agent.a2a_card or {}, agent=agent,
+                                  container=agent.installed_container)
             else:
                 from agent_env.a2a_agent import A2AAgent
                 from agent_env.config import get_config
@@ -1089,37 +1147,56 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 deploy_kwargs = {"env_vars": env_vars}
                 if run["judge_sandbox_type"]:
                     deploy_kwargs["sandbox_type"] = run["judge_sandbox_type"]
-                auto_deployed_judge = await a2a_agent.deploy(**deploy_kwargs)
-                judge_a2a_url = auto_deployed_judge.a2a_url
-                judge_sandbox_id = auto_deployed_judge.sandbox_id
-                judge_agent_card = auto_deployed_judge.agent_card
-                judge_agent = auto_deployed_judge
-                logger.info(f"Auto-deployed judge A2A agent '{resolved_judge_id}' at {judge_a2a_url}")
+                deployed = await a2a_agent.deploy(**deploy_kwargs)
+                one = _JudgeAgent(a2a_url=deployed.a2a_url, sandbox_id=deployed.sandbox_id,
+                                  sandbox_type=deployed.sandbox_type, card=deployed.agent_card, agent=deployed,
+                                  container=None, deployed=deployed)
+                logger.info(f"Auto-deployed judge A2A agent '{resolved_judge_id}' at {one.a2a_url}")
             # Loading the trajectory can fail (an override's staging, a transfer): the judge this step deployed is
             # released then too, not only after grading.
             try:
                 if self.use_trajectory:
                     from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
-                    judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
-                    provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
-                    sandbox = judge.recording(await provider.get_sandbox(judge_sandbox_id))
-                    staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
-                    if staged is None and atif is not None:
+                    provider = build_sandbox_provider(one.sandbox_type) if one.sandbox_type else get_agent_sandbox_provider()
+                    sandbox = judge.recording(await provider.get_sandbox(one.sandbox_id), one.sandbox_id)
+                    one.staged = await self.stage_trajectory(context, stored_response, run_context, sandbox,
+                                                             one.container)
+                    if one.staged is None and atif is not None:
                         media = await self._stage_atif_turns(
-                            sandbox, atif, multiturn_dir, filter_to_apply, judge_container, documents)
-                        atif_note = self._atif_note(atif, filter_to_apply, media=media)
-                    elif staged is None and multiturn:
+                            sandbox, atif, multiturn_dir, filter_to_apply, one.container, documents)
+                        one.atif_note = self._atif_note(atif, filter_to_apply, media=media)
+                    elif one.staged is None and multiturn:
                         await self._load_per_turn_trajectories(
-                            sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
-                    elif staged is None:
+                            sandbox, per_turn_uris, multiturn_dir, filter_to_apply, one.container)
+                    elif one.staged is None:
                         await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
-                                                             **into_container(judge_container))
+                                                             **into_container(one.container))
                         if compacted.tool_result_files:
-                            await self._load_tool_result_files(sandbox, compacted.tool_result_files, judge_container)
-                            compacted.tool_result_files = []
+                            await self._load_tool_result_files(sandbox, compacted.tool_result_files, one.container)
             except BaseException:
-                await _terminate_auto_deployed_judge(auto_deployed_judge)
+                await _terminate_auto_deployed_judge(one.deployed)
                 raise
+            return one
+
+        # A judge this step deploys gets a deployment of its own per sample, so no sample sees another's files; the
+        # task's own judge is the one agent the task deployed, which its samples share.
+        judges: list[_JudgeAgent] = []
+        if use_agent_judge:
+            if self.agent_name is not None or samples == 1:
+                judges = [await judge_agent()]
+            else:
+                deploying: list[asyncio.Task] = []
+                try:
+                    async with asyncio.TaskGroup() as group:
+                        deploying = [group.create_task(judge_agent()) for _ in range(samples)]
+                except BaseException as failed:
+                    await asyncio.gather(*(_terminate_auto_deployed_judge(task.result().deployed) for task in deploying
+                                           if task.done() and not task.cancelled() and task.exception() is None))
+                    if isinstance(failed, ExceptionGroup):
+                        raise failed.exceptions[0] from failed
+                    raise
+                judges = [task.result() for task in deploying]
+            compacted.tool_result_files = []
 
         try:
             model = self._judge_model(context)
@@ -1139,7 +1216,6 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             context_facts = (resolve_context_facts(self.context_facts_for_judge, context.metadata)
                              if self.context_facts_for_judge else [])
             image_blocks: list[dict] = []
-            trajectory_path: Optional[str] = None
             trajectory_inline: Optional[str] = None
             if use_agent_judge:
                 # Agent judge can't use inline screenshot frames; it loads the raw file.
@@ -1149,10 +1225,6 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         f"verifier '{self.verifier_id}' uses an agent judge — raw trajectory "
                         "passed through unchanged."
                     )
-                if staged is not None:
-                    trajectory_path = staged.path
-                elif self.use_trajectory:
-                    trajectory_path = multiturn_dir if multiturn or atif is not None else self.TRAJECTORY_CONTAINER_PATH
             else:
                 image_blocks = compacted.image_blocks
                 # Direct judge embeds the trajectory inline; DEFAULT has no pre-rendered text.
@@ -1167,27 +1239,34 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             if trajectory_content is not None:
                 trajectory_inline = trajectory_content
 
-            def eval_prompt_for(batch: list[dict]) -> str:
+            def trajectory_path_of(one: _JudgeAgent) -> Optional[str]:
+                if one.staged is not None:
+                    return one.staged.path
+                if self.use_trajectory:
+                    return multiturn_dir if multiturn or atif is not None else self.TRAJECTORY_CONTAINER_PATH
+                return None
+
+            def eval_prompt_for(batch: list[dict], one: Optional[_JudgeAgent]) -> str:
                 criteria_json = json.dumps([
                     {**c, "negative": True} if (c.get("weight") is not None and c["weight"] < 0) else c
                     for c in batch
                 ], indent=2)
-                if use_agent_judge:
+                if one is not None:
                     prompt = self._build_eval_prompt(
                         agent_prompt=agent_prompt_text,
                         agent_response=prompt_response.response,
                         criteria_json=criteria_json,
-                        trajectory_path=trajectory_path,
+                        trajectory_path=trajectory_path_of(one),
                         trajectory_inline=trajectory_inline,
                         loaded_artifacts=loaded_for_judge,
                         context_facts=context_facts,
                         run_context=run_context,
                         extra_sections=extra_sections,
                     )
-                    if staged is not None:
-                        prompt += staged.prompt_note
-                    elif atif_note:
-                        prompt += atif_note
+                    if one.staged is not None:
+                        prompt += one.staged.prompt_note
+                    elif one.atif_note:
+                        prompt += one.atif_note
                     elif self.use_trajectory and multiturn:
                         prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
                 else:
@@ -1222,25 +1301,27 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 # Batches merge by concatenating rows, which drops a format's one-per-call reasoning, checks and mistakes.
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
                                    f"output_format={self.output_format.value} is graded in one judge call.")
+            # Every call, a batch's or a sample's, takes a place of this limit.
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
             usage = judge
+            sample_trajectory_urls: dict[Optional[int], list[Optional[str]]] = {}
 
-            async def grade(batch: list[dict], number: Optional[int] = None
-                            ) -> tuple[list[dict], int, list[dict], Optional[str]]:
-                judge_usage.batch(number)
-                prompt = eval_prompt_for(batch)
-                if len(batches) > 1:
-                    prompt += self._BATCH_NOTE.format(
-                        first=position[batch[0]["id"]], last=position[batch[-1]["id"]],
-                        total=len(criteria_for_judge), count=len(batch))
+            def judge_for(sample_number: Optional[int]) -> Optional[_JudgeAgent]:
+                """The agent judge a sample's calls go to: its own when each sample has one; None for a direct one."""
+                if len(judges) > 1:
+                    return judges[(sample_number or 1) - 1]
+                return judges[0] if judges else None
+
+            async def call(batch: list[dict], prompt: str, one: Optional[_JudgeAgent]
+                           ) -> tuple[list[dict], int, list[dict], Optional[str]]:
                 async with concurrency:
                     return await self._run_judge_with_output_retries(
                         eval_prompt=prompt,
                         context=context,
                         model=model,
-                        judge_a2a_url=judge_a2a_url,
-                        judge_agent_card=judge_agent_card,
-                        judge_agent=judge_agent,
+                        judge_a2a_url=one.a2a_url if one is not None else None,
+                        judge_agent_card=one.card if one is not None else {},
+                        judge_agent=one.agent if one is not None else None,
                         judge_effort=judge_effort,
                         judge_max_thinking_tokens=judge_max_thinking_tokens,
                         use_agent_judge=use_agent_judge,
@@ -1249,6 +1330,38 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         reject_bulk_verdicts=batch_size is not None and self._spec().checks_bulk_verdicts,
                         usage=usage,
                     )
+
+            async def grade(batch: list[dict], number: Optional[int] = None
+                            ) -> tuple[list[dict], int, list[dict], Optional[str]]:
+                judge_usage.batch(number)
+
+                def prompt_for(one: Optional[_JudgeAgent]) -> str:
+                    prompt = eval_prompt_for(batch, one)
+                    if len(batches) > 1:
+                        prompt += self._BATCH_NOTE.format(
+                            first=position[batch[0]["id"]], last=position[batch[-1]["id"]],
+                            total=len(criteria_for_judge), count=len(batch))
+                    return prompt
+
+                if samples == 1:
+                    return await call(batch, prompt_for(judge_for(None)), judge_for(None))
+
+                async def sample(n: int) -> tuple[list[dict], int, list[dict], Optional[str]]:
+                    judge_usage.sample(n)
+                    return await call(batch, prompt_for(judge_for(n)), judge_for(n))
+
+                try:
+                    async with asyncio.TaskGroup() as group:
+                        sampled = [group.create_task(sample(n)) for n in range(1, samples + 1)]
+                except ExceptionGroup as failed:
+                    # A sample that fails fails the grade, as a batch does; the group cancels the others.
+                    raise failed.exceptions[0] from failed
+                outcomes = [task.result() for task in sampled]
+                sample_trajectory_urls[number] = [url for _, _, _, url in outcomes]
+                return (judge_samples_rule.median_rows([rows for rows, _, _, _ in outcomes]),
+                        sum(retries for _, retries, _, _ in outcomes),
+                        [{**d, "sample": n} for n, (_, _, ds, _) in enumerate(outcomes, 1) for d in ds],
+                        next((url for _, _, _, url in outcomes if url), None))
 
             if len(batches) == 1:
                 outcomes = [await grade(batches[0])]
@@ -1276,7 +1389,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 _restore_frame_labels(verification_results, real_by_short)
                 _restore_frame_labels(verification_results.checks, real_by_short)
         finally:
-            await _terminate_auto_deployed_judge(auto_deployed_judge)
+            await asyncio.gather(*(_terminate_auto_deployed_judge(one.deployed) for one in judges))
 
         judge_call_fields: dict = {
             **dual_keyed("compact_trajectory_s3_uri", "compact_trajectory_object_url", compacted.compact_object_url),
@@ -1289,11 +1402,25 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         if len(batches) > 1:
             judge_call_fields["judge_batches"] = len(batches)
             judge_call_fields["judge_batch_trajectory_object_urls"] = batch_trajectory_urls
+        if samples > 1:
+            judge_call_fields["judge_samples"] = samples
+            urls = [url for number in (range(1, len(batches) + 1) if len(batches) > 1 else [None])
+                    for url in sample_trajectory_urls.get(number, [])]
+            if any(urls):
+                judge_call_fields["judge_sample_trajectory_object_urls"] = urls
         if grade_up_to_turn is not None:
             judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
-        if staged is not None:
-            judge_call_fields["trajectory_staging"] = staged.record
-        return self._entries(verification_results, judge_call_fields, unjudged=unjudged)
+        if judges and judges[0].staged is not None:
+            judge_call_fields["trajectory_staging"] = judges[0].staged.record
+        verdict = self._entries(verification_results, judge_call_fields, unjudged=unjudged)
+        if samples > 1 and (split := judge_samples_rule.disagreeing(verdict.criteria, bar)):
+            # The rows stay on the failed grade, each with its samples, for whoever has to see why it split.
+            reason = judge_samples_rule.disagreement(self.verifier_id, split, bar)
+            verdict = replace(verdict, error=reason, raise_after=judge_samples_rule.JudgeDisagreementError(reason),
+                              output={**verdict.output, "judge_disagreement": {
+                                  "min_judge_agreement": bar,
+                                  "criteria": [{"id": row.get("id"), "agreement": row["agreement"]} for row in split]}})
+        return verdict
 
     def _entries(self, verification_results: list[dict], judge_call_fields: dict, *,
                  unjudged: Sequence[dict] = ()) -> RubricsVerdict:
@@ -1760,7 +1887,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         from agent_env.a2a_agent import protocol
 
         host = getattr(judge_agent, "model_endpoint_host", None)
-        sent = {"sent": usage.agent_input(eval_prompt)} if isinstance(usage, JudgeUsage) else {}
+        sent = ({"sent": usage.agent_input(eval_prompt, getattr(judge_agent, "sandbox_id", None))}
+                if isinstance(usage, JudgeUsage) else {})
         try:
             task_id, _ = await protocol.send_a2a_message(
                 judge_a2a_url,

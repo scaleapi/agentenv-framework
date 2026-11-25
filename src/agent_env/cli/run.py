@@ -15,6 +15,7 @@ from agent_env.bundle.hub import SOURCE_KEY, HubSource
 from agent_env.bundle.installed import InstalledBundle, checked, installed_bundles, locate_bundle, run_name
 from agent_env.bundle.plan import NotInStore
 from agent_env.bundle.requires import UnmetRequirements
+from agent_env.cli.utils import judge_samples_option, min_judge_agreement_option
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.teardown_output import echo_finish_teardown, gone
 from agent_env.cli.usage_output import cost_line, sources_line
@@ -40,6 +41,8 @@ _DRY_RUN = "Dry run: nothing is written or run."
 @click.option("--model", default=None, help="The model the solver agent runs on, whatever the tasks name.")
 @click.option("--user-model", default=None, help="The model the user simulator runs on, whatever the tasks name.")
 @click.option("--judge-model", default=None, help="The model the judges grade with, whatever the tasks name.")
+@judge_samples_option
+@min_judge_agreement_option
 @click.option("--agent", default=None,
               help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
                    "bundle or an installed one, or the store's.")
@@ -62,7 +65,8 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="Run tasks agent-env task lint refuses for its own rules (a field no step reads, a headline or aggregate source that grades nothing), saying them; a step's own config problems still refuse it.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
-        user_model: str | None, judge_model: str | None, agent: str | None, settings: tuple[str, ...],
+        user_model: str | None, judge_model: str | None, judge_samples: int | None, min_judge_agreement: float | None, agent: str | None,
+        settings: tuple[str, ...],
         sandbox: str | None, keep: bool, dry_run: bool, no_emulate: bool, skip_lint: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
@@ -106,10 +110,11 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     exits 130 (143 for SIGTERM); a second one stops the teardown and prints what is still up.
     """
     if bundle is None:
-        if tasks or evals or model or user_model or judge_model or agent or settings or sandbox or keep or dry_run \
-                or no_emulate or skip_lint:
-            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --set, --sandbox, "
-                                   "--keep, --dry-run, --no-emulate and --skip-lint need a BUNDLE to run")
+        if tasks or evals or model or user_model or judge_model or judge_samples or min_judge_agreement is not None \
+                or agent or settings or sandbox or keep or dry_run or no_emulate or skip_lint:
+            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --judge-samples, "
+                                   "--min-judge-agreement, --agent, --set, --sandbox, --keep, --dry-run, --no-emulate "
+                                   "and --skip-lint need a BUNDLE to run")
         _list_installed()
         return
     verbose = ctx.find_root().params.get("verbose")
@@ -124,7 +129,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                                            variant=variant, skip_lint=skip_lint))
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
-                            judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
+                            judge_model=judge_model, judge_samples=judge_samples,
+                            min_judge_agreement=min_judge_agreement, agent=agent, sandbox=sandbox,
+                            on_progress=click.echo,
                             id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None,
                             variant=variant, skip_lint=skip_lint)
     except BundleError as e:
@@ -206,6 +213,9 @@ def _summarize(result: BundleRun, verbose: bool) -> None:
             click.echo(f"    models: {models}")
         if cost := cost_line(run.usage_summary):
             click.echo(f"    {cost}")
+        if run.splits:
+            click.echo("    samples split: " + "; ".join(f"{step_id} on {', '.join(rows)}"
+                                                        for step_id, rows in run.splits.items()))
     if result.evals:
         click.echo("Evals:")
     for eval_run in result.evals:

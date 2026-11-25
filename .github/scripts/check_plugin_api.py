@@ -41,6 +41,9 @@ USED = (
     # What a plugin reads of recorded runs.
     "agent_env.task.store.task_instances", "agent_env.task.store.count_task_instances",
     "agent_env.task.store.find_task_instance", "agent_env.task.store.TaskInstance",
+    # What a reader of a run's usage sums its ledger with and shows.
+    "agent_env.task.usage.summary.summarize", "agent_env.task.usage.summary.UsageSummary",
+    "agent_env.task.usage.summary.Share", "agent_env.task.usage.summary.Bound",
     # What a runner calls and returns, and the run index it records each run in.
     "agent_env.task.task.Task.get", "agent_env.task.task.Task.run", "agent_env.task.teardown.teardown_run",
     "agent_env.runner.runner.run_outcome",

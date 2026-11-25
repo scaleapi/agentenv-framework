@@ -56,12 +56,55 @@ def test_a_multi_day_user_with_no_when_done_section_still_gets_the_sign_off_rule
 
 def test_rules_are_written_from_permissions_with_the_broken_rule_line_only_when_something_needs_asking():
     prompt = us.system_prompt(_person(permissions={
-        "just_do": ["book her flights", "reply to hosts"],
-        "tell_after": {"items": ["what it booked"], "then": "Ask once if it's missing."}}))
-    assert "  A1  Just do: book her flights; reply to hosts.\n" in prompt
-    assert "  A2  Tell you after: what it booked. Ask once if it's missing.\n" in prompt
+        "just_do": {"items": ["book her flights", "reply to hosts"], "then": "Be a bit short if it asks."},
+        "tell_after": ["what it booked"]}))
+    assert "  A1  Just do: book her flights; reply to hosts. Be a bit short if it asks.\n" in prompt
+    assert "  A2  Tell you after: what it booked.\n" in prompt
     assert us.BROKEN_RULE_LINE not in prompt
     assert us.BROKEN_RULE_LINE in us.system_prompt(_person(permissions={"never": ["text her mom"]}))
+
+
+# ---- the user sim never helps the assistant do its job ---------------------------------------------------------------
+def test_look_ups_are_things_the_assistant_finds_itself_and_the_user_never_says_where():
+    title = dict((key, title) for key, title, _ in us.SECTIONS)["what_to_look_up"]
+    assert title.startswith("THINGS THE ASSISTANT SHOULD FIND ITSELF")
+    assert "never give the value" in title and "never say where it is" in title
+    assert "a little impatiently, that it should already know or find it" in title
+    assert "say where" not in title.replace("never say where", "") and "WHAT TO LOOK UP" not in title
+    person = _person(description={"who_you_are": ["Hannah Reyes."], "what_to_look_up": ["What you usually pay."]})
+    prompt = us.system_prompt(person)
+    assert f"\n\n{title}\n  L1  What you usually pay.\n" in prompt
+    assert us.tagged_lines(person)["L1"] == "What you usually pay."  # the tag letter is unchanged, so used resolves
+
+
+def test_a_tell_after_then_shows_only_as_a_reaction_never_as_an_ask():
+    asks = "If its rundown misses one of these, ask for that one thing once."
+    person = _person(permissions={"tell_after": {"items": ["what it booked", "what it cost"], "then": asks}})
+    assert us.problems(person) == []  # still accepted at load
+    prompt = us.system_prompt(person)
+    assert f"  A1  Tell you after: what it booked; what it cost. {us.TELL_AFTER_MISSED}\n" in prompt
+    assert asks not in prompt and "ask for that one thing" not in prompt
+    assert "didn't tell you about that" in us.TELL_AFTER_MISSED
+    assert "never ask it to tell you now or to do it again" in us.TELL_AFTER_MISSED
+    assert us.tagged_lines(person)["A1"].endswith(us.TELL_AFTER_MISSED)
+    # the tested persona's own then is the asking kind: its prompt reacts instead
+    assert PERSON["permissions"]["tell_after"]["then"] not in PROMPT and us.TELL_AFTER_MISSED in PROMPT
+
+
+def test_a_then_on_another_kind_still_shows_as_written_and_tell_after_without_one_adds_nothing():
+    prompt = us.system_prompt(_person(permissions={"ask_first": {"items": ["anything over $300"],
+                                                                 "then": "Say what else there is."},
+                                                   "tell_after": ["what it booked"]}))
+    assert "Ask you first: anything over $300. Say what else there is.\n" in prompt
+    assert "Tell you after: what it booked.\n" in prompt and us.TELL_AFTER_MISSED not in prompt
+
+
+def test_the_rules_heading_says_the_assistant_may_not_know_them_and_to_tell_it_when_one_comes_up():
+    assert "in its notes" not in us.RULES_TITLE
+    assert us.RULES_TITLE == "YOUR RULES FOR THE ASSISTANT (it may not know them: tell it a rule when it comes up)"
+    prompt = us.system_prompt(_person(permissions={"never": ["text her mom"]}))
+    assert f"\n\n{us.RULES_TITLE}\n  A1  Never: text her mom.\n" in prompt
+    assert "in its notes" not in PROMPT and us.RULES_TITLE in PROMPT
 
 
 def test_sections_with_nothing_in_them_are_left_out():
@@ -85,7 +128,7 @@ def test_things_already_told_and_things_it_should_know_show_tagged_after_what_yo
              "briefly, a little irritated, even when you'd otherwise let something slide)\n  C1  You never book "
              "anything before 9am for your parents.\n")
     assert told in prompt and known in prompt
-    assert prompt.index("\nWHAT YOU KNOW") < prompt.index(told) < prompt.index(known) < prompt.index("\nWHAT TO LOOK UP")
+    assert prompt.index("\nWHAT YOU KNOW") < prompt.index(told) < prompt.index(known) < prompt.index("\nTHINGS THE ASSISTANT SHOULD FIND ITSELF")
     lines = us.tagged_lines(person)
     assert lines["T1"] == TOLD[0] and lines["C1"] == KNOWN[0]
     assert us.problems(person) == []

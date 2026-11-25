@@ -404,8 +404,9 @@ def _shipped():
             if bundle.dist == CORE and any((bundle.root / "tasks").glob("*.json"))}
 
 
-# The shipped examples that show env triggers and no grading, which lint rightly says grade nothing.
-_UNGRADED = {"advance-to-next-event", "next-env-event"}
+# The shipped examples that show env triggers or a conversation hook and no grading, which lint rightly says grade
+# nothing.
+_UNGRADED = {"advance-to-next-event", "milestone-gates", "next-env-event"}
 
 
 @pytest.mark.usefixtures("local_stores")
