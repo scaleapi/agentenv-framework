@@ -149,3 +149,33 @@ async def test_a_verifier_after_stop_agent_grades_the_tests_reward_not_the_agent
     assert (graded["before"]["score"], graded["after"]["score"]) == (0.0, 1.0)
     # A link, which a read of a copy on the sandbox's host would follow there: refused.
     assert graded["after"]["extracted_files"]["/logs/link.txt"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_server_of_another_user_is_found_though_root_cant_read_its_descriptors(local_backends):
+    """Root in a container has no CAP_SYS_PTRACE, so it reads only its own user's descriptors: the server, running as
+    nobody as an image's agent user would, is the oldest process of its socket's user. The writer that user left ends;
+    root's own process, started after, stays."""
+    image, server, _ = USERLANDS["busybox"]
+    sandbox = await LocalSandboxProvider().create_vm()
+    container = sandbox.scoped_name(f"user-{uuid.uuid4().hex[:8]}")
+    try:
+        _docker("run", "-d", "--name", container, image, "sleep", "infinity")
+        _docker("exec", "-d", container, "sh", "-c", f"su nobody -s /bin/sh -c '{server}' & sleep 1.1; "
+                f"su nobody -s /bin/sh -c \"setsid sh -c '{WRITER}' > /dev/null 2>&1 &\"; (sleep 1004 &); "
+                "touch /tmp/up")
+        await _until(lambda: "up" in _docker("exec", container, "ls", "/tmp"), "the agent's leftovers")
+        context = TaskStepContext(deployed_agents=[DeployedAgent(
+            agent_name="coder", api_url="http://127.0.0.1:9", sandbox_id=sandbox.sandbox_id, sandbox_type="local",
+            installed_container=container, a2a_port=PORT)])
+
+        await StopAgentTaskStep(id="stop", version=None, agent_name="coder", grace_s=1).execute(context)
+
+        report = context.metadata["stop_agent"]["stop"]
+        assert report["server"]["command"] == server
+        assert f"sh -c {WRITER}" in {entry["command"] for entry in report["processes"]}
+        left = _running(container)
+        assert "sleep 1004" in left and server in left and f"sh -c {WRITER}" not in left
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        await sandbox.terminate()

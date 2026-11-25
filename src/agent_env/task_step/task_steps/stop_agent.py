@@ -50,11 +50,14 @@ _COMMAND_CHARS = 500
 _REPORTED_PROCESSES = 200
 
 # Args: the server's port, and how many tenths of a second to wait after SIGTERM. Prints the server, then a line per
-# signal sent and per process left, each its pid and command line. A process is the agent's when it runs as the server's
-# user, started after it, and is the server's descendant or an orphan whose ancestors below the init all started after
-# it too (`ours`): a child of anything older, a service of the container's own say, isn't, nor is this script or what
-# runs it.
+# signal sent and per process left, each its pid and command line. The server is the oldest process holding the socket
+# listening on the port, or, when those processes' descriptors can't be read (root without CAP_SYS_PTRACE reads only its
+# own user's), the oldest process of the socket's user. A process is the agent's when it runs as the server's user,
+# started after it, and is the server's descendant or an orphan whose ancestors below the init all started after it
+# too (`ours`): a child of anything older, a service of the container's own say, isn't, nor is this script or what
+# runs it. PATH is the system's alone, so no folder the agent can write to is searched for the programs it runs.
 _END_PROCESSES = r"""
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 port=$1 polls=$2 me=$$
 info() {
   pid=$1
@@ -88,7 +91,7 @@ hex=$(printf '%04X' "$port")
 inode=
 for table in /proc/net/tcp /proc/net/tcp6; do
   [ -r "$table" ] || continue
-  while read -r _ local _ st _ _ _ _ _ ino _; do
+  while read -r _ local _ st _ _ _ owner _ ino _; do
     if [ "$st" = 0A ] && [ "${local##*:}" = "$hex" ]; then inode=$ino; break; fi
   done < "$table"
   [ -n "$inode" ] && break
@@ -100,10 +103,13 @@ holders=$(ls -l /proc/[0-9]*/fd 2>/dev/null | while read -r line; do
     *" -> socket:[$inode]") echo "$dir" ;;
   esac
 done)
+[ -n "$holders" ] || holders=$(for dir in /proc/[0-9]*; do
+  info "${dir#/proc/}" && [ "$uid" = "$owner" ] && [ "$state" != Z ] && echo "${dir#/proc/}"
+done)
 server=
 for p in $holders; do
   info "$p" || continue
-  if [ -z "$server" ] || [ "$start" -lt "$since" ]; then server=$p since=$start owner=$uid; fi
+  if [ -z "$server" ] || [ "$start" -lt "$since" ]; then server=$p since=$start; fi
 done
 [ -n "$server" ] || { echo "no process holds the socket listening on port $port" >&2; exit 3; }
 printf 'SERVER\t%s\t%s\n' "$server" "$(command_of "$server")"
@@ -132,6 +138,7 @@ for p in $(candidates); do printf 'LEFT\t%s\t%s\n' "$p" "$(command_of "$p")"; do
 # Args: the paths. Prints a line per path, in order: its kind, whether it was removed, and a file's size, mtime and
 # sha256 or a link's target.
 _CLEAR_PATHS = r"""
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 for p in "$@"; do
   kind=missing size= mtime= sha= target= removed=
   if [ -L "$p" ]; then kind=link target=$(readlink -- "$p" | tr '\011\012' '  ')
@@ -210,7 +217,7 @@ class StopAgentTaskStep(TaskStep):
 
         def run(script: str, *args: str):
             prefix = ("sudo", "docker", "exec", "-u", "0", "-w", "/", container) if container else ()
-            return asyncio.wait_for(sandbox.exec_with_output(*prefix, "sh", "-c", script, "stop_agent", *args),
+            return asyncio.wait_for(sandbox.exec_with_output(*prefix, "/bin/sh", "-c", script, "stop_agent", *args),
                                     timeout=self.grace_s + _EXEC_MARGIN_S)
 
         port = agent.a2a_port or DEFAULT_A2A_PORT

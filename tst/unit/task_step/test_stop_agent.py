@@ -92,7 +92,7 @@ def test_an_installed_agent_is_stopped_in_its_container_as_root_and_reported(sto
                       grace_s=3).execute(context))
 
     ended, cleared = stopping.sandbox.calls
-    in_container = ("sudo", "docker", "exec", "-u", "0", "-w", "/", "repo-sb-1", "sh", "-c")
+    in_container = ("sudo", "docker", "exec", "-u", "0", "-w", "/", "repo-sb-1", "/bin/sh", "-c")
     assert ended == (*in_container, stop_agent._END_PROCESSES, "stop_agent", "8123", "30")
     assert cleared == (*in_container, stop_agent._CLEAR_PATHS, "stop_agent", "/logs/verifier/reward.txt",
                        "/logs/verifier/link.txt", "/tmp/none")
@@ -133,7 +133,7 @@ def test_an_agent_whose_sandbox_is_its_container_is_stopped_in_the_sandbox(stopp
     asyncio.run(_step().execute(_context(sandbox_type="modal")))
 
     [ended] = stopping.sandbox.calls
-    assert ended[:3] == ("sh", "-c", stop_agent._END_PROCESSES)
+    assert ended[:3] == ("/bin/sh", "-c", stop_agent._END_PROCESSES)
 
 
 def test_a_turn_past_cancelling_is_recorded_with_the_agents_answer(stopping):
