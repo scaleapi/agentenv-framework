@@ -9,7 +9,7 @@ Each task is one `Agent.chat()` of the SDK in the A2A server's process, in `/app
 `localharness`, a static Go binary that runs the tools and calls the model. A context's first task starts an SDK
 conversation, and each later task resumes it by its id; the SDK keeps each conversation in a SQLite store under
 `$ANTIGRAVITY_HOME/conversations/`. Text parts are the prompt, and file parts are written under `/app/inputs/<task>/`
-and named in it; an image goes to the model inline too, with its message in every later turn, and a PDF as its
+and named in it; an image goes to the model inline too, as it was given, with its message in every later turn, and a PDF as its
 pages' PNGs, rendered with `pdftoppm`. Turns of
 different contexts run at once, a context's turns one at a time.
 

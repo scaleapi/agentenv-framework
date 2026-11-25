@@ -368,7 +368,7 @@ def _rewritten(rewrite, messages: list[dict]) -> list[dict]:
     return json.loads(asyncio.run(rewrite(json.dumps({"model": "m", "messages": messages}).encode())))["messages"]
 
 
-def test_an_image_goes_with_its_turns_message_once_and_with_it_in_the_turns_after(tmp_path):
+def test_an_image_goes_with_its_turns_message_once_and_as_it_was_given_in_the_turns_after(tmp_path):
     image = tmp_path / "chart.png"
     image.write_bytes(b"\x89PNG")
     part = antigravity_bridge.media_part(str(image))
@@ -378,6 +378,7 @@ def test_an_image_goes_with_its_turns_message_once_and_with_it_in_the_turns_afte
 
     once = _rewritten(first, asked)
     twice = _rewritten(first, once)
+    image.write_bytes(b"GIF89a, edited by the agent")
     later = _rewritten(antigravity_bridge.turn_rewrite(None, []), [
         *asked, {"role": "assistant", "content": "a chart"}, {"role": "user", "content": "its other label?"}])
 
@@ -389,15 +390,13 @@ def test_an_image_goes_with_its_turns_message_once_and_with_it_in_the_turns_afte
     assert later[4]["content"] == "its other label?"
 
 
-def test_an_image_that_is_gone_is_left_out(tmp_path):
-    image = tmp_path / "chart.png"
-    image.write_bytes(b"\x89PNG")
-    _rewritten(antigravity_bridge.turn_rewrite(None, [str(image)]), [{"role": "user", "content": "look"}])
-    image.unlink()
+def test_an_image_gone_before_its_turn_sends_it_is_left_out(tmp_path):
+    asked = [{"role": "user", "content": "look"}]
 
-    later = _rewritten(antigravity_bridge.turn_rewrite(None, []), [{"role": "user", "content": "look"}])
+    once = _rewritten(antigravity_bridge.turn_rewrite(None, [str(tmp_path / "chart.png")]), asked)
+    later = _rewritten(antigravity_bridge.turn_rewrite(None, []), asked)
 
-    assert later[0]["content"] == "look"
+    assert once == later == asked
     assert antigravity_bridge.media_part(str(tmp_path / "notes.txt")) is None
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -56,6 +57,9 @@ SAVE_DIR = HOME_DIR / "conversations"
 SKILLS_DIR = HOME_DIR / "skills"
 ENV_TIMES = Records(SAVE_DIR / "env-times.json")
 TURN_IMAGES = Records(SAVE_DIR / "turn-images.json")
+# Each turn's images as the turn was given them, by their content, so the agent editing an attachment never changes what
+# the user showed the model.
+IMAGES_DIR = SAVE_DIR / "images"
 # The characters of a value the SDK can't serialize that the trajectory keeps.
 _REPR_CHARS = 2000
 
@@ -188,23 +192,40 @@ def is_image(path: str) -> bool:
     return (mimetypes.guess_type(path)[0] or "").startswith("image/")
 
 
-def media_part(path: str) -> dict | None:
+def media_part(path: str | Path) -> dict | None:
     """An image the model sees inline, as a chat-completions image part with a data URL; None for any other file, which
     the prompt names for the model's own tools to read, or one that is gone."""
-    if not is_image(path):
+    if not is_image(str(path)):
         return None
     try:
         data = base64.b64encode(Path(path).read_bytes()).decode()
     except OSError:
         logger.warning(f"image {path} is gone: the model's message goes without it")
         return None
-    return {"type": "image_url", "image_url": {"url": f"data:{mimetypes.guess_type(path)[0]};base64,{data}"}}
+    return {"type": "image_url", "image_url": {"url": f"data:{mimetypes.guess_type(str(path))[0]};base64,{data}"}}
+
+
+def kept_image(path: str) -> str | None:
+    """A copy of the image at ``path`` in ``IMAGES_DIR``, named by its content, which no edit of the original reaches;
+    its name, or None when the image is gone."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        logger.warning(f"image {path} is gone: the model's message goes without it")
+        return None
+    name = hashlib.sha256(data).hexdigest() + Path(path).suffix.lower()
+    if not (IMAGES_DIR / name).is_file():
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        staged = IMAGES_DIR / f".{name}.tmp"
+        staged.write_bytes(data)
+        staged.replace(IMAGES_DIR / name)
+    return name
 
 
 def _with_images(request: dict, images: list[str], recorded: Records) -> bool:
     """Every user message's images, which the SDK's chat-completions backend drops: the turn's own go with its message,
-    the last user message, and are recorded by that message's text, so the turns after it, which send it again from a
-    store that never saw them, carry them too. Whether it changed the request."""
+    the last user message, kept as they were (``kept_image``) and recorded by that message's text, so the turns after
+    it, which send it again from a store that never saw them, carry them too. Whether it changed the request."""
     users = [message for message in request.get("messages") or [] if isinstance(message, dict)
              and message.get("role") == "user"]
     if not users:
@@ -212,16 +233,16 @@ def _with_images(request: dict, images: list[str], recorded: Records) -> bool:
     if images:
         key = message_digest(_text_of(users[-1]))
         if recorded.get(key) is None:
-            recorded.put(key, images)
+            recorded.put(key, [name for name in map(kept_image, images) if name is not None])
     changed = False
     for message in users:
-        paths = recorded.get(message_digest(_text_of(message)))
-        if not paths:
+        names = recorded.get(message_digest(_text_of(message)))
+        if not names:
             continue
         content = message.get("content")
         parts = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         present = {json.dumps(part, sort_keys=True) for part in parts if isinstance(part, dict)}
-        added = [part for part in (media_part(path) for path in paths)
+        added = [part for part in (media_part(IMAGES_DIR / name) for name in names)
                  if part is not None and json.dumps(part, sort_keys=True) not in present]
         if added:
             message["content"] = [*parts, *added]

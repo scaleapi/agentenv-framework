@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import tarfile
 from pathlib import Path
 
@@ -52,7 +53,10 @@ async def test_a_conversation_and_its_workspace_load_into_another_agents_context
     (store / "conv-1.db-wal").write_bytes(b"wal")
     (store / "conv-2.db").write_bytes(b"another")
     antigravity_bridge.ENV_TIMES.put("2026-11-25T10:00:00-08:00", "2031-03-03T23:06:07-06:00")
-    antigravity_bridge.TURN_IMAGES.put("3f2a", [str(folders / "inputs" / "t1" / "chart.png")])
+    antigravity_bridge.TURN_IMAGES.put("3f2a", ["c0ffee.png"])
+    antigravity_bridge.IMAGES_DIR.mkdir()
+    (antigravity_bridge.IMAGES_DIR / "c0ffee.png").write_bytes(b"\x89PNG")
+    (antigravity_bridge.IMAGES_DIR / "unused.png").write_bytes(b"\x89PNG")
     (folders / "report.md").write_text("draft")
     ag.agent.set_session_ref_for_context("ctx-source", "conv-1")
 
@@ -60,10 +64,10 @@ async def test_a_conversation_and_its_workspace_load_into_another_agents_context
         saved = await client.post("/ext/snapshot", json={"context_id": "ctx-source", "objects": {
             "trajectory": _WRITE, "workspace": _WRITE}})
         assert saved.status_code == 200, saved.text
-        assert _members(objects["conversation.tgz"]) == ["env-times.json", "manifest.json", "store/conv-1.db",
-                                                         "store/conv-1.db-wal", "turn-images.json"]
-        for path in store.iterdir():
-            path.unlink()
+        assert _members(objects["conversation.tgz"]) == ["env-times.json", "images/c0ffee.png", "manifest.json",
+                                                         "store/conv-1.db", "store/conv-1.db-wal", "turn-images.json"]
+        shutil.rmtree(store)
+        store.mkdir()
         (folders / "report.md").write_text("changed since")
         (folders / "stray.txt").write_text("stray")
 
@@ -78,7 +82,8 @@ async def test_a_conversation_and_its_workspace_load_into_another_agents_context
     assert {path.name: path.read_bytes() for path in store.glob("conv-*")} == {"conv-1.db": b"sqlite",
                                                                               "conv-1.db-wal": b"wal"}
     assert antigravity_bridge.ENV_TIMES.all() == {"2026-11-25T10:00:00-08:00": "2031-03-03T23:06:07-06:00"}
-    assert antigravity_bridge.TURN_IMAGES.all() == {"3f2a": [str(folders / "inputs" / "t1" / "chart.png")]}
+    assert antigravity_bridge.TURN_IMAGES.all() == {"3f2a": ["c0ffee.png"]}
+    assert [path.name for path in antigravity_bridge.IMAGES_DIR.iterdir()] == ["c0ffee.png"]
     assert sorted(path.name for path in folders.iterdir()) == ["report.md"]
     assert (folders / "report.md").read_text() == "draft"
 

@@ -69,6 +69,7 @@ from starlette.exceptions import HTTPException
 from antigravity_bridge import (
     ENV_TIMES,
     ERROR_MESSAGE_LIMIT,
+    IMAGES_DIR,
     SAVE_DIR,
     SKILLS_DIR,
     TURN_IMAGES,
@@ -107,6 +108,7 @@ TRAJECTORY_FORMAT = "antigravity-sdk/1"
 _MANIFEST = "manifest.json"
 _ENV_TIMES_MEMBER = "env-times.json"
 _TURN_IMAGES_MEMBER = "turn-images.json"
+_IMAGES_MEMBER = "images"
 
 
 class AntigravityConfig(AgentConfig):
@@ -386,7 +388,7 @@ class AntigravityAgent(DurableSessionRefs, AgentEnvAgent):
     @extension(SNAPSHOT_V1.save)
     async def save_snapshot(self, request: ObjectSnapshotSaveRequest) -> dict[str, Any]:
         """The context's conversation, its SDK store whole with the env times its turns were given and the images their
-        messages carry, and the workspace."""
+        messages carry, as they were given, and the workspace."""
         with tempfile.TemporaryDirectory(prefix="antigravity-snapshot-") as directory:
             conversation = Path(directory) / "conversation.tgz"
             workspace = Path(directory) / "workspace.tgz"
@@ -518,6 +520,10 @@ def _archive_conversation(conversation_id: str, archive: Path) -> None:
         with tarfile.open(archive, "w:gz") as tar:
             for member in (_MANIFEST, _ENV_TIMES_MEMBER, _TURN_IMAGES_MEMBER):
                 tar.add(Path(directory) / member, arcname=member)
+            kept = {name for names in TURN_IMAGES.all().values() if isinstance(names, list) for name in names}
+            for name in sorted(kept):
+                if isinstance(name, str) and (IMAGES_DIR / name).is_file():
+                    tar.add(IMAGES_DIR / name, arcname=f"{_IMAGES_MEMBER}/{name}")
             for path in _conversation_files(conversation_id):
                 tar.add(path, arcname=f"store/{path.name}")
 
@@ -556,6 +562,11 @@ def _restore_conversation(staged: Path, conversation_id: str) -> None:
             restored = {}
         if isinstance(restored, dict):
             records.merge({str(key): value for key, value in restored.items()})
+    if (staged / _IMAGES_MEMBER).is_dir():
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        for path in (staged / _IMAGES_MEMBER).iterdir():
+            if path.is_file() and not (IMAGES_DIR / path.name).exists():
+                shutil.copyfile(path, IMAGES_DIR / path.name)
 
 
 def _backup_exclusions() -> list[str]:

@@ -78,6 +78,7 @@ def folders(monkeypatch, tmp_path):
         monkeypatch.setattr(module, "SKILLS_DIR", tmp_path / "home" / "skills")
         monkeypatch.setattr(module, "ENV_TIMES", times)
         monkeypatch.setattr(module, "TURN_IMAGES", images)
+        monkeypatch.setattr(module, "IMAGES_DIR", conversations / "images")
     monkeypatch.setattr(a2a_server, "WORKSPACE_DIR", workspace)
     monkeypatch.setattr(a2a_server, "INPUTS_DIR", workspace / "inputs")
     monkeypatch.setattr(a2a_server, "_CHANGELOG_DIR", tmp_path / "changelog")
