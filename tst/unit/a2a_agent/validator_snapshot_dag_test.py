@@ -9,7 +9,7 @@ capture's timeout.
 import pytest
 
 from agent_env.a2a_agent import validator as validator_module
-from agent_env.a2a_agent.validator import A2AAgentValidator
+from agent_env.a2a_agent.validator import A2AAgentValidator, _UploadedFixtures
 from agent_env.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -38,7 +38,7 @@ async def test_the_snapshot_is_planted_on_and_saved_from_an_agent_of_its_own(mon
 
 
 async def _validation_steps(monkeypatch) -> list:
-    """The steps ``A2AAgentValidator.validate`` builds, from its real task construction, with nothing run."""
+    """The steps ``A2AAgentValidator.validate`` builds, its modality probes included, with nothing uploaded or run."""
     captured: dict = {}
 
     class FakeTask:
@@ -62,8 +62,8 @@ async def _validation_steps(monkeypatch) -> list:
 
     monkeypatch.setattr(Task, "put", capture_task_put)
     monkeypatch.setattr(A2AAgentValidator, "_upload_skill_fixture", lambda *_args, **_kwargs: "s3://fixture/skill")
-    monkeypatch.setattr(A2AAgentValidator, "_upload_probe_fixtures", lambda *_args: object())
-    monkeypatch.setattr(A2AAgentValidator, "_build_modality_steps", lambda *_args: ([], []))
+    monkeypatch.setattr(A2AAgentValidator, "_upload_probe_fixtures", lambda _agent, skill_object_url: _UploadedFixtures(
+        skill_object_url=skill_object_url, png_object_uri="s3://fixture/red.png", mp4_object_uri="s3://fixture/clip.mp4"))
     monkeypatch.setattr(A2AAgentValidator, "_validate_agent_changelog", noop)
     monkeypatch.setattr(A2AAgentValidator, "_validate_clock", noop)
     monkeypatch.setattr(A2AAgentValidator, "_validate_install", noop)
