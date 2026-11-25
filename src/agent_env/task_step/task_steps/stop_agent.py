@@ -87,11 +87,11 @@ command_of() {
   tr '\000\011\012' '   ' 2>/dev/null < "/proc/$1/cmdline"
 }
 server_on() {
-  hex=$(printf '%04X' "$1") inode= found= why=
+  hex=$(printf '%04X' "$1") inode= found= found_owner= why=
   for table in /proc/net/tcp /proc/net/tcp6; do
     [ -r "$table" ] || continue
-    while read -r _ local _ st _ _ _ owner _ ino _; do
-      if [ "$st" = 0A ] && [ "${local##*:}" = "$hex" ]; then inode=$ino; break; fi
+    while read -r _ local _ st _ _ _ user _ ino _; do
+      if [ "$st" = 0A ] && [ "${local##*:}" = "$hex" ]; then inode=$ino found_owner=$user; break; fi
     done < "$table"
     [ -n "$inode" ] && break
   done
@@ -103,7 +103,7 @@ server_on() {
     esac
   done)
   [ -n "$holders" ] || holders=$(for dir in /proc/[0-9]*; do
-    info "${dir#/proc/}" && [ "$uid" = "$owner" ] && [ "$state" != Z ] && echo "${dir#/proc/}"
+    info "${dir#/proc/}" && [ "$uid" = "$found_owner" ] && [ "$state" != Z ] && echo "${dir#/proc/}"
   done)
   for p in $holders; do
     info "$p" || continue
@@ -115,7 +115,7 @@ chain=" $me "
 q=$me
 while info "$q" && [ "$parent" -gt 0 ]; do chain="$chain$parent "; q=$parent; done
 server_on "$port" || { echo "$why" >&2; exit 3; }
-server=$found since=$found_start owner=$owner
+server=$found since=$found_start owner=$found_owner
 kept=" "
 for other in "$@"; do
   server_on "$other" && kept="$kept$found "

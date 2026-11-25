@@ -182,16 +182,21 @@ async def test_a_server_of_another_user_is_found_though_root_cant_read_its_descr
 
 
 @pytest.mark.asyncio
-async def test_stopping_one_agent_spares_the_server_of_another_in_its_container(local_backends):
-    """Two agents installed into one container, both root: stopping the first ends its leftover, and spares the
-    second's server, started after the first's, and what that server started."""
+@pytest.mark.parametrize("second_user", ["root", "nobody"])
+async def test_stopping_one_agent_spares_the_server_of_another_in_its_container(local_backends, second_user):
+    """Two agents installed into one container, the second's server started after the first's, as root too or as
+    another user: stopping the first ends its leftover, and spares the second's server and what that server
+    started."""
     image, server, _ = USERLANDS["busybox"]
     sandbox = await LocalSandboxProvider().create_vm()
     container = sandbox.scoped_name(f"two-{uuid.uuid4().hex[:8]}")
     second = f"nc -lk -p {PORT + 1}"
+    start_second = f"sh -c 'sleep 1005 & exec {second}'"
+    if second_user != "root":
+        start_second = f"su {second_user} -s /bin/sh -c \"{start_second}\""
     try:
         _docker("run", "-d", "--name", container, image, "sleep", "infinity")
-        _docker("exec", "-d", container, "sh", "-c", f"{server} & sleep 1.1; sh -c 'sleep 1005 & exec {second}' & "
+        _docker("exec", "-d", container, "sh", "-c", f"{server} & sleep 1.1; {start_second} & "
                 f"sleep 1.1; setsid sh -c '{WRITER}' > /dev/null 2>&1 & touch /tmp/up")
         await _until(lambda: "up" in _docker("exec", container, "ls", "/tmp"), "both servers")
         agents = [DeployedAgent(agent_name=name, api_url="http://127.0.0.1:9", sandbox_id=sandbox.sandbox_id,
