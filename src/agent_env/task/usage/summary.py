@@ -7,7 +7,7 @@ the ``bound`` word the CLI prints."""
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import reduce
 from typing import TYPE_CHECKING, Any
@@ -35,16 +35,21 @@ class Bound(StrEnum):
 @dataclass
 class Share:
     """One role's usage on one model: its tokens, each None when nothing counted it, and the cost of the part that was
-    priced, with ``unpriced`` when some part had no cost, ``assumed`` when some part's cost was priced on an assumed
-    rate (``cost_assumed``), and ``partial`` when its counts fall short (a partial or a still running entry)."""
+    priced, with ``unpriced`` when some part had no cost and ``unpriced_reasons`` the reasons its entries gave,
+    ``assumed`` when some part's cost was priced on an assumed rate and ``cost_assumed`` the rates assumed, and
+    ``partial`` when its counts fall short (a partial or a still running entry)."""
 
     role: str
     model: str | None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
     cost_usd: float | None = None
     unpriced: bool = False
+    unpriced_reasons: set[str] = field(default_factory=set)
     assumed: bool = False
+    cost_assumed: set[str] = field(default_factory=set)
     partial: bool = False
 
     @property
@@ -61,17 +66,24 @@ class Share:
 
     def to_dict(self) -> dict[str, Any]:
         return {"role": self.role, "model": self.model, "cost_usd": self.cost_usd, "bound": self.bound.value,
-                "input_tokens": self.input_tokens, "output_tokens": self.output_tokens, "unpriced": self.unpriced,
-                "assumed": self.assumed, "partial": self.partial}
+                "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                "cache_read_tokens": self.cache_read_tokens, "cache_write_tokens": self.cache_write_tokens,
+                "unpriced": self.unpriced, "unpriced_reasons": sorted(self.unpriced_reasons), "assumed": self.assumed,
+                "cost_assumed": sorted(self.cost_assumed), "partial": self.partial}
 
     def add(self, part: UsageEntry | ModelEntry, partial: bool) -> None:
         self.input_tokens = _plus(self.input_tokens, part.get("input_tokens"))
         self.output_tokens = _plus(self.output_tokens, part.get("output_tokens"))
+        self.cache_read_tokens = _plus(self.cache_read_tokens, part.get("cache_read_tokens"))
+        self.cache_write_tokens = _plus(self.cache_write_tokens, part.get("cache_write_tokens"))
         if (cost := part.get("cost_usd")) is None:
             self.unpriced = True
+            if reason := part.get("unpriced_reason"):
+                self.unpriced_reasons.add(reason)
         else:
             self.cost_usd = (self.cost_usd or 0.0) + cost
             self.assumed = self.assumed or bool(part.get("cost_assumed"))
+            self.cost_assumed.update(part.get("cost_assumed") or ())
         self.partial = self.partial or partial
 
 
