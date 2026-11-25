@@ -1,6 +1,7 @@
 """The followers of the gateway's clock (the computers on it, declared at its start, and the agents a run declares
 after it, ``declare``, and retires when it tears one down, ``retire``): each long-polls ``/clock/watch`` with the version it
-shows, which is its acknowledgement, and a clock write can wait until every one shows the write's version."""
+shows, which is its acknowledgement, and a clock write can wait until every one shows the write's version. A follower
+may hold only a range of times (its card's clock/v1 ``range``), which the clock keeps to while it follows."""
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +10,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 
-from .clock import Clock, ClockError
+from .clock import Clock, ClockError, FollowerRange
 from .constants import CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S
 
 
@@ -37,23 +38,33 @@ class ClockFollowers:
     #: to reconnect, so its connection is gone. A write doesn't wait for a quiet follower; it names it at once.
     QUIET_S = CLOCK_WATCH_HOLD_S + 5
 
-    def __init__(self, clock: Callable[[], Clock], tokens: Mapping[str, str]):
+    def __init__(self, clock: Callable[[], Clock], tokens: Mapping[str, str],
+                 held: Mapping[str, FollowerRange] | None = None):
         self._clock = clock
         self._tokens = dict(tokens)
+        self._held = {name: span for name, span in (held or {}).items() if name in self._tokens}
         self._shown: dict[str, int | None] = dict.fromkeys(self._tokens)
         self._seen: dict[str, float] = {}
         self._declared: set[str] = set()
         self._changed = asyncio.Event()
         self._acks = asyncio.Condition()
 
-    def declare(self, name: str, token: str) -> None:
-        """Declare ``name`` a follower, with the read token its watch carries, after the gateway started: an agent the
-        run deploys. Declared again, as a redeploy does, it takes the new token and is waited for afresh."""
+    def declare(self, name: str, token: str, held: FollowerRange | None = None) -> None:
+        """Declare ``name`` a follower, with the read token its watch carries and the range of times it holds if it
+        holds only some, after the gateway started: an agent the run deploys. Declared again, as a redeploy does, it takes
+        the new token and range and is waited for afresh. One whose range the clock is outside now, or would run past
+        the end of from within a real hour, is refused (``OutsideRange``)."""
         if not name or not token:
             raise ClockError("a follower takes a name and a read token")
         if name in self._tokens and name not in self._declared:
             raise ClockError(f"{name!r} is a follower this gateway started with, which a declaration doesn't replace")
+        if held is not None:
+            self._clock().check_follower(name, held)
         self._tokens[name] = token
+        if held is None:
+            self._held.pop(name, None)
+        else:
+            self._held[name] = held
         self._shown[name] = None
         self._seen.pop(name, None)
         self._declared.add(name)
@@ -64,12 +75,17 @@ class ClockFollowers:
         one; a follower the gateway started with stays."""
         if name not in self._declared:
             return False
+        self._clock().stop_at_end()  # a clock standing at the end of its range stays there when the range goes
         async with self._acks:
             self._declared.discard(name)
-            for followers in (self._tokens, self._shown, self._seen):
+            for followers in (self._tokens, self._shown, self._seen, self._held):
                 followers.pop(name, None)
             self._acks.notify_all()
         return True
+
+    def held(self) -> dict[str, FollowerRange]:
+        """Each follower that holds only a range of times, by name, with its range: the clock keeps to them."""
+        return dict(self._held)
 
     def changed(self) -> None:
         """Answer every held watch: the clock has a new version."""
@@ -134,5 +150,6 @@ class ClockFollowers:
         """Each follower's last shown version and how long ago it last watched, for ``/clock/state``."""
         now, clock = time.monotonic(), self._clock()
         return {name: {"version": None if shown is None else clock.version_of(shown),
-                       "seen_s_ago": round(now - self._seen[name], 3) if name in self._seen else None}
+                       "seen_s_ago": round(now - self._seen[name], 3) if name in self._seen else None,
+                       **({"range": held.as_dict()} if (held := self._held.get(name)) else {})}
                 for name, shown in self._shown.items()}

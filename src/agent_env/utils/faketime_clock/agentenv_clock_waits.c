@@ -134,11 +134,13 @@ static bool ft_snap_at(clockid_t clock, struct ft_clock_page *s, struct timespec
   return true;
 }
 
+/* a time in ns, exact anywhere in the clock's range, which is what 64 bits hold, and saturated beyond it */
 static inline int64_t ft_ns(const struct timespec *t)
 {
-  if (t->tv_sec > 9000000000LL) return FT_NEVER / 2;
-  if (t->tv_sec < -9000000000LL) return -(FT_NEVER / 2);
-  return (int64_t) t->tv_sec * FT_NS + t->tv_nsec;
+  int64_t ns;
+  if (__builtin_mul_overflow((int64_t) t->tv_sec, FT_NS, &ns) || __builtin_add_overflow(ns, (int64_t) t->tv_nsec, &ns))
+    return t->tv_sec < 0 ? INT64_MIN : INT64_MAX;
+  return ns;
 }
 static inline struct timespec ft_ts(int64_t ns)
 {
@@ -166,6 +168,12 @@ static inline bool ft_valid_ts(const struct timespec *t)
 {
   return t != NULL && t->tv_nsec >= 0 && t->tv_nsec < FT_NS && t->tv_sec >= 0;
 }
+/* an absolute deadline on the universe's realtime, which is before 1970 only while the universe is set: a real clock has
+   no time before 1970, so an unarmed page leaves such a deadline to the real call. */
+static inline bool ft_valid_due(const struct timespec *t, const struct ft_clock_page *s)
+{
+  return t != NULL && t->tv_nsec >= 0 && t->tv_nsec < FT_NS && (t->tv_sec >= 0 || s->armed);
+}
 static inline bool ft_rt_clock(clockid_t c)
 {
   return c == CLOCK_REALTIME || c == CLOCK_REALTIME_ALARM;
@@ -179,20 +187,17 @@ static inline bool ft_universe_clock(clockid_t c)
 /* the universe's realtime at real realtime t; before the anchor, the anchor's. */
 static int64_t ft_page_rt(const struct ft_clock_page *s, int64_t t)
 {
-  if (!s->armed) return t;
-  if (s->rate == 0 || t <= s->anchor_ns) return s->universe_ns;
-  if (s->rate == 1.0) return s->universe_ns + (t - s->anchor_ns);
-  return s->universe_ns + (int64_t) ((double) (t - s->anchor_ns) * s->rate);
+  return s->armed ? ft_universe_at(s, t) : t;
 }
 /* the real realtime at which the universe reaches ``due``; 0 (the past) once it has, FT_NEVER while frozen
-   short of it. */
+   short of it or for a time past the end of the range, where the universe stops. */
 static int64_t ft_real_of(const struct ft_clock_page *s, int64_t due)
 {
   double r;
   if (!s->armed) return due < 1 ? 1 : due;
   if (due <= s->universe_ns) return 1;
-  if (s->rate <= 0) return FT_NEVER;
-  r = (double) (due - s->universe_ns) / s->rate;
+  if (s->rate <= 0 || due > FT_END) return FT_NEVER;
+  r = (double) ((__int128) due - s->universe_ns) / s->rate;
   if (r > 4e18) return FT_NEVER;
   return s->anchor_ns + (int64_t) r + 1;
 }
@@ -223,8 +228,8 @@ static void ft_tab_unlock(const sigset_t *old)
 /*
  * ---- timers for a realtime clock time: timerfds and POSIX timers armed at TIMER_ABSTIME on a realtime clock. The
  * kernel timer is armed at the real realtime the universe reaches the deadline at (in the past once it has, so it fires
- * now), its interval at interval / rate, and disarmed while frozen short of it; the helper arms it again on each change.
- * A one-shot timer that has fired is left alone. ----
+ * now), its interval at interval / rate (none while frozen, which brings no later expiration), and disarmed while frozen
+ * short of it; the helper arms it again on each change. A one-shot timer that has fired is left alone. ----
  */
 #define FT_TIMER_FDS 8
 struct ft_timer
@@ -279,12 +284,13 @@ static int ft_timer_real_get(struct ft_timer *t, struct itimerspec *cur)
 {
   return t->kind == 1 ? (*real_timerfd_gettime)(t->fds[0], cur) : (*real_timer_gettime_new)(t->id, cur);
 }
-/* the next expiration at or after ``after``. */
-static int64_t ft_timer_next(const struct ft_timer *t, int64_t after)
+/* the next expiration at or after ``after``, in 128 bits, since a deadline and the universe may be at either end of the
+   range. */
+static int64_t ft_timer_next(const struct ft_timer *t, __int128 after)
 {
-  int64_t next = t->due;
+  __int128 next = t->due;
   if (t->interval > 0 && next < after) next += ((after - next + t->interval - 1) / t->interval) * t->interval;
-  return next;
+  return next > INT64_MAX ? INT64_MAX : (int64_t) next;
 }
 /* the kernel timer set from page ``s``. A periodic timer goes on from its first expiration past the
    universe's time on the page it was armed from, so a jump delivers what it passed at once. Lock held. */
@@ -301,13 +307,13 @@ static int ft_timer_arm(struct ft_timer *t, const struct ft_clock_page *s, bool 
     t->tracked = 0;   /* fired: the expiration is the kernel's to hand over */
     return 0;
   }
-  if (!first && t->interval > 0) next = ft_timer_next(t, ft_page_rt(&t->pg, ft_real_rt()) + 1);
+  if (!first && t->interval > 0) next = ft_timer_next(t, (__int128) ft_page_rt(&t->pg, ft_real_rt()) + 1);
   at = ft_real_of(s, next);
   if (at != FT_NEVER)
   {
     real.it_value = ft_ts(at);
     if (real.it_value.tv_sec == 0 && real.it_value.tv_nsec == 0) real.it_value.tv_nsec = 1;
-    if (t->interval > 0)
+    if (t->interval > 0 && rate > 0 && ft_page_rt(s, ft_real_rt()) < FT_END)
     {
       int64_t iv = (int64_t) ((double) t->interval / rate);
       real.it_interval = ft_ts(iv < 1 ? 1 : iv);
@@ -339,8 +345,11 @@ static void ft_timer_value(struct ft_timer *t, struct itimerspec *out)
   out->it_interval = ft_ts(t->interval);
   if (ft_snap(&s))
   {
-    int64_t now = ft_page_rt(&s, ft_real_rt()), next = ft_timer_next(t, now);
-    out->it_value = ft_ts(next - now < 1 ? 1 : next - now);
+    int64_t now = ft_page_rt(&s, ft_real_rt());
+    __int128 left = (__int128) ft_timer_next(t, now) - now;
+    if (left < 1) left = 1;
+    out->it_value.tv_sec = (time_t) (left / FT_NS);
+    out->it_value.tv_nsec = (long) (left % FT_NS);
   }
 }
 
@@ -416,16 +425,39 @@ static bool ft_on_change(const struct ft_clock_page *s, bool rebroadcast)
   return pending;
 }
 
+/* the clock reached the end of its range on page ``s`` at real realtime ``end`` before any page said so: its periodic
+   timers stop there, as its reads do, rather than tick on until the follower writes the page that stands at the end.
+   Stopping one drops the expirations a timerfd holds unread, as every clock change's re-arm does and as the follower's
+   page would a moment later: timerfd_settime zeroes them, and nothing restores them without racing the program's own
+   reads. */
+static void ft_at_end(const struct ft_clock_page *s, int64_t end)
+{
+  struct ft_clock_page stood = *s;
+  sigset_t old;
+  stood.universe_ns = FT_END;
+  stood.anchor_ns = end;
+  stood.rate = 0;
+  ft_tab_lock(&old);
+  for (int i = 0; i < ft_timers_top; i++)
+  {
+    struct ft_timer *t = &ft_timers[i];
+    if (t->kind != 0 && t->tracked && t->interval > 0) ft_timer_arm(t, &stood, false);
+  }
+  ft_tab_unlock(&old);
+}
+
 static void *ft_helper_main(void *arg)
 {
   struct ft_clock_page s;
   uint64_t gen = UINT64_MAX;   /* the first pass catches a change made while it started */
+  uint64_t ended = UINT64_MAX; /* the generation whose run to the end of the range ft_at_end has handled */
   int backoff_ms = 0;
   (void) arg;
   for (;;)
   {
     uint32_t seq32 = ft_seq32();
     bool pending = false;
+    int64_t end = FT_NEVER;
     if (ft_snap(&s))
     {
       if (s.generation != gen)
@@ -439,11 +471,22 @@ static void *ft_helper_main(void *arg)
         pending = ft_on_change(&s, true);
         backoff_ms = pending ? (backoff_ms < 64 ? backoff_ms * 2 : 100) : 0;
       }
+      if (s.armed && s.rate > 0 && s.universe_ns < FT_END && s.generation != ended) end = ft_real_of(&s, FT_END);
     }
     if (backoff_ms > 0)
     {
       struct timespec ts = {0, (long) backoff_ms * 1000000L};
       ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT, (long) seq32, (long) &ts, 0, 0);
+    }
+    else if (end != FT_NEVER)
+    {
+      struct timespec ts = ft_ts(end);
+      if (ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME, (long) seq32,
+                          (long) &ts, 0, FUTEX_BITSET_MATCH_ANY) == -1 && errno == ETIMEDOUT && ft_seq32() == seq32)
+      {
+        ft_at_end(&s, end);
+        ended = s.generation;
+      }
     }
     else
       ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT, (long) seq32, 0, 0, 0);
@@ -577,7 +620,7 @@ static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct ti
   struct ft_clock_page s;
   int64_t due = ft_ns(abs);
   *handled = false;
-  if (!ft_snap(&s)) return 0;
+  if (!ft_snap(&s) || !ft_valid_due(abs, &s)) return 0;
   *handled = true;
   for (;;)
   {
@@ -786,7 +829,7 @@ long syscall(long number, ...)
   {
     int op = (int) a[1];
     const struct timespec *ts = (const struct timespec *) a[3];
-    if ((op & FUTEX_CMD_MASK) == FUTEX_WAIT_BITSET && (op & FUTEX_CLOCK_REALTIME) && ft_valid_ts(ts)
+    if ((op & FUTEX_CMD_MASK) == FUTEX_WAIT_BITSET && (op & FUTEX_CLOCK_REALTIME) && ts != NULL
         && (uint32_t) a[5] == FUTEX_BITSET_MATCH_ANY)
     {
       bool handled;
@@ -824,8 +867,8 @@ static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, 
     }
     ft_tab_unlock(&old);
   }
-  if (!ft_rt_clock(clock) || !(flags & TFD_TIMER_ABSTIME) || !ft_valid_ts(&nv->it_value)
-      || !ft_valid_ts(&nv->it_interval) || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s))
+  if (!ft_rt_clock(clock) || !(flags & TFD_TIMER_ABSTIME) || !ft_valid_ts(&nv->it_interval)
+      || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s) || !ft_valid_due(&nv->it_value, &s))
   {
     r = (*real_timerfd_settime)(fd, flags, nv, ov);
     if (r == 0 && ov != NULL && was) *ov = prev;
@@ -1129,8 +1172,8 @@ int timer_settime(timer_t id, int flags, const struct itimerspec *nv, struct iti
     t->tracked = 0;
   }
   ft_tab_unlock(&old);
-  if (t == NULL || !ft_uw_active() || !(flags & TIMER_ABSTIME) || !ft_valid_ts(&nv->it_value)
-      || !ft_valid_ts(&nv->it_interval) || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s))
+  if (t == NULL || !ft_uw_active() || !(flags & TIMER_ABSTIME) || !ft_valid_ts(&nv->it_interval)
+      || (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) || !ft_snap(&s) || !ft_valid_due(&nv->it_value, &s))
   {
     r = (*real_timer_settime_new)(id, flags, nv, ov);
     if (r == 0 && ov != NULL && was) *ov = prev;

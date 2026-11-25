@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 import agent_env
+from agentenv_protocol.computer.clock import RANGE
 from agentenv_protocol.computer import clock as protocol_clock
 
 CLOCK = Path(agent_env.__file__).parent / "utils" / "faketime_clock"
@@ -144,6 +145,39 @@ def test_the_clock_file_the_follower_writes_reads_as_its_universe_to_a_server_on
         clockpage._universe_at(1, 1748768400 * 10**9, int(anchor * 10**9), 2.0, time.time_ns()) / 1e9, abs=0.5)
     clockpage.write(0, 0.0, 1.0, time.time())
     assert protocol_clock.session_time() == pytest.approx(time.time(), abs=1)
+
+
+def _range_ns(end: str) -> int:
+    return int(datetime.fromisoformat(RANGE[end].replace("Z", "+00:00")).timestamp()) * 10**9
+
+
+def test_the_page_holds_the_range_computers_declare():
+    clockpage = _clockpage(Path("/nonexistent"))
+    assert (clockpage.EARLIEST_NS, clockpage.LATEST_NS) == (_range_ns("earliest"), _range_ns("latest"))
+
+
+def test_a_universe_outside_the_range_is_written_at_its_end_and_the_page_left_whole(tmp_path):
+    """As a follower writes the clock of a gateway that outlives its range: a universe given past either end, or one
+    the page has run on past the end to when a re-anchoring continues it, is written at the end, where libfaketime
+    stops too, and a write never fails halfway with the page left mid-write (seq odd)."""
+    clockpage = _clockpage(tmp_path / "page")
+    clockpage.FILE = str(tmp_path / "clock")
+    end = _range_ns("latest")
+
+    def page() -> tuple[int, int, float]:
+        fields = clockpage.LAYOUT.unpack((tmp_path / "page").read_bytes())
+        return fields[2], fields[3], fields[5]
+
+    clockpage.write(1, 9223372100.0, 1.0, time.time())
+    seq, universe_ns, _ = page()
+    assert (seq % 2, universe_ns) == (0, end)
+    clockpage.write(1, -9223372100.0, 1.0, time.time())
+    assert page()[1] == _range_ns("earliest")
+
+    clockpage.write(1, 9223372035.0, 1.0, time.time() - 1.95)
+    clockpage.write(1, 9223372036.0, 0.0, time.time())
+    seq, universe_ns, rate = page()
+    assert (seq % 2, universe_ns, rate) == (0, end, 0.0)
 
 
 def test_it_follows_the_gateway_its_config_names_and_acknowledges_each_version_with_its_next_watch(follower):

@@ -10,6 +10,8 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,12 +20,52 @@ class ClockError(ValueError):
     """Invalid clock configuration (surfaced as HTTP 400)."""
 
 
+class OutsideRange(ClockError):
+    """A time outside the range of times a clock follower holds, or one the clock would run past its end from."""
+
+
 MAX_RATE = 86400.0  # 1 real second = 1 virtual day (the max virtual-time speed)
 
 # Fast-fail a t0 that would overflow within a real day of advancement at `rate` (frozen clocks
 # exempt). Not the overflow guarantee — reads still saturate (_advance) if the gateway outlives it.
 _OVERFLOW_HORIZON_S = 86400.0
 _MAX_T0 = datetime.max.replace(tzinfo=timezone.utc)
+# Fast-fail arming a clock that a follower would see run past the latest time it holds within a real hour at `rate`: an
+# hour, so a day per second still arms at today's dates on a computer, whose range ends in 2262.
+_FOLLOWER_HORIZON_S = 3600.0
+
+
+@dataclass(frozen=True)
+class FollowerRange:
+    """The times a clock follower holds, as its card declares them (clock/v1's ``range``): a computer's and a
+    clock-following agent's are what 64 bits of nanoseconds since 1970 hold, as their clock page and Python keep time."""
+
+    earliest: datetime
+    latest: datetime
+
+    def as_dict(self) -> dict[str, str]:
+        return {"earliest": _iso(self.earliest), "latest": _iso(self.latest)}
+
+
+def parse_follower_range(value) -> FollowerRange:
+    """A follower's declared range, ``{"earliest": <RFC3339>, "latest": <RFC3339>}``."""
+    if not isinstance(value, dict):
+        raise ClockError(f"a follower's range takes earliest and latest RFC3339 times, got {value!r}")
+    held = FollowerRange(_parse_rfc3339(value.get("earliest"), "range earliest"),
+                         _parse_rfc3339(value.get("latest"), "range latest"))
+    if held.earliest > held.latest:
+        raise ClockError(f"a follower's range ends before it starts: {value!r}")
+    return held
+
+
+def _check_range(what: str, name: str, held: FollowerRange, t: datetime, rate: float | None) -> None:
+    """Refuse ``t`` outside the range follower ``name`` holds, or, run at ``rate``, one it would pass the end of that
+    range from within a real hour."""
+    where = f"clock follower {name!r} holds, {_iso(held.earliest)} to {_iso(held.latest)}"
+    if not held.earliest <= t <= held.latest:
+        raise OutsideRange(f"{what} is outside the times {where}")
+    if rate and (held.latest - t).total_seconds() < _FOLLOWER_HORIZON_S * rate:
+        raise OutsideRange(f"{what} at rate {rate:g} would pass the end of the times {where}, within a real hour")
 
 
 def _parse_rate(rate) -> float:
@@ -54,23 +96,23 @@ _RFC3339_RE = re.compile(
 _RFC3339_SHAPE = "YYYY-MM-DDThh:mm:ss[.fff](Z|+hh:mm)"
 
 
-def _parse_rfc3339(text: str) -> datetime:
+def _parse_rfc3339(text: str, what: str = "virtual_time") -> datetime:
     if not isinstance(text, str):
-        raise ClockError(f"virtual_time must be an RFC3339 string, got {type(text).__name__}")
+        raise ClockError(f"{what} must be an RFC3339 string, got {type(text).__name__}")
     # Don't strip: a whitespace-wrapped value would slip through the anchored grammar (a 200 the contract calls a 400).
     raw = text
     if not _RFC3339_RE.match(raw):
-        raise ClockError(f"invalid RFC3339 virtual_time {text!r}: expected {_RFC3339_SHAPE}")
+        raise ClockError(f"invalid RFC3339 {what} {text!r}: expected {_RFC3339_SHAPE}")
     if raw.endswith(("Z", "z")):
         raw = raw[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(raw)
     except ValueError as e:
-        raise ClockError(f"invalid RFC3339 virtual_time {text!r}: {e}")
+        raise ClockError(f"invalid RFC3339 {what} {text!r}: {e}")
     try:
         return dt.astimezone(timezone.utc)
     except OverflowError:
-        raise ClockError(f"invalid RFC3339 virtual_time {text!r}: out of representable range")
+        raise ClockError(f"invalid RFC3339 {what} {text!r}: out of representable range")
 
 
 def _iso(dt: datetime) -> str:
@@ -129,8 +171,10 @@ class Clock:
 
     BOOT_ID_BYTES = 6  # a version's per-boot id, random, so a restarted gateway's versions never repeat its last boot's
 
-    def __init__(self, now_fn=time.monotonic):
+    def __init__(self, now_fn=time.monotonic,
+                 follower_ranges: Callable[[], Mapping[str, FollowerRange]] = dict):
         self._now = now_fn
+        self._follower_ranges = follower_ranges
         self._lock = threading.Lock()
         self._armed = False
         self._t0: datetime | None = None
@@ -191,8 +235,11 @@ class Clock:
             raise ClockError(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as 'America/New_York'")
         if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
+        self._check_followers(f"virtual_time {virtual_time!r}", t0, r)
         with self._lock:
-            self._bank(t0)
+            now = self._now()
+            self._stop_at_end(now)
+            self._bank(now, t0)
             self._t0 = t0
             self._rate = r
             self._ahead = 0.0
@@ -201,6 +248,23 @@ class Clock:
             self._generation += 1
             self._count += 1
         return self.state()
+
+    def _check_followers(self, what: str, t: datetime, rate: float | None) -> None:
+        """Refuse ``t``, a time the clock would be set or advanced to, outside the range of a follower it has, or, armed
+        at ``rate``, one it would run past the end of that range from within a real hour."""
+        for name, held in sorted(self._follower_ranges().items()):
+            _check_range(what, name, held, t, rate)
+
+    def check_follower(self, name: str, held: FollowerRange) -> None:
+        """Refuse a follower ``name`` that holds only ``held`` while the clock is outside it now, or, at its rate, would
+        run past its end from within a real hour, as set_time refuses arming with one; an unarmed clock takes any."""
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                return
+            real = self._now()
+            self._stop_at_end(real)
+            now, rate = self._current(real), self._rate
+        _check_range(f"the clock, at {_iso(now)},", name, held, now, rate)
 
     def set_rate(self, rate) -> dict:
         """Change an armed clock's rate from its time at the call, keeping t0 and generation as an advance does, so time
@@ -211,6 +275,7 @@ class Clock:
             if not self._armed or self._t0 is None:
                 raise ClockError("clock is not armed")
             now = self._now()
+            self._stop_at_end(now)
             ran = (now - self._anchor) * self._rate
             if _advance(self._t0, ran + self._ahead) > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
                 raise ClockError(f"rate {r:g} would overflow datetime near the max")
@@ -229,7 +294,10 @@ class Clock:
                 raise ClockError("clock is not armed")
             if target > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
                 raise ClockError(f"virtual_time {virtual_time!r} at rate {self._rate:g} would overflow datetime near the max")
-            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+            self._check_followers(f"virtual_time {virtual_time!r}", target, None)
+            now = self._now()
+            self._stop_at_end(now)
+            current = self._current(now)
             jump = (target - current).total_seconds()
             if jump < 0:
                 raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
@@ -241,7 +309,9 @@ class Clock:
     def clear(self) -> dict:
         """Disarm (idempotent). Afterwards reads 404."""
         with self._lock:
-            self._bank()
+            now = self._now()
+            self._stop_at_end(now)
+            self._bank(now)
             self._armed = False
             self._t0 = None
             self._time_zone = None
@@ -254,14 +324,17 @@ class Clock:
     def elapsed(self) -> float:
         """Virtual seconds run so far: real time at each arm's rate (1 unarmed), plus each forward re-arm or advance."""
         with self._lock:
-            return self._lived + (self._now() - self._anchor) * self._rate
+            now = self._now()
+            self._stop_at_end(now)
+            return self._lived + (now - self._anchor) * self._rate
 
     def now(self) -> datetime | None:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return None
-            elapsed = self._now() - self._anchor
-            return _advance(self._t0, elapsed * self._rate + self._ahead)
+            now = self._now()
+            self._stop_at_end(now)
+            return self._current(now)
 
     @property
     def time_zone(self) -> str | None:
@@ -274,6 +347,7 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return None
+            self._stop_at_end(self._now())
             return _advance(self._t0, elapsed - self._lived + self._ahead)
 
     def read(self) -> dict:
@@ -287,14 +361,42 @@ class Clock:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return {"armed": False, "version": self.version}
-            elapsed = self._now() - self._anchor
+            now = self._now()
+            self._stop_at_end(now)
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
-                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
+                    "virtual_time": _iso(self._current(now)),
                     **({"time_zone": self._time_zone} if self._time_zone else {}), "version": self.version}
 
-    def _bank(self, t0: datetime | None = None) -> None:
-        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
-        now = self._now()
+    def _current(self, now: float) -> datetime:
+        """The current arm's time at real time ``now``, the one time a locked operation reads, so its stop at a
+        follower's end and its reading agree. Lock held."""
+        return _advance(self._t0, (now - self._anchor) * self._rate + self._ahead)
+
+    def stop_at_end(self) -> None:
+        """``_stop_at_end``, taking the lock: before a follower's range stops applying, as when it retires."""
+        with self._lock:
+            self._stop_at_end(self._now())
+
+    def _stop_at_end(self, now: float) -> None:
+        """Once the clock has run to the end of the narrowest range a follower holds, stop it there, frozen (rate 0) from
+        the moment it got there, as the follower's page stands there: its reads, delays and marks agree with what the
+        follower shows, and it stays there until a write moves it. Lock held."""
+        if not self._armed or self._t0 is None or self._rate <= 0:
+            return
+        end = min((held.latest for held in self._follower_ranges().values()), default=None)
+        if end is None:
+            return
+        to_end = max(0.0, (end - _advance(self._t0, self._ahead)).total_seconds())
+        if (now - self._anchor) * self._rate < to_end:
+            return
+        self._lived += to_end
+        self._ahead += to_end
+        self._anchor = now
+        self._rate = 0.0
+
+    def _bank(self, now: float, t0: datetime | None = None) -> None:
+        """Fold the stretch since the last arm/clear, to real time ``now``, into `_lived` at its rate, and start the next
+        one then."""
         ran = (now - self._anchor) * self._rate
         self._lived += ran
         if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing

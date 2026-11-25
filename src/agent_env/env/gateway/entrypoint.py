@@ -8,8 +8,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
+from .clock import ClockError, FollowerRange, parse_follower_range
 from .console_session import frame_ancestor_problem
-from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
+from .constants import (CLOCK_FOLLOWER_RANGES_ENV, CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
                         GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
                         WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
@@ -212,6 +213,22 @@ def parse_clock_followers(spec: str) -> dict[str, str]:
     return followers
 
 
+def parse_clock_follower_ranges(spec: str) -> dict[str, FollowerRange]:
+    """``CLOCK_FOLLOWER_RANGES``: the times each computer that holds only a range of them holds, as
+    ``name=earliest/latest`` (RFC3339), comma-separated."""
+    held: dict[str, FollowerRange] = {}
+    for entry in filter(None, (part.strip() for part in spec.split(","))):
+        name, _, span = (part.strip() for part in entry.partition("="))
+        earliest, _, latest = span.partition("/")
+        if not name or not earliest or not latest:
+            raise ValueError(f"invalid {CLOCK_FOLLOWER_RANGES_ENV} entry {entry!r}: expected 'name=earliest/latest'")
+        try:
+            held[name] = parse_follower_range({"earliest": earliest, "latest": latest})
+        except ClockError as e:
+            raise ValueError(f"invalid {CLOCK_FOLLOWER_RANGES_ENV} entry for {name!r}: {e}") from e
+    return held
+
+
 def parse_site_names(env_str: str) -> dict[str, tuple[str, ...]]:
     """Each site's names from ``WEBSITE_NAMES``: ``shop=shop.test|www.shop.test,docs=docs.test``."""
     names: dict[str, tuple[str, ...]] = {}
@@ -259,6 +276,7 @@ if __name__ == "__main__":
         computers=[name.strip() for name in os.environ.get(COMPUTERS_ENV, "").split(",") if name.strip()],
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
         clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
+        clock_follower_ranges=parse_clock_follower_ranges(os.environ.get(CLOCK_FOLLOWER_RANGES_ENV, "")),
         site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),
         listed_by_name=[site.strip() for site in os.environ.get(WEBSITE_LISTED_BY_NAME_ENV, "").split(",")
                         if site.strip()],

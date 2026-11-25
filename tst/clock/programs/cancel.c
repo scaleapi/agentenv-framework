@@ -14,12 +14,13 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#include "rtbase.h"
 
 #define CONDS 600
 
 static int64_t ns(clockid_t c) { struct timespec t; clock_gettime(c, &t); return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec; }
 static struct timespec ts_of(int64_t v) { struct timespec t = {v / 1000000000LL, v % 1000000000LL}; return t; }
-static struct timespec hour_ahead(void) { return ts_of(ns(CLOCK_REALTIME) + 3600000000000LL); }
+static struct timespec hour_ahead(void) { return rt_ts(rt_ns() + 3600000000000LL); }
 
 static sem_t sem;
 static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
@@ -76,6 +77,7 @@ static long misaligned(double *ms) {
 }
 
 int main(void) {
+    rt_ns();
     int sem_ok, cns_ok, cond_ok = 0;
     uint64_t waiters;
     double ms;

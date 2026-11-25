@@ -3,7 +3,8 @@ the gateway, as the computer's sandbox reaches it, under the computer's name and
 keeps but the token; sync_env_clock arms the clock as a task does, calling the computer's sync_time; through the
 gateway's jumps of a day and a week on and a month back, a rate of 10, a freeze and a restart, a killed follower and a
 reset, the session's clock is within 1 s of the gateway's once the follower has acknowledged each change, and runs at
-the gateway's rate; a follower killed comes back within 3 s. Each reading is taken inside the computer, between two
+the gateway's rate; a follower killed comes back within 3 s. The computer's card declares the times it holds, so the
+gateway refuses a time past them, naming it. Each reading is taken inside the computer, between two
 of real time, so no driver or exec latency is in it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
@@ -12,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import pytest
+from agentenv_protocol.client import ExtensionCallError
+from agentenv_protocol.computer.clock import RANGE
 
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
@@ -89,6 +92,9 @@ async def test_a_multi_envs_computer_keeps_within_a_second_of_its_gateways_clock
             await _shown(deployed)
             skews["after a reset"] = await _skew(deployed, own)
             state_after_reset = await _shown(deployed)
+            with pytest.raises(ExtensionCallError) as refusal:
+                await deployed.invoke(EXT_CLOCK_URI, "set_time", {"virtual_time": "3026-11-23T12:00:00Z"}, timeout=30)
+            state_after_refusal = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=30)
         finally:
             report = await teardown_run(context)
 
@@ -99,6 +105,10 @@ async def test_a_multi_envs_computer_keeps_within_a_second_of_its_gateways_clock
     assert abs(rates[RATE] / RATE - 1) < 0.05 and abs(rates["frozen"]) < 0.01, rates
     assert back not in ("-", killed) and came_back < FOLLOWER_BACK_S, came_back
     assert state_after_reset["followers"]["desktop"]["version"] == state_after_reset["version"], state_after_reset
+    assert state_after_reset["followers"]["desktop"]["range"] == RANGE, state_after_reset
+    assert refusal.value.detail == ("virtual_time '3026-11-23T12:00:00Z' is outside the times clock follower 'desktop' "
+                                    "holds, 1677-09-21T00:12:44Z to 2262-04-11T23:47:16Z"), refusal.value.detail
+    assert state_after_refusal["version"] == state_after_reset["version"], state_after_refusal
     assert not report.failed
 
 

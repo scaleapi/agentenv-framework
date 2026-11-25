@@ -272,17 +272,45 @@ static void ft_page_open(void)
   ft_page = map;
 }
 
+/* the end of the env clock's range, 2262-04-11T23:47:16Z, the last whole second 64 bits of ns hold (the gateway's
+   LATEST, and clockpage.py's) */
+#define FT_END 9223372036000000000LL
+
+/* the universe in ns at real realtime t on armed page s, standing at FT_END: the gateway keeps the clock inside its
+   range, and one that outlives it stops at the end rather than wrapping, as the gateway's own clock does. Summed in 128
+   bits, so a page before 1970 runs on exactly however far it runs (the gateway's rates, at most a day per second, keep
+   the run inside them). Reads and waits share it, so a wait never ends before a read shows its deadline. */
+static inline int64_t ft_universe_at(const struct ft_clock_page *s, int64_t t)
+{
+  __int128 fake;
+  if (s->rate == 0 || t <= s->anchor_ns) return s->universe_ns;
+  fake = (__int128) s->universe_ns
+         + (s->rate == 1.0 ? (__int128) (t - s->anchor_ns) : (__int128) ((double) (t - s->anchor_ns) * s->rate));
+  return fake > FT_END ? FT_END : (int64_t) fake;
+}
+
+/* a time in ns as libfaketime's spec reads it (ft_parse_epoch): its sign once, before the whole value, so a time before
+   1970 isn't written "-1.-5". */
+static void ft_spec_time(char *out, size_t size, int64_t ns)
+{
+  uint64_t magnitude = ns < 0 ? -(uint64_t) ns : (uint64_t) ns;
+  snprintf(out, size, "%s%llu.%09llu", ns < 0 ? "-" : "", (unsigned long long) (magnitude / 1000000000u),
+           (unsigned long long) (magnitude % 1000000000u));
+}
+
 /* libfaketime's own state set to the page's clock; called with the MT lock held. */
 static void ft_page_apply_locked(const struct ft_clock_page *s)
 {
-  char spec[160];
+  char spec[160], universe[32], anchor[32];
   if (s->generation == ft_page_applied) return;
   if (!s->armed)
     snprintf(spec, sizeof spec, "+0 x1");
   else
-    snprintf(spec, sizeof spec, "@%lld.%09lld x%.17g ^%lld.%09lld",
-             (long long) (s->universe_ns / 1000000000LL), (long long) (s->universe_ns % 1000000000LL), s->rate,
-             (long long) (s->anchor_ns / 1000000000LL), (long long) (s->anchor_ns % 1000000000LL));
+  {
+    ft_spec_time(universe, sizeof universe, s->universe_ns);
+    ft_spec_time(anchor, sizeof anchor, s->anchor_ns);
+    snprintf(spec, sizeof spec, "@%s x%.17g ^%s", universe, s->rate, anchor);
+  }
   parse_ft_string(spec);
   __atomic_store_n(&ft_page_applied, s->generation, __ATOMIC_RELEASE);
 }

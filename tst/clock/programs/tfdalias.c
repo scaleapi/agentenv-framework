@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "rtbase.h"
 
 static int64_t ns(clockid_t c) { struct timespec t; clock_gettime(c, &t); return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec; }
 static struct timespec ts_of(int64_t v) { struct timespec t = {v / 1000000000LL, v % 1000000000LL}; return t; }
@@ -22,7 +23,7 @@ static struct timespec ts_of(int64_t v) { struct timespec t = {v / 1000000000LL,
 int main(int argc, char **argv) {
     const char *how = argc > 1 ? argv[1] : "dup";
     int o = timerfd_create(CLOCK_MONOTONIC, 0), a = timerfd_create(CLOCK_REALTIME, 0), a2, o2;
-    struct itimerspec ten = {{0, 0}, ts_of(10000000000LL)}, hour = {{0, 0}, ts_of(ns(CLOCK_REALTIME) + 3600000000000LL)};
+    struct itimerspec ten = {{0, 0}, ts_of(10000000000LL)}, hour = {{0, 0}, rt_ts(rt_ns() + 3600000000000LL)};
     unsigned long long count = 0;
     int64_t fired = 0;
     int failed = 0;

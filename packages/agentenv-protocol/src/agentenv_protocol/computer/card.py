@@ -56,8 +56,10 @@ def served_extensions(driver: ComputerDriverEnvironment,
             continue
         if extension.uri == COMPUTER_RECORDING and driver.recording is None:
             continue
-        if extension.uri == clock.CLOCK and not clock.follows():
-            continue
+        if extension.uri == clock.CLOCK:
+            if not clock.follows():
+                continue
+            extension = extension.model_copy(update={"params": {**extension.params, "range": dict(clock.RANGE)}})
         dropped = {op for (uri, op), need in _METHOD_NEEDS.items() if uri == extension.uri and not driver.has(need)}
         if dropped:
             methods = {op: entry for op, entry in extension.params["methods"].items() if op not in dropped}

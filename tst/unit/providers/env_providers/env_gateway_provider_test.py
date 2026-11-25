@@ -2931,6 +2931,25 @@ def test_compose_declares_the_children_that_follow_the_clock_by_their_read_token
     assert "read-desk" not in redacted and "      - CLOCK_FOLLOWER_TOKENS=***" in redacted
 
 
+def test_compose_hands_the_gateway_the_times_each_follower_that_holds_a_range_holds():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.env.gateway import ExternalChild
+    from agent_env.env.gateway.clock import parse_follower_range
+
+    held = parse_follower_range({"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"})
+    rendered = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk", held),
+                           ExternalChild("old", "https://old.example/mcp", "https://old.example", "read-old"),
+                           ExternalChild("phone", "https://phone.example/mcp", "https://phone.example", None, held)))
+
+    environment = yaml.safe_load(rendered)["services"][GATEWAY_SERVICE_NAME]["environment"]
+    assert [item for item in environment if item.startswith("CLOCK_FOLLOWER_RANGES=")] == [
+        "CLOCK_FOLLOWER_RANGES=desktop=1677-09-21T00:12:44Z/2262-04-11T23:47:16Z"]
+
+
 def test_no_service_depends_on_the_gateway_so_a_vm_deploy_can_start_them_all_before_it():
     """A VM deploy with children runs ``compose up --scale gateway=0`` first, which starts a service that depends on the
     gateway with it, before its children answer."""

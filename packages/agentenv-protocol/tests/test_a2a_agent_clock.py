@@ -95,6 +95,7 @@ def test_every_agent_in_an_image_with_the_follower_serves_sync_time(image):
     assert served is not None
     request = served["params"]["methods"]["sync_time"]["request"]
     assert request == {"required": ["env_get_time_url"], "optional": ["timezone", "watch_url", "name", "read_token"]}
+    assert served["params"]["range"] == {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
 
 
 def test_an_agent_in_an_image_without_the_follower_serves_no_clock(image, monkeypatch):
@@ -198,6 +199,7 @@ def test_a_server_starting_without_a_saved_zone_keeps_its_own(image, monkeypatch
     ("@1748768400.000000000 x2 ^{past}\n", 1748768400.0 + 20),
     ("@1748768400.000000000 x1 ^{future}\n", 1748768400.0),
     ("@1748768400.000000000 x0 ^{past}\n", 1748768400.0),
+    ("@9223372030.000000000 x1 ^{past}\n", 9223372036.0),
 ])
 def test_the_session_time_is_the_universe_while_the_clock_is_armed_and_real_time_otherwise(
         tmp_path, monkeypatch, spec, expected):

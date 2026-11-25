@@ -164,10 +164,10 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    ftpl_init();
 +  if (real_clock_nanosleep != NULL && (!(flags & TIMER_ABSTIME) || !ft_rt_clock(clock_id) || !ft_faked()))
 +    return (*real_clock_nanosleep)(clock_id, flags, req, rem);
-+  if (ft_uw_active() && ft_valid_ts(req))
++  if (ft_uw_active())
 +  {
 +    struct ft_clock_page s;
-+    if (ft_snap(&s)) return ft_rt_sleep(&s, ft_ns(req));
++    if (ft_snap(&s) && ft_valid_due(req, &s)) return ft_rt_sleep(&s, ft_ns(req));
 +  }
    if (real_clock_nanosleep == NULL)
    {
@@ -992,7 +992,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if ((faketimerc = open(custom_filename, O_RDONLY)) != -1 ||
        (faketimerc = open(filename, O_RDONLY)) != -1 ||
        (faketimerc = open("/etc/faketimerc", O_RDONLY)) != -1)
-@@ -3248,6 +3277,48 @@
+@@ -3248,6 +3277,42 @@
    tp_save.tv_nsec = tp->tv_nsec;
  
    if (dont_fake) return 0;
@@ -1020,13 +1020,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +      ft_tl_scale = (s.armed && s.rate > 0) ? 1.0 / s.rate : 1.0;
 +      if (s.armed)
 +      {
-+        int64_t now = (int64_t) tp->tv_sec * 1000000000LL + tp->tv_nsec, fake;
-+        if (s.rate == 0 || now <= s.anchor_ns)
-+          fake = s.universe_ns;
-+        else if (s.rate == 1.0)
-+          fake = s.universe_ns + (now - s.anchor_ns);
-+        else
-+          fake = s.universe_ns + (int64_t) ((double) (now - s.anchor_ns) * s.rate);
++        int64_t fake = ft_universe_at(&s, (int64_t) tp->tv_sec * 1000000000LL + tp->tv_nsec);
 +        tp->tv_sec = fake / 1000000000LL;
 +        tp->tv_nsec = fake % 1000000000LL;
 +        if (tp->tv_nsec < 0)
@@ -1041,7 +1035,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    /* Per process timers are only sped up or slowed down */
    if ((clk_id == CLOCK_PROCESS_CPUTIME_ID ) || (clk_id == CLOCK_THREAD_CPUTIME_ID))
    {
-@@ -3262,7 +3333,6 @@
+@@ -3262,7 +3327,6 @@
    volatile int ret = INT_MAX;
  
  #ifdef PTHREAD_SINGLETHREADED_TIME
@@ -1049,7 +1043,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  
    // block all signals while locked. prevents deadlocks if signal interrupts in in mid-operation.
    sigset_t all_signals, original_mask;
-@@ -3367,6 +3437,19 @@
+@@ -3367,6 +3431,19 @@
      force_cache_expiration = 0;
    }
  
@@ -1069,7 +1063,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (cache_expired == 1)
    {
      static char user_faked_time[BUFFERLEN]; /* changed to static for caching in v0.6 */
-@@ -3377,7 +3460,7 @@
+@@ -3377,7 +3454,7 @@
        fprintf(stderr, "***************++ Cache expired ++**************\n");
      */
  
@@ -1078,7 +1072,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      {
        strncpy(user_faked_time, tmp_env, BUFFERLEN - 1);
        user_faked_time[BUFFERLEN - 1] = 0;
-@@ -3401,6 +3484,9 @@
+@@ -3401,6 +3478,9 @@
      get_fake_monotonic_setting(&fake_monotonic_clock);
    } /* cache had expired */
  
@@ -1088,7 +1082,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (infile_set)
    {
      if (load_time(tp))
-@@ -3520,6 +3606,7 @@
+@@ -3520,6 +3600,7 @@
  {
    struct timespec ts;
    int ret;
@@ -1096,7 +1090,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    ts.tv_sec = tv->tv_sec;
    ts.tv_nsec = tv->tv_usec * 1000  + ftpl_starttime.real.tv_nsec % 1000;
  
-@@ -3627,6 +3714,8 @@
+@@ -3627,6 +3708,8 @@
    DONT_FAKE_TIME(result = (*real___clock_gettime)(clk_id, tp));
    if (result == -1) return result; /* original function failed */
  
@@ -1105,7 +1099,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    /* pass the real current time to our faking version, overwriting it */
    if (fake_monotonic_clock || (clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW
  #ifdef CLOCK_MONOTONIC_COARSE
-@@ -3723,238 +3812,124 @@
+@@ -3723,238 +3806,124 @@
  
  #ifdef FAKE_PTHREAD
  
@@ -1433,7 +1427,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  #endif
  
  /*
-@@ -4005,15 +3980,15 @@
+@@ -4005,15 +3974,15 @@
    /* If FAKETIME_TIMESTAMP_FILE was given in environment,
     * and if FAKETIME_UPDATE_TIMESTAMP_FILE=1, then update it.
     * This allows other process instances to share the same time. */
@@ -1454,7 +1448,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  
      if ((envfile = fopen(custom_filename, "wt")) != NULL)
      {
-@@ -4034,7 +4009,7 @@
+@@ -4034,7 +4003,7 @@
      {
        fprintf(stderr, "libfaketime: In clock_settime(), failed to "
          "%s while updating FAKETIME_TIMESTAMP_FILE (`%s'): %s\n",
@@ -1463,7 +1457,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      }
    }
  
-@@ -4125,7 +4100,7 @@
+@@ -4125,7 +4094,7 @@
  
  /* return 0 if no FAKERANDOM_SEED was seen */
  static int bypass_randomness(void* buf, size_t buflen) {
@@ -1472,7 +1466,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    char *b = buf;
  
    if (seedstring != NULL) {
-@@ -4169,7 +4144,7 @@
+@@ -4169,7 +4138,7 @@
  #else
  pid_t getpid() {
  #endif
@@ -1481,7 +1475,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (pidstring != NULL) {
      long int pid = strtol(pidstring, NULL, 0);
      return (pid_t)(pid);
-@@ -4270,7 +4245,7 @@
+@@ -4270,7 +4239,7 @@
    va_list ap;
    va_start(ap, number);
  #ifdef FAKE_RANDOM
@@ -1490,7 +1484,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      void *buf;
      size_t buflen;
      unsigned int flags;
-@@ -4282,7 +4257,7 @@
+@@ -4282,7 +4251,7 @@
    }
  #endif
  // static int (*real_clock_gettime) (clockid_t clk_id, struct timespec *tp);

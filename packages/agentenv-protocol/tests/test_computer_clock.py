@@ -47,6 +47,7 @@ async def test_the_card_serves_sync_time_where_the_base_runs_the_follower_and_it
 
     assert set(served["params"]["methods"]) == {"sync_time"}
     assert set(served["params"]["methods"]["sync_time"]["request"]["properties"]) == {"env_get_time_url", "timezone"}
+    assert served["params"]["range"] == {"earliest": "1677-09-21T00:12:44Z", "latest": "2262-04-11T23:47:16Z"}
     assert on_a_disk is None and await _clock_extension(FakeDriver()) is None
 
 

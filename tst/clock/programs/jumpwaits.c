@@ -21,6 +21,7 @@
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
+#include "rtbase.h"
 
 static int64_t ns(clockid_t c) { struct timespec t; clock_gettime(c, &t); return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec; }
 static struct timespec ts_of(int64_t v) { struct timespec t = {v / 1000000000LL, v % 1000000000LL}; return t; }
@@ -47,7 +48,7 @@ static void on_thread_timer(union sigval v) { sem_post((sem_t *)v.sival_ptr); }
 
 static long tfd_wait(int64_t due, int how) {
     int fd = timerfd_create(CLOCK_REALTIME, 0); unsigned long long n = 0;
-    struct itimerspec it = {{0, 0}, ts_of(due)};
+    struct itimerspec it = {{0, 0}, rt_ts(due)};
     if (timerfd_settime(fd, TFD_TIMER_ABSTIME, &it, NULL)) return errno;
     __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST);
     if (how == 1) { struct pollfd p = {fd, POLLIN, 0}; poll(&p, 1, -1); }
@@ -60,7 +61,7 @@ static long ptimer_thread(int64_t due) {
     sem_t s; sem_init(&s, 0, 0); timer_t id;
     struct sigevent sev = {.sigev_notify = SIGEV_THREAD}; sev.sigev_notify_function = on_thread_timer; sev.sigev_value.sival_ptr = &s;
     if (timer_create(CLOCK_REALTIME, &sev, &id)) return -errno;
-    struct itimerspec it = {{0, 0}, ts_of(due)};
+    struct itimerspec it = {{0, 0}, rt_ts(due)};
     if (timer_settime(id, TIMER_ABSTIME, &it, NULL)) return -errno;
     __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST);
     while (sem_wait(&s) != 0) ;
@@ -68,10 +69,10 @@ static long ptimer_thread(int64_t due) {
     return 0;
 }
 static long cond_loop(pthread_cond_t *c, int64_t due) {
-    struct timespec t = ts_of(due); long n = 0;
+    struct timespec t = rt_ts(due); long n = 0;
     pthread_mutex_lock(&m);
     __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST);
-    for (;;) { int r = pthread_cond_timedwait(c, &m, &t); n++; if (r == ETIMEDOUT || ns(CLOCK_REALTIME) >= due) break; }
+    for (;;) { int r = pthread_cond_timedwait(c, &m, &t); n++; if (r == ETIMEDOUT || rt_ns() >= due) break; }
     pthread_mutex_unlock(&m);
     return n;   /* calls it took */
 }
@@ -79,7 +80,7 @@ static long cond_loop(pthread_cond_t *c, int64_t due) {
 static void *run(void *arg) {
     struct waiter *w = arg; long r = 0; struct timespec t; uint32_t word = 0;
     const char *n = w->name;
-    if (!strcmp(n, "cns_in") || !strcmp(n, "cns_after")) { t = ts_of(w->kind == IN ? D_in : D_after); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &t, NULL); }
+    if (!strcmp(n, "cns_in") || !strcmp(n, "cns_after")) { t = rt_ts(w->kind == IN ? D_in : D_after); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &t, NULL); }
     else if (!strcmp(n, "tfd_poll_in")) r = tfd_wait(D_in, 1);
     else if (!strcmp(n, "tfd_poll_after")) r = tfd_wait(D_after, 1);
     else if (!strcmp(n, "tfd_read_in")) r = tfd_wait(D_in, 0);
@@ -90,16 +91,16 @@ static void *run(void *arg) {
         sigset_t set; sigemptyset(&set); sigaddset(&set, SIGRTMIN + 1); timer_t id; siginfo_t si;
         struct sigevent sev = {.sigev_notify = SIGEV_THREAD_ID, .sigev_signo = SIGRTMIN + 1}; sev._sigev_un._tid = gettid();
         if (timer_create(CLOCK_REALTIME, &sev, &id)) r = -errno;
-        else { struct itimerspec it = {{0, 0}, ts_of(D_in)}; timer_settime(id, TIMER_ABSTIME, &it, NULL); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST);
+        else { struct itimerspec it = {{0, 0}, rt_ts(D_in)}; timer_settime(id, TIMER_ABSTIME, &it, NULL); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST);
                r = sigwaitinfo(&set, &si) == SIGRTMIN + 1 ? 0 : -errno; timer_delete(id); }
     }
-    else if (!strcmp(n, "cond_rt_in")) { t = ts_of(D_in); pthread_mutex_lock(&m); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_cond_timedwait(&c_rt, &m, &t); pthread_mutex_unlock(&m); }
-    else if (!strcmp(n, "cond_clock_rt_in")) { t = ts_of(D_in); pthread_mutex_lock(&m); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_cond_clockwait(&c_rt2, &m, CLOCK_REALTIME, &t); pthread_mutex_unlock(&m); }
+    else if (!strcmp(n, "cond_rt_in")) { t = rt_ts(D_in); pthread_mutex_lock(&m); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_cond_timedwait(&c_rt, &m, &t); pthread_mutex_unlock(&m); }
+    else if (!strcmp(n, "cond_clock_rt_in")) { t = rt_ts(D_in); pthread_mutex_lock(&m); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_cond_clockwait(&c_rt2, &m, CLOCK_REALTIME, &t); pthread_mutex_unlock(&m); }
     else if (!strcmp(n, "cond_loop_in")) r = cond_loop(&c_rt3, D_in);
     else if (!strcmp(n, "cond_loop_after")) r = cond_loop(&c_rt4, D_after);
-    else if (!strcmp(n, "sem_rt_in")) { t = ts_of(D_in); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = sem_timedwait(&sem, &t) ? errno : 0; }
-    else if (!strcmp(n, "futex_rt_in")) { t = ts_of(D_in); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = syscall(SYS_futex, &word, FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME, 0, &t, NULL, FUTEX_BITSET_MATCH_ANY) ? errno : 0; }
-    else if (!strcmp(n, "mutex_rt_in")) { t = ts_of(D_in); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_mutex_timedlock(&held, &t); }
+    else if (!strcmp(n, "sem_rt_in")) { t = rt_ts(D_in); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = sem_timedwait(&sem, &t) ? errno : 0; }
+    else if (!strcmp(n, "futex_rt_in")) { t = rt_ts(D_in); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = syscall(SYS_futex, &word, FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME, 0, &t, NULL, FUTEX_BITSET_MATCH_ANY) ? errno : 0; }
+    else if (!strcmp(n, "mutex_rt_in")) { t = rt_ts(D_in); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_mutex_timedlock(&held, &t); }
     else if (!strcmp(n, "nanosleep_rel")) { t = ts_of(3000000000LL); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = nanosleep(&t, NULL); }
     else if (!strcmp(n, "poll_rel")) { __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = poll(NULL, 0, 3000); }
     else if (!strcmp(n, "cond_mono_rel")) { t = ts_of(ns(CLOCK_MONOTONIC) + 3000000000LL); pthread_mutex_lock(&m); __atomic_add_fetch(&ready, 1, __ATOMIC_SEQ_CST); r = pthread_cond_timedwait(&c_mono, &m, &t); pthread_mutex_unlock(&m); }
@@ -123,6 +124,7 @@ static void *reader(void *a) {
 }
 
 int main(void) {
+    rt_ns();
     pthread_condattr_t at; pthread_condattr_init(&at); pthread_condattr_setclock(&at, CLOCK_MONOTONIC); pthread_cond_init(&c_mono, &at);
     sem_init(&sem, 0, 0);
     sigset_t set; sigemptyset(&set); sigaddset(&set, SIGRTMIN + 1); pthread_sigmask(SIG_BLOCK, &set, NULL);
@@ -133,7 +135,7 @@ int main(void) {
     while (fgets(line, sizeof line, stdin)) {
         double din, dafter;
         if (sscanf(line, "arm %lf %lf", &din, &dafter) != 2) break;
-        int64_t u0 = ns(CLOCK_REALTIME), t0 = ns(CLOCK_MONOTONIC_RAW);
+        int64_t u0 = rt_ns(), t0 = ns(CLOCK_MONOTONIC_RAW);
         D_in = u0 + (int64_t)(din * 1e9); D_after = u0 + (int64_t)(dafter * 1e9);
         ready = 0;
         pthread_t t[64];

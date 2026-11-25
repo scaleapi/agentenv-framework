@@ -16,7 +16,11 @@ A page a writer died writing (seq left odd) is taken up by the next write, which
 A write that would put the universe less than CONTINUITY_NS behind where the page has it now (a rate change computed
 from a universe read a moment before the write) continues it from where it is instead: the write's real time is taken
 last, while seq is odd, and the universe at it read from the page being replaced, so no reader of either page ever sees
-the clock step back. A larger step back is a set_time and is written as given."""
+the clock step back. A larger step back is a set_time and is written as given.
+
+A universe outside the env clock's range (EARLIEST_NS to LATEST_NS, the gateway's), given or run on to, is written at
+its end, where the gateway's clock and agent-env's libfaketime stop too, so a write never fails halfway and leaves the
+page mid-write, and a session program's deadline past the end is never reached rather than reached at once."""
 import ctypes
 import mmap
 import os
@@ -34,6 +38,7 @@ MAGIC, VERSION = 0x4B434541, 2
 # magic version seq universe_ns anchor_ns rate armed reserved generation check mono_universe_ns mono_anchor_ns
 LAYOUT = struct.Struct("<IIQqqdIIQQqq")
 MASK = 0xFFFFFFFFFFFFFFFF
+EARLIEST_NS, LATEST_NS = -9223372036 * 10**9, 9223372036 * 10**9
 CONTINUITY_NS = 1_000_000_000
 _SYS_FUTEX = ({"x86_64": 202, "aarch64": 98, "arm64": 98}.get(platform.machine())
               if platform.system() == "Linux" else None)
@@ -84,18 +89,22 @@ def _wake(m: mmap.mmap) -> None:
         del buf
 
 
+def _held(ns: int) -> int:
+    return max(EARLIEST_NS, min(ns, LATEST_NS))
+
+
 def _universe_at(armed, universe_ns, anchor_ns, rate, now_ns) -> int:
     if not armed:
         return now_ns
     if rate == 0 or now_ns <= anchor_ns:
         return universe_ns
-    return universe_ns + int((now_ns - anchor_ns) * rate)
+    return _held(universe_ns + int((now_ns - anchor_ns) * rate))
 
 
 def write(armed: int, universe: float, rate: float, anchor: float) -> dict:
     m = open_page()
     _, _, seq, o_u, o_a, o_rate, o_armed, _, generation, _, _, _ = LAYOUT.unpack(m[:LAYOUT.size])
-    universe_ns, anchor_ns = int(Decimal(str(universe)) * 10**9), int(Decimal(str(anchor)) * 10**9)
+    universe_ns, anchor_ns = _held(int(Decimal(str(universe)) * 10**9)), int(Decimal(str(anchor)) * 10**9)
     if not armed:
         rate = 1.0
     generation += 1

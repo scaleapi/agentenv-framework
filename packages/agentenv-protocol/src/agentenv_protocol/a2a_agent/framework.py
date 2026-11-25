@@ -78,6 +78,7 @@ from .extensions import (
     TriggerRegisterRequest,
     enable,
 )
+from ..computer.clock import RANGE as CLOCK_RANGE
 from ..computer.errors import ComputerError
 from ..errors import AgentEnvError
 from ..types import error_body
@@ -1086,7 +1087,8 @@ def _with_clock(definition: _AgentDefinition) -> _AgentDefinition:
     if not agent_clock.follows() or any(a.definition.uri == CLOCK_V1.uri for a in definition.extensions):
         return definition
     agent_clock.restore_zone()  # a server restarted mid-run takes back the task's zone
-    return dataclasses.replace(definition, extensions=(*definition.extensions, ExtensionActivation(CLOCK_V1)))
+    clock = ExtensionActivation(CLOCK_V1, wire_params={"range": dict(CLOCK_RANGE)})
+    return dataclasses.replace(definition, extensions=(*definition.extensions, clock))
 
 
 class DefaultExtensionHandlers:

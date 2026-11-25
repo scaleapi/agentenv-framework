@@ -18,10 +18,12 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import ExtensionCallError
 from agentenv_protocol.computer.clock import CONFIG, FOLLOWER_USER
 
 from agent_env.env.envs.computer.utils.sites import RootChannel
+from agent_env.env.gateway.clock import ClockError, FollowerRange, parse_follower_range
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 
 if TYPE_CHECKING:
@@ -37,6 +39,21 @@ TIME_PATH = "/clock/time"
 def follows(record: DeployedEnv) -> bool:
     """Whether the computer ``record`` deployed follows the universe clock, as its card says."""
     return record.supports(EXT_CLOCK_URI, "sync_time")
+
+
+def held_range(record: DeployedEnv) -> Optional[FollowerRange]:
+    """The times the computer ``record`` deployed holds, when its card declares it holds only a range of them
+    (clock/v1's ``range``, ``{"earliest": ..., "latest": ...}``); a card from before it declares none, and one that
+    doesn't parse, which would stop the gateway starting, is logged and left out, as if it declared none."""
+    held = protocol_v1.extension_params(record.environment_card or {}, EXT_CLOCK_URI).get("range")
+    if not follows(record) or held is None:
+        return None
+    try:
+        return parse_follower_range(held)
+    except ClockError as e:
+        logger.warning(f"{record.env_id}: its card's clock/v1 range is left out, so the gateway's clock doesn't keep to "
+                       f"it: {e}")
+        return None
 
 
 def recorded(record: DeployedEnv) -> Optional[dict]:
