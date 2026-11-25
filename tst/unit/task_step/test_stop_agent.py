@@ -93,7 +93,7 @@ def test_an_installed_agent_is_stopped_in_its_container_as_root_and_reported(sto
 
     ended, cleared = stopping.sandbox.calls
     in_container = ("sudo", "docker", "exec", "-u", "0", "-w", "/", "repo-sb-1", "/bin/sh", "-c")
-    assert ended == (*in_container, stop_agent._END_PROCESSES, "stop_agent", "8123", "30")
+    assert ended == (*in_container, stop_agent._END_PROCESSES, "stop_agent", "8123", "30", "0.1", "5", "0.2")
     assert cleared == (*in_container, stop_agent._CLEAR_PATHS, "stop_agent", "/logs/verifier/reward.txt",
                        "/logs/verifier/link.txt", "/tmp/none")
     assert stopping.cancelled == [("http://coder", "task-1"), ("http://coder", "task-2")]
@@ -123,8 +123,25 @@ def test_a_deployed_agent_is_stopped_in_the_container_it_runs_in_on_its_port(sto
     asyncio.run(_step().execute(context))
 
     ps, ended = stopping.sandbox.calls
-    assert ps[:3] == ("sudo", "docker", "ps") and ended[7] == "agent-api" and ended[-2:] == ("8000", "50")
+    assert ps[:3] == ("sudo", "docker", "ps") and ended[7] == "agent-api" and ended[-5:-3] == ("8000", "50")
     assert "cleared" not in context.metadata["stop_agent"]["stop"]
+
+
+def test_the_other_agents_in_its_container_are_named_so_their_servers_are_spared(stopping):
+    context = _context(installed_container="repo", a2a_port=8000)
+    context.deployed_agents += [
+        DeployedAgent(agent_name="helper", api_url="http://helper", sandbox_id="sb-1", installed_container="repo",
+                      a2a_port=8001),
+        DeployedAgent(agent_name="elsewhere", api_url="http://e", sandbox_id="sb-1", installed_container="other",
+                      a2a_port=8002),
+        DeployedAgent(agent_name="judge", api_url="http://j", sandbox_id="sb-2", installed_container="repo",
+                      a2a_port=8003),
+    ]
+
+    asyncio.run(_step().execute(context))
+
+    [ended] = stopping.sandbox.calls
+    assert ended[-6:] == ("8000", "50", "0.1", "5", "0.2", "8001")
 
 
 def test_an_agent_whose_sandbox_is_its_container_is_stopped_in_the_sandbox(stopping):

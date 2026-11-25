@@ -600,5 +600,6 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
             "sudo", "docker", "exec", "-u", "0", "-w", "/", sandbox.scoped_name(self.container_name),
             "sh", "-c", READ_REGULAR_FILE, "read", path_in_container)
         if exit_code != 0:
-            raise RuntimeError(f"couldn't read {path_in_container!r} (exit {exit_code}): {stderr.strip()[-300:]}")
+            raise RuntimeError(f"couldn't read {path_in_container!r} (exit {exit_code}): "
+                               f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
         return stdout

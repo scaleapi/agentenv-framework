@@ -307,24 +307,27 @@ def _unstopped_agents(steps: Sequence[TaskStep]) -> Iterator[Finding]:
     installed into, and verify_sandbox on an agent's own. An agent installed on its sandbox's host isn't one stop_agent
     stops."""
     installs = [step for step in steps if isinstance(step, InstallAgentTaskStep)]
-    installed = {(step.sandbox_name, step.container_name): step.agent_name for step in installs if step.container_name}
+    installed: dict[tuple, list[str]] = {}
+    for step in installs:
+        if step.container_name:
+            installed.setdefault((step.sandbox_name, step.container_name), []).append(step.agent_name)
     on_host = {step.agent_name for step in installs if not step.container_name}
     by_id, deps = {step.id: step for step in steps}, _dependency_ids(list(steps))
     for step in steps:
         if isinstance(step, RunContainerUnitTestsVerifierTaskStep) and step.env_id is None:
-            agent = installed.get((step.sandbox_name, step.container_name))
+            agents = installed.get((step.sandbox_name, step.container_name), [])
         elif isinstance(step, VerifySandboxTaskStep) and step.sandbox_name is None:
-            agent = step.agent_name
+            agents = [step.agent_name]
         else:
-            continue
-        if agent is None or agent in on_host:
             continue
         stopped = {by_id[ancestor].agent_name for ancestor in _ancestor_ids(step.id, deps)
                    if isinstance(by_id.get(ancestor), StopAgentTaskStep)}
-        if agent not in stopped:
+        for agent in dict.fromkeys(agents):
+            if agent in stopped or agent in on_host:
+                continue
             yield Finding(Severity.WARNING, "agent-not-stopped",
-                          f"it reads agent {agent!r}'s container and no stop_agent step before it stops that agent, so "
-                          "a process the agent left running can still change what it reads; add a stop_agent for "
+                          f"it reads agent {agent!r}'s container and no stop_agent step before it stops that agent, "
+                          "so a process the agent left running can still change what it reads; add a stop_agent for "
                           f"{agent!r} after its last turn, and have this step depend on it", step.id)
 
 

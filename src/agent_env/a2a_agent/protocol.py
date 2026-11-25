@@ -28,6 +28,8 @@ _UNREACHABLE_MIN_POLLS = 3
 # What a proxy in front of the agent answers when it can't reach it; any other status is the agent answering.
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 _CANCEL_TIMEOUT_SECONDS = 10
+# How much of an agent's answer to a cancel, or of the error reaching it, the caller is told.
+_CANCEL_ANSWER_CHARS = 300
 # The A2A tasks ``poll_a2a_task`` is polling in this process, or that ``wake_poll`` woke before their poll began, each
 # with the event ``wake_poll`` sets. A task its waker just ended can show as working for a moment longer, so a woken
 # poll asks again every _WOKEN_POLL_SECONDS for up to _WOKEN_FOR_SECONDS before going back to its interval.
@@ -266,10 +268,10 @@ async def cancel_a2a_task(a2a_url: str, task_id: str) -> Optional[str]:
         error = resp.json().get("error")
     except (httpx.HTTPError, ValueError) as e:
         logger.warning(f"Couldn't cancel A2A task {task_id}: {type(e).__name__}: {e}")
-        return f"{type(e).__name__}: {e}"[:300]
+        return f"{type(e).__name__}: {e}"[:_CANCEL_ANSWER_CHARS]
     if error:
         logger.warning(f"The agent didn't cancel A2A task {task_id}: {error}")
-        return str(error.get("message") or error if isinstance(error, dict) else error)[:300]
+        return str(error.get("message") or error if isinstance(error, dict) else error)[:_CANCEL_ANSWER_CHARS]
     logger.info(f"Canceled A2A task {task_id}")
     return None
 

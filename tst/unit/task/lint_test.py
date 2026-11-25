@@ -398,6 +398,15 @@ def test_a_verifier_reading_a_container_an_agent_was_installed_into_with_no_stop
     assert _unstopped(BOX, REPO, INSTALL, WORK, UNIT) == [_unstopped_warning("unit")]
 
 
+def test_each_agent_installed_into_the_container_a_verifier_reads_needs_its_own_stop():
+    helper = {**INSTALL, "id": "install-helper", "agent_name": "helper"}
+
+    assert _unstopped(BOX, REPO, INSTALL, helper, WORK, {**STOP, "agent_name": "helper"}, UNIT) == [
+        _unstopped_warning("unit")]
+    assert _unstopped(BOX, REPO, INSTALL, helper, WORK, STOP, {**STOP, "id": "stop-helper", "agent_name": "helper"},
+                      UNIT) == []
+
+
 @pytest.mark.parametrize("steps", [
     (CODER, WORK, STOP, PROBE),
     (CODER, WORK, {**STOP, "depends_on": ["work"]}, {**PROBE, "depends_on": ["stop"]}),

@@ -46,19 +46,30 @@ MAX_GRACE_S = 300
 # How long each script may take beyond its grace period.
 _EXEC_MARGIN_S = 60
 _COMMAND_CHARS = 500
+# How much of a script's stderr a failure quotes, and how many of the processes still running it names.
+_STDERR_TAIL_CHARS = 500
+_LEFT_NAMED = 5
+_LEFT_COMMAND_CHARS = 80
 # The processes a report lists, so an agent that left thousands can't swell the run's record; it counts them all.
 _REPORTED_PROCESSES = 200
 
-# Args: the server's port, and how many tenths of a second to wait after SIGTERM. Prints the server, then a line per
-# signal sent and per process left, each its pid and command line. The server is the oldest process holding the socket
-# listening on the port, or, when those processes' descriptors can't be read (root without CAP_SYS_PTRACE reads only its
-# own user's), the oldest process of the socket's user. A process is the agent's when it runs as the server's user,
-# started after it, and is the server's descendant or an orphan whose ancestors below the init all started after it
-# too (`ours`): a child of anything older, a service of the container's own say, isn't, nor is this script or what
-# runs it. PATH is the system's alone, so no folder the agent can write to is searched for the programs it runs.
+# How often the script looks for what SIGTERM left, how many rounds of SIGKILL it sends, and the pause after each.
+_POLL_S = 0.1
+_KILL_ROUNDS = 5
+_KILL_PAUSE_S = 0.2
+
+# Args: the server's port, how many polls to wait after SIGTERM, _POLL_S, _KILL_ROUNDS, _KILL_PAUSE_S, then the ports of
+# the other agents in the container. Prints the server, then a line per signal sent and per process left, each its pid
+# and command line. A port's server is the oldest process holding the socket listening on it, or, when those processes'
+# descriptors can't be read (root without CAP_SYS_PTRACE reads only its own user's), the oldest process of the socket's
+# user. A process is the agent's when it runs as the server's user, started after it, and is the server's descendant or
+# an orphan whose ancestors below the init all started after it too (`ours`): a child of anything older, a service of
+# the container's own say, isn't, nor is another agent's server or what that started, nor this script or what runs it.
+# PATH is the system's alone, so no folder the agent can write to is searched for the programs it runs.
 _END_PROCESSES = r"""
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-port=$1 polls=$2 me=$$
+port=$1 polls=$2 poll_s=$3 kill_rounds=$4 kill_pause_s=$5 me=$$
+shift 5
 info() {
   pid=$1
   read -r stat 2>/dev/null < "/proc/$pid/stat" || return 1
@@ -74,44 +85,51 @@ info() {
 command_of() {
   tr '\000\011\012' '   ' 2>/dev/null < "/proc/$1/cmdline"
 }
+server_on() {
+  hex=$(printf '%04X' "$1") inode= found= why=
+  for table in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$table" ] || continue
+    while read -r _ local _ st _ _ _ owner _ ino _; do
+      if [ "$st" = 0A ] && [ "${local##*:}" = "$hex" ]; then inode=$ino; break; fi
+    done < "$table"
+    [ -n "$inode" ] && break
+  done
+  [ -n "$inode" ] || { why="nothing listens on port $1, so the agent's server isn't running"; return 1; }
+  holders=$(ls -l /proc/[0-9]*/fd 2>/dev/null | while read -r line; do
+    case $line in
+      /proc/*/fd:) dir=${line#/proc/}; dir=${dir%/fd:} ;;
+      *" -> socket:[$inode]") echo "$dir" ;;
+    esac
+  done)
+  [ -n "$holders" ] || holders=$(for dir in /proc/[0-9]*; do
+    info "${dir#/proc/}" && [ "$uid" = "$owner" ] && [ "$state" != Z ] && echo "${dir#/proc/}"
+  done)
+  for p in $holders; do
+    info "$p" || continue
+    if [ -z "$found" ] || [ "$start" -lt "$found_start" ]; then found=$p found_start=$start; fi
+  done
+  [ -n "$found" ] || { why="no process holds the socket listening on port $1"; return 1; }
+}
 chain=" $me "
 q=$me
 while info "$q" && [ "$parent" -gt 0 ]; do chain="$chain$parent "; q=$parent; done
+server_on "$port" || { echo "$why" >&2; exit 3; }
+server=$found since=$found_start owner=$owner
+kept=" "
+for other in "$@"; do
+  server_on "$other" && kept="$kept$found "
+done
 ours() {
-  case $chain in *" $1 "*) return 1 ;; esac
+  case $chain$kept in *" $1 "*) return 1 ;; esac
   info "$1" || return 1
   while :; do
     q=$parent
     case $q in "$server") return 0 ;; "$me") return 1 ;; esac
+    case $kept in *" $q "*) return 1 ;; esac
     [ "$q" -gt 1 ] || return 0
     info "$q" && [ "$start" -gt "$since" ] || return 1
   done
 }
-hex=$(printf '%04X' "$port")
-inode=
-for table in /proc/net/tcp /proc/net/tcp6; do
-  [ -r "$table" ] || continue
-  while read -r _ local _ st _ _ _ owner _ ino _; do
-    if [ "$st" = 0A ] && [ "${local##*:}" = "$hex" ]; then inode=$ino; break; fi
-  done < "$table"
-  [ -n "$inode" ] && break
-done
-[ -n "$inode" ] || { echo "nothing listens on port $port, so the agent's server isn't running" >&2; exit 3; }
-holders=$(ls -l /proc/[0-9]*/fd 2>/dev/null | while read -r line; do
-  case $line in
-    /proc/*/fd:) dir=${line#/proc/}; dir=${dir%/fd:} ;;
-    *" -> socket:[$inode]") echo "$dir" ;;
-  esac
-done)
-[ -n "$holders" ] || holders=$(for dir in /proc/[0-9]*; do
-  info "${dir#/proc/}" && [ "$uid" = "$owner" ] && [ "$state" != Z ] && echo "${dir#/proc/}"
-done)
-server=
-for p in $holders; do
-  info "$p" || continue
-  if [ -z "$server" ] || [ "$start" -lt "$since" ]; then server=$p since=$start; fi
-done
-[ -n "$server" ] || { echo "no process holds the socket listening on port $port" >&2; exit 3; }
 printf 'SERVER\t%s\t%s\n' "$server" "$(command_of "$server")"
 candidates() {
   for dir in /proc/[0-9]*; do
@@ -129,9 +147,9 @@ signal() {
 }
 signal TERM
 n=0
-while [ "$n" -lt "$polls" ] && [ -n "$(candidates)" ]; do sleep 0.1; n=$((n + 1)); done
+while [ "$n" -lt "$polls" ] && [ -n "$(candidates)" ]; do sleep "$poll_s"; n=$((n + 1)); done
 n=0
-while [ "$n" -lt 5 ] && [ -n "$(candidates)" ]; do signal KILL; sleep 0.2; n=$((n + 1)); done
+while [ "$n" -lt "$kill_rounds" ] && [ -n "$(candidates)" ]; do signal KILL; sleep "$kill_pause_s"; n=$((n + 1)); done
 for p in $(candidates); do printf 'LEFT\t%s\t%s\n' "$p" "$(command_of "$p")"; done
 """
 
@@ -220,21 +238,23 @@ class StopAgentTaskStep(TaskStep):
             return asyncio.wait_for(sandbox.exec_with_output(*prefix, "/bin/sh", "-c", script, "stop_agent", *args),
                                     timeout=self.grace_s + _EXEC_MARGIN_S)
 
-        port = agent.a2a_port or DEFAULT_A2A_PORT
-        exit_code, stdout, stderr = await run(_END_PROCESSES, str(port), str(round(self.grace_s * 10)))
+        exit_code, stdout, stderr = await run(_END_PROCESSES, str(agent.a2a_port or DEFAULT_A2A_PORT),
+                                              str(round(self.grace_s / _POLL_S)), str(_POLL_S), str(_KILL_ROUNDS),
+                                              str(_KILL_PAUSE_S), *_neighbours(context, agent))
         server, ended, left = _read_processes(stdout)
         report.update(server=server, processes=ended[:_REPORTED_PROCESSES], processes_ended=len(ended),
                       processes_left=left)
         if exit_code != 0:
             raise RuntimeError(f"stop_agent: couldn't end agent '{self.agent_name}''s processes (exit {exit_code}): "
-                               f"{stderr.strip()[-500:]}")
-        problems = [f"{len(left)} process(es) still ran after SIGKILL: "
-                    + ", ".join(f"{p['pid']} ({p['command'][:80]})" for p in left[:5])] if left else []
+                               f"{stderr.strip()[-_STDERR_TAIL_CHARS:]}")
+        problems = [f"{len(left)} process(es) still ran after SIGKILL: " + ", ".join(
+            f"{p['pid']} ({p['command'][:_LEFT_COMMAND_CHARS]})" for p in left[:_LEFT_NAMED])] if left else []
         if self.clear_paths:
             exit_code, stdout, stderr = await run(_CLEAR_PATHS, *self.clear_paths)
             report["cleared"] = cleared = _read_paths(self.clear_paths, stdout)
             if exit_code != 0 or len(cleared) != len(self.clear_paths):
-                problems.append(f"couldn't clear the paths (exit {exit_code}): {stderr.strip()[-500:]}")
+                problems.append(f"couldn't clear the paths (exit {exit_code}): "
+                                f"{stderr.strip()[-_STDERR_TAIL_CHARS:]}")
             if kept := [entry["path"] for entry in cleared if entry["kind"] != "missing" and not entry["removed"]]:
                 problems.append(f"couldn't remove {kept}")
         logger.info(f"stop_agent: agent '{self.agent_name}': cancelled {len(report['cancelled'])} task(s), ended "
@@ -261,6 +281,13 @@ class StopAgentTaskStep(TaskStep):
         if sandbox.mode != SANDBOX_MODE_VM:
             return sandbox, None
         return sandbox, agent.installed_container or await find_agent_container(sandbox)
+
+
+def _neighbours(context: TaskStepContext, agent: DeployedAgent) -> list[str]:
+    """The ports of the other agents in ``agent``'s container, whose servers, and what those start, the stop spares."""
+    return [str(other.a2a_port or DEFAULT_A2A_PORT) for other in context.deployed_agents
+            if other is not agent and other.sandbox_id == agent.sandbox_id and not other.on_host
+            and other.installed_container == agent.installed_container]
 
 
 def _read_processes(stdout: str) -> tuple[Optional[dict], list[dict], list[dict]]:

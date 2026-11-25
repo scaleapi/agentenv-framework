@@ -179,3 +179,30 @@ async def test_a_server_of_another_user_is_found_though_root_cant_read_its_descr
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         await sandbox.terminate()
+
+
+@pytest.mark.asyncio
+async def test_stopping_one_agent_spares_the_server_of_another_in_its_container(local_backends):
+    """Two agents installed into one container, both root: stopping the first ends its leftover, and spares the
+    second's server, started after the first's, and what that server started."""
+    image, server, _ = USERLANDS["busybox"]
+    sandbox = await LocalSandboxProvider().create_vm()
+    container = sandbox.scoped_name(f"two-{uuid.uuid4().hex[:8]}")
+    second = f"nc -lk -p {PORT + 1}"
+    try:
+        _docker("run", "-d", "--name", container, image, "sleep", "infinity")
+        _docker("exec", "-d", container, "sh", "-c", f"{server} & sleep 1.1; sh -c 'sleep 1005 & exec {second}' & "
+                f"sleep 1.1; setsid sh -c '{WRITER}' > /dev/null 2>&1 & touch /tmp/up")
+        await _until(lambda: "up" in _docker("exec", container, "ls", "/tmp"), "both servers")
+        agents = [DeployedAgent(agent_name=name, api_url="http://127.0.0.1:9", sandbox_id=sandbox.sandbox_id,
+                                sandbox_type="local", installed_container=container, a2a_port=port)
+                  for name, port in (("coder", PORT), ("helper", PORT + 1))]
+
+        await StopAgentTaskStep(id="stop", version=None, agent_name="coder", grace_s=1).execute(
+            TaskStepContext(deployed_agents=agents))
+
+        left = _running(container)
+        assert server in left and second in left and "sleep 1005" in left and f"sh -c {WRITER}" not in left
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        await sandbox.terminate()
