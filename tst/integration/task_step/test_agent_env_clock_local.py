@@ -104,12 +104,12 @@ async def _codex_turn(context: TaskStepContext, endpoint: fake_responses.FakeRes
     model and a `date` the model runs are the env's."""
     endpoint.respond = fake_responses.tool_then_answer("exec_command", {"cmd": "date -u +%FT%TZ"},
                                                        prefix="the shell said: ")
+    # A model the CLI's catalog doesn't know, which it offers its shell to as exec_command.
     await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
-                              max_conversation_turns=1).execute(context)
+                              model="gpt-x", max_conversation_turns=1).execute(context)
     bodies = [json.dumps(call.body) for call in endpoint.calls()]
     dated = {m for body in bodies for m in re.findall(r"<current_date>([^<]*)</current_date>", body)}
-    print("the date the model was told:", dated, "date:", endpoint.tool_results(),
-          "items:", [[item.get("type") for item in call.body.get("input") or []][-4:] for call in endpoint.calls()])
+    print("the date the model was told:", dated, "date:", endpoint.tool_results())
     assert dated == {VIRTUAL[:10]}, dated
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
     assert not [body for body in bodies if str(datetime.now(timezone.utc).date()) in body]
