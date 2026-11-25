@@ -79,6 +79,43 @@ def test_an_installed_agent_runs_its_own_cli_and_its_node_and_python_only_where_
     assert "node_modules/opencode-ai/bin/opencode.exe" in install_sh
 
 
+CERTIFI = "SSL_CERT_FILE='/opt/agent/venv/lib/python3.12/site-packages/certifi/cacert.pem'\n"
+
+
+@pytest.mark.parametrize("bundle, content, trust, written", [
+    (None, "", "", CERTIFI),
+    ("etc/ssl/certs/ca-certificates.crt", "PEM", "", ""),
+    ("etc/pki/tls/certs/ca-bundle.crt", "PEM", "", ""),
+    ("etc/ssl/cert.pem", "PEM", "", ""),
+    ("etc/ssl/certs/ca-certificates.crt", "", "", CERTIFI),
+    (None, "", "SSL_CERT_FILE='/trust/ca-bundle.pem'", ""),
+], ids=["no-bundle", "debian-bundle", "rhel-bundle", "alpine-bundle", "an-empty-bundle", "trust-lines-name-one"])
+def test_an_installed_agent_trusts_certifis_cas_only_on_a_target_with_none_and_no_bundle_named(
+        tmp_path, bundle, content, trust, written):
+    """The relay reads the system's CA certificates: the agent's environment names certifi's only where the target has
+    no bundle and the trust lines name none."""
+    if bundle:
+        (tmp_path / bundle).parent.mkdir(parents=True)
+        (tmp_path / bundle).write_text(content)
+
+    assert _ca_line(tmp_path, trust) == written
+
+
+def _ca_line(target: Path, trust: str) -> str:
+    """What install.sh writes to the agent's environment for its CA bundle, its decision run against a target whose
+    ``/etc`` is ``target``'s."""
+    install_sh = (AGENT_DIR / "install.sh").read_text()
+    lines = install_sh.splitlines()
+    quoted = next(line for line in lines if line.startswith("quoted() {"))
+    decision = install_sh[install_sh.index("certifi=$root/venv"):]
+    decision = decision[:decision.index("needs_cas= ;; esac") + len("needs_cas= ;; esac")]
+    written = next(line.strip() for line in lines if '"$needs_cas" ] || printf' in line)
+    on = f'on() {{ sh -c "$(printf %s "$1" | sed "s#/etc/#{target}/etc/#g")"; }}'
+    script = "\n".join([quoted, on, "root=/opt/agent PYTHON_VERSION=3.12", decision, written])
+    return subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin", "AGENT_TRUST_ENV": trust},
+                          capture_output=True, text=True, check=True).stdout
+
+
 def test_an_installed_agent_keeps_opencodes_state_and_its_workspace_where_the_install_says():
     install_sh = (AGENT_DIR / "install.sh").read_text()
 

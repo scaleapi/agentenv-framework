@@ -106,6 +106,15 @@ chmod 0755 "$stage/uv-$uv_cpu-unknown-linux-musl/uv"
 printf '#!/bin/sh\nexec %s "$@"\n' "$(quoted "$root/npm/node_modules/opencode-ai/bin/opencode.exe")" > "$stage/opencode"
 chmod 0755 "$stage/opencode"
 
+# The CLI's model calls go through the turn's model relay, in the agent's Python, which reads the system's CA
+# certificates, and a bare image has none: such a target's agent trusts certifi's, from that Python, unless the trust
+# lines name a bundle.
+certifi=$root/venv/lib/python$PYTHON_VERSION/site-packages/certifi/cacert.pem
+needs_cas=
+on 'for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem
+  do [ -s "$f" ] && exit 0; done; exit 1' || needs_cas=1
+case ${AGENT_TRUST_ENV:-} in *SSL_CERT_FILE=*) needs_cas= ;; esac
+
 # The model endpoint and CA, as the agent's environment, readable by its user only.
 {
   for name in LITELLM_API_KEY LITELLM_BASE_URL LITELLM_EXTRA_HEADERS; do
@@ -113,6 +122,7 @@ chmod 0755 "$stage/opencode"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
   [ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\n' "$(quoted "$AGENTENV_CONTROL_TOKEN")"
+  [ -z "$needs_cas" ] || printf 'SSL_CERT_FILE=%s\n' "$(quoted "$certifi")"
   # OpenCode's state, its sessions and skills, as the image keeps it under /data.
   printf 'A2A_PORT=%s\nOPENCODE_WORKSPACE_DIR=%s\nHOME=%s\n' \
     "$(quoted "$port")" "$(quoted "$workspace")" "$(quoted "$root/data")"
@@ -149,7 +159,7 @@ on "cd $r/npm && export PATH=$r/node/bin:\$PATH npm_config_cache=$r/cache/npm np
   && cd $r && export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR=$r/python \
   UV_CACHE_DIR=$r/cache/uv && bin/uv venv --quiet --clear --python $PYTHON_VERSION venv \
   && bin/uv pip install --quiet --python venv/bin/python -r app/requirements.txt \
-  && rm -rf $r/cache"
+  && rm -rf $r/cache && [ -s $(quoted "$certifi") ]"
 
 if [ "$mode" = container ]; then
   docker exec -d -u 0 "$target" sh -c "exec $r/app/run.sh $r > $r/agent.log 2>&1"
