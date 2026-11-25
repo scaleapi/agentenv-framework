@@ -30,7 +30,11 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (  #
     transcript_from_atif,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import TrajectoryFilter  # noqa: E402
-from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import atif_turn_events, turn_events  # noqa: E402
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (  # noqa: E402
+    TrajectoryFormatError,
+    atif_turn_events,
+    turn_events,
+)
 from tst.unit.agents.claude_code.agent import claude_code_atif  # noqa: E402
 
 FIXTURES = REPO / "tst" / "data" / "claude_code_atif"
@@ -161,7 +165,8 @@ def test_a_judge_reads_each_recorded_turn_with_its_calls_results_answer_and_scre
 def test_a_recorded_turns_copy_gives_a_judge_the_events_its_native_trajectory_does(scenario):
     """always_on's judge stages each wake from its events. A copy gives the native turn's, but for a sub-agent's prompt,
     which only native stdout carries (as a note), and its closing text, which only its transcript, so the copy, has. A
-    turn that compacts the conversation gives its summary and the CLI's "Compacted" as notes from both."""
+    turn that compacts the conversation gives its summary as a compaction note with its facts, and the CLI's
+    "Compacted" as a note, from both."""
     data = json.loads((FIXTURES / f"{scenario}.json").read_text())
     document = replay(scenario).document
     for turn in data["turns"]:
@@ -173,6 +178,34 @@ def test_a_recorded_turns_copy_gives_a_judge_the_events_its_native_trajectory_do
             native = [e for e in native if not (e["type"] == "note" and e.get("subagent"))]
             copied = [e for e in copied if not (e["type"] == "text" and e.get("subagent"))]
         assert copied == native
+
+
+@pytest.mark.parametrize(("scenario", "turn", "facts", "said"), [
+    ("compacted", 1, {"written_by": "assistant", "trigger": "manual", "tokens_before": 28634, "tokens_after": 2839},
+     "it was set off on request, such as by a command (manual); the history went from 28,634 tokens to 2,839"),
+    ("autocompacted", 0, {"written_by": "assistant", "trigger": "auto", "tokens_before": 58741, "tokens_after": 32484},
+     "the harness set it off on its own (auto); the history went from 58,741 tokens to 32,484")])
+def test_a_recorded_compaction_reaches_a_judge_as_one_note_with_its_facts_natively_and_from_its_copy(scenario, turn,
+                                                                                                     facts, said):
+    """/compact between turns, and an auto-compaction partway through one as the history filled."""
+    recorded = json.loads((FIXTURES / f"{scenario}.json").read_text())["turns"][turn]
+    native = turn_events(json.dumps(recorded["native"])).events
+    copied = atif_turn_events(task_document(replay(scenario).document, [recorded["turn"]["task_id"]])).events
+    [compaction] = [event for event in native if event.get("compaction")]
+    assert compaction["compaction"] == facts
+    assert compaction["text"].startswith(
+        "Compaction summary (written by the assistant's own model, in a summary turn the harness asked for; it replaces "
+        f"the older history the assistant sees; {said}):\nThis session is being continued from a previous conversation")
+    assert [event for event in copied if event.get("compaction")] == [compaction]
+
+
+def test_a_copys_compaction_that_doesnt_say_who_wrote_its_summary_is_refused_as_native_is():
+    data = json.loads((FIXTURES / "compacted.json").read_text())
+    document = replay("compacted").document
+    step = next(step for step in document["steps"] if is_compaction(step))
+    del step["extra"]["agentenv"]["compaction"]["written_by"]
+    with pytest.raises(TrajectoryFormatError, match="who wrote the compaction summary isn't known"):
+        atif_turn_events(task_document(document, [data["turns"][1]["turn"]["task_id"]]))
 
 
 def test_from_atif_reads_harbors_own_conversion_of_a_recorded_session():

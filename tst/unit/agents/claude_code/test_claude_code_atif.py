@@ -4,13 +4,16 @@ the live rule holds after every record and the document validates as a producer'
 from __future__ import annotations
 
 import base64
+import json
+import random
 import re
 import struct
 import zlib
 
 import pytest
-from agentenv_protocol.atif import AtifTurn, Fed, RecordedTask, TurnContext, check_adapter, profile_of
+from agentenv_protocol.atif import AtifTurn, Fed, RecordedTask, TurnContext, check_adapter, profile_of, task_document
 
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import atif_turn_events, turn_events
 from tst.unit.agents.claude_code.agent import AGENT_DIR, claude_bridge, claude_code_atif
 
 ClaudeCodeAtif = claude_code_atif.ClaudeCodeAtif
@@ -382,7 +385,8 @@ def test_an_auto_compaction_is_the_step_of_its_summary_call_holding_what_the_tur
     kit = run(feed)
     user_step, first, compaction, notice, done = kit.document["steps"][:5]
     assert (compaction["source"], compaction["message"]) == ("agent", "The summary of the conversation so far.")
-    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "auto"}
+    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "auto", "tokens_before": 90000,
+                                                    "tokens_after": 3000}
     assert compaction["metrics"] == {"prompt_tokens": 500 + 1000 + 20, "cached_tokens": 1000, "completion_tokens": 300,
                                      "extra": {"agentenv": {"cache_write_tokens": 20}}}
     assert (notice["source"], notice["message"]) == ("system", "<local-command-stdout>Compacted</local-command-stdout>")
@@ -460,6 +464,16 @@ def test_a_compaction_names_its_model_as_the_agents_calls_answered_it_and_never_
         MODEL, MODEL, "gateway/another-model", called]
 
 
+def test_a_summary_in_several_text_blocks_is_one_compaction_as_natively():
+    summary = {"type": "user", "uuid": "u3", "parent_tool_use_id": None, "session_id": "s",
+               "message": {"role": "user", "content": [text("The first part."), text("The second part.")]}}
+    feed = Feed().out(_boundary("b1")).out(summary).transcript(summary, "2026-11-22T02:01:01.000Z")
+    document = run(feed.aux("turn", COUNTED_TURN)).document
+    [compaction] = [step for step in document["steps"] if "compaction" in profile_of(step)]
+    assert compaction["message"] == "The first part.\nThe second part."
+    assert not [step for step in document["steps"] if step["source"] == "system"]
+
+
 def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts():
     """A call whose transcript record never came has no counts, which the turn's remainder would hold too."""
     uncounted, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u4", text("done"))
@@ -469,3 +483,87 @@ def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts(
     kit = run(feed.aux("turn", COUNTED_TURN))
     [compaction] = [step for step in kit.document["steps"] if "compaction" in profile_of(step)]
     assert "metrics" not in compaction and compaction["message"] == "The summary."
+
+
+class _RandomConversation:
+    """A seed's Claude Code conversation of one to three turns. Each turn holds root text, tool calls with their results
+    and compactions in a random order: a boundary whose facts are good or bad, its summary a string or one to three
+    text blocks, sometimes the CLI's "Compacted", sometimes two in a turn. It ends with its closing text, the CLI's
+    result, and a turn record whose counts are right, short or missing. ``facts``: each turn's compactions' facts."""
+
+    TRIGGERS = ("manual", "auto", None, "later")
+    COUNTS = (12345, 0, None, -5, True, "300", 2.5)
+
+    def __init__(self, seed: int):
+        self.rng, self.n = random.Random(seed), 0
+        self.feeds: list[Feed] = []
+        self.facts: list[list[dict]] = []
+        for _ in range(self.rng.randint(1, 3)):
+            self.turn()
+
+    def uid(self) -> str:
+        self.n += 1
+        return f"u{self.n}"
+
+    def at(self) -> str:
+        return f"2026-11-22T02:{self.n // 60:02d}:{self.n % 60:02d}.000Z"
+
+    def say(self, feed: Feed, words: str) -> str:
+        event = assistant(f"m{self.n}", self.uid(), text(words))
+        feed.out(event).transcript(event, self.at())
+        return words
+
+    def compact(self, feed: Feed) -> dict:
+        rng = self.rng
+        trigger, before, after = rng.choice(self.TRIGGERS), rng.choice(self.COUNTS), rng.choice(self.COUNTS)
+        metadata = {key: value for key, value in (("trigger", trigger), ("pre_tokens", before), ("post_tokens", after))
+                    if value is not None}
+        feed.out({"type": "system", "subtype": "compact_boundary", "session_id": "s", "uuid": self.uid(),
+                  "compact_metadata": metadata})
+        words = [f"Summary {self.n}, part {k}." for k in range(rng.randint(1, 3))]
+        summary = (_summary(self.uid(), words[0]) if rng.random() < 0.5 else
+                   {**_summary(self.uid(), ""), "message": {"role": "user", "content": [text(w) for w in words]}})
+        feed.out(summary).transcript(summary, self.at())
+        if rng.random() < 0.4:
+            notice = _summary(self.uid(), "<local-command-stdout>Compacted</local-command-stdout>")
+            feed.out(notice).transcript(notice, self.at())
+        counts = {name: value for name, value in (("tokens_before", before), ("tokens_after", after))
+                  if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+        return {"written_by": "assistant", **({"trigger": trigger} if trigger in ("manual", "auto") else {}), **counts}
+
+    def turn(self) -> None:
+        rng, feed, facts, last = self.rng, Feed(), [], ""
+        for _ in range(rng.randint(1, 6)):
+            roll = rng.random()
+            if roll < 0.35:
+                last = self.say(feed, rng.choice(["Looking.", "One moment."]))
+            elif roll < 0.7:
+                call_id = f"c{self.n}"
+                asked = assistant(f"m{self.n}", self.uid(), call(call_id))
+                feed.out(asked).transcript(asked, self.at())
+                answered = user(self.uid(), result(call_id, rng.choice(["ok", ""])))
+                feed.out(answered).transcript(answered, self.at())
+            else:
+                facts.append(self.compact(feed))
+        if last or rng.random() < 0.8:
+            last = self.say(feed, "Done.")
+        feed.out({"type": "result", "result": last, "is_error": False})
+        roll = rng.random()
+        if roll < 0.7:
+            short = {name: 0 for name in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}
+            feed.aux("turn", COUNTED_TURN if roll < 0.5 else {**COUNTED_TURN, **short})
+        self.feeds.append(feed)
+        self.facts.append(facts)
+
+
+def test_random_conversations_that_compact_give_a_judge_the_same_events_natively_and_from_the_copy():
+    """Two readers keep one rule for a compaction: the adapter, which writes the copy, and the judges' native reader.
+    Over fixed seeds, every turn's events are the same from both, its compaction notes and their facts included."""
+    for seed in range(200):
+        conversation = _RandomConversation(seed)
+        document = run(*conversation.feeds).document
+        for i, (feed, facts) in enumerate(zip(conversation.feeds, conversation.facts)):
+            native = turn_events(json.dumps([fed.record for fed in feed.records if fed.aux is None])).events
+            copied = atif_turn_events(task_document(document, [f"t{i}"])).events
+            assert copied == native, f"seed {seed}, turn {i}"
+            assert [event["compaction"] for event in native if event.get("compaction")] == facts, f"seed {seed}, turn {i}"

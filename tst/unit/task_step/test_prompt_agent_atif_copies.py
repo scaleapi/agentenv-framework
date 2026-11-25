@@ -317,7 +317,7 @@ async def test_a_copy_that_fails_validation_is_stored_and_recorded_invalid_with_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field, version", [("schema_version", "ATIF-v1.9"), ("profile", "1.2")])
+@pytest.mark.parametrize("field, version", [("schema_version", "ATIF-v1.9"), ("profile", "1.3")])
 async def test_a_copy_newer_than_the_worker_is_stored_and_recorded_newer(monkeypatch, tmp_path, field, version):
     run = _Run(monkeypatch, tmp_path)
 

@@ -22,8 +22,8 @@ verifier), and a change seen before a wake's turn, a contact's reply say, is fil
 wake file is in the order things happened. A change that record lacks keeps only its summary, and the entry counts it
 (``trajectory_staging.app_change_values``).
 
-For a run of the PSI neutral harness (its trace carries ``harness.*`` labels), the judge is told whose a compaction
-summary's losses are, by who wrote it (``harness.compaction.written_by``: the assistant's own model, graded as its own,
+For a run of the PSI neutral harness (its trace carries ``harness.*`` labels), or one whose trajectories hold a
+compaction (Claude Code's, natively or from atif/1), the judge is told whose a compaction summary's losses are, by who wrote it (``harness.compaction.written_by``: the assistant's own model, graded as its own,
 or the harness, not held against the assistant), and, with a per-criterion format, says for each failed criterion
 whether it traces to context a compaction lost (``context_loss`` on the row; the entry counts them): reported next to
 the score, never changing it. A trajectory whose compaction doesn't say who wrote its summary leaves the run ungraded
@@ -130,16 +130,19 @@ ran (a nudge's turn is one of its own), not a wake of the run. It has the text t
 the turn's own events, and no times, app changes, messages to the user or reads of them: for those, use the run wake \
 by wake and the user's chat in this prompt."""
 # Added to _FILES_NOTE for a run whose trajectories carry the PSI harness's labels (compaction, memory, helpers), where
-# these lines appear; a run without them gets none of it.
-_HARNESS_NOTE = """
+# these lines appear, or hold a compaction, which gets the first and last of them; a run with neither gets none of it.
+_HARNESS_LINES = """
 - "harness_note" lines are from the harness that runs the assistant, never from the assistant or the user: a message \
-the harness sent the assistant, or a compaction summary that replaced older history in what the assistant sees.
+the harness sent the assistant, or a compaction summary that replaced older history in what the assistant sees."""
+_LABELLED_LINES = """
 - Lines with "step": "pre_compaction_save" are a turn the harness asked for before a compaction. What the assistant \
 wrote there went to the harness, not the user, and it ran before the assistant saw that wake's message.
 - Tool calls marked "internal" are tools the harness itself provides (notes, look-ups of past wakes). They count as \
 what the assistant did, but they change nothing in any app.
-- Lines with "subagent" are from a helper agent the assistant started.
+- Lines with "subagent" are from a helper agent the assistant started."""
+_NOTES_ORDER = """
 - Harness notes have no "at": read them in file order."""
+_HARNESS_NOTE = _HARNESS_LINES + _LABELLED_LINES + _NOTES_ORDER
 # Added to _FILES_NOTE for a run staged with full_app_changes (its record's "app_change_values").
 _FULL_CHANGES_NOTE = """
 - Each "app_change" line is one change to an app's data. "by" says whose: "agent" is the assistant's own, "others" \
@@ -178,8 +181,8 @@ _CONTEXT_LOSS_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputF
 
 @dataclasses.dataclass
 class _ContextLoss:
-    """Whether the run being graded has the harness's agent labels and a per-criterion format, so its judge is asked
-    for context loss: one per run (one step serves concurrent runs), set by stage_trajectory, read by _spec. A holder,
+    """Whether the run being graded has the harness's agent labels or a compaction, and a per-criterion format, so its
+    judge is asked for context loss: one per run (one step serves concurrent runs), set by stage_trajectory, read by _spec. A holder,
     so staging in a task of its own, as each sample's judge is staged, sets it for the run."""
     asked: bool = False
 
@@ -304,7 +307,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
     async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
         """rubrics_verifier's verdict, refused for a run whose overrides cut the prompt or take the wakes from its judge;
         then, for a staged run, what each judge call read of it (``judge_reads``); for a run with agent labels (the PSI
-        harness's), how many failed criteria the judge traced to a compaction (``context_loss``); and for every run,
+        harness's) or a compaction, how many failed criteria the judge traced to a compaction (``context_loss``); and
+        for every run,
         the assistant's harness as the run records it (``assistant_harness``)."""
         if "grade_up_to_turn" in self.step_param_overrides(context):
             raise RuntimeError(f"Verifier '{self.verifier_id}': grade_up_to_turn can't cut an always_on step's "
@@ -328,8 +332,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         return dataclasses.replace(verdict, output=output)
 
     def _spec(self) -> JudgeOutputFormatSpec:
-        """rubrics_verifier's format; for a run with agent labels (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and
-        ``context_loss_evidence``."""
+        """rubrics_verifier's format; for a run with agent labels or a compaction (``_CONTEXT_LOSS_RUN``), its rows also
+        take ``context_loss`` and ``context_loss_evidence``."""
         spec = super()._spec()
         loss = _CONTEXT_LOSS_RUN.get()
         return _with_context_loss(spec) if loss is not None and loss.asked else spec
@@ -420,7 +424,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         values = await self._change_values(context) if self.full_app_changes and not by_position else None
         staged = await asyncio.to_thread(stage_run, timeline, turns, firings=run.firings_read(),
                                          unavailable=run.unavailable, by_position=by_position, change_values=values)
-        asked = bool(staged.record.get("agent_labeled_trajectories")) and self.output_format in _CONTEXT_LOSS_FORMATS
+        asked = _harness_read(staged.record) and self.output_format in _CONTEXT_LOSS_FORMATS
         if (loss := _CONTEXT_LOSS_RUN.get()) is not None:
             loss.asked = asked
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
@@ -559,6 +563,12 @@ def _builtin_tool_names(card: dict) -> set[str]:
     return names
 
 
+def _harness_read(record: dict) -> bool:
+    """Whether a staged run gets the harness's reading: its trajectories carry a harness's own labels, or hold a
+    compaction, whose summary's losses the judge is told whose they are."""
+    return bool(record.get("agent_labeled_trajectories") or record.get("compaction_summaries_written_by"))
+
+
 def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> str:
     r = staged.record
     wakes = sorted(name for name in staged.files if name.startswith(f"{WAKES_DIR}/wake_"))
@@ -566,8 +576,9 @@ def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> 
     gap_note = ("\n- These wakes' tool calls are not in the files (their trajectory is missing or unreadable), so "
                 "for them only the run's record is there: " + ", ".join(str(n) for n in gaps) + ".") if gaps else ""
     writers = r.get("compaction_summaries_written_by") or {}
-    harness = (_HARNESS_NOTE + "".join(note for writer, note in _COMPACTION_NOTES.items() if writer in writers)
-               + (_CONTEXT_LOSS_NOTE if context_loss else "")) if r.get("agent_labeled_trajectories") else ""
+    lines = _HARNESS_NOTE if r.get("agent_labeled_trajectories") else _HARNESS_LINES + _NOTES_ORDER
+    harness = (lines + "".join(note for writer, note in _COMPACTION_NOTES.items() if writer in writers)
+               + (_CONTEXT_LOSS_NOTE if context_loss else "")) if _harness_read(r) else ""
     values = r.get("app_change_values")
     missing = (f"\n- {values['missing']} app changes have no \"changed_fields\": the run's record of its apps' changes "
                "doesn't have them, so their \"summary\" is all there is.") if values and values["missing"] else ""
