@@ -66,6 +66,18 @@ def tool_then_answer(tool_suffix: str, arguments: dict, *, prefix: str = "") -> 
     return respond
 
 
+def tool_on_cue_then_answer(cue: str, tool_suffix: str, arguments: dict, reply: str) -> Responder:
+    """A turn whose prompt holds ``cue`` calls the tool, then answers with its result's text, as ``tool_then_answer``;
+    any other turn, a later prompt in the same session say, is answered with ``reply``."""
+    tool = tool_then_answer(tool_suffix, arguments)
+
+    def respond(body: dict) -> Text | ToolUse:
+        user = next((m for m in reversed(body.get("messages") or []) if m.get("role") == "user"), {})
+        return tool(body) if _tool_result_text(body) is not None or cue in json.dumps(user) else Text(reply)
+
+    return respond
+
+
 def delegate_then_answer(cue: str, peer: str, prompt: str, reply: str) -> Responder:
     """For a lead agent and its peer, both calling this endpoint: a request whose messages hold ``cue``, the lead's,
     calls ``peer_send_message`` to send ``peer`` the ``prompt``, then answers with the tool result's text; every other

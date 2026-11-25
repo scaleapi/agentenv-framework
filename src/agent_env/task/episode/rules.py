@@ -53,7 +53,7 @@ def works_in_sandbox(steps: list[TaskStep], agent: str) -> bool:
     """Whether ``steps`` use ``agent``'s sandbox, so its proxy is deployed there rather than served in this
     process."""
     return any(step.agent_name == agent and (
-        step.type in ("install_agent", "load_artifact", "run_code", "add_skills")
+        step.type in ("install_agent", "load_artifact", "run_code", "add_skills", "stop_agent")
         or step.type == "deploy_agent" and step.skills
         or step.type == "verify_sandbox" and not step.sandbox_name
         or step.type == "collect_artifacts" and not (step.env_id or step.container_name or step.sandbox_name)
@@ -171,7 +171,7 @@ UNAFFECTED = frozenset({
     # being played from outside.
     "rate_user_satisfaction",
     # They act on an outside agent's proxy, in its sandbox, as on the agent; install_agent installs the proxy in its place.
-    "add_skills", "install_agent", "load_artifact", "run_code", "verify_sandbox",
+    "add_skills", "install_agent", "load_artifact", "run_code", "stop_agent", "verify_sandbox",
 })
 
 DEPLOYS = ("deploy_agent", "install_agent")

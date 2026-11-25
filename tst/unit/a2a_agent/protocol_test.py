@@ -520,3 +520,19 @@ async def test_a_cancel_that_fails_still_reports_the_timeout(monkeypatch, caplog
             await poll_a2a_task("http://agent", "t-1", 60, 2)
 
     assert logged in caplog.text
+
+
+@pytest.mark.parametrize(("answer", "why_not"), [
+    (lambda request: httpx.Response(200, json={"jsonrpc": "2.0", "id": "cancel", "result": {"id": "t1"}}), None),
+    (lambda request: httpx.Response(200, json={"jsonrpc": "2.0", "id": "cancel",
+                                               "error": {"code": -32002, "message": "Task cannot be canceled"}}),
+     "Task cannot be canceled"),
+    (lambda request: httpx.Response(503), "HTTPStatusError: Server error '503 Service Unavailable'"),
+], ids=["cancelled", "past-cancelling", "unreachable"])
+def test_cancelling_a_task_says_why_it_wasnt(monkeypatch, answer, why_not):
+    client = httpx.AsyncClient
+    monkeypatch.setattr(protocol.httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(answer), **kw))
+
+    said = asyncio.run(protocol.cancel_a2a_task("http://agent", "t1"))
+
+    assert said is None if why_not is None else said.startswith(why_not)

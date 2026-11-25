@@ -306,12 +306,11 @@ def test_runs_and_retries_in_one_second_keep_their_outputs_apart(local_stores, m
 
 
 class _ContainerSandbox(_Sandbox):
-    """The task container's files as a dict: `rm -f` and `docker cp` act on it, and the
+    """The task container's files as a dict: `rm -f` and the in-container read act on it, and the
     verifier command runs `test_sh`, which may or may not write the reward file."""
 
     def __init__(self, files, test_sh):
         self.files = dict(files)
-        self.vm_files: dict[str, str] = {}
         self.test_sh = test_sh
 
     async def exec_script(self, script: str) -> str:
@@ -319,20 +318,13 @@ class _ContainerSandbox(_Sandbox):
         if words[0] == "docker" and "rm" in words:
             for path in words[words.index("--") + 1:]:
                 self.files.pop(path, None)
-        elif words[:2] == ["rm", "-f"]:
-            self.vm_files.pop(words[2], None)
         return ""
 
     async def exec_with_output(self, *args) -> tuple[int, str, str]:
-        if args[:2] == ("sudo", "cat"):
-            return 0, self.vm_files[args[2]], ""
+        if verifier_module.READ_REGULAR_FILE in args:
+            path = args[-1]
+            return (0, self.files[path], "") if path in self.files else (3, "", "not a regular file")
         return self.test_sh(self.files), "", ""
-
-    async def docker_cp(self, source: str, destination: str) -> None:
-        path = source.split(":", 1)[1]
-        if path not in self.files:
-            raise RuntimeError(f"no such file: {path}")
-        self.vm_files[destination] = self.files[path]
 
 
 def _test_sh_writing_reward_only_on_pass(answer):

@@ -253,9 +253,9 @@ async def _nap(woken: asyncio.Event, seconds: float) -> bool:
     return False
 
 
-async def cancel_a2a_task(a2a_url: str, task_id: str) -> None:
-    """POST /a2a tasks/cancel, so the agent stops working on ``task_id``. Best effort: an agent that can't be
-    reached, or won't cancel, is only logged."""
+async def cancel_a2a_task(a2a_url: str, task_id: str) -> Optional[str]:
+    """POST /a2a tasks/cancel, so the agent stops working on ``task_id``; None once it has, else why it hasn't. Best
+    effort: an agent that can't be reached, or won't cancel, is only logged."""
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(f"{a2a_url}/a2a", json={
@@ -266,11 +266,12 @@ async def cancel_a2a_task(a2a_url: str, task_id: str) -> None:
         error = resp.json().get("error")
     except (httpx.HTTPError, ValueError) as e:
         logger.warning(f"Couldn't cancel A2A task {task_id}: {type(e).__name__}: {e}")
-        return
+        return f"{type(e).__name__}: {e}"[:300]
     if error:
         logger.warning(f"The agent didn't cancel A2A task {task_id}: {error}")
-    else:
-        logger.info(f"Canceled A2A task {task_id}")
+        return str(error.get("message") or error if isinstance(error, dict) else error)[:300]
+    logger.info(f"Canceled A2A task {task_id}")
+    return None
 
 
 _USAGE_FIELDS = frozenset(f.name for f in fields(Usage)) - {"provider_details"}

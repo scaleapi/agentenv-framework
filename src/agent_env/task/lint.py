@@ -15,15 +15,21 @@ from agent_env.store.ids import is_local_id
 from agent_env.task.task import Task, _ancestor_ids, _dependency_ids
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import StepRole, TaskStep, attach_base_fields
+from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import solver_agents
+from agent_env.task_step.task_steps.stop_agent import StopAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import (
     POOLED,
     AggregateVerifiersTaskStep,
     legacy_entry_writers,
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
+    RunContainerUnitTestsVerifierTaskStep,
+)
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator
 from agent_env.task_step.task_steps.verifiers.verifier import VerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
 
 
 class Severity(str, Enum):
@@ -62,6 +68,7 @@ def lint(task: Task, step_dicts: Sequence[Mapping[str, Any]] | None = None, *, c
         *_headlines(task),
         *_aggregate_sources(task.steps),
         *_judge_as_solver(task.steps),
+        *_unstopped_agents(task.steps),
         *_lopsided(task.steps),
         *(_unpinned(task.steps) if unpinned else ()),
         *_coverage(task),
@@ -292,6 +299,33 @@ def _judge_as_solver(steps: Sequence[TaskStep]) -> Iterator[Finding]:
                       f"its judge runs in {judge.agent_name!r}, the agent under test, so the solver grades its own work; "
                       "for a judge of its own, deploy a judge agent, load the files it grades into it (load_artifact "
                       "with artifact_from_step_id) and name it in agent_name", judge.id)
+
+
+def _unstopped_agents(steps: Sequence[TaskStep]) -> Iterator[Finding]:
+    """A verifier that reads an agent's container with no stop_agent for that agent before it, so a process the agent
+    left running there can still change what it reads: run_container_unit_tests_verifier on a container an agent was
+    installed into, and verify_sandbox on an agent's own. An agent installed on its sandbox's host isn't one stop_agent
+    stops."""
+    installs = [step for step in steps if isinstance(step, InstallAgentTaskStep)]
+    installed = {(step.sandbox_name, step.container_name): step.agent_name for step in installs if step.container_name}
+    on_host = {step.agent_name for step in installs if not step.container_name}
+    by_id, deps = {step.id: step for step in steps}, _dependency_ids(list(steps))
+    for step in steps:
+        if isinstance(step, RunContainerUnitTestsVerifierTaskStep) and step.env_id is None:
+            agent = installed.get((step.sandbox_name, step.container_name))
+        elif isinstance(step, VerifySandboxTaskStep) and step.sandbox_name is None:
+            agent = step.agent_name
+        else:
+            continue
+        if agent is None or agent in on_host:
+            continue
+        stopped = {by_id[ancestor].agent_name for ancestor in _ancestor_ids(step.id, deps)
+                   if isinstance(by_id.get(ancestor), StopAgentTaskStep)}
+        if agent not in stopped:
+            yield Finding(Severity.WARNING, "agent-not-stopped",
+                          f"it reads agent {agent!r}'s container and no stop_agent step before it stops that agent, so "
+                          "a process the agent left running can still change what it reads; add a stop_agent for "
+                          f"{agent!r} after its last turn, and have this step depend on it", step.id)
 
 
 def _lopsided(steps: Sequence[TaskStep]) -> Iterator[Finding]:
