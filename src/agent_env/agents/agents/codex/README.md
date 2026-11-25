@@ -60,6 +60,11 @@ change. On an armed clock the CLI's commands and MCP clients go out through the 
 relay directly, and the relay, on real time, reaches the endpoint directly. Without a `LITELLM_BASE_URL` the CLI has no
 provider of agent-env's and no relay, so nothing tells it the env's date.
 
+For a model in its catalog, such as `gpt-6-astra`, the CLI runs in code mode: the model calls its tools from JavaScript
+it hands the `exec` tool, which runs in `codex-code-mode-host`, another static binary. The tools it calls there follow
+the clock as above, but JavaScript's own `Date` in that code reads real time; the `clock` namespace's `sleep` only
+waits, so it's unaffected.
+
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;
 config.toml stays as it is. `{"disable": "*"}` turns off every setting below, `{"only": [...]}` every one but those whose
 tools it names, and a list to turn off those whose tools it names. A list names all of a setting's tools or none:
