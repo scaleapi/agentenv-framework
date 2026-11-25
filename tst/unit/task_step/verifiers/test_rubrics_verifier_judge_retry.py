@@ -13,6 +13,19 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVer
 from tst.util.config import install_model_config
 
 
+@pytest.mark.asyncio
+async def test_direct_judge_does_not_retry_context_overflow(monkeypatch):
+    import litellm
+
+    exc = litellm.BadRequestError(message="This endpoint's maximum context length is 1048576 tokens",
+                                  model='test', llm_provider='openai')
+    completion = AsyncMock(side_effect=exc)
+    monkeypatch.setattr(litellm, 'acompletion', completion)
+    with pytest.raises(litellm.BadRequestError, match='maximum context length'):
+        await _verifier()._prompt_llm_judge('test', model='openai/test', context=TaskStepContext())
+    completion.assert_awaited_once()
+
+
 def _criteria(ids: list[str]) -> list[dict]:
     return [{"id": cid, "title": f"Test {cid}"} for cid in ids]
 

@@ -95,6 +95,26 @@ async def test_direct_judge_multiturn_inlines_all_turns_marked(monkeypatch):
     assert ctx.metadata["verifications"]["vt"]["score"] == 1.0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turns", [1, 2])
+async def test_direct_text_judge_omits_actor_image_bytes(monkeypatch, turns):
+    png = 'iVBORw0KGgo' + 'A' * 4000
+    raw = json.dumps([{'parts': [{'file': {'bytes': png}}]},
+                      {'message': {'content': [{'image_url': {'url': 'data:image/png;base64,' + png}}]}},
+                      {'message': {'content': 'dealer reply'}}])
+    urls = [f's3://t/{i}.json' for i in range(turns)]
+    verifier = _verifier()
+    monkeypatch.setattr(verifier, '_read_trajectory_text', lambda uri: raw)
+    captured = _capture_judge(monkeypatch, verifier)
+    await verifier.execute(TaskStepContext(prompt_responses=[_pr(
+        target_agent_per_turn_trajectory_object_urls=urls, agent_trajectory_object_url=urls[-1],
+    )]))
+    prompt = captured['eval_prompt']
+    assert png not in prompt and 'data:image' not in prompt
+    assert prompt.count('<image omitted>') == 2 * turns
+    assert prompt.count('dealer reply') == turns
+
+
 # --- _merge_per_turn_text logic ----------------------------------------------
 
 def test_merge_per_turn_text_default_filter_compacts_each_turn(monkeypatch):

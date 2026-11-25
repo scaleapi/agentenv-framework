@@ -88,6 +88,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
     TrajectoryText,
     compact_otel_trajectory,
     final_image_frames,
+    strip_base64_images,
     strip_trajectory_images,
 )
 
@@ -1238,6 +1239,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         trajectory_inline = await asyncio.to_thread(self._read_trajectory_text, compacted.container_object_url)
             if trajectory_content is not None:
                 trajectory_inline = trajectory_content
+            if not use_agent_judge and trajectory_inline is not None and overrides.get("apply_trajectory_filter") is not False:
+                trajectory_inline = await asyncio.to_thread(strip_base64_images, trajectory_inline)
 
             def trajectory_path_of(one: _JudgeAgent) -> Optional[str]:
                 if one.staged is not None:
@@ -1800,6 +1803,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 last_exc = exc
                 if judge is not None:
                     _record_failed_call(judge, exc, model=model, endpoint_host=route.endpoint_host, sent=judge_input)
+                if model_call.context_overflow(exc):
+                    raise
                 if params and model_call.refused_setting(exc):
                     raise JudgeSettingRefused(f"{model} refused the judge's "
                                               f"{sorted(key for key in _JUDGE_SETTINGS if key in sent)}: {exc}") from exc

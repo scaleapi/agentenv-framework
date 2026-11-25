@@ -141,6 +141,14 @@ def takes(route: ModelRoute, param: str) -> bool:
     return param in (supported or ())
 
 
+def context_overflow(exc: BaseException) -> bool:
+    import litellm
+
+    return isinstance(exc, litellm.ContextWindowExceededError) or (
+        isinstance(exc, litellm.BadRequestError) and "maximum context length" in str(exc).lower()
+    )
+
+
 def refused_setting(exc: BaseException) -> bool:
     """Whether ``exc`` is LiteLLM refusing a param's value for the model before sending the call, as GPT-5 refuses
     ``reasoning_effort="xhigh"``: the call wasn't made, so nothing was spent."""
