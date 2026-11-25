@@ -69,6 +69,8 @@ A gate is `{id, nudge, check}`. The check kinds, by the gate types of a multitur
 | action | `{"call": call, "expect": expect}` | a read tool's result: `"exists"`, `{"count": {"eq"/"min"/"max": n}}`, `{"contains": text}`, `{"equals": value}` |
 | action | `{"artifact": name, "expect": "exists"}` | the artifact was found |
 | action | `{"no_new": [call + {baseline_count?}]}` | nothing added since the milestone opened |
+| action | `{"no_removed": [call + {baseline_count?}]}` | nothing removed since the milestone opened: the count isn't below its count then |
+| action | `{"trajectory": {contains_none?, no_call?, scope?}}` | the agent's own tool calls and words, by code: no call's arguments or anything it said has a `contains_none` text, and no call matches a `no_call` `{tool?, args_contains?}`; over the open milestone's turns (`scope: "step"`, the default), every turn (`"run"`), or the turns before a milestone opened (`{"before": id}`) |
 | content | `{"artifact": name, "judge": "statement"}` | one model call over the artifact's text |
 | content | `{"trajectory_judge": "statement"}` | one model call over the agent's work: every turn's trajectory so far, writes in full, reads shortened, the open milestone's turns marked `THIS STEP` |
 
@@ -150,8 +152,8 @@ the next entry with `group` naming the milestone it revises (or an earlier revis
   M1-r3's `m1-total`); any other repeated gate id is refused. Without `carry_gates` a revision checks only its own gates.
 
 After the wrap-up the hook checks the last milestone again, and the latest revision of every earlier milestone (the
-latest entry, for a milestone without revisions) on its state gates: `call`, `artifact` checks and judges, not `no_new`
-or `trajectory_judge`, which are about the turns it was open. One found broken is `undone`. Passing there doesn't
+latest entry, for a milestone without revisions) on its state gates: `call`, `artifact` checks and judges, not
+`no_new`, `no_removed`, `trajectory` or `trajectory_judge`, which are about the turns it was open. One found broken is `undone`. Passing there doesn't
 mark a revision that was let go as passed, since its other gates weren't checked again.
 
 In the summary a milestone with revisions holds them in `revisions`, each the usual row with its `revision` number
