@@ -129,6 +129,24 @@ def test_an_agents_token_travels_in_its_own_header_not_authorization():
     assert client.control_token_headers(None) == {} and client.control_token_headers("") == {}
 
 
+@pytest.mark.parametrize("url, granted", [
+    ("http://proxy/sandbox/A/svc/mcp-x/agentenv", True),
+    ("http://PROXY:80/sandbox/A/./svc/x", True),
+    ("http://proxy/sandbox/A/svc/x/../y", True),
+    ("http://proxy/sandbox/A/svc/mcp-x/../../../B/x", False),
+    ("http://proxy/sandbox/A/../B/x", False),
+    ("http://proxy/sandbox/A/%2e%2e/B/x", False),
+    ("http://proxy/sandbox/AB/x", False),
+    ("https://proxy/sandbox/A/x", False),
+    ("../sandbox/A/x", False),
+])
+def test_a_grant_covers_only_urls_that_resolve_under_its_address(url, granted):
+    """The server resolves dot segments before it routes, so a dotted path that climbs out of the env's address
+    reaches another env behind the same proxy."""
+    assert client.granted_headers(url, {"http://proxy/sandbox/A/": client.control_headers("s3cret")}) == (
+        {"Authorization": "Bearer s3cret"} if granted else {})
+
+
 @pytest.mark.asyncio
 async def test_invoke_extension_and_the_data_plane_send_the_token(monkeypatch):
     seen = []

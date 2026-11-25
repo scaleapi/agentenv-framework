@@ -174,9 +174,17 @@ wake held the fact, or "" when false. This is reported next to the score and nev
 # The per-criterion row fields a judge of such a run may add, and the formats whose rows take them.
 CONTEXT_LOSS_FIELDS = {"context_loss": {"type": "boolean"}, "context_loss_evidence": {"type": "string"}}
 _CONTEXT_LOSS_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
-# Whether the run being graded (this task's context) has the harness's agent labels and a per-criterion format, so its
-# judge is asked for context loss: set by stage_trajectory, read by _spec, per run (one step serves concurrent runs).
-_CONTEXT_LOSS_RUN: ContextVar[bool] = ContextVar("always_on_context_loss_run", default=False)
+
+
+@dataclasses.dataclass
+class _ContextLoss:
+    """Whether the run being graded has the harness's agent labels and a per-criterion format, so its judge is asked
+    for context loss: one per run (one step serves concurrent runs), set by stage_trajectory, read by _spec. A holder,
+    so staging in a task of its own, as each sample's judge is staged, sets it for the run."""
+    asked: bool = False
+
+
+_CONTEXT_LOSS_RUN: ContextVar[Optional[_ContextLoss]] = ContextVar("always_on_context_loss_run", default=None)
 
 
 class UngradableRunError(RuntimeError):
@@ -218,6 +226,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         judge_sandbox_type: Optional[str] = None,
         judge_batch_size: Optional[int] = None,
         judge_batch_concurrency: Optional[int] = None,
+        judge_samples: Optional[int] = None,
+        min_judge_agreement: Optional[float] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
         full_app_changes: bool = False,
@@ -245,7 +255,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             default_model=default_model, default_model_api_base=default_model_api_base, effort=effort,
             max_thinking_tokens=max_thinking_tokens, judge_a2a_agent_id=judge_a2a_agent_id,
             judge_sandbox_type=judge_sandbox_type, judge_batch_size=judge_batch_size,
-            judge_batch_concurrency=judge_batch_concurrency,
+            judge_batch_concurrency=judge_batch_concurrency, judge_samples=judge_samples,
+            min_judge_agreement=min_judge_agreement,
             judge_timeout_retries=(self.DEFAULT_JUDGE_TIMEOUT_RETRIES if judge_timeout_retries is None
                                    else judge_timeout_retries),
             judge_max_turns=self.DEFAULT_JUDGE_MAX_TURNS if judge_max_turns is None else judge_max_turns,
@@ -301,16 +312,16 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         if self.use_trajectory and (context.metadata.get("user_overrides") or {}).get("use_agent_judge") is False:
             raise RuntimeError(f"Verifier '{self.verifier_id}': use_trajectory needs the agent judge; this run's "
                                "use_agent_judge=False would grade without the wakes it was set to read.")
-        token = _CONTEXT_LOSS_RUN.set(False)
+        loss = _ContextLoss()
+        token = _CONTEXT_LOSS_RUN.set(loss)
         try:
             verdict = await super()._judged(context)
-            asked = _CONTEXT_LOSS_RUN.get()
         finally:
             _CONTEXT_LOSS_RUN.reset(token)
         output = dict(verdict.output)
         if "trajectory_staging" in output:
             output["trajectory_staging"]["judge_reads"] = await self._judge_reads(output)
-        if asked:
+        if loss.asked:
             output["context_loss"] = context_loss(verdict.criteria)
         if harness := await self._assistant_harness(context, staged="trajectory_staging" in output):
             output["assistant_harness"] = harness
@@ -320,7 +331,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         """rubrics_verifier's format; for a run with agent labels (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and
         ``context_loss_evidence``."""
         spec = super()._spec()
-        return _with_context_loss(spec) if _CONTEXT_LOSS_RUN.get() else spec
+        loss = _CONTEXT_LOSS_RUN.get()
+        return _with_context_loss(spec) if loss is not None and loss.asked else spec
 
     async def _assistant_harness(self, context: TaskStepContext, *, staged: bool) -> dict:
         """The graded assistant's harness as the run records it: its agent name, its A2A card's name and version, and,
@@ -408,8 +420,9 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         values = await self._change_values(context) if self.full_app_changes and not by_position else None
         staged = await asyncio.to_thread(stage_run, timeline, turns, firings=run.firings_read(),
                                          unavailable=run.unavailable, by_position=by_position, change_values=values)
-        _CONTEXT_LOSS_RUN.set(bool(staged.record.get("agent_labeled_trajectories"))
-                              and self.output_format in _CONTEXT_LOSS_FORMATS)
+        asked = bool(staged.record.get("agent_labeled_trajectories")) and self.output_format in _CONTEXT_LOSS_FORMATS
+        if (loss := _CONTEXT_LOSS_RUN.get()) is not None:
+            loss.asked = asked
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
         await self._write_files(sandbox, {f"{path}/{name}": text for name, text in staged.files.items()}, container)
         self._log_staging(staged)
@@ -417,7 +430,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             # Its turns carry no labels: each trajectory's format is the one its shape reads as.
             judge.read([{"format": fmt, "trajectories": count, "guessed": True}
                         for fmt, count in (staged.record.get("formats") or {}).items()])
-        return StagedTrajectory(path=path, prompt_note=_files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get()),
+        return StagedTrajectory(path=path, prompt_note=_files_note(path, staged, context_loss=asked),
                                 record=staged.record)
 
     async def _read_turns(self, urls: list[str], names: dict[str, str],

@@ -352,3 +352,120 @@ def test_a_sub_agent_a_later_task_names_by_its_first_call_is_left_to_the_native_
     document = run(first, second).document
     assert [len(sub["steps"]) for sub in document["subagent_trajectories"]] == [2]
     assert agent_steps(document)[-1]["message"] == "still here"
+
+
+def _compacting_feed(turn_counts=None):
+    """A turn that compacts partway: a call and its result, the CLI's boundary and its summary, its own message, then a
+    reply; and the turn's record with ``turn_counts``, when given."""
+    first, done = assistant("msg-1", "u1", call("c1")), assistant("msg-2", "u4", text("done"))
+    answered = user("u2", result("c1"))
+    summary = {"type": "user", "uuid": "u3", "parent_tool_use_id": None, "session_id": "s",
+               "message": {"role": "user", "content": "The summary of the conversation so far."}}
+    notice = {"type": "user", "uuid": "u5", "parent_tool_use_id": None, "session_id": "s",
+              "message": {"role": "user", "content": "<local-command-stdout>Compacted</local-command-stdout>"}}
+    feed = Feed().out(first).transcript(first, "2026-11-22T02:01:00.000Z").out(answered)
+    feed.transcript(answered, "2026-11-22T02:01:01.000Z")
+    feed.out({"type": "system", "subtype": "compact_boundary", "session_id": "s", "uuid": "b1",
+              "compact_metadata": {"trigger": "auto", "pre_tokens": 90000, "post_tokens": 3000}})
+    feed.out(summary).transcript(summary, "2026-11-22T02:01:02.000Z").out(notice)
+    feed.transcript(notice, "2026-11-22T02:01:02.500Z").out(done)
+    feed.transcript(done, "2026-11-22T02:01:03.000Z", usage={**USAGE, "output_tokens": 4})
+    if turn_counts is not None:
+        feed.aux("turn", {"type": "turn", "cost_usd": 0.5, **turn_counts})
+    return feed
+
+
+def test_an_auto_compaction_is_the_step_of_its_summary_call_holding_what_the_turn_counted_beyond_its_steps():
+    steps_counted = {"input_tokens": 4, "output_tokens": 79, "cache_read_tokens": 136084, "cache_write_tokens": 188}
+    summary_call = {"input_tokens": 500, "output_tokens": 300, "cache_read_tokens": 1000, "cache_write_tokens": 20}
+    feed = _compacting_feed({name: steps_counted[name] + summary_call[name] for name in steps_counted})
+    kit = run(feed)
+    user_step, first, compaction, notice, done = kit.document["steps"][:5]
+    assert (compaction["source"], compaction["message"]) == ("agent", "The summary of the conversation so far.")
+    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "auto"}
+    assert compaction["metrics"] == {"prompt_tokens": 500 + 1000 + 20, "cached_tokens": 1000, "completion_tokens": 300,
+                                     "extra": {"agentenv": {"cache_write_tokens": 20}}}
+    assert (notice["source"], notice["message"]) == ("system", "<local-command-stdout>Compacted</local-command-stdout>")
+    assert done["message"] == "done" and "metrics" in done
+    # Held for the turn's count, its last record: no live page before it serves the compaction, the one after it does.
+    counted = len(feed.records)
+    compactions = [any("compaction" in profile_of(step) for step in (page or {}).get("steps", [])) for page in kit.pages]
+    assert not any(compactions[:counted]) and compactions[counted]
+
+
+def test_a_compaction_whose_turn_counted_less_than_its_steps_has_no_usage():
+    kit = run(_compacting_feed({"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 1, "cache_write_tokens": 1}))
+    compaction = next(step for step in kit.document["steps"] if "compaction" in profile_of(step))
+    assert "metrics" not in compaction and compaction["llm_call_count"] == 1
+
+
+def test_a_compaction_whose_turn_never_reported_is_written_as_its_task_ends():
+    kit = run(_compacting_feed())
+    sources = [(step["source"], "compaction" in profile_of(step)) for step in kit.document["steps"]]
+    assert sources[2:5] == [("agent", True), ("system", False), ("agent", False)]
+
+
+def _summary(uuid, text_value):
+    return {"type": "user", "uuid": uuid, "parent_tool_use_id": None, "session_id": "s",
+            "message": {"role": "user", "content": text_value}}
+
+
+def _boundary(uuid):
+    return {"type": "system", "subtype": "compact_boundary", "session_id": "s", "uuid": uuid,
+            "compact_metadata": {"trigger": "auto"}}
+
+
+COUNTED_TURN = {"type": "turn", "cost_usd": 0.5, "input_tokens": 9000, "output_tokens": 900,
+                "cache_read_tokens": 200000, "cache_write_tokens": 2000}
+
+
+def test_two_compactions_in_one_turn_have_no_usage_since_the_turns_remainder_cant_be_split_between_them():
+    first, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u6", text("done"))
+    one, two = _summary("u3", "The first summary."), _summary("u5", "The second summary.")
+    feed = Feed().out(first).transcript(first, "2026-11-22T02:01:00.000Z").out(_boundary("b1")).out(one)
+    feed.transcript(one, "2026-11-22T02:01:01.000Z").out(_boundary("b2")).out(two)
+    feed.transcript(two, "2026-11-22T02:01:02.000Z").out(done).transcript(done, "2026-11-22T02:01:03.000Z")
+    kit = run(feed.aux("turn", COUNTED_TURN))
+    compactions = [step for step in kit.document["steps"] if "compaction" in profile_of(step)]
+    assert [step["message"] for step in compactions] == ["The first summary.", "The second summary."]
+    assert all("metrics" not in step for step in compactions)
+
+
+def _named(kit):
+    return next(step for step in kit.document["steps"] if "compaction" in profile_of(step))["model_name"]
+
+
+def _compacting_only(called):
+    summary = _summary("u9", "The summary.")
+    feed = Feed().out(_boundary("b9")).out(summary).transcript(summary, "2026-11-22T02:02:01.000Z")
+    return feed.aux("turn", {**COUNTED_TURN, "model": called})
+
+
+def test_a_compaction_names_its_model_as_the_agents_calls_answered_it_and_never_names_another():
+    """The turn's tally keys a model by the name it was called as, a gateway's route prefixing it; the agent's steps
+    name it as the API answered. A compaction is named as its model's calls answered, or as called when none has."""
+    called = "gateway/" + MODEL
+    mid_turn = run(_compacting_feed({name: value for name, value in {**COUNTED_TURN, "model": called}.items()
+                                     if name != "type"}))
+    working = assistant("msg-1", "u1", text("working"))
+    earlier = Feed().out(working).transcript(working, "2026-11-22T02:01:00.000Z")
+    earlier.aux("turn", {**COUNTED_TURN, "model": called})
+    same_model = run(earlier, _compacting_only(called))
+    working = assistant("msg-1", "u1", text("working"))
+    earlier = Feed().out(working).transcript(working, "2026-11-22T02:01:00.000Z")
+    earlier.aux("turn", {**COUNTED_TURN, "model": called})
+    another_model = run(earlier, _compacting_only("gateway/another-model"))
+    alone = run(_compacting_only(called))
+    assert [_named(kit) for kit in (mid_turn, same_model, another_model, alone)] == [
+        MODEL, MODEL, "gateway/another-model", called]
+
+
+def test_a_compaction_has_no_usage_when_one_of_its_turns_calls_lacks_its_counts():
+    """A call whose transcript record never came has no counts, which the turn's remainder would hold too."""
+    uncounted, done = assistant("msg-1", "u1", text("working")), assistant("msg-2", "u4", text("done"))
+    summary = _summary("u3", "The summary.")
+    feed = Feed().out(uncounted).out(_boundary("b1")).out(summary).transcript(summary, "2026-11-22T02:01:01.000Z")
+    feed.out(done).transcript(done, "2026-11-22T02:01:03.000Z")
+    kit = run(feed.aux("turn", COUNTED_TURN))
+    [compaction] = [step for step in kit.document["steps"] if "compaction" in profile_of(step)]
+    assert "metrics" not in compaction and compaction["message"] == "The summary."

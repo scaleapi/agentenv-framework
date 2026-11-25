@@ -93,24 +93,29 @@ class Uploads:
 
 
 class StagingRecorder:
-    """A judge's sandbox, every file written into it kept in its run's manifest (``staged``): a file written as text
-    stored by its sha256 too (``Uploads.put``), one copied from a stored object named by that object's URL."""
+    """A judge's sandbox, every file written into it kept in its run's manifests (``manifests``, each entry the same
+    in each): a file written as text stored by its sha256 too (``Uploads.put``), one copied from a stored object named
+    by that object's URL."""
 
-    def __init__(self, sandbox: Any, staged: list[dict[str, Any]], uploads: Uploads) -> None:
-        self._sandbox, self._staged, self._uploads = sandbox, staged, uploads
+    def __init__(self, sandbox: Any, manifests: tuple[list[dict[str, Any]], ...], uploads: Uploads) -> None:
+        self._sandbox, self._manifests, self._uploads = sandbox, manifests, uploads
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._sandbox, name)
 
     async def write_file_from_text(self, text: str, path: str, **kwargs: Any) -> Any:
         written = await self._sandbox.write_file_from_text(text, path, **kwargs)
-        self._staged.append({"path": path, **self._uploads.put(text.encode(), "text/plain; charset=utf-8")})
+        self._record({"path": path, **self._uploads.put(text.encode(), "text/plain; charset=utf-8")})
         return written
 
     async def write_file_from_object(self, object_url: str, path: str, **kwargs: Any) -> Any:
         written = await self._sandbox.write_file_from_object(object_url, path, **kwargs)
-        self._staged.append({"path": path, "object_url": object_url})
+        self._record({"path": path, "object_url": object_url})
         return written
+
+    def _record(self, entry: dict[str, Any]) -> None:
+        for manifest in self._manifests:
+            manifest.append(entry)
 
 
 def _encoded(body: Any) -> tuple[bytes, str]:

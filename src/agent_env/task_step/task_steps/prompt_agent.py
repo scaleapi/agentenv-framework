@@ -591,8 +591,8 @@ class PromptAgentTaskStep(TaskStep):
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
-            # Again each turn, so an agent that restarted since deploy_agent sent it doesn't get its own tools back.
-            "builtin_tools": card.get("builtin_tools"),
+            # Again, so an agent that restarted since deploy_agent sent them doesn't get its tools back.
+            **A2AAgent.tool_settings(card),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         model_params = get_config().get_model_params(self.model_params)
@@ -611,13 +611,17 @@ class PromptAgentTaskStep(TaskStep):
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
         if built_in is not None:  # deploy_user_sim_agent set its model and answer format
+            await resend_tool_settings(user_sim, user_url)
             context.record_model(ModelRole.USER_SIMULATOR.record_key, self.id, built_in[0].get("model"))
             usage.start(ModelRole.USER_SIMULATOR, built_in[0].get("model"), user_sim)
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
-            negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
+            user_card = user_sim.a2a_card or {}
+            # Its own tools and peer tools as deploy_agent set them, again, as for the agent above.
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items()
+                           if v is not None} | A2AAgent.tool_settings(user_card)
+            negotiated = A2AAgent.negotiate_agent_config(user_card, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields,
                                                  headers=user_sim.control_headers)
@@ -676,6 +680,7 @@ class PromptAgentTaskStep(TaskStep):
         conversation_tool_call_count: Optional[int] = None
         final_task_id = ""
         per_turn_trajectory_urls: list[str | None] = []
+        hook_trajectory_urls: list[str | None] = []  # what post-turn hooks read: native while the run's copies wait
         per_turn_trajectories: list[TurnTrajectory] = []
         source_agent_per_turn_prompt_parts: list[list[dict] | None] = []
         traj_ext_cached = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
@@ -772,12 +777,22 @@ class PromptAgentTaskStep(TaskStep):
                         target_a2a_task_id, card=card, sandbox_type=agent.sandbox_type, headers=agent.control_headers,
                     )
                     stored = StoredTrajectory()
+                    hook_url = None
                     if not atif_copies.replaces_native:  # the run's copy, read off the turn's path, replaces native
                         try:
                             stored = await read_native()
                         except Exception as e:
                             logger.warning(f"Turn {turn+1} trajectory fetch failed (continuing): {e}")
+                        hook_url = stored.url
+                    elif hooks is not None:
+                        # The run's copies arrive after the conversation; hooks judge this turn's work now, so they get
+                        # its native trajectory. The step's record keeps the copies.
+                        try:
+                            hook_url = (await read_native()).url
+                        except Exception as e:
+                            logger.warning(f"Turn {turn+1} trajectory fetch for post-turn hooks failed (continuing): {e}")
                     per_turn_trajectory_urls.append(stored.url)
+                    hook_trajectory_urls.append(hook_url)
                     turn_record = TurnTrajectory(format=stored.format, atif=None)
                     per_turn_trajectories.append(turn_record)
                     atif_copies.turn(len(per_turn_trajectory_urls) - 1, sent_task_id, target_a2a_task_id, turn_record,
@@ -815,6 +830,7 @@ class PromptAgentTaskStep(TaskStep):
                         agent_parts=agent_response_parts,
                         ask_user=functools.partial(user_side.ask, turn + 1, reply, agent_response_parts),
                         user_triggers=functools.partial(user_side.triggers, turn + 1, reply),
+                        trajectory_urls=hook_trajectory_urls,
                     )
                 if answer is None and not last:
                     answer = await user_side.ask(turn + 1, final_terminal.response_text, agent_response_parts)
@@ -1243,14 +1259,35 @@ class _UserSide:
                 self._record("user_side_notes", {"turn": number, "note": note})
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in,
                                               note=note)
+            keep = note is not None and self._built_in.person.get("preset") == "milestone"
+            if keep:
+                answer = await self._keep_replying(number, answer)
             if self._gate is not None and "message" in answer:
                 async def rewrite_built_in(why: str) -> dict:  # the gate's request alone: the hook's note went once
-                    return await self._built_in.rewrite(number, why, self._ask_built_in)
+                    got = await self._built_in.rewrite(number, why, self._ask_built_in)
+                    # A rewrite is still a turn with the note in play: a milestone user doesn't leave by no_reply here.
+                    return await self._keep_replying(number, got) if keep else got
 
                 answer = await self._gated(number, answer, rewrite_built_in, hook_note=note)
             self._end_after = answer.get("end_after")
             return answer
         return await self._ask_peer(number, agent_parts, note)
+
+    async def _keep_replying(self, number: int, answer: dict) -> dict:
+        """A milestone user sim stays in the conversation while a hook's note is in play: a no_reply to a turn that
+        carried a note is asked again, up to ``NOTE_REPLY_TRIES`` times, in the same session (each try is listed under
+        the read's ``gate_rewrites``). A user sim that still won't reply ends the run as a user-sim error, so verifiers
+        skip it and it is redone, rather than grading the agent on a conversation the user abandoned mid-milestone."""
+        for _ in range(NOTE_REPLY_TRIES):
+            if answer.get("end") != "user_no_reply":
+                return answer
+            self._record("user_sim_note_retries", {"turn": number})
+            answer = await self._built_in.rewrite(number, NOTE_NO_REPLY, self._ask_built_in)
+        if answer.get("end") == "user_no_reply":
+            self._built_in.error = ("the milestone user sim answered no_reply to a turn that carried a hook's note, "
+                                    f"{NOTE_REPLY_TRIES + 1} times")
+            return {"end": "user_sim_error"}
+        return answer
 
     async def _ask_built_in(self, text: str) -> dict:
         """One turn of the user sim deploy_user_sim_agent deployed, in this conversation's session: ``{"text",
@@ -1434,6 +1471,13 @@ def _text_of(parts: list[dict]) -> str:
     return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
 
 
+# A milestone user sim that answers no_reply while a hook's note is in play is asked again this many times.
+NOTE_REPLY_TRIES = 2
+NOTE_NO_REPLY = ("[Conversation system note, not from the assistant.] The chat isn't over: what you found checking its "
+                 "work still needs answering. Reply to the assistant about it, in your own words and no more "
+                 "specifically than your note. Answer in JSON: " + user_sim_versions.ANSWER_LINE)
+
+
 class _BuiltInUserSim:
     """The user deployed by deploy_user_sim_agent, read as always_on reads it, in one sitting: each agent reply is one
     read, done ends the conversation, and there is no phone."""
@@ -1521,7 +1565,12 @@ class _BuiltInUserSim:
         ``schema_errors`` are the latest rewrite's), keeps what the user sim first answered as ``first_message``, and
         lists each rewrite under ``gate_rewrites``."""
         got = await ask_user_sim(note)
-        ans = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
+        ans = user_sim_versions.allowed(self.person, user_sim_versions.parse(
+            got["structured"] if isinstance(got.get("structured"), dict) else got.get("text")))
+        if ans["schema_errors"] and not got.get("error"):  # as an ordinary answer: one retry in the answer's format
+            got = await ask_user_sim(user_sim_versions.retry_line(self.person))
+            ans = user_sim_versions.allowed(self.person, user_sim_versions.parse(
+                got["structured"] if isinstance(got.get("structured"), dict) else got.get("text")))
         error = got.get("error")
         rewrite = {k: ans.get(k) for k in ("outcome", "message", "used", "schema_errors")}
         rewrite.update(user_sim_error=error, user_sim_trajectory_url=got.get("trajectory_url"))
@@ -1663,6 +1712,15 @@ async def prescribe_formats(context: TaskStepContext, step_id: str, agent: Deplo
         logger.warning(f"agent '{agent.agent_name}': prescribing trajectory formats {wanted} failed, so it builds what "
                        f"it was last prescribed (continuing): {failure}")
         return
+
+
+async def resend_tool_settings(agent: DeployedAgent, url: str) -> None:
+    """Send ``agent`` its own-tool and peer-tools settings again, as deploy_agent stamped them on its card, for a user
+    sim whose model and prompt deploy_user_sim_agent already set; nothing when it has none, or its card takes neither."""
+    card = agent.a2a_card or {}
+    negotiated = A2AAgent.negotiate_agent_config(card, A2AAgent.tool_settings(card))
+    if negotiated:
+        await protocol.post_agent_config(url + negotiated.endpoint, negotiated.fields, headers=agent.control_headers)
 
 
 class StoredTrajectory(NamedTuple):

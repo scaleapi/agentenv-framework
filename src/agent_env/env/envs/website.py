@@ -372,9 +372,10 @@ class WebsiteEnv(Env):
         container_path = await self._copy_artifact_into_container(file_artifact, file_artifact.filename)
         base_url = legacy_protocol.environment_base_url(self._gateway_url, self.environment_name, mcp=False)
         from agent_env.env.gateway.constants import DATA_PLANE_LOAD_TIMEOUT_S
-        await legacy_protocol.reset_via_rest(base_url, timeout=60)
+        headers = data_plane_headers(self, base_url)
+        await legacy_protocol.reset_via_rest(base_url, timeout=60, headers=headers)
         try:
-            await legacy_protocol.add_via_rest(base_url, container_path, timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+            await legacy_protocol.add_via_rest(base_url, container_path, timeout=DATA_PLANE_LOAD_TIMEOUT_S, headers=headers)
         except Exception as e:
             logger.error(
                 "load_environment_artifact: /api/add failed after /api/reset succeeded; "

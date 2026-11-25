@@ -16,7 +16,7 @@ import pytest
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI
 
 from agent_env.config import get_config, reset_config
-from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.env.envs._deployment import LOAD_OPERATIONS
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -228,9 +228,9 @@ async def test_close_closes_the_plugin_that_deployed():
 async def test_a_multi_env_child_of_a_plugin_type_is_still_the_gateways():
     child = _env()
     multi = MultiEnv(id="multi", version=1, mcp_server_envs=[child])
-    record = SimpleNamespace(env_id="multi", env_version=1, sandbox_id="gw", sandbox_type="modal", sandbox_ids={},
-                             env_state_instance_ids=[], instance_id="i", mcp_server_name="m", environment_card=None,
-                             environment_card_url=None, gateway_url="https://gw.example")
+    record = DeployedGatewayEnv(env_id="multi", env_version=1, sandbox_id="gw", sandbox_type="modal", instance_id="i",
+                                mcp_server_name="m", gateway_url="https://gw.example", mcp_url="https://gw.example/mcp",
+                                db_web_url=None)
     gw = MagicMock(sandbox_id="gw", mode="vm", type="modal")
     with patch("agent_env.env.env.Env.get", return_value=multi), \
          patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=AsyncMock(return_value=gw))), \

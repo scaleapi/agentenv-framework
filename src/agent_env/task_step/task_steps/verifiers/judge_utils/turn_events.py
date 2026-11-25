@@ -20,6 +20,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import (
     SubAgents,
     calls_with_results,
     content_text,
+    is_compaction,
     steps_of,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import (
@@ -452,13 +453,20 @@ def atif_turn_events(view: Mapping[str, Any]) -> TurnEvents:
     """One atif/1 turn's events, from its view (its A2A task cut out of the conversation's document, as
     ``atif_turns.AtifDocuments.view`` gives it), in the shapes a native Claude Code turn's take: each agent step's
     thinking and text, then its tool calls with their results; a sub-agent's events after the result that started it,
-    each naming it as ``subagent`` (the call that started it, as its ``parent_tool_use_id`` is natively); and the final,
-    the closing message, an error when the turn's task didn't complete."""
+    each naming it as ``subagent`` (the call that started it, as its ``parent_tool_use_id`` is natively); a message the
+    harness put in (a system step) and a compaction's summary as notes, as a native turn's user-shaped messages are;
+    and the final, the closing message ("" for none, as the CLI's result gives it), an error when the turn's task didn't
+    complete."""
     events: list[dict] = []
     subagents = SubAgents(view)
 
     def walk(trajectory: Mapping[str, Any], tag: dict) -> None:
         for step in steps_of(trajectory):
+            if step.get("source") == "system" or (step.get("source") == "agent" and is_compaction(step)):
+                text = content_text(step.get("message"))
+                if text.strip():
+                    events.append({"type": "note", "text": text, **tag})
+                continue
             if step.get("source") != "agent":
                 continue
             if isinstance(step.get("reasoning_content"), str) and step["reasoning_content"].strip():
@@ -480,10 +488,10 @@ def atif_turn_events(view: Mapping[str, Any]) -> TurnEvents:
 
     walk(view, {})
     steps = steps_of(view)
-    closing = next((step for step in reversed(steps)
-                    if step.get("source") == "agent" and content_text(step.get("message")).strip()), None)
+    closing = next((step for step in reversed(steps) if step.get("source") == "agent" and not is_compaction(step)
+                    and content_text(step.get("message")).strip()), None)
     state = profile_of(steps[-1]).get("state") if steps else None
-    events.append({"type": "final", "text": content_text(closing.get("message")) if closing else None,
+    events.append({"type": "final", "text": content_text(closing.get("message")) if closing else "",
                    "error": state not in (None, "completed")})
     return TurnEvents(ATIF, events, len(json.dumps(view)))
 

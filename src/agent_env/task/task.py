@@ -221,6 +221,7 @@ async def _roll_back_span(
     completed_ids: set[str],
     log_prefix: str,
     state: _SchedulerState,
+    error: BaseException | None = None,
 ) -> set[str] | None:
     """Roll back a failed span so the scheduler can re-dispatch it on a clean world.
 
@@ -252,8 +253,10 @@ async def _roll_back_span(
     span_order = [s.id for s in steps if s.id in span_ids]
     rollback_ids = span_ids | cancelled_ids
     logger.warning(
-        "%sStep %s failed; rolling back span %s and re-dispatching from %s (attempt %d).",
-        log_prefix, failed_id, span_order, resume_from, attempt,
+        "%sStep %s failed%s; rolling back span %s and re-dispatching from %s (attempt %d).",
+        # The error's type alone: some steps put a response body in their messages, which the run record keeps.
+        log_prefix, failed_id, f" ({type(error).__name__})" if error is not None else "", span_order,
+        resume_from, attempt,
     )
     if not instance_id:
         logger.error(
@@ -826,7 +829,7 @@ class Task:
                         failed_id=step_obj.id, resume_from=retry_cfg.retry_from_step_id,
                         cancelled_ids=cancelled, attempt=retry_counts[step_obj.id] + 1,
                         windows={sid: (t0, ended.get(sid, now_tick)) for sid, t0 in started.items()},
-                        completed_ids=set(state.completed), log_prefix=log_prefix, state=state,
+                        completed_ids=set(state.completed), log_prefix=log_prefix, state=state, error=exc,
                     )
                     if outcome is None:
                         # Could not roll back (refused, unpersisted, or a concurrent survivor):

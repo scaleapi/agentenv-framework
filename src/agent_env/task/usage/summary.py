@@ -1,13 +1,16 @@
 """A run's usage for people to read: its ledger (``ledger``) summed by role, then by model. An entry with per-model rows
 (``models``) splits along them; one without counts under its own model. Usage the map couldn't price is unpriced, never
 $0, and makes the cost a lower bound, as a partial or a still running entry does; a cost priced on an assumed rate
-(``cost_assumed``) makes it an upper bound."""
+(``cost_assumed``) makes it an upper bound. ``to_dict`` gives a summary as JSON, the one shape every reader takes, with
+the ``bound`` word the CLI prints."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from functools import reduce
+from typing import TYPE_CHECKING, Any
 
 from agent_env.config.model import ModelRole
 
@@ -16,6 +19,17 @@ if TYPE_CHECKING:
 
 # The order roles are shown in; any other comes after them.
 _ROLES = tuple(role.value for role in ModelRole)
+
+
+class Bound(StrEnum):
+    """What a cost figure is: the whole cost, a lower bound (some usage unpriced, partial or still running), an upper
+    bound (some cost priced on an assumed rate), an estimate (both), or nothing priced."""
+
+    EXACT = "exact"
+    AT_LEAST = "at_least"
+    AT_MOST = "at_most"
+    ESTIMATED = "estimated"
+    UNPRICED = "unpriced"
 
 
 @dataclass
@@ -40,6 +54,15 @@ class Share:
     @property
     def upper_bound(self) -> bool:
         return self.assumed
+
+    @property
+    def bound(self) -> Bound:
+        return _bound(self.cost_usd, self.lower_bound, self.upper_bound)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"role": self.role, "model": self.model, "cost_usd": self.cost_usd, "bound": self.bound.value,
+                "input_tokens": self.input_tokens, "output_tokens": self.output_tokens, "unpriced": self.unpriced,
+                "assumed": self.assumed, "partial": self.partial}
 
     def add(self, part: UsageEntry | ModelEntry, partial: bool) -> None:
         self.input_tokens = _plus(self.input_tokens, part.get("input_tokens"))
@@ -75,6 +98,26 @@ class UsageSummary:
     def upper_bound(self) -> bool:
         return any(share.upper_bound for share in self.shares)
 
+    @property
+    def bound(self) -> Bound:
+        return _bound(self.cost_usd, self.lower_bound, self.upper_bound)
+
+    @property
+    def input_tokens(self) -> int | None:
+        return reduce(_plus, (share.input_tokens for share in self.shares), None)
+
+    @property
+    def output_tokens(self) -> int | None:
+        return reduce(_plus, (share.output_tokens for share in self.shares), None)
+
+    def to_dict(self, attempts: bool = True) -> dict[str, Any]:
+        """The summary as JSON: its cost and bound, token counts, attempts (null with ``attempts=False``, for a total
+        over several runs), sources and shares in role order. Every key is always there; a figure nothing gave is
+        null, never 0."""
+        return {"cost_usd": self.cost_usd, "bound": self.bound.value, "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens, "attempts": self.attempts if attempts else None,
+                "sources": list(self.sources), "shares": [share.to_dict() for share in self.shares]}
+
 
 def summarize(ledger: Iterable[UsageEntry]) -> UsageSummary | None:
     """``ledger``'s entries summed by role and model; None when it has none. A task instance's ``usage`` gives a run's;
@@ -99,6 +142,16 @@ def _parts(entry: UsageEntry) -> list[tuple[str | None, UsageEntry | ModelEntry]
     if rows := entry.get("models"):
         return [(row.get("model") or entry.get("model"), row) for row in rows]
     return [(entry.get("model"), entry)]
+
+
+def _bound(cost_usd: float | None, lower: bool, upper: bool) -> Bound:
+    if cost_usd is None:
+        return Bound.UNPRICED
+    if lower and upper:
+        return Bound.ESTIMATED
+    if lower:
+        return Bound.AT_LEAST
+    return Bound.AT_MOST if upper else Bound.EXACT
 
 
 def _rank(role: str) -> int:

@@ -106,7 +106,7 @@ async def test_capture_universe_state_publishes_unsigned_object_urls(monkeypatch
 
     monkeypatch.setattr(protocol_v1, "supports_v1", _supports_v1)
 
-    async def _export_state(_gw, name):
+    async def _export_state(_gw, name, headers=None):
         return {"service": name, "rows": 1}
 
     monkeypatch.setattr(legacy_protocol, "export_state", _export_state)
@@ -138,7 +138,7 @@ async def test_each_service_state_uploads_off_the_event_loop(monkeypatch):
     async def _no_v1(_base):
         return False
 
-    async def _export_state(_gw, name):
+    async def _export_state(_gw, name, headers=None):
         return {"service": name}
 
     monkeypatch.setattr(protocol_v1, "supports_v1", _no_v1)
@@ -170,7 +170,7 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
         got.append(base)
         return GetDataResponse(parts=[DataPart(data={"rows": 1})])
 
-    async def _export_state(gw, name):
+    async def _export_state(gw, name, headers=None):
         legacy.append((gw, name))
         return {"rows": 1}
 
@@ -220,6 +220,40 @@ async def test_a_service_that_exports_a_file_bundle_is_captured_from_its_export_
     bodies = {url.rsplit("/", 1)[-1]: json.loads(data) for url, data in store.objects.items()}
     assert bodies == {"calendar.json": {"events": 7}, "contacts.json": {"contacts": 4}}
     assert set(json.loads(ctx.metadata["snapshot_json_url"])) == {"calendar", "contacts"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token, sent", [("t0ken", "Bearer t0ken"), (None, None)], ids=["token", "no-token"])
+async def test_each_services_state_is_read_with_the_records_control_token(monkeypatch, token, sent):
+    """calendar answers data/get with a bundle, so its state comes from its export-state; contacts serves no card, so
+    its state comes from its export-state behind the gateway."""
+    import httpx
+    from agentenv_protocol import uploaded_file_part
+
+    from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+
+    store = _Store()
+    monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
+    monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
+    seen, real = [], httpx.AsyncClient
+    bundle = uploaded_file_part("calendar.zip", name="calendar.zip").model_dump(mode="json")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith("/agentenv"):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"parts": [bundle]}})
+        return httpx.Response(200, json={"rows": 1})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    ctx = _ctx()
+    record = ctx.deployed_envs[0]
+    record.environment_card_url, record.environment_card = f"https://gw{WELL_KNOWN_PATH}", await _card("mcp-calendar")
+    record.control_token = token
+
+    await _step()._capture_universe_state(ctx, _PREFIX)
+
+    assert seen == [("/svc/mcp-calendar/agentenv", sent), ("/svc/mcp-calendar/export-state", sent),
+                    ("/svc/mcp-contacts/export-state", sent)]
 
 
 async def _card(*keys: str) -> dict:

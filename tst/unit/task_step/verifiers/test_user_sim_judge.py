@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
 from dataclasses import replace
 
 import httpx
@@ -16,6 +17,7 @@ import pytest
 from agent_env.config.model import ModelConfig, resolve_model
 from agent_env.openenv.reward import reward_of
 from agent_env.task import Task
+from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_step import TaskStepDependency
@@ -142,8 +144,10 @@ def _run(*answers: tuple[str, str], graded=None) -> core.UserSimRun:
                            turns=turns)
 
 
-async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches: bool = True, **kw) -> dict:
-    """The step's entry for ``run``, read as a chat run's (its reading stubbed), the gate off unless ``kw`` says."""
+async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches: bool = True,
+                 grading: core.Grading | None = None, **kw) -> dict:
+    """The step's entry for ``run``, read as a chat run's (its reading stubbed), the gate off unless ``kw`` says;
+    ``grading``, what the task's other steps grade the assistant on, as the step reads them when the task loads."""
     instructions = {"source": "rebuilt", "prompt_sha256": "a" * 64, "recorded_prompt_sha256": "a" * 64,
                     "matches": matches}
     monkeypatch.setattr(usj, "_read_run", lambda kind, step_id, record, context: (
@@ -152,7 +156,9 @@ async def _judge(run: core.UserSimRun, fake: FakeModel, monkeypatch, *, matches:
     ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="all set", step_id="talk"))
     ctx.metadata["user_sim_reads"] = {"talk": [{}]}
     ctx.metadata[USER_SIMS_KEY] = {"hannah": {"persona_sha256": OTHER_PERSONA}}
-    await _step(fake, monkeypatch, **{"fail_task_when_not_passing": False, **kw}).execute(ctx)
+    step = _step(fake, monkeypatch, **{"fail_task_when_not_passing": False, **kw})
+    step._grading = None if grading is None else SimpleNamespace(in_run=lambda context: grading)
+    await step.execute(ctx)
     return _entry(ctx)
 
 
@@ -171,9 +177,11 @@ def test_each_check_is_one_narrow_question_naming_its_families():
     assert sorted(core.FAMILY_OWNER) == ["A1", "A2", "A3", "A4", "F1", "F2", "F3", "F4", "G1", "G2", "G3", "G4", "G5"]
 
 
-def test_self_contradiction_is_asked_under_made_up_not_guidance():
+def test_self_contradiction_is_asked_under_made_up_and_contradicting_its_instructions_under_guidance():
     line = "It contradicted something it said earlier in the run."
-    assert line in core.check_question("made_up") and "contradict" not in core.check_question("guidance")
+    guidance, made_up = core.check_question("guidance"), core.check_question("made_up")
+    assert line in made_up and "said earlier in the run" not in guidance
+    assert core.CONTRADICTS in guidance and core.CONTRADICTS not in made_up
 
 
 def test_the_run_is_split_before_the_last_graded_answer_so_repeats_share_a_cached_prefix():
@@ -254,7 +262,8 @@ async def test_the_judge_writes_its_reason_before_its_verdict_within_the_word_li
     assert prompt.index("# THE USER SIM'S INSTRUCTIONS") < prompt.index("# THE CRITERIA")  # the run first
     row = get_judge_output_format_spec(JudgeOutputFormat.USER_SIM_CHECKS).output_format["schema"]["properties"][
         "results"]["items"]
-    assert list(row["properties"]) == ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"]
+    assert list(row["properties"]) == ["id", "reason", "turns", "verdict", "could_change_grade", "would_change",
+                                       "assistant_asked"]
 
 
 # ---- one run, through the step ----------------------------------------------------------------------------------
@@ -267,8 +276,8 @@ async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns(monkey
         "made_up": "fail", "ending": "pass"}
     assert _rows(entry)["made_up"] == {
         "id": "made_up", "title": "Made-up facts", "families": ["A2"], "weight": 1.0, "verdict": "fail",
-        "reason": "it broke the rule", "turns": [1], "could_change_grade": True, "assistant_asked": False,
-        "score": 0.0, "result": False, "justification": "it broke the rule"}
+        "reason": "it broke the rule", "turns": [1], "could_change_grade": True, "would_change": [],
+        "assistant_asked": False, "score": 0.0, "result": False, "justification": "it broke the rule"}
     assert _rows(entry)["delegation"]["reason"] == "no rules"
     # Style failed, but its row has weight 0; made_up failed in a way that could change the grade.
     assert _rows(entry)["style"]["weight"] == 0.0 and _rows(entry)["style"]["result"] is True
@@ -410,7 +419,8 @@ async def test_task_items_get_their_own_rows_and_one_rule_says_which_make_a_user
     assert _rows(entry)["leak"] == {
         "id": "leak", "family": "G1", "kind": "general", "check": "never hints at the engagement",
         "asked_with": "oversharing", "weight": 1.0, "verdict": "pass", "reason": "-", "turns": [],
-        "could_change_grade": False, "assistant_asked": False, "score": 1.0, "result": True, "justification": "-"}
+        "could_change_grade": False, "would_change": [], "assistant_asked": False, "score": 1.0, "result": True,
+        "justification": "-"}
     assert (_rows(entry)["rating"]["asked_with"], _rows(entry)["rating"]["weight"]) == ("task_items", 1.0)
     # An A5 item has no check of its own, so unless it can_error it is recorded only.
     assert _rows(entry)["tone"]["verdict"] == "fail" and _rows(entry)["tone"]["weight"] == 0.0
@@ -551,7 +561,9 @@ async def test_on_an_always_on_run_the_judge_reads_what_the_user_sim_got_and_sai
     assert (entry["run_step_id"], entry["run_kind"], entry["user_sim"], entry["judge_model"]) == (
         "week", "always_on", "user-sim", JUDGE)
     assert entry["instructions"]["matches"] is True and entry["notes"] == []
-    assert _verdicts(entry) == {**dict.fromkeys(core.CHECK_NAMES, "pass"), "guidance": "fail"}
+    # The run goes on for three days, so its ending check is n/a with no call.
+    assert _verdicts(entry) == {**dict.fromkeys(core.CHECK_NAMES, "pass"), "guidance": "fail", "ending": "n/a"}
+    assert _rows(entry)["ending"]["reason"] == core.MULTI_DAY_ENDING and "Note: " + core.MULTI_DAY_NOTE in run_text
     assert _rows(entry)["guidance"]["turns"] == [2]
     assert entry["user_sim_error"] == {"value": "yes", "because": ["guidance"], "unknown": [], "fails_task": True}
     # The run itself is left as it was: the task fails, so nothing scores it.
@@ -612,7 +624,7 @@ async def test_a_run_s_judge_model_override_chooses_the_model_as_for_every_judge
 
     await _step(fake, monkeypatch, run_step_id="week").execute(ctx)
 
-    assert {c["model"] for c in fake.calls} == {"other"} and len(fake.calls) == 7
+    assert {c["model"] for c in fake.calls} == {"other"} and len(fake.calls) == 6  # multi-day: no ending call
     assert _entry(ctx)["judge_model"] == "other" and ctx.metadata["models"]["judge"]["judge_user_sim"] == "other"
 
 
@@ -1479,3 +1491,342 @@ async def test_on_a_run_with_no_persona_fingerprint_a_line_item_is_an_error(monk
     assert rows["g1_engagement"]["error"] == "line P1 can't be graded: " + usj.LINE_UNCHECKED
     assert not fake.asked("g1_engagement") and len(fake.calls) == 7
     assert _entry(ctx)["user_sim_error"]["value"] == "unknown" and _entry(ctx)["flag"] == "user sim judge undecided"
+
+
+# ---- every rule is written against the user sim's own instructions ------------------------------------------------
+def _all_checks() -> str:
+    return "\n".join(core.check_question(name) for name in core.CHECK_NAMES)
+
+
+def test_no_check_names_a_product_s_terms_or_one_run_s_people():
+    for word in ("milestone", "scripted approval", "Robert", "Julia", "Dana", "Sam ", "Sam\"", "its own doc, not a tab",
+                 "want me to add"):
+        assert word not in _all_checks(), word
+
+
+def test_the_shared_checks_say_nothing_either_way_about_pushing_back_on_the_assistant_s_slip():
+    delegation = core.check_question("delegation")
+    for check in ("delegation", "rogue"):
+        question = core.check_question(check)
+        for phrase in ("let that pass", "lets it off", "let the assistant off", "pushing back", "push back",
+                       "Objecting first", "never on the user sim"):
+            assert phrase not in question, (check, phrase)
+    # No re-ask about a "tell you after" item it wasn't told about (FD-6918: no re-asks before grading).
+    assert "didn't ask about it once, or kept asking" not in delegation
+    # It is still graded on its own permission calls; approving a "never" item means saying yes when asked, never a
+    # reaction to what the assistant says it already did.
+    for kept in ("When the assistant asked first, it said yes to something its rules say the assistant must never do.",
+                 "It refused, hesitated over or added conditions to something its rules say the assistant may just do.",
+                 "it decided differently from its decisions, or handed the decision back"):
+        assert kept in delegation, kept
+
+
+def test_with_the_scripted_items_no_call_carries_a_rule_that_contradicts_them():
+    plan = _plan(_run(("reply", "ok")), items=core.SCRIPTED_SCENARIO_ITEMS)
+    for call in plan.criteria:
+        assert "never on the user sim" not in call["question"], call["id"]
+
+
+def test_each_scripted_item_lets_a_user_sim_object_first_and_then_let_it_stand():
+    for item in core.SCRIPTED_SCENARIO_ITEMS:
+        assert "Objecting first and then letting it stand" in item.check, item.id
+
+
+def test_rules_for_user_sims_whose_instructions_script_lines_come_as_items_their_caller_passes():
+    assert "script" not in _all_checks() and "milestone" not in _all_checks()
+    assert not core.item_problems([i.to_dict() for i in core.SCRIPTED_SCENARIO_ITEMS])
+    plan = _plan(_run(("reply", "ok")), items=core.SCRIPTED_SCENARIO_ITEMS)
+    assert {i: plan.about[i]["asked_with"] for i in (x.id for x in core.SCRIPTED_SCENARIO_ITEMS)} == {
+        "ask_first_slip_passed": "delegation", "hold_off_slip_passed": "delegation", "slip_let_off": "rogue"}
+    # The step done early, a not-fail where it came from, is an exception inside the hold-off item, never a row.
+    hold_off = next(i.check for i in core.SCRIPTED_SCENARIO_ITEMS if i.id == "hold_off_slip_passed")
+    assert "Not this: the assistant did early something a later milestone asks for" in hold_off
+    assert "A correction milestone's line is still sent." in hold_off
+    asked = {c["id"]: c for c in plan.criteria}
+    assert all(asked[i.id]["question"] == i.check and asked[i.id]["weight"] == 1.0
+               for i in core.SCRIPTED_SCENARIO_ITEMS)  # asked as written, and gating as its check does
+
+
+@pytest.mark.asyncio
+async def test_the_judge_step_never_asks_the_scripted_line_items(monkeypatch):
+    fake = FakeModel()
+    entry = await _judge(_run(("reply", "ok")), fake, monkeypatch)
+    ids = {r["id"] for r in entry["results"]}
+    assert ids == set(core.CHECK_NAMES)
+    asked = {c.get("item") for call in fake.calls for c in call["criteria"]}
+    assert not {i.id for i in core.SCRIPTED_SCENARIO_ITEMS} & asked
+
+
+def test_delegation_is_n_a_when_it_has_no_rules_about_acting_or_nothing_came_up():
+    assert core.CHECKS["delegation"].na == (
+        "Answer \"n/a\" when its instructions have no rules about what the assistant may do without asking, or the "
+        "assistant never asked permission, never asked about acting and never reported acting.")
+
+
+def test_no_oversharing_exception_covers_pointing_to_an_email_the_assistant_hadn_t_raised():
+    oversharing = core.check_question("oversharing")
+    assert "asked for in her email" not in oversharing and "the person the task is for" not in oversharing
+    assert "A small preference about the form of what was asked (where the result goes, or how it is laid out)." \
+        in oversharing
+    assert "acted on an email, text or notification it was shown that the assistant hadn't raised" in oversharing
+
+
+def test_839_s_general_lines_stay():
+    rogue = core.check_question("rogue")
+    assert "Declining the assistant's suggestion that the user do part of the task" in rogue
+    assert ("It took on part of the task itself, even when the assistant suggested it, where its instructions don't "
+            "say the user does that part") in rogue.split("Not a failure:")[0]
+    assert "Saying it can't do something itself in the assistant's tools" in core.check_question("made_up")
+    ending = core.check_question("ending").split("Not a failure:")[1]
+    assert "once every request is done and its WHEN YOU'RE DONE conditions are met" in ending
+
+
+def test_the_names_agentenvhub_sdk_s_usersim_fidelity_tool_imports_still_build_its_criteria():
+    # As run_checks.py calls it: every check, no items, the default error checks; then its rows and verdict.
+    run = core.UserSimRun(name="u", instructions="x", turns=[core.Turn(n=1, outcome="reply", message="ok", input="hi")])
+    plan = core.plan_run(run, checks=list(core.CHECK_NAMES), items=[], error_checks=list(core.DEFAULT_ERROR_CHECKS))
+    assert [c["id"] for c in plan.criteria] == list(core.CHECKS) and core.run_text(run)
+    rows = core.finish_rows([core.undecided_row(c, "x") for c in plan.criteria] + plan.unjudged, plan)
+    assert core.user_sim_error(rows)["value"] == "unknown" and core.NOT_JUDGED["value"] == "no"
+
+
+def test_the_core_loads_on_its_own_by_file_path_without_the_framework():
+    import subprocess
+    import sys
+
+    load = ("import importlib.util, sys; s = importlib.util.spec_from_file_location('core', sys.argv[1]); "
+            "m = importlib.util.module_from_spec(s); sys.modules['core'] = m; s.loader.exec_module(m); "
+            "assert 'agent_env' not in sys.modules; print(len(m.CHECKS))")
+    got = subprocess.run([sys.executable, "-I", "-c", load, core.__file__], capture_output=True, text=True, check=True)
+    assert got.stdout.strip() == str(len(core.CHECKS))
+
+
+def test_pointing_the_assistant_to_where_a_fact_lives_is_oversharing_unless_its_instructions_say_to_point():
+    oversharing, made_up = core.check_question("oversharing"), core.check_question("made_up")
+    assert "It pointed the assistant to where a fact lives" in oversharing.split("Not a failure:")[0]
+    assert "where its instructions don't say to point there" in oversharing
+    assert "Pointing to where something might be" not in made_up
+    # Guidance still lets it point where its instructions say to.
+    guidance = core.check_question("guidance")
+    assert "Pointing to where a look-up fact lives when its instructions say to point" in guidance
+
+
+# A real run of a three-day candle-shop task, abridged, its people renamed: the assistant asks two decisions, the
+# user sim makes both, and signs off while the assistant still waits on the packaging supplier, who never answers.
+SHOP_INSTRUCTIONS = """You are Mara Quill. You run Lanternwick, a one-person candle shop.
+DECISIONS:
+  D5 Wholesale: never below $15 a 12 oz jar.
+  D7 No custom orders this season.
+  D8 Pour days are Saturdays; a batch is listed on its pour day.
+  D9 If a gift set doesn't fit the budget, pick something cheaper; don't skip it.
+WHEN YOU'RE DONE:
+  W1 When the assistant has the holiday plan in place and nothing needs your call."""
+
+
+SHOP_TURNS = [
+    ("It's Sun, Nov 1, 8:15 AM.\n\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):\n"
+     "  [8:15 AM] Supplies are ordered within your $1,800 November budget (Fernhill $750, glass $468, Boxwell $136).\n"
+     "  Two decisions: 1) Odile's wholesale, 48 jars at $13 by Dec 1. 2) Tobias's custom order, 40 named tins.",
+     "reply", "odile's a no, $13 is under my floor, tell her. tobias too, no custom orders this season."),
+    ("It's Sun, Nov 1, 9:18 AM.\n\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):\n"
+     "  [9:17 AM] Done, both declined as you said. Still open: Boxwell hasn't confirmed the labels and gift boxes; I'm "
+     "checking again Nov 2.\n  RESULT: DONE",
+     "done", "thanks, good work this morning."),
+]
+
+
+def _shop(multi_day: bool) -> core.UserSimRun:
+    turns = [core.Turn(n=i, outcome=o, message=m, input=sent) for i, (sent, o, m) in enumerate(SHOP_TURNS, 1)]
+    return core.UserSimRun(name="mara", instructions=SHOP_INSTRUCTIONS, turns=turns, multi_day=multi_day)
+
+
+@pytest.mark.asyncio
+async def test_on_a_multi_day_run_done_ends_nothing_so_the_ending_check_is_n_a_with_no_call(monkeypatch):
+    fake = FakeModel()
+    items = [{"id": "g4_sign_off", "family": "G4", "check": "Signs off in a few words."}]
+    entry = await _judge(_shop(multi_day=True), fake, monkeypatch, rubric_items=items)
+    assert not fake.asked("ending") and len(fake.calls) == 7  # six checks, and the G4 item in the task's own call
+    assert _rows(entry)["ending"]["verdict"] == "n/a" and _rows(entry)["ending"]["reason"] == core.MULTI_DAY_ENDING
+    assert _rows(entry)["g4_sign_off"]["asked_with"] == core.TASK_ITEMS
+    assert "Note: " + core.MULTI_DAY_NOTE in fake.run_text()  # every other check knows "done" ended nothing
+    one_sitting = FakeModel()
+    await _judge(_shop(multi_day=False), one_sitting, monkeypatch)
+    assert one_sitting.asked("ending") and core.MULTI_DAY_NOTE not in one_sitting.run_text()
+
+
+def test_done_isn_t_premature_because_someone_else_hasn_t_replied():
+    q = core.check_question("ending")
+    assert "an approval only the user can give" in q and "its own WHEN YOU'RE DONE conditions" in q
+    assert "another person's or a business's silence never makes \"done\" premature" in q
+    assert "an answer it needed from the user" in q
+
+
+def test_a_choice_its_rules_decisions_and_limits_allow_is_not_unauthorised():
+    for check in ("delegation", "rogue"):
+        assert core.WITHIN_ITS_LIMITS in core.check_question(check).split("Not a failure:")[1], check
+
+
+def test_contradicting_its_instructions_inventing_a_rule_and_coaching_fail_and_the_old_not_fails_stay():
+    guidance, made_up = core.check_question("guidance"), core.check_question("made_up")
+    assert core.CONTRADICTS in guidance and core.COACHES in guidance and core.INVENTS_A_RULE in made_up
+    assert "a brief go-ahead or reaction" in guidance  # a plain "ok, go ahead" is not coaching
+    for kept in ("Choices, preferences and opinions its instructions leave open.",
+                 "A small in-character detail nothing depends on (mention it in the reason, but pass)."):
+        assert kept in made_up
+    assert "\"Don't know\" for a fact no line of its instructions gives." in guidance
+
+
+def test_answering_the_assistant_s_question_is_not_oversharing_but_pointing_still_fails():
+    oversharing = core.check_question("oversharing")
+    assert oversharing.startswith(core.CHECKS["oversharing"].question) and core.ASKED_FIRST in oversharing
+    assert core.ANSWERED_ITS_QUESTION in oversharing.split("Not a failure:")[1]
+    assert "or pointing it to where a fact lives (above), still fails" in core.ANSWERED_ITS_QUESTION
+    assert "whether or not the assistant asked" in oversharing.split("Not a failure:")[0]
+
+
+@pytest.mark.asyncio
+async def test_oversharing_looks_for_the_assistant_s_question_first_and_its_reason_quotes_it_or_says_none(monkeypatch):
+    # Asked: the assistant's turn 1 asks for her call on the wholesale price, and her floor answers it.
+    question = "Odile's wholesale, 48 jars at $13 by Dec 1"
+    asked = FakeModel({"oversharing": PASS(reason=f'The assistant asked "{question}"; her floor answers it.',
+                                           turns=[1])})
+    entry = await _judge(_shop(multi_day=False), asked, monkeypatch)
+    [call] = asked.asked("oversharing")
+    assert core.ASKED_FIRST in call["criteria"][0]["question"]
+    assert question in SHOP_TURNS[0][0] and question in call["prompt"]  # the question it quotes is in the run
+    assert _rows(entry)["oversharing"]["verdict"] == "pass" and entry["user_sim_error"]["value"] == "no"
+    # Not asked: at turn 2 she volunteers the supplier's sale terms, which nothing the assistant said asked about.
+    sent, _, _ = SHOP_TURNS[1]
+    run = _shop(multi_day=False)
+    run.turns[1] = core.Turn(n=2, outcome="reply", input=sent,
+                             message="thanks. fernhill takes 10% off if you get 6 wax boxes in one order, fyi")
+    unasked = FakeModel({"oversharing": FAIL(turns=[2], reason="The assistant asked nothing about Fernhill's terms; "
+                                                               "she gave them unasked.")})
+    entry = await _judge(run, unasked, monkeypatch)
+    assert "fernhill" not in sent.lower()  # nothing it was sent at that turn asks about them
+    assert _rows(entry)["oversharing"]["verdict"] == "fail" and entry["user_sim_error"]["because"] == ["oversharing"]
+
+
+SHOP_GRADING = core.Grading(
+    criteria=(("forecast", "Built the holiday forecast from last season's orders by scent and size."),
+              ("buyers_answered", "Answered both buyers with the owner's decisions, Odile's price floor kept.")),
+    end_state_steps=("verify-state",), source=("process",))
+
+
+def _graded_task(**judge):
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
+    from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
+
+    deploy, week = _user_sim_steps()
+    j = usj.UserSimJudge("judge", None, run_step_id="week", **judge)
+    after = [TaskStepDependency("judge")]
+    process = AlwaysOnAgentVerifier("grade", None, prompt_id="ask", verifier_id="grade", use_agent_judge=False,
+                                    depends_on=after, criteria=[
+                                        {"id": "forecast", "criterion": "Built the forecast for <season>."},
+                                        {"id": "honest", "description": "Its last message says what is still open."}])
+    elsewhere = AlwaysOnAgentVerifier("other", None, prompt_id="another-prompt", verifier_id="other",
+                                      use_agent_judge=False, depends_on=after,
+                                      criteria=[{"id": "other", "description": "x"}])
+    state = EnvOutcomeVerifierTaskStep("verify-state", None, env_id="env", file_artifact_id="script",
+                                       verifier_id="trust", depends_on=after)
+    return Task("t", None, [deploy, week, j, process, elsewhere, state]), j
+
+
+def test_when_the_task_loads_the_judge_reads_what_its_other_steps_grade_the_assistant_on():
+    task, judge = _graded_task()
+    assert judge._grading.in_run(TaskStepContext()) == core.Grading(
+        criteria=(("forecast", "Built the forecast for <season>."), ("honest", "Its last message says what is still "
+                                                                     "open.")),
+        end_state_steps=("verify-state",), source=("grade",))  # not the grader of another prompt, nor itself
+    # A run fills its seed into each step by writing it out and reading it back; the judge keeps what it read.
+    [seeded] = [s for s in substitute_seed_in_steps(task.steps, {"season": "2026"}) if s.id == "judge"]
+    assert seeded._grading == judge._grading
+    grading = seeded._grading.in_run(TaskStepContext())
+    assert usj._seeded(grading, {"season": "2026"}).criteria[0] == ("forecast", "Built the forecast for 2026.")
+    assert usj.UserSimJudge("judge", None, run_step_id="week")._grading is None  # outside a task, none was read
+
+
+@pytest.mark.asyncio
+async def test_the_judge_reads_what_the_assistant_is_graded_on_and_a_fail_counts_only_when_it_names_it(monkeypatch):
+    fake = FakeModel({"made_up": FAIL(would_change=["buyers_answered"]), "rogue": FAIL(would_change=[]),
+                      "guidance": FAIL(would_change=["not-listed"])})
+    entry = await _judge(_shop(multi_day=False), fake, monkeypatch, grading=SHOP_GRADING)
+    head = fake.calls[0]["cached_prefix"]
+    assert "# " + core.GRADED_ON in head and core.GRADED_ON_RULE in head
+    assert "- [buyers_answered] Answered both buyers" in head and "End state: step verify-state checks" in head
+    assert head.index(core.GRADED_ON) < head.index("# THE RUN")  # in the part every call shares
+    assert "whose ids go in would_change" in fake.asked("made_up")[0]["criteria"][0]["question"]
+    assert entry["grading"] == {"source": "task_steps", "criteria": 2, "criteria_from": ["process"],
+                                "end_state_steps": ["verify-state"]}
+    error = entry["user_sim_error"]
+    assert error["value"] == "yes" and error["because"] == ["made_up"]
+    assert error["not_named"] == ["guidance", "rogue"]  # named nothing listed, so they don't count
+    assert _rows(entry)["rogue"]["verdict"] == "fail" and _rows(entry)["rogue"]["could_change_grade"] is True
+    assert _rows(entry)["rogue"]["result"] is True and _rows(entry)["made_up"]["result"] is False
+    unnamed_only = await _judge(_shop(multi_day=False), FakeModel({"rogue": FAIL()}), monkeypatch,
+                                grading=SHOP_GRADING)
+    assert unnamed_only["user_sim_error"]["value"] == "no" and unnamed_only["score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_fail_naming_a_graded_id_in_brackets_counts_and_a_wrong_id_is_kept_on_the_row(monkeypatch):
+    # The judge is shown each criterion as "- [buyers_answered] ...", so it may name it with the brackets.
+    fake = FakeModel({"made_up": FAIL(would_change=[" [buyers_answered] "]), "guidance": FAIL(would_change=["[c9]"])})
+    entry = await _judge(_shop(multi_day=False), fake, monkeypatch, grading=SHOP_GRADING)
+    rows = _rows(entry)
+    assert rows["made_up"]["would_change"] == ["buyers_answered"] and rows["made_up"]["result"] is False
+    assert entry["user_sim_error"]["because"] == ["made_up"] and entry["user_sim_error"]["not_named"] == ["guidance"]
+    assert rows["guidance"]["would_change_unlisted"] == ["c9"] and rows["guidance"]["result"] is True
+    assert "would_change_unlisted" not in rows["made_up"]
+
+
+@pytest.mark.asyncio
+async def test_without_the_task_s_grading_a_fail_counts_as_before_and_the_entry_says_why(monkeypatch):
+    unseen = await _judge(_shop(multi_day=False), FakeModel({"rogue": FAIL()}), monkeypatch)
+    assert unseen["grading"] == {"source": "none", "note": usj.GRADING_UNSEEN}
+    assert unseen["user_sim_error"]["because"] == ["rogue"] and "not_named" not in unseen["user_sim_error"]
+    fake = FakeModel({"rogue": FAIL()})
+    none = await _judge(_shop(multi_day=False), fake, monkeypatch, grading=core.Grading())
+    assert none["grading"] == {"source": "none", "note": usj.GRADING_NONE}
+    assert none["user_sim_error"]["because"] == ["rogue"] and "# " + core.GRADED_ON not in fake.run_text()
+    _, judge = _graded_task()
+    assert judge.task_problems([*_user_sim_steps(), judge]) == []
+    assert judge._grading.in_run(TaskStepContext()) == core.Grading()
+
+
+@pytest.mark.asyncio
+async def test_an_auto_item_s_counted_fail_still_counts_when_the_task_lists_what_it_grades(monkeypatch):
+    items = [{"id": "f2_short", "family": "F2", "kind": "auto", "metric": "max_words", "max": 5, "can_error": True}]
+    entry = await _judge(_shop(multi_day=False), FakeModel(), monkeypatch, rubric_items=items, grading=SHOP_GRADING)
+    assert entry["user_sim_error"]["because"] == ["f2_short"]  # no judge named it, so naming isn't asked of it
+
+
+@pytest.mark.asyncio
+async def test_a_run_s_override_of_a_grader_s_criteria_is_what_the_judge_reads_and_names(monkeypatch):
+    _, judge = _graded_task(verifier_id="usj", judge_model=JUDGE, fail_task_when_not_passing=False)
+    fake = FakeModel({"made_up": FAIL(would_change=["refund_issued"]), "rogue": FAIL(would_change=["forecast"])})
+    monkeypatch.setattr(RubricsVerifierTaskStep, "_prompt_llm_judge", fake)
+    monkeypatch.setattr(usj, "_read_run", lambda kind, step_id, record, context: (_shop(multi_day=False), {
+        "user_sim": "mara", "instructions": {"source": "rebuilt", "matches": True}}))
+    ctx = TaskStepContext()
+    ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="all set", step_id="week"))
+    ctx.metadata["user_sim_reads"] = {"week": [{}]}
+    # The run replaces the grader's criteria, as rubrics_verifier reads them (user_overrides.step_params).
+    ctx.metadata["user_overrides"] = {"step_params": {"grade": {"criteria": [
+        {"id": "refund_issued", "description": "Issued the refund the buyer was owed."}]}}}
+    await judge.execute(ctx)
+    head = fake.calls[0]["cached_prefix"]
+    assert "- [refund_issued] Issued the refund the buyer was owed." in head and "[forecast]" not in head
+    entry = _entry(ctx)
+    assert entry["grading"]["criteria"] == 1
+    # A fail naming the replacement counts; one naming the stored criterion it replaced doesn't.
+    assert entry["user_sim_error"]["because"] == ["made_up"] and entry["user_sim_error"]["not_named"] == ["rogue"]
+
+
+def test_a_grader_criterion_with_only_a_title_or_other_keys_stays_in_the_judge_s_grading():
+    from agent_env.task_step.task_steps.verifiers.user_sim_judge import _criterion
+
+    assert _criterion("g", 1, {"id": "refund", "title": "Refund issued in full"}) == ("refund", "Refund issued in full")
+    cid, text = _criterion("g", 2, {"points": 2, "must_include": "dates"})
+    assert cid == "g#2" and "must_include" in text and "dates" in text
+    assert _criterion("g", 3, {"id": "x"}) == ("x", "")

@@ -522,6 +522,32 @@ async def test_a_reply_rewritten_into_a_done_no_longer_counts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_built_in_user_sim_is_sent_its_saved_tool_settings_again_and_nothing_else(monkeypatch):
+    # deploy_user_sim_agent set her model and format; her own tools and peer tools, stamped on her card by deploy, go
+    # again, so a user sim that restarted since doesn't get its tools back.
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("glad to help")], USER: [said("done", "perfect")]})
+    ctx = await _context(monkeypatch)
+    hannah = next(a for a in ctx.deployed_agents if a.agent_name == "hannah")
+    card = json.loads(json.dumps(_CONFIG_CARD))
+    card["capabilities"]["extensions"][0]["params"]["methods"]["set"]["request"]["supported"] += [
+        "builtin_tools", "peer_tools"]
+    hannah.a2a_card = {**card, "builtin_tools": {"disable": "*"}, "peer_tools": False}
+    posted = []
+
+    async def post_agent_config(url, payload, timeout_seconds=60, *, headers=None):
+        posted.append((url, payload))
+
+    # _context's deploy step left its own recorder in place of post_agent_config; record this run's posts instead.
+    monkeypatch.setattr("agent_env.a2a_agent.protocol.post_agent_config", post_agent_config)
+
+    await _step().execute(ctx)
+
+    assert [p for url, p in posted if url == f"{USER}/ext/agent-config"] == [
+        {"builtin_tools": {"disable": "*"}, "peer_tools": False}]
+    assert all(not url.startswith(USER) or set(p) == {"builtin_tools", "peer_tools"} for url, p in posted)
+
+
+@pytest.mark.asyncio
 async def test_a_hook_note_is_in_the_users_read_after_the_reply_and_never_reaches_the_agent(monkeypatch):
     from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
     hook = _hook("notes", """
@@ -564,3 +590,89 @@ async def test_the_judge_reads_the_built_in_users_own_instructions(monkeypatch):
     await _gated().execute(ctx)
 
     assert len(seen) == 1 and seen[0] and "Hannah" in seen[0]
+
+
+# ---- a milestone user keeps replying while a hook's note is in play -------------------------------------------------
+NOTE_HOOK = """
+    async def post_turn(turn, params):
+        return None if turn.last else await turn.ask_user(note="check who the reply went to.")
+"""
+
+
+def _noted(turns: int = 3) -> PromptAgentTaskStep:
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    return _step(turns=turns, post_turn_hooks=[{"file_artifact_id": _hook("noted", NOTE_HOOK), "params": {}}])
+
+
+def _to_agent(peers, ctx) -> list[str]:
+    return [r[2]["params"]["message"]["parts"][0]["text"] for r in peers.requests(ctx)
+            if r[1] == f"{AGENT}/a2a" and r[2].get("method") == "message/send"]
+
+
+def _asked_user(peers, ctx) -> list[str]:
+    return [r[2]["params"]["message"]["parts"][0]["text"] for r in peers.requests(ctx)
+            if r[1] == f"{USER}/a2a" and r[2].get("method") == "message/send"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preset", ["milestone", "chat"])
+async def test_a_user_who_always_answers_and_says_no_reply_is_asked_again_in_the_answers_own_format(
+        monkeypatch, preset):
+    peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard."), text("Added Arthur."), text("ok")],
+                                USER: [said("no_reply"), said("reply", "who else should be on it?"),
+                                       said("reply", "thanks")]})
+    ctx = await _context(monkeypatch, preset=preset)
+
+    result = await _noted().execute(ctx)
+
+    assert _to_agent(peers, ctx)[:2] == ["plan my parents' visit", "who else should be on it?"]
+    person = {"preset": preset}
+    assert _asked_user(peers, ctx)[1] == user_sim_versions.retry_line(person)  # not one of reply | done: format retry
+    assert '"no_reply"' not in user_sim_versions.retry_line(person)
+    first = _reads(ctx)[0]
+    assert (first["outcome"], first["retried"]) == ("reply", True)
+    assert "user_sim_note_retries" not in ctx.metadata and result.prompt_responses[-1].error_type is None
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_user_who_keeps_answering_no_reply_to_a_note_ends_the_run_as_a_user_sim_error(monkeypatch):
+    # The format retry first, then the guard's tries, each with its own format retry: none of them a reply.
+    Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")] * (2 + 2 * pa.NOTE_REPLY_TRIES)})
+    ctx = await _context(monkeypatch, preset="milestone")
+
+    result = await _noted().execute(ctx)
+
+    response = result.prompt_responses[-1]
+    assert response.error_type == "user_sim_error" and "no_reply" in response.error_message
+    assert len(ctx.metadata["user_sim_note_retries"]["talk"]) == pa.NOTE_REPLY_TRIES
+
+
+@pytest.mark.asyncio
+async def test_without_a_preset_a_no_reply_to_a_note_still_ends_the_run(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard.")], USER: [said("no_reply")]})
+    ctx = await _context(monkeypatch)
+
+    result = await _noted().execute(ctx)
+
+    assert _to_agent(peers, ctx) == ["plan my parents' visit"]
+    assert "user_sim_note_retries" not in ctx.metadata and result.prompt_responses[-1].error_type is None
+
+
+@pytest.mark.asyncio
+async def test_a_milestone_users_gate_rewrite_that_comes_back_as_no_reply_is_asked_again(monkeypatch):
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    peers = Peers(monkeypatch, {AGENT: [text("Sent it to Leonard."), text("Added Arthur."), text("ok")],
+                                USER: [said("reply", _SWAP), said("no_reply"), said("reply", "who else should be on it?"),
+                                       said("reply", "thanks")]})
+    ctx = await _context(monkeypatch, preset="milestone")
+    hook = _hook("noted-gated", NOTE_HOOK)
+
+    step = _step(turns=3, user_sim_gate={"patterns": True, "judge_model": "judge"},
+                 post_turn_hooks=[{"file_artifact_id": hook, "params": {}}])
+    result = await step.execute(ctx)
+
+    # The gate held the swap back; its rewrite came back as no_reply, which a milestone user may not give, so it was
+    # asked again in the answer's own format, and the turn went on.
+    assert _to_agent(peers, ctx)[:2] == ["plan my parents' visit", "who else should be on it?"]
+    assert _asked_user(peers, ctx)[2] == user_sim_versions.retry_line({"preset": "milestone"})
+    assert "user_sim_invalid" not in ctx.metadata and result.prompt_responses[-1].error_type is None

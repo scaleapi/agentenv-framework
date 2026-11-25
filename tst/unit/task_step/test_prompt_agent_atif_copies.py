@@ -317,7 +317,7 @@ async def test_a_copy_that_fails_validation_is_stored_and_recorded_invalid_with_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field, version", [("schema_version", "ATIF-v1.9"), ("profile", "1.1")])
+@pytest.mark.parametrize("field, version", [("schema_version", "ATIF-v1.9"), ("profile", "1.2")])
 async def test_a_copy_newer_than_the_worker_is_stored_and_recorded_newer(monkeypatch, tmp_path, field, version):
     run = _Run(monkeypatch, tmp_path)
 
@@ -559,3 +559,26 @@ async def test_an_error_code_the_sdk_wouldnt_send_isnt_kept_as_the_reason(monkey
     response = await run.execute(run.context(), max_conversation_turns=1)
 
     assert [(atif["status"], atif["reason"]) for atif in _atifs(response)] == [("unavailable", "http_409")]
+
+
+@pytest.mark.asyncio
+async def test_post_turn_hooks_read_each_turns_native_trajectory_while_the_runs_copies_wait(monkeypatch, tmp_path):
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook
+    run = _Run(monkeypatch, tmp_path)
+    context = run.context()
+    hook = _hook("reads", """
+        async def post_turn(turn, params):
+            texts = [await turn.read_trajectory(n) for n in range(1, len(turn.trajectory_urls) + 1)]
+            turn.record({"urls": list(turn.trajectory_urls), "read": [t is not None for t in texts]})
+            return None
+        """)
+
+    response = await run.execute(context, post_turn_hooks=[{"file_artifact_id": hook, "params": {}}])
+
+    records = context.metadata["post_turn_hooks"]["solve"]
+    assert [r["read"] for r in records] == [[True], [True, True]]  # this turn's work, while the conversation runs
+    assert all(url is not None and isinstance(run.read(url), list) for url in records[-1]["urls"])  # native shots
+    # The step's own record is still the run's copies.
+    assert [turn["format"] for turn in response.target_agent_per_turn_trajectories] == [ATIF, ATIF]
+    assert response.target_agent_per_turn_trajectory_object_urls == [t["atif"]["url"] for t in
+                                                                     response.target_agent_per_turn_trajectories]

@@ -19,7 +19,8 @@ def person_of(us: dict) -> dict:
             "email": us.get("email"), "time_zone": us.get("time_zone"),
             "description": us.get("description"), "versions": us.get("versions") or {},
             "output_format": us.get("output_format"),
-            "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
+            "permissions": us.get("permissions"), "keep_private": us.get("keep_private"),
+            **({"preset": us["preset"]} if us.get("preset") else {})}
 
 
 def persona_fingerprint(persona: dict, opening_prompt: Any) -> str:
