@@ -16,12 +16,14 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 from agentenv_protocol.client import ExtensionCallError
 
+import agent_env
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.a2a_agent.clock import FOLLOWING_KEY
 from agent_env.artifact import DockerImageArtifact
@@ -115,6 +117,12 @@ async def _codex_turn(context: TaskStepContext, endpoint: fake_responses.FakeRes
     assert not [body for body in bodies if str(datetime.now(timezone.utc).date()) in body]
 
 
+def _pinned(agent: str, package: str) -> str:
+    """The version of ``package`` the agent's package.json pins, which its CLI's --version names."""
+    folder = Path(agent_env.__file__).parent / "agents" / "agents" / agent
+    return json.loads((folder / "package.json").read_text())["dependencies"][package]
+
+
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
@@ -131,11 +139,11 @@ class Agent:
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
-    "codex": Agent(bridge="codex_bridge", version=("codex", "--version"), shows="codex-cli 0.162.1",
+    "codex": Agent(bridge="codex_bridge", version=("codex", "--version"), shows=f"codex-cli {_pinned('codex', '@openai/codex')}",
                    turn=_codex_turn, endpoint=fake_responses.FakeResponses),
     "letta-code": Agent(bridge="letta_code_bridge", version=("letta", "--version"), shows="(Letta Code)",
                         turn=_letta_turn, endpoint=fake_openai.FakeOpenAI),
-    "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
+    "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows=_pinned("opencode", "opencode-ai")),
 }
 
 

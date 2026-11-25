@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import time
 
@@ -15,6 +14,7 @@ import pytest
 from aiohttp import web
 
 from tst.unit.agents.opencode.agent import model_relay, opencode_date
+from tst.util import fake_date
 
 # OpenCode's system prompt as its SystemPrompt.environment writes it (opencode-ai 1.17.18, src/session/system.ts).
 ENV_BLOCK = ("Here is some useful information about the environment you are running in:\n<env>\n"
@@ -37,23 +37,10 @@ def _call(system=SYSTEM, *, parts=False, tools=True, user=SYSTEM) -> dict:
 
 @pytest.fixture
 def env_clock(tmp_path, monkeypatch):
-    """An armed clock, in UTC, whose time a stand-in ``date`` prints (``FAKE_DATE_OUT``; it fails without one) before
-    it exits (``FAKE_DATE_EXIT``), recording the environment it got."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "date").write_text('#!/bin/sh\nenv > "$FAKE_DATE_ENV"\n[ "$1" = "+%s %N" ] || exit 2\n'
-                                  '[ -n "$FAKE_DATE_SLEEP" ] && sleep "$FAKE_DATE_SLEEP"\n'
-                                  '[ -n "$FAKE_DATE_KID" ] && { sleep 30 & echo $! > "$FAKE_DATE_KID"; }\n'
-                                  '[ -n "$FAKE_DATE_OUT" ] || { echo no clock >&2; exit 1; }\necho "$FAKE_DATE_OUT"\n'
-                                  'exit "${FAKE_DATE_EXIT:-0}"\n')
-    (bin_dir / "date").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-    monkeypatch.setenv("FAKE_DATE_ENV", str(tmp_path / "date.env"))
-    monkeypatch.setenv("AGENTENV_REAL_TIME", "1")
-    monkeypatch.setenv("TZ", "UTC")
-    time.tzset()
+    """An armed clock, in UTC, whose time the stand-in ``date`` prints (tst/util/fake_date.py)."""
+    recorded = fake_date.install(tmp_path, monkeypatch)
     monkeypatch.setattr(opencode_date, "clock_armed", lambda: True)
-    yield tmp_path / "date.env"
+    yield recorded
     monkeypatch.undo()
     time.tzset()
 

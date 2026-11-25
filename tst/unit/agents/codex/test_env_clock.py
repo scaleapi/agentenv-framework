@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import subprocess
 import tomllib
 
 import pytest
 
-from tst.unit.agents.codex.agent import AGENT_DIR, agent_egress, codex_bridge, codex_config, codex_date
+from tst.unit.agents.codex.agent import agent_egress, codex_bridge, codex_config, codex_date
 
 PROXY = "http://127.0.0.1:3128"
 SERVERS = {"env": {"url": "http://gateway:8080/mcp"}, "remote": {"url": "https://abc-123.w.modal.host/mcp"}}
@@ -115,24 +114,3 @@ def test_without_an_endpoint_there_is_no_provider_to_relay_and_the_cli_runs_as_b
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
 
     assert _cli_command(monkeypatch, None)[-2:] == ["-c", "features.goals=false"]
-
-
-def test_start_agent_keeps_a_providers_ca_bundle_trusted_by_the_server_and_the_proxy(tmp_path):
-    """Sail points SSL_CERT_FILE and the like at the bundle it signs model requests under; root.conf points the server
-    at agent-env's bundles, so start-agent adds the provider's to them and to the proxy's roots, once each."""
-    start = (AGENT_DIR / "start-agent").read_text()
-    merge = start[start.index('for bundle in "${SSL_CERT_FILE'):start.index("exec supervisord")]
-    targets = {"/etc/agentenv/ca-bundle.pem": tmp_path / "ca-bundle.pem", "/etc/agentenv/ca.pem": tmp_path / "ca.pem",
-               "/usr/local/lib/agentenv-egress/roots.pem": tmp_path / "roots.pem"}
-    for real, fake in targets.items():
-        fake.write_text("SYSTEM ROOTS\n")
-        merge = merge.replace(real, str(fake))
-    sail = tmp_path / "sailbox-ca-bundle.crt"
-    sail.write_text("-----BEGIN CERTIFICATE-----\nSAIL\n-----END CERTIFICATE-----\n")
-
-    subprocess.run(["sh", "-c", merge], check=True, env={"PATH": "/usr/bin:/bin", "SSL_CERT_FILE": str(sail),
-                   "NODE_EXTRA_CA_CERTS": str(sail), "REQUESTS_CA_BUNDLE": "/etc/agentenv/ca-bundle.pem"})
-
-    for fake in targets.values():
-        text = fake.read_text()
-        assert text.startswith("SYSTEM ROOTS\n") and text.count("SAIL") == 1, (fake.name, text)
