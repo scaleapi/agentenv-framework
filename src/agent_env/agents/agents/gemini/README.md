@@ -27,7 +27,7 @@ CLI by its last segment, and the proxy translates its generate calls to `/v1/cha
 
 A task's usage is what that proxy forwarded: every generate call the CLI made through its base URL (the main loop's,
 its subagents', its router, loop and next-speaker checks, compression, web tools and answered retries), each recorded in
-the trajectory as an `agentenv.model_call` event with its model and counts, and the task's `Usage` their sum, with each
+the trajectory as an `agentenv.model_call` event with its model, its counts and when it ended, and the task's `Usage` their sum, with each
 model's counts in `provider_details.models`. A call the endpoint refused counts nothing; one answered without counts,
 or still running when the CLI stopped, is counted in `unreported_calls`. The proxy can't see a call a tool makes to the
 endpoint itself, or one a CLI pointed elsewhere makes (a host `GOOGLE_GEMINI_BASE_URL`, Vertex auth): when the proxy
@@ -39,7 +39,7 @@ bound. Through a LiteLLM proxy, a provider-prefixed model's chat completions don
 | `agent-config/v1` | `GeminiConfig`: `model`, `system_prompt`, `allowed_tools` (read back, but the CLI has no per-run tool allowlist), `project_id`, `task_id`, `timeout_seconds` (600 by default), `web_tools` (`false` adds the CLI's `google_web_search` and `web_fetch` to its settings' `tools.exclude`) |
 | `mcp-config/v1` | SDK default, with names stripped of `_`; written to each run's settings |
 | `skill-config/v1` | inline and bundle skills installed as `~/.gemini/skills/<name>/SKILL.md`, where the CLI finds them |
-| `trajectory/v1` | the task's stream-json events, live while it runs (format `gemini-stream-json/1`) |
+| `trajectory/v1` | the task's stream-json events, live while it runs (format `gemini-stream-json/1`); `atif/1` when the run prescribes it (`gemini_atif.py`): a step per model response from the session transcript, with its thoughts, calls, results and images, and the usage of the proxy's `agentenv.model_call` whose input it names; a call that wrote no message, or that the endpoint refused, is a step of its own |
 | `snapshot/v1` | `save` uploads the session's transcript, byte for byte, and an empty workspace object; `load` plants it under a fresh session id and binds the target context |
 | `snapshot/v1` changelog | where the host has GNU tar: an AfterTool hook captures each tool call's writes as an incremental tar uploaded through the namespace grant; `apply` replays them in order and, with `resume_conversation`, binds the last applied tool call's session |
 | `peer-agents/v1` | SDK default: the CLI reaches the task's other agents through the SDK's `peer_agents` MCP tools |
