@@ -261,10 +261,13 @@ class A2AAgentValidator:
         skill_verifier_id = f"{task_id}-skill-rubric"
         # Snapshot validation: plant a unique token on agent A, snapshot, deploy
         # agent B with the snapshot loaded into a known target context_id, prompt
-        # agent B for recall, grade with a rubric.
+        # agent B for recall, grade with a rubric. Agent A is a deployment of its
+        # own: a save waits out every turn its agent is running and captures its
+        # workspace, so the modality probes' turns and files would ride in it.
         snapshot_token = f"SNAPSHOT-TOKEN-{uuid.uuid4().hex[:12]}"
         snapshot_plant_prompt_id = f"{task_id}-snapshot-plant-prompt"
         snapshot_artifact_id = f"{task_id}-snapshot"
+        snapshot_source_agent_name = "snapshot-source-agent"
         snapshot_target_agent_name = "snapshot-target-agent"
         snapshot_target_context_id = uuid.uuid4().hex
         snapshot_recall_prompt_id = f"{task_id}-snapshot-recall-prompt"
@@ -280,6 +283,7 @@ class A2AAgentValidator:
         mcp_step_id = f"{task_id}-mcp"
         skill_chain_id = f"{task_id}-add-skill"
         snapshot_capture_id = f"{task_id}-snapshot-capture"
+        snapshot_source_deploy_id = f"{task_id}-deploy-snapshot-source"
         snapshot_target_deploy_id = f"{task_id}-deploy-snapshot-target"
         snapshot_recall_rubric_id = f"{task_id}-snapshot-recall-rubric-step"
         peer_target_deploy_id = f"{task_id}-deploy-peer-target"
@@ -337,15 +341,23 @@ class A2AAgentValidator:
                 fail_task_on_error=False,
             ),
             # ── snapshot extension validation ────────────────────────────────
+            DeployAgentTaskStep(
+                id=snapshot_source_deploy_id, version=None,
+                env_ids=[], a2a_agent_id=agent.id, a2a_agent_version=agent.version,
+                agent_name=snapshot_source_agent_name,
+                depends_on=deploy_agent_dep, fail_task_on_error=False,
+            ),
             PromptAgentTaskStep(
                 id=snapshot_plant_prompt_id, version=None,
+                agent_name=snapshot_source_agent_name,
                 prompt=f"Remember exactly this token: {snapshot_token}. Just acknowledge with OK.",
                 prompt_id=snapshot_plant_prompt_id, timeout_seconds=120,
-                depends_on=deploy_agent_dep, fail_task_on_error=False,
+                depends_on=[TaskStepDependency(task_step_id=snapshot_source_deploy_id)], fail_task_on_error=False,
             ),
             SnapshotAgentStateTaskStep(
                 id=snapshot_capture_id, version=None,
                 artifact_id=snapshot_artifact_id, prompt_id=snapshot_plant_prompt_id,
+                agent_name=snapshot_source_agent_name,
                 depends_on=[TaskStepDependency(task_step_id=snapshot_plant_prompt_id)],
                 fail_task_on_error=False,
             ),
