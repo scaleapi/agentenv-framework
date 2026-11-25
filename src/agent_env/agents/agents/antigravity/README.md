@@ -54,10 +54,19 @@ The image is `python:3.11-slim` with `pdftoppm`, git, the SDK and the agent, run
 **The env's clock.** The image follows the env's clock as the other clocked agents do (the agents' README). The harness
 is a static binary, which agent-env's libfaketime can't reach, so it keeps real time and its conversation store stays in
 order at any env date, while the commands it runs read the env's time and go out through the egress proxy. The model
-sees the time only in the line the harness opens each user message with, "The current local time is: <RFC 3339>.":
-while the clock is armed, the relay puts the env's time there, read from `date`, and records it beside the
-conversations, so a resumed conversation's earlier turns keep the time each was given (`antigravity_date.py`). A call
-whose time the relay can't read is refused, so the task fails rather than tell the model the machine's time.
+sees the harness's clock in two places, and while the clock is armed the relay rewrites both (`antigravity_date.py`).
+
+- **The local-time line.** The relay puts the env's time, read from `date`, in each turn's "The current local time is:
+  <RFC 3339>." line.
+- **Command-result stamps.** It shifts the `Created At:` / `Completed At:` stamps on a command's result by the env's
+  offset from real time, so the command keeps its duration.
+- **A date change mid-turn.** When the env's date moves past the one the model was last told during a turn, the next
+  command result gets "The date has changed. The current local time is now: …", as Claude Code tells its model.
+
+Each rewrite is recorded beside the conversations, so a resumed conversation's earlier turns keep what they were
+given. A call whose time the relay can't read is refused, so the task fails rather than tell the model the machine's
+time. The harness's own file tools write real modification times, and its `schedule` timers run on real time and end
+with the turn, since a turn's harness is started for it and stopped after it.
 
 A `deploy_agent` `builtin_tools` selection picks the SDK's own tools: `{"disable": "*"}` and `{"only": [...]}` turn off
 every tool but those named, a list to turn off turns off those alone; the tools of the MCP servers agent-env gives the

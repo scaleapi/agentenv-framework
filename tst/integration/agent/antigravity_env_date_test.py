@@ -16,12 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.antigravity.agent import AGENT_DIR, PYTHONPATH, antigravity_bridge
+from tst.unit.agents.antigravity.agent import AGENT_DIR, PYTHONPATH, antigravity_bridge, antigravity_date
 from tst.util import fake_openai
 
 pytestmark = [pytest.mark.integration]
 
 ENV_TIMES = ("1950-01-01T09:30:00Z", "1950-01-02T08:15:00Z", "1950-01-03T07:00:00Z")
+# The env's time from the first turn's second model call on: a day past the first turn's line.
+MOVED_TO = "1950-01-02T06:00:00Z"
 # How long the endpoint holds the stalled turn's second model call: past that turn's 20 s.
 _STALL_S = 40
 # The tools the first turn calls, in order, by a word of the name the model is offered each by: a command, the
@@ -40,10 +42,13 @@ import google.antigravity as ag
 from google.antigravity import types as agt
 import antigravity_bridge, antigravity_date
 
-times = iter(sys.argv[2:])
+times = iter(sys.argv[2:-1])
 antigravity_date.clock_armed = lambda: True
+reads, moved = 0, None
 async def env_now():
-    return current
+    global reads
+    reads += 1
+    return moved if moved and reads > 1 else current
 antigravity_date._env_now = env_now
 
 async def turn(prompt, session_id, timeout_s=300):
@@ -55,9 +60,9 @@ async def turn(prompt, session_id, timeout_s=300):
             "session_id": result.session_id, "tool_calls": result.tool_call_count, "usage": result.usage.to_dict(),
             "events": events, "stored": antigravity_bridge.conversation_store_exists(result.session_id)}
 
-current = next(times)
+current, moved = next(times), sys.argv[-1]
 first = asyncio.run(turn("Run the shell command `echo 42` and reply with what it prints.", None))
-current = next(times)
+current, moved, reads = next(times), None, 0
 second = asyncio.run(turn("Thanks. Reply with the word done.", first["session_id"]))
 current = next(times)
 stalled = asyncio.run(turn("STALL: run the shell command `echo 42`.", None, timeout_s=20))
@@ -157,7 +162,7 @@ def run(sdk_python, tmp_path_factory) -> tuple[dict, fake_openai.FakeOpenAI]:
         env = {**{key: value for key, value in os.environ.items() if not key.startswith(("LITELLM_", "AGENTENV_"))},
                "LITELLM_BASE_URL": f"{endpoint.url}/v1", "LITELLM_API_KEY": "sk-fake", "HOME": str(folder),
                "ANTIGRAVITY_HOME": str(folder / ".antigravity"), "PYTHONPATH": PYTHONPATH}
-        out = subprocess.run([str(sdk_python), "-u", str(driver), str(workspace), *ENV_TIMES],
+        out = subprocess.run([str(sdk_python), "-u", str(driver), str(workspace), *ENV_TIMES, MOVED_TO],
                              cwd=folder, env=env, capture_output=True, text=True, timeout=900)
     assert out.returncode == 0, out.stderr[-4000:]
     return json.loads(out.stdout.strip().splitlines()[-1]), endpoint
@@ -230,3 +235,17 @@ def test_a_first_turn_past_its_time_leaves_the_conversation_the_sdk_started_for_
     assert stalled["error_code"] == "timeout", stalled
     assert stalled["session_id"] and stalled["stored"], stalled
     assert stalled["session_id"] != run[0]["turns"][0]["session_id"]
+
+
+def test_a_date_change_during_a_turn_is_noted_on_the_command_result_after_it_in_that_turn_and_the_next(run):
+    _, endpoint = run
+    note = antigravity_date.DATE_CHANGED.format(MOVED_TO)
+    resent = [body for body in (seen.body for seen in endpoint.completions())
+              if f"The current local time is: {ENV_TIMES[0]}." in (_user_texts(body) or [""])[0]
+              and any(message.get("role") == "tool" for message in body["messages"])]
+
+    assert len({len(_user_texts(body)) for body in resent}) == 2, "the first turn's result was never sent again"
+    for body in resent:
+        results = [message["content"] for message in body["messages"] if message.get("role") == "tool"]
+        assert results[0].endswith(note), results[0][-300:]
+        assert not any("The date has changed" in result for result in results[1:])

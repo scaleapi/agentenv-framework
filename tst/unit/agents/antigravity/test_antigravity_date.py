@@ -184,6 +184,52 @@ def test_a_commands_result_from_a_turn_off_the_clock_is_left_as_written(env_cloc
     assert call["messages"][3]["content"] == result
 
 
+def _sent(rewrite, call: dict) -> dict:
+    return json.loads(asyncio.run(rewrite(json.dumps(call).encode())))
+
+
+def test_a_command_result_on_the_date_the_model_was_told_gets_no_note(env_clock, monkeypatch, times):
+    rewrite = antigravity_date.env_time_rewrite(times)
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:06:07-06:00")
+    _sent(rewrite, _call(_line(REAL) + "go"))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:59:00-06:00")
+
+    ran = _ran("2026-11-25T18:08:29Z", "2026-11-25T18:08:34Z")
+
+    call = _sent(rewrite, _with_run(_call(_line(REAL) + "go"), ran, after=1))
+
+    assert "The date has changed" not in json.dumps(call)
+
+
+def test_a_date_change_during_a_turn_is_noted_on_the_result_after_it_and_kept_there(env_clock, monkeypatch, times):
+    rewrite = antigravity_date.env_time_rewrite(times)
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:06:07-06:00")
+    _sent(rewrite, _call(_line(REAL) + "go"))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-05T09:00:00-06:00")
+    first = _ran("2026-11-25T18:08:29Z", "2026-11-25T18:08:34Z")
+    second = _ran("2026-11-25T18:09:00Z", "2026-11-25T18:09:01Z", "7")
+    note = antigravity_date.DATE_CHANGED.format("2031-03-05T09:00:00-06:00")
+
+    noted = _sent(rewrite, _with_run(_call(_line(REAL) + "go"), first, after=1))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-05T09:01:00-06:00")
+    then = _sent(rewrite, _with_run(_with_run(_call(_line(REAL) + "go"), first, after=1), second, after=3))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-06T08:00:00-06:00")
+    later = _sent(antigravity_date.env_time_rewrite(times),
+                  _with_run(_call(_line(REAL) + "go", _line("2026-11-25T10:20:00-08:00") + "again"), first, after=1))
+
+    assert noted["messages"][-1]["content"].endswith(note)
+    assert then["messages"][3]["content"].endswith(note) and "The date has changed" not in then["messages"][5]["content"]
+    assert later["messages"][3]["content"].endswith(note) and later["messages"][3]["content"].count("date has changed") == 1
+    assert later["messages"][-1]["content"] == _line("2031-03-06T08:00:00-06:00") + "again"
+
+
+def test_off_the_clock_no_note_is_added(monkeypatch, times):
+    monkeypatch.setattr(antigravity_date, "clock_armed", lambda: False)
+    call = _with_run(_call(_line(REAL) + "go"), _ran("2026-11-25T18:08:29Z", "2026-11-25T18:08:34Z"), after=1)
+
+    assert _sent(antigravity_date.env_time_rewrite(times), call) == call
+
+
 def test_an_earlier_turn_the_agent_followed_no_clock_for_is_left_as_written(env_clock, monkeypatch, times):
     monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:06:07-06:00")
 

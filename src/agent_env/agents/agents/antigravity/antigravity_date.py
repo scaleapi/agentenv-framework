@@ -3,9 +3,11 @@ agent-env's libfaketime can't reach, so it runs on real time wherever the image 
 commands it starts read the env's time. The model sees the harness's clock in two places: the line ``The current local
 time is: <RFC 3339>.`` in each turn's user message, and the ``Created At:`` and ``Completed At:`` stamps that head a
 command's result. While this agent follows an armed clock the turn's model relay puts the env's time in the line and
-shifts the stamps by the env's offset from real time when it first sees them, so a command keeps its duration. Each
-keeps what it was first given, recorded in ``Records`` beside the conversations by the time and the message it is in,
-which the harness sends again as it stored it, so the earlier turns a resumed conversation sends again keep theirs.
+shifts the stamps by the env's offset from real time when it first sees them, so a command keeps its duration. When the
+env's date moves on during a turn, past the date the model was last told, the next command result gets a note saying so
+(``DATE_CHANGED``), as Claude Code tells its model. Each keeps what it was first given, recorded in ``Records`` beside
+the conversations by the time and the message it is in, which the harness sends again as it stored it, so the earlier
+turns a resumed conversation sends again keep theirs.
 tst/integration/agent/antigravity_env_date_test.py checks the SDK's model calls hold the machine's date nowhere else."""
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ _STAMP = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(?:Z|[+-][0-9]{2}:[0-9]{2})"
 LOCAL_TIME = re.compile(rf"(The current local time is: )({_STAMP})(\.)")
 # The harness's head of a command's result: when the command started and, once it has, when it ended.
 RUN_TIMES = re.compile(rf"^((?:Created|Completed) At: )({_STAMP})$", re.MULTILINE)
+# What a command's result gets when the env's date has changed since the model was last told it, in the harness's own
+# metadata block, and worded so LOCAL_TIME never reads it as a turn's line.
+DATE_CHANGED = "\n\n<ADDITIONAL_METADATA>\nThe date has changed. The current local time is now: {}.\n</ADDITIONAL_METADATA>"
 _DATE_TIMEOUT_S = 5
 # The hex digits of a message's digest a key holds.
 _KEY_DIGEST_CHARS = 16
@@ -97,8 +102,9 @@ def env_time_rewrite(times: Records | Tracked):
     """The relay's rewrite for a turn: while the agent follows an armed clock, every local-time line of a user message
     gets the env time recorded for it, and the last one, the turn's own, the env's time when the turn first sends it;
     every command result's stamps are shifted by the offset recorded for it, a result of the turn's own recording the
-    env's offset now. A line or result of an earlier turn with none recorded is left as written: the agent followed no
-    clock then. Unchanged otherwise; a call that isn't JSON, or whose env time can't be read, is refused, so the model
+    env's offset now; and the turn's latest command result, sent last, gets a ``DATE_CHANGED`` note once the env's date
+    is past the one the turn's line or an earlier note told the model, every recorded note going with its result again.
+    A line or result of an earlier turn with none recorded is left as written: the agent followed no clock then. Unchanged otherwise; a call that isn't JSON, or whose env time can't be read, is refused, so the model
     is never told the machine's time instead."""
 
     given: set[str] = set()
@@ -117,8 +123,9 @@ def env_time_rewrite(times: Records | Tracked):
         turn = max((index for index, message in enumerate(messages) if message.get("role") == "user"), default=-1)
         lines = [(holder, key) for message in messages if message.get("role") == "user"
                  for holder, key in _texts(message) if LOCAL_TIME.search(holder[key])]
-        runs = [(holder, key, index > turn) for index, message in enumerate(messages) if message.get("role") == "tool"
-                for holder, key in _texts(message) if RUN_TIMES.search(holder[key])]
+        tools = [(index, holder, key, holder[key]) for index, message in enumerate(messages)
+                 if message.get("role") == "tool" for holder, key in _texts(message)]
+        runs = [(holder, key, index > turn) for index, holder, key, text in tools if RUN_TIMES.search(text)]
         if not lines and not runs:
             return body
         now = _Now()
@@ -138,10 +145,31 @@ def env_time_rewrite(times: Records | Tracked):
                 times.put(run, " ".join(await now()))
             if (recorded := times.get(run)) is not None:
                 holder[key] = RUN_TIMES.sub(lambda match: match.group(1) + _shifted(match.group(2), recorded), text)
+        if lines:
+            await _note_date_changes(tools, turn, len(messages), times.get(current), times, now)
         # Escaped, so a lone surrogate an MCP server's tool sent, which UTF-8 can't encode, goes as it came.
         return json.dumps(request, separators=(",", ":")).encode()
 
     return rewrite
+
+
+async def _note_date_changes(tools: list, turn: int, count: int, told: str | None, times: Records | Tracked,
+                             now: _Now) -> None:
+    """Every command result with a recorded ``DATE_CHANGED`` note gets it again, and the turn's own result sent last a new
+    one when the env's date is past ``told``, the turn's env time, or the last note of the turn's."""
+    for index, holder, key, original in tools:
+        if (noted := times.get(f"note#{message_digest(original)}")) is not None:
+            holder[key] += DATE_CHANGED.format(noted)
+            told = noted if index > turn else told
+    if not tools or told is None:
+        return
+    index, holder, key, original = tools[-1]
+    if index != count - 1 or index <= turn or times.get(f"note#{message_digest(original)}") is not None:
+        return
+    env = (await now())[0]
+    if env[:10] != told[:10]:
+        times.put(f"note#{message_digest(original)}", env)
+        holder[key] += DATE_CHANGED.format(env)
 
 
 def line_key(text: str, real: str) -> str:
