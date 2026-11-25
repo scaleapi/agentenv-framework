@@ -53,7 +53,9 @@ def test_extensions_are_the_same_set_in_the_same_order(codex):
 def test_descriptions(codex):
     assert {uri: ext["description"] for uri, ext in _extensions(codex).items()} == {
         "urn:agentenv:agent-config/v1": "Set or read agent configuration such as model and role.",
-        "urn:agentenv:trajectory/v1": "Retrieve a task's Codex --json trajectory, also while it runs.",
+        "urn:agentenv:trajectory/v1": (
+            "Retrieve a task's Codex --json trajectory, also while it runs; atif/1 when the run prescribes it."
+        ),
         "urn:agentenv:attribution-probe/v1": (
             "Read back the LiteLLM attribution headers the agent most recently emitted on an outbound "
             "LLM call. Used by the agent-env runtime attribution validator."
@@ -87,7 +89,9 @@ def test_endpoints_and_verbs(codex):
     }
     assert routes == {
         "urn:agentenv:agent-config/v1": ("/ext/agent-config", {"set": ("POST", None), "get": ("GET", None)}),
-        "urn:agentenv:trajectory/v1": ("/ext/trajectory", {"get": ("POST", None)}),
+        "urn:agentenv:trajectory/v1": ("/ext/trajectory", {
+            "get": ("POST", None), "prescribe": ("POST", "/ext/trajectory/prescribe"),
+            "media": ("POST", "/ext/trajectory/media")}),
         "urn:agentenv:attribution-probe/v1": ("/ext/attribution-probe", {"probe": ("POST", None)}),
         "urn:agentenv:mcp-config/v1": ("/ext/mcp-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:skill-config/v1": ("/ext/skill-config", {"add": ("POST", None), "list": ("GET", None)}),
@@ -194,3 +198,9 @@ def test_the_card_and_health_are_served(codex):
     assert legacy.json() == current.json()
     assert legacy.json()["name"] == "Codex"
     assert health.json() == {"status": "ok"}
+
+
+def test_the_card_offers_atif_beside_exec_json_which_stays_the_default(codex):
+    params = _extensions(codex)["urn:agentenv:trajectory/v1"]["params"]
+    assert params["formats"] == ["codex-exec-json/1", "atif/1"]
+    assert params["native"] == params["default"] == "codex-exec-json/1"

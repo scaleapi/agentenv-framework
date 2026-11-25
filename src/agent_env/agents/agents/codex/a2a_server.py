@@ -65,6 +65,7 @@ from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
 import codex_config
+from codex_atif import CodexAtif
 from codex_bridge import (
     SESSIONS_DIR,
     CodexResult,
@@ -230,6 +231,12 @@ def _discard_execution_task(context_id: str, task: asyncio.Task) -> None:
     tasks.discard(task)
     if not tasks:
         _active_execution_tasks.pop(context_id, None)
+
+
+def _builds_atif(request: TaskRequest[CodexConfig]) -> bool:
+    """Whether the task feeds an atif/1 copy; a protocol from before ``builds_atif`` is taken to, and its copy is built
+    only when the run prescribed it."""
+    return getattr(request.trajectory, "builds_atif", True)
 
 
 class CodexConfig(AgentConfig):
@@ -647,7 +654,10 @@ def _by_model(threads: list[ThreadCalls], model: str | None) -> tuple[ModelUsage
             TRAJECTORY_V1,
             live=True,
             native=TRAJECTORY_FORMAT,
-            description="Retrieve a task's Codex --json trajectory, also while it runs.",
+            atif=CodexAtif,
+            description=(
+                "Retrieve a task's Codex --json trajectory, also while it runs; atif/1 when the run prescribes it."
+            ),
         ),
         enable(
             ATTRIBUTION_PROBE_V1,
@@ -751,6 +761,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
+                            aux_callback=request.trajectory.aux if _builds_atif(request) else None,
                             max_turns=cfg.max_turns,
                             mcp_urls=[info["url"] for info in request.mcp_servers.values()],
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
