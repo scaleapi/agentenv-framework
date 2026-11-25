@@ -53,6 +53,7 @@ IMAGES = {
     "agentenv-db-web": "src/agent_env/env/envs/service_db/Dockerfile.db-web",
     "agentenv-db-mcp": "src/agent_env/env/envs/service_db/Dockerfile.db-mcp",
     "agentenv-playwright-mcp": "src/agent_env/env/envs/playwright_mcp/Dockerfile",
+    "agentenv-antigravity": "src/agent_env/agents/agents/antigravity/Dockerfile",
     "agentenv-browser-use": "src/agent_env/agents/agents/browser-use/Dockerfile",
     "agentenv-claude-code": "src/agent_env/agents/agents/claude-code/Dockerfile",
     "agentenv-codex": "src/agent_env/agents/agents/codex/Dockerfile",
@@ -108,7 +109,8 @@ _RETRY_WAITS_SECONDS = (30, 60, 120)
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
 # browser answer their own commands, Claude Code's, Codex's, Gemini's, Hermes', OpenCode's and pi's agents run their
-# CLIs and import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
+# CLIs and import their servers, Antigravity's imports its server and starts its SDK's harness, which refuses the
+# config it isn't given, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
 # server, which loads Pydantic AI, Browser Use's loads browser-use in its own environment and imports its server, the proxy imports its
 # server, the mail example's env imports its server, and the base computer's desktop comes up, every program running.
 _SMOKES = {
@@ -120,6 +122,10 @@ _SMOKES = {
                                 " && ls -d /root/.cache/ms-playwright/chromium-*"],
     "agentenv-claude-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                              'claude --version && python -c "import a2a_server"'],
+    "agentenv-antigravity": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                             'python -c "import a2a_server" && "$(python -c "import google.antigravity as ag, pathlib; '
+                             'print(pathlib.Path(ag.__file__).parent / \'bin\' / \'localharness\')")" < /dev/null 2>&1 '
+                             '| grep -q "Failed to read InputConfig"'],
     "agentenv-browser-use": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                              '/opt/browser-use/bin/python -c "import agent" && python -c "import a2a_server"'],
     "agentenv-codex": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
