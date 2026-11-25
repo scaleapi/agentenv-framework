@@ -68,17 +68,14 @@ async def test_rpc_socket_options_and_routing(monkeypatch, scheme, proxies, via_
     await client.add_data(f"{scheme}://worker.env.test", [], verify=verify)
 
     (host, port), = connections
-    if via_proxy:
-        assert (host, port) == ("proxy.test", 8080)
-        assert options == []
-    else:
-        assert (host, port) == ("worker.env.test", 443 if scheme == "https" else 80)
-        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
-        idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
-        if idle is not None:
-            assert (socket.IPPROTO_TCP, idle, 30) in options
-        for name, value in (("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
-            if hasattr(socket, name):
-                assert (socket.IPPROTO_TCP, getattr(socket, name), value) in options
+    target = ("proxy.test", 8080) if via_proxy else ("worker.env.test", 443 if scheme == "https" else 80)
+    assert (host, port) == target
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
+    idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
+    if idle is not None:
+        assert (socket.IPPROTO_TCP, idle, 30) in options
+    for name, value in (("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+        if hasattr(socket, name):
+            assert (socket.IPPROTO_TCP, getattr(socket, name), value) in options
     expected = ssl.CERT_REQUIRED if verify else ssl.CERT_NONE
     assert handshakes == ([("worker.env.test", expected)] if scheme == "https" else [])
