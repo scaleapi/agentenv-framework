@@ -340,7 +340,7 @@ async def test_the_gateways_token_reaches_a_computer_as_that_computers_own(monke
     ("/svc/desk/agentenv", ("/agentenv", f"Bearer {DESK}")),
     ("/svc/laptop/agentenv", ("/agentenv", None)),
     ("/svc/laptop/agentenv/ext/computer-exec", ("/agentenv/ext/computer-exec", None)),
-    ("/svc/mcp-svc/export-state", ("/export-state", None)),
+    ("/svc/mcp-svc/api/messages", ("/api/messages", None)),
     ("/svc/shop/api/orders", ("/api/orders", None)),
     ("/website/shop/index.html", ("/index.html", None))])
 async def test_a_computers_token_goes_on_only_to_that_computer(monkeypatch, path, reached):
