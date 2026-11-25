@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # The model a run uses when neither the task nor the agent-config names one; the
 # @ai-sdk/openai-compatible provider forwards it verbatim as the chat model.
-DEFAULT_MODEL = os.environ.get("OPENCODE_MODEL", "anthropic/claude-sonnet-4-6")
+DEFAULT_MODEL = os.environ.get("OPENCODE_MODEL", "anthropic/claude-sonnet-5-5")
 ERROR_MESSAGE_LIMIT = 4000
 ROLE_HEADER = "AgentEnv-Role"
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.

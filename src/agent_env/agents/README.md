@@ -115,7 +115,7 @@ framework: each turn is one `opencode run --format json` run, resumed in the con
 MCP servers go to the run's own inline config, and its JSON events are the turn's trajectory. Name it as `opencode`, its
 alias, or by its id, `@local/agentenv-framework/agents/opencode`. It calls the `[model]` endpoint as an
 OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from the prompt, else
-`anthropic/claude-sonnet-4-6`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
+`anthropic/claude-sonnet-5-5`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
 with glibc. Its folder's `README.md` covers the extensions it implements.
 
 `agents/letta-code/` runs [Letta Code](https://github.com/letta-ai/letta-code) behind the protocol's A2A agent

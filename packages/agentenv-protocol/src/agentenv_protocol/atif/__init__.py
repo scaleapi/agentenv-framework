@@ -45,6 +45,7 @@ from .profile import (
     ToolCallProfile,
     TrajectoryProfile,
     dump_profile,
+    is_token_count,
     profile_of,
     read_profile,
 )
@@ -74,7 +75,7 @@ __all__ = [
     "AtifError", "AtifTurn", "AudioSource", "aux", "AuxEntry", "check", "check_adapter", "check_media", "Compaction",
     "COMPACTION_TRIGGERS", "ContentItem", "ContentPart",
     "Document", "dump_profile", "errors_in", "Fed", "FinalMetrics", "FinalMetricsProfile", "Finding", "finish",
-    "FORMAT", "ImageSource", "is_prefix", "KIT_RULES", "KitResult", "load", "Media", "MEDIA_PATH", "media_file", "media_paths", "MediaInfo",
+    "FORMAT", "ImageSource", "is_prefix", "is_token_count", "KIT_RULES", "KitResult", "load", "Media", "MEDIA_PATH", "media_file", "media_paths", "MediaInfo",
     "MediaItem", "MediaRef", "media_refs", "Metrics", "MetricsProfile", "Native", "native", "Observation", "ObservationResult",
     "ObservationResultProfile", "PROFILE_KEY", "profile_of", "PROFILE_VERSION", "PROFILES", "RAW_ARGUMENTS",
     "read_profile", "ReasoningBlock", "RecordedTask", "replay", "Rule", "RULES", "SCHEMA_VERSION", "Selector",

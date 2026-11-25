@@ -1790,7 +1790,7 @@
    {
     "model": "judge-model",
     "prompt": {
-     "sha256": "40d801b49766d4480f0ddf25ed938cc8a23f602a3b11ad015e470a4b806b4baa",
+     "sha256": "aea08aefdfb21b2f327961c4289634a4ffd42b6fee8e4bb4b20f8b18314fbb77",
      "chars": 5462
     },
     "images": null,
@@ -1820,7 +1820,7 @@
    {
     "model": "judge-model",
     "prompt": {
-     "sha256": "21fa9a54c66143ab1b91f7ea9a3e296de081d6673c3d4942efa4b294a7314f51",
+     "sha256": "3bde24d6fe7c54f6ba6e928adf9f53a71f236b45a2f08e30823e7d432f31f1eb",
      "chars": 8120
     },
     "images": null,
@@ -1850,7 +1850,7 @@
    {
     "model": "judge-model",
     "prompt": {
-     "sha256": "72dbf7fa2ec660a524f9fb275829287e33916b325646defd3f968673bef37456",
+     "sha256": "79b6e5f49077fbb629c417b93dae9d855ba8f2283f261c471e7cd21f052ff059",
      "chars": 27161
     },
     "images": null,
@@ -1865,7 +1865,7 @@
    {
     "model": "judge-model",
     "prompt": {
-     "sha256": "08ff116ff1f18f0bca58cc5cf5d6497538899513483f4c30fd57b6041eba41ad",
+     "sha256": "d9421b56191903a2ae558b7ee6c0c8ae4623d607934373784da1630882f98635",
      "chars": 6807
     },
     "images": [
@@ -1893,7 +1893,7 @@
    {
     "model": "judge-model",
     "prompt": {
-     "sha256": "1ef02d0872348b7ab37571c63b52b8baf0da3ddb8ce029a7ad56e68b6f400708",
+     "sha256": "c26e7fb3d04cc0425d2c5e902107bddbb59ae3ea0b0ab22b38b1a9b99be297e8",
      "chars": 6791
     },
     "images": null,
@@ -1970,7 +1970,7 @@
    },
    "/tmp/prompt_trajectory_turns/<run>/turn_01.json": {
     "text": {
-     "sha256": "459155b7c3251a24f07dd1976dee79415435551ff7a918817a870fd8e7442a65",
+     "sha256": "ff38cf7d4021447c2e713ea39d80bbd0308e205523ab9a469b35bfd25774eee4",
      "chars": 3440
     }
    }
@@ -2024,13 +2024,13 @@
   "files": {
    "/tmp/prompt_trajectory_turns/<run>/turn_01.json": {
     "text": {
-     "sha256": "915ef75b2692cd49442fd5f6775dccf3580184a9de9e3afe44743c4dc39cf67e",
+     "sha256": "476a344310d4ff3b64713cca699c9a48d9fcd4fc738cce46d573bd90708f0a14",
      "chars": 4670
     }
    },
    "/tmp/prompt_trajectory_turns/<run>/turn_02.json": {
     "text": {
-     "sha256": "c42e98ee768d0b4d38c4c48b15251f1a4a7bc8a9fdc194a92ea48a50e03aead4",
+     "sha256": "393dabe26a664f170a5d4bf3bb58ce58323f6d1cbf59a871a1eee22840c1119a",
      "chars": 1388
     }
    }
@@ -2081,7 +2081,7 @@
    },
    "/tmp/prompt_trajectory_turns/<run>/turn_02.json": {
     "text": {
-     "sha256": "c42e98ee768d0b4d38c4c48b15251f1a4a7bc8a9fdc194a92ea48a50e03aead4",
+     "sha256": "393dabe26a664f170a5d4bf3bb58ce58323f6d1cbf59a871a1eee22840c1119a",
      "chars": 1388
     }
    }
@@ -2427,7 +2427,7 @@
     },
     "extra": {
      "agentenv": {
-      "version": "1.1",
+      "version": "1.2",
       "native_format": "toy-events/1",
       "adapter": {
        "name": "toy-events-atif",

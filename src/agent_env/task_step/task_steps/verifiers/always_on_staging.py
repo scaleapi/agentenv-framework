@@ -425,8 +425,10 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
         i, line = wake_input
         out.append(f"- input: \"{_cut(_text(line, 'text'), INDEX_TEXT_CHARS)}\" ({path}:{i})")
     changes = Counter()
+    acted = False   # whether the assistant's own turn has begun: a harness's step (a save turn) isn't it
     for i, line in enumerate(lines, 1):
         event = line["event"]
+        acted = acted or (event in ("assistant_text", "assistant_thinking", "tool_call") and not line.get("step"))
         tool = line.get("tool") or ""
         # A tool the harness provides itself ("internal": its notes, its look-ups of past wakes) changes no app.
         own = bool(line.get("internal"))
@@ -463,7 +465,7 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
                    if line.get("cut_off") else "")
             out.append(f"- nudged after closing text; then {line.get('outcome')}{cut} ({path}:{i})")
         elif event == "harness_note" and line.get("compaction") is not None:
-            out.append(f"- {_compaction_line(line['compaction'])} ({path}:{i})")
+            out.append(f"- {_compaction_line(line['compaction'], during=acted)} ({path}:{i})")
         elif event == "app_change":
             changes["by the assistant" if line.get("by") == "agent" else "by others" if line.get("by")
                     else "with no known actor"] += 1
@@ -484,13 +486,13 @@ def _limit_words(limit: Any) -> str:
     return LIMIT_WORDS.get(limit, str(limit or "limit").replace("_", " "))
 
 
-def _compaction_line(facts: dict) -> str:
-    """index.md's words for a compaction the harness ran before the wake's turn, from its note's ``compaction``: who
-    wrote its summary, and what it did."""
+def _compaction_line(facts: dict, *, during: bool = False) -> str:
+    """index.md's words for a compaction the harness ran before the wake's turn, or ``during`` it, from its note's
+    ``compaction``: who wrote its summary, and what it did."""
     writer = "the assistant's own model" if facts["written_by"] == "assistant" else "the harness"
     words = compaction_words(facts)
-    return (f"compaction by the harness, before this wake's turn, its summary written by {writer}"
-            + (": " + "; ".join(words) if words else ""))
+    return (f"compaction by the harness, {'partway through' if during else 'before'} this wake's turn, its summary "
+            f"written by {writer}" + (": " + "; ".join(words) if words else ""))
 
 
 def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict],

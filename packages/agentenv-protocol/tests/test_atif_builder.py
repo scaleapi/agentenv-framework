@@ -98,7 +98,8 @@ class Compacting(Adapter):
     @native(type="compact")
     def compact(self, r, turn):
         turn.message(step=r["step"], text=r["text"])
-        turn.compaction(step=r["step"], written_by=r.get("by", "assistant"), trigger=r.get("trigger"))
+        turn.compaction(step=r["step"], written_by=r.get("by", "assistant"), trigger=r.get("trigger"),
+                        tokens_before=r.get("before"), tokens_after=r.get("after"))
         turn.step(key=r["step"], input_tokens=100, output_tokens=20)
 
     @native(type="system")
@@ -108,14 +109,16 @@ class Compacting(Adapter):
 
 def test_a_compaction_is_the_step_of_the_call_that_wrote_its_summary_and_the_harnesss_message_a_system_step():
     run, pages = run_task([{"type": "say", "step": "s1", "text": "working"},
-                           {"type": "compact", "step": "c1", "text": "the summary so far", "trigger": "manual"},
+                           {"type": "compact", "step": "c1", "text": "the summary so far", "trigger": "manual",
+                            "before": 28634, "after": 2839},
                            {"type": "system", "text": "Compacted"},
                            {"type": "say", "step": "s2", "text": "after it"}], cls=Compacting)
     user, before, compaction, system, after = run.document()["steps"]
     assert (compaction["source"], compaction["message"], compaction["llm_call_count"]) == (
         "agent", "the summary so far", 1)
     assert compaction["metrics"] == {"prompt_tokens": 100, "completion_tokens": 20}
-    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "manual"}
+    assert profile_of(compaction)["compaction"] == {"written_by": "assistant", "trigger": "manual",
+                                                    "tokens_before": 28634, "tokens_after": 2839}
     assert (system["source"], system["message"]) == ("system", "Compacted")
     assert not {"model_name", "metrics", "llm_call_count", "tool_calls"} & set(system)
     assert after["message"] == "after it"
@@ -123,10 +126,13 @@ def test_a_compaction_is_the_step_of_the_call_that_wrote_its_summary_and_the_har
     assert all(is_prefix(a, b) for a, b in zip(pages, pages[1:]) if a is not None)
 
 
-@pytest.mark.parametrize("record", [{"type": "compact", "step": "c1", "text": "x", "by": "someone"},
-                                    {"type": "compact", "step": "c1", "text": "x", "trigger": "now"}])
-def test_a_compaction_names_a_writer_and_trigger_of_its_vocabularies(record):
-    with pytest.raises(AtifError, match="isn't one of"):
+@pytest.mark.parametrize(("record", "refusal"), [
+    ({"type": "compact", "step": "c1", "text": "x", "by": "someone"}, "isn't one of"),
+    ({"type": "compact", "step": "c1", "text": "x", "trigger": "now"}, "isn't one of"),
+    ({"type": "compact", "step": "c1", "text": "x", "before": -1}, "isn't a count of tokens"),
+    ({"type": "compact", "step": "c1", "text": "x", "after": "2839"}, "isn't a count of tokens")])
+def test_a_compaction_names_a_writer_and_trigger_of_its_vocabularies_and_counts_tokens(record, refusal):
+    with pytest.raises(AtifError, match=refusal):
         run_task([record], cls=Compacting)
 
 

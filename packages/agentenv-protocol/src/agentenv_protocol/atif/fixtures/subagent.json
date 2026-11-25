@@ -160,7 +160,7 @@
  },
  "extra": {
   "agentenv": {
-   "version": "1.1",
+   "version": "1.2",
    "native_format": "toy-events/1",
    "adapter": {
     "name": "toy-events-atif",

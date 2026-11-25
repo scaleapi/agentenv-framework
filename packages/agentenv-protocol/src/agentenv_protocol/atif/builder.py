@@ -32,6 +32,7 @@ from .profile import (
     TASK_STATES,
     VISIBILITIES,
     AtifError,
+    is_token_count,
 )
 
 #: Media types ATIF has a part type for; any other medium is written as a text note naming its file.
@@ -915,18 +916,24 @@ class AtifTurn:
         target.media.update(media)
         self._touch(target, when)
 
-    def compaction(self, *, step: str, written_by: str, trigger: str | None = None, agent: str | None = None) -> None:
+    def compaction(self, *, step: str, written_by: str, trigger: str | None = None, tokens_before: int | None = None,
+                   tokens_after: int | None = None, agent: str | None = None) -> None:
         """Mark step ``step`` a compaction: its message a summary that replaced the conversation before it in what the
         agent sees, written by ``written_by`` (``assistant``, the agent's own model, or ``harness``) and set off by
-        ``trigger`` (``manual``, something asked for it, or ``auto``). The step is the call that wrote the summary,
-        so its usage goes on it with ``step``. Profile 1.1."""
+        ``trigger`` (``manual``, something asked for it, or ``auto``), the conversation counting ``tokens_before`` just
+        before it and ``tokens_after`` just after, when the harness counts them. The step is the call that wrote the
+        summary, so its usage goes on it with ``step``. Profile 1.1; its tokens 1.2."""
         if written_by not in SUMMARY_WRITERS:
             raise AtifError(f"written_by {written_by!r} isn't one of {', '.join(SUMMARY_WRITERS)}")
         if trigger is not None and trigger not in COMPACTION_TRIGGERS:
             raise AtifError(f"trigger {trigger!r} isn't one of {', '.join(COMPACTION_TRIGGERS)}")
+        for name, count in (("tokens_before", tokens_before), ("tokens_after", tokens_after)):
+            if count is not None and not is_token_count(count):
+                raise AtifError(f"{name} {count!r} isn't a count of tokens")
         target = self._doc.step_for(_key(step), agent)
-        target.profile["compaction"] = {key: value for key, value in (("written_by", written_by), ("trigger", trigger))
-                                        if value is not None}
+        target.profile["compaction"] = {key: value for key, value in (
+            ("written_by", written_by), ("trigger", trigger), ("tokens_before", tokens_before),
+            ("tokens_after", tokens_after)) if value is not None}
 
     def attempt(self, number: int) -> None:
         """A harness retry: steps from here on carry attempt ``number``."""

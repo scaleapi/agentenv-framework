@@ -29,8 +29,25 @@ NATIVE_FORMAT = "claude-code-stream-json/1"
 TESTED_WITH = ("2.1.322",)
 #: The model a message the CLI wrote itself names, such as an API error's, which no model call produced.
 _SYNTHETIC_MODEL = "<synthetic>"
+#: What sets a compaction off, as atif/1's COMPACTION_TRIGGERS names it.
+_TRIGGERS = ("manual", "auto")
 #: A step's token counts as the builder takes them, and as the turn record and a session record give them.
 _COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+def _token_count(value: Any) -> int | None:
+    """``value`` when it counts tokens, as atif/1's ``is_token_count`` says, which the module defines itself: it
+    imports only what its protocol floor has, and the image installs any protocol at or above that floor."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+@dataclass(frozen=True)
+class _Boundary:
+    """A ``compact_boundary``'s facts: what set the compaction off, and the history's tokens before and after it."""
+
+    trigger: str | None = None
+    tokens_before: int | None = None
+    tokens_after: int | None = None
 
 
 @dataclass(eq=False)
@@ -41,10 +58,9 @@ class _Entry:
     agent: str | None
     from_stdout: bool
     ready: bool = False
-    #: A compaction's summary, held until the turn's count gives its call's usage, and what set it off.
-    summary: bool = False
+    #: A compaction's summary: its boundary, held until the turn's count gives its call's usage.
+    boundary: _Boundary | None = None
     held: bool = False
-    trigger: str | None = None
     usage: dict[str, int] | None = None
     model: str | None = None
 
@@ -98,8 +114,8 @@ class ClaudeCodeAtif(Adapter):
         self._unplaced: set[str] = set()
         self._inits = 0
         self._attempt_step: str | None = None
-        self._summary_next = False
-        self._summary_trigger: str | None = None
+        #: The boundary whose summary is the next root user text on stdout.
+        self._boundary: _Boundary | None = None
         self._task_counts: dict[str, int] = {}
         #: The model the task's latest root call named, as the API answered, and each model the turn's tally named as
         #: called (a gateway route prefixes it) by the name its calls answered as: a compaction is named as they are.
@@ -120,9 +136,8 @@ class ClaudeCodeAtif(Adapter):
             self._spawner_of_uuid[uuid] = agent
             self._link(uuid)
         entry = self._enqueue(record, uuid, agent, from_stdout=True)
-        if self._summary_next and agent is None and record.get("type") == "user" and _texts(record):
-            entry.summary, entry.held, entry.trigger = True, True, self._summary_trigger
-            self._summary_next = False
+        if self._boundary is not None and agent is None and record.get("type") == "user" and _texts(record):
+            entry.boundary, entry.held, self._boundary = self._boundary, True, None
         if uuid is not None and uuid in self._session:
             self._match(entry)
         self._flush(turn)
@@ -131,8 +146,9 @@ class ClaudeCodeAtif(Adapter):
     def boundary(self, record: dict[str, Any], turn: Any) -> None:
         """The CLI's compaction: the next user message on stdout is its summary."""
         metadata = record.get("compact_metadata") if _is_mapping(record.get("compact_metadata")) else {}
-        self._summary_next = True
-        self._summary_trigger = metadata.get("trigger") if metadata.get("trigger") in ("manual", "auto") else None
+        trigger, before, after = (metadata.get(key) for key in ("trigger", "pre_tokens", "post_tokens"))
+        self._boundary = _Boundary(trigger=trigger if trigger in _TRIGGERS else None,
+                                   tokens_before=_token_count(before), tokens_after=_token_count(after))
 
     @native(type="system", where={"subtype": "init"})
     def init(self, record: dict[str, Any], turn: Any) -> None:
@@ -207,7 +223,7 @@ class ClaudeCodeAtif(Adapter):
         self._cli_of_uuid.clear()
         self._inits = 0
         self._attempt_step = None
-        self._summary_next = False
+        self._boundary = None
         self._task_model = None
         self._task_counts = {}
         self._task_calls = set()
@@ -356,15 +372,17 @@ class ClaudeCodeAtif(Adapter):
                                  status="error" if block.get("is_error") else "ok", time=when)
         if entry.agent is not None:
             return
-        for text in _texts(entry.record):
-            if entry.summary:
-                key = f"compaction-{entry.uuid or entry.seq}"
-                turn.message(step=key, text=text, time=when)
-                turn.compaction(step=key, written_by="assistant", trigger=entry.trigger)
-                turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
-                entry.summary = False
-            else:
-                turn.system_message(text=text, time=when)
+        texts = _texts(entry.record)
+        if entry.boundary is not None:
+            boundary, entry.boundary = entry.boundary, None
+            key = f"compaction-{entry.uuid or entry.seq}"
+            turn.message(step=key, text="\n".join(texts), time=when)
+            turn.compaction(step=key, written_by="assistant", trigger=boundary.trigger,
+                            tokens_before=boundary.tokens_before, tokens_after=boundary.tokens_after)
+            turn.step(key=key, model_name=entry.model, time=when, **(entry.usage or {}))
+            return
+        for text in texts:
+            turn.system_message(text=text, time=when)
 
     def _left_over(self, record: dict[str, Any]) -> dict[str, int] | None:
         """What the turn reported beyond its model calls written or still queued: the one call no session record
@@ -425,8 +443,7 @@ class ClaudeCodeAtif(Adapter):
         counts = {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
                   "cache_read_tokens": usage.get("cache_read_input_tokens"),
                   "cache_write_tokens": usage.get("cache_creation_input_tokens")}
-        counts = {name: value for name, value in counts.items()
-                  if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+        counts = {name: value for name, value in counts.items() if _token_count(value) is not None}
         return counts or None
 
     def _attempt_failed(self, result: dict[str, Any], turn: Any) -> None:
