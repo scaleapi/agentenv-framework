@@ -170,7 +170,7 @@ def control_token() -> str:
     return secrets.token_urlsafe(CONTROL_TOKEN_BYTES)
 
 
-def control_environment(token: Optional[str], card: Optional[dict] = None) -> dict[str, str]:
+def control_environment(token: Optional[str], card: Optional[dict]) -> dict[str, str]:
     """What hands a computer its control ``token`` in its boot environment, by what ``card``, its driver's as a probe
     read it, says the driver takes: only the token's sha256 for a driver that takes that (computer/v1's
     ``control_token``), so nothing in the computer holds the token; the token for one an older protocol built; both for

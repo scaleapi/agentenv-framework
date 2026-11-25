@@ -12,9 +12,9 @@ import pytest
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.clock_followers import ClockFollowers
-from agent_env.env.gateway.constants import (CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S, EXT_CLOCK_URI,
-                                             GATEWAY_EXTENSIONS)
-from agent_env.env.gateway.entrypoint import parse_clock_followers
+from agent_env.env.gateway.constants import (CLOCK_FOLLOWERS_ENV, CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S,
+                                             EXT_CLOCK_URI, GATEWAY_EXTENSIONS)
+from agent_env.env.gateway.entrypoint import parse_named_tokens
 from agent_env.env.gateway.gateway import Gateway
 
 T0 = "2026-01-01T00:00:00Z"
@@ -381,12 +381,13 @@ async def test_a_hundred_advances_are_each_acknowledged_in_order(gateway):
 
 
 def test_the_gateway_reads_its_declared_computers_from_its_environment():
-    assert parse_clock_followers("") == {}
-    assert parse_clock_followers(" desktop=read-d ,laptop=read-l,") == {"desktop": "read-d", "laptop": "read-l"}
+    assert parse_named_tokens("", CLOCK_FOLLOWERS_ENV) == {}
+    assert parse_named_tokens(" desktop=read-d ,laptop=read-l,", CLOCK_FOLLOWERS_ENV) == {"desktop": "read-d",
+                                                                                         "laptop": "read-l"}
     for spec, fragment in (("desktop", "expected 'name=token'"), ("=tok", "expected"), ("desktop=", "expected"),
                            ("desktop=a,desktop=b", "twice")):
         with pytest.raises(ValueError, match=fragment):
-            parse_clock_followers(spec)
+            parse_named_tokens(spec, CLOCK_FOLLOWERS_ENV)
 
 
 @pytest.mark.asyncio

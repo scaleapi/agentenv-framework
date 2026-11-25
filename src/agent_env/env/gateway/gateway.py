@@ -623,7 +623,7 @@ class Gateway:
         and to an older agent-env's computers (``control_token_children``), and nowhere else. A child's token goes on
         only to that child's /svc routes and to the clock watch, where the child sends it as its read token. Any other
         value goes on as it came."""
-        child = path.removeprefix("/svc/").split("/", 1)[0] if path.startswith("/svc/") else None
+        child = route[0] if (route := svc_route(path)) else None
         if self._control_bearer is not None and hmac.compare_digest(value, self._control_bearer):
             if child in self._child_bearers:
                 return self._child_bearers[child]
@@ -715,11 +715,10 @@ class Gateway:
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
-        prefix, _, rest = path.lstrip("/").partition("/")
-        service, _, rest = rest.partition("/")
-        if prefix == "svc" and service in self._consoles:
+        service, rest = svc_route(path) or (None, "")
+        if service in self._consoles:
             return True
-        guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
+        guarded = self._token_paths.get(service, ())
         raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
         return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
 
@@ -1970,6 +1969,15 @@ def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str]
                  and resolved.route_path is not None]
         endpoints[key] = found[0] if found else "/mcp"
     return endpoints
+
+
+def svc_route(path: str) -> tuple[str, str] | None:
+    """The child a /svc/<child>/<rest> path is routed to and the rest of its path, None for a path outside /svc."""
+    prefix, _, rest = path.lstrip("/").partition("/")
+    if prefix != "svc":
+        return None
+    child, _, rest = rest.partition("/")
+    return child, rest
 
 
 def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],

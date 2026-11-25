@@ -41,7 +41,7 @@ async def test_the_launcher_takes_a_burst_of_new_connections_and_a_reset_boots_i
                              network_policy=None, timeout=1800, attribution=None, form="disk")
     try:
         statuses = await asyncio.gather(*(_status(f"{booted.url}{WELL_KNOWN_PATH}") for _ in range(BURST)))
-        await provider.reset_vm(booted.sandbox, image=image, env={**environment, **boot.control_environment(token)})
+        await provider.reset_vm(booted.sandbox, image=image, env={**environment, **boot.control_environment(token, None)})
         again = await boot.ready(booted.url, boot.READY_TIMEOUT_S, token)
     finally:
         await boot.discard(booted.sandbox)

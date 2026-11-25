@@ -223,8 +223,9 @@ class Computers:
                 for error in failed[1:]:
                     logger.warning(f"multi env '{self._owner}': another computer failed to deploy too: {error!r}")
                 raise failed[0]
-            return [ExternalChild(env.environment_name, record.mcp_url, record.environment_url, _clock_read_token(record),
-                                  record.control_token) for env, record in zip(self.every, results)]
+            return [ExternalChild(env.environment_name, record.mcp_url, record.environment_url,
+                                  clock_read_token=_clock_read_token(record), control_token=record.control_token)
+                    for env, record in zip(self.every, results)]
         return deploy
 
     async def finish(self, deployed: DeployedEnv) -> None:

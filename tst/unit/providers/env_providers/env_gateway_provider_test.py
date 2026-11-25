@@ -2911,6 +2911,9 @@ def test_compose_names_the_gateways_computers_with_their_own_tokens_and_logs_non
     assert gateway_env("gw-token")["CHILD_CONTROL_TOKENS"] == gateway_env(None)["CHILD_CONTROL_TOKENS"] == \
         "desktop=desk-own,laptop=lap-own"
     assert "CONTROL_TOKEN_CHILDREN" not in gateway_env("gw-token")
+    assert gateway_env("gw-token")["AGENTENV_CONTROL_TOKEN"] == "gw-token"
+    assert "AGENTENV_CONTROL_TOKEN_SHA256" not in gateway_env("gw-token")
+    assert "AGENTENV_CONTROL_TOKEN" not in gateway_env(None)
     assert gateway_env("gw-token")["COMPUTERS"] == gateway_env(None)["COMPUTERS"] == "desktop,laptop"
     assert "desk-own" not in caplog.text and "lap-own" not in caplog.text
 

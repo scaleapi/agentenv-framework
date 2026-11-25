@@ -199,9 +199,9 @@ def parse_frame_ancestors(spec: str) -> tuple[str, ...]:
     return origins
 
 
-def parse_clock_followers(spec: str, variable: str = CLOCK_FOLLOWERS_ENV) -> dict[str, str]:
-    """``CLOCK_FOLLOWER_TOKENS``, each computer that follows the clock as ``name=read token``, or another ``variable``
-    of the same form, ``CHILD_CONTROL_TOKENS``; comma-separated."""
+def parse_named_tokens(spec: str, variable: str) -> dict[str, str]:
+    """``variable``'s value, a token by name as ``name=token`` entries, comma-separated: ``CLOCK_FOLLOWER_TOKENS``, each
+    computer that follows the clock and its read token, or ``CHILD_CONTROL_TOKENS``, each computer's own control token."""
     tokens: dict[str, str] = {}
     for entry in filter(None, (part.strip() for part in spec.split(","))):
         name, _, token = (part.strip() for part in entry.partition("="))
@@ -257,11 +257,11 @@ if __name__ == "__main__":
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         control_token_children=[name.strip() for name in os.environ.get(CONTROL_TOKEN_CHILDREN_ENV, "").split(",")
                                 if name.strip()],
-        child_control_tokens=parse_clock_followers(os.environ.get(CHILD_CONTROL_TOKENS_ENV, ""),
+        child_control_tokens=parse_named_tokens(os.environ.get(CHILD_CONTROL_TOKENS_ENV, ""),
                                                    CHILD_CONTROL_TOKENS_ENV),
         computers=[name.strip() for name in os.environ.get(COMPUTERS_ENV, "").split(",") if name.strip()],
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
-        clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
+        clock_followers=parse_named_tokens(os.environ.get(CLOCK_FOLLOWERS_ENV, ""), CLOCK_FOLLOWERS_ENV),
         site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),
         listed_by_name=[site.strip() for site in os.environ.get(WEBSITE_LISTED_BY_NAME_ENV, "").split(",")
                         if site.strip()],

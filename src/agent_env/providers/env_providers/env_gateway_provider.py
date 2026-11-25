@@ -42,6 +42,7 @@ from agent_env.env.gateway.constants import (
     CONSOLE_FRAME_ANCESTORS_ENV,
     CONSOLE_URLS_ENV,
     CHILD_CONTROL_TOKENS_ENV,
+    CONTROL_TOKEN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
@@ -57,7 +58,6 @@ from agent_env.env.envs.service_db import (
     DB_MCP_SERVICE_NAME,
     PGWEB_SERVICE_NAME,
 )
-from agent_env.env.envs.computer.utils.boot import control_environment
 from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
@@ -569,7 +569,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
         gateway_env.extend(f"      - {key}={value}" for key, value in consoles_environment(state_provider.console_urls()).items())
-        gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in control_token_environment(control_token).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}"
                            for key, value in child_control_tokens_environment(external_children).items())
@@ -1158,7 +1158,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 **consoles_environment(consoles),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
-                **control_environment(control_token),
+                **control_token_environment(control_token),
                 **clock_followers_environment(external),
                 **child_control_tokens_environment(external),
                 **computers_environment(external),
@@ -1864,6 +1864,11 @@ def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, 
     """The gateway's declared clock followers: each child that is one, by the read token its watch carries."""
     followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children if child.clock_read_token)
     return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
+
+
+def control_token_environment(control_token: str | None) -> dict[str, str]:
+    """The gateway's own control token, which its control routes, data plane and consoles take."""
+    return {CONTROL_TOKEN_ENV: control_token} if control_token else {}
 
 
 def child_control_tokens_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
