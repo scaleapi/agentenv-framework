@@ -66,24 +66,36 @@ def median_rows(sampled: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     return merged
 
 
+def overrides(samples: Optional[int], bar: Optional[float]) -> dict[str, Any]:
+    """The ``user_overrides`` a run's sample count and agreement bar make: each one given, a bar of 0 included."""
+    return {**({"judge_samples": samples} if samples is not None else {}),
+            **({"min_judge_agreement": bar} if bar is not None else {})}
+
+
+def _sampled(row: dict[str, Any]) -> bool:
+    """Whether ``median_rows`` made ``row``, so it carries its ``samples`` and ``agreement``."""
+    return "samples" in row
+
+
+def _tally(row: dict[str, Any]) -> str:
+    """How a sampled row's samples split, as ``<passes> of <samples>``."""
+    return f"{sum(1 for sample in row['samples'] if sample['passed'])} of {len(row['samples'])}"
+
+
 def disagreeing(rows: list[dict[str, Any]], bar: float) -> list[dict[str, Any]]:
     """The sampled rows whose ``agreement`` is under ``bar``."""
-    return [row for row in rows if "agreement" in row and row["agreement"] < bar]
+    return [row for row in rows if _sampled(row) and row["agreement"] < bar]
 
 
 def splits(rows: list[dict[str, Any]]) -> list[str]:
     """Each sampled row its samples didn't all agree on, as ``<id> (<passes> of <samples> pass)``."""
-    return [f"{row.get('id')} ({sum(1 for s in row['samples'] if s.get('passed'))} of {len(row['samples'])} pass)"
-            for row in rows if row.get("samples") and row.get("agreement", 1.0) < 1.0]
+    return [f"{row.get('id')} ({_tally(row)} pass)" for row in rows if _sampled(row) and row["agreement"] < 1.0]
 
 
 def disagreement(verifier_id: str, rows: list[dict[str, Any]], bar: float) -> str:
     """Why a grade whose samples split on ``rows`` failed, naming how each split."""
-    splits = []
-    for row in rows:
-        passes = sum(1 for sample in row["samples"] if sample["passed"])
-        splits.append(f"{row.get('id')} ({passes} of {len(row['samples'])} samples pass it)")
+    named = ", ".join(f"{row.get('id')} ({_tally(row)} samples pass it)" for row in rows)
     which = "a criterion" if len(rows) == 1 else f"{len(rows)} criteria"
     return (f"Verifier '{verifier_id}': its judge samples split on {which}, under min_judge_agreement {bar:g}: "
-            f"{', '.join(splits)}. Each sample's verdict and justification are on the grade's rows; a lower "
+            f"{named}. Each sample's verdict and justification are on the grade's rows; a lower "
             "min_judge_agreement keeps the median instead.")
