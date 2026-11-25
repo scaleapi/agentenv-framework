@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import struct
 import zlib
 
@@ -193,3 +194,72 @@ def test_each_task_of_a_session_writes_its_own_steps():
 def test_the_tested_cli_is_the_one_the_image_pins():
     pinned = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["@google/gemini-cli"]
     assert gemini_atif.TESTED_WITH == (pinned,)
+
+
+def seeded_session(seed: int) -> tuple[list[Feed], dict]:
+    """A random session of one to three tasks, as the CLI and the proxy write them: responses of thoughts, text and
+    calls, some returning images or errors; the proxy's record of each response's call, a refused attempt before some,
+    calls that wrote no message between them, and some the proxy couldn't count; each message fed once a later one
+    follows it, or all at the task's end. With what the copy must hold."""
+    rng = random.Random(seed)
+    image = png()
+    want = {"input": 0, "steps": 0, "calls": set(), "messages": []}
+    n = iter(range(10**6))
+    feeds = []
+    for _ in range(rng.randint(1, 3)):
+        feed, held, lagged = Feed(), [], rng.random() < 0.5
+        for _ in range(rng.randint(1, 4)):
+            if rng.random() < 0.2:
+                feed.call(outcome="refused", status=rng.choice([429, 500, 503]))
+                want["steps"] += 1
+            if rng.random() < 0.2:
+                side = rng.randint(100, 900)
+                feed.call(inputs=side, output=1)
+                want["input"] += side
+                want["steps"] += 1
+            inputs, tool_tokens = rng.randint(1000, 9000), rng.choice([0, 0, 40])
+            if rng.random() < 0.1:
+                feed.call(outcome="unreported")
+            else:
+                feed.call(inputs=inputs + tool_tokens, output=rng.randint(1, 50), cached=rng.randint(0, inputs))
+            want["input"] += inputs + tool_tokens
+            calls = []
+            for _ in range(rng.choice([0, 1, 1, 2])):
+                call_id = f"call_{next(n)}"
+                calls.append(tool(call_id, image=image if rng.random() < 0.3 else None,
+                                  status=rng.choice(["success", "success", "error"]),
+                                  error="failed" if rng.random() < 0.2 else None))
+                want["calls"].add(call_id)
+            text = rng.choice(["", "", "done", "looking"])
+            thoughts = [("Plan", "Run it.")] * rng.randint(0, 2)
+            message_id = f"m-{next(n)}"
+            message = (message_id, text, {"input": inputs, "output": 10, "cached": 0, "thoughts": 5,
+                                          "tool": tool_tokens}, thoughts, calls)
+            want["messages"].append(text)
+            want["steps"] += 1
+            held.append(message)
+            while len(held) > (1 if lagged else 10**6):
+                message_id, text, tokens, thoughts, calls = held.pop(0)
+                feed.message(message_id, text, tokens=tokens, thoughts=thoughts, calls=calls)
+        for message_id, text, tokens, thoughts, calls in held:
+            feed.message(message_id, text, tokens=tokens, thoughts=thoughts, calls=calls)
+        if rng.random() < 0.2:
+            feed.call(inputs=500, output=1)
+            want["input"] += 500
+            want["steps"] += 1
+        feeds.append(feed.result())
+    return feeds, want
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_a_seeded_sessions_copy_holds_every_response_and_every_call_the_proxy_forwarded(seed):
+    feeds, want = seeded_session(seed)
+    steps = agent_steps(run(*feeds).document)
+
+    assert len(steps) == want["steps"]
+    assert sum(step.get("metrics", {}).get("prompt_tokens", 0) for step in steps) == want["input"]
+    assert [step["message"] for step in steps if step["message"]] == [text for text in want["messages"] if text]
+    calls = [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()]
+    results = {result["source_call_id"] for step in steps for result in (step.get("observation") or {}).get(
+        "results") or ()}
+    assert sorted(calls) == sorted(want["calls"]) and set(calls) <= results

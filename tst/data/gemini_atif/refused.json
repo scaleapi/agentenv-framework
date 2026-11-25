@@ -1,0 +1,91 @@
+{
+ "scenario": "refused",
+ "cli": "0.38.2",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-gemini-refused",
+    "task_id": "fa167a96-17dd-4465-8d31-47fceb636228",
+    "message_id": "05569035e705450dacade853251b01a3",
+    "agent_name": "Gemini",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-25T17:01:42.412250Z",
+    "inbound": [
+     "Reply with ok."
+    ],
+    "state": "failed",
+    "final": [
+     "gemini CLI exited with code 144: [API Error: {\"error\":{\"message\":\"refused by the recording proxy\",\"code\":400}}]"
+    ],
+    "ended_at": "2026-11-25T17:01:44.048892Z",
+    "data": [
+     {
+      "data": {
+       "tool_call_count": 0
+      }
+     }
+    ],
+    "error": {
+     "kind": "agent_error",
+     "message": "gemini CLI exited with code 144: [API Error: {\"error\":{\"message\":\"refused by the recording proxy\",\"code\":400}}]",
+     "code": "cli_error"
+    }
+   },
+   "native": [
+    {
+     "type": "init",
+     "timestamp": "2026-11-25T17:01:43.972Z",
+     "session_id": "281db378-3034-4ee6-a47d-b721f30066c7",
+     "model": "gemini-2.5-flash"
+    },
+    {
+     "type": "message",
+     "timestamp": "2026-11-25T17:01:43.973Z",
+     "role": "user",
+     "content": "Reply with ok."
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 400,
+     "outcome": "refused",
+     "timestamp": "2026-11-25T17:01:43.997Z"
+    },
+    {
+     "type": "result",
+     "timestamp": "2026-11-25T17:01:44.021Z",
+     "status": "error",
+     "error": {
+      "type": "unknown",
+      "message": "[API Error: {\"error\":{\"message\":\"refused by the recording proxy\",\"code\":400}}]"
+     },
+     "stats": {
+      "total_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached": 0,
+      "input": 0,
+      "duration_ms": 0,
+      "tool_calls": 0,
+      "models": {
+       "gemini-2.5-flash": {
+        "total_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached": 0,
+        "input": 0
+       }
+      }
+     }
+    }
+   ],
+   "aux": [],
+   "usage": {
+    "tool_call_count": 0
+   }
+  }
+ ]
+}

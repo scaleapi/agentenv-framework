@@ -112,6 +112,40 @@ class _Followed:
     inode: int
     offset: int
     lines: int
+    # A forked sub-agent's rollout begins with the turns of the thread it was forked from, which aren't its own.
+    copied_turns: frozenset[str] = frozenset()
+
+
+def _turn_of(record: dict) -> str | None:
+    """The turn a rollout record belongs to, as the CLI names it."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    passthrough = payload.get("internal_chat_message_metadata_passthrough")
+    turn = payload.get("turn_id") or (passthrough.get("turn_id") if isinstance(passthrough, dict) else None)
+    return turn if isinstance(turn, str) else None
+
+
+def _thread_turns(thread: str) -> frozenset[str]:
+    """Every turn a thread's rollout holds, the ones it copied from a thread it was forked from included."""
+    path = find_rollout_path(thread)
+    if path is None:
+        return frozenset()
+    turns = set()
+    try:
+        with path.open("rb") as file:
+            for raw in file:
+                if b'"task_started"' not in raw:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(record, dict) and (turn := _turn_of(record)) is not None:
+                    turns.add(turn)
+    except OSError:
+        pass
+    return frozenset(turns)
 
 
 class RolloutTail:
@@ -155,12 +189,14 @@ class RolloutTail:
             records = [record for path in list(self._files) for record in self._new_records(path)]
         return sorted(records, key=lambda record: str(record.get("timestamp") or ""))
 
-    def _start(self, path: Path, thread: str, parent: str | None, from_end: bool) -> None:
+    def _start(self, path: Path, thread: str, parent: str | None, from_end: bool, forked_from: str | None = None
+               ) -> None:
         try:
             status, lines = path.stat(), _count_lines(path) if from_end else 0
         except OSError:
             return
-        self._files[path] = _Followed(thread, parent, status.st_ino, status.st_size if from_end else 0, lines)
+        copied = _thread_turns(forked_from) if forked_from else frozenset()
+        self._files[path] = _Followed(thread, parent, status.st_ino, status.st_size if from_end else 0, lines, copied)
 
     def _scan(self, *, from_end: bool) -> None:
         """Follow each sub-agent rollout not yet followed whose parent is a thread followed, until none is new. Each
@@ -176,7 +212,8 @@ class RolloutTail:
                 thread, parent = meta.get("id"), meta.get("parent_thread_id")
                 if parent in self._threads and isinstance(thread, str) and thread not in self._threads:
                     self._threads.add(thread)
-                    self._start(path, thread, parent, from_end)
+                    forked = meta.get("forked_from_id")
+                    self._start(path, thread, parent, from_end, forked if isinstance(forked, str) else None)
                     found = True
 
     def _new_records(self, path: Path) -> list[dict]:
@@ -202,9 +239,21 @@ class RolloutTail:
                 record = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            if isinstance(record, dict) and (fed := rollout_aux(record, followed.thread, followed.parent)) is not None:
+            if not isinstance(record, dict) or self._copied(record, followed):
+                continue
+            if (fed := rollout_aux(record, followed.thread, followed.parent)) is not None:
                 records.append(fed)
         return records
+
+
+    @staticmethod
+    def _copied(record: dict, followed: _Followed) -> bool:
+        """A record a forked sub-agent's rollout copied from the thread it was forked from: that thread's meta, or
+        one of its turns'."""
+        payload = record.get("payload")
+        if record.get("type") == "session_meta":
+            return isinstance(payload, dict) and payload.get("id") != followed.thread
+        return bool(followed.copied_turns) and _turn_of(record) in followed.copied_turns
 
 
 def _count_lines(path: Path) -> int:

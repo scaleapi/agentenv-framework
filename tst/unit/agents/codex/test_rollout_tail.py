@@ -104,6 +104,30 @@ def test_a_sub_agents_rollout_seen_before_its_parents_is_followed_once_its_paren
     assert sorted(texts(tail.read(final=True))) == ["deeper", "sub"]
 
 
+def test_a_forked_sub_agents_rollout_leaves_out_what_it_copied_from_its_parent(sessions):
+    def started(turn):
+        return {"timestamp": "2026-11-25T16:23:42.500Z", "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": turn}}
+
+    def call(call_id, turn):
+        return {"timestamp": "2026-11-25T16:23:43.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "id": f"fc_{call_id}", "name": "exec_command", "call_id": call_id,
+                            "arguments": "{}", "internal_chat_message_metadata_passthrough": {"turn_id": turn}}}
+
+    write(rollout(sessions, MAIN), meta(MAIN), started("turn-1"), call("call_1", "turn-1"), started("turn-2"))
+    tail = codex_bridge.RolloutTail(None)
+    tail.bind(MAIN)
+    tail.read()
+    forked = {**meta(SUB, MAIN), "payload": {**meta(SUB, MAIN)["payload"], "forked_from_id": MAIN}}
+    write(rollout(sessions, SUB), forked, meta(MAIN), started("turn-1"), call("call_1", "turn-1"), started("turn-2"),
+          started("turn-s"), call("call_s", "turn-s"))
+
+    records = tail.read(final=True)
+    assert [record["type"] for record in records] == ["session_meta", "event_msg", "response_item"]
+    assert records[0]["payload"]["id"] == SUB
+    assert [record["payload"].get("call_id") for record in records] == [None, None, "call_s"]
+
+
 def test_a_replaced_rollout_is_read_on_from_its_line_count(sessions):
     path = rollout(sessions, MAIN)
     write(path, meta(MAIN), item("one"))

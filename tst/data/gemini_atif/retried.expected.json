@@ -1,0 +1,162 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-gemini-retried",
+ "agent": {
+  "name": "Gemini",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-25T17:01:45.907573Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-gemini-retried",
+     "task_id": "2a8e300b-3954-4303-a896-8532201f078e",
+     "message_id": "aaaf53076a37408980c65916ca8bc3e0",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-25T17:01:48.940Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "reasoning_content": "Executing Sequential Commands: I'm currently executing the requested shell commands one after another. My focus is on capturing the output from each `echo` operation. Once both commands have finished, I'll be merging their results into a single, consolidated line for you.",
+   "tool_calls": [
+    {
+     "tool_call_id": "run_shell_command_1795626108935_0",
+     "function_name": "run_shell_command",
+     "arguments": {
+      "command": "echo first"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "run_shell_command_1795626108935_0",
+      "content": "Output: first\nBackground PIDs: NaN\nProcess Group PGID: 46"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 7332,
+    "cached_tokens": 6979,
+    "completion_tokens": 71
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 272,
+       "visibility": "summary"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-25T17:01:48.982Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-25T17:01:53.003Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "the endpoint refused the call (HTTP 503)"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-25T17:02:03.661Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "run_shell_command_1795626123659_0",
+     "function_name": "run_shell_command",
+     "arguments": {
+      "command": "echo second"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "run_shell_command_1795626123659_0",
+      "content": "Output: second\nBackground PIDs: NaN\nProcess Group PGID: 50"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 7364,
+    "cached_tokens": 0,
+    "completion_tokens": 18
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-25T17:02:04.451Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "first\nsecond",
+   "metrics": {
+    "prompt_tokens": 7396,
+    "cached_tokens": 6962,
+    "completion_tokens": 3
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 22092,
+  "total_completion_tokens": 92,
+  "total_cached_tokens": 13941,
+  "total_steps": 6
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "gemini-stream-json/1",
+   "adapter": {
+    "name": "gemini-stream-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

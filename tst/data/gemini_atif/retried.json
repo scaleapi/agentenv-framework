@@ -1,0 +1,299 @@
+{
+ "scenario": "retried",
+ "cli": "0.38.2",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-gemini-retried",
+    "task_id": "2a8e300b-3954-4303-a896-8532201f078e",
+    "message_id": "aaaf53076a37408980c65916ca8bc3e0",
+    "agent_name": "Gemini",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-25T17:01:45.907573Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "first\nsecond"
+    ],
+    "ended_at": "2026-11-25T17:02:04.486935Z",
+    "data": [
+     {
+      "data": {
+       "tool_call_count": 2
+      }
+     }
+    ]
+   },
+   "native": [
+    {
+     "type": "init",
+     "timestamp": "2026-11-25T17:01:47.502Z",
+     "session_id": "0b6bdb31-4ca4-4b6d-9b2e-6fadea0fe1f5",
+     "model": "gemini-2.5-flash"
+    },
+    {
+     "type": "message",
+     "timestamp": "2026-11-25T17:01:47.503Z",
+     "role": "user",
+     "content": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 200,
+     "outcome": "answered",
+     "usage": {
+      "input_tokens": 7332,
+      "output_tokens": 71,
+      "cache_read_tokens": 6979,
+      "reasoning_tokens": 54
+     },
+     "timestamp": "2026-11-25T17:01:48.930Z"
+    },
+    {
+     "type": "tool_use",
+     "timestamp": "2026-11-25T17:01:48.935Z",
+     "tool_name": "run_shell_command",
+     "tool_id": "run_shell_command_1795626108935_0",
+     "parameters": {
+      "command": "echo first"
+     }
+    },
+    {
+     "type": "tool_result",
+     "timestamp": "2026-11-25T17:01:48.970Z",
+     "tool_id": "run_shell_command_1795626108935_0",
+     "status": "success"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 503,
+     "outcome": "refused",
+     "timestamp": "2026-11-25T17:01:48.982Z"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 503,
+     "outcome": "refused",
+     "timestamp": "2026-11-25T17:01:53.003Z"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 200,
+     "outcome": "answered",
+     "usage": {
+      "input_tokens": 7364,
+      "output_tokens": 18,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0
+     },
+     "timestamp": "2026-11-25T17:02:03.657Z"
+    },
+    {
+     "type": "tool_use",
+     "timestamp": "2026-11-25T17:02:03.660Z",
+     "tool_name": "run_shell_command",
+     "tool_id": "run_shell_command_1795626123659_0",
+     "parameters": {
+      "command": "echo second"
+     }
+    },
+    {
+     "type": "tool_result",
+     "timestamp": "2026-11-25T17:02:03.676Z",
+     "tool_id": "run_shell_command_1795626123659_0",
+     "status": "success"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 200,
+     "outcome": "answered",
+     "usage": {
+      "input_tokens": 7396,
+      "output_tokens": 3,
+      "cache_read_tokens": 6962,
+      "reasoning_tokens": 0
+     },
+     "timestamp": "2026-11-25T17:02:04.446Z"
+    },
+    {
+     "type": "message",
+     "timestamp": "2026-11-25T17:02:04.449Z",
+     "role": "assistant",
+     "content": "first\nsecond",
+     "delta": true
+    },
+    {
+     "type": "result",
+     "timestamp": "2026-11-25T17:02:04.451Z",
+     "status": "success",
+     "stats": {
+      "total_tokens": 22184,
+      "input_tokens": 22092,
+      "output_tokens": 38,
+      "cached": 13941,
+      "input": 8151,
+      "duration_ms": 16949,
+      "tool_calls": 2,
+      "models": {
+       "gemini-2.5-flash": {
+        "total_tokens": 22184,
+        "input_tokens": 22092,
+        "output_tokens": 38,
+        "cached": 13941,
+        "input": 8151
+       }
+      }
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "session",
+     "record": {
+      "type": "gemini",
+      "id": "7de403e5-fb51-4361-9556-946df5c3a205",
+      "timestamp": "2026-11-25T17:01:48.940Z",
+      "model": "gemini-2.5-flash",
+      "content": "",
+      "thoughts": [
+       {
+        "subject": "Executing Sequential Commands",
+        "description": "I'm currently executing the requested shell commands one after another. My focus is on capturing the output from each `echo` operation. Once both commands have finished, I'll be merging their results into a single, consolidated line for you.",
+        "timestamp": "2026-11-25T17:01:48.934Z"
+       }
+      ],
+      "tokens": {
+       "input": 7332,
+       "output": 17,
+       "cached": 6979,
+       "thoughts": 54,
+       "tool": 0,
+       "total": 7403
+      },
+      "toolCalls": [
+       {
+        "id": "run_shell_command_1795626108935_0",
+        "name": "run_shell_command",
+        "args": {
+         "command": "echo first"
+        },
+        "status": "success",
+        "timestamp": "2026-11-25T17:01:48.970Z",
+        "result": [
+         {
+          "functionResponse": {
+           "id": "run_shell_command_1795626108935_0",
+           "name": "run_shell_command",
+           "response": {
+            "output": "Output: first\nBackground PIDs: NaN\nProcess Group PGID: 46"
+           }
+          }
+         }
+        ]
+       }
+      ]
+     },
+     "after": 10
+    },
+    {
+     "name": "session",
+     "record": {
+      "type": "gemini",
+      "id": "920a4f21-59ea-4c41-ba62-400eaf78c65d",
+      "timestamp": "2026-11-25T17:02:03.661Z",
+      "model": "gemini-2.5-flash",
+      "content": "",
+      "thoughts": [],
+      "tokens": {
+       "input": 7364,
+       "output": 18,
+       "cached": 0,
+       "thoughts": 0,
+       "tool": 0,
+       "total": 7382
+      },
+      "toolCalls": [
+       {
+        "id": "run_shell_command_1795626123659_0",
+        "name": "run_shell_command",
+        "args": {
+         "command": "echo second"
+        },
+        "status": "success",
+        "timestamp": "2026-11-25T17:02:03.676Z",
+        "result": [
+         {
+          "functionResponse": {
+           "id": "run_shell_command_1795626123659_0",
+           "name": "run_shell_command",
+           "response": {
+            "output": "Output: second\nBackground PIDs: NaN\nProcess Group PGID: 50"
+           }
+          }
+         }
+        ]
+       }
+      ]
+     },
+     "after": 13
+    },
+    {
+     "name": "session",
+     "record": {
+      "type": "gemini",
+      "id": "119a1075-0d08-44fa-88e1-bb58814404c3",
+      "timestamp": "2026-11-25T17:02:04.451Z",
+      "model": "gemini-2.5-flash",
+      "content": "first\nsecond",
+      "thoughts": [],
+      "tokens": {
+       "input": 7396,
+       "output": 3,
+       "cached": 6962,
+       "thoughts": 0,
+       "tool": 0,
+       "total": 7399
+      }
+     },
+     "after": 13
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 22092,
+    "output_tokens": 92,
+    "total_tokens": 22184,
+    "cache_read_tokens": 13941,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "gemini-2.5-flash",
+      "calls": 3,
+      "input_tokens": 22092,
+      "output_tokens": 92,
+      "cache_read_tokens": 13941,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3,
+     "reasoning_tokens": 54
+    }
+   }
+  }
+ ]
+}

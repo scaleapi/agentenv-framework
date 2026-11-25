@@ -11,8 +11,8 @@ container of it with atif/1 prescribed. For each turn it writes the native final
 aux log and turn context), the atif/1 pages read live every second, and the CLI's own files after (Codex's rollouts,
 Gemini's ``~/.gemini``). The scenarios: two coding turns of one conversation; a browser's screenshot returned to the
 model, through Playwright MCP beside the agent; and the endpoint refusing every call and failing calls that are then
-retried, through ``fault_proxy.py`` in a container of its own; for Codex also a high reasoning effort, a sub-agent and
-a sub-agent that spawns its own. They cost about a dollar. Needs Docker; ``mcr.microsoft.com/playwright/mcp`` is pulled
+retried, through ``fault_proxy.py`` in a container of its own; for Codex also a high reasoning effort, a sub-agent, and
+a second turn's sub-agent forked with the conversation so far. They cost about a dollar. Needs Docker; ``mcr.microsoft.com/playwright/mcp`` is pulled
 for the browser scenario.
 
 The key is never written: every text is masked, and a copied file holding it is dropped. Then ``make_fixtures.py``
@@ -65,9 +65,10 @@ SCENARIOS = {
     "subagent": {"agents": ["codex"], "prompts": [
         "Spawn a sub-agent and have it run `wc -l /etc/passwd` and report the count back to you. Then reply with only "
         "that number."]},
-    "nested": {"agents": ["codex"], "prompts": [
-        "Spawn a sub-agent, and tell it to spawn a sub-agent of its own that runs `uname -s` and reports back. Have the "
-        "answer come back to you through both, then reply with only that answer."]},
+    "forked": {"agents": ["codex"], "prompts": [
+        "Run `echo one` with your shell tool and reply with only its output.",
+        "Spawn a sub-agent forked with this conversation's full history (all turns), have it run `echo two` with its "
+        "shell tool and report the output back, then reply with only that output."]},
 }
 
 

@@ -169,6 +169,11 @@ class CodexAtif(Adapter):
                            agent=agent)
             if function == _SPAWN:
                 self._spawns.add(call_id)
+            if item == "web_search_call":
+                # The provider runs the search inside the response; the rollout has no result for it, only its status.
+                status = _string(payload.get("status")) or "completed"
+                turn.tool_result(source_call_id=call_id, text=status, status="ok" if status == "completed" else "error",
+                                 time=when)
 
     def _output(self, payload: dict[str, Any], record: dict[str, Any], turn: Any) -> None:
         call_id = payload.get("call_id")
@@ -282,7 +287,7 @@ def _call(payload: dict[str, Any]) -> tuple[str, str, Any]:
     as the model sees it."""
     item = payload["type"]
     if item == "web_search_call":
-        return payload["id"], "web_search", payload.get("action")
+        return payload["id"], "web_search", payload.get("action") or {}
     if item == "tool_search_call":
         return payload["call_id"], "tool_search", payload.get("arguments")
     name, namespace = payload["name"], _string(payload.get("namespace"))

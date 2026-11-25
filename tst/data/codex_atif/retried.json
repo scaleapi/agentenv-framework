@@ -1,0 +1,429 @@
+{
+ "scenario": "retried",
+ "cli": "0.162.1",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-codex-retried",
+    "task_id": "6b2c46ae-7da3-4233-bbe0-df5fd6254456",
+    "message_id": "457d2b525c3541baa76d6a740b64e155",
+    "agent_name": "Codex",
+    "agent_version": "1.0.0",
+    "agent_model": "gpt-5.5",
+    "started_at": "2026-11-25T17:00:20.167540Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "first second"
+    ],
+    "ended_at": "2026-11-25T17:00:33.889521Z",
+    "data": [
+     {
+      "data": {
+       "tool_call_count": 2,
+       "cli_attempts": 2,
+       "token_usage": {
+        "input_tokens": 40369,
+        "cached_input_tokens": 39552,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 72,
+        "reasoning_output_tokens": 0
+       },
+       "warnings": [
+        "{\"type\": \"error\", \"message\": \"Reconnecting... 1/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses)\", \"timestamp\": \"2026-11-25T17:00:22.904+00:00\"}",
+        "{\"type\": \"error\", \"message\": \"Reconnecting... 2/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses)\", \"timestamp\": \"2026-11-25T17:00:23.686+00:00\"}",
+        "{\"type\": \"error\", \"message\": \"unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses\", \"timestamp\": \"2026-11-25T17:00:24.694+00:00\"}"
+       ]
+      }
+     }
+    ]
+   },
+   "native": [
+    {
+     "type": "thread.started",
+     "thread_id": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+     "timestamp": "2026-11-25T17:00:20.608+00:00"
+    },
+    {
+     "type": "turn.started",
+     "timestamp": "2026-11-25T17:00:20.643+00:00"
+    },
+    {
+     "type": "item.started",
+     "item": {
+      "id": "item_0",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'echo first'",
+      "aggregated_output": "",
+      "exit_code": null,
+      "status": "in_progress"
+     },
+     "timestamp": "2026-11-25T17:00:22.302+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_0",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'echo first'",
+      "aggregated_output": "first\n",
+      "exit_code": 0,
+      "status": "completed"
+     },
+     "timestamp": "2026-11-25T17:00:22.303+00:00"
+    },
+    {
+     "type": "error",
+     "message": "Reconnecting... 1/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses)",
+     "timestamp": "2026-11-25T17:00:22.904+00:00"
+    },
+    {
+     "type": "error",
+     "message": "Reconnecting... 2/2 (unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses)",
+     "timestamp": "2026-11-25T17:00:23.686+00:00"
+    },
+    {
+     "type": "error",
+     "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses",
+     "timestamp": "2026-11-25T17:00:24.694+00:00"
+    },
+    {
+     "type": "turn.failed",
+     "error": {
+      "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses"
+     },
+     "timestamp": "2026-11-25T17:00:24.701+00:00"
+    },
+    {
+     "type": "thread.started",
+     "thread_id": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+     "timestamp": "2026-11-25T17:00:30.058+00:00"
+    },
+    {
+     "type": "turn.started",
+     "timestamp": "2026-11-25T17:00:30.068+00:00"
+    },
+    {
+     "type": "item.started",
+     "item": {
+      "id": "item_0",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'echo second'",
+      "aggregated_output": "",
+      "exit_code": null,
+      "status": "in_progress"
+     },
+     "timestamp": "2026-11-25T17:00:32.162+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_0",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'echo second'",
+      "aggregated_output": "second\n",
+      "exit_code": 0,
+      "status": "completed"
+     },
+     "timestamp": "2026-11-25T17:00:32.165+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_1",
+      "type": "agent_message",
+      "text": "first second"
+     },
+     "timestamp": "2026-11-25T17:00:33.767+00:00"
+    },
+    {
+     "type": "turn.completed",
+     "usage": {
+      "input_tokens": 40369,
+      "cached_input_tokens": 39552,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 72,
+      "reasoning_output_tokens": 0
+     },
+     "timestamp": "2026-11-25T17:00:33.781+00:00"
+    },
+    {
+     "type": "agentenv.usage",
+     "usage": {
+      "input_tokens": 40369,
+      "cached_input_tokens": 39552,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 72,
+      "reasoning_output_tokens": 0
+     },
+     "model_requests": 3,
+     "timestamp": "2026-11-25T17:00:33.889+00:00"
+    }
+   ],
+   "aux": [
+    {
+     "name": "rollout",
+     "record": {
+      "type": "session_meta",
+      "timestamp": "2026-11-25T17:00:20.612Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "id": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+       "cli_version": "0.162.1"
+      }
+     },
+     "after": 1
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-25T17:00:20.612Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "task_started"
+      }
+     },
+     "after": 1
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "turn_context",
+      "timestamp": "2026-11-25T17:00:20.646Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "model": "gpt-5.5"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-25T17:00:22.258Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "function_call",
+       "id": "fc_01d192d5eb6a3f25016b071425f374819798d5983b5c7ba229",
+       "name": "exec_command",
+       "arguments": "{\"cmd\":\"echo first\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}",
+       "call_id": "call_VY2pVcoh0yWmx7pfijQAJGP7"
+      }
+     },
+     "after": 4
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-25T17:00:22.260Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "response_id": "resp_01d192d5eb6a3f25016b071424ce3c8197b1f67bf5e36df3b7",
+       "usage": {
+        "input_tokens": 13346,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 33,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13379
+       }
+      }
+     },
+     "after": 4
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-25T17:00:22.306Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "function_call_output",
+       "id": "fco_01a213a6-b5a2-7972-b7fd-377fb2911761",
+       "call_id": "call_VY2pVcoh0yWmx7pfijQAJGP7",
+       "output": "Chunk ID: e2467e\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nfirst\n"
+      }
+     },
+     "after": 4
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-25T17:00:24.695Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "task_complete",
+       "error": {
+        "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses",
+        "codex_error_info": {
+         "http_connection_failed": {
+          "http_status_code": 503
+         }
+        }
+       }
+      }
+     },
+     "after": 7
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-25T17:00:30.065Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "task_started"
+      }
+     },
+     "after": 10
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "turn_context",
+      "timestamp": "2026-11-25T17:00:30.068Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "model": "gpt-5.5"
+      }
+     },
+     "after": 10
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-25T17:00:32.119Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "function_call",
+       "id": "fc_01d192d5eb6a3f25016b07142fc8b88197ab34c72a10077ccb",
+       "name": "exec_command",
+       "arguments": "{\"cmd\":\"echo second\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}",
+       "call_id": "call_gH26sxmMpaqSedyDGI5XC3zs"
+      }
+     },
+     "after": 10
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-25T17:00:32.121Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "response_id": "resp_01d192d5eb6a3f25016b07142e3a4c8197b5997bdd09e14067",
+       "usage": {
+        "input_tokens": 13472,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 33,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13505
+       }
+      }
+     },
+     "after": 10
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-25T17:00:32.169Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "function_call_output",
+       "id": "fco_01a213a6-dc29-7ea3-a3a6-9e68dee04fbd",
+       "call_id": "call_gH26sxmMpaqSedyDGI5XC3zs",
+       "output": "Chunk ID: d45488\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nsecond\n"
+      }
+     },
+     "after": 12
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-25T17:00:33.766Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "message",
+       "id": "msg_01d192d5eb6a3f25016b0714318e60819792bed12d1c835c0c",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "output_text",
+         "text": "first second"
+        }
+       ],
+       "phase": "final_answer"
+      }
+     },
+     "after": 14
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-25T17:00:33.768Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "response_id": "resp_01d192d5eb6a3f25016b0714305bc081979fbb000f450b2264",
+       "usage": {
+        "input_tokens": 13551,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 6,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13557
+       }
+      }
+     },
+     "after": 14
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-25T17:00:33.774Z",
+      "thread": "01a213a6-adf9-7c81-8f1b-e27582cb6389",
+      "payload": {
+       "type": "task_complete"
+      }
+     },
+     "after": 14
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 40369,
+    "output_tokens": 72,
+    "total_tokens": 40441,
+    "cache_read_tokens": 39552,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "gpt-5.5",
+      "calls": 3,
+      "input_tokens": 40369,
+      "output_tokens": 72,
+      "cache_read_tokens": 39552,
+      "cache_write_tokens": 0,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  }
+ ]
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import struct
 import zlib
 
@@ -305,3 +306,115 @@ def test_a_response_that_wrote_nothing_gets_a_step_for_its_usage():
 def test_the_tested_cli_is_the_one_the_image_pins():
     pinned = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["@openai/codex"]
     assert codex_atif.TESTED_WITH == (pinned,)
+
+
+def seeded_conversation(seed: int) -> tuple[list[Feed], dict]:
+    """A random conversation of one to three tasks, as the CLI writes its rollouts: responses of reasoning, a message
+    and calls of every kind, some returning images; a usage record per response, some with nothing else; sub-agents
+    spawned, whose first record comes before or after the spawn's result and whose records interleave with the
+    parent's; and failed attempts the bridge resumed. With what the copy must hold."""
+    rng = random.Random(seed)
+    image_url = "data:image/png;base64," + base64.b64encode(png()).decode()
+    want = {"input": 0, "calls": set(), "subs": {}, "attempts": 0}
+    n = iter(range(10**6))
+
+    def response(feed, thread=MAIN, parent=None):
+        made = []
+        if rng.random() < 0.5:
+            feed.reasoning(f"rs_{next(n)}", summary=rng.choice([(), ("Plan.",)]),
+                           encrypted=rng.choice(["ct", None]), thread=thread, parent=parent)
+        if rng.random() < 0.4:
+            feed.message(f"msg_{next(n)}", rng.choice(["ok", "looking", "done"]), thread=thread, parent=parent)
+        for _ in range(rng.choice([0, 0, 1, 1, 2, 3])):
+            call_id, kind = f"call_{next(n)}", rng.choice(["exec", "mcp", "patch"])
+            if kind == "patch":
+                feed.raw("response_item", {"type": "custom_tool_call", "id": f"ctc_{next(n)}", "call_id": call_id,
+                                           "name": "apply_patch", "input": "*** Begin Patch\n"}, thread, parent)
+            else:
+                feed.call(f"fc_{next(n)}", call_id, "browser_take_screenshot" if kind == "mcp" else "exec_command",
+                          {} if kind == "mcp" else {"cmd": "ls"}, namespace="mcp__browser" if kind == "mcp" else None,
+                          thread=thread, parent=parent)
+            made.append((call_id, kind))
+        tokens = rng.randint(10, 9000)
+        want["input"] += tokens
+        feed.usage(f"resp_{next(n)}", input_tokens=tokens, cached=rng.randint(0, tokens), output=rng.randint(0, 50),
+                   thread=thread, parent=parent)
+        for call_id, kind in made:
+            want["calls"].add(call_id)
+            output = [{"type": "input_text", "text": "shot"}, {"type": "input_image", "image_url": image_url}] \
+                if kind == "mcp" and rng.random() < 0.5 else "out"
+            feed.output(call_id, output, kind="custom_tool_call_output" if kind == "patch" else "function_call_output",
+                        thread=thread, parent=parent)
+
+    def sub_agent(feed, parent_thread, depth):
+        thread, path = f"sub-{next(n)}", f"/root/a{next(n)}"
+        spawn = f"call_{next(n)}"
+        feed.call(f"fc_{next(n)}", spawn, "spawn_agent", {"task_name": path}, namespace="collaboration",
+                  thread=parent_thread, parent=None if parent_thread == MAIN else "x")
+        feed.usage(f"resp_{next(n)}", input_tokens=5, cached=0, thread=parent_thread,
+                   parent=None if parent_thread == MAIN else "x")
+        want["input"] += 5
+        want["calls"].add(spawn)
+        records = Feed()
+        records.meta(thread, parent_thread, path, rng.choice([None, "Mendel"]))
+        records.started(thread, parent_thread).context(thread, parent_thread)
+        responses = rng.randint(1, 3)
+        for _ in range(responses):
+            response(records, thread, parent_thread)
+        if depth < 2 and rng.random() < 0.3:
+            sub_agent(records, thread, depth + 1)
+        records.complete(thread=thread, parent=parent_thread)
+        result = Feed().spawned(spawn, path, thread=parent_thread)
+        result.records[0].record.update({"parent": "x"} if parent_thread != MAIN else {})
+        first, rest = records.records[:1], records.records[1:]
+        cut = rng.randint(0, len(rest))
+        ordered = (first + result.records if rng.random() < 0.5 else result.records + first) + rest[:cut]
+        feed.records.extend(ordered)
+        feed.records.extend(rest[cut:])
+        want["subs"][thread] = parent_thread
+
+    feeds = []
+    for task in range(rng.randint(1, 3)):
+        feed = Feed()
+        if task == 0:
+            feed.meta()
+        feed.started().context(effort=rng.choice([None, "high"])).user("go")
+        for _ in range(rng.randint(1, 4)):
+            roll = rng.random()
+            if roll < 0.15:
+                sub_agent(feed, MAIN, 1)
+            elif roll < 0.22:
+                feed.complete(error="unexpected status 503").started().context().user("resume")
+                response(feed)
+                want["attempts"] += 1
+            else:
+                response(feed)
+        feeds.append(feed.complete())
+    return feeds, want
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_a_seeded_conversations_copy_holds_every_response_call_and_sub_agent_where_it_happened(seed):
+    feeds, want = seeded_conversation(seed)
+    document = run(*feeds).document
+    trajectories = [document, *(document.get("subagent_trajectories") or [])]
+    steps = [step for trajectory in trajectories for step in agent_steps(trajectory)]
+
+    assert sum(step.get("metrics", {}).get("prompt_tokens", 0) for step in steps) == want["input"]
+    calls = [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()]
+    results = {result["source_call_id"] for step in steps for result in (step.get("observation") or {}).get(
+        "results") or ()}
+    assert sorted(calls) == sorted(want["calls"]) and set(calls) <= results
+    assert set(subagents(document)) == set(want["subs"])
+    assert sum(profile_of(step).get("attempt") is not None for step in agent_steps(document)) >= want["attempts"]
+
+
+def test_a_web_search_the_provider_ran_is_answered_with_its_status_so_its_step_is_served():
+    feed = opening().raw("response_item", {"type": "web_search_call", "id": "ws_1", "status": "completed"})
+    feed.usage("r1").message("msg_2", "found it")
+    kit = run(feed.usage("r2").complete())
+    first = agent_steps(kit.document)[0]
+
+    assert first["tool_calls"] == [{"tool_call_id": "ws_1", "function_name": "web_search", "arguments": {}}]
+    assert first["observation"]["results"] == [{"source_call_id": "ws_1", "content": "completed"}]
+    assert any(agent_steps(page) for page in kit.pages[:-1] if page)

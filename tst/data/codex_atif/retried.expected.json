@@ -1,0 +1,164 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-codex-retried",
+ "agent": {
+  "name": "Codex",
+  "version": "1.0.0",
+  "model_name": "gpt-5.5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-25T17:00:20.167540Z",
+   "source": "user",
+   "message": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-codex-retried",
+     "task_id": "6b2c46ae-7da3-4233-bbe0-df5fd6254456",
+     "message_id": "457d2b525c3541baa76d6a740b64e155",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-25T17:00:22.258Z",
+   "source": "agent",
+   "model_name": "gpt-5.5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_VY2pVcoh0yWmx7pfijQAJGP7",
+     "function_name": "exec_command",
+     "arguments": {
+      "cmd": "echo first",
+      "yield_time_ms": 10000,
+      "max_output_tokens": 2000
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_VY2pVcoh0yWmx7pfijQAJGP7",
+      "content": "Chunk ID: e2467e\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nfirst\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 13346,
+    "cached_tokens": 13184,
+    "completion_tokens": 33,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-25T17:00:24.695Z",
+   "source": "agent",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "unexpected status 503 Service Unavailable: service unavailable, url: http://atif-recording-faults:18602/openai/v1/responses"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-25T17:00:32.119Z",
+   "source": "agent",
+   "model_name": "gpt-5.5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "call_gH26sxmMpaqSedyDGI5XC3zs",
+     "function_name": "exec_command",
+     "arguments": {
+      "cmd": "echo second",
+      "yield_time_ms": 10000,
+      "max_output_tokens": 2000
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "call_gH26sxmMpaqSedyDGI5XC3zs",
+      "content": "Chunk ID: d45488\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nsecond\n"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 13472,
+    "cached_tokens": 13184,
+    "completion_tokens": 33,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "attempt": 2
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-25T17:00:33.766Z",
+   "source": "agent",
+   "model_name": "gpt-5.5",
+   "message": "first second",
+   "metrics": {
+    "prompt_tokens": 13551,
+    "cached_tokens": 13184,
+    "completion_tokens": 6,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 0
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "attempt": 2,
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 40369,
+  "total_completion_tokens": 72,
+  "total_cached_tokens": 39552,
+  "total_steps": 5,
+  "extra": {
+   "agentenv": {
+    "total_cache_write_tokens": 0
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "codex-exec-json/1",
+   "adapter": {
+    "name": "codex-exec-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}
