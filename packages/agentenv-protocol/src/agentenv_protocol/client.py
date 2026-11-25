@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import socket
 from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -106,7 +107,8 @@ async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: b
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
+        response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers),
+                                     extensions={"trace": _keepalive})
         response.raise_for_status()
         body = response.json()
     if "error" in body:
@@ -386,3 +388,24 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
         if response.status_code >= 400:
             raise ExtensionCallError(response)
         return response.json()
+
+
+_KEEPALIVE_IDLE_SECONDS = 30
+_KEEPALIVE_PROBE_INTERVAL_SECONDS = 10
+_KEEPALIVE_PROBE_COUNT = 3
+
+
+async def _keepalive(event: str, info: dict) -> None:
+    """Best-effort TCP keepalive on each connection the RPC opens, a proxy's included, so a reply the env takes
+    minutes to send isn't lost to an idle drop. A setting the socket refuses is skipped."""
+    if event != "connection.connect_tcp.complete" or (sock := info["return_value"].get_extra_info("socket")) is None:
+        return
+    idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
+    tuning = ((idle, _KEEPALIVE_IDLE_SECONDS),
+              (getattr(socket, "TCP_KEEPINTVL", None), _KEEPALIVE_PROBE_INTERVAL_SECONDS),
+              (getattr(socket, "TCP_KEEPCNT", None), _KEEPALIVE_PROBE_COUNT))
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    options += [(socket.IPPROTO_TCP, option, value) for option, value in tuning if option is not None]
+    for level, option, value in options:
+        with contextlib.suppress(OSError):
+            sock.setsockopt(level, option, value)
