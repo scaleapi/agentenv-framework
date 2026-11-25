@@ -48,7 +48,8 @@ the conversation goes as if no hook were listed. It records `disabled` once.
 Params:
 
 - `enabled`: `true` by default; `false` switches the gates off, as above.
-- `milestones`: `[{id, line?, type?, blocking?, max_nudges?, skip_if_done?, show?, artifacts, gates}]`, in order. `line`
+- `milestones`: `[{id, line?, type?, blocking?, max_nudges?, skip_if_done?, show?, group?, carry_gates?, artifacts,
+  gates}]`, in order (`group` and `carry_gates`: see Revisions below). `line`
   is what the user sim sends to open the milestone (the first one's is the step's prompt). `show` names an artifact
   whose start goes in a nudge's note, so the user sim can react to what it "opened". `type: "correct"` is never
   skipped.
@@ -84,7 +85,7 @@ doesn't define, a gate `type` outside format, action and content, repeated gate 
 with no judge model each fail the step there. Without this, a malformed check would fail as a gate on every turn and
 nudge the agent about nothing.
 
-After the wrap-up has been answered, the hook checks the last milestone once more and records it, so the summary matches what the agent left: work it changed while answering the wrap-up counts. If any milestone was let go, the wrap-up note (`final_note_gave_up`) asks the user sim to wrap up without saying everything is done and without taking on anything new.
+After the wrap-up has been answered, the hook checks the last milestone once more and records it, so the summary matches what the agent left: work it changed while answering the wrap-up counts. It checks every earlier milestone's state gates again too (see Revisions below). If any milestone was let go, the wrap-up note (`final_note_gave_up`) asks the user sim to wrap up without saying everything is done and without taking on anything new.
 
 After every turn the hook also sets its summary of where the conversation got to, for a verifier or the hub to read
 without going through its records (`turn.summarize`), at
@@ -96,7 +97,7 @@ without going through its records (`turn.summarize`), at
                  "gates": {"m1-draft": {"passed": true, "type": "action"}, "m1-short": {"passed": true, "type": "format"}}}]}
 ```
 
-A milestone's `status` is `not_reached`, `open`, `passed`, `skipped` (done before it opened), `gave_up` (let go after
+A milestone's `status` is `not_reached`, `open`, `passed`, `skipped` (done before it opened), `undone` (done, then found broken by the check after the wrap-up), `gave_up` (let go after
 `max_nudges`), `passed_over` (the user sim moved past it) or `derailed` (a blocking one that never passed, which ended
 the conversation: `end` is then `gate_never_passed:<id>`). A gate's `type` follows its check, as in the table above.
 `end` stays null when the conversation ended some other way, such as running out of turns. Switched off, the summary
@@ -109,3 +110,53 @@ gates need the agent to offer per-turn trajectories (`turn.trajectory_urls`); wi
 The user sim should treat the note as what it found when it checked, and never judge "done" itself: the hook ends the
 conversation. A hook runs in the control-plane process with the trust of an `env_outcome_verifier` script, and its
 model calls are not in the step's usage.
+
+## Revisions
+
+A long task often asks for the same piece of work again, changed: a report, then "make it tables", then "it's going
+public now, take out the internal numbers". Each ask is a revision of the milestone, with gates of its own. Write it as
+the next entry with `group` naming the milestone it revises (or an earlier revision of it):
+
+```json
+"milestones": [
+  {"id": "M1", "artifacts": {"report": {"find": {"tool": "docs_list", "path": "files", "where": {"name": "report"}},
+                                        "read": {"tool": "doc_read", "args": {"id": "{id}"}}}},
+   "gates": [
+     {"id": "m1-report", "nudge": "I don't see the report.", "check": {"artifact": "report", "expect": "exists"}},
+     {"id": "m1-total", "nudge": "Does it have the quarter's total?",
+      "check": {"artifact": "report", "judge": "The report gives the quarter's total spend."}}]},
+  {"id": "M1-r2", "group": "M1", "carry_gates": true, "line": "Can you put that in tables?",
+   "gates": [{"id": "m1-tables", "nudge": "It's still hard to scan.",
+              "check": {"artifact": "report", "format": {"contains_all": ["|"]}}}]},
+  {"id": "M1-r3", "group": "M1", "carry_gates": true, "max_nudges": 2, "blocking": false,
+   "line": "This is going out publicly now, so no internal numbers.",
+   "gates": [{"id": "m1-total", "nudge": "Keep the total, but nothing internal-only.",
+              "check": {"artifact": "report", "judge": "The report gives the total and no internal-only figures."}}]},
+  {"id": "M2", "line": "Now send it to the team.",
+   "gates": [{"id": "m2-sent", "nudge": "Did it go out?",
+              "check": {"call": {"tool": "gmail_sent", "path": "messages"}, "expect": {"count": {"min": 1}}}}]}]
+```
+
+- A milestone's revisions come right after it, in order; `check_params` refuses a `group` that names no earlier
+  milestone, or a revision that doesn't follow its milestone or that milestone's last revision.
+- Each revision is opened, nudged, let go and ended like any milestone, with its own `line`, `max_nudges` and
+  `blocking`. Giving up is per revision: a revision let go after `max_nudges` opens the next entry, the next revision
+  or the next milestone, and a `blocking` revision that never passes ends the conversation
+  (`gate_never_passed:<revision id>`).
+- A revision is never skipped as already done unless it sets `skip_if_done: true`: it asks for a change, and work
+  that already passes its gates may still be the work from before.
+- `carry_gates: true` checks the previous revision's gates too, and keeps its artifacts, so a revision can't pass by
+  breaking what the one before it got right. A gate the revision writes with the id of a carried one replaces it (above,
+  M1-r3's `m1-total`); any other repeated gate id is refused. Without `carry_gates` a revision checks only its own gates.
+
+After the wrap-up the hook checks the last milestone again, and the latest revision of every earlier milestone (the
+latest entry, for a milestone without revisions) on its state gates: `call`, `artifact` checks and judges, not `no_new`
+or `trajectory_judge`, which are about the turns it was open. One found broken is `undone`. Passing there doesn't
+mark a revision that was let go as passed, since its other gates weren't checked again.
+
+In the summary a milestone with revisions holds them in `revisions`, each the usual row with its `revision` number
+(1 is the milestone as first written) and its carried gates marked `"carried": true`; the milestone's own row rolls them
+up: the `status` and `closed_turn` of the furthest revision reached (`reached_revision`), the turn the first opened, the
+nudges of all of them and `revisions_done`. The summary's `done` and `total` count milestones, `revisions_done` and
+`revisions_total` revisions, and `reached_revision` names the furthest revision. A task without revisions has the
+same summary as before.

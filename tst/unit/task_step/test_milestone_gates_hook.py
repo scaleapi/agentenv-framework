@@ -804,3 +804,198 @@ async def test_a_milestone_broken_while_the_agent_answers_the_wrap_up_is_undone_
     await post_turn(t2, PARAMS)
     assert records[-1]["milestone"] == "M2"
     assert _status(t2)[1][:2] == ("M2", "undone") and t2.summary["done"] == 1
+
+
+# ---- revisions ----------------------------------------------------------------------------------------------------
+
+REPORT = {"report": {"find": {"tool": "docs", "path": "files"}, "read": {"tool": "doc_read", "args": {"id": "{id}"}}}}
+
+
+def _revised(**r2) -> dict:
+    """M1, then its revision M1-r2 (carrying M1's gates, overriding m1-total), then M2."""
+    return {"role": "r", "milestones": [
+        {"id": "M1", "artifacts": REPORT, "gates": [
+            {"id": "m1-report", "nudge": "Where's the report?", "check": {"artifact": "report", "expect": "exists"}},
+            {"id": "m1-total", "nudge": "Does it have the total?",
+             "check": {"artifact": "report", "format": {"contains_all": ["total"]}}},
+            {"id": "m1-quiet", "nudge": "Don't email yet.",
+             "check": {"no_new": [{"tool": "gmail_sent", "path": "messages", "baseline_count": 0}]}}]},
+        {"id": "M1-r2", "group": "M1", "carry_gates": True, "line": "Make it a table; it's going public now.",
+         "max_nudges": 1, "blocking": False, "gates": [
+             {"id": "m1-table", "nudge": "Can it be a table?",
+              "check": {"artifact": "report", "format": {"contains_all": ["|"]}}},
+             {"id": "m1-total", "nudge": "Keep the total, not the internal number.",
+              "check": {"artifact": "report", "format": {"contains_all": ["total"], "contains_none": ["internal"]}}}],
+         **r2},
+        {"id": "M2", "line": "Now post it on the card.", "gates": [
+            {"id": "m2-card", "nudge": "Is it on the card?",
+             "check": {"call": {"tool": "trello_comments", "path": "comments"}, "expect": {"count": {"min": 1}}}}]}]}
+
+
+def report_world(text="Report\ntotal 40 (internal 12)"):
+    return {"docs": {"files": [{"id": "d1"}]}, "doc_read": text, "gmail_sent": {"messages": []},
+            "trello_comments": {"comments": []}}
+
+
+def _load_error(milestones) -> str:
+    with pytest.raises(ValueError) as e:
+        mg.check_params({"role": "r", "milestones": milestones})
+    return str(e.value)
+
+
+def _m(mid, gate="g", **kw):
+    return {"id": mid, "gates": [{"id": f"{mid}-{gate}", "nudge": "n", "check": {"call": {"tool": "t"}, "expect": "exists"}}],
+            **kw}
+
+
+def test_a_revision_must_name_an_earlier_milestone_and_follow_it():
+    assert "names no earlier milestone" in _load_error([_m("M1", group="M9")])
+    assert "names no earlier milestone" in _load_error([_m("M1"), _m("M2", group="M3"), _m("M3")])
+    # M1's revision after M2 has opened: its revisions must run one after another
+    assert "must follow it or its last revision" in _load_error([_m("M1"), _m("M2"), _m("M1-r2", group="M1")])
+    assert "carry_gates needs group" in _load_error([_m("M1"), _m("M2", carry_gates=True)])
+    assert "carry_gates must be true or false" in _load_error([_m("M1"), _m("M1-r2", group="M1", carry_gates="yes")])
+
+
+def test_a_revision_may_name_its_milestone_or_an_earlier_revision_of_it():
+    spec = mg._spec({"role": "r", "milestones": [_m("M1"), _m("M1-r2", group="M1"), _m("M1-r3", group="M1-r2"),
+                                                 _m("M2")]})
+    assert [(m["id"], m["group"], m["revision"], m["skip_if_done"]) for m in spec["milestones"]] == [
+        ("M1", "M1", 1, True), ("M1-r2", "M1", 2, False), ("M1-r3", "M1", 3, False), ("M2", "M2", 1, True)]
+
+
+def test_only_a_carrying_revision_may_reuse_a_gate_id_and_then_it_overrides_that_gate():
+    reuse = [_m("M1"), {**_m("M1-r2", group="M1"), "gates": _m("M1")["gates"]}]
+    assert "gate ids must be unique" in _load_error(reuse)
+    reuse[1]["carry_gates"] = True
+    mg.check_params({"role": "r", "milestones": reuse})
+    assert "gate ids must be unique" in _load_error([_m("M1"), _m("M2"), {**_m("M3"), "gates": _m("M1")["gates"]}])
+
+
+def test_carried_gates_keep_their_place_an_override_takes_its_and_new_gates_follow():
+    spec = mg._spec(_revised())
+    r2 = spec["milestones"][1]
+    assert [(g["id"], g.get("carried", False)) for g in r2["gates"]] == [
+        ("m1-report", True), ("m1-total", False), ("m1-quiet", True), ("m1-table", False)]
+    assert r2["gates"][1]["nudge"] == "Keep the total, not the internal number."
+    assert r2["artifacts"] == REPORT  # carried with the gates that read it
+    assert [g["id"] for g in spec["milestones"][2]["gates"]] == ["m2-card"]  # a new milestone carries nothing
+
+
+def test_a_revision_without_carry_gates_checks_only_its_own_gates_and_may_read_its_own_artifacts():
+    params = _revised(carry_gates=False)
+    assert "not in its milestone's artifacts" in _load_error(params["milestones"])
+    params["milestones"][1]["artifacts"] = REPORT
+    assert "gate ids must be unique" in _load_error(params["milestones"])  # m1-total, reused without carrying
+    params["milestones"][1]["gates"][1]["id"] = "m1-public"
+    assert [g["id"] for g in mg._spec(params)["milestones"][1]["gates"]] == ["m1-table", "m1-public"]
+
+
+@pytest.mark.asyncio
+async def test_a_revision_opens_after_its_milestone_even_when_already_done_and_nudges_on_a_carried_gate():
+    w = report_world("| total | 40 |")  # already a table with no internal number
+    env, records = Env(w), []
+    t1 = Turn(env, records, 1)
+    await post_turn(t1, _revised())
+    assert t1.notes == ["M1 is done. Open M1-r2 now: send this line: Make it a table; it's going public now."]
+    w["docs"] = {"files": []}  # the agent deletes the report while revising it
+    t2 = Turn(env, records, 2)
+    await post_turn(t2, _revised())
+    assert t2.notes == ["Where's the report?"]  # M1's own gate, carried into the revision
+    assert records[-1]["milestone"] == "M1-r2" and records[-1]["decision"] == "nudge"
+
+
+@pytest.mark.asyncio
+async def test_a_revision_let_go_opens_the_next_milestone():
+    env, records = Env(report_world()), []
+    await post_turn(Turn(env, records, 1), _revised())  # M1 passes
+    await post_turn(Turn(env, records, 2), _revised())  # M1-r2 nudged: still internal, no table
+    t3 = Turn(env, records, 3)
+    await post_turn(t3, _revised())  # max_nudges 1, not blocking: let go
+    assert t3.notes == ["M1-r2 isn't done, but let it go. Open M2 now: send this line: Now post it on the card."]
+    m1 = t3.summary["milestones"][0]
+    assert (m1["status"], m1["reached_revision"], m1["revisions_done"]) == ("gave_up", "M1-r2", 1)
+    assert [(r["revision"], r["status"]) for r in m1["revisions"]] == [(1, "passed"), (2, "gave_up")]
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_revision_that_never_passes_ends_the_run():
+    env, records = Env(report_world()), []
+    for n in (1, 2, 3):
+        returned = await post_turn(Turn(env, records, n), _revised(blocking=True))
+    assert returned == {"end": "gate_never_passed:M1-r2"}
+
+
+async def _run_revised(w, final_text=None):
+    """M1 passes, M1-r2 is nudged then passes, M2 passes and the wrap-up goes out, then the final check."""
+    env, records, turns = Env(w), [], []
+
+    async def turn(n):
+        turns.append(Turn(env, records, n))
+        return await post_turn(turns[-1], _revised())
+
+    await turn(1)
+    await turn(2)
+    w["doc_read"] = "| total | 40 |"
+    await turn(3)
+    w["trello_comments"] = {"comments": [{"text": "posted"}]}
+    await turn(4)
+    if final_text is not None:
+        w["doc_read"] = final_text
+    env.calls.clear()
+    returned = await turn(5)
+    return returned, records, turns, env
+
+
+@pytest.mark.asyncio
+async def test_the_summary_nests_revisions_under_their_milestone():
+    returned, records, turns, _ = await _run_revised(report_world())
+    assert returned == {"end": "milestones_done"}
+    s = turns[-1].summary
+    assert {k: s[k] for k in ("reached", "reached_revision", "done", "total", "revisions_done", "revisions_total",
+                              "end")} == {"reached": "M2", "reached_revision": "M2", "done": 2, "total": 2,
+                                          "revisions_done": 3, "revisions_total": 3, "end": "milestones_done"}
+    m1, m2 = s["milestones"]
+    assert {k: m1[k] for k in ("id", "status", "opened_turn", "closed_turn", "nudges", "reached_revision",
+                               "revisions_done")} == {"id": "M1", "status": "passed", "opened_turn": 1, "closed_turn": 3,
+                                                      "nudges": 1, "reached_revision": "M1-r2", "revisions_done": 2}
+    assert [(r["id"], r["revision"], r["status"], r["opened_turn"], r["closed_turn"], r["nudges"])
+            for r in m1["revisions"]] == [("M1", 1, "passed", 1, 1, 0), ("M1-r2", 2, "passed", 2, 3, 1)]
+    r2_gates = m1["revisions"][1]["gates"]
+    assert r2_gates["m1-report"] == {"passed": True, "type": "action", "carried": True}
+    assert "carried" not in r2_gates["m1-table"] and "carried" not in r2_gates["m1-total"]
+    assert (m2["status"], "revisions" in m2) == ("passed", False)  # a milestone without revisions is one row
+
+
+@pytest.mark.asyncio
+async def test_after_the_wrap_up_every_milestones_latest_revision_is_checked_and_a_broken_one_is_undone():
+    returned, records, turns, env = await _run_revised(report_world(), final_text="total 40 (internal 12)")
+    done = records[-1]
+    assert done["decision"] == "done" and done["milestone"] == "M2"
+    [m1] = done["final_checks"]
+    assert m1["milestone"] == "M1-r2"
+    # state gates only: m1-quiet (no_new) is about the turns M1-r2 was open, so it isn't checked again
+    assert [(g["id"], g["passed"]) for g in m1["gates"]] == [
+        ("m1-report", True), ("m1-total", False), ("m1-table", False)]
+    assert not any(tool == "gmail_sent" for tool, _, _ in env.calls)
+    s = turns[-1].summary
+    assert [(r["id"], r["status"]) for r in s["milestones"][0]["revisions"]] == [("M1", "passed"), ("M1-r2", "undone")]
+    assert (s["milestones"][0]["status"], s["done"], s["revisions_done"]) == ("undone", 1, 2)
+
+
+@pytest.mark.asyncio
+async def test_after_the_wrap_up_an_earlier_milestone_without_revisions_is_checked_too():
+    w = world()
+    w["drive_list"] = {"files": [SHEET]}
+    env, records = Env(w), []
+    params = copy.deepcopy(PARAMS)
+    params["milestones"][1]["skip_if_done"] = False
+    await post_turn(Turn(env, records, 1), params)  # M1 passes
+    w["trello_comments"] = {"comments": [{"text": "Vaultly cancelled"}]}
+    await post_turn(Turn(env, records, 2), params)  # M2 passes: wrap-up
+    w["drive_list"] = {"files": []}  # the agent removes M1's sheet while answering the wrap-up
+    t3 = Turn(env, records, 3)
+    assert await post_turn(t3, params) == {"end": "milestones_done"}
+    assert [g["id"] for g in records[-1]["final_checks"][0]["gates"]] == ["m1-sheet", "m1-cols"]
+    assert _status(t3) == [("M1", "undone", 1, 3, 0), ("M2", "passed", 2, 2, 0)]
+    assert "reached_revision" not in t3.summary  # a task without revisions keeps its summary's shape

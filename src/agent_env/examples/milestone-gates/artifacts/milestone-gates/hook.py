@@ -31,12 +31,22 @@ Params:
                            logs)
   trajectory_max_chars     the most rendered trajectory one judge call gets (default 600000); the oldest turns
                            before the open milestone are cut first
-  milestones      [{id, line?, type?, skip_if_done?, blocking?, max_nudges?, show?, artifacts: {name: artifact},
-                    gates: [gate]}]
+  milestones      [{id, line?, type?, skip_if_done?, blocking?, max_nudges?, show?, group?, carry_gates?,
+                    artifacts: {name: artifact}, gates: [gate]}]
                   ``line`` is the text the sim sends to open the milestone, used to tell when it has moved on.
                   When a milestone is done, each next one the agent has already done is skipped (its gates all pass
                   then, at least one of them on something the agent made): the note tells the sim to skip its line.
                   ``skip_if_done: false`` turns that off for a milestone; type ``correct`` is never skipped.
+                  ``group`` makes an entry a revision of an earlier milestone (its id): a change asked of work already
+                  done, with gates of its own. A milestone's revisions follow it one after another, each opened,
+                  nudged, given up on and ended like any milestone, and by default never skipped. ``carry_gates:
+                  true`` checks the previous revision's gates (and keeps its artifacts) too, but for any gate the
+                  revision writes with the same id, which replaces it. The summary nests revisions under their
+                  milestone.
+
+After the wrap-up is answered, the last milestone is checked once more, and so is the latest revision of every earlier
+milestone, on its state gates only (not no_new or trajectory_judge, which are about the turns it was open): one found
+broken is ``undone``.
 
 A gate is {id, nudge, check}, with check one of:
   {"trajectory_judge": "statement"}            one LLM call: is the statement true of the agent's work, read from its
@@ -70,7 +80,9 @@ from typing import Any, Optional
 # milestone whose evidence never arrives is let go (or ends the run, if blocking) instead of holding forever.
 HOLD_NOTE = ("Nothing could be checked this time. Don't move on: reply to what the assistant said, and stay on the "
              "milestone you're on.")
-MILESTONE_KEYS = {"id", "line", "type", "skip_if_done", "blocking", "max_nudges", "show", "artifacts", "gates"}
+MILESTONE_KEYS = {"id", "line", "type", "skip_if_done", "blocking", "max_nudges", "show", "artifacts", "gates", "group",
+                  "carry_gates"}
+DONE = ("passed", "skipped")  # the statuses that count a milestone done
 DEFAULT_FINAL = "Everything you asked for is done. Wrap up the way you planned (send your last line), then stop."
 # The wrap-up after a milestone was let go: nothing claims it was all done, and the user takes on nothing new.
 DEFAULT_FINAL_GAVE_UP = ("Wrap up now: send your last line, then stop. Don't say everything is done, and don't ask "
@@ -112,11 +124,23 @@ async def _post_turn(turn, spec):
     state = _state(turn.records())
     milestones = spec["milestones"]
     if state["finished"]:  # the wrap-up was sent and the agent has answered it
-        # Check the last milestone once more: the agent may have changed its work while answering the wrap-up, and
-        # the summary should match what it left, as the task's final rubric will.
+        # Check the work once more: the agent may have changed it while answering the wrap-up, or broken an earlier
+        # milestone's work since, and the summary should match what it left, as the task's final rubric will.
+        env = _env(turn, spec)
         m = milestones[state["index"]]
-        gates = await _run_gates(turn, spec, _env(turn, spec), m, state)
-        turn.record({"decision": "done", "milestone": m["id"], "gates": gates})
+        gates = await _run_gates(turn, spec, env, m, state)
+        record = {"decision": "done", "milestone": m["id"], "gates": gates}
+        earlier = []
+        for o in _latest_revisions(spec):
+            if o["group"] == m["group"]:
+                continue
+            kept = [g for g in o["gates"] if _state_check(g["check"])]
+            if kept:
+                earlier.append({"milestone": o["id"], "gates": await _run_gates(
+                    turn, spec, env, {**o, "gates": kept}, {**state, "baselines": {}})})
+        if earlier:
+            record["final_checks"] = earlier
+        turn.record(record)
         return {"end": "milestones_done"}
     if state["idle"]:  # the sim repeated itself last turn; the agent has answered that, so end before asking again
         turn.record({"decision": "end", "end": "sim_idle"})
@@ -203,10 +227,11 @@ def _gate_type(check: dict) -> str:
 def _summary(spec: dict, records: list[dict]) -> dict:
     """Where the conversation got to, from this hook's records, for whoever grades it (Turn.summarize): each
     milestone's status (not_reached, open, passed, skipped (done before it opened), gave_up (let go after max_nudges),
-    undone (done, then broken while the agent answered the wrap-up),
+    undone (done, then found broken by the check after the wrap-up),
     passed_over (the user sim moved past it), derailed (a blocking one that never passed, which ended the run)), the
     turn it opened and closed, nudges spent, and each gate's last verdict and type; then the furthest milestone
-    reached, how many were done, and the end reason once the hook ended the conversation."""
+    reached, how many were done, and the end reason once the hook ended the conversation. With revisions, each
+    milestone's row holds its revisions' rows and rolls them up (``_rollup``)."""
     if not spec["enabled"]:
         return {"enabled": False}
     milestones = spec["milestones"]
@@ -252,12 +277,50 @@ def _summary(spec: dict, records: list[dict]) -> dict:
                     row.update(status="passed", closed_turn=turn)  # done in the end, after the wrap-up
                 elif any(g["passed"] is False for g in final) and row["status"] in ("passed", "skipped"):
                     row.update(status="undone", closed_turn=turn)  # done before, broken while answering the wrap-up
+            # An earlier milestone's latest revision, checked on its state gates only: those passing don't prove a
+            # revision let go is done, so the check can only find one broken.
+            for f in r.get("final_checks") or []:
+                earlier = by_id.get(f["milestone"])
+                if earlier is None:
+                    continue
+                verdicts(earlier, f["gates"])
+                if any(g["passed"] is False for g in f["gates"]) and earlier["status"] in ("passed", "skipped"):
+                    earlier.update(status="undone", closed_turn=turn)
         elif r.get("decision") == "end":
             end = r.get("end")
-    reached = [row["id"] for row in rows if row["status"] != "not_reached"]
-    return {"enabled": True, "reached": reached[-1] if reached else None,
-            "done": sum(row["status"] in ("passed", "skipped") for row in rows), "total": len(rows),
-            "end": end, "milestones": rows}
+    for m, row in zip(milestones, rows):
+        for gid in [g["id"] for g in m["gates"] if g.get("carried")]:
+            if gid in row["gates"]:
+                row["gates"][gid]["carried"] = True
+    groups: dict[str, list[dict]] = {}
+    for m, row in zip(milestones, rows):
+        groups.setdefault(m["group"], []).append(row)
+    if all(len(revs) == 1 for revs in groups.values()):  # no revisions: one row per milestone, as always
+        reached = [row["id"] for row in rows if row["status"] != "not_reached"]
+        return {"enabled": True, "reached": reached[-1] if reached else None,
+                "done": sum(row["status"] in DONE for row in rows), "total": len(rows),
+                "end": end, "milestones": rows}
+    out = [revs[0] if len(revs) == 1 else _rollup(head, revs) for head, revs in groups.items()]
+    reached = [row for row in out if row["status"] != "not_reached"]
+    return {"enabled": True, "reached": reached[-1]["id"] if reached else None,
+            "reached_revision": (reached[-1].get("reached_revision", reached[-1]["id"]) if reached else None),
+            "done": sum(row["status"] in DONE for row in out), "total": len(out),
+            "revisions_done": sum(row["status"] in DONE for row in rows), "revisions_total": len(rows),
+            "end": end, "milestones": out}
+
+
+def _rollup(head: str, revs: list[dict]) -> dict:
+    """A milestone with revisions: its revisions' rows (numbered from 1, the milestone as first written), under the
+    status of the furthest one reached, as that's the work the user last asked for."""
+    for k, rev in enumerate(revs, 1):
+        rev["revision"] = k
+    reached = [rev for rev in revs if rev["status"] != "not_reached"]
+    top = reached[-1] if reached else None
+    return {"id": head, "status": top["status"] if top else "not_reached",
+            "opened_turn": reached[0]["opened_turn"] if reached else None,
+            "closed_turn": top["closed_turn"] if top else None, "nudges": sum(rev["nudges"] for rev in revs),
+            "reached_revision": top["id"] if top else None, "revisions_done": sum(rev["status"] in DONE for rev in revs),
+            "revisions": revs}
 
 
 async def _skips(turn, spec, env, state, nxt) -> tuple[int, list[dict]]:
@@ -371,6 +434,20 @@ async def _run_gates(turn, spec, env, m, state) -> list[dict]:
                         **({"type": g["type"]} if g.get("type") else {})})
     order = {g["id"]: i for i, g in enumerate(m["gates"])}
     return sorted(out, key=lambda r: order[r["id"]])
+
+
+def _state_check(check: dict) -> bool:
+    """A gate on the state the agent left, which still means something after its milestone closed: not a no_new
+    (nothing added while the milestone was open) or a trajectory_judge (what the agent did during it)."""
+    return "no_new" not in check and "trajectory_judge" not in check
+
+
+def _latest_revisions(spec: dict) -> list[dict]:
+    """Each milestone's last revision (a milestone without revisions is its own), in order."""
+    last: dict[str, dict] = {}
+    for m in spec["milestones"]:
+        last[m["group"]] = m
+    return list(last.values())
 
 
 def _costly(check: dict) -> bool:
@@ -828,24 +905,44 @@ def _spec(params: dict) -> dict:
     milestones = params.get("milestones")
     if not isinstance(milestones, list) or not milestones:
         raise ValueError("milestone-gates needs milestones")
-    out = []
+    out, authored = [], []  # authored: (gate id, overrides a carried gate) for every gate the spec writes
     for i, m in enumerate(milestones):
         unknown = set(m) - MILESTONE_KEYS
         if unknown:
             raise ValueError(f"milestone {i} has unknown keys {sorted(unknown)}")
-        gates = m.get("gates") or []
-        if not gates:
-            raise ValueError(f"milestone {m.get('id', i)} has no gates")
-        for g in gates:
+        mid = m.get("id") or f"M{i + 1}"
+        if any(mid == o["id"] for o in out):
+            raise ValueError(f"milestone ids must be unique: {mid!r} is repeated")
+        prev = out[-1] if out else None
+        group, carry = m.get("group"), m.get("carry_gates", False)
+        if not isinstance(carry, bool):
+            raise ValueError(f"milestone {mid}: carry_gates must be true or false")
+        if group is not None:
+            # A revision names the milestone it revises: an earlier one of the group just before it, so a
+            # milestone's revisions run one after another.
+            named = next((o for o in out if o["id"] == group), None)
+            if named is None:
+                raise ValueError(f"milestone {mid}: group {group!r} names no earlier milestone")
+            if named["group"] != prev["group"]:
+                raise ValueError(f"milestone {mid}: a revision of {named['group']} must follow it or its last "
+                                 f"revision, not {prev['id']}")
+        elif carry:
+            raise ValueError(f"milestone {mid}: carry_gates needs group (the milestone it revises)")
+        own = m.get("gates") or []
+        if not own:
+            raise ValueError(f"milestone {mid} has no gates")
+        carried = {g["id"]: g for g in prev["gates"]} if carry else {}
+        artifacts = {**(prev["artifacts"] if carry else {}), **(m.get("artifacts") or {})}
+        for g in own:
             if not g.get("id") or not g.get("nudge") or not isinstance(g.get("check"), dict):
-                raise ValueError(f"milestone {m.get('id', i)}: each gate needs id, nudge and check")
+                raise ValueError(f"milestone {mid}: each gate needs id, nudge and check")
             unknown_gate = set(g) - GATE_KEYS
             if unknown_gate:
                 raise ValueError(f"gate {g['id']} has unknown keys {sorted(unknown_gate)}")
             if g.get("type") is not None and g["type"] not in GATE_TYPES:
                 raise ValueError(f"gate {g['id']}: type {g['type']!r} is not one of {list(GATE_TYPES)}")
             art = g["check"].get("artifact")
-            if art is not None and art not in (m.get("artifacts") or {}):
+            if art is not None and art not in artifacts:
                 raise ValueError(f"gate {g['id']} names artifact {art!r}, not in its milestone's artifacts")
             problem = _check_problem(g["check"])
             if problem:
@@ -854,17 +951,23 @@ def _spec(params: dict) -> dict:
                 for call in g["check"].get("no_new") or []:
                     if call.get("baseline_count") is None:
                         raise ValueError(f"gate {g['id']}: a no_new gate in the first milestone needs baseline_count")
-        out.append({"id": m.get("id") or f"M{i + 1}", "line": m.get("line"), "blocking": m.get("blocking", True),
-                    "max_nudges": int(m.get("max_nudges", 3)), "show": m.get("show"),
-                    "type": m.get("type"), "skip_if_done": bool(m.get("skip_if_done", True)),
-                    "artifacts": m.get("artifacts") or {}, "gates": gates})
-    ids = [g["id"] for m in out for g in m["gates"]]
+            authored.append((g["id"], g["id"] in carried))
+        # Carried gates keep their place; one the revision overrides (same id) takes its place, new ones follow.
+        mine = {g["id"]: g for g in own}
+        gates = [mine.pop(gid) if gid in mine else {**g, "carried": True} for gid, g in carried.items()]
+        gates += list(mine.values())
+        revision = prev["revision"] + 1 if group is not None else 1
+        out.append({"id": mid, "line": m.get("line"), "blocking": m.get("blocking", True),
+                    "max_nudges": int(m.get("max_nudges", 3)), "show": m.get("show"), "type": m.get("type"),
+                    # a revision asks for a change to work already done, so by default it's never skipped as done
+                    "skip_if_done": bool(m.get("skip_if_done", group is None)),
+                    "group": prev["group"] if group is not None else mid, "revision": revision,
+                    "artifacts": artifacts, "gates": gates})
+    ids = [gid for gid, override in authored if not override]
     repeated = sorted({gid for gid in ids if ids.count(gid) > 1})
     if repeated:
-        raise ValueError(f"gate ids must be unique; repeated: {repeated}")
-    milestone_ids = [m["id"] for m in out]
-    if len(set(milestone_ids)) != len(milestone_ids):
-        raise ValueError(f"milestone ids must be unique: {milestone_ids}")
+        raise ValueError(f"gate ids must be unique (a revision with carry_gates may reuse one it carries, to "
+                         f"override it); repeated: {repeated}")
     checks = [g["check"] for m in out for g in m["gates"]]
     for key, kind in (("judge_model", "judge"), ("trajectory_judge_model", "trajectory_judge")):
         if any(kind in c for c in checks) and not (isinstance(params.get(key), str) and params[key].strip()):
