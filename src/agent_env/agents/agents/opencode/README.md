@@ -27,7 +27,7 @@ disk:
   subagent's session's, compaction's, the session title's and an answered retry's. The task's `Usage` is their sum,
   `input_tokens` counting the cache; a call answered without usage is counted in `unreported_calls`, and a refused one
   counts nothing.
-- the model: the task's, else `OPENCODE_MODEL`, else `anthropic/claude-sonnet-4-6`;
+- the model: the task's, else `OPENCODE_MODEL`, else `anthropic/claude-sonnet-5-5`;
 - every registered MCP server, the task's `peer_agents` tools included, as a remote server. Its `AgentEnv-Role` header
   is the role its registration names, unless the task has a role of its own;
 - every tool allowed, and the one that asks the user a question denied.
