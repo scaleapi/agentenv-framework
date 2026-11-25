@@ -185,6 +185,7 @@ def test_agent_config_reaches_the_cli(calls, client):
         "attachment_paths": None,
         "timeout_s": 42,
         "cwd": a2a_server.GEMINI_CWD,
+        "aux_callback": None,
     }
 
 

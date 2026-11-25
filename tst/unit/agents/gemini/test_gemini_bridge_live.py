@@ -242,6 +242,7 @@ def test_a_canceled_turn_keeps_the_model_calls_its_proxy_forwarded(cli, app):
     final = asyncio.run(exercise())
 
     assert started[0].killed
+    assert final["trajectory"][1].pop("timestamp").endswith("Z")
     assert final["trajectory"] == [_INIT, {"type": "agentenv.model_call", "via": "passthrough",
                                            "model": "gemini-2.5-flash", "status": 200, "outcome": "answered",
                                            "usage": counts}]

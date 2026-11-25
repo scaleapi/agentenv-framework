@@ -74,7 +74,9 @@ def test_descriptions(app):
             "Read back the LiteLLM attribution headers the agent most recently emitted on an outbound "
             "LLM call. Used by the agent-env runtime attribution validator."
         ),
-        "urn:agentenv:trajectory/v1": "Retrieve a task's Gemini stream-json trajectory, also while it runs.",
+        "urn:agentenv:trajectory/v1": (
+            "Retrieve a task's Gemini stream-json trajectory, also while it runs; atif/1 when the run prescribes it."
+        ),
         "urn:agentenv:mcp-config/v1": "Register MCP servers the Gemini CLI should connect to.",
         "urn:agentenv:skill-config/v1": "Register a skill loaded by the Gemini CLI from ~/.gemini/skills/.",
         "urn:agentenv:peer-agents/v1": (
@@ -104,7 +106,9 @@ def test_endpoints_and_verbs(app):
         "urn:agentenv:install/v1": (None, {}),
         "urn:agentenv:agent-config/v1": ("/ext/agent-config", {"set": ("POST", None), "get": ("GET", None)}),
         "urn:agentenv:attribution-probe/v1": ("/ext/attribution-probe", {"probe": ("POST", None)}),
-        "urn:agentenv:trajectory/v1": ("/ext/trajectory", {"get": ("POST", None)}),
+        "urn:agentenv:trajectory/v1": ("/ext/trajectory", {
+            "get": ("POST", None), "prescribe": ("POST", "/ext/trajectory/prescribe"),
+            "media": ("POST", "/ext/trajectory/media")}),
         "urn:agentenv:mcp-config/v1": ("/ext/mcp-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:skill-config/v1": ("/ext/skill-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:peer-agents/v1": ("/ext/peer-agents", {"set": ("POST", None), "list": ("GET", None)}),
@@ -238,3 +242,9 @@ def test_install_mode_reads_the_card_by_importing_agent_card():
     exported = json.loads(out.stdout)
     (install,) = [e for e in exported["capabilities"]["extensions"] if e["uri"] == "urn:agentenv:install/v1"]
     assert install["params"]["install_commands"] and install["params"]["install_commands_host"]
+
+
+def test_the_card_offers_atif_beside_stream_json_which_stays_the_default(app):
+    params = _extensions(app)["urn:agentenv:trajectory/v1"]["params"]
+    assert params["formats"] == ["gemini-stream-json/1", "atif/1"]
+    assert params["native"] == params["default"] == "gemini-stream-json/1"

@@ -1,0 +1,195 @@
+"""Gemini's ATIF adapter on records shaped as the CLI and the agent write them: stdout's stream-json events and the
+proxy's ``agentenv.model_call`` records as natives, and the session transcript's model messages as the bridge feeds
+them (``session_aux``). Each case runs through the protocol's adapter kit, so the live rule holds after every record and
+the document validates as a producer's."""
+from __future__ import annotations
+
+import base64
+import json
+import struct
+import zlib
+
+import pytest
+from agentenv_protocol.atif import Fed, RecordedTask, TurnContext, check_adapter, profile_of
+
+from tst.unit.agents.gemini.agent import AGENT_DIR, gemini_atif, gemini_bridge
+
+GeminiAtif = gemini_atif.GeminiAtif
+MODEL = "gemini-2.5-flash"
+
+
+def png(width=4, height=3) -> bytes:
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    rows = b"".join(b"\x00" + b"\x10\x20\x30" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+class Feed:
+    """One task's records in arrival order, each a millisecond after the last."""
+
+    clock = 0
+
+    def __init__(self):
+        self.records: list[Fed] = []
+
+    @staticmethod
+    def at():
+        Feed.clock += 1
+        return f"2026-11-25T16:16:{Feed.clock // 1000:02d}.{Feed.clock % 1000:03d}Z"
+
+    def native(self, event):
+        self.records.append(Fed({**event, "timestamp": event.get("timestamp") or self.at()}))
+        return self
+
+    def call(self, inputs=7338, output=182, cached=0, outcome="answered", status=200, model=MODEL):
+        record = {"type": "agentenv.model_call", "via": "passthrough", "model": model, "status": status,
+                  "outcome": outcome}
+        if outcome == "answered":
+            record["usage"] = {"input_tokens": inputs, "output_tokens": output, "cache_read_tokens": cached,
+                               "reasoning_tokens": 105}
+        return self.native(record)
+
+    def tool_use(self, tool_id, name="run_shell_command"):
+        return self.native({"type": "tool_use", "tool_name": name, "tool_id": tool_id, "parameters": {}})
+
+    def message(self, message_id, content="", *, tokens=None, thoughts=(), calls=(), model=MODEL):
+        message = {"id": message_id, "timestamp": self.at(), "type": "gemini", "content": content,
+                   "thoughts": [{"subject": subject, "description": description, "timestamp": self.at()}
+                                for subject, description in thoughts],
+                   "tokens": tokens or {"input": 7338, "output": 77, "cached": 0, "thoughts": 105, "tool": 0,
+                                        "total": 7520},
+                   "model": model, "toolCalls": list(calls)}
+        self.records.append(Fed(gemini_bridge.session_aux(message), aux="session"))
+        return self
+
+    def result(self, error=None):
+        event = {"type": "result", "status": "error" if error else "success", "stats": {"tool_calls": 0}}
+        if error:
+            event["error"] = {"type": "unknown", "message": error}
+        return self.native(event)
+
+
+def tool(call_id, output="Output: 5050", *, name="run_shell_command", status="success", error=None, image=None):
+    response = {"error": error} if error else {"output": output}
+    result = [{"functionResponse": {"id": call_id, "name": name, "response": response}}]
+    if image is not None:
+        result.append({"inlineData": {"mimeType": "image/png", "data": base64.b64encode(image).decode()}})
+    return {"id": call_id, "name": name, "args": {"command": "python3 hello.py"}, "result": result, "status": status,
+            "timestamp": Feed.at(), "resultDisplay": [[{"text": "5050", "bold": False}]], "displayName": "Shell",
+            "renderOutputAsMarkdown": False}
+
+
+def context(index=0):
+    return TurnContext(index=index, context_id="ctx", task_id=f"t{index}", message_id=f"m{index}", inbound=["do it"],
+                       agent_name="Gemini", agent_version="1.0.0", agent_model=MODEL,
+                       started_at=f"2026-11-25T16:00:0{index}Z")
+
+
+def run(*feeds: Feed, state="completed"):
+    kit = check_adapter(GeminiAtif, [RecordedTask(context=context(i), records=feed.records, state=state)
+                                     for i, feed in enumerate(feeds)])
+    kit.raise_for_errors()
+    return kit
+
+
+def agent_steps(document):
+    return [step for step in document["steps"] if step["source"] == "agent"]
+
+
+def test_a_response_is_one_step_with_its_thoughts_calls_results_and_its_proxy_calls_usage():
+    feed = Feed().native({"type": "init", "session_id": "s-1"}).call().tool_use("shell_1")
+    feed.native({"type": "tool_result", "tool_id": "shell_1", "status": "success"})
+    feed.message("m-1", thoughts=[("Running it", "I'll run the script.")], calls=[tool("shell_1")])
+    feed.call(inputs=7521, output=4, cached=7003).message("m-2", "5050", tokens={"input": 7521, "output": 4,
+                                                                                 "cached": 7003}).result()
+    first, second = agent_steps(run(feed).document)
+
+    assert first["model_name"] == MODEL and first["reasoning_content"] == "Running it: I'll run the script."
+    assert profile_of(first)["reasoning"][0]["visibility"] == "summary"
+    assert first["tool_calls"] == [{"tool_call_id": "shell_1", "function_name": "run_shell_command",
+                                    "arguments": {"command": "python3 hello.py"}}]
+    assert first["observation"]["results"] == [{"source_call_id": "shell_1", "content": "Output: 5050"}]
+    assert first["metrics"] == {"prompt_tokens": 7338, "cached_tokens": 0, "completion_tokens": 182}
+    assert second["message"] == "5050" and second["metrics"]["cached_tokens"] == 7003
+
+
+def test_a_tool_use_prompt_counts_as_the_proxy_counts_it():
+    feed = Feed().call(inputs=7400).message("m-1", "ok", tokens={"input": 7338, "output": 4, "tool": 62})
+    (step,) = agent_steps(run(feed.result()).document)
+
+    assert step["metrics"]["prompt_tokens"] == 7400 and step["metrics"]["completion_tokens"] == 182
+
+
+def test_a_call_that_wrote_no_message_is_a_step_with_its_usage_alone_in_its_place():
+    feed = Feed().call().call(inputs=900, output=3).call(inputs=7500, output=10)
+    feed.message("m-1", "first", tokens={"input": 7338, "output": 77, "thoughts": 105})
+    feed.message("m-2", "second", tokens={"input": 7500, "output": 10}).call(inputs=950, output=2).result()
+    steps = agent_steps(run(feed).document)
+
+    assert [step["message"] for step in steps] == ["first", "", "second", ""]
+    assert [step["metrics"]["prompt_tokens"] for step in steps] == [7338, 900, 7500, 950]
+
+
+def test_a_refused_call_is_a_step_with_no_model_call_before_the_retry_that_answered():
+    feed = Feed().call(outcome="refused", status=429).call().message("m-1", "ok").result()
+    refused, answered = agent_steps(run(feed).document)
+
+    assert refused["llm_call_count"] == 0 and "metrics" not in refused
+    assert profile_of(refused)["error"] == {"kind": "infra_error", "message": "the endpoint refused the call (HTTP 429)"}
+    assert answered["message"] == "ok"
+
+
+def test_the_clis_report_of_a_turn_failed_at_a_refused_call_replaces_its_error():
+    error = '[API Error: {"error":{"message":"refused","code":400}}]'
+    feed = Feed().native({"type": "init", "session_id": "s-1"}).call(outcome="refused", status=400).result(error)
+    (step,) = agent_steps(run(feed, state="failed").document)
+
+    assert profile_of(step)["error"] == {"kind": "infra_error", "message": error}
+
+
+def test_an_image_beside_a_result_is_a_media_file_and_an_error_is_the_results():
+    image = png()
+    calls = [tool("shot_1", "### Result", name="mcp_browser_browser_take_screenshot", image=image),
+             tool("shot_2", name="mcp_browser_browser_take_screenshot", status="error", error="scale is required")]
+    kit = run(Feed().call().message("m-1", calls=calls).call(inputs=8000).message(
+        "m-2", "Example Domain", tokens={"input": 8000, "output": 4}).result())
+
+    shot, failed = agent_steps(kit.document)[0]["observation"]["results"]
+    text, picture = shot["content"]
+    assert text == {"type": "text", "text": "### Result"} and kit.media[picture["source"]["path"]] == image
+    assert failed["content"] == "scale is required" and profile_of(failed)["status"] == "error"
+
+
+def test_a_cancelled_call_without_a_result_is_canceled():
+    cancelled = {**tool("shell_1"), "status": "cancelled"}
+    del cancelled["result"]
+    (step,) = agent_steps(run(Feed().call().message("m-1", calls=[cancelled]).result()).document)
+
+    (result,) = step["observation"]["results"]
+    assert profile_of(result)["status"] == "canceled"
+
+
+@pytest.mark.parametrize("proxied", [
+    pytest.param(lambda feed: feed.call(outcome="unreported"), id="unreported"),
+    pytest.param(lambda feed: feed, id="unseen"),
+])
+def test_a_response_whose_call_the_proxy_didnt_count_takes_the_transcripts(proxied):
+    feed = proxied(Feed()).message("m-1", "ok", tokens={"input": 7338, "output": 77, "cached": 10, "thoughts": 105})
+    (step,) = agent_steps(run(feed.result()).document)
+
+    assert step["metrics"] == {"prompt_tokens": 7338, "cached_tokens": 10, "completion_tokens": 182}
+
+
+def test_each_task_of_a_session_writes_its_own_steps():
+    first = Feed().call().message("m-1", "5050").result()
+    second = Feed().call(inputs=7700).message("m-2", "500500", tokens={"input": 7700, "output": 6}).result()
+    kit = run(first, second)
+
+    assert [step["message"] for step in agent_steps(kit.document)] == ["5050", "500500"]
+
+
+def test_the_tested_cli_is_the_one_the_image_pins():
+    pinned = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["@google/gemini-cli"]
+    assert gemini_atif.TESTED_WITH == (pinned,)
