@@ -23,7 +23,7 @@ INSTALLABLE = sorted(path.name for path in AGENTS.iterdir()
 
 
 def test_the_bundled_agents_that_install_are_the_ones_this_test_knows():
-    assert INSTALLABLE == ["claude-code", "codex", "gemini", "letta-code", "opencode", "openhands", "pi", "proxy",
+    assert INSTALLABLE == ["antigravity", "claude-code", "codex", "gemini", "letta-code", "opencode", "openhands", "pi", "proxy",
                            "pydantic-ai"]
 
 
