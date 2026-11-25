@@ -216,6 +216,13 @@ class A2AAgent:
         return method, config.get("endpoint") or (spec.path if spec else None)
 
     @staticmethod
+    def tool_settings(card: dict) -> dict:
+        """The agent's own-tool selection and peer-tools setting as deploy_agent stamped them on its card
+        (``builtin_tools``, ``peer_tools``); only the ones set. Sent again with each conversation's config, so an
+        agent that restarted since its deploy doesn't get its tools back."""
+        return {k: card[k] for k in ("builtin_tools", "peer_tools") if card.get(k) is not None}
+
+    @staticmethod
     def negotiate_agent_config(card: dict, desired: dict) -> Optional[NegotiatedAgentConfig]:
         """Filter ``desired`` to the fields the card's agent-config extension accepts (capability negotiation)."""
         ext = A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG)

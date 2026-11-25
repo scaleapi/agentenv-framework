@@ -258,3 +258,14 @@ async def test_a_turn_of_the_loop_past_the_reserve_ends_the_run_on_a_step_error(
     with pytest.raises(RuntimeError, match="the opening wake ran past its worst case"):
         await asyncio.wait_for(rig.run(rig.step(), ctx), 10)
     assert ctx.metadata[ao.ALWAYS_ON_KEY]["week"]["end_reason"] == "step_error"
+
+
+@pytest.mark.parametrize("gate", [{"patterns": True, "max_rewrites": 2},
+                                  {"judge_model": "j", "max_rewrites": 3, "judge_timeout_seconds": 45}],
+                         ids=["patterns", "judge"])
+def test_a_gated_read_has_time_for_every_rewrite_and_judge_call_and_the_reserve_grows_with_it(gate):
+    plain, gated = _step(), _step(user_sim_gate=gate)
+    turn = plain.user_timeout_seconds + ao.TURN_GRACE_SECONDS + ao.TRAJECTORY_FETCH_SECONDS
+    judging = (gate["max_rewrites"] + 1) * gate["judge_timeout_seconds"] if "judge_model" in gate else 0
+    assert gated.read_cap_seconds() == (ao.READ_ASKS + gate["max_rewrites"]) * turn + judging
+    assert gated.wake_reserve_seconds() - plain.wake_reserve_seconds() == gated.read_cap_seconds() - plain.read_cap_seconds()

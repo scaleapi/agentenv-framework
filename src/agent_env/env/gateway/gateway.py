@@ -74,6 +74,8 @@ from .constants import (
     WILDCARD,
     PGWEB_CONSOLE,
     GatewayMode,
+    LEGACY_STATE_ROUTES,
+    SITE_LEGACY_STATE_ROUTES,
     tool_name_clashes_text,
 )
 from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
@@ -83,6 +85,7 @@ from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
 from .clock_followers import ClockFollowers, parse_wait
 from .console_session import ConsoleSession, LinkRedaction, without_session_cookie
+from .deferred_calls import DeferredCalls
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
     ROLE_HEADER_BYTES,
@@ -266,6 +269,7 @@ class Gateway:
         self._mcp.settings.port = port
         self._mcp.settings.transport_security.enable_dns_rebinding_protection = False
         self._trigger_engine = TriggerEngine(self)
+        self._deferred = DeferredCalls(self)
         if self.website_urls:
             @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
             async def list_website_urls() -> list[str]:
@@ -388,7 +392,7 @@ class Gateway:
 
         @self._mcp.custom_route("/triggers/state", methods=["GET"])
         async def triggers_state(request: Request) -> Response:
-            return self._json_response(self._trigger_engine.state(), 200)
+            return self._json_response(self._deferred.in_state(self._trigger_engine.state()), 200)
 
         @self._mcp.custom_route("/clock/set-time", methods=["PUT"])
         async def clock_set_time(request: Request) -> Response:
@@ -705,9 +709,9 @@ class Gateway:
 
     def _takes_control_token(self, scope: dict) -> bool:
         """Whether a request takes the deploy's control token: a control route, the env's data plane, any path of a SQL
-        console behind /svc, or one of ``token_paths`` behind /svc, by the path as routed or by the one the backing
-        server receives (``reaches``), after dot-segment normalisation. A site's /website route never reaches its data
-        plane."""
+        console behind /svc, or one of ``token_paths`` behind /svc (a backing server's data plane, its MCP endpoint and
+        its LEGACY_STATE_ROUTES), by the path as routed or by the one the backing server receives (``reaches``), after
+        dot-segment normalisation. A site's /website route never reaches its data plane."""
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
@@ -734,7 +738,8 @@ class Gateway:
 
     def _process_lifespan(self, mcp_lifespan):
         """Once per process (uvicorn's lifespan), outer to the MCP session manager's: at shutdown the MCP sessions end
-        first, then the driver stops and the scheduled trigger actions are cancelled, then the child sessions close."""
+        first, then the driver stops, the deferred calls and then the scheduled trigger actions are cancelled, and the
+        child sessions close."""
         @asynccontextmanager
         async def lifespan(app):
             try:
@@ -751,6 +756,7 @@ class Gateway:
             finally:
                 self._sessions.closing = True
                 await self._trigger_engine.stop_driver()
+                await self._deferred.cancel()
                 await self._trigger_engine.cancel_scheduled()
                 await self._close_child_sessions()
 
@@ -818,8 +824,9 @@ class Gateway:
     def _fire_triggers(self, role: str, name: str, arguments: dict | None,
                        result: Any) -> tuple[list[asyncio.Task], float | None]:
         """Feed a completed external tool call to the trigger engine (fail-open). Hooked at every
-        external boundary (MCP filter + both `/step` handlers); the engine's `_internal_call` reads
-        bypass these, so internal reads never re-trigger (no recursion). Only watched roles fire."""
+        external boundary (MCP filter + both `/step` handlers) and for each deferred call an external call declared,
+        once made, as the call it stands for; the engine's `_internal_call` reads, and the calls they declare, bypass
+        these, so internal reads never re-trigger (no recursion). Only watched roles fire."""
         try:
             return self._trigger_engine.on_tool_call(role, name, arguments or {}, result)
         except Exception:
@@ -983,12 +990,13 @@ class Gateway:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
         A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
         never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
-        reaches them through /svc/<name>/."""
+        reaches them through /svc/<name>/. On a gateway with a token, neither is SITE_LEGACY_STATE_ROUTES
+        (``_site_reserved``)."""
         app = request.path_params["service_name"]
         card = await self._site_card(app)
         if card is None:
             return self._json_response({"error": "website card unavailable"}, 503)
-        if reserved_site_request(request, card.reserved):
+        if reserved_site_request(request, self._site_reserved(card), self.website_urls.get(app, "http://site")):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls, site_names=self._names(app, card))
         engine = self._trigger_engine
@@ -1006,14 +1014,15 @@ class Gateway:
 
     async def _proxy_website_socket(self, websocket: WebSocket) -> None:
         """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
-        every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
-        the role, role key and forwarded address an HTTP request would carry."""
+        every path its card advertises for agentenv (``site_reserved_paths``), are refused, as ``_site_reserved``
+        says, and it goes upstream with the role, role key and forwarded address an HTTP request would carry."""
         service_name = websocket.path_params["service_name"]
         card = await self._site_card(service_name)
         if card is None:
             await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
             return
-        if reserved_site_request(websocket, card.reserved):
+        if reserved_site_request(websocket, self._site_reserved(card),
+                                 self.website_urls.get(service_name, "http://site")):
             await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
             return
         base_url = self.website_urls.get(service_name)
@@ -1023,6 +1032,11 @@ class Gateway:
         await relay_websocket(websocket, base_url, role=self._request_role(websocket),
                               open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld,
                               site_names=self._names(service_name, card))
+
+    def _site_reserved(self, card: SiteCard) -> frozenset[str]:
+        """The paths a site's route never reaches: those its card advertises for agentenv, and on a gateway with a
+        token SITE_LEGACY_STATE_ROUTES, which an older site's frontend passes on to its backend."""
+        return card.reserved | SITE_LEGACY_STATE_ROUTES if self._control_bearer else card.reserved
 
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
@@ -1243,13 +1257,18 @@ class Gateway:
         await self._sessions.close()
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
-                               caller: Caller | None = None) -> CallToolResult:
-        """Every child tools/call (MCP proxy, /step, trigger engine), with the caller's `_meta` stamp (none for an
-        unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
-        reconnect; the registered proxies look their child up by URL."""
+                               caller: Caller | None = None, report: bool) -> CallToolResult:
+        """Every child tools/call (MCP proxy, /step, trigger engine, deferred calls), with the caller's `_meta` stamp
+        (none for an unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone
+        on a reconnect; the registered proxies look their child up by URL. The deferred calls a result declares are taken
+        off it here, before anyone sees it, and scheduled as the caller's role, reported to the triggers once made unless
+        ``report`` is False (the trigger engine's own calls). It has no default: a trigger action's call that left it
+        out would have the calls it defers provoke triggers again."""
         meta = caller.meta() if caller is not None else None
-        self._drive(caller.role if caller is not None else DEFAULT_ROLE, tool_name)
-        return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
+        role = caller.role if caller is not None else DEFAULT_ROLE
+        self._drive(role, tool_name)
+        result = await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
+        return self._deferred.take(result, server_url, role, report=report)
 
     async def _ensure_tools_discovered(self) -> None:
         """Idempotent discovery over the process's child sessions (startup, MCP session start, /step, /state, triggers)."""
@@ -1436,7 +1455,8 @@ class Gateway:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
                 try:
-                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role),
+                                                         report=True)
                 except Exception as e:
                     await self._log_failed_call(tool_call_event_id, changelog_before, e, **source)
                     raise
@@ -1661,7 +1681,7 @@ class Gateway:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
                 try:
-                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller, report=True)
                 except Exception as e:
                     await self._log_failed_call(tool_call_event_id, changelog_before, e)
                     raise
@@ -1955,10 +1975,11 @@ def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str]
 def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
                 rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
     """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
-    extensions included, and an MCP server's own endpoint (``mcp_endpoints``), which skips the gateway's trajectory and
-    triggers. A child env registered under its own name, a computer, takes its own token, so none of its paths are here."""
+    extensions included, its LEGACY_STATE_ROUTES, and an MCP server's own endpoint (``mcp_endpoints``), which skips
+    the gateway's trajectory and triggers. A child env registered under its own name, a computer, takes its own token,
+    so none of its paths are here."""
     endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
-    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()))
+    return {key: (RPC_PATH, *LEGACY_STATE_ROUTES, *((endpoints[key],) if key in endpoints else ()))
             for key, base in rest_proxy_urls.items()
             if key in website_urls or route_environment_name(key, base, servers, website=False) != key
             or not any(server.name == key for server in servers)}
@@ -2025,23 +2046,29 @@ def site_reserved_paths(card: dict, base: str = "") -> frozenset[str]:
     return frozenset(p for p in paths if p != "/")
 
 
-def site_request_path(request: HTTPConnection) -> str | None:
-    """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
-    by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
-    (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
-    refuses it."""
+def site_request_path(request: HTTPConnection, base_url: str = "http://site") -> str | None:
+    """The path a site's server receives for a request on its route, relative to the path of its address
+    ``base_url``: the raw path forwarded, decoded and its dot segments removed, with the address's path taken off. It differs from the path as routed here when an encoded slash sits beside a dot segment
+    (``public%2Fx/../api`` reaches ``/api``), or when dot segments climb out of the address's path and back into it
+    (``../base/api`` under ``/base`` reaches ``/api``). A path that climbs out and stays out is given whole. None for
+    a request-target the proxy can't build a URL for: ``forward()`` refuses it."""
     try:
-        return httpx.URL(upstream_url("http://site", request)).path
+        sent = _normalized(httpx.URL(upstream_url(base_url.rstrip("/"), request)).path)
+        under = _normalized(httpx.URL(base_url).path).rstrip("/")
     except (ValueError, httpx.InvalidURL):
         return None
+    if under and (sent == under or sent.startswith(under + "/")):
+        return sent[len(under):] or "/"
+    return sent
 
 
-def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset()) -> bool:
+def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset(),
+                          base_url: str = "http://site") -> bool:
     """Whether a request or WebSocket on a site's route reaches its data plane or env card, or one of the paths
-    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server receives
-    (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved here: ``forward()``
-    refuses it."""
+    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server at
+    ``base_url`` receives (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved
+    here: ``forward()`` refuses it."""
     if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
         return True
-    sent = site_request_path(request)
+    sent = site_request_path(request, base_url)
     return sent is not None and reserved_site_path(sent, reserved)

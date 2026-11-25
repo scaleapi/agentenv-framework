@@ -4,10 +4,13 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import litellm
 import pytest
 
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from tst.util.config import install_model_config
 
 
 def _criteria(ids: list[str]) -> list[dict]:
@@ -57,6 +60,7 @@ async def test_retries_then_succeeds_on_second_attempt(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=False,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2
@@ -93,9 +97,25 @@ async def test_raises_after_max_retries(monkeypatch):
             judge_effort=None,
             judge_max_thinking_tokens=None,
             use_agent_judge=False,
+            usage=StepUsage(TaskStepContext(), "verify"),
         )
 
     assert verifier._prompt_llm_judge.await_count == verifier.DEFAULT_MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_a_judge_its_endpoint_refuses_names_the_model_and_the_endpoints_reason(monkeypatch):
+    install_model_config(monkeypatch, base_url="https://gw.test/v1", api_key="k")
+    refusal = "Invalid model name passed in model=claude-sonnet-5-5"
+
+    async def acompletion(**kwargs):
+        raise Exception(refusal)
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    with pytest.raises(RuntimeError) as raised:
+        await _verifier()._prompt_llm_judge("Evaluate the agent.", model="claude-sonnet-5-5", context=TaskStepContext())
+
+    assert str(raised.value) == f"LLM judge on claude-sonnet-5-5 failed after 3 attempts (Exception: {refusal})"
 
 
 @pytest.mark.asyncio
@@ -107,7 +127,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
     monkeypatch.setattr(verifier, "_configure_judge_a2a", AsyncMock())
     monkeypatch.setattr(verifier, "DEFAULT_MAX_RETRIES", 2)
 
-    async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent) -> dict:
+    async def fake_invoke(*, eval_prompt: str, judge_a2a_url: str, judge_agent_card: dict, judge_agent, **_) -> dict:
         prompts.append(eval_prompt)
         if len(prompts) == 1:
             return {"response": bad, "trajectory_object_url": None}
@@ -126,6 +146,7 @@ async def test_a2a_path_retries_with_correction(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=True,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2
@@ -159,6 +180,7 @@ async def test_retries_on_malformed_json(monkeypatch):
         judge_effort=None,
         judge_max_thinking_tokens=None,
         use_agent_judge=False,
+        usage=StepUsage(TaskStepContext(), "verify"),
     )
 
     assert len(results) == 2

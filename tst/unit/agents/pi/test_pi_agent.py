@@ -108,6 +108,38 @@ def test_usage_adds_the_cache_back_to_the_input() -> None:
     }
 
 
+def _compacted_run(summary: dict[str, Any] | None) -> pi_agent._Run:
+    """pi-compaction-gpt as pi reported it on 2026-11-20 through Scale's LiteLLM proxy: a call that ran 18 tools, an
+    auto-compaction whose summary call (329 in, 156 out) pi reports only in its compaction_end, then the answer."""
+    run = pi_agent._Run()
+    events = [{"type": "session", "id": "s"},
+              {"type": "message_end", "message": {"role": "assistant", "usage": {
+                  "input": 195, "output": 1150, "cacheRead": 1024, "cacheWrite": 0, "totalTokens": 2369,
+                  "cost": {"total": 0}}}},
+              *({"type": "tool_execution_end"} for _ in range(18)),
+              {"type": "compaction_start", "reason": "threshold"},
+              {"type": "compaction_end", "result": summary and {"summary": "...", "usage": summary}},
+              {"type": "message_end", "message": {"role": "assistant", "usage": {
+                  "input": 326471, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 326472}}}]
+    for event in events:
+        pi_agent._record(run, event)
+    return run
+
+
+def test_usage_counts_a_compactions_summary_call() -> None:
+    """The proxy answered three calls: 328,019 input (1,024 cached) and 1,307 output in all."""
+    run = _compacted_run({"input": 329, "output": 156, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 485,
+                          "cost": {"total": 0}})
+
+    assert pi_agent._usage(run).to_dict() == {
+        "tool_call_count": 18, "input_tokens": 328019, "output_tokens": 1307, "total_tokens": 329326,
+        "cache_read_tokens": 1024, "cache_write_tokens": 0, "input_includes_cache": True}
+
+
+def test_a_compaction_that_ended_without_usage_is_unreported() -> None:
+    assert pi_agent._usage(_compacted_run(None)).provider_details == {"unreported_calls": 1}
+
+
 def test_usage_follows_what_each_messages_total_says_its_input_holds() -> None:
     """A total of the input and output alone says pi counted the cache in the input already; one that is neither sum
     keeps pi's rule, unconfirmed."""
@@ -132,6 +164,17 @@ def test_a_call_that_reported_no_usage_is_unknown_not_zero() -> None:
     assert pi_agent._usage(partly).to_dict() == {
         "tool_call_count": 0, "input_tokens": 1139, "output_tokens": 2, "total_tokens": 1141, "cache_read_tokens": 1024,
         "cache_write_tokens": 0, "input_includes_cache": True, "provider_details": {"unreported_calls": 1}}
+
+
+def test_a_request_the_endpoint_refused_counts_nothing() -> None:
+    """As in pi-retry-faults on 2026-11-20: pi ends a request the proxy refused with a 500 as an error message with no
+    usage, then retries it. The refused request wasn't billed; the retry was answered."""
+    refused = {**_message(0, 0, 0, 0), "stopReason": "error", "errorMessage": "500 Internal Server Error"}
+    run = pi_agent._Run(assistant_messages=[refused, _message(1109, 21, 0, 1130)])
+
+    assert pi_agent._usage(run).to_dict() == {
+        "tool_call_count": 0, "input_tokens": 1109, "output_tokens": 21, "total_tokens": 1130, "cache_read_tokens": 0,
+        "cache_write_tokens": 0, "input_includes_cache": True}
 
 
 def test_a_context_keeps_one_pi_session(client: TestClient, record: Path) -> None:

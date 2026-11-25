@@ -9,11 +9,12 @@
 """
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
-from tst.unit.agents.opencode.agent import opencode_bridge
+from tst.unit.agents.opencode.agent import a2a_server, model_relay, opencode_bridge
 from tst.unit.agents.opencode.fake_cli import FakeCLI
 
 _build_config = opencode_bridge._build_config
@@ -166,8 +167,99 @@ def test_the_system_prompt_reaches_the_model_as_instructions_and_the_output_form
     assert Path(instructions).read_text() == "be brief"
 
 
+@pytest.mark.parametrize("armed", [False, True])
+def test_on_an_armed_clock_only_the_endpoint_the_relay_dates_is_enabled(monkeypatch, spawned, armed):
+    """A provider a project's opencode.json adds, as for a subagent's model, would reach a model with the real date."""
+    monkeypatch.setattr(opencode_bridge, "clock_armed", lambda: armed)
+
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+
+    ((_argv, env),) = spawned
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]).get("enabled_providers") == (["litellm"] if armed else None)
+
+
 def test_a_turn_with_no_system_prompt_names_no_instructions(spawned):
     asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
 
     ((_argv, env),) = spawned
     assert "instructions" not in json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+
+# opencode-baseline-claude on claude-haiku-4-5, recorded on 2026-11-21 through Scale's LiteLLM proxy: each streamed
+# call's usage as the proxy answered it, the session title's first, then the turn's two steps.
+CLAUDE_TURN = [
+    {"prompt_tokens": 598, "completion_tokens": 6, "total_tokens": 604,
+     "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+    {"prompt_tokens": 9345, "completion_tokens": 95, "total_tokens": 9440,
+     "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 9342},
+     "cache_creation_input_tokens": 9342, "cache_read_input_tokens": 0},
+    {"prompt_tokens": 9546, "completion_tokens": 4, "total_tokens": 9550,
+     "prompt_tokens_details": {"cached_tokens": 9342, "cache_write_tokens": 197},
+     "cache_creation_input_tokens": 197, "cache_read_input_tokens": 9342},
+]
+
+
+def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_count(monkeypatch, spawned):
+    """The relay counts every call the CLI makes, the title's too: the recorded turn's equals the proxy's 19,489 in
+    (9,342 read from the cache, 9,539 written) and 105 out."""
+    relays = []
+
+    @asynccontextmanager
+    async def relay(upstream, calls, **kwargs):
+        relays.append(upstream)
+        for usage in CLAUDE_TURN:
+            calls.add(200, model_relay.answer_usage(f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode()))
+        yield "http://127.0.0.1:41000/token"
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setattr(opencode_bridge, "model_relay", relay)
+
+    result = asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m"))
+
+    ((_, env),) = spawned
+    assert relays == ["https://gateway.example"]
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["provider"]["litellm"]["options"]["baseURL"] == \
+        "http://127.0.0.1:41000/token/v1"
+    assert env["LITELLM_BASE_URL"] == "https://gateway.example/v1"
+    assert result.usage.to_dict() == {
+        "tool_call_count": 0, "input_tokens": 19489, "output_tokens": 105, "total_tokens": 19594,
+        "cache_read_tokens": 9342, "cache_write_tokens": 9539, "input_includes_cache": True,
+        "models": [{"model": "m", "calls": 3, "input_tokens": 19489, "output_tokens": 105, "cache_read_tokens": 9342,
+                    "cache_write_tokens": 9539, "input_includes_cache": True}],
+        "provider_details": {"model_calls": 3}}
+
+
+def test_max_output_tokens_sets_the_models_output_limit_alone():
+    entry = _model_entry(_build_config(MODEL, None, {}, None, max_output_tokens=64000))
+    # No context limit, which would turn on OpenCode's auto-compaction.
+    assert entry["limit"] == {"output": 64000}
+
+
+def test_no_max_output_tokens_omits_the_limit():
+    assert "limit" not in _model_entry(_build_config(MODEL, None, {}, None))
+
+
+def test_max_output_tokens_also_reaches_the_cli_as_its_output_cap(spawned):
+    """OpenCode caps a step at min(limit.output, the variable), so the limit alone can't raise it past 32,000."""
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m", max_output_tokens=64000))
+
+    ((_argv, env),) = spawned
+    assert env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "64000"
+    assert _model_entry(json.loads(env["OPENCODE_CONFIG_CONTENT"]), "m")["limit"] == {"output": 64000}
+
+
+def test_a_turn_with_no_max_output_tokens_sets_no_output_cap(monkeypatch, spawned):
+    monkeypatch.delenv("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", raising=False)
+
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m"))
+
+    ((_argv, env),) = spawned
+    assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX" not in env
+    assert "limit" not in _model_entry(json.loads(env["OPENCODE_CONFIG_CONTENT"]), "m")
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_the_config_refuses_a_max_output_tokens_that_is_not_positive(value):
+    with pytest.raises(ValueError):
+        a2a_server.OpenCodeConfig(max_output_tokens=value)

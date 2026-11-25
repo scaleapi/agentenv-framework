@@ -27,7 +27,8 @@ from agent_env.config import set_document_store
 
 
 class _FlakyDocStore:
-    """Raises on the first ``fail_times`` ``update`` calls, then succeeds."""
+    """Raises on the first ``fail_times`` writes, an ``update`` or a compare-and-swap's ``update_one_and_get``, then
+    succeeds."""
     def ensure_index(self, *a, **k):   # a DocumentStore has one; this double stands in for it
         pass
 
@@ -36,10 +37,20 @@ class _FlakyDocStore:
         self.fail_times = fail_times
         self.calls = 0
 
-    def update(self, collection, filt, spec):
+    def _write(self):
         self.calls += 1
         if self.calls <= self.fail_times:
             raise RuntimeError("transient mongo error")
+
+    def update(self, collection, filt, spec):
+        self._write()
+
+    def find_one(self, collection, filt):
+        return {"instance_id": "inst-1", "rev": 0, "status": "running"}
+
+    def update_one_and_get(self, collection, filt, spec):
+        self._write()
+        return {}
 
 
 def _store_with(doc_store) -> TaskInstanceStore:

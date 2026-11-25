@@ -23,19 +23,23 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
+from agent_env.task_step.task_steps.verifiers.judge_utils import judge_samples as judge_samples_rule
+from agent_env.task_step.task_steps.verifiers.verifier import GRADES_KEY
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
-from agent_env.task.store import record_task_cancelled
+from agent_env.task.store import find_task_instance, record_task_cancelled
 from agent_env.task.interrupts import Interrupts
 from agent_env.task.lint import said
 from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import TeardownReport, attempt_epoch, record_teardown, teardown_run
+from agent_env.task.usage.summary import UsageSummary, summarize
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 
 from .hub import SOURCE_KEY, HubSource
@@ -75,6 +79,7 @@ class TaskRun:
     started: bool = True  # False when it was cancelled before it started
     torn_down: TeardownReport | None = None  # None while its sandboxes are kept up
     attempt_epoch: int | None = None  # its instance's as its teardown began, which ``record_teardown`` is fenced by
+    usage: tuple[dict, ...] = ()  # its instance's ledger once the run ended, every attempt's entries
 
     @property
     def instance_id(self) -> str | None:
@@ -93,9 +98,21 @@ class TaskRun:
         return recorded_scores(self.task.steps, self.context)
 
     @property
+    def splits(self) -> dict[str, list[str]]:
+        """The criteria a sampled judge's samples split on in a grade that stood, by step id, each with its passes."""
+        grades = self.context.metadata.get(GRADES_KEY) or {}
+        return {step_id: split for step_id, grade in grades.items() if grade.get("verifier_status") == "graded"
+                and (split := judge_samples_rule.splits(grade.get("verifier_criteria") or []))}
+
+    @property
     def models(self) -> dict[str, dict[str, str | None]]:
         """The model each step asked for, by role then step id; None leaves it to the agent."""
         return self.context.metadata.get("models") or {}
+
+    @property
+    def usage_summary(self) -> UsageSummary | None:
+        """The run's usage by role and model, from its ledger; None when it recorded none."""
+        return summarize(self.usage)
 
     @property
     def outcome(self) -> Outcome:
@@ -218,6 +235,8 @@ def run_bundle(
     model: str | None = None,
     user_model: str | None = None,
     judge_model: str | None = None,
+    judge_samples: int | None = None,
+    min_judge_agreement: float | None = None,
     agent: str | None = None,
     sandbox: str | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -230,8 +249,8 @@ def run_bundle(
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
-    user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
-    tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
+    user simulator and the judges run on, ``judge_samples`` how many times each judge that can grades each criterion and ``min_judge_agreement`` the share of those samples each criterion's verdict needs,
+    and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
     pick the forms a computer env composes, on the env's default provider, this machine unless the config names
     another; that compose emulates an arch no link of it runs natively unless ``emulate`` is False, which leaves it
     skipped. ``on_progress`` is given a line of text
@@ -257,11 +276,13 @@ def run_bundle(
     ends.
 
     Before anything is written, raises RuntimeError when an event loop is already running, ValueError when
-    ``sandbox`` names no provider, and BundleError when the bundle can't be planned or a deploy can't run where
+    ``sandbox`` names no provider or ``judge_samples`` isn't a positive count or ``min_judge_agreement`` a number from 0 to 1, and BundleError when the bundle can't be planned or a deploy can't run where
     it would (``preflight``). A task that fails its preflight raises BundleError once the entities it reads are
     written, before any task is. Building an infra env the run needs raises what the build raises, before any task
     runs."""
     _refuse_a_running_loop()
+    judge_samples = judge_samples_rule.validated(judge_samples)
+    min_judge_agreement = judge_samples_rule.validated_agreement(min_judge_agreement)
     composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
@@ -270,12 +291,13 @@ def run_bundle(
                             variant=variant, skip_lint=skip_lint)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
-            overrides = _overrides(sandbox, user_model, judge_model)
+            overrides = _overrides(sandbox, user_model, judge_model, judge_samples, min_judge_agreement)
             runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, overrides,
                                            solver_params(plan, prepared.materialization), keep, say, interrupts,
                                            source))
             _mark_cancelled(runs, interrupts.reason)
             _record_teardowns(runs)
+            runs = _with_usage(runs)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
             if not interrupts.count:
@@ -388,6 +410,22 @@ def _mark_cancelled(runs: tuple[TaskRun, ...], reason: str) -> None:
         if run.cancelled and run.instance_id:
             with run_scope(run.task.id):
                 record_task_cancelled(run.instance_id, reason, Task._utc_now_str())
+
+
+def _with_usage(runs: tuple[TaskRun, ...]) -> tuple[TaskRun, ...]:
+    """Each run with its instance's ledger, read once the run's last write has landed. A read that fails leaves the
+    run without it, logged, since the result and the teardown after it matter more than the cost line."""
+    def read(run: TaskRun) -> TaskRun:
+        if not run.instance_id:
+            return run
+        try:
+            with run_scope(run.task.id):
+                instance = find_task_instance(run.instance_id)
+        except Exception as e:
+            logger.warning("usage of %s not read: %r", run.instance_id, e)
+            return run
+        return replace(run, usage=tuple(instance.usage)) if instance is not None else run
+    return tuple(read(run) for run in runs)
 
 
 def _record_teardowns(runs: Sequence[TaskRun]) -> None:
@@ -534,15 +572,20 @@ def solver_params(plan: Plan, materialization: Materialization) -> dict[str, dic
     return {task_id: {step_id: dict(choice) for step_id in steps} for task_id, steps in plan.agent.steps.items()}
 
 
-def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None) -> dict[str, str]:
-    """The run's ``user_overrides``: where everything deploys, and the models the user simulator and judges run on."""
+def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | None,
+               judge_samples: int | None = None, min_judge_agreement: float | None = None) -> dict[str, Any]:
+    """The run's ``user_overrides``: where everything deploys, the models the user simulator and judges run on, how
+    many samples the judges take and how many of them must agree."""
     overrides = sandbox_overrides(sandbox) if sandbox else {}
-    return {**overrides, **{key: value for key, value in (("user_model", user_model), ("judge_model", judge_model))
-                            if value}}
+    overrides.update({key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
+                                                    ("judge_samples", judge_samples)) if value})
+    if min_judge_agreement is not None:
+        overrides["min_judge_agreement"] = min_judge_agreement
+    return overrides
 
 
 async def _run_all(
-    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, str],
+    plan: Plan, to_run: list[tuple[BundleEntry, Task]], model: str | None, overrides: dict[str, Any],
     step_params: Mapping[str, dict], keep: bool, say: Callable[[str], None], interrupts: Interrupts,
     source: HubSource | None,
 ) -> tuple[TaskRun, ...]:

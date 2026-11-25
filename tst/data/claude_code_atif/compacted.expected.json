@@ -1,0 +1,243 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-compacted",
+ "agent": {
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "model_name": "anthropic/claude-sonnet-5-5",
+  "tool_definitions": {
+   "shared": "tools/a2f232fa81dcec06.json"
+  }
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-24T16:18:49.081829Z",
+   "source": "user",
+   "message": "Create notes.txt holding three lines, alpha, beta and gamma, with your Bash tool, then reply with only ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-compacted",
+     "task_id": "b5f6e991-9fbb-4ab4-82df-26365cd417a2",
+     "message_id": "bc81b8233f354384bdc90835960f89fc",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-24T16:18:51.016Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_01XsDF5WYPxcQc9hpezrmcyU",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "printf 'alpha\\nbeta\\ngamma\\n' > /app/notes.txt",
+      "description": "Create notes.txt with three lines"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_01XsDF5WYPxcQc9hpezrmcyU",
+      "content": "(Bash completed with no output)"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 28509,
+    "cached_tokens": 0,
+    "completion_tokens": 106,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 28507
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-24T16:18:52.040Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "ok",
+   "metrics": {
+    "prompt_tokens": 28630,
+    "cached_tokens": 28507,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 121
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-24T16:18:52.111309Z",
+   "source": "user",
+   "message": "/compact",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-compacted",
+     "task_id": "3582283e-2286-4159-a3d8-081ff8818a46",
+     "message_id": "70b357f0f76e4928b19432afc4227521",
+     "turn": 1
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-24T16:18:57.853Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<system-reminder>\n<tools-used-before-summary>Bash</tools-used-before-summary>\n</system-reminder>\nSummary:\n1. Primary Request and Intent:\n   The user asked me to create notes.txt holding three lines, alpha, beta and gamma, with the Bash tool, and then reply with only \"ok\".\n\n2. Key Technical Concepts:\n   - Bash `printf` for writing multi-line file content.\n   - Working directory is /app, which is not a git repository.\n   - A system-reminder set attribution lines for future git commits and PRs. It has not been used, because no git operations were requested.\n\n3. Files and Code Sections:\n   - /app/notes.txt (created)\n      - It is the file the user asked for.\n      - Command used: `printf 'alpha\\nbeta\\ngamma\\n' > /app/notes.txt`\n      - Intended contents:\n        ```\n        alpha\n        beta\n        gamma\n        ```\n\n4. Errors and fixes:\n   - None. The command completed with no output and no errors. I did not run a separate check of the file contents.\n\n5. Problem Solving:\n   The task was simple and was solved with a single Bash command.\n\n6. All user messages:\n   - \"Create notes.txt holding three lines, alpha, beta and gamma, with your Bash tool, then reply with only ok.\"\n   - A later message asked for a text-only summary of the conversation, with no tool calls.\n\n7. Pending Tasks:\n   - Send the final reply to the original request, which must be only \"ok\".\n\n8. Current Work:\n   I had just created /app/notes.txt with the Bash tool. The only step left from the user's request is the one-word reply.\n\n9. Optional Next Step:\n   Reply with only \"ok\", as the user asked: \"then reply with only ok.\"\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/agent/.claude/projects/-app/be7b16da-08d9-4cb5-b992-aab353b9ffa0.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. The summary was written without seeing them, so something it says has not happened yet may already have happened in them.",
+   "metrics": {
+    "prompt_tokens": 30626,
+    "cached_tokens": 28507,
+    "completion_tokens": 749,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 108
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "compaction": {
+      "written_by": "assistant",
+      "trigger": "manual"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-24T16:18:57.961Z",
+   "source": "system",
+   "message": "<local-command-stdout>Compacted </local-command-stdout>"
+  },
+  {
+   "step_id": 7,
+   "timestamp": "2026-11-24T16:18:57.886758Z",
+   "source": "agent",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  },
+  {
+   "step_id": 8,
+   "timestamp": "2026-11-24T16:18:58.166723Z",
+   "source": "user",
+   "message": "Read notes.txt with your tools and reply with only its second line.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-compacted",
+     "task_id": "cfe13578-8114-4f29-94c0-2f212258b1de",
+     "message_id": "6c15caada7af483f8f0d9f87a2553cec",
+     "turn": 2
+    }
+   }
+  },
+  {
+   "step_id": 9,
+   "timestamp": "2026-11-24T16:18:59.557Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "",
+   "tool_calls": [
+    {
+     "tool_call_id": "toolu_vrtx_018qXuMNxTjZ49fouyUngguP",
+     "function_name": "Read",
+     "arguments": {
+      "file_path": "/app/notes.txt"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "toolu_vrtx_018qXuMNxTjZ49fouyUngguP",
+      "content": "1\talpha\n2\tbeta\n3\tgamma\n4\t"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 29462,
+    "cached_tokens": 25110,
+    "completion_tokens": 55,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 4350
+     }
+    }
+   },
+   "llm_call_count": 1
+  },
+  {
+   "step_id": 10,
+   "timestamp": "2026-11-24T16:19:00.493Z",
+   "source": "agent",
+   "model_name": "claude-sonnet-5-5",
+   "message": "beta",
+   "metrics": {
+    "prompt_tokens": 29541,
+    "cached_tokens": 29460,
+    "completion_tokens": 4,
+    "extra": {
+     "agentenv": {
+      "cache_write_tokens": 79
+     }
+    }
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 146768,
+  "total_completion_tokens": 918,
+  "total_cached_tokens": 111584,
+  "total_cost_usd": 0.1072889,
+  "total_steps": 10,
+  "extra": {
+   "agentenv": {
+    "cost_source": "harness",
+    "total_cache_write_tokens": 33165
+   }
+  }
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.1",
+   "native_format": "claude-code-stream-json/1",
+   "adapter": {
+    "name": "claude-code-stream-json-atif",
+    "version": "0.1.0"
+   },
+   "unmatched": {
+    "system": 2
+   }
+  }
+ }
+}

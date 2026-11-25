@@ -20,6 +20,7 @@ from ._image_size import image_size
 from .adapter import AdapterSpec
 from .models.content import AudioMediaType, ContentPart, ImageSource
 from .profile import (
+    COMPACTION_TRIGGERS,
     COST_SOURCES,
     ERROR_KINDS,
     PROFILE_KEY,
@@ -27,6 +28,7 @@ from .profile import (
     RAW_ARGUMENTS,
     RESULT_STATUSES,
     SCHEMA_VERSION,
+    SUMMARY_WRITERS,
     TASK_STATES,
     VISIBILITIES,
     AtifError,
@@ -229,6 +231,13 @@ class _Trajectory:
     steps: list[_Step] = field(default_factory=list)
     open: _Step | None = None
     task: int = -1
+    tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def agent_block(self) -> dict[str, Any]:
+        block = dict(self.agent)
+        if self.tools:
+            block["tool_definitions"] = [json.loads(json.dumps(tool)) for tool in self.tools.values()]
+        return block
 
 
 class Document:
@@ -338,6 +347,9 @@ class Document:
     def step_for(self, key: str, agent: str | None) -> _Step:
         return self.peek(key, agent) or self._start(self._traj(agent), "agent", key)
 
+    def system_step(self) -> _Step:
+        return self._start(self._traj(None), "system", None)
+
     def open_step(self, agent: str | None) -> _Step:
         step = self._traj(agent).open
         if step is None:
@@ -410,6 +422,14 @@ class Document:
             raise AtifError(f"call {spawned_by!r} already spawned sub-agent {self._spawned[spawned_by]!r}")
         self._subs[agent_id] = _Trajectory(agent_id, _agent(name or agent_id, version, model_name), task=self._task)
         self._spawned[spawned_by] = agent_id
+
+    def tool_definitions(self, agent: str | None, definitions: Sequence[Any]) -> None:
+        if not isinstance(definitions, (list, tuple)):
+            raise AtifError(f"tool definitions are a list, not {type(definitions).__name__}")
+        checked = [_tool_definition(definition) for definition in definitions]
+        tools = self._traj(agent).tools
+        for definition in checked:
+            tools[definition["function"]["name"]] = definition
 
     def store(self, data: bytes, media_type: str, info: Mapping[str, Any]) -> Media:
         if not isinstance(data, (bytes, bytearray)):
@@ -576,9 +596,9 @@ class Document:
         doc: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "session_id": self._context_id}
         if self._trajectory_id is not None:
             doc["trajectory_id"] = self._trajectory_id
-        doc["agent"] = dict(root.agent)
+        doc["agent"] = root.agent_block()
         doc["steps"] = _steps(root, counts[None], linked, closed_only)
-        subs = [{"schema_version": SCHEMA_VERSION, "trajectory_id": trajectory.actor, "agent": dict(trajectory.agent),
+        subs = [{"schema_version": SCHEMA_VERSION, "trajectory_id": trajectory.actor, "agent": trajectory.agent_block(),
                  "steps": _steps(trajectory, counts[trajectory.actor], linked, closed_only)}
                 for trajectory in self._subs.values() if counts[trajectory.actor]]
         if subs:
@@ -654,6 +674,19 @@ def _task_error(error: Mapping[str, Any] | None) -> dict[str, Any] | None:
     message = _str(error.get("message"), "an error's message", optional=False)
     code = _str(error.get("code"), "an error's code")
     return {k: v for k, v in (("kind", kind), ("message", message), ("code", code)) if v is not None}
+
+
+def _tool_definition(definition: Any) -> dict[str, Any]:
+    function = definition.get("function") if isinstance(definition, Mapping) else None
+    if not isinstance(function, Mapping) or definition.get("type") != "function":
+        raise AtifError(f"a tool definition is a function entry, {{'type': 'function', 'function': {{...}}}}, "
+                        f"not {definition!r:.80}")
+    _str(function.get("name"), "a tool definition's name", optional=False)
+    if function.get("description") is not None and not isinstance(function["description"], str):
+        raise AtifError("a tool definition's description is a string")
+    if function.get("parameters") is not None and not isinstance(function["parameters"], Mapping):
+        raise AtifError("a tool definition's parameters are a JSON Schema object")
+    return _json(dict(definition), "a tool definition")
 
 
 def _agent(name: str | None, version: str | None, model: str | None) -> dict[str, Any]:
@@ -871,6 +904,30 @@ class AtifTurn:
         target.profile["error"] = {k: v for k, v in (("kind", kind), ("message", message), ("code", code))
                                    if v is not None}
 
+    def system_message(self, *, text: str | None = None, content: Sequence[Any] | None = None,
+                       time: str | datetime | None = None) -> None:
+        """A message the harness itself put in the conversation, such as a command's output: a ``source: system`` step
+        of its own in the root trajectory, which closes the step before it. Profile 1.1."""
+        parts, media = self._doc.parse_parts(content, text)
+        when = timestamp(time)
+        target = self._doc.system_step()
+        target.parts.extend(parts)
+        target.media.update(media)
+        self._touch(target, when)
+
+    def compaction(self, *, step: str, written_by: str, trigger: str | None = None, agent: str | None = None) -> None:
+        """Mark step ``step`` a compaction: its message a summary that replaced the conversation before it in what the
+        agent sees, written by ``written_by`` (``assistant``, the agent's own model, or ``harness``) and set off by
+        ``trigger`` (``manual``, something asked for it, or ``auto``). The step is the call that wrote the summary,
+        so its usage goes on it with ``step``. Profile 1.1."""
+        if written_by not in SUMMARY_WRITERS:
+            raise AtifError(f"written_by {written_by!r} isn't one of {', '.join(SUMMARY_WRITERS)}")
+        if trigger is not None and trigger not in COMPACTION_TRIGGERS:
+            raise AtifError(f"trigger {trigger!r} isn't one of {', '.join(COMPACTION_TRIGGERS)}")
+        target = self._doc.step_for(_key(step), agent)
+        target.profile["compaction"] = {key: value for key, value in (("written_by", written_by), ("trigger", trigger))
+                                        if value is not None}
+
     def attempt(self, number: int) -> None:
         """A harness retry: steps from here on carry attempt ``number``."""
         self._doc.set_attempt(number)
@@ -881,6 +938,13 @@ class AtifTurn:
         steps (written with ``agent=agent_id``, in this task) form an embedded trajectory, and the spawning call's
         result points at it; a sub-agent that writes no step is left out, and so is the pointer."""
         self._doc.subagent(agent_id, spawned_by, name, version, model_name)
+
+    def tool_definitions(self, definitions: Sequence[Mapping[str, Any]], *, agent: str | None = None) -> None:
+        """The tools the model was offered, each in OpenAI's function-calling form (``{"type": "function", "function":
+        {"name", "description", "parameters"}}``), written to the trajectory's ``agent.tool_definitions``. A later call
+        adds tools and replaces those of the same name, in place. The agent block isn't one of the steps a live reader
+        holds, so it may grow after a page is served."""
+        self._doc.tool_definitions(agent, definitions)
 
     def media(self, data: bytes, media_type: str, *, width: int | None = None, height: int | None = None,
               duration_ms: int | None = None, pages: int | None = None, name: str | None = None) -> Media:

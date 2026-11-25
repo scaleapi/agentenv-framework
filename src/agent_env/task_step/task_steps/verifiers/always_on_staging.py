@@ -6,7 +6,9 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
   own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), what the
   harness put in the turn (``harness_note``: a compaction summary, a message it sent the assistant), then the rest
   of the wake in time order (``app_change`` for every change, ``turn_end`` with its closing reply,
-  ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
+  ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn that ended at its time or tool-call limit
+  while the run went on (the step's ``continue_after_wake_limit``) has ``cut_off`` on its ``turn_end`` (or ``nudge``)
+  and a ``wake_cut_off`` line; the next wake's ``woke`` line has ``cut_off_notice``. A turn's
   trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so. A
   helper agent's lines carry ``subagent``; those of a turn the harness asked for carry ``step`` (the PSI harness's
   ``pre_compaction_save``, where only its memory and history tools work; ``after_compaction`` and ``failed_wake``
@@ -20,6 +22,10 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
 
 A run that kept no timeline is staged from one made of its turns by position (``by_position``): each wake file is
 one turn, in the order the turns ran, with the text it was sent and its own events.
+
+Given ``change_values`` (opt-in), each ``app_change`` line also carries the change in full (``changed_fields``) and
+is filed where it happened: one seen before its wake's turn, a contact's reply say, before the wake's input, and one a
+nudge's turn saw after that turn's lines (the timeline logs both before the event they follow).
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
-from agent_env.task_step.task_steps.always_on import BULKY_EVENT_FIELDS, woke_by_text
+from agent_env.task_step.task_steps.always_on import BULKY_EVENT_FIELDS, LIMIT_WORDS, woke_by_text
 from agent_env.task_step.task_steps.notification_delivery import label_time
 from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import UNKNOWN, TurnEvents, compaction_words
 from agent_env.task_step.task_steps.verifiers.run_context import Firing
@@ -62,7 +68,7 @@ _SAVE_STEP = "pre_compaction_save"
 _BEFORE_WAKE_STEPS = frozenset({_SAVE_STEP, "after_compaction", "failed_wake"})
 # A line's fields that say what and where it is; ``fit`` moves only the others.
 _IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
-                       "step", "subagent", "compaction", "internal"})
+                       "step", "subagent", "compaction", "internal", "cut_off", "cut_off_notice", "limit"})
 
 
 @dataclass(frozen=True)
@@ -79,26 +85,35 @@ class _Wake:
     at: Optional[str] = None
     woke_by: list[str] = field(default_factory=list)
     head: list[dict] = field(default_factory=list)
+    changed_before: list[dict] = field(default_factory=list)  # app changes seen before its turn (with change_values)
+    nudge_changes: list[dict] = field(default_factory=list)  # a nudge's, until its turn's lines (with change_values)
     before: list[dict] = field(default_factory=list)  # what the harness ran before the wake's input (a compaction)
     calls: list[dict] = field(default_factory=list)
     body: list[dict] = field(default_factory=list)
     call_count: int = 0
 
     def lines(self) -> list[dict]:
-        """In the order they happened: what woke the assistant, then anything the harness ran before the assistant saw
-        the wake's input, then the input, its turn and the rest of the wake."""
-        return self.head[:1] + self.before + self.head[1:] + self.calls + self.body
+        """In the order they happened: what woke the assistant, the app changes made before its turn (when filed
+        apart), anything the harness ran before the assistant saw the wake's input, then the input, its turn and the
+        rest of the wake."""
+        return self.head[:1] + self.changed_before + self.before + self.head[1:] + self.calls + self.body \
+            + self.nudge_changes
 
 
 def stage_run(timeline: Sequence[dict], turns: Mapping[str, Optional[TurnEvents]], *,
               firings: Sequence[Firing] = (), unavailable: Optional[Mapping[str, str]] = None,
-              by_position: bool = False) -> StagedRun:
+              by_position: bool = False, change_values: Optional[Mapping[tuple[str, Any], Any]] = None) -> StagedRun:
     """The run's files: ``turns`` holds each trajectory the timeline names, by its url (None for one that couldn't be
     read); ``firings`` and ``unavailable`` are the run context's trigger firings and the logs it couldn't read.
     ``by_position``: the timeline is the run's turns in order, one wake a turn (the run kept none of its own), which
-    index.md and the record (``turns_by_position``) say."""
+    index.md and the record (``turns_by_position``) say. ``change_values``: each app change's ``changed_fields`` (an
+    UPDATE's fields with their old and new values, an INSERT's or DELETE's whole row) by its env and changelog id, as
+    the env's changes (urn:agentenv:changes/v1) record them. Given, each app_change line carries its own (one not there
+    is counted in the record's ``app_change_values``) and is filed where it happened (the module's docstring); not
+    given, neither happens."""
     stager = _Stager(turns, max((e.get("n") or 0 for e in timeline if e.get("event") == "wake"), default=0))
     stager.by_position = by_position
+    stager.change_values = change_values
     for event in timeline:
         stager.add(event)
     return stager.finish(firings, unavailable or {})
@@ -167,6 +182,8 @@ class _Stager:
         self.unrecorded_changes = 0
         self.by_changes = False  # whether the run recorded app changes, so write actions are read from them
         self.by_position = False  # whether each wake is one turn by position (the run kept no timeline)
+        self.change_values: Optional[Mapping[tuple[str, Any], Any]] = None  # see stage_run
+        self.change_values_found = self.change_values_missing = 0
         self.labelled = 0  # trajectories whose spans say which agent made each (``TurnEvents.agent_labels``)
         self.summary_writers: Counter = Counter()  # compactions by who wrote their summary (``written_by``)
 
@@ -182,7 +199,7 @@ class _Stager:
             w = self.wake(event["n"])
             w.at, w.woke_by = at, list(event.get("woke_by") or [])
             w.head.append(_line("woke", w.n, at=at, woke_by=w.woke_by, notifications=event.get("notifications") or None,
-                                last=event.get("last")))
+                                last=event.get("last"), cut_off_notice=event.get("cut_off_notice")))
             w.head += [_line(m.pop("event"), w.n, **m) for m in self.pending_user]
             self.pending_user = []
             w.head.append(_line("wake_input", w.n, text=event.get("parts_text") or ""))
@@ -193,13 +210,26 @@ class _Stager:
         elif kind == "app_changes":
             w = self.wake(event.get("wake"))
             self.by_changes = True
+            # Logged before the wake (or nudge) it was seen in: filed before that wake's input (after the nudge's
+            # turn) when asked to, else in the wake's body as logged.
+            phase = event.get("phase") if self.change_values is not None else None
+            to = w.changed_before if phase == "before_turn" else w.nudge_changes if phase == "nudge" else w.body
             for change in event.get("changes") or []:
                 # The changelog's own timestamp is wall-clock time, not the run's pretend time.
-                w.body.append(_line("app_change", w.n, **{k: v for k, v in change.items() if k not in ("wake", "at")},
-                                    recorded_at=change.get("at")))
+                line = _line("app_change", w.n, **{k: v for k, v in change.items() if k not in ("wake", "at")},
+                             recorded_at=change.get("at"))
+                if self.change_values is not None:
+                    key = (change.get("env_id"), change.get("id"))
+                    if key not in self.change_values:
+                        self.change_values_missing += 1
+                    else:
+                        self.change_values_found += 1
+                        if self.change_values[key] is not None:
+                            line["changed_fields"] = self.change_values[key]
+                to.append(line)
             if event.get("not_kept"):
                 self.unrecorded_changes += event["not_kept"]
-                w.body.append(_line("app_changes_not_recorded", w.n, count=event["not_kept"], phase=event.get("phase")))
+                to.append(_line("app_changes_not_recorded", w.n, count=event["not_kept"], phase=event.get("phase")))
         elif kind == "agent_turn_end":
             w = self.wake(event.get("n"))
             lines = self.turn(w, event.get("trajectory_url"), "turn")
@@ -220,13 +250,14 @@ class _Stager:
                                 tool_calls=calls, save_turn_tool_calls=saved or None,
                                 messages_to_user=event.get("messages_to_user"),
                                 stay_quiet_calls=event.get("stay_quiet_calls") or None,
-                                virtual_seconds=event.get("virtual_seconds")))
+                                virtual_seconds=event.get("virtual_seconds"), cut_off=event.get("cut_off")))
         elif kind == "nudge":
             w = self.wake(event.get("wake"))
             w.body.append(_line("nudge", w.n, at=at, closing_text=event.get("closing_text"),
                                 outcome=event.get("outcome"), state=event.get("state"),
-                                reply_after=event.get("plain_reply_after")))
-            w.body += self.turn(w, event.get("trajectory_url"), "nudge")
+                                reply_after=event.get("plain_reply_after"), cut_off=event.get("cut_off")))
+            w.body += self.turn(w, event.get("trajectory_url"), "nudge") + w.nudge_changes
+            w.nudge_changes = []
         elif kind == "message_to_user":
             self.wake(event.get("wake")).body.append(_line(
                 "message_to_user", event.get("wake") or self.current, at=at, text=event.get("text"),
@@ -356,6 +387,8 @@ class _Stager:
                            ("turns_by_position", self.by_position)):
             if value:
                 record[key] = value
+        if self.change_values is not None:
+            record["app_change_values"] = {"found": self.change_values_found, "missing": self.change_values_missing}
         return StagedRun(self.files, record)
 
 
@@ -409,17 +442,26 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
         elif event == "message_to_user":
             out.append(f"- sent the user ({label_time(line.get('at'))}): \"{_cut(_text(line, 'text'), INDEX_TEXT_CHARS)}\" "
                        f"({path}:{i})")
+        elif event == "woke" and line.get("cut_off_notice"):
+            told = line["cut_off_notice"]
+            out.append(f"- opened by telling the assistant that wake {told.get('wake')}'s turn was cut off at its "
+                       f"{_limit_words(told.get('limit'))} ({path}:{i})")
         elif event == "turn_end":
             if line.get("stay_quiet_calls"):
                 out.append(f"- stayed quiet ({path}:{i})")
-            if line.get("state") not in (None, "completed", "TaskState.completed"):
+            if line.get("cut_off"):
+                out.append(f"- cut off: its turn reached its {_limit_words(line['cut_off'])}; the wake ended there "
+                           f"and the run went on ({path}:{i})")
+            elif line.get("state") not in (None, "completed", "TaskState.completed"):
                 out.append(f"- error: its turn ended {line.get('state')} ({path}:{i})")
         elif event in ("trajectory_missing", "trajectory_unreadable"):
             out.append(f"- error: the {line.get('turn')}'s trajectory is "
                        f"{'missing' if event == 'trajectory_missing' else 'unreadable'}: its tool calls aren't here "
                        f"({path}:{i})")
         elif event == "nudge":
-            out.append(f"- nudged after closing text; then {line.get('outcome')} ({path}:{i})")
+            cut = (f"; its nudge turn was cut off at its {_limit_words(line['cut_off'])} and the run went on"
+                   if line.get("cut_off") else "")
+            out.append(f"- nudged after closing text; then {line.get('outcome')}{cut} ({path}:{i})")
         elif event == "harness_note" and line.get("compaction") is not None:
             out.append(f"- {_compaction_line(line['compaction'])} ({path}:{i})")
         elif event == "app_change":
@@ -435,6 +477,11 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     if untold:
         out.append(f"- {untold} of the assistant's app changes name no tool (made through a website, say)")
     return "\n".join(out)
+
+
+def _limit_words(limit: Any) -> str:
+    """A turn's limit in words ("time limit", "tool-call limit")."""
+    return LIMIT_WORDS.get(limit, str(limit or "limit").replace("_", " "))
 
 
 def _compaction_line(facts: dict) -> str:

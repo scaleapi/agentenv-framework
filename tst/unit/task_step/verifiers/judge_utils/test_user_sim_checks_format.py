@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     JUDGE_OUTPUT_FORMAT_REGISTRY,
     JudgeOutputFormat,
@@ -128,16 +129,42 @@ def test_the_judge_is_told_how_to_read_the_run_and_the_criteria_fields():
 
 
 # ---- schema -------------------------------------------------------------------------------------------------------
-def test_each_row_gives_its_reason_first_then_turns_verdict_could_change_grade_and_assistant_asked():
+def test_each_row_gives_its_reason_first_then_turns_verdict_could_change_grade_would_change_and_assistant_asked():
     schema = SPEC.output_format
     assert schema["type"] == "json_schema" and schema["schema"]["required"] == ["results"]
     row = schema["schema"]["properties"]["results"]["items"]
-    order = ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"]
+    # would_change is required in the schema, as strict structured output needs every property; the parser doesn't.
+    order = ["id", "reason", "turns", "verdict", "could_change_grade", "would_change", "assistant_asked"]
     assert list(row["properties"]) == order == row["required"]
     assert row["properties"]["verdict"]["enum"] == ["pass", "fail", "n/a"]
     assert row["properties"]["turns"] == {"type": "array", "items": {"type": "integer"}}
     assert row["properties"]["could_change_grade"] == row["properties"]["assistant_asked"] == {"type": "boolean"}
+    assert row["properties"]["would_change"] == {"type": "array", "items": {"type": "string"}}
     assert row["additionalProperties"] is False and schema["schema"]["additionalProperties"] is False
+
+
+def test_a_fail_keeps_the_graded_ids_it_names_and_an_answer_from_before_would_change_still_parses():
+    criteria = _criteria("c1", "c2", "c3")
+    rows, discrepancy = diagnose_user_sim_checks_response(_answer(
+        _fail("c1", would_change=["forecast", " "]), _row("c2", would_change=["forecast"]), _fail("c3")), criteria)
+    assert discrepancy is None
+    named, passed, old = rows
+    assert named["would_change"] == ["forecast"]  # blanks dropped
+    assert passed["would_change"] == [] and old["would_change"] == []  # a pass names nothing; an old answer neither
+    assert old["could_change_grade"] is True and old["score"] == 0.0  # the format scores as before; the judge gates
+
+
+def test_a_would_change_that_is_not_a_list_of_ids_is_asked_again():
+    rows, discrepancy = diagnose_user_sim_checks_response(_answer(_fail("c1", would_change="forecast")),
+                                                          _criteria("c1"))
+    assert rows is None and "c1: would_change must be a list of the ids it would change" in str(discrepancy)
+
+
+def test_the_judge_is_told_to_name_what_a_fail_would_change():
+    prompt = _render(SPEC.prompt_template_inline)
+    assert '"would_change" names what it would change' in prompt and "[] when could_change_grade is" in prompt
+    shape = prompt.split("Return only this JSON object")[1]
+    assert shape.index('"could_change_grade"') < shape.index('"would_change"') < shape.index('"assistant_asked"')
 
 
 # ---- reading an answer --------------------------------------------------------------------------------------------
@@ -343,7 +370,7 @@ async def _run_judge(verifier: RubricsVerifierTaskStep):
     return await verifier._run_judge_with_output_retries(
         eval_prompt="EVAL", criteria=verifier.criteria, context=TaskStepContext(), model="claude-sonnet-4-6",
         judge_a2a_url=None, judge_agent_card={}, judge_agent=None, judge_effort=None,
-        judge_max_thinking_tokens=None, use_agent_judge=False)
+        judge_max_thinking_tokens=None, use_agent_judge=False, usage=StepUsage(TaskStepContext(), "verify"))
 
 
 @pytest.mark.asyncio

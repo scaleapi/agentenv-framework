@@ -9,7 +9,16 @@ from typing import Any, Callable
 
 import pytest
 
-from agentenv_protocol.atif import KIT_RULES, RULES, errors_in, validate, validate_live
+from agentenv_protocol.atif import (
+    KIT_RULES,
+    RULES,
+    StoredMedia,
+    errors_in,
+    media_refs,
+    validate,
+    validate_live,
+    validate_media,
+)
 from agentenv_protocol.atif.__main__ import main
 from atif_cases import CASES, FIXTURES, build
 
@@ -69,6 +78,7 @@ NEGATIVE: dict[str, tuple[str, Callable[[dict[str, Any]], None]]] = {
     "profile": ("coding", lambda d: d["steps"][0]["extra"]["agentenv"].update(turn="zero")),
     "profile-key": ("coding", lambda d: d["steps"][0]["extra"]["agentenv"].update(later=1)),
     "profile-version": ("coding", lambda d: d["extra"]["agentenv"].update(version="2.0")),
+    "compaction": ("coding", lambda d: d["steps"][0]["extra"]["agentenv"].update(compaction={"written_by": "assistant"})),
     "vocabulary": ("coding", lambda d: d["steps"][-1]["extra"]["agentenv"].update(state="paused")),
     "outside-key": ("coding", lambda d: d["steps"][0]["extra"].update(note="x")),
     "call-id": ("coding", _duplicate_call_id),
@@ -134,12 +144,61 @@ def test_an_unknown_profile_key_fails_a_producer_and_only_warns_a_reader(tmp_pat
     assert "warning profile-key steps[0].extra.agentenv.later" in capsys.readouterr().out
 
 
+def test_a_compaction_sits_on_an_agent_step_names_who_wrote_it_and_holds_its_vocabularies():
+    document = _fixture("coding")
+    profile = document["steps"][1].setdefault("extra", {}).setdefault("agentenv", {})
+    profile["compaction"] = {"written_by": "assistant", "trigger": "manual"}
+    assert errors_in(validate(document)) == []
+    profile["compaction"] = {"trigger": "auto"}
+    assert [(f.rule, f.where) for f in errors_in(validate(document))] == [
+        ("compaction", "steps[1].extra.agentenv.compaction.written_by")]
+    profile["compaction"] = {"written_by": "someone", "trigger": "now"}
+    assert [(f.rule, f.where) for f in errors_in(validate(document))] == [
+        ("vocabulary", "steps[1].extra.agentenv.compaction.written_by"),
+        ("vocabulary", "steps[1].extra.agentenv.compaction.trigger")]
+
+
+@pytest.mark.parametrize(("version", "known"), [("1.0", True), ("1.1", True), ("1.2", False), ("2.0", False)])
+def test_a_document_of_an_earlier_minor_is_read_whole_and_a_later_one_is_flagged(version, known):
+    """A minor only adds optional fields, so a validator of 1.1 checks a 1.0 copy, from an agent on an older SDK, as its
+    own; one it doesn't know yet is flagged, as a newer document is."""
+    document = _fixture("coding")
+    document["extra"]["agentenv"]["version"] = version
+    assert ("profile-version" in _rules(errors_in(validate(document)))) is not known
+
+
 def test_media_bytes_are_checked_against_their_name_and_profile():
     document = _fixture("computer_use")
     path = _parts(document)[0]["source"]["path"]
     assert validate(document, media=FIXTURES) == []
     assert "media-bytes" in _rules(errors_in(validate(document, media={})))
     assert "media-bytes" in _rules(errors_in(validate(document, media={path: b"not the screenshot"})))
+
+
+def test_stored_media_hold_the_profile_to_each_files_name_and_stored_size_without_its_bytes():
+    document = _fixture("computer_use")
+    sizes = {ref.path: ref.info["bytes"] for ref in media_refs(document)}
+    assert validate(document, media=StoredMedia(sizes)) == []
+    assert validate(document, media=StoredMedia(dict.fromkeys(sizes))) == []  # a store that can't tell sizes
+    [first, *_] = sizes
+    missing = errors_in(validate(document, media=StoredMedia({p: n for p, n in sizes.items() if p != first})))
+    assert [(f.rule, f.message) for f in missing] == [("media-bytes", f"{first} isn't in the media given")]
+    resized = errors_in(validate(document, media=StoredMedia({**sizes, first: sizes[first] + 1})))
+    assert [f.rule for f in resized] == ["media-bytes"] and "bytes" in resized[0].message
+    [holder] = [result for step in document["steps"] for result in (step.get("observation") or {}).get("results", [])
+                if first in (result.get("extra") or {}).get("agentenv", {}).get("media", {})]
+    holder["extra"]["agentenv"]["media"][first]["sha256"] = "0" * 64
+    renamed = errors_in(validate(document, media=StoredMedia(sizes)))
+    assert [f.rule for f in renamed] == ["media-bytes"] and "but the name has" in renamed[0].message
+
+
+def test_media_are_checked_on_their_own_for_a_document_newer_than_the_models():
+    document = {**_fixture("computer_use"), "schema_version": "ATIF-v1.9"}
+    sizes = {ref.path: ref.info["bytes"] for ref in media_refs(document)}
+    assert _rules(errors_in(validate(document, reader=True, media=StoredMedia({})))) == {"atif"}
+    assert validate_media(document, StoredMedia(sizes), reader=True) == []
+    assert _rules(errors_in(validate_media(document, StoredMedia({}), reader=True))) == {"media-bytes"}
+    assert validate_media(document, FIXTURES) == []
 
 
 def test_totals_sum_the_sub_agents_steps_and_skip_a_count_a_step_lacks():

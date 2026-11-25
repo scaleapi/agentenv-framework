@@ -153,6 +153,46 @@ async def test_a_hook_that_is_not_an_async_post_turn_fails_the_step_before_the_a
     assert peers.raw == []
 
 
+CHECKS_PARAMS = """
+    def check_params(params):
+        if "role" not in params:
+            raise ValueError("needs role")
+
+    async def post_turn(turn, params):
+        turn.record({"role": params["role"]})
+        return None
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_hook_that_refuses_its_params_fails_the_step_before_the_agent_is_prompted(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: []})
+
+    with pytest.raises(ValueError, match="post-turn hook 'checks' refused its params: needs role"):
+        await _step(_hook("checks", CHECKS_PARAMS)).execute(_context())
+
+    assert peers.raw == []
+
+
+@pytest.mark.asyncio
+async def test_a_hook_whose_params_pass_its_check_runs(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("done")]})
+    ctx = _context()
+
+    await _step(_hook("checks", CHECKS_PARAMS), turns=1, params={"role": "r"}).execute(ctx)
+
+    assert [r["role"] for r in _recorded(ctx)] == ["r"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_params_that_is_async_fails_the_step(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: []})
+    source = "async def check_params(params):\n    pass\n\nasync def post_turn(turn, params):\n    return None\n"
+
+    with pytest.raises(ValueError, match="check_params must be `def check_params"):
+        await _step(_hook("async-check", source)).execute(_context())
+
+
 @pytest.mark.asyncio
 async def test_a_hook_with_a_dataclass_and_postponed_annotations_loads_and_close_unregisters_it():
     source = """
@@ -191,6 +231,41 @@ async def test_a_hook_message_is_the_agents_next_prompt_and_no_user_side_is_aske
         (1, False, "one"), (2, False, "two"), (3, True, "three")]
     assert {e["hook"] for e in _recorded(ctx)} == {"next"}
     assert _stored(ctx, peers)["messages"][2] == {"role": "user", "parts": text("wake 1")}
+
+
+@pytest.mark.asyncio
+async def test_a_hooks_summary_is_one_object_per_hook_the_latest_kept(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one"), text("two"), text("three")]})
+    ctx = _context()
+    counts = _hook("counts", """
+        async def post_turn(turn, params):
+            turn.summarize({"turns": turn.number, "last": turn.last})
+            return {"message": "go on"}
+        """)
+    quiet = _hook("quiet", """
+        async def post_turn(turn, params):
+            if turn.number == 1:
+                turn.summarize({})
+            return None
+        """)
+
+    await _step(quiet, counts, turns=3).execute(ctx)  # quiet first: a hook that answers ends the turn's hooks
+
+    assert ctx.metadata["post_turn_hook_summaries"] == {"talk": {"counts": {"turns": 3, "last": True}, "quiet": {}}}
+    assert "post_turn_hooks" not in ctx.metadata  # a summary is not a record
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_is_not_an_object_fails_the_turn(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("bad", """
+        async def post_turn(turn, params):
+            turn.summarize(["M1"])
+        """)
+
+    with pytest.raises(Exception, match="a hook's summary is an object"):
+        await _step(hook, turns=1).execute(ctx)
 
 
 @pytest.mark.asyncio
@@ -262,6 +337,51 @@ async def test_a_hook_that_asks_the_user_reaches_the_configured_human_peer(monke
         *exchange("http://human.test", text("one"), "<id2>", "<ctx>", "task-2"),
         send(AGENT, text("go on"), "<id3>", "<ctx>"),
     ]
+
+
+NOTES = """
+    async def post_turn(turn, params):
+        return None if turn.last else await turn.ask_user(note=f"the sheet has no total (turn {turn.number})")
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_hook_note_reaches_the_user_sim_after_the_reply_and_never_the_agent(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("add a total?")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("notes", NOTES), turns=2).execute(ctx)
+
+    note = ("[Only you see this; the assistant doesn't. What you found when you checked its work yourself: "
+            "the sheet has no total (turn 1)]")
+    assert peers.requests(ctx)[1:] == [
+        *exchange(AGENT, text("plan my week"), "<id1>", "<ctx>", "task-1"),
+        *exchange(USER, [*text("one"), *text(note)], "<id2>", "<ctx>", "task-2"),
+        *exchange(AGENT, text("add a total?"), "<id3>", "<ctx>", "task-3"),
+    ]
+    assert ctx.metadata["user_side_notes"]["talk"] == [{"turn": 1, "note": "the sheet has no total (turn 1)"}]
+
+
+@pytest.mark.asyncio
+async def test_a_human_peer_gets_no_hook_note(monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_HUMAN_A2A_URL", "http://human.test")
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one"), text("two")], "http://human.test": [text("go on")]})
+    ctx = _context()
+
+    await _step(_hook("notes", NOTES), turns=2).execute(ctx)
+
+    assert peers.requests(ctx)[2:4] == exchange("http://human.test", text("one"), "<id2>", "<ctx>", "task-2")
+    assert "user_side_notes" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", ["''", "'  '", "7"])
+async def test_a_hook_note_that_is_not_text_fails_the_step(monkeypatch, note):
+    EnvPeers(monkeypatch, {AGENT: [text("one")], USER: [sim("ok")]})
+    hook = _hook("bad", f"async def post_turn(turn, params):\n    return await turn.ask_user(note={note})\n")
+
+    with pytest.raises(ValueError, match="a note for the user side is non-empty text"):
+        await _step(hook, turns=2).execute(_context(user_card=_USER_SIM_CARD))
 
 
 @pytest.mark.asyncio
@@ -571,3 +691,132 @@ async def test_with_no_armed_env_clock_stored_messages_carry_none(monkeypatch):
                               poll_interval_seconds=0).execute(ctx)
 
     assert all("env_clock" not in m for m in _stored(ctx, peers)["messages"])
+
+
+@pytest.mark.asyncio
+async def test_a_hook_sees_each_turns_trajectory_so_far_and_can_read_it(monkeypatch):
+    from agent_env.a2a_agent import A2AAgent
+    from agent_env.config import get_config
+    from agent_env.task_step.task_steps import prompt_agent as pa
+
+    EnvPeers(monkeypatch, {AGENT: [text("one"), text("two"), text("three")]})
+    ctx = _context()
+    ctx.deployed_agents[0].a2a_card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
+    stored = {"task-1": b'[{"turn": 1}]', "task-3": b'[{"turn": 3}]'}  # turn 2's agent returned none
+
+    async def fetch(url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
+        if task_id not in stored:
+            return pa.StoredTrajectory()
+        return pa.StoredTrajectory(get_config().get_object_store().put(f"traj/{task_id}.json", stored[task_id]))
+
+    monkeypatch.setattr(pa, "fetch_native_trajectory", fetch)
+    hook = _hook("reads", """
+        async def post_turn(turn, params):
+            urls = turn.trajectory_urls
+            texts = [await turn.read_trajectory(n) for n in range(1, len(urls) + 1)]
+            try:
+                await turn.read_trajectory(len(urls) + 1)
+                ahead = "read"
+            except IndexError:
+                ahead = "refused"
+            turn.record({"count": len(urls), "missing": [n for n, u in enumerate(urls, 1) if u is None],
+                         "texts": texts, "ahead": ahead})
+            return {"message": f"wake {turn.number}"}
+    """)
+
+    await _step(hook, turns=3).execute(ctx)
+
+    assert [(e["count"], e["missing"], e["texts"], e["ahead"]) for e in _recorded(ctx)] == [
+        (1, [], ['[{"turn": 1}]'], "refused"),
+        (2, [2], ['[{"turn": 1}]', None], "refused"),
+        (3, [2], ['[{"turn": 1}]', None, '[{"turn": 3}]'], "refused"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_offers_no_trajectories_hands_a_hook_none(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("none", """
+        async def post_turn(turn, params):
+            try:
+                await turn.read_trajectory(turn.number + 1)
+                ahead = "read"
+            except IndexError:
+                ahead = "refused"
+            turn.record({"urls": list(turn.trajectory_urls), "this_turn": await turn.read_trajectory(turn.number),
+                         "ahead": ahead})
+            return None
+    """)
+
+    await _step(hook, turns=1).execute(ctx)
+
+    # A turn that happened has no trajectory (None), not an error; one that hasn't is still refused.
+    assert [(e["urls"], e["this_turn"], e["ahead"]) for e in _recorded(ctx)] == [([], None, "refused")]
+
+@pytest.mark.asyncio
+async def test_a_note_passed_after_the_user_side_was_asked_raises_instead_of_being_dropped():
+    from agent_env.task_step.task_steps.post_turn_hooks import _Answer
+
+    asked = []
+
+    async def ask_user(note=None):
+        asked.append(note)
+        return {"message": text("ok")}
+
+    async def no_trigger():
+        return None
+
+    answer = _Answer(ask_user, no_trigger)
+    assert await answer.ask_user() == {"message": text("ok")}
+    with pytest.raises(RuntimeError, match="already asked this turn without a note"):
+        await answer.ask_user(note="the sheet has no total")
+    assert await answer.ask_user() == {"message": text("ok")} and asked == [None]   # asked once
+
+    noted = _Answer(ask_user, no_trigger)
+    await noted.ask_user(note="first")
+    assert await noted.ask_user(note="first") == {"message": text("ok")}             # the same note is fine
+    with pytest.raises(RuntimeError, match="with another note"):
+        await noted.ask_user(note="second")
+
+
+@pytest.mark.asyncio
+async def test_a_note_after_an_agent_trigger_answered_the_turn_has_no_one_to_reach_and_isnt_an_error():
+    from agent_env.task_step.task_steps.post_turn_hooks import _Answer
+
+    async def ask_user(note=None):
+        raise AssertionError("the user side isn't asked once a trigger answered")
+
+    async def fired():
+        return {"message": text("nudge from a trigger")}
+
+    answer = _Answer(ask_user, fired)
+    assert await answer.user_triggers() == {"message": text("nudge from a trigger")}
+    assert await answer.ask_user(note="the sheet has no total") == {"message": text("nudge from a trigger")}
+
+
+@pytest.mark.asyncio
+async def test_with_a_user_sim_gate_the_note_goes_with_the_first_send_only_and_the_judge_is_shown_it(monkeypatch):
+    from agent_env.task_step.task_steps import user_sim_gate
+    from tst.unit.task_step.test_prompt_agent_user_side import _SWAP
+
+    shown = []
+
+    async def judge(self, candidate, history, call_config, user_note=None, **_):
+        shown.append(user_note)
+        return {"in_role": not candidate.startswith("Done."), "reason": "judged"}
+
+    monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
+    monkeypatch.setattr("agent_env.config.model_call.resolve_route", lambda model, **kw: None)
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim(_SWAP), sim("add a total?")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("notes", NOTES), turns=2,
+                user_sim_gate={"patterns": True, "judge_model": "judge-model"}).execute(ctx)
+
+    to_user = [r[2]["params"]["message"]["parts"] for r in peers.requests(ctx)
+               if r[1] == f"{USER}/a2a" and r[2] and r[2].get("method") == "message/send"]
+    assert [len(parts) for parts in to_user] == [2, 1]        # the reply and the note; then the rewrite request alone
+    assert "the sheet has no total" in to_user[0][1]["text"]
+    assert "the sheet has no total" not in json.dumps(to_user[1])
+    assert shown == ["the sheet has no total (turn 1)"] * 2   # the judge is shown it for the message and its rewrite

@@ -29,7 +29,9 @@ mostly the lxml and Pillow they depend on, and their pins match the Codex and Ge
 task's documents read the same way in each. A `deploy_agent` `builtin_tools`
 selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
-`--strict-mcp-config`, so its MCP servers are only the task env's. Tool search is off unless the agent's environment sets
+`--strict-mcp-config`, so its MCP servers are only the task env's. A `deploy_agent` `peer_tools: false` also leaves out the peer_agents MCP
+server, so the agent can't message the task's other agents; an agent whose agent-config takes no `peer_tools` fails
+the deploy. Tool search is off unless the agent's environment sets
 `ENABLE_TOOL_SEARCH`, so the CLI sends the env's tools and its own up front. The names are `ClaudeCodeTool`'s in
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
@@ -48,7 +50,17 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   declares the agent at the gateway as a follower with a read token of its own and calls its `sync_time` with the
   follower's config, which the server writes; `deploy_agent` does the same for an agent it deploys while that clock is
   armed. From then on the CLI, its own "Today's date is" line included, and every command the model runs read the env's
-  time, and a clock write that waits for followers waits for the agent.
+  time, and a clock write that waits for followers waits for the agent. A resumed Claude Code session keeps its first
+  turn's date line as history; when the date has changed by its next model call, between turns or during one, the CLI
+  adds "The date has changed. Today's date is now ..." (`tst/integration/agent/claude_code_date_test.py` checks the
+  pinned CLI does).
+- **OpenCode's CLI on real time.** OpenCode orders a session's messages by when they were written and takes no time
+  before 1970, so on the env's clock a clock set behind its messages broke the session. Where the image follows the
+  clock, the bridge starts the CLI on real time; the commands it runs still read the env's time. While the clock is
+  armed, the turn's model relay puts the env's date, read from `date`, in the prompt's "Today's date" line and the
+  websearch tool's year, and the CLI enables no provider but the endpoint, so no call bypasses the relay. A call whose
+  date the relay can't read or place is refused, so the turn fails rather than tell the model the machine's date
+  (`opencode_date.py`).
 - **For the rest of the run.** An agent that follows goes on following: a later `sync_env_clock` without `agent_clock`
   re-arms the clock it follows, and only agents that never followed keep real time.
 - **Through the egress proxy.** While the agent follows an armed clock, the CLI goes out through the egress proxy, which
@@ -61,7 +73,8 @@ The A2A server starts with the real-time marker, so it and its records stay on r
 - **One rule for every clocked agent.** That rule is `agent_egress.py` in `utils/agent_clock`, which only agent images
   take (`agent_clock = "utils/agent_clock"` in `shared_sources.toml`), so changing it rebuilds no computer base. The
   bridge imports it, and the image and `install.sh` copy it beside the bridge with the clock's `clockpage.py`, whose
-  layout and check it reads the page by, so every agent put on the clock, OpenCode's too, goes out the same way.
+  layout and check it reads the page by, so every agent put on the clock, OpenCode's and Letta Code's too, goes out
+  the same way.
 
 Started as a user other than root, the image runs the A2A server alone, on real time, as before.
 

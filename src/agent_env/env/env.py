@@ -130,6 +130,11 @@ class DeployedEnv:
         ``url`` is or is under, as a step's grant gives them, and none anywhere else, an override's address say."""
         return protocol_v1.granted_headers(url, self.control_grants)
 
+    def control_headers_or_grant(self, url: str) -> Optional[dict[str, str]]:
+        """``control_headers_for(url)``, or None when the record gives ``url`` no token, which leaves the call to
+        a run's grant (``protocol_v1.request_headers``)."""
+        return self.control_headers_for(url) or None
+
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
         return protocol_v1.find_extension_method(self.environment_card or {}, uri, method) is not None
@@ -236,6 +241,8 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     env_provider_type: Optional[str] = "gateway"
     gateway_url: str
     gateway_mode: str = GatewayMode.PERFORMANCE.value
+    # pgweb's and db-mcp's direct URLs, which only a record an older deploy wrote carries; nothing writes them now.
+    # Kept for one release so a consumer can still read an env deployed before then. Remove in the release after.
     db_web_url: Optional[str] = None
     db_mcp_url: Optional[str] = None
     # pgweb and db-mcp behind the gateway, which take the control token (``control_headers_for``); None when the deploy

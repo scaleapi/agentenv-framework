@@ -129,6 +129,19 @@ def test_turns_sharing_a_system_prompt_share_its_file_until_the_last_ends(home):
         assert prompt.read_text() == "be brief" and not second.exists()
     assert not prompt.exists() and not first.exists()
 
+
+def test_a_run_includes_the_task_directories_that_exist_so_the_file_tools_read_them(monkeypatch, tmp_path, home):
+    app_dir, data_dir = tmp_path / "app", tmp_path / "data"
+    app_dir.mkdir()
+    monkeypatch.setattr(gemini_config, "TASK_DIRS", (str(app_dir), str(data_dir)))
+
+    with gemini_config.run_settings({}, None, None) as path:
+        assert json.loads(path.read_text())["context"] == {"includeDirectories": [str(app_dir)]}
+    data_dir.mkdir()
+    with gemini_config.run_settings({}, None, "be brief") as path:
+        context = json.loads(path.read_text())["context"]
+    assert context["includeDirectories"] == [str(app_dir), str(data_dir)] and context["fileName"][0] == "GEMINI.md"
+
 def test_a_duplicate_url_or_name_is_a_409(home, client):
     client.post(MCP_CONFIG_PATH, json={"url": "https://gw/a/mcp", "name": "env1"})
 

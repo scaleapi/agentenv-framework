@@ -216,7 +216,7 @@ def _captured_snapshot_id(series: SnapshotSeries, monkeypatch) -> str:
     monkeypatch.setattr("agent_env.env.env.Env.get", lambda *args: SimpleNamespace(id="crm-suite"))
     monkeypatch.setattr(SnapshotEnvTaskStep, "snapshot_env_state", staticmethod(snapshot_env_state))
     deployed = DeployedGatewayEnv(env_id="crm-suite", env_version=1, gateway_url="https://gw", mcp_url="https://gw/mcp",
-                                  db_web_url=None, sandbox_id="sb-1")
+                                  sandbox_id="sb-1")
     assert asyncio.run(series._capture_env_state(TaskStepContext(deployed_envs=[deployed]), {}, 30)) is None
     (snapshot_id,) = snapshot_ids
     return snapshot_id
