@@ -33,7 +33,8 @@ LOCAL_TIME = re.compile(rf"(The current local time is: )({_STAMP})(\.)")
 RUN_TIMES = re.compile(rf"^((?:Created|Completed) At: )({_STAMP})$", re.MULTILINE)
 # What a command's result gets when the env's date has changed since the model was last told it, in the harness's own
 # metadata block, and worded so LOCAL_TIME never reads it as a turn's line.
-DATE_CHANGED = "\n\n<ADDITIONAL_METADATA>\nThe date has changed. The current local time is now: {}.\n</ADDITIONAL_METADATA>"
+DATE_CHANGED = ("\n\n<ADDITIONAL_METADATA>\nThe date has changed. The current local time is now: {}.\n"
+                "</ADDITIONAL_METADATA>")
 _DATE_TIMEOUT_S = 5
 # The hex digits of a message's digest a key holds.
 _KEY_DIGEST_CHARS = 16
@@ -102,10 +103,11 @@ def env_time_rewrite(times: Records | Tracked):
     """The relay's rewrite for a turn: while the agent follows an armed clock, every local-time line of a user message
     gets the env time recorded for it, and the last one, the turn's own, the env's time when the turn first sends it;
     every command result's stamps are shifted by the offset recorded for it, a result of the turn's own recording the
-    env's offset now; and the turn's latest command result, sent last, gets a ``DATE_CHANGED`` note once the env's date
-    is past the one the turn's line or an earlier note told the model, every recorded note going with its result again.
-    A line or result of an earlier turn with none recorded is left as written: the agent followed no clock then. Unchanged otherwise; a call that isn't JSON, or whose env time can't be read, is refused, so the model
-    is never told the machine's time instead."""
+    env's offset now; and the turn's latest command result, sent last, gets a ``DATE_CHANGED`` note once the env's
+    date is past the one the turn's line or an earlier note told the model, every recorded note going with its result
+    again. A line or result of an earlier turn with none recorded is left as written: the agent followed no clock
+    then. Unchanged otherwise; a call that isn't JSON, or whose env time can't be read, is refused, so the model is
+    never told the machine's time instead."""
 
     given: set[str] = set()
 
@@ -123,9 +125,9 @@ def env_time_rewrite(times: Records | Tracked):
         turn = max((index for index, message in enumerate(messages) if message.get("role") == "user"), default=-1)
         lines = [(holder, key) for message in messages if message.get("role") == "user"
                  for holder, key in _texts(message) if LOCAL_TIME.search(holder[key])]
-        tools = [(index, holder, key, holder[key]) for index, message in enumerate(messages)
-                 if message.get("role") == "tool" for holder, key in _texts(message)]
-        runs = [(holder, key, index > turn) for index, holder, key, text in tools if RUN_TIMES.search(text)]
+        tools = [(index, holder, key, holder[key], str(message.get("tool_call_id"))) for index, message
+                 in enumerate(messages) if message.get("role") == "tool" for holder, key in _texts(message)]
+        runs = [(holder, key, index > turn) for index, holder, key, text, _ in tools if RUN_TIMES.search(text)]
         if not lines and not runs:
             return body
         now = _Now()
@@ -155,21 +157,27 @@ def env_time_rewrite(times: Records | Tracked):
 
 async def _note_date_changes(tools: list, turn: int, count: int, told: str | None, times: Records | Tracked,
                              now: _Now) -> None:
-    """Every command result with a recorded ``DATE_CHANGED`` note gets it again, and the turn's own result sent last a new
-    one when the env's date is past ``told``, the turn's env time, or the last note of the turn's."""
-    for index, holder, key, original in tools:
-        if (noted := times.get(f"note#{message_digest(original)}")) is not None:
+    """Every command result with a recorded ``DATE_CHANGED`` note gets it again, and the turn's own result sent last a
+    new one when the env's date is past ``told``, the turn's env time, or the last note of the turn's. A note is the
+    result's by the model's id for its call, which the harness sends again as it stored it, and its text, so a later
+    result with the same text never takes an earlier one's."""
+    for index, holder, key, original, call in tools:
+        if (noted := times.get(_note_key(call, original))) is not None:
             holder[key] += DATE_CHANGED.format(noted)
             told = noted if index > turn else told
     if not tools or told is None:
         return
-    index, holder, key, original = tools[-1]
-    if index != count - 1 or index <= turn or times.get(f"note#{message_digest(original)}") is not None:
+    index, holder, key, original, call = tools[-1]
+    if index != count - 1 or index <= turn or times.get(_note_key(call, original)) is not None:
         return
     env = (await now())[0]
     if env[:10] != told[:10]:
-        times.put(f"note#{message_digest(original)}", env)
+        times.put(_note_key(call, original), env)
         holder[key] += DATE_CHANGED.format(env)
+
+
+def _note_key(call: str, text: str) -> str:
+    return f"note#{call}#{message_digest(text)}"
 
 
 def line_key(text: str, real: str) -> str:

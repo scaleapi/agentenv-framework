@@ -403,10 +403,42 @@ def test_a_turns_records_are_filed_under_its_conversation(monkeypatch, tmp_path)
     monkeypatch.setattr(antigravity_bridge, "model_relay", relay)
     antigravity_bridge.file_records("conv-1", {"earlier#1"}, set())
 
-    _run(Turn(steps=[("chunk", Text(step_index=0, text="ok"))], conversation_id="conv-1"), attachment_paths=[str(image)])
+    _run(Turn(steps=[("chunk", Text(step_index=0, text="ok"))], conversation_id="conv-1"),
+         attachment_paths=[str(image)])
 
     assert antigravity_bridge.CONVERSATION_RECORDS.get("conv-1") == {
         "env_times": ["earlier#1"], "turn_images": [antigravity_date.message_digest("look")]}
+
+
+def test_a_cancelled_turn_files_its_records_under_the_conversation_it_reached(monkeypatch, tmp_path):
+    image = tmp_path / "chart.png"
+    image.write_bytes(b"\x89PNG")
+    antigravity_bridge.SAVE_DIR.mkdir(parents=True)
+    (antigravity_bridge.SAVE_DIR / "conv-9.db").write_bytes(b"")
+
+    @asynccontextmanager
+    async def relay(upstream, calls, **kwargs):
+        await kwargs["rewrite"](json.dumps({"model": "m", "messages": [{"role": "user", "content": "look"}]}).encode())
+        yield "http://relay.test/token"
+
+    monkeypatch.setattr(antigravity_bridge, "model_relay", relay)
+    fake_sdk.Agent.turns.append(Turn(steps=[("chunk", Text(step_index=0, text="working")), ("sleep", 5)],
+                                     conversation_id="conv-9"))
+
+    async def cancelled() -> None:
+        turn = asyncio.create_task(antigravity_bridge.run_antigravity(
+            "look", model="m", session_id=None, mcp_servers=None, system_prompt=None, timeout_s=30, role=None,
+            builtin_tools=None, max_turns=None, workspace="/w", event_callback=lambda _: None,
+            attachment_paths=[str(image)]))
+        await asyncio.sleep(0.2)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    asyncio.run(cancelled())
+
+    assert antigravity_bridge.CONVERSATION_RECORDS.get("conv-9") == {
+        "env_times": [], "turn_images": [antigravity_date.message_digest("look")]}
 
 
 def test_an_image_gone_before_its_turn_sends_it_is_left_out(tmp_path):

@@ -430,13 +430,27 @@ async def run_antigravity(prompt: str, *, model: str | None, project_id: str | N
     calls = Calls()
     headers = endpoint_headers(os.environ, attribution_headers(project_id, task_id))
     times, turn_images = Tracked(ENV_TIMES), Tracked(TURN_IMAGES)
-    async with model_relay(_api_root(os.environ.get("LITELLM_BASE_URL") or ""), calls, headers=headers,
-                           rewrite=turn_rewrite(effort, images, times, turn_images)) as relay:
-        result = await _turn(prompt, base_url=f"{relay}/v1", model=model or DEFAULT_MODEL, **kwargs)
+    started: list[Any] = []
+    result = None
+    try:
+        async with model_relay(_api_root(os.environ.get("LITELLM_BASE_URL") or ""), calls, headers=headers,
+                               rewrite=turn_rewrite(effort, images, times, turn_images)) as relay:
+            result = await _turn(prompt, base_url=f"{relay}/v1", model=model or DEFAULT_MODEL, started=started,
+                                 **kwargs)
+    finally:
+        # A cancelled turn's records go with its conversation too, for a snapshot taken next to carry.
+        conversation = result.session_id if result is not None else _kept(started, kwargs.get("session_id"))
+        if conversation:
+            file_records(conversation, times.keys, turn_images.keys)
     result.usage = calls.usage(result.tool_call_count, model or DEFAULT_MODEL)
-    if result.session_id:
-        file_records(result.session_id, times.keys, turn_images.keys)
     return result
+
+
+def _kept(started: list[Any], session_id: str | None) -> str | None:
+    """The conversation a turn that didn't finish leaves for the next: the one the SDK started, which it names with the
+    turn's first streamed step, once its store is on disk, else the one the turn resumed."""
+    current = getattr(started[0], "conversation_id", None) if started else None
+    return current if conversation_store_exists(current) else session_id
 
 
 def file_records(conversation_id: str, env_times: set[str], turn_images: set[str]) -> None:
@@ -450,7 +464,9 @@ def file_records(conversation_id: str, env_times: set[str], turn_images: set[str
 async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | None,
                 mcp_servers: dict[str, dict] | None, system_prompt: str | None, timeout_s: int, role: str | None,
                 builtin_tools: BuiltinTools[AntigravityTool] | None, max_turns: int | None, workspace: str,
-                event_callback: Callable[[dict], None]) -> AntigravityResult:
+                event_callback: Callable[[dict], None], started: list[Any]) -> AntigravityResult:
+    """One turn of the SDK; ``started`` gets the turn's ``Agent`` once it starts, so whoever awaits the turn knows its
+    conversation however it ends."""
     recorder = TrajectoryRecorder(event_callback)
     servers = mcp_servers or {}
     urls = [os.environ.get("LITELLM_BASE_URL", ""), *(info["url"] for info in servers.values())]
@@ -480,8 +496,6 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
             logger.warning(f"conversation {session_id} has no store in {SAVE_DIR}: the turn starts a new one")
             session_id = None
 
-    started: list[Any] = []
-
     async def converse() -> tuple[str | None, Any]:
         async with ag.Agent(ag.LocalOpenAIAgentConfig(**config)) as agent:
             started.append(agent)
@@ -490,24 +504,19 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
                 recorder.chunk(chunk)
             return agent.conversation_id, response.stop_reason
 
-    def kept() -> str | None:
-        """The conversation a failed turn leaves for the next: the one the SDK started, which it names with the turn's
-        first streamed step, once its store is on disk, else the one the turn resumed."""
-        current = getattr(started[0], "conversation_id", None) if started else None
-        return current if conversation_store_exists(current) else session_id
-
     try:
         conversation_id, stop = await asyncio.wait_for(converse(), timeout=timeout_s)
     except TimeoutError:
         recorder.close()
-        return AntigravityResult(session_id=kept(), tool_call_count=recorder.tool_calls, error_code="timeout",
+        return AntigravityResult(session_id=_kept(started, session_id), tool_call_count=recorder.tool_calls,
+                                 error_code="timeout",
                                  error=f"the turn ran past its {timeout_s} s")
     except agt.AntigravityExecutionError as exc:
         recorder.close()
         text = str(exc)[:ERROR_MESSAGE_LIMIT]
         # A task env's MCP server that fails its initialize fails the harness's start: the run's tools aren't there.
         mcp = "mcp load failed" in text.lower()
-        return AntigravityResult(session_id=kept(), tool_call_count=recorder.tool_calls, error=text,
+        return AntigravityResult(session_id=_kept(started, session_id), tool_call_count=recorder.tool_calls, error=text,
                                  error_code="mcp_load_failed" if mcp else "antigravity_error", infra=mcp)
     recorder.close()
     result = AntigravityResult(response=recorder.response(), session_id=conversation_id or session_id,

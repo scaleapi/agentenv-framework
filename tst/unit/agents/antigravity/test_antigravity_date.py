@@ -138,13 +138,13 @@ def _ran(created: str, completed: str, output: str = "42") -> str:
     return f"Created At: {created}\nCompleted At: {completed}\n\nOutput:\n{output}"
 
 
-def _with_run(call: dict, result: str, after: int) -> dict:
-    """``call`` with a command's call and ``result`` after its message ``after``."""
+def _with_run(call: dict, result: str, after: int, call_id: str = "c1") -> dict:
+    """``call`` with a command's call ``call_id`` and its ``result`` after its message ``after``."""
     messages = call["messages"]
     messages[after + 1:after + 1] = [
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {
+        {"role": "assistant", "content": None, "tool_calls": [{"id": call_id, "type": "function", "function": {
             "name": "run_command", "arguments": "{}"}}]},
-        {"role": "tool", "tool_call_id": "c1", "content": result}]
+        {"role": "tool", "tool_call_id": call_id, "content": result}]
     return call
 
 
@@ -212,15 +212,43 @@ def test_a_date_change_during_a_turn_is_noted_on_the_result_after_it_and_kept_th
 
     noted = _sent(rewrite, _with_run(_call(_line(REAL) + "go"), first, after=1))
     monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-05T09:01:00-06:00")
-    then = _sent(rewrite, _with_run(_with_run(_call(_line(REAL) + "go"), first, after=1), second, after=3))
+    then = _sent(rewrite, _with_run(_with_run(_call(_line(REAL) + "go"), first, after=1), second, after=3,
+                                    call_id="c2"))
     monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-06T08:00:00-06:00")
     later = _sent(antigravity_date.env_time_rewrite(times),
                   _with_run(_call(_line(REAL) + "go", _line("2026-11-25T10:20:00-08:00") + "again"), first, after=1))
 
     assert noted["messages"][-1]["content"].endswith(note)
-    assert then["messages"][3]["content"].endswith(note) and "The date has changed" not in then["messages"][5]["content"]
-    assert later["messages"][3]["content"].endswith(note) and later["messages"][3]["content"].count("date has changed") == 1
+    assert then["messages"][3]["content"].endswith(note)
+    assert "The date has changed" not in then["messages"][5]["content"]
+    assert later["messages"][3]["content"].endswith(note)
+    assert later["messages"][3]["content"].count("date has changed") == 1
     assert later["messages"][-1]["content"] == _line("2031-03-06T08:00:00-06:00") + "again"
+
+
+def test_a_result_with_an_earlier_ones_text_keeps_its_own_note_or_none(env_clock, monkeypatch, times):
+    rewrite = antigravity_date.env_time_rewrite(times)
+    same = _ran("2026-11-25T18:08:29Z", "2026-11-25T18:08:34Z")
+
+    def results(count: int) -> dict:
+        call = _call(_line(REAL) + "go")
+        for n in range(count):
+            _with_run(call, same, after=1 + 2 * n, call_id=f"c{n + 1}")
+        return call
+
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-03T23:06:07-06:00")
+    _sent(rewrite, _call(_line(REAL) + "go"))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-05T09:00:00-06:00")
+    _sent(rewrite, results(1))
+    two = _sent(rewrite, results(2))
+    monkeypatch.setenv("FAKE_DATE_OUT", "2031-03-07T10:00:00-06:00")
+    three = _sent(rewrite, results(3))
+
+    notes = [[message["content"].count("The date has changed") for message in call["messages"]
+              if message["role"] == "tool"] for call in (two, three)]
+    assert notes == [[1, 0], [1, 0, 1]]
+    assert three["messages"][3]["content"].endswith(antigravity_date.DATE_CHANGED.format("2031-03-05T09:00:00-06:00"))
+    assert three["messages"][7]["content"].endswith(antigravity_date.DATE_CHANGED.format("2031-03-07T10:00:00-06:00"))
 
 
 def test_off_the_clock_no_note_is_added(monkeypatch, times):
