@@ -7,7 +7,7 @@ import json
 import pytest
 
 from agent_env.cli.usage_output import cost_line, sources_line
-from agent_env.task.usage.summary import Bound, summarize
+from agent_env.task.usage.summary import Bound, Share, summarize
 
 
 def _entry(role, model, input_tokens, output_tokens, cost, attempt=0, **more):
@@ -188,6 +188,14 @@ def test_each_share_says_why_it_is_unpriced_and_which_rates_it_assumed_with_its_
     assert solver["cost_assumed"] == ["cache_read_rate", "cache_write_rate"]
     assert judge["unpriced_reasons"] == ["no_price", "no_tokens"] and judge["cost_assumed"] == []
     assert (judge["cache_read_tokens"], judge["cache_write_tokens"]) == (None, None)
+
+
+def test_a_share_built_as_plugins_built_it_before_the_reasons_and_cache_counts_still_is():
+    share = Share("solver", "m", 1, 2, 0.5, False, True, False)
+    share.assumed = True
+
+    assert (share.cost_usd, share.unpriced, share.assumed, share.partial) == (0.5, False, True, False)
+    assert Share(role="judge", model=None, assumed=True).bound is Bound.UNPRICED
 
 
 def test_the_closing_line_names_each_source_of_the_costs():
