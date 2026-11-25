@@ -17,6 +17,7 @@ from agent_env.cli.banner import print_banner
 from agent_env.cli.task._checks import runnable_task
 from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE
 from agent_env.cli import submitted_runs
+from agent_env.cli.utils import judge_samples_option, min_judge_agreement_option
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_finish_teardown, echo_teardown, gone
 from agent_env.cli.usage_output import cost_line, sources_line
@@ -368,6 +369,8 @@ def _stored(task, context: TaskStepContext) -> str:
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
+@judge_samples_option
+@min_judge_agreement_option
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--start-step", default=0, type=int, help="0-based step index to start execution from")
 @click.option("--context-json", default=None, type=click.Path(exists=True, dir_okay=False), help="Path to a JSON file to seed the TaskStepContext")
@@ -394,7 +397,7 @@ def _stored(task, context: TaskStepContext) -> str:
               help="Keep what a run deployed up when it ends, print it, and tear it down on Ctrl-C; while it holds, "
                    "another terminal can resume the run with --start-step and --context-json. Without it, each run "
                    "is torn down as it ends, as Ctrl-C mid-run always does.")
-def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, website_browser_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
+def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, user_model: str | None, judge_model: str | None, judge_samples: int | None, min_judge_agreement: float | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, website_browser_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
     """Run a task through the configured [runner] and follow it.
 
     Each run's sandboxes are torn down as it ends, passed or failed; its instance and context JSON stay.
@@ -426,6 +429,10 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["user_model"] = user_model
     if judge_model:
         initial_context.metadata.setdefault("user_overrides", {})["judge_model"] = judge_model
+    if judge_samples:
+        initial_context.metadata.setdefault("user_overrides", {})["judge_samples"] = judge_samples
+    if min_judge_agreement is not None:
+        initial_context.metadata.setdefault("user_overrides", {})["min_judge_agreement"] = min_judge_agreement
     if agent_sandbox:
         initial_context.metadata.setdefault("user_overrides", {})["agent_sandbox"] = agent_sandbox
     if env_sandbox:
@@ -531,6 +538,8 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
 @click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
 @click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
+@judge_samples_option
+@min_judge_agreement_option
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for all runs; a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents; a secret:KEY or env:NAME reference is resolved where it is used")
@@ -546,7 +555,7 @@ def _seed_universe_id(task, seed: dict) -> str | None:
 @click.option("--keep", is_flag=True,
               help="Keep what each run deployed up when it ends, print it, and tear it down on Ctrl-C. Without it, "
                    "each run is torn down as it ends, as Ctrl-C mid-batch always does.")
-def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
+def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: int, output_dir: str | None, agent_model: str | None, user_model: str | None, judge_model: str | None, judge_samples: int | None, min_judge_agreement: float | None, agent_artifact_id: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, agent_sandbox: str | None, env_sandbox: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
     """Run a task through the configured [runner] once per seed in a CSV file, and follow the runs.
 
     Each run's sandboxes are torn down as it ends; --keep holds them up until Ctrl-C instead. Ctrl-C or
@@ -573,6 +582,7 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     _stamp_agent_env_client_metadata(metadata, get_agent_env_client_id())
     given = {"litellm_api_key": litellm_api_key, "judge_litellm_api_key": judge_litellm_api_key,
              "apply_trajectory_filter": apply_trajectory_filter, "user_model": user_model, "judge_model": judge_model,
+             "judge_samples": judge_samples, "min_judge_agreement": min_judge_agreement,
              "agent_sandbox": agent_sandbox, "env_sandbox": env_sandbox, "env_state_type": env_state_type,
              "env_state_instance_id": env_state_instance_id}
     if overrides := {key: value for key, value in given.items() if value is not None and value != ""}:

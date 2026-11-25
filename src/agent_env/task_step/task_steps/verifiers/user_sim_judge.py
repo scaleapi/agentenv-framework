@@ -200,8 +200,8 @@ PINNED: dict[str, Any] = {
     **dict.fromkeys(("criteria", "prompt_id", "default_model", "default_model_api_base", "agent_name",
                      "trajectory_filter", "max_thinking_tokens", "effort", "judge_a2a_agent_id", "judge_sandbox_type",
                      "grading_policy_prompt", "context_facts_for_judge", "grade_up_to_turn", "run_context_for_judge",
-                     "judge_batch_size", "judge_batch_concurrency", "judge_timeout_retries", "judge_max_turns",
-                     "min_passing_score"))}
+                     "judge_batch_size", "judge_batch_concurrency", "judge_samples", "min_judge_agreement", "judge_timeout_retries",
+                     "judge_max_turns", "min_passing_score"))}
 NOT_FAILING_OFF = "fail_task_when_not_passing is off: verdicts are recorded only"
 NOT_FAILING_UNCONFIRMED = ("the judge's copy of the user sim's instructions isn't confirmed to be the one it ran with, "
                            "so it doesn't fail the task")

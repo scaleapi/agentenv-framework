@@ -9,7 +9,6 @@ import base64
 import contextlib
 import dataclasses
 import email.message
-import gc
 import io
 import json
 import os
@@ -40,6 +39,10 @@ from tst.unit.env.envs.test_computer_stand_in_proxy import _serving as _stand_in
 from tst.unit.env.gateway.website_websocket_test import EchoSite
 
 pytestmark = pytest.mark.usefixtures("socket_enabled")
+
+#: How long a test waits for answers that come back in under a second: generous, since the wait ends once every answer is
+#: in, and a busy test worker's event loop can stall for seconds, as a full garbage collection of its heap does.
+ANSWERS_WAIT_S = 5.0
 
 
 def _ok(body=b"hello", extra=()):
@@ -885,12 +888,11 @@ async def test_dns_over_udp_answers_every_query_a_client_sends_while_a_slow_name
                                                         local_addr=("127.0.0.1", 0))
         client, _ = await loop.create_datagram_endpoint(Client, remote_addr=server.get_extra_info("sockname"))
         try:
-            deadline = loop.time() + 10 * nameserver_delay_s
             client.sendto(_query("eu.chat.test", 1))
             for _ in range(passed_on):
                 client.sendto(_query("example.org", 1))
+            deadline = loop.time() + ANSWERS_WAIT_S
             while loop.time() < deadline and len(answered) < passed_on + 1:
-                gc.collect()
                 await asyncio.sleep(0.05)
         finally:
             for transport in (client, server, upstream):
