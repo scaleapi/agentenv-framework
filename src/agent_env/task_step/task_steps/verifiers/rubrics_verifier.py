@@ -26,6 +26,7 @@ from agent_env.config.errors import ConfigError
 from agent_env.config import model_call
 from agent_env.config.model import ModelRole, no_key_for
 from agent_env.config.model_pricing import Cost, ReportedBy
+from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -447,7 +448,9 @@ _JUDGE_TIMEOUT_MARGIN_SECONDS = 60
 
 
 async def _terminate_auto_deployed_judge(judge: Any) -> None:
-    """Terminate the judge sandbox a verifier deployed itself; None (it used a task's agent) has nothing to release."""
+    """Terminate the judge sandbox a verifier deployed itself and, on this machine, remove its work folder, as a run's
+    teardown does for the sandboxes it records, which this one isn't; None (it used a task's agent) has nothing to
+    release."""
     if judge is None:
         return
     from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
@@ -458,6 +461,12 @@ async def _terminate_auto_deployed_judge(judge: Any) -> None:
         logger.info(f"Terminated auto-deployed judge sandbox {judge.sandbox_id}")
     except Exception as e:
         logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
+        return
+    if sandbox.ON_THIS_MACHINE:
+        try:
+            await asyncio.to_thread(remove_local_work_dir, judge.sandbox_id)
+        except OSError as e:
+            logger.warning(f"Judge sandbox {judge.sandbox_id}'s work folder was not removed: {e}")
 
 
 _T = TypeVar("_T")

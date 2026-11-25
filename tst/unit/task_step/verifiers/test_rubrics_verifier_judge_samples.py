@@ -429,6 +429,8 @@ class _Fleet:
         fleet = self
 
         class Sandbox:
+            ON_THIS_MACHINE = False
+
             def __init__(self, sandbox_id):
                 self.sandbox_id = sandbox_id
 
