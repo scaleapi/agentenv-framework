@@ -114,13 +114,15 @@ def test_a_forked_sub_agents_rollout_leaves_out_what_it_copied_from_its_parent(s
                 "payload": {"type": "function_call", "id": f"fc_{call_id}", "name": "exec_command", "call_id": call_id,
                             "arguments": "{}", "internal_chat_message_metadata_passthrough": {"turn_id": turn}}}
 
-    write(rollout(sessions, MAIN), meta(MAIN), started("turn-1"), call("call_1", "turn-1"), started("turn-2"))
+    reply = {**item("one"), "payload": {**item("one")["payload"],
+                                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}}}
+    write(rollout(sessions, MAIN), meta(MAIN), started("turn-1"), call("call_1", "turn-1"), reply, started("turn-2"))
     tail = codex_bridge.RolloutTail(None)
     tail.bind(MAIN)
     tail.read()
     forked = {**meta(SUB, MAIN), "payload": {**meta(SUB, MAIN)["payload"], "forked_from_id": MAIN}}
-    write(rollout(sessions, SUB), forked, meta(MAIN), started("turn-1"), call("call_1", "turn-1"), started("turn-2"),
-          started("turn-s"), call("call_s", "turn-s"))
+    write(rollout(sessions, SUB), forked, meta(MAIN), started("turn-1"), call("call_1", "turn-1"), reply,
+          started("turn-2"), started("turn-s"), call("call_s", "turn-s"))
 
     records = tail.read(final=True)
     assert [record["type"] for record in records] == ["session_meta", "event_msg", "response_item"]
