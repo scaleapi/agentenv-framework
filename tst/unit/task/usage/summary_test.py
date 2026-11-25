@@ -7,7 +7,7 @@ import json
 import pytest
 
 from agent_env.cli.usage_output import cost_line, sources_line
-from agent_env.task.usage.summary import Bound, summarize
+from agent_env.task.usage.summary import Bound, Share, summarize
 
 
 def _entry(role, model, input_tokens, output_tokens, cost, attempt=0, **more):
@@ -156,13 +156,46 @@ def test_a_summary_is_one_json_shape_with_the_bound_word_on_its_total_and_each_s
         "attempts": 2, "sources": ["harness", "litellm@1.80.0"],
         "shares": [
             {"role": "solver", "model": "gpt-4.1-mini", "cost_usd": pytest.approx(0.0005), "bound": "estimated",
-             "input_tokens": 1200, "output_tokens": 12, "unpriced": False, "assumed": True, "partial": True},
+             "input_tokens": 1200, "output_tokens": 12, "cache_read_tokens": None, "cache_write_tokens": None,
+             "unpriced": False, "unpriced_reasons": [], "assumed": True, "cost_assumed": ["cache_read_rate"],
+             "partial": True},
             {"role": "user_simulator", "model": "gpt-4.1-nano", "cost_usd": 0.0002, "bound": "exact",
-             "input_tokens": None, "output_tokens": None, "unpriced": False, "assumed": False, "partial": False},
+             "input_tokens": None, "output_tokens": None, "cache_read_tokens": None, "cache_write_tokens": None,
+             "unpriced": False, "unpriced_reasons": [], "assumed": False, "cost_assumed": [], "partial": False},
             {"role": "judge", "model": "mystery-1", "cost_usd": None, "bound": "unpriced", "input_tokens": 300,
-             "output_tokens": 3, "unpriced": True, "assumed": False, "partial": False}]}
+             "output_tokens": 3, "cache_read_tokens": None, "cache_write_tokens": None, "unpriced": True,
+             "unpriced_reasons": ["no_price"], "assumed": False, "cost_assumed": [], "partial": False}]}
     assert json.loads(json.dumps(shape)) == shape
     assert summary.to_dict(attempts=False)["attempts"] is None
+
+
+def test_each_share_says_why_it_is_unpriced_and_which_rates_it_assumed_with_its_cache_counts():
+    rows = [{"model": "a", "input_tokens": 9, "output_tokens": 1, "cache_read_tokens": 6, "cost_usd": 0.2,
+             "cost_assumed": ["cache_write_rate"]},
+            {"model": "a", "input_tokens": 3, "output_tokens": 1, "cost_usd": None, "unpriced_reason": "no_price"}]
+    summary = summarize([
+        _entry("solver", "a", 12, 2, 0.2, models=rows),
+        _entry("solver", "a", 100, 5, 0.01, cache_read_tokens=40, cache_write_tokens=8,
+               cost_assumed=["cache_read_rate", "cache_write_rate"]),
+        _entry("judge", "j", None, None, None, unpriced_reason="no_tokens"),
+        _entry("judge", "j", 5, 1, None, unpriced_reason="no_price"),
+        _entry("judge", "j", 5, 1, None),
+    ])
+
+    solver, judge = summary.to_dict()["shares"]
+    assert (solver["cache_read_tokens"], solver["cache_write_tokens"]) == (46, 8)
+    assert solver["unpriced_reasons"] == ["no_price"]
+    assert solver["cost_assumed"] == ["cache_read_rate", "cache_write_rate"]
+    assert judge["unpriced_reasons"] == ["no_price", "no_tokens"] and judge["cost_assumed"] == []
+    assert (judge["cache_read_tokens"], judge["cache_write_tokens"]) == (None, None)
+
+
+def test_a_share_built_as_plugins_built_it_before_the_reasons_and_cache_counts_still_is():
+    share = Share("solver", "m", 1, 2, 0.5, False, True, False)
+    share.assumed = True
+
+    assert (share.cost_usd, share.unpriced, share.assumed, share.partial) == (0.5, False, True, False)
+    assert Share(role="judge", model=None, assumed=True).bound is Bound.UNPRICED
 
 
 def test_the_closing_line_names_each_source_of_the_costs():
