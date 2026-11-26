@@ -2,13 +2,17 @@
 members leave the base class's own alone, and its features are in range."""
 from __future__ import annotations
 
+from pydantic import TypeAdapter, ValidationError
+
 from ..errors import AgentEnvError
+from ..transfers import RelativePath
 from .keys import canonical
 from .operations import declared
 from .recording import check_recording
 from .settings import MAX_SCREENSHOT_DELAY_MS, ComputerSettings
 
 BUTTONS = ("left", "right", "middle", "back", "forward")
+_DATA_PATHS = TypeAdapter(tuple[RelativePath, ...])
 
 
 def check_names(cls: type, base: type) -> None:
@@ -50,6 +54,11 @@ def check_features(cls: type) -> None:
                         "or beside")
     elif cls.placement not in ("inside", "beside"):
         problems.append(f"placement is inside or beside, got {cls.placement!r}")
+    try:
+        _DATA_PATHS.validate_python(cls.default_data_paths, strict=True)
+    except ValidationError:
+        problems.append(f"default_data_paths is a tuple of normalized paths relative to the session user's home, got "
+                        f"{cls.default_data_paths!r}")
     if ("set_display" in declared(cls)) != bool(cls.display_modes):
         problems.append("display_modes and @set_display come together")
     problems += check_recording(cls.recording)

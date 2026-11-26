@@ -120,6 +120,10 @@ def test_unknown_predicates_are_refused():
     ({"display_modes": ((10, 10),)}, "display_modes and @set_display come together"),
     ({"screen_kind": "tablet"}, "screen_kind is desktop or page, got 'tablet'"),
     ({"placement": "provider"}, "placement provider, a driver its device's provider serves, isn't supported yet"),
+    ({"default_data_paths": "Download"}, "default_data_paths is a tuple of normalized paths relative to the session "
+                                         "user's home, got 'Download'"),
+    ({"default_data_paths": ("/sdcard/Download",)}, r"default_data_paths is a tuple .*, got \('/sdcard/Download',\)"),
+    ({"default_data_paths": ("Download", "../etc")}, r"default_data_paths is a tuple .*, got \('Download', '../etc'\)"),
     ({"screenshot_delay_ms": -1}, "screenshot_delay_ms is an integer from 0 to 10000, got -1"),
     ({"screenshot_delay_ms": 0.5}, "screenshot_delay_ms is an integer from 0 to 10000, got 0.5"),
 ])
