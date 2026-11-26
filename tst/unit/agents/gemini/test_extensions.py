@@ -142,6 +142,13 @@ def test_a_run_includes_the_task_directories_that_exist_so_the_file_tools_read_t
         context = json.loads(path.read_text())["context"]
     assert context["includeDirectories"] == [str(app_dir), str(data_dir)] and context["fileName"][0] == "GEMINI.md"
 
+def test_web_tools_off_leaves_the_clis_web_tools_out_of_its_registry(home):
+    with gemini_config.run_settings({}, None, None, web_tools=False) as path:
+        assert json.loads(path.read_text())["tools"]["exclude"] == ["google_web_search", "web_fetch"]
+    with gemini_config.run_settings({}, None, None) as path:
+        assert "tools" not in json.loads(path.read_text())
+
+
 def test_a_duplicate_url_or_name_is_a_409(home, client):
     client.post(MCP_CONFIG_PATH, json={"url": "https://gw/a/mcp", "name": "env1"})
 

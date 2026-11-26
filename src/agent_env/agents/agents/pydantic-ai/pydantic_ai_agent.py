@@ -107,6 +107,8 @@ class PydanticAIConfig(AgentConfig):
     system_prompt: str | None = None
     effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     request_limit: int = 500
+    # Its own tools have no web search or fetch, so false leaves them as they are.
+    web_tools: bool = True
     timeout_seconds: int = 1800
 
 

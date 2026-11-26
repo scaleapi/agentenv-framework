@@ -21,7 +21,7 @@ Sessions live in `~/.pi-a2a/sessions` and skills in `~/.pi-a2a/skills/<name>`.
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `PiConfig`: `model`, `effort` (pi thinking level), `system_prompt`, `append_system_prompt`, `tools`, `context_window`, `max_tokens`, `model_params`, `timeout_seconds` |
+| `agent-config/v1` | `PiConfig`: `model`, `effort` (pi thinking level), `system_prompt`, `append_system_prompt`, `tools`, `context_window`, `max_tokens`, `model_params`, `timeout_seconds`, `web_tools` (pi's tools have no web search or fetch, so `false` changes nothing) |
 | `mcp-config/v1` | SDK default; written to `mcp.json` per task |
 | `skill-config/v1` | inline and bundle skills installed as `SKILL.md` directories, passed with `--skill` |
 | `trajectory/v1` | the task's pi JSON events, with `message_update` / `tool_execution_update` deltas dropped (format `pi-json-events/v1`) |

@@ -27,9 +27,23 @@ _SERVERS = {"env4821": {"url": "https://gw/mcp", "headers": None},
             "fake-env.x": {"url": "https://gw2/mcp", "headers": None}}
 
 
-def _permission(selection: dict | None, servers: dict | None = None) -> dict:
-    tools = a2a_server.OpenCodeConfig(builtin_tools=selection).builtin_tools
-    return opencode_bridge._build_config(MODEL, servers, {}, None, builtin_tools=tools)["permission"]
+def _permission(selection: dict | None, servers: dict | None = None, web_tools: bool = True) -> dict:
+    config = a2a_server.OpenCodeConfig(builtin_tools=selection, web_tools=web_tools)
+    return opencode_bridge._build_config(MODEL, servers, {}, None, builtin_tools=config.builtin_tools,
+                                         web_tools=config.web_tools)["permission"]
+
+
+@pytest.mark.parametrize("selection", [None, {"disable": ["bash"]}, {"only": ["read", "webfetch"]}, {"disable": "*"}],
+                         ids=["no-selection", "disable-list", "only-with-webfetch", "disable-all"])
+def test_web_tools_off_denies_the_clis_web_tools_after_any_selection_with_question_last(selection):
+    rules = _permission(selection, _SERVERS, web_tools=False)
+
+    assert rules["websearch"] == rules["webfetch"] == "deny"
+    assert list(rules)[-3:] == ["websearch", "webfetch", "question"] and rules["question"] == "deny"
+
+
+def test_web_tools_on_changes_nothing():
+    assert _permission({"disable": ["bash"]}, _SERVERS, web_tools=True) == _permission({"disable": ["bash"]}, _SERVERS)
 
 
 @pytest.fixture

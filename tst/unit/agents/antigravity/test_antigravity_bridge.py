@@ -169,6 +169,27 @@ def test_a_selection_of_the_sdks_tools_is_its_capabilities(selection, expected):
         agent_behavior=fake_sdk.AgentBehavior.AUTONOMOUS, **expected)
 
 
+@pytest.mark.parametrize("selection, expected", [
+    (None, {"disabled_tools": [*ALWAYS_OFF, TOOLS.SEARCH_WEB, TOOLS.READ_URL_CONTENT]}),
+    ({"only": ["view_file", "search_web"]}, {"enabled_tools": [TOOLS.VIEW_FILE, TOOLS.FINISH]}),
+    ({"disable": ["run_command", "search_web"]},
+     {"disabled_tools": [*ALWAYS_OFF, TOOLS.RUN_COMMAND, TOOLS.SEARCH_WEB, TOOLS.READ_URL_CONTENT]}),
+], ids=["no-selection", "only-with-search-web", "disable-list"])
+def test_web_tools_off_turns_the_sdks_web_tools_off_whatever_the_selection_keeps(selection, expected):
+    config = a2a_server.AntigravityConfig(builtin_tools=selection, web_tools=False)
+
+    _run(Turn(), builtin_tools=config.builtin_tools, web_tools=config.web_tools)
+
+    assert _config()["capabilities"] == fake_sdk.CapabilitiesConfig(
+        agent_behavior=fake_sdk.AgentBehavior.AUTONOMOUS, **expected)
+
+
+def test_the_card_takes_web_tools_so_deploy_agent_can_turn_them_off(ag):
+    extension = A2AAgent.find_extension(ag.card, A2AAgent.EXT_AGENT_CONFIG)
+
+    assert "web_tools" in extension["params"]["methods"]["set"]["request"]["supported"]
+
+
 @pytest.mark.parametrize("selection, match", [
     ({"only": ["ask_question"]}, "ask_question"),
     ({"disable": ["finish"]}, "finish"),

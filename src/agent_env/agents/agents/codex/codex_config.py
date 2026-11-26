@@ -75,17 +75,20 @@ class CodexTools(BaseModel):
         return self
 
 
-def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
-    """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep; none without one. The MCP
-    tools agent-env gives the agent stay with any selection."""
+def builtin_tools_overrides(builtin_tools: CodexTools | None, web_tools: bool = True) -> list[str]:
+    """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep, and its web search when
+    ``web_tools`` is False; none without either. The MCP tools agent-env gives the agent stay with any selection."""
+    off: list[frozenset[str]] = []
     if builtin_tools is None:
-        return []
-    if builtin_tools.only is not None:
+        pass
+    elif builtin_tools.only is not None:
         off = [tools for tools, _ in _TOOL_SWITCHES if not tools <= set(builtin_tools.only)]
     elif builtin_tools.disable == "*":
         off = [tools for tools, _ in _TOOL_SWITCHES]
     else:
         off = [tools for tools, _ in _TOOL_SWITCHES if tools <= set(builtin_tools.disable)]
+    if not web_tools and _WEB_TOOLS not in off:
+        off.append(_WEB_TOOLS)
     return [override for tools, overrides in _TOOL_SWITCHES if tools in off for override in overrides]
 
 
@@ -295,3 +298,8 @@ def role_overrides(servers: Mapping[str, Any], role: str | None) -> list[str]:
     if not role:
         return []
     return [f"mcp_servers.{name}.env.{_ROLE_VARIABLE}={json.dumps(role, ensure_ascii=False)}" for name in servers]
+
+
+
+# The CLI's own web tool: what a deploy_agent web_tools False turns off.
+_WEB_TOOLS = frozenset({"web_search"})

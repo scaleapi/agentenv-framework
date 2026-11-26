@@ -1926,6 +1926,20 @@ class MyAgentConfig(AgentConfig):
     builtin_tools: BuiltinTools[Literal["shell", "read_file", "web_fetch"]] | None = None
 ```
 
+An agent whose own tools include web search or fetch also takes `web_tools: bool = True` and maps `false` to turning
+those tools off, whatever they are called; the MCP tools AgentEnv gives it stay. A task sets it on `deploy_agent`
+without knowing which agent runs. `false` for an agent whose config has no `web_tools` is refused before the deploy
+sends it anything. A `network_policy` that restricts egress makes `false` the default for an agent that takes it; an
+agent that doesn't keeps its web tools, with a warning. A `builtin_tools` list to turn off that names another agent's
+web tools, such as Claude Code's `WebSearch` and `WebFetch`, becomes `web_tools: false` on an agent whose schema
+doesn't have them. An agent with no web tools of its own can declare the field and ignore it, so such a task runs
+on it too.
+
+```python
+class MyAgentConfig(AgentConfig):
+    web_tools: bool = True
+```
+
 `output_format` is author-owned in v1 rather than a field on the base
 `AgentConfig`. An agent that supports structured output must declare the field
 on its config subclass, apply it to its model or runtime, and return the value

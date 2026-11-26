@@ -28,7 +28,7 @@ direct Letta Code tools through `letta.tools.register`; each tool executes `lett
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | SDK set/get; `model`, `effort`, `system_prompt`, `output_format`, `project_id`, `task_id`, `timeout_seconds`. Before every turn, task instructions are committed to the existing agent's core memory, which the local backend compiles into its system prompt. JSON schema answers are validated locally. |
+| `agent-config/v1` | SDK set/get; `model`, `effort`, `system_prompt`, `output_format`, `project_id`, `task_id`, `timeout_seconds`, `web_tools` (the local backend's tools have no web search or fetch, so `false` changes nothing). Before every turn, task instructions are committed to the existing agent's core memory, which the local backend compiles into its system prompt. JSON schema answers are validated locally. |
 | `mcp-config/v1` | SDK registration and listing; servers passed to the context's agent settings each turn, with their discovered schemas exposed as direct tools through the public mods API. |
 | `skill-config/v1` | Inline and bundle skills installed under `$HOME/.letta/skills/`, copied into each context's home before its turn. |
 | `trajectory/v1` | Native stream-json events appended live, format `letta-code-events/1`. |

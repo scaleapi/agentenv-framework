@@ -80,7 +80,7 @@ async def test_a_contexts_turns_run_one_at_a_time_each_resuming_the_last(hermes,
 async def test_the_turns_config_servers_and_workspace_reach_hermes(monkeypatch, hermes, turns, folders):
     monkeypatch.setenv("A2A_PORT", "8000")
     config = {"model": "provider/model", "effort": "high", "system_prompt": "be brief", "project_id": "p-1",
-              "task_id": "t-1", "role": "solver", "timeout_seconds": 42}
+              "task_id": "t-1", "role": "solver", "timeout_seconds": 42, "web_tools": False}
     async with hermes.client() as client:
         assert (await client.post("/ext/agent-config", json=config)).status_code == 200
         await client.post("/ext/mcp-config", json={"name": "env", "url": "https://mcp.example/mcp",
@@ -89,10 +89,10 @@ async def test_the_turns_config_servers_and_workspace_reach_hermes(monkeypatch, 
 
     (call,) = turns.calls
     assert {key: call[key] for key in ("prompt", "model", "effort", "system_prompt", "project_id", "task_id", "role",
-                                       "timeout_s", "workspace", "skills_dir")} == {
+                                       "timeout_s", "workspace", "skills_dir", "web_tools")} == {
         "prompt": "go", "model": "provider/model", "effort": "high", "system_prompt": "be brief",
         "project_id": "p-1", "task_id": "t-1", "role": "solver", "timeout_s": 42, "workspace": str(folders),
-        "skills_dir": a2a_server.SKILLS_DIR}
+        "skills_dir": a2a_server.SKILLS_DIR, "web_tools": False}
     assert call["mcp_servers"]["env"] == {"url": "https://mcp.example/mcp", "headers": {"X-Key": "k"}}
     assert call["mcp_servers"]["peer_agents"]["url"] == "http://127.0.0.1:8000/ext/peer-agents/mcp"
     assert task["status"]["state"] == "completed"
@@ -400,6 +400,15 @@ def test_the_profile_turns_hermes_review_fork_off():
     config = hermes_bridge.build_config("m", None, {}, None, Path("/skills"), environ={"LITELLM_BASE_URL": "http://x"})
 
     assert config["auxiliary"] == {"background_review": {"enabled": False}}
+
+
+def test_web_tools_off_turns_off_hermes_web_search_and_browser_toolsets():
+    def config(**kwargs):
+        return hermes_bridge.build_config("m", None, {}, None, Path("/skills"), environ={"LITELLM_BASE_URL": "x"},
+                                          **kwargs)
+
+    assert config(web_tools=False)["agent"] == {"disabled_toolsets": ["web", "search", "browser", "x_search"]}
+    assert "agent" not in config() and config(web_tools=True) == config()
 
 
 def test_a_turn_whose_calls_reported_no_usage_has_unknown_counts():

@@ -101,6 +101,8 @@ class HermesConfig(AgentConfig):
     output_format: dict[str, Any] | None = None
     project_id: str | None = None
     task_id: str | None = None
+    # False: Hermes' own web, search and browser tools are off; its MCP tools stay.
+    web_tools: bool = True
     timeout_seconds: int = Field(default=1800, gt=0)
 
     @field_validator("output_format")
@@ -406,6 +408,7 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
                         project_id=request.config.project_id,
                         task_id=request.config.task_id,
                         role=request.config.role,
+                        web_tools=request.config.web_tools,
                         skills_dir=SKILLS_DIR,
                         event_callback=record,
                         workspace=str(WORKSPACE_DIR),

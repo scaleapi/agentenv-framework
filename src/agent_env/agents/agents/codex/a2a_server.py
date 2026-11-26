@@ -244,6 +244,8 @@ class CodexConfig(AgentConfig):
     max_turns: int | None = None
     # Which of the CLI's own tools it may use. With any selection, the MCP tools agent-env gives it stay.
     builtin_tools: codex_config.CodexTools | None = None
+    # False: the CLI's own web search is off whatever builtin_tools selects.
+    web_tools: bool = True
 
 
 @asynccontextmanager
@@ -751,7 +753,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             event_callback=_record_event,
                             max_turns=cfg.max_turns,
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
-                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools),
+                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools, cfg.web_tools),
                                               *catalog],
                         )
                 except Exception as e:

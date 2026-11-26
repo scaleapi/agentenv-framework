@@ -197,6 +197,7 @@ def build_config(
     role: str | None,
     skills_dir: Path,
     environ: Mapping[str, str] = os.environ,
+    web_tools: bool = True,
 ) -> dict:
     """The profile's config.yaml for one turn, as JSON (which YAML reads). Everything dynamic is rebuilt each turn, and
     a context's turns run one at a time, so no turn reads another's."""
@@ -220,6 +221,8 @@ def build_config(
                 entry["headers"] = hdrs
             servers[name] = entry
         config["mcp_servers"] = servers
+    if not web_tools:
+        config["agent"] = {"disabled_toolsets": list(_WEB_TOOLSETS)}
     return config
 
 
@@ -328,6 +331,7 @@ async def run_hermes(
     task_id: str | None = None,
     role: str | None = None,
     effort: str | None = None,
+    web_tools: bool = True,
     skills_dir: Path = HERMES_ROOT / "agentenv-skills",
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
@@ -345,7 +349,8 @@ async def run_hermes(
             "\n\nReturn only a JSON object matching this schema, with no Markdown or surrounding text: "
             + json.dumps(schema, separators=(",", ":"))
         )
-    config = build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, skills_dir)
+    config = build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, skills_dir,
+                          web_tools=web_tools)
     # To its end even for a cancelled turn: a snapshot may archive the profile as soon as the turn lets go.
     home = await in_thread_to_its_end(prepare_profile, context_id, config, system_prompt)
 
@@ -535,3 +540,7 @@ class _EventParser:
             usage=usage,
             side_calls=self.side_calls if self.side_calls.calls else None,
         )
+
+
+# The toolsets that reach the web, which agent.disabled_toolsets turns off.
+_WEB_TOOLSETS = ("web", "search", "browser", "x_search")

@@ -146,6 +146,8 @@ class ClaudeCodeConfig(AgentConfig):
     builtin_tools: ClaudeCodeTools | None = None
     # Whether a turn gets the SDK's peer_agents MCP tools, to message the task's other agents.
     peer_tools: bool = True
+    # False: the CLI's own web tools, WebSearch and WebFetch, are off whatever builtin_tools selects.
+    web_tools: bool = True
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:
@@ -604,6 +606,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
+                web_tools=cfg.web_tools,
                 event_callback=request.trajectory.append,
                 **self._atif_feed(request),
             )

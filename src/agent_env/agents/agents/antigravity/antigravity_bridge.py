@@ -169,18 +169,21 @@ def mcp_headers(headers: Mapping[str, str] | None, role: str | None) -> dict[str
     return merged or None
 
 
-def capabilities(builtin_tools: BuiltinTools[AntigravityTool] | None) -> Any:
+def capabilities(builtin_tools: BuiltinTools[AntigravityTool] | None, web_tools: bool = True) -> Any:
     """The SDK's capabilities for a turn: autonomous, with `ask_question` and `generate_image` off on every turn, and
-    the task's selection of the rest; `finish` stays on whatever the selection."""
+    the task's selection of the rest; `finish` stays on whatever the selection, and ``web_tools`` False turns the
+    SDK's web tools off whatever it keeps."""
     always_off = list(_ALWAYS_OFF)
-    if builtin_tools is None:
-        return ag.CapabilitiesConfig(agent_behavior=agt.AgentBehavior.AUTONOMOUS, disabled_tools=always_off)
     named = {tool.value: tool for tool in agt.BuiltinTools}
+    web_off = [] if web_tools else [named[name] for name in _WEB_TOOLS]
+    if builtin_tools is None:
+        return ag.CapabilitiesConfig(agent_behavior=agt.AgentBehavior.AUTONOMOUS, disabled_tools=always_off + web_off)
     selectable = [named[name] for name in AntigravityTool.__args__]
     if builtin_tools.only is not None:
-        enabled = [named[name] for name in builtin_tools.only] + list(_ALWAYS_ON)
+        enabled = [named[name] for name in builtin_tools.only if named[name] not in web_off] + list(_ALWAYS_ON)
         return ag.CapabilitiesConfig(agent_behavior=agt.AgentBehavior.AUTONOMOUS, enabled_tools=enabled)
     disabled = selectable if builtin_tools.disable == "*" else [named[name] for name in builtin_tools.disable]
+    disabled += [tool for tool in web_off if tool not in disabled]
     return ag.CapabilitiesConfig(agent_behavior=agt.AgentBehavior.AUTONOMOUS, disabled_tools=always_off + disabled)
 
 
@@ -464,7 +467,7 @@ def file_records(conversation_id: str, env_times: set[str], turn_images: set[str
 async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | None,
                 mcp_servers: dict[str, dict] | None, system_prompt: str | None, timeout_s: int, role: str | None,
                 builtin_tools: BuiltinTools[AntigravityTool] | None, max_turns: int | None, workspace: str,
-                event_callback: Callable[[dict], None], started: list[Any]) -> AntigravityResult:
+                event_callback: Callable[[dict], None], started: list[Any], web_tools: bool = True) -> AntigravityResult:
     """One turn of the SDK; ``started`` gets the turn's ``Agent`` once it starts, so whoever awaits the turn knows its
     conversation however it ends."""
     recorder = TrajectoryRecorder(event_callback)
@@ -473,7 +476,7 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     config = dict(
         base_url=base_url, model=model, save_dir=str(SAVE_DIR), workspaces=[workspace],
-        capabilities=capabilities(builtin_tools), policies=[ag_policy.allow_all()], hooks=_hooks(recorder),
+        capabilities=capabilities(builtin_tools, web_tools), policies=[ag_policy.allow_all()], hooks=_hooks(recorder),
         retry_config=agt.RetryConfig(api_retry=_API_RETRY),
         # Merged into the harness's environment, which the model's commands inherit: on an armed clock, the egress
         # proxy, which keeps their TLS working at the env's date.
@@ -526,3 +529,7 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
     elif stop not in (None, agt.StopReason.UNSPECIFIED):
         result.error_code, result.error = "stopped", f"the SDK stopped the turn: {getattr(stop, 'name', stop)}"
     return result
+
+
+# The SDK's own web tools: what a deploy_agent web_tools False turns off.
+_WEB_TOOLS = ("search_web", "read_url_content")

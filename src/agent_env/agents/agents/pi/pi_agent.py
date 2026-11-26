@@ -126,6 +126,8 @@ class PiConfig(AgentConfig):
     append_system_prompt: str | None = None
     effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     tools: str | None = None
+    # Its own tools have no web search or fetch, so false leaves them as they are.
+    web_tools: bool = True
     context_window: int = 200_000
     max_tokens: int = 32_000
     model_params: WriteOnly[dict[str, Any] | None] = None
