@@ -793,13 +793,16 @@ async def _trajectory_check(turn, spec, state, check: dict) -> tuple[Optional[bo
     breaches, unread = [], []
     for n in turns:
         url = urls[n - 1] if n <= len(urls) else None
-        messages = await _messages(turn, n, url) if url is not None else None
-        calls, said = _work(messages or [])
-        if url is None or (messages and not calls and not said):  # not fetched, or a format this hook doesn't read
+        try:
+            messages = await _messages(turn, n, url) if url is not None else None
+        except Exception:  # noqa: BLE001 - a turn that can't be fetched or parsed is unread, not a breach
+            messages = None
+        calls, said = _work(messages if isinstance(messages, list) else [])
+        if not messages or not (calls or said):  # not fetched, empty, or a format this hook doesn't read
             unread.append(n)
             continue
         for name, args in calls:
-            short, blob = name.split("__")[-1], json.dumps(args, ensure_ascii=False).lower()
+            short, blob = name.split("__")[-1], "\n".join(_strings(args)).lower()
             breaches += [f"turn {n}: {short} has {t!r}" for t in texts if t in blob]
             for rule in check.get("no_call") or []:
                 if (not rule.get("tool") or rule["tool"] in (short, name)) and \
@@ -812,6 +815,15 @@ async def _trajectory_check(turn, spec, state, check: dict) -> tuple[Optional[bo
     if unread:
         return None, f"unknown: no readable trajectory for turn(s) {unread}"
     return True, f"clean over turn(s) {turns.start}-{turns.stop - 1}" if len(turns) else "no turns in scope"
+
+
+def _strings(value: Any) -> list[str]:
+    """Every text a tool call's arguments hold, nested values included, as written (not JSON-escaped)."""
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return [] if value is None else [value if isinstance(value, str) else json.dumps(value)]
 
 
 def _work(messages: list) -> tuple[list[tuple[str, Any]], list[str]]:

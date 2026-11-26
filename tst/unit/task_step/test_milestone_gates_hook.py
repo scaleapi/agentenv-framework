@@ -1146,3 +1146,56 @@ def test_the_new_gates_are_not_rechecked_after_the_wrap_up_and_never_make_a_mile
     assert not mg._state_check({"no_removed": [{"tool": "t"}]})
     assert not mg._state_check({"trajectory": {"contains_none": ["k"]}})
     assert mg._gate_type({"trajectory": {"contains_none": ["k"]}}) == "action"
+
+
+class FlakyTurn(Turn):
+    """A turn whose trajectory reads fail for the urls in ``broken``."""
+
+    def __init__(self, *a, broken=(), **kw):
+        super().__init__(*a, **kw)
+        self.broken = set(broken)
+
+    async def read_trajectory(self, n):
+        if self.trajectory_urls[n - 1] in self.broken:
+            raise OSError("storage unavailable")
+        return await super().read_trajectory(n)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_or_null_trajectory_is_unread_not_clean():
+    records = []
+    await post_turn(Turn(Env(world()), records, 1, trajectories={"s3://e/1.json": None}), NEVER)
+    gate = records[-1]["gates"][0]
+    assert gate["passed"] is None and gate["why"] == "unknown: no readable trajectory for turn(s) [1]"
+    assert records[-1]["decision"] == "hold"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_fails_to_read_is_unread_and_the_other_turns_are_still_checked():
+    traj = {"s3://f/1.json": _turn_messages(("gdrive_list", {}, "[]")),
+            "s3://f/2.json": _turn_messages(("slack_post", {"text": "ok"}, "ok"))}
+    records = [{"decision": "nudge", "milestone": "M1", "nudges": 1, "turn": 1}]
+    await post_turn(FlakyTurn(Env(world()), records, 2, trajectories=traj, broken={"s3://f/1.json"}), NEVER)
+    assert records[-1]["gates"][0]["passed"] is None  # nothing found in turn 2, and turn 1 couldn't be read
+
+    mg._MESSAGES.clear()
+    traj["s3://f/2.json"] = _turn_messages(("slack_post", {"text": SECRET}, "ok"))
+    records = [{"decision": "nudge", "milestone": "M1", "nudges": 1, "turn": 1}]
+    await post_turn(FlakyTurn(Env(world()), records, 2, trajectories=traj, broken={"s3://f/1.json"}), NEVER)
+    gate = records[-1]["gates"][0]
+    assert gate["passed"] is False and gate["why"].startswith("turn 2: slack_post has")
+
+
+@pytest.mark.asyncio
+async def test_text_with_quotes_newlines_or_backslashes_matches_as_written_in_nested_arguments():
+    forbidden = 'the "internal" forecast\nC:\\backup'
+    params = {"role": "auditor", "milestones": [{"id": "M1", "gates": [
+        {"id": "g", "nudge": "n", "check": {"trajectory": {"contains_none": [forbidden],
+                                                           "no_call": [{"args_contains": 'C:\\backup'}]}}}]}]}
+    traj = {"s3://q/1.json": _turn_messages(("gdocs_batch_update", {"requests": [{"insertText": {"text": forbidden}}]},
+                                             "ok"))}
+    records = []
+    await post_turn(Turn(Env(world()), records, 1, trajectories=traj), params)
+    why = records[-1]["gates"][0]["why"]
+    assert records[-1]["gates"][0]["passed"] is False
+    assert "gdocs_batch_update has" in why and "called gdocs_batch_update(" in why
