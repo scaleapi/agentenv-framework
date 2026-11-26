@@ -9,7 +9,7 @@ import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
 from .console_session import frame_ancestor_problem
-from .constants import (CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
+from .constants import (CHILD_CONTROL_TOKENS_ENV, CLOCK_FOLLOWERS_ENV, COMPUTERS_ENV, CONSOLE_FRAME_ANCESTORS_ENV, CONSOLE_URLS_ENV, CONTROL_TOKEN_CHILDREN_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
                         GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
                         WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
@@ -199,17 +199,18 @@ def parse_frame_ancestors(spec: str) -> tuple[str, ...]:
     return origins
 
 
-def parse_clock_followers(spec: str) -> dict[str, str]:
-    """``CLOCK_FOLLOWER_TOKENS``: each computer that follows the clock as ``name=read token``, comma-separated."""
-    followers: dict[str, str] = {}
+def parse_named_tokens(spec: str, variable: str) -> dict[str, str]:
+    """``variable``'s value, a token by name as ``name=token`` entries, comma-separated: ``CLOCK_FOLLOWER_TOKENS``, each
+    computer that follows the clock and its read token, or ``CHILD_CONTROL_TOKENS``, each computer's own control token."""
+    tokens: dict[str, str] = {}
     for entry in filter(None, (part.strip() for part in spec.split(","))):
         name, _, token = (part.strip() for part in entry.partition("="))
         if not name or not token:
-            raise ValueError(f"invalid {CLOCK_FOLLOWERS_ENV} entry for {name or '?'!r}: expected 'name=read token'")
-        if name in followers:
-            raise ValueError(f"{CLOCK_FOLLOWERS_ENV} names {name!r} twice")
-        followers[name] = token
-    return followers
+            raise ValueError(f"invalid {variable} entry for {name or '?'!r}: expected 'name=token'")
+        if name in tokens:
+            raise ValueError(f"{variable} names {name!r} twice")
+        tokens[name] = token
+    return tokens
 
 
 def parse_site_names(env_str: str) -> dict[str, tuple[str, ...]]:
@@ -256,9 +257,11 @@ if __name__ == "__main__":
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         control_token_children=[name.strip() for name in os.environ.get(CONTROL_TOKEN_CHILDREN_ENV, "").split(",")
                                 if name.strip()],
+        child_control_tokens=parse_named_tokens(os.environ.get(CHILD_CONTROL_TOKENS_ENV, ""),
+                                                   CHILD_CONTROL_TOKENS_ENV),
         computers=[name.strip() for name in os.environ.get(COMPUTERS_ENV, "").split(",") if name.strip()],
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
-        clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
+        clock_followers=parse_named_tokens(os.environ.get(CLOCK_FOLLOWERS_ENV, ""), CLOCK_FOLLOWERS_ENV),
         site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),
         listed_by_name=[site.strip() for site in os.environ.get(WEBSITE_LISTED_BY_NAME_ENV, "").split(",")
                         if site.strip()],

@@ -257,6 +257,8 @@ JUDGE_TRAJECTORY = json.dumps([
 
 
 class _Sandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self):
         self.files: dict[str, str] = {}
 

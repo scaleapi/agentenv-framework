@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import socket
 from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -77,15 +78,17 @@ def request_headers(url: str, headers: dict[str, str] | None = None) -> dict[str
 
 def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[str, str]:
     """What ``grants``, env addresses and the headers that carry their control tokens, give a call to ``url``: those of
-    the address it resolves to or under, and none anywhere else."""
+    the longest address it resolves to or under, as a child's route under its gateway's, and none anywhere else."""
     where = _resolved(url)
     if where is None:
         return {}
+    longest, granted = -1, {}
     for base, sent in grants.items():
         address = _resolved(base) if base else None
-        if address is not None and where[0] == address[0] and where[1][:len(address[1])] == address[1]:
-            return sent
-    return {}
+        if address is not None and where[0] == address[0] and where[1][:len(address[1])] == address[1] \
+                and len(address[1]) > longest:
+            longest, granted = len(address[1]), sent
+    return granted
 
 
 def _resolved(url: str) -> tuple[tuple[str, str, int | None], list[str]] | None:
@@ -106,7 +109,8 @@ async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: b
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
+        response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers),
+                                     extensions={"trace": _keepalive})
         response.raise_for_status()
         body = response.json()
     if "error" in body:
@@ -386,3 +390,24 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
         if response.status_code >= 400:
             raise ExtensionCallError(response)
         return response.json()
+
+
+_KEEPALIVE_IDLE_SECONDS = 30
+_KEEPALIVE_PROBE_INTERVAL_SECONDS = 10
+_KEEPALIVE_PROBE_COUNT = 3
+
+
+async def _keepalive(event: str, info: dict) -> None:
+    """Best-effort TCP keepalive on each connection the RPC opens, a proxy's included, so a reply the env takes
+    minutes to send isn't lost to an idle drop. A setting the socket refuses is skipped."""
+    if event != "connection.connect_tcp.complete" or (sock := info["return_value"].get_extra_info("socket")) is None:
+        return
+    idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
+    tuning = ((idle, _KEEPALIVE_IDLE_SECONDS),
+              (getattr(socket, "TCP_KEEPINTVL", None), _KEEPALIVE_PROBE_INTERVAL_SECONDS),
+              (getattr(socket, "TCP_KEEPCNT", None), _KEEPALIVE_PROBE_COUNT))
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    options += [(socket.IPPROTO_TCP, option, value) for option, value in tuning if option is not None]
+    for level, option, value in options:
+        with contextlib.suppress(OSError):
+            sock.setsockopt(level, option, value)

@@ -85,7 +85,6 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         reach: str = "",
         sites_later: bool = False,
         live_hosts: tuple[str, ...] = (),
-        control_token: Optional[str] = None,
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
@@ -93,8 +92,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         a URL this process reaches, a network that restricts the computer's egress allows its host too, and the
         ``live_hosts`` of the run's live websites. With
         ``sites_later``, a computer routing sites, whose sites aren't up yet, boots with its boot apps held and returns
-        once its driver answers; ``route_sites`` routes them and finishes its boot. With ``control_token``, its
-        framework-only routes take that token (a multi env's own) rather than one of the computer's own."""
+        once its driver answers; ``route_sites`` routes them and finishes its boot."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -127,7 +125,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
                                     tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
-                                    live_hosts=tuple(live_hosts), control_token=control_token)
+                                    live_hosts=tuple(live_hosts))
         return await self._run(sandbox_provider, env.id, attempt)
 
     async def route_sites(self, env: ComputerEnv, record: DeployedSandboxEnv, sites: list[dict]) -> None:
@@ -155,8 +153,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
                     attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "",
-                    sites_later: bool = False, live_hosts: tuple[str, ...] = (),
-                    control_token: Optional[str] = None) -> DeployedSandboxEnv:
+                    sites_later: bool = False, live_hosts: tuple[str, ...] = ()) -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -177,7 +174,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             build = await probe_first_boot(env, form, arch, sandbox_provider)
             if build["status"] != "ready":
                 raise RuntimeError(f"{env.id}'s {form}/{arch} failed its probe on its first boot: {build['reason']}")
-        computer, name, token = env.computer_artifact(), env.environment_name, control_token or new_control_token()
+        computer, name, token = env.computer_artifact(), env.environment_name, new_control_token()
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              platform_of(env.computer.os))
@@ -186,6 +183,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         shm_mb = env.shm_mb()
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
+            card=build.get("card"),
             environment=_environment(env, computer, values, params, tool_prefix, sites_later=sites_later),
             timeout=ttl_seconds,
             attribution=attribution,
@@ -235,7 +233,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
         shm_mb = record.get("shm_mb")
         environment = {**_environment(env, computer, values, params, record.get("tool_prefix", "")),
-                       **control_environment(deployed.control_token),
+                       **control_environment(deployed.control_token, deployed.environment_card),
                        **shm_environment(record.get("form", "container"), env.computer.os.type, shm_mb)}
         try:
             if record.get("form") in ("disk", "vm_bundle"):

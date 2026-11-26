@@ -296,6 +296,8 @@ def test_the_run_flags_set_the_runs_count_and_bar_and_refuse_bad_ones(tmp_path):
     assert _overrides(None, None, None, 2) == {"judge_samples": 2}
     assert _overrides(None, None, None, 3, 0.0) == {"judge_samples": 3, "min_judge_agreement": 0.0}
     assert _overrides(None, None, None, None) == {}
+    assert judge_samples.overrides(None, 1.0) == {"min_judge_agreement": 1.0}
+    assert judge_samples.overrides(5, None) == {"judge_samples": 5}
     for bad in (0, -1):
         with pytest.raises(ValueError, match="judge_samples must be a positive integer"):
             run_bundle(tmp_path, judge_samples=bad)
@@ -427,6 +429,8 @@ class _Fleet:
         fleet = self
 
         class Sandbox:
+            ON_THIS_MACHINE = False
+
             def __init__(self, sandbox_id):
                 self.sandbox_id = sandbox_id
 

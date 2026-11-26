@@ -577,10 +577,8 @@ def _overrides(sandbox: str | None, user_model: str | None, judge_model: str | N
     """The run's ``user_overrides``: where everything deploys, the models the user simulator and judges run on, how
     many samples the judges take and how many of them must agree."""
     overrides = sandbox_overrides(sandbox) if sandbox else {}
-    overrides.update({key: value for key, value in (("user_model", user_model), ("judge_model", judge_model),
-                                                    ("judge_samples", judge_samples)) if value})
-    if min_judge_agreement is not None:
-        overrides["min_judge_agreement"] = min_judge_agreement
+    overrides.update({key: value for key, value in (("user_model", user_model), ("judge_model", judge_model)) if value})
+    overrides.update(judge_samples_rule.overrides(judge_samples, min_judge_agreement))
     return overrides
 
 

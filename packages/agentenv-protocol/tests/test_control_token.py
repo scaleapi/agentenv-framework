@@ -5,6 +5,7 @@ or else the headers a grant gives the address it calls."""
 from __future__ import annotations
 
 import contextlib
+import hashlib
 
 import anyio
 import httpx
@@ -18,6 +19,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
     CONTROL_TOKEN_ENV,
+    CONTROL_TOKEN_SHA256_ENV,
     RPC_PATH,
     WELL_KNOWN_PATH,
     AgentEnvEnvironment,
@@ -97,8 +99,41 @@ async def test_with_a_token_every_framework_only_route_refuses_a_call_without_it
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("plain", [None, "a-different-token"], ids=["alone", "beside-a-token"])
+async def test_given_only_the_tokens_sha256_every_framework_only_route_takes_the_token_itself(monkeypatch, plain):
+    """An env handed the token's sha256 holds nothing a caller could send: the digest itself is refused, the token
+    answers, and a plain token beside the digest is ignored."""
+    digest = hashlib.sha256(b"s3cret").hexdigest()
+    monkeypatch.setenv(CONTROL_TOKEN_SHA256_ENV, digest)
+    if plain is None:
+        monkeypatch.delenv(CONTROL_TOKEN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(CONTROL_TOKEN_ENV, plain)
+
+    with anyio.fail_after(30):
+        async with _served() as (rest, _):
+            without = await _calls(rest, {})
+            the_digest = await _calls(rest, client.control_headers(digest))
+            not_bearer = await _calls(rest, {"Authorization": "s3cret"})
+            beside = await _calls(rest, client.control_headers(plain)) if plain else [401, 401, 401]
+            right = await _calls(rest, client.control_headers("s3cret"))
+
+    assert without == the_digest == not_bearer == beside == [401, 401, 401]
+    assert right == [200, 200, 200]
+
+
+def test_a_grant_for_a_route_under_an_address_wins_over_the_address():
+    gateway = "http://gw:18765"
+    with client.authorized({gateway: client.control_headers("env"), f"{gateway}/svc/desk": client.control_headers("desk")}):
+        sent = [client.request_headers(url) for url in (f"{gateway}/svc/desk/agentenv", f"{gateway}/svc/desk",
+                                                        f"{gateway}/svc/desk-2/agentenv", f"{gateway}/state")]
+    assert sent == [{"Authorization": "Bearer desk"}] * 2 + [{"Authorization": "Bearer env"}] * 2
+
+
+@pytest.mark.asyncio
 async def test_without_a_token_every_route_is_open(monkeypatch):
     monkeypatch.delenv(CONTROL_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(CONTROL_TOKEN_SHA256_ENV, raising=False)
 
     with anyio.fail_after(30):
         async with _served() as (rest, _):
