@@ -229,19 +229,22 @@ def _text(content: Any) -> str:
 
 
 def _content(result: Any, turn: Any) -> list[Any]:
-    """A call's result as content: the function's output, or its error, and each image beside it as a media file."""
+    """A call's result as content: the function's output, or its error, and each file it carries as a media file,
+    beside the response (an MCP tool's image) or in its own parts (a file ``read_file`` gives a model that takes
+    media in a tool's response)."""
     parts: list[Any] = []
     for item in result if isinstance(result, list) else ():
         if not _is_mapping(item):
             continue
-        answer = item.get("functionResponse")
-        response = answer.get("response") if _is_mapping(answer) else None
+        answer = item.get("functionResponse") if _is_mapping(item.get("functionResponse")) else {}
+        response = answer.get("response")
         if _is_mapping(response):
             said = _string(response.get("output")) or _string(response.get("error"))
             parts.append(said if said is not None else json.dumps(response, ensure_ascii=False))
-        inline = item.get("inlineData")
-        if _is_mapping(inline) and (media := _media(inline, turn)) is not None:
-            parts.append(media)
+        for holder in (item, *(part for part in answer.get("parts") or () if _is_mapping(part))):
+            inline = holder.get("inlineData")
+            if _is_mapping(inline) and (media := _media(inline, turn)) is not None:
+                parts.append(media)
     return parts
 
 

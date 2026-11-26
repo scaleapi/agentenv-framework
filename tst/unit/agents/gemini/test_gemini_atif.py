@@ -298,3 +298,17 @@ def test_a_response_takes_its_own_uncounted_call_not_the_next_answered_one_of_th
 
     assert (first["message"], first["metrics"]["completion_tokens"]) == ("first", 10)
     assert (second["message"], second["metrics"]["completion_tokens"]) == ("second", 20)
+
+
+def test_a_file_in_a_results_own_parts_is_a_media_file_after_its_text():
+    image = png(6, 5)
+    call = tool("read_1", "Read image file: shot.png", name="read_file")
+    call["result"][0]["functionResponse"]["parts"] = [
+        {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(image).decode()}}]
+    kit = run(Feed().call().message("m-1", calls=[call]).call(inputs=8000).message(
+        "m-2", "a red square", tokens={"input": 8000, "output": 4}).result())
+
+    (result,) = agent_steps(kit.document)[0]["observation"]["results"]
+    text, picture = result["content"]
+    assert text == {"type": "text", "text": "Read image file: shot.png"}
+    assert picture["type"] == "image" and kit.media[picture["source"]["path"]] == image
