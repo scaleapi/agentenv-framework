@@ -25,6 +25,9 @@ pytestmark = pytest.mark.integration
 
 PORT = 8000
 WRITER = "while :; do echo 0 > /tmp/reward; sleep 0.2; done"
+# A leftover script whose name, and so its process name, holds a newline, ") " and a space: its /proc stat record
+# spans two lines.
+ODD = "/tmp/a\nb) c"
 DEAF = "trap '' TERM; while :; do sleep 1; done"
 TREE = "sleep 1001 & sleep 1002 & wait"
 SERVICE = "while :; do sleep 0.3; done"
@@ -88,6 +91,7 @@ async def agent_left_running(local_backends, request):
         _docker("run", "-d", "--name", container, image, "sleep", "infinity")
         _docker("exec", "-d", container, "sh", "-c", f"({SERVICE}) & sleep 1.1; {server} & sleep 1.1; "
                 f"setsid sh -c '{WRITER}' > /dev/null 2>&1 & sh -c \"{DEAF}\" & sh -c '{TREE}' & {other} & "
+                f"printf '#!/bin/sh\\nsleep 1006\\n' > '{ODD}'; chmod +x '{ODD}'; setsid '{ODD}' > /dev/null 2>&1 & "
                 "mkdir -p /logs; echo 1 > /logs/reward.txt; ln -s /etc/hostname /logs/link.txt; touch /logs/up")
         await _until(lambda: "sleep 1003" in _running(container) and "up" in _docker("exec", container, "ls", "/logs"),
                      "the agent's leftovers")
@@ -117,10 +121,12 @@ async def test_stop_agent_ends_what_the_agent_left_and_spares_the_rest(agent_lef
     signalled = {entry["command"]: entry["signals"] for entry in report["processes"]}
     assert signalled[f"sh -c {WRITER}"] == ["TERM"] and signalled[f"sh -c {DEAF}"] == ["TERM", "KILL"]
     assert signalled[f"sh -c {TREE}"] == ["TERM"] and {"sleep 1001", "sleep 1002"} <= set(signalled)
+    assert signalled[f"/bin/sh {ODD.replace(chr(10), ' ')}"] == ["TERM"] and "sleep 1006" in signalled
     assert str(PORT) in report["server"]["command"]
     assert report["processes_left"] == []
     left = _running(container)
-    assert [c for c in left if c.startswith(("sh -c while", "sh -c trap", "sleep 100", "sleep 0.2"))] == ["sleep 1003"]
+    assert [c for c in left if c.startswith(("sh -c while", "sh -c trap", "sleep 100", "sleep 0.2", "/bin/sh /tmp/a"))
+            ] == ["sleep 1003"]
     assert any(SERVICE in c for c in left) and any(str(PORT) in c for c in left)
     assert [(e["path"], e["kind"], e["removed"]) for e in report["cleared"]] == [
         ("/logs/reward.txt", "file", True), ("/logs/link.txt", "link", True), ("/logs/none", "missing", False)]

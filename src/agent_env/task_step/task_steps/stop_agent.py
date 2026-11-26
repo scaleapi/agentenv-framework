@@ -66,15 +66,18 @@ _KILL_PAUSE_S = 0.2
 # user. A process is the agent's when it runs as the server's user, started after it, and is the server's descendant or
 # an orphan whose ancestors below the init all started after it too (`ours`): a child of anything older, a service of
 # the container's own say, isn't, nor is another agent's server or what that started, nor this script or what runs it.
-# PATH is the system's alone, so no folder the agent can write to is searched for the programs it runs.
+# A record is read whole, as a process name may hold a newline, and a scan that fails fails the script rather than
+# reading as no process left. PATH is the system's alone, so no folder the agent can write to is searched for the
+# programs it runs.
 _END_PROCESSES = r"""
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 port=$1 polls=$2 poll_s=$3 kill_rounds=$4 kill_pause_s=$5 me=$$
 shift 5
 info() {
-  pid=$1
-  read -r stat 2>/dev/null < "/proc/$pid/stat" || return 1
+  pid=$1 stat=
+  while IFS= read -r line; do stat="$stat$line "; done 2>/dev/null < "/proc/$pid/stat" || return 1
   set -- ${stat##*") "}
+  [ $# -ge 20 ] || return 1
   state=$1 parent=$2
   shift 19
   start=$1 uid=
@@ -139,19 +142,25 @@ candidates() {
     [ "$state" != Z ] && [ "$uid" = "$owner" ] && [ "$start" -gt "$since" ] || continue
     ours "$p" && printf '%s\n' "$p"
   done
+  return 0
+}
+scan() {
+  listed=$(candidates) || { echo "the scan of the container's processes failed" >&2; exit 4; }
 }
 signal() {
-  for p in $(candidates); do
+  scan
+  for p in $listed; do
     c=$(command_of "$p")
     kill -s "$1" "$p" 2>/dev/null && printf '%s\t%s\t%s\n' "$1" "$p" "$c"
   done
 }
 signal TERM
 n=0
-while [ "$n" -lt "$polls" ] && [ -n "$(candidates)" ]; do sleep "$poll_s"; n=$((n + 1)); done
+while [ "$n" -lt "$polls" ] && scan && [ -n "$listed" ]; do sleep "$poll_s"; n=$((n + 1)); done
 n=0
-while [ "$n" -lt "$kill_rounds" ] && [ -n "$(candidates)" ]; do signal KILL; sleep "$kill_pause_s"; n=$((n + 1)); done
-for p in $(candidates); do printf 'LEFT\t%s\t%s\n' "$p" "$(command_of "$p")"; done
+while [ "$n" -lt "$kill_rounds" ] && scan && [ -n "$listed" ]; do signal KILL; sleep "$kill_pause_s"; n=$((n + 1)); done
+scan
+for p in $listed; do printf 'LEFT\t%s\t%s\n' "$p" "$(command_of "$p")"; done
 """
 
 # Args: the paths. Prints a line per path, in order: its kind, whether it was removed, and a file's size, mtime and
