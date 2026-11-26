@@ -11,6 +11,7 @@ change of weights needs no judging again.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from dataclasses import dataclass, field
@@ -321,19 +322,31 @@ def system_text(told: bool = False) -> str:
                          anchors="\n".join(anchors))
 
 
-def run_prompt(run: UserSimRun, satisfaction: Optional[dict[str, str]] = None,
-               unread: Optional[list[dict]] = None, told: Optional[str] = None) -> str:
+FINAL_READ = "read_at_end"  # the outcome of the check-in with_final_read adds: read, and never answered
+
+
+def with_final_read(run: UserSimRun, unread: Optional[list[dict]], at: Optional[str] = None) -> UserSimRun:
+    """``run`` with what the person read only after its last check-in (``unread``, each ``at`` and ``text``; the
+    rating's read, at ``at``) as one more check-in, which they read and never answered: so the judge can place an
+    incident or a fix there, and its quote is checked against what they read. ``run`` itself when there's none."""
+    said = [m for m in unread or [] if (m.get("text") or "").strip()]
+    if not said:
+        return run
+    n = max((t.n for t in run.turns), default=0) + 1
+    read = Turn(n=n, outcome=FINAL_READ, input="\n".join(f"[{m.get('at')}] {m['text'].strip()}" for m in said),
+                time=at, flags=["the person read these after the last check-in, and never answered"])
+    return dataclasses.replace(run, turns=[*run.turns, read])
+
+
+def run_prompt(run: UserSimRun, satisfaction: Optional[dict[str, str]] = None, told: Optional[str] = None) -> str:
     """The judge's one message: the person (their instructions and, from the rating step, what a 5, a 3 and a 1 mean to
-    them), what the assistant was told (``told``, its own instructions for the job, when known), every check-in, what
-    the person read only after the last one (``unread``: ``at`` and ``text``), and the ask."""
+    them), what the assistant was told (``told``, its own instructions for the job, when known), every check-in
+    (``with_final_read`` adds what they read after the last one), and the ask."""
     parts = [_person_text(run, satisfaction)]
     if told:
         parts.append("# WHAT THE ASSISTANT WAS TOLD (its own instructions for this job; it never saw the person's)\n"
                      "<assistant_instructions>\n" + told.strip() + "\n</assistant_instructions>")
     parts += ["# THE RUN"] + [_turn_text(t) for t in run.turns]
-    if unread:
-        parts.append("## After the last check-in, the person also read:\n"
-                     + "\n".join(f"  [{m.get('at')}] {(m.get('text') or '').strip()}" for m in unread))
     outcomes = "; ".join(f'"{k}" if {v}' for k, v in OUTCOMES.items())
     return "\n\n".join(parts + [RUN_ASK.format(outcomes=outcomes, format=json.dumps(_shape(RUN_SCHEMA)))])
 
@@ -384,6 +397,22 @@ def parse(raw: Any) -> Optional[dict]:
     except json.JSONDecodeError:
         return None
     return got if isinstance(got, dict) else None
+
+
+_LISTS = ("actions", "asks", "incidents", "recovered", "commitments", "moods")
+
+
+def answer_problems(got: dict) -> list[str]:
+    """What keeps an answer from being a log, so it's asked again rather than scored: a part of RUN_SCHEMA missing or
+    of the wrong type, an item that isn't an object, or an end with no outcome. What's wrong inside an item is the
+    log's to record (``apply_run``)."""
+    out = [f"{k} isn't a list" for k in _LISTS if not isinstance(got.get(k), list)]
+    out += [f"{k}[{n}] isn't an object" for k in _LISTS if isinstance(got.get(k), list)
+            for n, item in enumerate(got[k]) if not isinstance(item, dict)]
+    end = got.get("end")
+    if not isinstance(end, dict) or end.get("outcome") not in OUTCOMES:
+        out.append(f"end has no outcome of {list(OUTCOMES)}")
+    return out
 
 
 def _norm(s: str) -> str:
@@ -575,21 +604,22 @@ def _apply_end(ledger: Ledger, got: dict) -> None:
 
 # ---- the score ------------------------------------------------------------------------------------------------------
 def collapsed(ledger: Ledger) -> Ledger:
-    """The log as the score reads it: one incident per check-in and dimension, the worst of them, so a judge that lists
-    one message's three hand-backs separately and one that lists them together score the same. The stored log keeps
-    every incident; repeat_of is pointed at what each group became."""
+    """The log as the score reads it: one incident per check-in and dimension, so a judge that lists one message's
+    three hand-backs separately and one that lists them together score the same. Each group keeps the worst incident
+    the assistant could have known about, else its worst, with that incident's own could_know and repair: a free one
+    never makes a knowable one cost more. The stored log keeps every incident; repeat_of is pointed at what each group
+    became."""
     rank = {k: n for n, k in enumerate(SEVERITIES)}
     groups: dict[tuple[int, str], list[Incident]] = {}
     for i in ledger.incidents:
         groups.setdefault((i.turn, i.dimension), []).append(i)
-    keep = {key: max(g, key=lambda i: (rank[i.severity], i.could_know)) for key, g in groups.items()}
+    keep = {key: max(g, key=lambda i: (i.could_know, rank[i.severity])) for key, g in groups.items()}
     into = {i.id: keep[(i.turn, i.dimension)].id for i in ledger.incidents}
     out = []
     for key, g in groups.items():
         k = keep[key]
         reps = [into.get(i.repeat_of, "") for i in g if i.repeat_of and into.get(i.repeat_of) != k.id]
-        out.append(Incident(**{**vars(k), "repeat_of": reps[0] if reps else "",
-                               "could_know": any(i.could_know for i in g)}))
+        out.append(Incident(**{**vars(k), "repeat_of": reps[0] if reps else ""}))
     out.sort(key=lambda i: int(i.id[1:]))
     return Ledger(incidents=out, commitments=ledger.commitments, moods=ledger.moods, outcome=ledger.outcome,
                   problems=ledger.problems, actions=ledger.actions, asks=ledger.asks)

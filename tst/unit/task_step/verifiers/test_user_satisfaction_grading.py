@@ -125,6 +125,34 @@ def test_an_incident_against_a_rule_in_its_notes_is_one_it_could_know_and_a_bad_
     assert scored["score"] == 2.85
 
 
+def test_a_free_incident_never_makes_a_knowable_one_at_the_same_check_in_cost_more():
+    # Two at check-in 3 in one dimension: a severe one it couldn't have known about, a minor one it could.
+    _, scored = _log(_answer(incidents=[
+        _incident("a", 3, "ignored_me", "severe", "check your card", could_know=False),
+        _incident("b", 3, "ignored_me", "minor", "check your card", line="A2")]))
+    assert scored["incident_cost"] == 0.15 and scored["tally"] == {"ignored_me": {"minor": 1}}
+
+
+def test_what_the_person_read_after_the_last_check_in_is_a_check_in_an_incident_can_name():
+    run = core.with_final_read(_shop(), [{"at": "Wed 8:00", "text": "Refund is on its way, nothing for you to do."},
+                                         {"at": "Wed 8:01", "text": "  "}], "Wed 9:00")
+    assert [(t.n, t.outcome, t.time) for t in run.turns][-1] == (4, core.FINAL_READ, "Wed 9:00")
+    assert core.with_final_read(_shop(), [{"at": "x", "text": " "}]).turns == _shop().turns  # nothing read: as it was
+    ledger, _ = _log(_answer(incidents=[_incident("I1", 3, "put_it_on_me", "major", "check your card statement")],
+                             recovered=[{"turn": 4, "incident": "I1", "how": "it said nothing's left for her"}],
+                             asks=[{"turn": 3, "what": "check your card", "quote": "check your card statement",
+                                    "kind": "step", "could_handle": True, "how": "", "same_as": 0}]), run)
+    assert ledger.incidents[0].recovered_at == 4 and not ledger.problems
+
+
+def test_an_answer_that_isn_t_a_whole_log_is_named():
+    assert core.answer_problems(_answer()) == []
+    assert core.answer_problems({}) == [*(f"{k} isn't a list" for k in core._LISTS),
+                                        "end has no outcome of ['done', 'partly', 'not_done']"]
+    assert core.answer_problems(_answer(incidents=["oops"], end={"outcome": "great"})) == [
+        "incidents[0] isn't an object", "end has no outcome of ['done', 'partly', 'not_done']"]
+
+
 def test_with_its_instructions_shown_only_a_line_they_hold_is_one_it_could_know():
     run = _shop()
     run.tagged_lines = {"A2": "Ask you first: placing any order.", "C1": "Her card is the Visa ending 4417."}
@@ -143,9 +171,11 @@ def test_with_its_instructions_shown_only_a_line_they_hold_is_one_it_could_know(
 
 def test_the_prompt_holds_the_person_every_check_in_and_what_they_read_last():
     run = _shop()
-    prompt = core.run_prompt(run, {"S1": SATISFACTION[0]}, [{"at": "Tue 9:00", "text": "Bag arrives Thursday."}])
+    read = core.with_final_read(run, [{"at": "Tue 9:00", "text": "Bag arrives Thursday."}], "Tue 9:05")
+    prompt = core.run_prompt(read, {"S1": SATISFACTION[0]})
     assert prompt.startswith("# THE PERSON\n<instructions>\nYou are Mia.")
-    assert "  S1  5, perfect" in prompt and "[Tue 9:00] Bag arrives Thursday." in prompt
+    assert "  S1  5, perfect" in prompt and "## Check-in 4 · Tue 9:05" in prompt  # what they read last, a check-in
+    assert "<saw>\n[Tue 9:00] Bag arrives Thursday.\n</saw>" in prompt and "outcome: read_at_end" in prompt
     for t in run.turns:
         assert f"## Check-in {t.n}" in prompt and f"<saw>\n{t.input}\n</saw>" in prompt
     assert json.loads(prompt.rsplit("Answer only in JSON: ", 1)[1])["actions"][0]["needs_ok"] == "..."
@@ -164,7 +194,8 @@ def test_the_prompt_holds_the_person_every_check_in_and_what_they_read_last():
 def _put_rating(ctx: TaskStepContext, run_step: str, read: list[dict]) -> None:
     """A rate_user_satisfaction entry for ``run_step``, its whole ask in the object store, as that step leaves it."""
     url = get_config().get_object_store().put(f"ratings/{run_step}.json", json.dumps(
-        {"read": {"assistant_messages": read}}).encode(), content_type="application/json")
+        {"read": {"time": "2026-11-12T15:00:00Z", "assistant_messages": read}}).encode(),
+        content_type="application/json")
     ctx.metadata.setdefault(SATISFACTION_KEY, {})[run_step] = {
         "score": 4, "object_url": url, "tagged_lines": {f"S{n}": line for n, line in enumerate(SATISFACTION, 1)}}
 
@@ -207,7 +238,8 @@ async def test_on_an_always_on_run_the_judge_reads_what_the_user_saw_and_the_log
     assert (entry["run_step_id"], entry["run_kind"], entry["user_sim"], entry["judge_model"]) == (
         "week", "always_on", "user-sim", JUDGE)
     assert entry["instructions"]["matches"] is True and entry["turns"] == 2
-    assert entry["assistant_instructions"] == "shown"
+    assert entry["assistant_instructions"] == "shown" and entry["read_at_end"] == 1
+    assert "## Check-in 3 · 2026-11-12T15:00:00Z" in sent  # the rating's read, a check-in of its own
     assert (entry["score"], entry["outcome"], entry["incidents"], entry["calls"]) == (4.85, "done", 1, 1)
     log = usj._load(entry["log_object_url"])
     assert log["incidents"][0]["quote_found"] is True and log["asks"][0]["could_handle"] is True
@@ -232,28 +264,29 @@ def _chat(monkeypatch, run: UserSimRun) -> TaskStepContext:
 
 @pytest.mark.usefixtures("local_stores", "litellm_config")
 @pytest.mark.asyncio
-async def test_an_answer_that_isn_t_json_is_asked_again_and_without_a_rating_the_log_says_so(monkeypatch):
+async def test_an_answer_that_isn_t_a_whole_log_is_asked_again_and_without_a_rating_the_log_says_so(monkeypatch):
     ctx = _chat(monkeypatch, _shop())
-    answers = iter(["I think it went fine.", json.dumps(_answer())])
+    answers = iter(["I think it went fine.", "{}", json.dumps(_answer())])  # not JSON, then not a whole log
     calls = _litellm_answers(monkeypatch, lambda kwargs: next(answers))
 
     await _step().execute(ctx)
 
     entry = ctx.metadata["verifications"]["psi_satisfaction_grading"]
-    assert len(calls) == 2 and entry["calls"] == 2 and entry["score"] == 5.0
+    assert len(calls) == 3 and entry["calls"] == 3 and entry["score"] == 5.0
     assert entry["run_kind"] == "prompt_agent"
     assert entry["notes"] == ["the run has no rate_user_satisfaction entry: no rating lines, and nothing read after "
                               "the last check-in"]
     assert entry["assistant_instructions"].startswith("unknown")  # built outside a task
     assert calls[0]["messages"][0]["content"] == core.system_text(False)
-    assert [c["attempt"] for c in ctx.metadata["grades"]["grading"]["judge_calls"]] == [1, 2]
+    assert [c["attempt"] for c in ctx.metadata["grades"]["grading"]["judge_calls"]] == [1, 2, 3]
 
 
 @pytest.mark.usefixtures("local_stores", "litellm_config")
 @pytest.mark.asyncio
 async def test_it_sends_no_temperature_and_drops_a_setting_the_model_refuses(monkeypatch):
     ctx = _chat(monkeypatch, _shop())
-    refused = litellm.UnsupportedParamsError(message="max_tokens isn't supported", llm_provider="anthropic", model=JUDGE)
+    refused = litellm.UnsupportedParamsError(message="max_tokens isn't supported", llm_provider="anthropic",
+                                             model=JUDGE)
     answers = iter([refused, json.dumps(_answer())])
     calls = _litellm_answers(monkeypatch, lambda kwargs: next(answers))
 

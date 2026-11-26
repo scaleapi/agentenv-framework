@@ -206,14 +206,15 @@ class UserSatisfactionGrading(VerifierTaskStep):
                      notes=list(run.notes))
         if not run.turns:
             return self._skip("the user sim never read: the run has no check-ins", entry)
-        satisfaction, unread = await self._rating(context, step_id, entry)
+        satisfaction, unread, read_at = await self._rating(context, step_id, entry)
+        run = core.with_final_read(run, unread, read_at)  # what the user read after the last check-in, as one more
+        entry["read_at_end"] = len(run.turns) - entry["turns"]
         told = _seeded(self._assistant_prompt, context.metadata.get("seed") or {})
         entry["assistant_instructions"] = "shown" if told else "unknown: the user sim's rules taken as in its notes"
 
         context.record_model(ModelRole.JUDGE.record_key, self.id, model)
         judge = judge_usage.start(context, self.id)
-        got, error = await self._ask(context, judge, model, core.run_prompt(run, satisfaction, unread, told),
-                                     told is not None)
+        got, error = await self._ask(context, judge, model, core.run_prompt(run, satisfaction, told), told is not None)
         answered = [call for call in judge_usage.calls() if call["outcome"] == "answered"]
         entry.update(calls=len(answered), usage=_usage(answered), **_cost(answered))
         if got is None:  # raised, not returned: a failed grade, with no score in the entry for anyone to read
@@ -250,30 +251,31 @@ class UserSatisfactionGrading(VerifierTaskStep):
                                f"{sorted(records)}; prompt_agent user sim reads: {sorted(reads)})")
 
     async def _rating(self, context: TaskStepContext, step_id: str,
-                      entry: dict) -> tuple[Optional[dict[str, str]], Optional[list[dict]]]:
+                      entry: dict) -> tuple[Optional[dict[str, str]], Optional[list[dict]], Optional[str]]:
         """From the run's rate_user_satisfaction entry: its lines (S1...), and what the user read only after the last
-        check-in, from the rating's stored ask. Neither, without a rating; its lines alone, when the ask can't be
-        read (said in the entry's ``notes``)."""
+        check-in, from the rating's stored ask, with when they read it. None of them without a rating; its lines alone
+        when the ask can't be read (said in the entry's ``notes``)."""
         rating = (context.metadata.get(SATISFACTION_KEY) or {}).get(step_id) or {}
         if not rating:
             entry["notes"].append("the run has no rate_user_satisfaction entry: no rating lines, and nothing read "
                                   "after the last check-in")
-            return None, None
-        unread = None
+            return None, None, None
+        unread = read_at = None
         if rating.get("object_url"):
             try:
                 full = await asyncio.to_thread(_load, rating["object_url"])
                 unread = (full.get("read") or {}).get("assistant_messages") or []
+                read_at = (full.get("read") or {}).get("time")
             except Exception as e:
                 entry["notes"].append(f"the rating's stored ask could not be read ({type(e).__name__}): what the user "
                                       "read after the last check-in isn't shown")
-        return rating.get("tagged_lines") or None, unread
+        return rating.get("tagged_lines") or None, unread, read_at
 
     async def _ask(self, context: TaskStepContext, judge: JudgeUsage, model: str, prompt: str,
                    told: bool) -> tuple[Optional[dict], Optional[str]]:
         """The judge's answer, through core's one model call (``model_call``) as rubrics_verifier's direct judge makes
         it, with the run's judge key and base: up to ``MAX_ATTEMPTS`` calls, each in the judge's record, until one
-        answers with a JSON object; else None and why."""
+        answers with a whole log (``answer_problems``); else None and why."""
         overrides = context.metadata.get("user_overrides", {})
         route = model_call.resolve_route(
             model, api_key=overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"),
@@ -306,9 +308,11 @@ class UserSatisfactionGrading(VerifierTaskStep):
                        model=reply.model, endpoint_host=reply.endpoint_host, reported_by=ReportedBy.PROVIDER,
                        cost=reply.cost.fields(), sent=sent)
             got = core.parse(reply.content)
-            if got is not None:
+            wrong = core.answer_problems(got) if got is not None else []
+            if got is not None and not wrong:
                 return got, None
-            error = f"its answer isn't a JSON object: {reply.content[:300]!r}"
+            error = (f"its answer isn't a whole log: {'; '.join(wrong)}" if got is not None
+                     else f"its answer isn't a JSON object: {reply.content[:300]!r}")
             logger.warning(f"{self.type} '{self.id}': judge attempt {attempt}/{MAX_ATTEMPTS}: {error}")
         return None, error
 

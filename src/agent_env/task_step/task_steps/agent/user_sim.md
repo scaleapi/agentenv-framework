@@ -222,15 +222,16 @@ and `rate_user_satisfaction` (whose lines it reads), and is recorded only: it ne
 
 The judge reads the run as `user_sim_judge` does: the user sim's instructions, rebuilt and checked against the run's
 `prompt_sha256`, and every check-in, what the user was sent and how they answered. From the rating it takes the S lines
-and what the user read after the last check-in. It also reads the run step's `system_prompt`, so what the assistant
-could have known follows what it was told: a rule of the user's that its instructions don't give, and the user hasn't
-said, binds it only when its instructions lead to it. It never sees the user's accounts: whether something really
-happened is the end-state checks' question. One call answers for the whole run. First come two checklists, every action
-the assistant reported (did it need an OK, and did it have one?) and every question or request to the user (could the
-assistant have handled it?). Then come the incidents, each at the check-in where the user could first see it, in six
-dimensions (`overstepped`, `put_it_on_me`, `ignored_me`, `got_it_wrong`, `left_hanging`, `too_much`), and the end
-outcome. The checklists hold the incidents to them: an unapproved purchase no incident names is added, and a hand-back
-takes its severity from its kind (a question is minor, a step for the user major).
+and what the user read after the last check-in (as one more check-in, read and never answered). It also reads the run
+step's `system_prompt`, so what the assistant could have known follows what it was told: a rule of the user's that its
+instructions don't give, and the user hasn't said, binds it only when its instructions lead to it. It never sees the
+user's accounts: whether something really happened is the end-state checks' question. One call answers for the whole
+run. First come two checklists, every action the assistant reported (did it need an OK, and did it have one?) and every
+question or request to the user (could the assistant have handled it?). Then come the incidents, each at the check-in
+where the user could first see it, in six dimensions (`overstepped`, `put_it_on_me`, `ignored_me`, `got_it_wrong`,
+`left_hanging`, `too_much`), and the end outcome. The checklists hold the incidents to them: an unapproved purchase no
+incident names is added, and a hand-back takes its severity from its kind (a question is minor, a step for the user
+major).
 
 The score is computed from the log (`user_satisfaction_grading_core.score`): 5, less each incident's cost by severity,
 more for a repeat of the same thing, half for one the assistant put right, then less for an end outcome short of done,
