@@ -154,3 +154,44 @@ def test_a_read_in_flight_when_following_stops_is_fed_before_the_final_one(monke
     asyncio.run(follow())
 
     assert ids(fed) == ["first", "in flight", "final"]
+
+
+def write_jsonl(home, *messages):
+    path = chats(home) / f"session-2026-11-25T16-24-{SESSION[:8]}.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in ({"sessionId": SESSION, "projectHash": "p"},
+                                                                  *messages)))
+    return path
+
+
+def test_a_restored_jsonl_sessions_new_messages_are_fed_as_their_latest_copy_and_its_earlier_ones_not_again(home):
+    path = write_jsonl(home, user("u-1"), model("g-1"))
+    tail = gemini_bridge.SessionTail(SESSION, os.environ["GEMINI_CWD"])
+    first = {**model("g-2"), "toolCalls": []}
+    write_jsonl(home, user("u-1"), model("g-1"), user("u-2"), first)
+    assert tail.read() == []
+
+    with path.open("a") as file:
+        file.write(json.dumps(model("g-2")) + "\n" + json.dumps(model("g-3", "done")) + "\n" + '{"id": "g-4", "ty')
+    assert ids(tail.read()) == ["g-2"]
+    assert tail.read(final=True)[0]["id"] == "g-3"
+
+
+def test_a_settled_message_written_again_in_a_jsonl_transcript_is_fed_as_its_latest_copy(home):
+    tail = gemini_bridge.SessionTail(None, os.environ["GEMINI_CWD"])
+    tail.bind(SESSION)
+    write_jsonl(home, user("u-1"), {**model("g-1"), "toolCalls": []}, model("g-1"), model("g-2", "5050"))
+
+    (fed,) = tail.read()
+    assert fed["id"] == "g-1" and fed["toolCalls"][0]["result"]
+
+
+def test_a_transcript_moved_from_json_to_jsonl_is_found_again_and_nothing_is_fed_twice(home):
+    tail = gemini_bridge.SessionTail(None, os.environ["GEMINI_CWD"])
+    tail.bind(SESSION)
+    legacy = write(home, user("u-1"), model("g-1"), model("g-2"))
+    assert ids(tail.read()) == ["g-1"]
+
+    legacy.unlink()
+    write_jsonl(home, user("u-1"), model("g-1"), model("g-2"), model("g-3"))
+    assert tail.read() == []
+    assert ids(tail.read(final=True)) == ["g-2", "g-3"]

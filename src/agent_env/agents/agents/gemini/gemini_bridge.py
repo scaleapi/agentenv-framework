@@ -180,11 +180,34 @@ def session_aux(message: dict) -> dict | None:
     return record
 
 
+def transcript_messages(text: str, jsonl: bool) -> list[dict] | None:
+    """A transcript's messages in order: a ``.json`` file's ``messages``, which the CLI rewrites whole, or a ``.jsonl``
+    file's lines after its first, the session's metadata, a message written again replacing its earlier copy in its
+    place. None for a ``.json`` file that doesn't parse whole, as one the CLI is writing; a ``.jsonl`` line not yet
+    whole is left out."""
+    if not jsonl:
+        try:
+            transcript = json.loads(text)
+        except ValueError:
+            return None
+        messages = transcript.get("messages") if isinstance(transcript, dict) else None
+        return [message for message in messages if isinstance(message, dict)] if isinstance(messages, list) else None
+    by_id: dict[str, dict] = {}
+    for line in text.splitlines(keepends=True)[1:]:
+        try:
+            message = json.loads(line) if line.endswith("\n") else None
+        except ValueError:
+            continue
+        if isinstance(message, dict) and isinstance(message.get("id"), str):
+            by_id[message["id"]] = message
+    return list(by_id.values())
+
+
 class SessionTail:
-    """One turn's new model messages from the session's transcript, which the CLI rewrites whole, as ``session_aux``
-    gives them: each once a later message follows it, since the CLI adds a message's tool calls and their results
-    after writing it, and the last at the turn's end. A resumed session's messages from before the turn aren't fed
-    again. ``bind`` names the session once the CLI has started a new one."""
+    """One turn's new model messages from the session's transcript, ``.json`` or ``.jsonl``, as ``session_aux`` gives
+    them: each once a later message follows it, since the CLI adds a message's tool calls and their results after
+    writing it, and the last at the turn's end. A resumed session's messages from before the turn aren't fed again,
+    one restored from a snapshot's included. ``bind`` names the session once the CLI has started a new one."""
 
     def __init__(self, session_id: str | None, cwd: str) -> None:
         self._lock = threading.Lock()
@@ -221,13 +244,12 @@ class SessionTail:
             return fed
 
     def _load(self) -> None:
-        """The transcript's messages, read again when the file changed and parses whole: one the CLI is still
-        writing is read at the next poll."""
+        """The transcript's messages, read again when the file changed: one the CLI is still writing is read at the
+        next poll, and one it moved, as from ``.json`` to ``.jsonl``, is found again."""
         if self._session is None:
             return
-        if self._path is None and (path := find_session_file(self._session, self._cwd)) is not None \
-                and path.suffix == ".json":
-            self._path = path
+        if self._path is None:
+            self._path = find_session_file(self._session, self._cwd)
         if self._path is None:
             return
         try:
@@ -235,13 +257,16 @@ class SessionTail:
             stamp = (status.st_mtime_ns, status.st_size)
             if stamp == self._stamp:
                 return
-            transcript = json.loads(self._path.read_text())
-        except (OSError, ValueError):
+            text = self._path.read_text()
+        except FileNotFoundError:
+            self._path = self._stamp = None
             return
-        messages = transcript.get("messages") if isinstance(transcript, dict) else None
-        if isinstance(messages, list):
+        except OSError:
+            return
+        messages = transcript_messages(text, jsonl=self._path.suffix == ".jsonl")
+        if messages is not None:
             self._stamp = stamp
-            self._messages = [message for message in messages if isinstance(message, dict)]
+            self._messages = messages
             if self._resumed:
                 # The transcript as the turn found it: what's in it already is earlier turns'.
                 self._fed.update(message.get("id") for message in self._messages)
