@@ -265,6 +265,11 @@ name)` raises `AmbiguousChildError` for a shared name, and `client.find_child` r
 `client.serves(card, method)` says whether a card serves a data-plane method by its declared
 `operations`, None for a card that declares none.
 
+The client enables TCP keepalive on each `data/add`, `data/get`, and `data/reset` connection, a
+proxy's included, so it can stay open while the environment prepares a reply. Where supported, probes
+start after 30 seconds of inactivity. Each socket uses the keepalive settings its kernel accepts.
+These calls use HTTPX's usual proxy and TLS settings.
+
 Extensions are invoked from what the card advertises. `client.find_extension_method(card, uri,
 method)` returns one advertised method, whose `endpoint` is the method's own or else the
 extension's, and `client.invoke_extension(base_url, card, uri, params, method=...)` calls it with

@@ -61,6 +61,11 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   websearch tool's year, and the CLI enables no provider but the endpoint, so no call bypasses the relay. A call whose
   date the relay can't read or place is refused, so the turn fails rather than tell the model the machine's date
   (`opencode_date.py`).
+- **Antigravity's harness on real time.** The Antigravity SDK's harness is a static Go binary, which libfaketime can't
+  reach, so it keeps real time while the commands it runs read the env's. While the clock is armed, the turn's model
+  relay puts the env's time, read from `date`, in the "The current local time is" line the harness opens each user
+  message with, and keeps the time each turn was given, so a resumed conversation's history doesn't change
+  (`antigravity_date.py`). A call whose time it can't read is refused.
 - **For the rest of the run.** An agent that follows goes on following: a later `sync_env_clock` without `agent_clock`
   re-arms the clock it follows, and only agents that never followed keep real time.
 - **Through the egress proxy.** While the agent follows an armed clock, the CLI goes out through the egress proxy, which
@@ -122,6 +127,15 @@ OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from th
 `anthropic/claude-sonnet-5-5`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
 with glibc. Its folder's `README.md` covers the extensions it implements.
 
+`agents/antigravity/` runs Google's [Antigravity SDK](https://pypi.org/project/google-antigravity/) behind the
+protocol's A2A agent framework, in process rather than a CLI: each turn is one `Agent.chat()` of the SDK, resumed in the
+context's SDK conversation, the task env's MCP servers are its streamable-HTTP servers, and its streamed steps, with each
+tool call's result from the SDK's hooks, are the turn's trajectory. Name it as `antigravity`, its alias, or by its id,
+`@local/agentenv-framework/agents/antigravity`. Its harness calls the `[model]` endpoint as an OpenAI-compatible one,
+`<base>/v1/chat/completions`, through a relay that adds the key and the run's attribution and counts usage, and takes
+its model from the prompt, else `anthropic/claude-sonnet-5-5`. It declares `install/v1` too, into a container or onto a
+`vm` sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions it implements.
+
 `agents/letta-code/` runs [Letta Code](https://github.com/letta-ai/letta-code) behind the protocol's A2A agent
 framework: each turn is one `letta --backend local -p --output-format stream-json` run, resumed in the context's
 conversation, with a separate local agent and memory per context. Name it as `letta-code`, its alias, or by its id,
@@ -164,8 +178,8 @@ it as `hermes`, its alias, or by its id, `@local/agentenv-framework/agents/herme
 an OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from the prompt, else
 `anthropic/claude-sonnet-4-6`. Its folder's `README.md` covers the extensions it implements.
 
-A release publishes Codex's, Gemini's, Hermes', OpenCode's, pi's, OpenHands' and Pydantic AI's images too, at
-`ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
+A release publishes Antigravity's, Codex's, Gemini's, Hermes', OpenCode's, pi's, OpenHands' and Pydantic AI's images
+too, at `ghcr.io/scaleapi/agentenv-antigravity:src-<hex>`, `ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
 `ghcr.io/scaleapi/agentenv-hermes:src-<hex>`, `ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>`,
 `ghcr.io/scaleapi/agentenv-openhands:src-<hex>` and `ghcr.io/scaleapi/agentenv-pydantic-ai:src-<hex>`, each built again only when its folder changes, and a run deploys
 them as it does Claude Code's: it pulls the image
@@ -183,4 +197,4 @@ others'. It has no alias and no smoke task: with nobody driving it, a prompt onl
 
 `agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs
 Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task hermes-smoke` Hermes', `--task opencode-smoke` OpenCode's,
-`--task pi-smoke` pi's, `--task openhands-smoke` OpenHands', `--task pydantic-ai-smoke` Pydantic AI's.
+`--task antigravity-smoke` Antigravity's, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands', `--task pydantic-ai-smoke` Pydantic AI's.

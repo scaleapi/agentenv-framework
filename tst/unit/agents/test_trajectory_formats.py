@@ -17,6 +17,7 @@ AGENTS_DIR = Path(agent_env.__file__).parent / "agents" / "agents"
 #: The agents with an ATIF adapter, whose cards offer atif/1 beside native.
 SERVES_ATIF = {"claude-code"}
 AGENTS = {
+    "antigravity": ("antigravity-sdk/1", "tst.unit.agents.antigravity.agent", "a2a_server"),
     "claude-code": ("claude-code-stream-json/1", "tst.unit.agents.claude_code.agent", "a2a_server"),
     "codex": ("codex-exec-json/1", "tst.unit.agents.codex.agent", "a2a_server"),
     "gemini": ("gemini-stream-json/1", "tst.unit.agents.gemini.agent", "a2a_server"),

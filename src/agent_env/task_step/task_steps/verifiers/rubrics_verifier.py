@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, NamedTuple, Optional, TypeVar
 
 from agentenv_protocol.a2a_agent import Usage
 
@@ -25,6 +26,7 @@ from agent_env.config.errors import ConfigError
 from agent_env.config import model_call
 from agent_env.config.model import ModelRole, no_key_for
 from agent_env.config.model_pricing import Cost, ReportedBy
+from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -446,7 +448,9 @@ _JUDGE_TIMEOUT_MARGIN_SECONDS = 60
 
 
 async def _terminate_auto_deployed_judge(judge: Any) -> None:
-    """Terminate the judge sandbox a verifier deployed itself; None (it used a task's agent) has nothing to release."""
+    """Terminate the judge sandbox a verifier deployed itself and, on this machine, remove its work folder, as a run's
+    teardown does for the sandboxes it records, which this one isn't; None (it used a task's agent) has nothing to
+    release."""
     if judge is None:
         return
     from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
@@ -457,6 +461,70 @@ async def _terminate_auto_deployed_judge(judge: Any) -> None:
         logger.info(f"Terminated auto-deployed judge sandbox {judge.sandbox_id}")
     except Exception as e:
         logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
+        return
+    if sandbox.ON_THIS_MACHINE:
+        try:
+            await asyncio.to_thread(remove_local_work_dir, judge.sandbox_id)
+        except OSError as e:
+            logger.warning(f"Judge sandbox {judge.sandbox_id}'s work folder was not removed: {e}")
+
+
+_T = TypeVar("_T")
+
+
+class _JudgeOutcome(NamedTuple):
+    """What grading a batch gave, as ``_run_judge_with_output_retries`` returns it: its rows, the output retries it
+    took, the discrepancies they corrected and the judge's trajectory; for a sampled batch, its samples merged."""
+
+    rows: list[dict]
+    retries: int
+    discrepancies: list[dict]
+    trajectory_url: Optional[str]
+
+
+async def _side_by_side(calls: Sequence[Coroutine[Any, Any, _T]]) -> list[_T]:
+    """Each of ``calls`` run at once, their results in order. The first to fail is raised as itself, as a lone call
+    would raise it, and the rest are cancelled."""
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(call) for call in calls]
+    except ExceptionGroup as failed:
+        raise failed.exceptions[0] from failed
+    return [task.result() for task in tasks]
+
+
+def _merged_samples(outcomes: Sequence[_JudgeOutcome]) -> _JudgeOutcome:
+    """A batch's samples as one outcome: each criterion's median row (``judge_samples.median_rows``), every sample's
+    retries, each discrepancy named by its sample, and the first trajectory a sample left."""
+    return _JudgeOutcome(judge_samples_rule.median_rows([o.rows for o in outcomes]), sum(o.retries for o in outcomes),
+                         [{**d, "sample": n} for n, o in enumerate(outcomes, 1) for d in o.discrepancies],
+                         next((o.trajectory_url for o in outcomes if o.trajectory_url), None))
+
+
+@contextlib.asynccontextmanager
+async def _judge_agents(make: Callable[[], Coroutine[Any, Any, _JudgeAgent]], count: int
+                        ) -> AsyncIterator[list[_JudgeAgent]]:
+    """``count`` agent judges from ``make``, none for a direct judge, each one this step deployed terminated on the way
+    out. One is made in the caller's task, as before sampling; several are made at once, and when one can't be, those
+    that were are terminated and its error is raised as itself."""
+    if count <= 1:
+        judges = [await make()] if count else []
+    else:
+        made: list[asyncio.Task] = []
+        try:
+            async with asyncio.TaskGroup() as group:
+                made = [group.create_task(make()) for _ in range(count)]
+        except BaseException as failed:
+            await asyncio.gather(*(_terminate_auto_deployed_judge(task.result().deployed) for task in made
+                                   if task.done() and not task.cancelled() and task.exception() is None))
+            if isinstance(failed, ExceptionGroup):
+                raise failed.exceptions[0] from failed
+            raise
+        judges = [task.result() for task in made]
+    try:
+        yield judges
+    finally:
+        await asyncio.gather(*(_terminate_auto_deployed_judge(one.deployed) for one in judges))
 
 
 def _image_count(blocks: list[dict]) -> int:
@@ -986,6 +1054,50 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         return replace(verdict, raise_after=VerifierNotPassingError(
             f"Verifier '{self.verifier_id}' isn't passing (score {verdict.score}); rows not met: {unmet}"))
 
+    async def _judge_agent_of(self, context: TaskStepContext, run: dict[str, Any]) -> _JudgeAgent:
+        """The agent judge to grade with, nothing staged in it yet: the task's agent ``agent_name`` names, or one this
+        step deploys (``judge_a2a_agent_id``, else the configured default) with the run's model key and endpoint."""
+        if self.agent_name is not None:
+            agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
+            if agent is None:
+                raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
+            if not agent.sandbox_id:
+                raise RuntimeError(f"Agent '{self.agent_name}' has no sandbox_id")
+            return _JudgeAgent(a2a_url=agent.a2a_url or agent.api_url, sandbox_id=agent.sandbox_id,
+                               sandbox_type=agent.sandbox_type, card=agent.a2a_card or {}, agent=agent,
+                               container=agent.installed_container)
+        from agent_env.a2a_agent import A2AAgent
+        from agent_env.config import get_config
+
+        overrides = context.metadata.get("user_overrides", {})
+        config = get_config()
+        api_key = config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
+        litellm_base_url = (
+            overrides.get("judge_litellm_base_url")
+            or overrides.get("litellm_base_url")
+            or config.get_litellm_base_url()
+        )
+        if not api_key:
+            if not config.is_model_endpoint(litellm_base_url):
+                raise ConfigError(f"{self.type} '{self.id}': its judge agent: "
+                                  f"{no_key_for(litellm_base_url, _JUDGE_KEY_HOW)}")
+            api_key = config.get_litellm_api_key()
+        env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
+        resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
+        try:
+            a2a_agent = A2AAgent.get(resolved_judge_id)
+        except NotFoundError:
+            if not is_local_id(resolved_judge_id):
+                raise
+            raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
+        deploy_kwargs = {"env_vars": env_vars}
+        if run["judge_sandbox_type"]:
+            deploy_kwargs["sandbox_type"] = run["judge_sandbox_type"]
+        deployed = await a2a_agent.deploy(**deploy_kwargs)
+        logger.info(f"Auto-deployed judge A2A agent '{resolved_judge_id}' at {deployed.a2a_url}")
+        return _JudgeAgent(a2a_url=deployed.a2a_url, sandbox_id=deployed.sandbox_id, sandbox_type=deployed.sandbox_type,
+                           card=deployed.agent_card, agent=deployed, container=None, deployed=deployed)
+
     async def _judged(self, context: TaskStepContext) -> RubricsVerdict:
         """What the judge found in this run, written by nothing: an override point, whose result ``verify`` gates."""
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
@@ -1025,7 +1137,6 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             judge.read(_trajectory_sources(prompt_response))
         documents = AtifDocuments()
 
-        overrides = context.metadata.get("user_overrides", {})
         use_agent_judge = run["use_agent_judge"]
         criteria = self._resolved_criteria(context)
         # The judge sees/echoes short keys (c1..cN), not UUIDs; frame labels use them too, hence before compaction.
@@ -1108,50 +1219,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         bar = judge_samples_rule.DEFAULT_MIN_AGREEMENT if bar is None else bar
 
         async def judge_agent() -> _JudgeAgent:
-            """An agent judge for the run, the trajectory staged in its sandbox: the task's agent, or one this step
-            deploys, which is terminated here too when staging fails."""
-            if self.agent_name is not None:
-                agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
-                if agent is None:
-                    raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
-                if not agent.sandbox_id:
-                    raise RuntimeError(f"Agent '{self.agent_name}' has no sandbox_id")
-                one = _JudgeAgent(a2a_url=agent.a2a_url or agent.api_url, sandbox_id=agent.sandbox_id,
-                                  sandbox_type=agent.sandbox_type, card=agent.a2a_card or {}, agent=agent,
-                                  container=agent.installed_container)
-            else:
-                from agent_env.a2a_agent import A2AAgent
-                from agent_env.config import get_config
-
-                config = get_config()
-                api_key = config.resolve_reference(
-                    overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
-                litellm_base_url = (
-                    overrides.get("judge_litellm_base_url")
-                    or overrides.get("litellm_base_url")
-                    or config.get_litellm_base_url()
-                )
-                if not api_key:
-                    if not config.is_model_endpoint(litellm_base_url):
-                        raise ConfigError(f"{self.type} '{self.id}': its judge agent: "
-                                          f"{no_key_for(litellm_base_url, _JUDGE_KEY_HOW)}")
-                    api_key = config.get_litellm_api_key()
-                env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
-                resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
-                try:
-                    a2a_agent = A2AAgent.get(resolved_judge_id)
-                except NotFoundError:
-                    if not is_local_id(resolved_judge_id):
-                        raise
-                    raise NotFoundError(unwritten_local_agent(resolved_judge_id, "judge_a2a_agent_id")) from None
-                deploy_kwargs = {"env_vars": env_vars}
-                if run["judge_sandbox_type"]:
-                    deploy_kwargs["sandbox_type"] = run["judge_sandbox_type"]
-                deployed = await a2a_agent.deploy(**deploy_kwargs)
-                one = _JudgeAgent(a2a_url=deployed.a2a_url, sandbox_id=deployed.sandbox_id,
-                                  sandbox_type=deployed.sandbox_type, card=deployed.agent_card, agent=deployed,
-                                  container=None, deployed=deployed)
-                logger.info(f"Auto-deployed judge A2A agent '{resolved_judge_id}' at {one.a2a_url}")
+            """An agent judge for the run with the trajectory staged in its sandbox; one this step deployed is
+            terminated here too when staging fails."""
+            one = await self._judge_agent_of(context, run)
             # Loading the trajectory can fail (an override's staging, a transfer): the judge this step deployed is
             # released then too, not only after grading.
             try:
@@ -1180,25 +1250,10 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
 
         # A judge this step deploys gets a deployment of its own per sample, so no sample sees another's files; the
         # task's own judge is the one agent the task deployed, which its samples share.
-        judges: list[_JudgeAgent] = []
-        if use_agent_judge:
-            if self.agent_name is not None or samples == 1:
-                judges = [await judge_agent()]
-            else:
-                deploying: list[asyncio.Task] = []
-                try:
-                    async with asyncio.TaskGroup() as group:
-                        deploying = [group.create_task(judge_agent()) for _ in range(samples)]
-                except BaseException as failed:
-                    await asyncio.gather(*(_terminate_auto_deployed_judge(task.result().deployed) for task in deploying
-                                           if task.done() and not task.cancelled() and task.exception() is None))
-                    if isinstance(failed, ExceptionGroup):
-                        raise failed.exceptions[0] from failed
-                    raise
-                judges = [task.result() for task in deploying]
-            compacted.tool_result_files = []
-
-        try:
+        agents = 0 if not use_agent_judge else 1 if self.agent_name is not None or samples == 1 else samples
+        async with _judge_agents(judge_agent, agents) as judges:
+            if use_agent_judge:
+                compacted.tool_result_files = []
             model = self._judge_model(context)
             context.record_model(ModelRole.JUDGE.record_key, self.id, model)
             agent_prompt_text = prompt_response.prompt_text or ""
@@ -1312,10 +1367,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     return judges[(sample_number or 1) - 1]
                 return judges[0] if judges else None
 
-            async def call(batch: list[dict], prompt: str, one: Optional[_JudgeAgent]
-                           ) -> tuple[list[dict], int, list[dict], Optional[str]]:
+            async def call(batch: list[dict], prompt: str, one: Optional[_JudgeAgent]) -> _JudgeOutcome:
                 async with concurrency:
-                    return await self._run_judge_with_output_retries(
+                    return _JudgeOutcome(*await self._run_judge_with_output_retries(
                         eval_prompt=prompt,
                         context=context,
                         model=model,
@@ -1329,10 +1383,9 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                         image_blocks=image_blocks,
                         reject_bulk_verdicts=batch_size is not None and self._spec().checks_bulk_verdicts,
                         usage=usage,
-                    )
+                    ))
 
-            async def grade(batch: list[dict], number: Optional[int] = None
-                            ) -> tuple[list[dict], int, list[dict], Optional[str]]:
+            async def grade(batch: list[dict], number: Optional[int] = None) -> _JudgeOutcome:
                 judge_usage.batch(number)
 
                 def prompt_for(one: Optional[_JudgeAgent]) -> str:
@@ -1346,50 +1399,32 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                 if samples == 1:
                     return await call(batch, prompt_for(judge_for(None)), judge_for(None))
 
-                async def sample(n: int) -> tuple[list[dict], int, list[dict], Optional[str]]:
+                async def sample(n: int) -> _JudgeOutcome:
                     judge_usage.sample(n)
                     return await call(batch, prompt_for(judge_for(n)), judge_for(n))
 
-                try:
-                    async with asyncio.TaskGroup() as group:
-                        sampled = [group.create_task(sample(n)) for n in range(1, samples + 1)]
-                except ExceptionGroup as failed:
-                    # A sample that fails fails the grade, as a batch does; the group cancels the others.
-                    raise failed.exceptions[0] from failed
-                outcomes = [task.result() for task in sampled]
-                sample_trajectory_urls[number] = [url for _, _, _, url in outcomes]
-                return (judge_samples_rule.median_rows([rows for rows, _, _, _ in outcomes]),
-                        sum(retries for _, retries, _, _ in outcomes),
-                        [{**d, "sample": n} for n, (_, _, ds, _) in enumerate(outcomes, 1) for d in ds],
-                        next((url for _, _, _, url in outcomes if url), None))
+                # A sample that fails fails the grade, as a batch does.
+                outcomes = await _side_by_side([sample(n) for n in range(1, samples + 1)])
+                sample_trajectory_urls[number] = [o.trajectory_url for o in outcomes]
+                return _merged_samples(outcomes)
 
-            if len(batches) == 1:
-                outcomes = [await grade(batches[0])]
-            else:
-                try:
-                    async with asyncio.TaskGroup() as group:
-                        graded = [group.create_task(grade(batch, number)) for number, batch in enumerate(batches, 1)]
-                except ExceptionGroup as failed:
-                    # The first batch's error, as an unbatched judge would raise it; the group cancels the rest.
-                    raise failed.exceptions[0] from failed
-                outcomes = [task.result() for task in graded]
+            outcomes = ([await grade(batches[0])] if len(batches) == 1
+                        else await _side_by_side([grade(batch, number) for number, batch in enumerate(batches, 1)]))
             if len(outcomes) == 1:
                 verification_results, judge_output_retries, judge_output_discrepancies, judge_trajectory_url = (
                     outcomes[0])
             else:
-                verification_results = [row for rows, _, _, _ in outcomes for row in rows]
-                judge_output_retries = sum(retries for _, retries, _, _ in outcomes)
+                verification_results = [row for o in outcomes for row in o.rows]
+                judge_output_retries = sum(o.retries for o in outcomes)
                 judge_output_discrepancies = [
-                    {**d, "batch": i} for i, (_, _, ds, _) in enumerate(outcomes, 1) for d in ds]
-                batch_trajectory_urls = [url for _, _, _, url in outcomes]
+                    {**d, "batch": i} for i, o in enumerate(outcomes, 1) for d in o.discrepancies]
+                batch_trajectory_urls = [o.trajectory_url for o in outcomes]
                 judge_trajectory_url = next((url for url in batch_trajectory_urls if url), None)
             # Rows come back keyed by c1..cN; restore the real criterion ids, in the cited frame labels too.
             _restore_criterion_ids(verification_results, real_by_short)
             if isinstance(verification_results, ResultRows):
                 _restore_frame_labels(verification_results, real_by_short)
                 _restore_frame_labels(verification_results.checks, real_by_short)
-        finally:
-            await asyncio.gather(*(_terminate_auto_deployed_judge(one.deployed) for one in judges))
 
         judge_call_fields: dict = {
             **dual_keyed("compact_trajectory_s3_uri", "compact_trajectory_object_url", compacted.compact_object_url),
