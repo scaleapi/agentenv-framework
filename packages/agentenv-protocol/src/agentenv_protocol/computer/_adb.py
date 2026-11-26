@@ -15,6 +15,8 @@ from ._linux import DRAIN_S, _Capped
 from .errors import DeliveryFailed, DeviceUnavailable, InvalidArgument
 from .operations import ExecResult
 
+#: Who the device's commands run as, and the home they run in, which the computer skill names to the agent.
+USER = "shell"
 HOME = PurePosixPath("/sdcard")
 ADB_TIMEOUT_S = 60
 TRANSFER_TIMEOUT_S = 600

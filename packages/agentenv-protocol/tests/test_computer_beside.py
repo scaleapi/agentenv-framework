@@ -1,6 +1,7 @@
 """A driver beside an Android device: the base class's Android defaults go through adb under /sdcard, write atomically,
 keep output under its cap, share one upload grant with the recordings kept in the driver's home, and fail rather than
-look empty; and the probe reads a recording back through data/get, with no python3."""
+look empty; its skill names the device's user and home; and the probe reads a recording back through data/get, with no
+python3."""
 from __future__ import annotations
 
 import asyncio
@@ -116,6 +117,13 @@ async def test_commands_and_files_go_through_adb_under_sdcard_and_recordings_sta
     command = calls[-1]["args"][1]
     assert "cd /sdcard/Download " in command and command.endswith("exec test -f f.csv")
     assert {(call["serial"], call["server"]) for call in calls} == {("emulator-5554", "tcp:10.0.0.2:5037")}
+
+
+@pytest.mark.asyncio
+async def test_the_skill_of_a_driver_beside_a_device_names_the_devices_user_and_home():
+    async with http_client(BesideDriver()) as http:
+        skill_md = (await http.get("/agentenv/ext/skill/get", params={"name": "computer-desktop"})).json()["skill_md"]
+    assert "- You act as `shell`, whose home is `/sdcard`." in skill_md
 
 
 class _ProbedDriver:
