@@ -245,23 +245,26 @@ class SessionTail:
 
     def _load(self) -> None:
         """The transcript's messages, read again when the file changed: one the CLI is still writing is read at the
-        next poll, and one it moved, as from ``.json`` to ``.jsonl``, is found again."""
+        next poll, and one it moved, as from ``.json`` to ``.jsonl``, is found and read in this one."""
         if self._session is None:
             return
-        if self._path is None:
-            self._path = find_session_file(self._session, self._cwd)
-        if self._path is None:
-            return
-        try:
-            status = self._path.stat()
-            stamp = (status.st_mtime_ns, status.st_size)
-            if stamp == self._stamp:
+        for _ in range(2):
+            if self._path is None:
+                self._path = find_session_file(self._session, self._cwd)
+                if self._path is None:
+                    return
+            try:
+                status = self._path.stat()
+                stamp = (status.st_mtime_ns, status.st_size)
+                if stamp == self._stamp:
+                    return
+                text = self._path.read_text()
+                break
+            except FileNotFoundError:
+                self._path = self._stamp = None
+            except OSError:
                 return
-            text = self._path.read_text()
-        except FileNotFoundError:
-            self._path = self._stamp = None
-            return
-        except OSError:
+        else:
             return
         messages = transcript_messages(text, jsonl=self._path.suffix == ".jsonl")
         if messages is not None:

@@ -193,5 +193,4 @@ def test_a_transcript_moved_from_json_to_jsonl_is_found_again_and_nothing_is_fed
 
     legacy.unlink()
     write_jsonl(home, user("u-1"), model("g-1"), model("g-2"), model("g-3"))
-    assert tail.read() == []
     assert ids(tail.read(final=True)) == ["g-2", "g-3"]
