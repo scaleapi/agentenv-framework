@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import clock
-from .dataplane import DEFAULT_DATA_PATHS
 from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 
@@ -89,16 +88,16 @@ def extension_params(driver: ComputerDriverEnvironment, uri: str) -> dict:
 
 def computer_features(driver: ComputerDriverEnvironment) -> dict:
     """computer/v1's params: what the seven tools take, how input is delivered, the platform, the default data paths,
-    and that the driver takes its control token's sha256 (``CONTROL_TOKEN_SHA256_ENV``), so agent-env boots it with
-    that and not the token."""
+    where the driver runs, and that the driver takes its control token's sha256 (``CONTROL_TOKEN_SHA256_ENV``), so
+    agent-env boots it with that and not the token."""
     return {
         "buttons": list(driver.buttons), "max_click_count": driver.max_click_count,
         "keys": driver.keys if driver.keys == "all" else list(driver.keys), "max_text_length": driver.max_text_length,
         "max_wait_ms": driver.max_wait_ms, "max_drag_points": driver.max_drag_points,
         "max_duration_ms": driver.max_duration_ms, "max_key_repeat": driver.max_key_repeat,
         "max_scroll_amount": driver.max_scroll_amount, "delivery": "foreground", "platform": driver.platform.as_dict(),
-        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS), "screen": driver.screen_kind,
-        "control_token": CONTROL_TOKEN_SHA256,
+        "supports": list(driver.supports), "default_data_paths": list(driver.default_data_paths),
+        "screen": driver.screen_kind, "placement": driver.placement, "control_token": CONTROL_TOKEN_SHA256,
     }
 
 

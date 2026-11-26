@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import math
@@ -54,6 +55,8 @@ DATA_PLANE = (INTAKE_EXTENSION_URI, DATA_OBJECTS_EXTENSION_URI)
 STAGE = ".agentenv-probe"
 #: How the probe reads a staged file's owner: through the python3 the fixture runs on, the same on every OS.
 OWNER = ("python3", "-c", "import os, sys; print(os.stat(sys.argv[1]).st_uid)")
+#: How it reads the owner on Android, which has no python3: toybox's stat.
+ANDROID_OWNER = ("stat", "-c", "%u")
 #: Where a page driver's computer_upload takes files from, relative to the session user's home.
 UPLOADS = "Uploads"
 #: What the probe answers the page fixture's prompt with.
@@ -144,6 +147,9 @@ class Probe:
         self.gtk = not self.page and platform.get("display") == "wayland"
         self.fixture = "page_fixture.py" if self.page else "wayland_fixture.py" if self.gtk else "fixture.py"
         self.windows = platform.get("os") == "windows"
+        self.android = platform.get("os") == "android"
+        #: Whether the driver runs beside the device, so the recordings it keeps are in its own home, not the device's.
+        self.beside = self.features.get("placement") == "beside"
         #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or on the GTK
         #: desk GTK's own Ctrl+A.
         self.select_all = ["Control", "a"] if self.gtk else ["Control", "/"]
@@ -690,7 +696,8 @@ class Probe:
 
         async def one_user() -> str | None:
             uid = (await self.driver.run("id", "-u"))["stdout"].strip()
-            owner = (await self.driver.run(*OWNER, f"{STAGE}/{self.fixture}"))["stdout"].strip()
+            reader = ANDROID_OWNER if self.android else OWNER
+            owner = (await self.driver.run(*reader, f"{STAGE}/{self.fixture}"))["stdout"].strip()
             if uid == "0":
                 return "commands run as root"
             return None if owner == uid else f"data/add wrote as uid {owner}, commands run as uid {uid}"
@@ -1177,8 +1184,11 @@ class Probe:
 
     async def _read_back(self, segment: ManifestSegment) -> bytes | str:
         """A segment a recording without a grant kept on the computer, read back and matched to its manifest entry's
-        size and digest; what is wrong, as a string, when it can't be."""
+        size and digest; what is wrong, as a string, when it can't be. Beside a device, through data/get, which reads
+        the recordings where the driver keeps them, needing no python3."""
         path = f"{RECORDINGS_DIR}/{segment.path}"
+        if self.beside:
+            return await self._read_back_through_data_get(segment, path)
         out = await self.driver.run("python3", "-c", READ_DIGEST, path)
         if out.get("exit_code") != 0:
             return f"segment {segment.index} couldn't be read back: {out.get('stderr', '')[-200:]}"
@@ -1194,6 +1204,18 @@ class Probe:
                 return f"segment {segment.index} stopped reading back at byte {len(data)} of {file['size']}: " \
                        f"{chunk.get('stderr', '')[-200:]}"
             data += read
+        return data
+
+    async def _read_back_through_data_get(self, segment: ManifestSegment, path: str) -> bytes | str:
+        got = await self.driver.rpc("data/get", {"paths": [path]})
+        parts = (got.get("result") or {}).get("parts")
+        if not parts:
+            return f"segment {segment.index} couldn't be read back through data/get: it answered {str(got)[:200]}"
+        data = base64.b64decode(parts[0]["file"]["bytes"])
+        digest = hashlib.sha256(data).hexdigest()
+        if (len(data), digest) != (segment.bytes, segment.sha256):
+            return f"segment {segment.index}'s file is {len(data)} bytes, sha256 {digest[:12]}; " \
+                   f"the manifest says {segment.bytes}, {segment.sha256[:12]}"
         return data
 
     async def _annotated_click(self, wire: dict, size: tuple[int, int], point: tuple[int, int],

@@ -651,7 +651,8 @@ class Store(ForwardingSite):
 
 ## Computer drivers
 
-A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
+A computer driver is what runs inside a computer an agent uses through screenshots and input, or
+beside a device it reaches (see Where it runs below). Write
 one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`, which needs the
 `computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn, Pillow and PyAV).
 The driver marks the methods that capture the screen and send input; the base class serves the
@@ -704,8 +705,9 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@pointer_move`, `@pointer_down`, `@pointer_up`, `@pointer_position` | all or none | `computer-pointer/v1` and its five tools; click and scroll at the pointer |
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
 | `@navigate`, `@history`, `@tabs`, `@dialog`, `@upload`, `@page_state` | all or none, for a screen that is a website browser's page | `computer-page/v1` and its five tools; the `page` of every frame |
-| `@run_in_session` | no; a Linux default | `computer-exec/v1` |
-| `@write_files` | no; a Linux default | `data/add` |
+| `@run_in_session` | no; a default on Linux, macOS, Windows and Android | `computer-exec/v1` |
+| `@write_files` | no; a default on Linux, macOS, Windows and Android | `data/add` |
+| `@read_files` | no; a default on Android | what `data/get` reads in place of the driver's own home |
 | `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
 
 The class is checked when it is defined: a missing required operation, half a group, two methods
@@ -713,12 +715,22 @@ for one operation that some platform could both match, or features that don't ma
 decorators raise `TypeError`. Predicates (`os`, `distribution`, `version`, `arch`, `display`)
 choose a method per platform, read from `/etc/os-release`, the machine and `XDG_SESSION_TYPE` or
 `DISPLAY`: `@capture(display="x11")` and `@capture(display="wayland")` can sit side by side. A
-driver's own `@run_in_session` or `@write_files` replaces the base class's Linux default, which runs
-as the driver's user inside the desktop session. The base class keeps its state in `self._computer`
+driver's own `@run_in_session`, `@write_files` or `@read_files` replaces the base class's default for
+its OS. On Linux, macOS and Windows that default acts as the driver's user inside the desktop
+session. On Android it goes through adb (`AGENTENV_ADB`, else the `adb` on `PATH`, with adb's own
+`ANDROID_SERIAL` and `ADB_SERVER_SOCKET`) as the device's `shell` user under `/sdcard`, and a written
+file is announced to the media scanner. The base class keeps its state in `self._computer`
 and names its own members `_computer_*` and `computer_*`; a driver that redefines one of them, or
 another private member of the base class, is refused when it is defined, so a helper of the
 driver's can't silently replace one. What the optional operations give is served only when the
 driver has them, through the `served_tools`, `served_extensions` and `served_operations` hooks.
+
+**Where it runs.** A driver runs `inside` its computer, as the session user, unless its class says
+`placement = "beside"`. It then runs next to a device it reaches, such as an Android phone over
+adb, and passes `__init__` the device's `Platform`, since what it would detect is its own host's.
+`computer/v1`'s params carry `placement`. `provider`, a driver the device's provider serves, is
+reserved, and a class that names it is refused. agent-env's `computer_driver` env names the placement in its
+`env.toml` too, and a put where the two differ is refused.
 
 **What the base class serves:**
 
@@ -768,9 +780,13 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
   `data/get` returns the files under the `paths` it's given, relative to the home, or under the
-  card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
-  uploaded under a `write_namespace` grant, leaving out the paths its apps keep their data in. An
-  environment whose `@get_data` hook takes no `paths` refuses them.
+  card's `default_data_paths` when it's given none, inline or uploaded under a `write_namespace`
+  grant, leaving out the paths its apps keep their data in. The default paths are `Desktop`,
+  `Documents` and `Downloads`, unless the driver class declares its own
+  (`default_data_paths = ("Download", "DCIM")`): a tuple of normalized relative paths, checked when
+  the class is defined. With `@read_files`, `data/get` reads the files through it. A beside
+  driver's recordings, under `.agentenv-recordings`, still come from its own home. An environment
+  whose `@get_data` hook takes no `paths` refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 

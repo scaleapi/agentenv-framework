@@ -119,6 +119,11 @@ def test_unknown_predicates_are_refused():
     ({"keys": ("Return",)}, "keys: 'Return' is not a W3C key value"),
     ({"display_modes": ((10, 10),)}, "display_modes and @set_display come together"),
     ({"screen_kind": "tablet"}, "screen_kind is desktop or page, got 'tablet'"),
+    ({"placement": "provider"}, "placement provider, a driver its device's provider serves, isn't supported yet"),
+    ({"default_data_paths": "Download"}, "default_data_paths is a tuple of normalized paths relative to the session "
+                                         "user's home, got 'Download'"),
+    ({"default_data_paths": ("/sdcard/Download",)}, r"default_data_paths is a tuple .*, got \('/sdcard/Download',\)"),
+    ({"default_data_paths": ("Download", "../etc")}, r"default_data_paths is a tuple .*, got \('Download', '../etc'\)"),
     ({"screenshot_delay_ms": -1}, "screenshot_delay_ms is an integer from 0 to 10000, got -1"),
     ({"screenshot_delay_ms": 0.5}, "screenshot_delay_ms is an integer from 0 to 10000, got 0.5"),
 ])
@@ -132,11 +137,12 @@ def test_set_display_without_modes_is_refused():
         _define({"resize": set_display(lambda self, w, h, s: None)})
 
 
-def test_a_driver_method_replaces_the_linux_default():
+def test_a_driver_method_replaces_the_os_defaults():
     Driver = _define({"run": run_in_session(lambda self, *a: None)})
     assert declared(Driver)["run_in_session"] == [("run", {})]
-    assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session",
-                                                         {"os": frozenset({"linux", "macos", "windows"})})]
+    assert sorted(declared(MinimalDriver)["run_in_session"]) == [
+        ("_computer_android_run_in_session", {"os": frozenset({"android"})}),
+        ("_computer_linux_run_in_session", {"os": frozenset({"linux", "macos", "windows"})})]
 
 
 def test_the_platform_is_detected(tmp_path, monkeypatch):

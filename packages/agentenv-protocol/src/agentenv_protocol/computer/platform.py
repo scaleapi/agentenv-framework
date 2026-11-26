@@ -16,7 +16,7 @@ _Entry = TypeVar("_Entry")
 #: The platform (``platform_key``) the computer's composer built an app for, which its server and install steps read in
 #: place of what /etc/os-release says, so they act on the install the image holds; unset outside a composed computer.
 PLATFORM_ENV = "AGENTENV_PLATFORM"
-_OS = {"linux": "linux", "darwin": "macos", "win32": "windows"}
+_OS = {"linux": "linux", "darwin": "macos", "win32": "windows", "android": "android"}
 
 
 @dataclass(frozen=True)
