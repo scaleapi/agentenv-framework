@@ -29,6 +29,7 @@ from agent_env.config.model_pricing import Cost, ReportedBy
 from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
+    INFRA_ERROR,
     PromptResponse,
     StepContextError,
     TaskStepContext,
@@ -813,6 +814,13 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
                     if self.writes_mistakes_entry else None)
         return RubricsVerdict(criteria=rows(), score=0, output=self._entry_format_fields(), mistakes_entry=mistakes)
 
+    def _not_graded(self, reason: str) -> RubricsVerdict:
+        """A true skip, no score and no rows: a run that says nothing about the agent, which an aggregate leaves out;
+        for rubric_evidence_with_mistakes the second entry is skipped too."""
+        mistakes = ({**self._mistakes_entry_fields(), "results": [], "score": None, "skipped": reason}
+                    if self.writes_mistakes_entry else None)
+        return RubricsVerdict(skipped=reason, output=self._entry_format_fields(), mistakes_entry=mistakes)
+
     def _judge_model(self, context: TaskStepContext) -> str:
         """The model this judge asks for in this run: the run's ``judge_model``, the step's own, then the config's judge
         role and default, and claude-sonnet-5-5 last."""
@@ -1047,7 +1055,8 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         """``verdict``, failing its step once recorded when ``fail_task_when_not_passing`` and it scores under
         ``min_passing_score``, naming the rows that weren't met; one that failed already, as a judge whose samples
         split, keeps its own error."""
-        if verdict.error is not None or not self.fail_task_when_not_passing or verdict.score >= self.min_passing_score:
+        if (verdict.skipped is not None or verdict.error is not None or not self.fail_task_when_not_passing
+                or verdict.score >= self.min_passing_score):
             return verdict
         unmet = [str(row.get("id")) for row in verdict.criteria
                  if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
@@ -1117,6 +1126,11 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
             )
         stored_response, prompt_response = prompt_response, as_of
 
+        if prompt_response.error_type == INFRA_ERROR:
+            reason = (f"the run's turn failed for an infrastructure reason (error_code="
+                      f"{prompt_response.error_code}), not the assistant's")
+            logger.warning(f"Not grading '{self.verifier_id}': {reason}")
+            return self._not_graded(reason)
         if prompt_response.error_type:
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
             return self._skipped("prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")

@@ -12,7 +12,7 @@ from agent_env.store import LocalSqliteDocumentStore
 from agent_env.task.outcome import FailureCause, StepRole, classify_failure
 from agent_env.task.store import TASK_INSTANCES_COLLECTION, TaskInstanceStore, set_task_instance_store
 from agent_env.task.task import Task
-from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError
+from agent_env.task_step.context import AgentTurnInfraError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
@@ -78,6 +78,13 @@ def _chained(outer: BaseException, inner: BaseException, *, explicit: bool = Tru
     (RuntimeError("codex CLI stalled (attempt 1: unexpected status 408 Request Timeout: request body arrived too slowly)"),
      FailureCause.TRANSIENT),
     (VerifierNotPassingError("verifier 'grade' scored 0.5: rows not met: done"), FailureCause.VERDICT),
+    # An agent turn that its agent says failed for an infrastructure reason is one agent-env may retry; a key out of
+    # budget in its message still wins, since a retry fails the same way.
+    (AgentTurnInfraError("always_on: wake 3's agent turn failed for an infrastructure reason (error_type=infra_error, "
+                         "error_code=psi.harness): TypeError: 'NoneType' object is not iterable"),
+     FailureCause.TRANSIENT),
+    (AgentTurnInfraError(f"always_on: wake 3's agent turn failed for an infrastructure reason: {BUDGET_400}"),
+     FailureCause.KEY_BUDGET),
     # Text from an env, a tool, a script or a model mentions codes and words the proxy also uses; none of it is ours.
     (RuntimeError("tool get_account returned HTTP 401 Unauthorized from env MCP server"), FailureCause.UNKNOWN),
     (RuntimeError("run_code 'reload': exited 1: urllib.error.HTTPError: HTTP Error 401: Unauthorized"),

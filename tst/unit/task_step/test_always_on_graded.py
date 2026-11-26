@@ -1,12 +1,14 @@
 """What graders read of an always_on run: the graded response (the user's whole chat from the agent, with times), the
 conversation (what the user saw: her messages and the agent's message_user texts, her last word, an end marker), and
-error_type on a run whose agent turn failed or timed out, so verifiers skip it."""
+error_type on a run whose agent turn failed or timed out; one whose turn failed for an infrastructure reason is recorded
+the same way, then fails its step."""
 
 from __future__ import annotations
 
 import pytest
 
 from agent_env.a2a_agent import conversation_store
+from agent_env.task_step.context import AgentTurnInfraError
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import (
     AgentPromptResponseVerifierTaskStep,
@@ -222,11 +224,11 @@ async def test_a_take_refused_before_the_run_still_closes_the_conversation_and_r
 
 @pytest.mark.parametrize("play,error_type,end_reason", [
     (lambda rig: Fail("the CLI crashed"), "agent_turn_failed", "agent_turn_failed"),
-    (lambda rig: Fail("sandbox gone", error_type="infra_error"), "infra_error", "agent_turn_failed"),
+    (lambda rig: Fail("bad tool call", error_type="agent_error"), "agent_error", "agent_turn_failed"),
     (lambda rig: (_ for _ in ()).throw(TimeoutError("no answer")), "agent_turn_timeout", "agent_turn_timeout"),
     (lambda rig: Fail("stopped", state="canceled"), "agent_turn_canceled", "agent_turn_failed"),
     (lambda rig: Fail("won't do that", state="rejected"), "agent_turn_rejected", "agent_turn_failed"),
-], ids=["failed", "failed with the agent's error type", "timed out", "canceled", "rejected"])
+], ids=["failed", "failed with the agent's own error", "timed out", "canceled", "rejected"])
 @pytest.mark.asyncio
 async def test_a_failed_or_timed_out_turn_sets_error_type_and_the_verifier_skips_the_run(monkeypatch, tmp_path, play,
                                                                                          error_type, end_reason):
@@ -255,3 +257,68 @@ async def test_a_nudge_turn_that_doesn_t_complete_sets_error_type_too(monkeypatc
     assert nudge["state"] == state and len(rig.sent) == 2
     [response] = ctx.prompt_responses
     assert (response.error_type, rig.record(ctx)["end_reason"]) == (f"agent_turn_{state}", "agent_turn_failed")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_error_turn_keeps_its_error_code_in_the_record_and_is_still_graded(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(
+        t1=_message("on it"), t2=lambda rig: Fail("the model refused", error_type="agent_error", error_code="psi.model")),
+              answers=[{"outcome": "reply", "message": "great"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
+    record = rig.record(ctx)
+    assert (record["end_reason"], record["error_type"], record["error_code"]) == (
+        "agent_turn_failed", "agent_error", "psi.model")
+    assert ctx.prompt_responses[0].error_code == "psi.model"
+
+
+# ---- a turn that failed for an infrastructure reason fails the step, once the run is recorded -------------------------
+
+def _gateway_502(rig):
+    rig.message("checking flights now")
+    return Fail("APIStatusError: 502 Bad Gateway", error_type="infra_error", error_code="psi.gateway")
+
+
+@pytest.mark.asyncio
+async def test_an_infra_error_turn_is_recorded_as_any_failed_turn_and_then_fails_the_step(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("on it"), t2=_gateway_502),
+              answers=[{"outcome": "reply", "message": "great"}])
+    await rig.arm()
+    ctx = rig.context()
+    with pytest.raises(AgentTurnInfraError, match=r"wake 2's agent turn failed for an infrastructure reason "
+                                                  r"\(error_type=infra_error, error_code=psi.gateway\)"):
+        await rig.run(rig.step(), ctx)
+
+    record = rig.record(ctx)
+    assert (record["end_reason"], record["error_type"], record["error_code"]) == (
+        ao.AGENT_TURN_INFRA_ERROR, "infra_error", "psi.gateway")
+    assert record["error"] == "APIStatusError: 502 Bad Gateway" and record["object_url"]
+    [response] = ctx.prompt_responses
+    assert (response.error_type, response.error_code, response.error_message) == (
+        "infra_error", "psi.gateway", "APIStatusError: 502 Bad Gateway")
+    assert response.response == ("[Mon Nov 9, 9:00 AM EST] on it\n\n"
+                                 "[Mon Nov 9, 9:00 AM EST] checking flights now")
+    assert len(response.target_agent_per_turn_trajectory_object_urls) == 2
+    [end] = rig.events(ctx, "end")
+    assert end["reason"] == ao.AGENT_TURN_INFRA_ERROR
+    assert rig.events(ctx, "agent_turn_end")[-1]["state"] == "failed"
+    assert rig.chat(ctx)[-1]["parts"][-1]["metadata"]["agentenv"]["end_reason"] == ao.AGENT_TURN_INFRA_ERROR
+    assert conversation_store.get_conversation(ctx.metadata["a2a_conversations"]["week"])["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_a_nudge_turn_that_fails_for_an_infrastructure_reason_fails_the_step_too(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(
+        t1=lambda rig: "PRIVATE all done",
+        t2=lambda rig: Fail("connection reset", error_type="infra_error", error_code="psi.gateway")))
+    await rig.arm()
+    ctx = rig.context()
+    with pytest.raises(AgentTurnInfraError):
+        await rig.run(rig.step(), ctx)
+
+    [nudge] = rig.events(ctx, "nudge")
+    assert nudge["state"] == "failed"
+    record = rig.record(ctx)
+    assert (record["end_reason"], record["error_code"]) == (ao.AGENT_TURN_INFRA_ERROR, "psi.gateway")
+    assert ctx.prompt_responses[0].error_type == "infra_error"

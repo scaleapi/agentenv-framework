@@ -55,7 +55,8 @@ class TurnEvents:
     "result", "error"}`` (``result`` absent when none came back; ``internal`` for a tool the harness provides itself), ``{"type": "prompt", "text"}`` (the turn's input,
     when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn; a compaction's
     also has ``compaction``, what its span recorded: ``written_by``, ``wakes_summarized``, ``wakes_kept``,
-    ``first_kept_wake``, ``waited_s``) or ``{"type": "final", "text", "error"}``; for an unknown format,
+    ``first_kept_wake``, ``waited_s``; the harness's account of a failed wake has ``failure``: its ``kind`` and what
+    else its span recorded) or ``{"type": "final", "text", "error"}``; for an unknown format,
     ``{"type": "raw", "event"}`` per stored item. ``agent_labels``: its spans say which agent made each, or hold the
     harness's own compaction or messages (``has_agent_labels``)."""
 
@@ -169,17 +170,24 @@ def _settle(call: dict, result: Any, error: bool) -> None:
 # assistant). A model span's ``gen_ai.output.messages`` lists its parts in order: reasoning, text, tool calls (the
 # summary call's text is a ``compaction`` part). The harness's own records are ``harness.*`` spans: the compaction
 # (``harness.compaction``, from the start of the save turn to the end of the summary, its ``written_by`` saying who
-# wrote the summary) and each message it put before the assistant (``harness.message``, with its ``purpose``).
+# wrote the summary), each message it put before the assistant (``harness.message``, with its ``purpose``), and why a
+# wake failed (``harness.error``, its ``kind`` also on that wake's ``failed_wake`` message).
 _AGENT = "gen_ai.agent.name"
 _MAIN_AGENT = "gen_ai.main_agent.name"
 _OUTPUT_MESSAGES = "gen_ai.output.messages"
 _COMPACTION = "harness.compaction"
 _MESSAGE = "harness.message"
+_ERROR = "harness.error"
 _SAVE = "pre_compaction_save"
 _AFTER = "after_compaction"
 _FAILED_WAKE = "failed_wake"
 # The step a harness message's purpose stands for, as staging and the judge name it.
 _STEP_OF_PURPOSE = {"save_request": _SAVE, "after_summary": _AFTER, "failed_wake": _FAILED_WAKE}
+# The kinds of wake failure a harness reports (``harness.error.kind``) that are its infrastructure's, not the
+# assistant's: the model endpoint failing, throttling past its retries, a model call timing out, the harness's own bug.
+# Its other kinds (the model's own doing, a full context, the wake's time limit, a cost cap, unknown) say nothing either
+# way.
+INFRA_FAILURE_KINDS = frozenset({"gateway", "throttled", "timeout_call", "harness"})
 
 
 def _span_id(span: dict) -> Optional[str]:
@@ -238,6 +246,10 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             continue
         if span.get("name") == _MESSAGE:
             timed.append((start, i, {"type": "note", "text": _harness_message_note(attrs), **tag}))
+            continue
+        if span.get("name") == _ERROR:  # the harness's own span, which _is_harness_own would leave out
+            failure = _span_failure(attrs)
+            timed.append((start, i, {"type": "note", "text": _failure_note(failure), "failure": failure}))
             continue
         if harness and _is_harness_own(span, attrs, by_id):
             continue
@@ -405,13 +417,43 @@ def compaction_note(facts: dict, summary: str) -> str:
 
 
 def _harness_message_note(attrs: dict) -> str:
-    """A ``harness.message`` span as a note: the text the harness put before the model, labelled by its purpose. The
-    message after a compaction repeats the user's first request word for word: it is the harness's, not a new one from
-    the user."""
+    """A ``harness.message`` span as a note: the text the harness put before the model, labelled by its purpose, and
+    for the message after a failed wake, the kind of failure the harness says it was. The message after a compaction
+    repeats the user's first request word for word: it is the harness's, not a new one from the user."""
     step = _STEP_OF_PURPOSE.get(str(attrs.get("harness.message.purpose") or ""))
     who = "re-sent by the harness, it repeats the user's earlier words" if step == _AFTER else "not from the user"
-    return (f"Message the harness sent the assistant ({f'step {step}; ' if step else ''}{who}):\n"
+    kind = attrs.get(f"{_ERROR}.kind") if step == _FAILED_WAKE else None
+    failed = f"the wake failed: {_kind_words(kind)}; " if kind else ""
+    return (f"Message the harness sent the assistant ({f'step {step}; ' if step else ''}{failed}{who}):\n"
             + str(attrs.get("harness.message.text") or ""))
+
+
+def _span_failure(attrs: dict) -> dict:
+    """What a ``harness.error`` span recorded, by its attributes' names after ``harness.error.``: ``kind``, ``class``,
+    ``message``, and when they apply ``http_status``, ``retries``, ``timeout_s``, ``during`` and the gateway's ids."""
+    prefix = f"{_ERROR}."
+    return {key[len(prefix):]: value for key, value in attrs.items() if key.startswith(prefix) and value is not None}
+
+
+def is_infra_failure(failure: Mapping) -> bool:
+    """Whether a failure note's ``failure`` is the infrastructure's (``INFRA_FAILURE_KINDS``), not the assistant's."""
+    return failure.get("kind") in INFRA_FAILURE_KINDS
+
+
+def _kind_words(kind: Any) -> str:
+    return f"{kind}, an infrastructure failure, not the assistant's doing" if kind in INFRA_FAILURE_KINDS else str(kind)
+
+
+def _failure_note(failure: Mapping) -> str:
+    """A failed wake as the harness tells it: the kind of failure (said to be no doing of the assistant's when it is
+    the infrastructure's), its message (for the wake's time limit, what was running), the HTTP status and retries."""
+    details = [str(failure["message"])] if failure.get("message") else []
+    if failure.get("http_status") is not None:
+        details.append(f"HTTP {failure['http_status']}")
+    if failure.get("retries") is not None:
+        details.append(f"after {failure['retries']} retries")
+    return (f"The harness says this wake failed: {_kind_words(failure.get('kind') or 'unknown')}"
+            + (f" ({'; '.join(details)})" if details else ""))
 
 
 def _span_text(attrs: dict) -> str:

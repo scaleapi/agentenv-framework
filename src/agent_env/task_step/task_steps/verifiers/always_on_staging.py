@@ -4,7 +4,8 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
 - ``wakes/wake_NNN.jsonl``: what woke the assistant (``woke``, the user's messages in full ``user_message``, the full
   text it was sent ``wake_input``), then its turn's tool calls with their inputs and results (``tool_call``), its
   own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), what the
-  harness put in the turn (``harness_note``: a compaction summary, a message it sent the assistant), then the rest
+  harness put in the turn (``harness_note``: a compaction summary, a message it sent the assistant, its account of
+  why the wake failed, which has ``failure``), then the rest
   of the wake in time order (``app_change`` for every change, ``turn_end`` with its closing reply,
   ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn that ended at its time or tool-call limit
   while the run went on (the step's ``continue_after_wake_limit``) has ``cut_off`` on its ``turn_end`` (or ``nudge``)
@@ -18,7 +19,8 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
 - ``events.jsonl``: every line of every wake, and the run's start and end. ``triggers.jsonl``: every trigger firing.
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
   arguments) and messages with the ``file:line`` they're at, a
-  compaction the harness ran before its turn, and its errors.
+  compaction the harness ran before its turn, and its errors, a failure the harness reports among them, said to be no
+  doing of the assistant's when it is the infrastructure's.
 
 A run that kept no timeline is staged from one made of its turns by position (``by_position``): each wake file is
 one turn, in the order the turns ran, with the text it was sent and its own events.
@@ -39,7 +41,12 @@ from typing import Any, Mapping, Optional, Sequence
 
 from agent_env.task_step.task_steps.always_on import BULKY_EVENT_FIELDS, LIMIT_WORDS, woke_by_text
 from agent_env.task_step.task_steps.notification_delivery import label_time
-from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import UNKNOWN, TurnEvents, compaction_words
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (
+    UNKNOWN,
+    TurnEvents,
+    compaction_words,
+    is_infra_failure,
+)
 from agent_env.task_step.task_steps.verifiers.run_context import Firing
 
 WAKES_DIR = "wakes"
@@ -68,7 +75,8 @@ _SAVE_STEP = "pre_compaction_save"
 _BEFORE_WAKE_STEPS = frozenset({_SAVE_STEP, "after_compaction", "failed_wake"})
 # A line's fields that say what and where it is; ``fit`` moves only the others.
 _IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
-                       "step", "subagent", "compaction", "internal", "cut_off", "cut_off_notice", "limit"})
+                       "step", "subagent", "compaction", "failure", "internal", "cut_off", "cut_off_notice",
+                       "limit"})
 
 
 @dataclass(frozen=True)
@@ -186,6 +194,7 @@ class _Stager:
         self.change_values_found = self.change_values_missing = 0
         self.labelled = 0  # trajectories whose spans say which agent made each (``TurnEvents.agent_labels``)
         self.summary_writers: Counter = Counter()  # compactions by who wrote their summary (``written_by``)
+        self.harness_failures: list[dict] = []  # each wake the harness says failed: {wake, kind}
 
     def wake(self, n: Optional[int]) -> _Wake:
         n = n or self.current
@@ -298,8 +307,10 @@ class _Stager:
             elif kind == "note":
                 if e.get("compaction"):
                     self.summary_writers[e["compaction"]["written_by"]] += 1
+                if e.get("failure"):
+                    self.harness_failures.append({"wake": w.n, "kind": e["failure"].get("kind")})
                 lines.append(_line("harness_note", w.n, turn=which, step=e.get("step"), compaction=e.get("compaction"),
-                                   text=e["text"]))
+                                   failure=e.get("failure"), text=e["text"]))
             elif kind == "raw":
                 lines.append(_line("trajectory_item", w.n, turn=which, item=e["event"]))
         staged = sum(len(_dumps(line).encode()) for line in lines) + side
@@ -384,6 +395,7 @@ class _Stager:
                            ("app_changes_not_recorded", self.unrecorded_changes),
                            ("agent_labeled_trajectories", self.labelled),
                            ("compaction_summaries_written_by", dict(sorted(self.summary_writers.items()))),
+                           ("harness_failures", self.harness_failures),
                            ("turns_by_position", self.by_position)):
             if value:
                 record[key] = value
@@ -466,6 +478,10 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
             out.append(f"- nudged after closing text; then {line.get('outcome')}{cut} ({path}:{i})")
         elif event == "harness_note" and line.get("compaction") is not None:
             out.append(f"- {_compaction_line(line['compaction'], during=acted)} ({path}:{i})")
+        elif event == "harness_note" and line.get("failure"):
+            failure = line["failure"]
+            whose = "; an infrastructure failure isn't the assistant's doing" if is_infra_failure(failure) else ""
+            out.append(f"- error: the harness says the wake failed ({failure.get('kind')}){whose} ({path}:{i})")
         elif event == "app_change":
             changes["by the assistant" if line.get("by") == "agent" else "by others" if line.get("by")
                     else "with no known actor"] += 1

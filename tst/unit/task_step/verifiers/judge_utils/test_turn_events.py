@@ -328,6 +328,56 @@ def test_a_failed_wake_s_message_is_a_note_in_its_step():
         "[Harness: your last wake ended with an error before it finished (TimeoutError).]")}
 
 
+def _error_span(kind: str, **attrs) -> dict:
+    """A failed wake's harness.error span, as the PSI harness writes it: the harness's own, status ERROR."""
+    return {"name": "harness.error", "start_time": "9", "end_time": "9", "parent_id": None,
+            "status": {"status_code": "ERROR", "description": attrs.get("harness.error.message", "")},
+            "attributes": {"gen_ai.agent.name": "harness", "gen_ai.main_agent.name": "Orchestrator",
+                           "harness.error.kind": kind, "harness.error.class": "APIStatusError", **attrs}}
+
+
+def test_a_harness_error_span_is_a_failure_note_with_its_kind_after_the_wake_s_own_events():
+    spans = _v7("claude")
+    turn_start = next(s["start_time"] for s in spans if s["name"] == "mcp_tools")
+    spans = [s for s in spans if s["start_time"] >= turn_start]
+    error = _error_span("gateway", **{"harness.error.message": "APIStatusError: Error code: 502 - Bad Gateway",
+                                      "harness.error.http_status": 502, "harness.error.retries": 2,
+                                      "harness.error.router_request_id": "req-1"})
+    error["start_time"] = error["end_time"] = max(str(s.get("end_time") or s["start_time"]) for s in spans)
+    spans.append(error)
+
+    events = turn_events(json.dumps(spans)).events
+
+    assert events[-1] == {"type": "note", "text": (
+        "The harness says this wake failed: gateway, an infrastructure failure, not the assistant's doing "
+        "(APIStatusError: Error code: 502 - Bad Gateway; HTTP 502; after 2 retries)"), "failure": {
+        "kind": "gateway", "class": "APIStatusError", "message": "APIStatusError: Error code: 502 - Bad Gateway",
+        "http_status": 502, "retries": 2, "router_request_id": "req-1"}}
+    assert [e["type"] for e in events[:-1]] == ["thinking", "text", "tool_call", "thinking", "text"]
+
+
+@pytest.mark.parametrize("kind", ["model", "timeout_wake", "context_full", "cost_cap", "unknown"])
+def test_a_failure_the_harness_doesn_t_put_on_the_infrastructure_is_named_without_saying_whose_it_is(kind):
+    [note] = turn_events(json.dumps([_error_span(kind, **{"harness.error.message": "it stopped"})])).events
+
+    assert note["text"] == f"The harness says this wake failed: {kind} (it stopped)"
+    assert note["failure"]["kind"] == kind
+
+
+def test_a_failed_wake_s_message_names_the_kind_of_failure_the_harness_says_it_was():
+    span = {"name": "harness.message", "start_time": "1", "attributes": {
+        "gen_ai.agent.name": "harness", "gen_ai.main_agent.name": "Orchestrator",
+        "harness.message.purpose": "failed_wake", "harness.error.kind": "throttled",
+        "harness.message.text": "[Harness: your last wake ended with an error before it finished (RateLimitError).]"}}
+
+    [note] = turn_events(json.dumps([span])).events
+
+    assert note["text"] == (
+        "Message the harness sent the assistant (step failed_wake; the wake failed: throttled, an infrastructure "
+        "failure, not the assistant's doing; not from the user):\n"
+        "[Harness: your last wake ended with an error before it finished (RateLimitError).]")
+
+
 def test_a_harness_wake_with_no_compaction_messages_or_helpers_gets_no_notes_or_marks():
     # A wake with no compaction before it: the recorded wake's own turn and its usage record.
     spans = _v7("claude")
