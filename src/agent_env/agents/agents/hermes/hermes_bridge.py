@@ -197,7 +197,8 @@ def build_config(
     role: str | None,
     skills_dir: Path,
     environ: Mapping[str, str] = os.environ,
-    web_tools: bool = True,
+    *,
+    web_tools: bool,
 ) -> dict:
     """The profile's config.yaml for one turn, as JSON (which YAML reads). Everything dynamic is rebuilt each turn, and
     a context's turns run one at a time, so no turn reads another's."""
@@ -331,7 +332,8 @@ async def run_hermes(
     task_id: str | None = None,
     role: str | None = None,
     effort: str | None = None,
-    web_tools: bool = True,
+    *,
+    web_tools: bool,
     skills_dir: Path = HERMES_ROOT / "agentenv-skills",
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
@@ -544,3 +546,7 @@ class _EventParser:
 
 # The toolsets that reach the web, which agent.disabled_toolsets turns off.
 _WEB_TOOLSETS = ("web", "search", "browser", "x_search")
+
+
+# The Hermes commit whose one-shot runner was checked to drop _WEB_TOOLSETS' tools named in agent.disabled_toolsets.
+WEB_TOOLSETS_COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"

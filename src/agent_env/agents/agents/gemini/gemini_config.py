@@ -74,7 +74,7 @@ def _default_system_settings() -> dict[str, Any]:
 
 @contextmanager
 def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
-                 system_prompt: str | None, web_tools: bool = True) -> Iterator[Path]:
+                 system_prompt: str | None, *, web_tools: bool) -> Iterator[Path]:
     """One run's system settings, in an owner-only file of its own that names `servers` with `role`; with a
     `system_prompt`, also a context file the CLI layers on its own system prompt (the CLI has no flag for one, and
     replacing its system prompt would lose its tool protocol). `web_tools` False leaves the CLI's own web tools out
@@ -130,3 +130,7 @@ def _prompt_file(home: Path, system_prompt: str) -> Iterator[Path]:
 
 # The CLI's own web tools: what a deploy_agent web_tools False leaves out.
 _WEB_TOOLS = ("google_web_search", "web_fetch")
+
+
+# The CLI version on which `tools.exclude` was checked to leave _WEB_TOOLS out of the CLI's tool registry.
+WEB_TOOLS_CLI_VERSION = "0.38.2"

@@ -753,7 +753,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             event_callback=_record_event,
                             max_turns=cfg.max_turns,
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
-                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools, cfg.web_tools),
+                                              *codex_config.builtin_tools_overrides(
+                                                  cfg.builtin_tools, web_tools=cfg.web_tools),
                                               *catalog],
                         )
                 except Exception as e:

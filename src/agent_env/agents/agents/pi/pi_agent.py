@@ -745,3 +745,7 @@ class PiAgent(AgentEnvAgent):
 
 def _is_tool_result(event: Mapping[str, Any]) -> bool:
     return event.get("type") == "message_end" and (event.get("message") or {}).get("role") == "toolResult"
+
+
+# The pi version checked to have no web tools of its own, so web_tools False changes nothing.
+NO_WEB_TOOLS_VERSION = "1.1.0"

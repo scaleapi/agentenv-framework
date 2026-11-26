@@ -29,7 +29,7 @@ def test_the_judge_s_cli_offers_bash_and_read_and_no_mcp_server_of_its_own(app):
     cfg = _judge_config(app)
     command = claude_bridge._command("sess", False, model=None, allowed_tools=None, mcp_servers=None,
                                      system_prompt=None, output_format=None, role=None, effort=None,
-                                     max_turns=cfg.max_turns, builtin_tools=cfg.builtin_tools)
+                                     max_turns=cfg.max_turns, builtin_tools=cfg.builtin_tools, web_tools=True)
     assert command[command.index("--tools") + 1] == "Bash,Read"
     assert "--strict-mcp-config" in command and "--mcp-config" not in command
     assert command[command.index("--max-turns") + 1] == "400"

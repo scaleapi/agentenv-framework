@@ -35,7 +35,7 @@ def _run(turn: Turn | None = None, **kwargs: Any) -> tuple[antigravity_bridge.An
         fake_sdk.Agent.turns.append(turn)
     events: list[dict] = []
     arguments = dict(model="m", session_id=None, mcp_servers=None, system_prompt=None, timeout_s=30, role=None,
-                     builtin_tools=None, max_turns=None, workspace="/w", event_callback=events.append)
+                     builtin_tools=None, web_tools=True, max_turns=None, workspace="/w", event_callback=events.append)
     result = asyncio.run(antigravity_bridge.run_antigravity("go", **{**arguments, **kwargs}))
     return result, events
 
@@ -449,7 +449,7 @@ def test_a_cancelled_turn_files_its_records_under_the_conversation_it_reached(mo
     async def cancelled() -> None:
         turn = asyncio.create_task(antigravity_bridge.run_antigravity(
             "look", model="m", session_id=None, mcp_servers=None, system_prompt=None, timeout_s=30, role=None,
-            builtin_tools=None, max_turns=None, workspace="/w", event_callback=lambda _: None,
+            builtin_tools=None, web_tools=True, max_turns=None, workspace="/w", event_callback=lambda _: None,
             attachment_paths=[str(image)]))
         await asyncio.sleep(0.2)
         turn.cancel()

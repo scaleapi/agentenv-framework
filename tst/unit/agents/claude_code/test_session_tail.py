@@ -148,7 +148,7 @@ def test_run_claude_feeds_a_turns_transcript_records_and_each_resumed_attempts_e
     events: list = []
     result = asyncio.run(claude_bridge.run_claude(
         prompt="p", session_id="sess-1", resume=True, event_callback=lambda e: events.append(("stdout", e)),
-        aux_callback=lambda name, record: events.append((name, record)), tool_shapes=(shapes := set())))
+        aux_callback=lambda name, record: events.append((name, record)), tool_shapes=(shapes := set()), web_tools=True))
     fed = [(name, record.get("uuid") or record.get("subtype")) for name, record in events if name != "stdout"]
     assert result.attempts == 2
     assert fed == [("session", "u1"), ("tools", None), ("attempt", "success"), ("session", "u2")]
@@ -160,7 +160,8 @@ def test_run_claude_feeds_a_turns_transcript_records_and_each_resumed_attempts_e
 def test_run_claude_without_an_aux_callback_reads_no_transcript(scripted, monkeypatch):  # noqa: F811
     scripted["queue"].append((_event(type="result", subtype="success", result="done").encode(), 0))
     monkeypatch.setattr(claude_bridge, "SessionTail", None)
-    assert asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False)).response == "done"
+    assert asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False,
+                                                web_tools=True)).response == "done"
 
 
 @pytest.fixture

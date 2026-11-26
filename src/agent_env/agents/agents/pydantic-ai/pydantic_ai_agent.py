@@ -632,3 +632,7 @@ def _entry_holding(directory: Path, path: Path) -> str | None:
         return path.resolve().relative_to(directory.resolve()).parts[0]
     except (ValueError, IndexError):
         return None
+
+
+# The pydantic-ai-harness version whose Coder was checked to bundle no web tools, so web_tools False changes nothing.
+NO_WEB_TOOLS_HARNESS_VERSION = "0.61.0"

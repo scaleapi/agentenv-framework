@@ -49,7 +49,7 @@ def spawn_capture_hang(monkeypatch):
 
 def test_prompt_goes_to_stdin_not_argv(spawn_capture):
     prompt = "evaluate this trajectory against the criteria"
-    result = asyncio.run(claude_bridge.run_claude(prompt=prompt, session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt=prompt, session_id="sess-1", resume=False, web_tools=True))
     assert not any(prompt in arg for arg in spawn_capture["cmd"])
     assert spawn_capture["kwargs"].get("stdin") is asyncio.subprocess.PIPE
     assert spawn_capture["proc"].stdin.data == prompt.encode()
@@ -69,8 +69,7 @@ def test_disables_dynamic_attribution_block_for_every_model(spawn_capture, monke
             prompt="p",
             session_id="sess-1",
             resume=False,
-            model=model,
-        )
+            model=model, web_tools=True)
     )
 
     assert spawn_capture["kwargs"]["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
@@ -84,8 +83,7 @@ def test_cache_fix_preserves_litellm_cost_attribution(spawn_capture):
             session_id="sess-1",
             resume=False,
             project_id="project-1",
-            task_id="task-1",
-        )
+            task_id="task-1", web_tools=True)
     )
 
     env = spawn_capture["kwargs"]["env"]
@@ -99,7 +97,7 @@ def test_cache_fix_preserves_litellm_cost_attribution(spawn_capture):
 def test_oversized_judge_prompt_never_lands_on_argv(spawn_capture):
     # ~360 KB, well past MAX_ARG_STRLEN.
     prompt = "criteria " * 45_000
-    asyncio.run(claude_bridge.run_claude(prompt=prompt, session_id="sess-1", resume=False))
+    asyncio.run(claude_bridge.run_claude(prompt=prompt, session_id="sess-1", resume=False, web_tools=True))
     assert all(len(arg) < MAX_ARG_STRLEN for arg in spawn_capture["cmd"])
     assert spawn_capture["proc"].stdin.data == prompt.encode()
 
@@ -108,7 +106,7 @@ def test_timeout_kills_process_and_returns_error(spawn_capture_hang):
     # A hung CLI must hit the asyncio.TimeoutError path, which kills the
     # process and awaits proc.wait() — exercises those _FakeProc stubs.
     result = asyncio.run(
-        claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, timeout_s=0)
+        claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, timeout_s=0, web_tools=True)
     )
     assert result.error is not None
     assert "timed out" in result.error
@@ -124,6 +122,7 @@ def test_a_timed_out_turn_keeps_the_tool_calls_it_made(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, timeout_s=1))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, timeout_s=1,
+                                                  web_tools=True))
 
     assert "timed out" in result.error and result.tool_call_count == 1

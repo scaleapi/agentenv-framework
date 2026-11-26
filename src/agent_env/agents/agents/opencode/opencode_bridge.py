@@ -258,8 +258,8 @@ def _mcp_tool_prefix(server: str) -> str:
 _NON_TOOL_PERMISSIONS = ("external_directory", "doom_loop")
 
 
-def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict] | None,
-                web_tools: bool = True) -> dict[str, str]:
+def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict] | None, *,
+                web_tools: bool) -> dict[str, str]:
     """The config's ``permission``: which tools the CLI offers the model. A denied tool is left out of the model's
     tool list, not only refused when called. Without a selection every tool is allowed; ``{"disable": "*"}`` and
     ``{"only": [...]}`` deny every tool but those named and the tools of ``mcp_servers``, which a ``"*"`` deny would
@@ -271,22 +271,22 @@ def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict
     a call. Those stay allowed, as ``"*": "allow"`` leaves them, so a kept tool works as it does without a
     selection. ``web_tools`` False denies the CLI's web tools whatever the selection keeps."""
     if builtin_tools is None:
-        rules = {"*": "allow", "question": "deny"}
+        rules = {"*": "allow"}
     elif isinstance(builtin_tools.disable, list):
-        rules = {"*": "allow", **{tool: "deny" for tool in builtin_tools.disable}, "question": "deny"}
+        rules = {"*": "allow", **{tool: "deny" for tool in builtin_tools.disable}}
     else:
         rules = {
             "*": "deny",
             **{check: "allow" for check in _NON_TOOL_PERMISSIONS},
             **{tool: "allow" for tool in builtin_tools.only or []},
             **{f"{_mcp_tool_prefix(name)}*": "allow" for name in mcp_servers or {}},
-            "question": "deny",
         }
     if not web_tools:
-        # After any selection's rules, since the CLI applies the last rule that matches; `question` stays last.
-        rules = {tool: rule for tool, rule in rules.items() if tool not in _WEB_TOOLS and tool != "question"}
-        rules.update({tool: "deny" for tool in _WEB_TOOLS}, question="deny")
-    return rules
+        # After the selection's rules, since the CLI applies the last rule that matches a tool.
+        rules = {tool: rule for tool, rule in rules.items() if tool not in _WEB_TOOLS}
+        rules.update({tool: "deny" for tool in _WEB_TOOLS})
+    rules.pop("question", None)
+    return {**rules, "question": "deny"}
 
 
 def _build_config(
@@ -300,7 +300,8 @@ def _build_config(
     builtin_tools: OpenCodeTools | None = None,
     max_output_tokens: int | None = None,
     armed: bool = False,
-    web_tools: bool = True,
+    *,
+    web_tools: bool,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
@@ -353,7 +354,7 @@ def _build_config(
         # Headless: hard-deny the "ask the human" tool so a run can never block
         # waiting for input; every other tool is allowed unless builtin_tools
         # selects otherwise.
-        "permission": _permission(builtin_tools, mcp_servers, web_tools),
+        "permission": _permission(builtin_tools, mcp_servers, web_tools=web_tools),
         "autoupdate": False,
     }
     if instructions:
@@ -479,7 +480,8 @@ async def _run_opencode(
     attachment_paths: list[str] | None = None,
     effort: str | None = None,
     builtin_tools: OpenCodeTools | None = None,
-    web_tools: bool = True,
+    *,
+    web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
     max_turns: int | None = None,

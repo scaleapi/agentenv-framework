@@ -159,16 +159,8 @@ def _config_request(agent_config: dict | None) -> dict:
 def _check_builtin_tools(agent_config: dict | None, agent_name: str, selection: dict) -> None:
     """Refuse a selection of the agent's own tools that its card's agent-config extension can't take: it has no
     ``builtin_tools``, or its schema doesn't name a tool the selection does."""
-    request = _config_request(agent_config)
-    if "builtin_tools" not in request.get("supported", []):
-        raise RuntimeError(f"Agent '{agent_name}' cannot have its own tools selected: its card's "
-                           f"{AGENT_CONFIG_V1.uri} takes no 'builtin_tools'")
-    schema = request.get("schema") or {}
-    field = (schema.get("properties") or {}).get("builtin_tools")
-    if field is not None:
-        error = best_match(Draft202012Validator({**field, "$defs": schema.get("$defs", {})}).iter_errors(selection))
-        if error is not None:
-            raise RuntimeError(f"Agent '{agent_name}' can't take builtin_tools {selection}: {error.message}")
+    if (problem := _builtin_tools_problem(agent_config, selection)) is not None:
+        raise RuntimeError(f"Agent '{agent_name}' {problem}")
 
 
 def _check_peer_tools(agent_config: dict | None, agent_name: str) -> None:
@@ -487,13 +479,11 @@ class DeployAgentTaskStep(TaskStep):
         if self.role is not None:
             identity_payload["role"] = self.role
         agent_config = A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG)
-        builtin_tools, web_tools = self.builtin_tools, self.web_tools
-        if builtin_tools is not None:
-            builtin_tools, web_off = _web_tools_from_selection(agent_config, builtin_tools)
-            if web_off:
-                logger.warning(f"Agent '{self.agent_name}' doesn't name the web tools builtin_tools "
-                               f"{self.builtin_tools} turns off; turning its own web tools off with web_tools instead")
-                web_tools = False
+        builtin_tools, web_off = _web_tools_from_selection(agent_config, self.builtin_tools)
+        web_tools = False if web_off else self.web_tools
+        if web_off:
+            logger.warning(f"Agent '{self.agent_name}' doesn't name the web tools builtin_tools "
+                           f"{self.builtin_tools} turns off; turning its own web tools off with web_tools instead")
         if builtin_tools is not None:
             # Before the first request to the agent, so an agent that would keep its own tools never runs the task.
             _check_builtin_tools(agent_config, self.agent_name, builtin_tools)
@@ -833,23 +823,30 @@ def _check_web_tools(agent_config: dict | None, agent_name: str) -> None:
                            f"{AGENT_CONFIG_V1.uri} takes no 'web_tools'")
 
 
-def _web_tools_from_selection(agent_config: dict | None, selection: dict) -> tuple[dict | None, bool]:
+def _web_tools_from_selection(agent_config: dict | None, selection: dict | None) -> tuple[dict | None, bool]:
     """A ``{"disable": [...]}`` selection the agent can't take only because it names other agents' web tools: the
     selection without those names (None when nothing is left) and True, so the step turns the agent's web tools off
-    instead. Any other selection comes back unchanged with False, and is checked as written."""
-    disable = selection.get("disable")
+    instead. Any other selection, None included, comes back unchanged with False, and is checked as written."""
+    disable = (selection or {}).get("disable")
     if not isinstance(disable, list):
         return selection, False
-
-    def takes(name: str) -> bool:
-        try:
-            _check_builtin_tools(agent_config, "", {"disable": [name]})
-        except RuntimeError:
-            return False
-        return True
-
-    unknown = [name for name in disable if not takes(name)]
+    unknown = [name for name in disable if _builtin_tools_problem(agent_config, {"disable": [name]}) is not None]
     if not unknown or not set(unknown) <= _OTHER_AGENTS_WEB_TOOLS:
         return selection, False
     kept = [name for name in disable if name not in unknown]
     return ({"disable": kept} if kept else None), True
+
+
+def _builtin_tools_problem(agent_config: dict | None, selection: dict) -> str | None:
+    """Why the card's agent-config extension can't take a selection of the agent's own tools, worded to follow
+    "Agent '<name>'", or None when it can."""
+    request = _config_request(agent_config)
+    if "builtin_tools" not in request.get("supported", []):
+        return f"cannot have its own tools selected: its card's {AGENT_CONFIG_V1.uri} takes no 'builtin_tools'"
+    schema = request.get("schema") or {}
+    field = (schema.get("properties") or {}).get("builtin_tools")
+    if field is not None:
+        error = best_match(Draft202012Validator({**field, "$defs": schema.get("$defs", {})}).iter_errors(selection))
+        if error is not None:
+            return f"can't take builtin_tools {selection}: {error.message}"
+    return None

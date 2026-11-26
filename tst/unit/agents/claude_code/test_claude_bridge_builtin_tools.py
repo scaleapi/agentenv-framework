@@ -59,8 +59,10 @@ def test_web_tools_off_with_a_selection_adds_the_web_tools_to_what_is_turned_off
     assert command.count("--disallowedTools") == 1
 
 
-def test_web_tools_on_changes_nothing():
-    assert _command({"disable": ["Bash"]}, web_tools=True) == _command({"disable": ["Bash"]})
+def test_web_tools_on_leaves_the_clis_web_tools_on():
+    command = _command({"disable": ["Bash"]}, web_tools=True)
+
+    assert command[command.index("--disallowedTools") + 1] == "Bash"
 
 
 def test_a_tool_the_cli_does_not_have_is_refused():

@@ -33,7 +33,8 @@ def test_on_an_armed_clock_the_cli_goes_out_through_the_proxy_and_to_loopback_di
 @pytest.mark.parametrize("resume", [False, True])
 def test_every_cli_run_keeps_transcripts_whatever_date_the_clock_shows(resume):
     command = claude_bridge._command("sess", resume, model=None, allowed_tools=None, mcp_servers=None,
-                                     system_prompt=None, output_format=None, role=None, effort=None, max_turns=None)
+                                     system_prompt=None, output_format=None, role=None, effort=None, max_turns=None,
+                                     web_tools=True)
 
     assert command[command.index("--setting-sources") + 1] == "user"
     assert json.loads(command[command.index("--settings") + 1])["cleanupPeriodDays"] >= JS_DATE_RANGE_DAYS
@@ -55,7 +56,7 @@ def _spawned_env(monkeypatch, tmp_path, armed: bool) -> dict[str, str]:
     servers = {"env": {"url": "https://abc-123.w.modal.host/mcp"}, "local": {"url": "http://gateway:8080/mcp"},
                "peers": {"url": "http://127.0.0.1:8000/peers/mcp"}}
     with pytest.raises(RuntimeError, match="not starting the CLI"):
-        asyncio.run(claude_bridge._spawn_claude("hi", "s", False, mcp_servers=servers))
+        asyncio.run(claude_bridge._spawn_claude("hi", "s", False, mcp_servers=servers, web_tools=True))
     return spawned
 
 

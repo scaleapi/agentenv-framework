@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tst.unit.agents.letta_code.agent import a2a_server, letta_code_bridge as bridge, model_relay
+from tst.unit.agents.letta_code.agent import AGENT_DIR, a2a_server, letta_code_bridge as bridge, model_relay
 
 
 @pytest.mark.asyncio
@@ -430,3 +430,14 @@ async def test_a_caller_cancelled_twice_still_waits_for_the_work_and_its_last_st
     with pytest.raises(asyncio.CancelledError):
         await task
     assert finished == [True]
+
+
+def test_web_tools_is_a_no_op_checked_on_the_cli_version_and_backend_the_bridge_runs():
+    pinned = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["@letta-ai/letta-code"]
+
+    assert bridge.NO_WEB_TOOLS_CLI_VERSION == pinned, (
+        "the CLI version changed: check that a local-backend agent still has no web tools of its own, then move "
+        "NO_WEB_TOOLS_CLI_VERSION")
+    assert '"--backend", "local"' in (AGENT_DIR / "letta_code_bridge.py").read_text(), (
+        "the bridge left the local backend: a cloud-backend agent has web_search and fetch_webpage, which web_tools "
+        "False must then turn off")

@@ -75,7 +75,7 @@ class CodexTools(BaseModel):
         return self
 
 
-def builtin_tools_overrides(builtin_tools: CodexTools | None, web_tools: bool = True) -> list[str]:
+def builtin_tools_overrides(builtin_tools: CodexTools | None, *, web_tools: bool) -> list[str]:
     """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep, and its web search when
     ``web_tools`` is False; none without either. The MCP tools agent-env gives the agent stay with any selection."""
     off: list[frozenset[str]] = []

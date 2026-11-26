@@ -737,7 +737,8 @@ async def run_claude(
     max_turns: int | None = None,
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
-    web_tools: bool = True,
+    *,
+    web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
     aux_callback: Callable[[str, Any], None] | None = None,
     tool_shapes: set[tuple[str | None, str]] | None = None,
@@ -960,7 +961,7 @@ def _with_1m_window(model: str) -> str:
 def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools: list[str] | None,
              mcp_servers: dict[str, dict] | None, system_prompt: str | None, output_format: dict | None,
              role: str | None, effort: str | None, max_turns: int | None,
-             builtin_tools: ClaudeCodeTools | None = None, web_tools: bool = True) -> list[str]:
+             builtin_tools: ClaudeCodeTools | None = None, web_tools: bool) -> list[str]:
     """The CLI's argv. The prompt goes on stdin, since one argument over 128 KiB fails exec. ``builtin_tools`` selects
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
     the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``. ``web_tools`` False
@@ -984,8 +985,9 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
         cmd += ["--json-schema", json.dumps(output_format["schema"])]
     if allowed_tools:
         cmd += ["--allowedTools", ",".join(allowed_tools)]
-    disallowed = list(builtin_tools.disable) if builtin_tools is not None and builtin_tools.disable != "*" and \
-        builtin_tools.disable else []
+    disallowed: list[str] = []
+    if builtin_tools is not None and isinstance(builtin_tools.disable, list):
+        disallowed += builtin_tools.disable
     if builtin_tools is not None:
         if builtin_tools.only is not None or builtin_tools.disable == "*":
             cmd += ["--tools", ",".join(builtin_tools.only or [])]
@@ -1024,7 +1026,8 @@ async def _spawn_claude(
     max_turns: int | None = None,
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
-    web_tools: bool = True,
+    *,
+    web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
     on_stdout: set[str] | None = None,
 ) -> ClaudeResult:

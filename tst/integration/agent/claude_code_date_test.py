@@ -61,7 +61,8 @@ def _turn(claude: Path, home: Path, endpoint: FakeAnthropic, session_id: str, re
           zone: str) -> set[str]:
     """One turn with the bridge's own argv, in ``zone``; the dates the zone had while it ran."""
     argv = claude_bridge._command(session_id, resume, model="claude-sonnet-4-6", allowed_tools=None, mcp_servers=None,
-                                  system_prompt=None, output_format=None, role=None, effort=None, max_turns=None)
+                                  system_prompt=None, output_format=None, role=None, effort=None, max_turns=None,
+                                  web_tools=True)
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / ".claude"), "TZ": zone,
            "ANTHROPIC_BASE_URL": endpoint.url, "ANTHROPIC_API_KEY": "sk-fake", "DISABLE_AUTOUPDATER": "1",
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}

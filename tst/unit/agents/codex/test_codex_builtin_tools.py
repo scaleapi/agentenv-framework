@@ -41,7 +41,7 @@ _CATALOG = {"models": [
 
 def _overrides(selection: dict | None, web_tools: bool = True) -> list[str]:
     config = a2a_server.CodexConfig(builtin_tools=selection, web_tools=web_tools)
-    return codex_config.builtin_tools_overrides(config.builtin_tools, config.web_tools)
+    return codex_config.builtin_tools_overrides(config.builtin_tools, web_tools=config.web_tools)
 
 
 @pytest.mark.parametrize("selection", [None, {"disable": ["view_image"]}, {"only": ["exec_command", "write_stdin", "web_search"]},

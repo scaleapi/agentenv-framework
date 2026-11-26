@@ -660,7 +660,8 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                                                  _Calls(sink=request.trajectory.append))
             own = self.session_ref_for_context(context_id)
             try:
-                with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt, cfg.web_tools) as settings:
+                with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt,
+                                  web_tools=cfg.web_tools) as settings:
                     base_url = None
                     if os.environ.get("LITELLM_BASE_URL"):
                         port = os.environ.get("A2A_PORT") or "8000"

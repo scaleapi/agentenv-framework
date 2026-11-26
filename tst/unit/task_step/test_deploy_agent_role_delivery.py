@@ -2,8 +2,10 @@
 records a role the agent did not get. Its selection of the agent's own tools goes the same way: refused before any
 request by an agent whose agent-config doesn't take it or names no such tool."""
 
+import ast
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -461,3 +463,14 @@ def _gateway_env() -> DeployedGatewayEnv:
         env_id="crm", env_version=1, gateway_url="https://gw.example", mcp_url=_GATEWAY_MCP_URL, sandbox_id="sb-1", environment_card_url="https://gw.example/.well-known/agent-env.json",
         environment_card={"name": "crm"},
     )
+
+
+def test_the_rewrite_takes_exactly_the_web_tools_the_agents_name_as_their_own():
+    names: set[str] = set()
+    for path in (Path(deploy_agent.__file__).parents[2] / "agents" / "agents").glob("*/*.py"):
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "_WEB_TOOLS" for t in node.targets):
+                value = node.value.args[0] if isinstance(node.value, ast.Call) else node.value
+                names |= set(ast.literal_eval(value))
+
+    assert names == deploy_agent._OTHER_AGENTS_WEB_TOOLS

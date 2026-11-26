@@ -42,8 +42,10 @@ def test_web_tools_off_denies_the_clis_web_tools_after_any_selection_with_questi
     assert list(rules)[-3:] == ["websearch", "webfetch", "question"] and rules["question"] == "deny"
 
 
-def test_web_tools_on_changes_nothing():
-    assert _permission({"disable": ["bash"]}, _SERVERS, web_tools=True) == _permission({"disable": ["bash"]}, _SERVERS)
+def test_web_tools_on_leaves_the_clis_web_tools_on():
+    rules = _permission({"disable": ["bash"]}, _SERVERS, web_tools=True)
+
+    assert rules == {"*": "allow", "bash": "deny", "question": "deny"}
 
 
 @pytest.fixture
@@ -69,7 +71,7 @@ def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawn
 
     asyncio.run(opencode_bridge.run_opencode(
         prompt="go", context_id="ctx", session_id="ses_0", model="m", mcp_servers={"env": {"url": "https://gw/mcp"}},
-        effort="high", attachment_paths=["/w/a.png"], workspace="/w"))
+        effort="high", attachment_paths=["/w/a.png"], workspace="/w", web_tools=True))
 
     ((argv, env, cli),) = spawned
     assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0",
@@ -113,7 +115,7 @@ def test_without_mcp_servers_disable_all_denies_every_tool():
 def test_the_selection_reaches_the_cli(spawned):
     tools = a2a_server.OpenCodeConfig(builtin_tools={"disable": "*"}).builtin_tools
 
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", builtin_tools=tools))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", builtin_tools=tools, web_tools=True))
 
     ((argv, env, cli),) = spawned
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny", **_CHECKS, "question": "deny"}
@@ -129,7 +131,7 @@ def test_turns_get_the_selection_the_agent_config_set(monkeypatch, oc):
 
     async def fake_run_opencode(**kwargs):
         config = opencode_bridge._build_config(MODEL, kwargs["mcp_servers"], {}, None,
-                                               builtin_tools=kwargs.get("builtin_tools"))
+                                               builtin_tools=kwargs.get("builtin_tools"), web_tools=True)
         permissions.append(config["permission"])
         return result()
 

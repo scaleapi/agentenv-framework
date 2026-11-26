@@ -169,7 +169,7 @@ def mcp_headers(headers: Mapping[str, str] | None, role: str | None) -> dict[str
     return merged or None
 
 
-def capabilities(builtin_tools: BuiltinTools[AntigravityTool] | None, web_tools: bool = True) -> Any:
+def capabilities(builtin_tools: BuiltinTools[AntigravityTool] | None, *, web_tools: bool) -> Any:
     """The SDK's capabilities for a turn: autonomous, with `ask_question` and `generate_image` off on every turn, and
     the task's selection of the rest; `finish` stays on whatever the selection, and ``web_tools`` False turns the
     SDK's web tools off whatever it keeps."""
@@ -467,7 +467,7 @@ def file_records(conversation_id: str, env_times: set[str], turn_images: set[str
 async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | None,
                 mcp_servers: dict[str, dict] | None, system_prompt: str | None, timeout_s: int, role: str | None,
                 builtin_tools: BuiltinTools[AntigravityTool] | None, max_turns: int | None, workspace: str,
-                event_callback: Callable[[dict], None], started: list[Any], web_tools: bool = True) -> AntigravityResult:
+                event_callback: Callable[[dict], None], started: list[Any], web_tools: bool) -> AntigravityResult:
     """One turn of the SDK; ``started`` gets the turn's ``Agent`` once it starts, so whoever awaits the turn knows its
     conversation however it ends."""
     recorder = TrajectoryRecorder(event_callback)
@@ -476,7 +476,8 @@ async def _turn(prompt: str, *, base_url: str, model: str, session_id: str | Non
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     config = dict(
         base_url=base_url, model=model, save_dir=str(SAVE_DIR), workspaces=[workspace],
-        capabilities=capabilities(builtin_tools, web_tools), policies=[ag_policy.allow_all()], hooks=_hooks(recorder),
+        capabilities=capabilities(builtin_tools, web_tools=web_tools), policies=[ag_policy.allow_all()],
+        hooks=_hooks(recorder),
         retry_config=agt.RetryConfig(api_retry=_API_RETRY),
         # Merged into the harness's environment, which the model's commands inherit: on an armed clock, the egress
         # proxy, which keeps their TLS working at the env's date.

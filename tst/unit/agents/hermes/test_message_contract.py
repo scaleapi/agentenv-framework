@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 from agentenv_protocol.a2a_agent import ModelUsage, Uploaded
 
-from tst.unit.agents.hermes.agent import a2a_server, hermes_bridge, hermes_kit
+from tst.unit.agents.hermes.agent import AGENT_DIR, a2a_server, hermes_bridge, hermes_kit
 from tst.unit.agents.hermes.conftest import result
 
 
@@ -397,18 +398,27 @@ def test_a_killed_turns_counts_are_the_model_its_calls_named():
 
 
 def test_the_profile_turns_hermes_review_fork_off():
-    config = hermes_bridge.build_config("m", None, {}, None, Path("/skills"), environ={"LITELLM_BASE_URL": "http://x"})
+    config = hermes_bridge.build_config("m", None, {}, None, Path("/skills"),
+                                        environ={"LITELLM_BASE_URL": "http://x"}, web_tools=True)
 
     assert config["auxiliary"] == {"background_review": {"enabled": False}}
 
 
 def test_web_tools_off_turns_off_hermes_web_search_and_browser_toolsets():
-    def config(**kwargs):
+    def config(web_tools: bool) -> dict:
         return hermes_bridge.build_config("m", None, {}, None, Path("/skills"), environ={"LITELLM_BASE_URL": "x"},
-                                          **kwargs)
+                                          web_tools=web_tools)
 
-    assert config(web_tools=False)["agent"] == {"disabled_toolsets": ["web", "search", "browser", "x_search"]}
-    assert "agent" not in config() and config(web_tools=True) == config()
+    assert config(False)["agent"] == {"disabled_toolsets": ["web", "search", "browser", "x_search"]}
+    assert "agent" not in config(True)
+
+
+def test_the_web_toolsets_are_those_of_the_hermes_commit_the_dockerfile_pins():
+    pinned = re.search(r"^ARG HERMES_COMMIT=(\S+)$", (AGENT_DIR / "Dockerfile").read_text(), re.M).group(1)
+
+    assert hermes_bridge.WEB_TOOLSETS_COMMIT == pinned, (
+        "Hermes moved: check that agent.disabled_toolsets still drops web_search, web_extract and the browser tools "
+        "from a one-shot turn, then move WEB_TOOLSETS_COMMIT")
 
 
 def test_a_turn_whose_calls_reported_no_usage_has_unknown_counts():
