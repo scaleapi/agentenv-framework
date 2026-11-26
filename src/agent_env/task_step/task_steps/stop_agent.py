@@ -14,9 +14,10 @@ a verifier that reads an agent's container without one). In order, it:
 3. removes what is at each of ``clear_paths``, a result file the agent may have written, say.
 
 Its report is ``context.metadata["stop_agent"][step_id]``: each task and whether it was cancelled, the server, each
-process it ended with its command line and the signals it took, and each path as it was before it was removed (its
-kind, and a file's size, mtime and sha256). A process still running after SIGKILL, or a path left in place, fails the
-step once the report is written. An agent installed on its sandbox's host is refused, since the processes and files
+process it ended with its name and the signals it took, and each path as it was before it was removed (its kind, and a
+file's size, mtime and sha256). A process is named as ``ps`` names it, never by its arguments, which can hold a secret
+the shell expanded, such as the agent's model key. A process still running after SIGKILL, or a path left in place,
+fails the step once the report is written. An agent installed on its sandbox's host is refused, since the processes and files
 there aren't its alone.
 """
 
@@ -46,11 +47,9 @@ DEFAULT_GRACE_S = 5
 MAX_GRACE_S = 300
 # How long each script may take beyond its grace period.
 _EXEC_MARGIN_S = 60
-_COMMAND_CHARS = 500
 # How much of a script's stderr a failure quotes, and how many of the processes still running it names.
 _STDERR_TAIL_CHARS = 500
 _LEFT_NAMED = 5
-_LEFT_COMMAND_CHARS = 80
 # The processes a report lists, so an agent that left thousands can't swell the run's record; it counts them all.
 _REPORTED_PROCESSES = 200
 
@@ -61,7 +60,7 @@ _KILL_PAUSE_S = 0.2
 
 # Args: the server's port, how many polls to wait after SIGTERM, _POLL_S, _KILL_ROUNDS, _KILL_PAUSE_S, then the ports of
 # the other agents in the container. Prints the server, then a line per signal sent and per process left, each its pid
-# and command line. A port's server is the oldest process holding the socket listening on it, or, when those processes'
+# and name. A port's server is the oldest process holding the socket listening on it, or, when those processes'
 # descriptors can't be read (root without CAP_SYS_PTRACE reads only its own user's), the oldest process of the socket's
 # user. A process is the agent's when it runs as the server's user, started after it, and is the server's descendant or
 # an orphan whose ancestors below the init all started after it too (`ours`): a child of anything older, a service of
@@ -76,6 +75,8 @@ shift 5
 info() {
   pid=$1 stat=
   while IFS= read -r line; do stat="$stat$line "; done 2>/dev/null < "/proc/$pid/stat" || return 1
+  name=${stat#*(}
+  name=${name%") "*}
   set -- ${stat##*") "}
   [ $# -ge 20 ] || return 1
   state=$1 parent=$2
@@ -85,9 +86,6 @@ info() {
     if [ "$key" = Uid: ]; then uid=$value; break; fi
   done 2>/dev/null < "/proc/$pid/status"
   [ -n "$uid" ]
-}
-command_of() {
-  tr '\000\011\012' '   ' 2>/dev/null < "/proc/$1/cmdline"
 }
 server_on() {
   hex=$(printf '%04X' "$1") inode= found= found_owner= why=
@@ -134,7 +132,8 @@ ours() {
     info "$q" && [ "$start" -gt "$since" ] || return 1
   done
 }
-printf 'SERVER\t%s\t%s\n' "$server" "$(command_of "$server")"
+info "$server"
+printf 'SERVER\t%s\t%s\n' "$server" "$name"
 candidates() {
   for dir in /proc/[0-9]*; do
     p=${dir#/proc/}
@@ -150,8 +149,8 @@ scan() {
 signal() {
   scan
   for p in $listed; do
-    c=$(command_of "$p")
-    kill -s "$1" "$p" 2>/dev/null && printf '%s\t%s\t%s\n' "$1" "$p" "$c"
+    info "$p" || continue
+    kill -s "$1" "$p" 2>/dev/null && printf '%s\t%s\t%s\n' "$1" "$p" "$name"
   done
 }
 signal TERM
@@ -160,7 +159,7 @@ while [ "$n" -lt "$polls" ] && scan && [ -n "$listed" ]; do sleep "$poll_s"; n=$
 n=0
 while [ "$n" -lt "$kill_rounds" ] && scan && [ -n "$listed" ]; do signal KILL; sleep "$kill_pause_s"; n=$((n + 1)); done
 scan
-for p in $listed; do printf 'LEFT\t%s\t%s\n' "$p" "$(command_of "$p")"; done
+for p in $listed; do info "$p" && printf 'LEFT\t%s\t%s\n' "$p" "$name"; done
 """
 
 # Args: the paths. Prints a line per path, in order: its kind, whether it was removed, and a file's size, mtime and
@@ -258,7 +257,7 @@ class StopAgentTaskStep(TaskStep):
             raise RuntimeError(f"stop_agent: couldn't end agent '{self.agent_name}''s processes (exit {exit_code}): "
                                f"{stderr.strip()[-_STDERR_TAIL_CHARS:]}")
         problems = [f"{len(left)} process(es) still ran after SIGKILL: " + ", ".join(
-            f"{p['pid']} ({p['command'][:_LEFT_COMMAND_CHARS]})" for p in left[:_LEFT_NAMED])] if left else []
+            f"{p['pid']} ({p['name']})" for p in left[:_LEFT_NAMED])] if left else []
         if self.clear_paths:
             exit_code, stdout, stderr = await run(_CLEAR_PATHS, *self.clear_paths)
             report["cleared"] = cleared = _read_paths(self.clear_paths, stdout)
@@ -305,10 +304,10 @@ def _read_processes(stdout: str) -> tuple[Optional[dict], list[dict], list[dict]
     server, ended, left = None, {}, []
     for line in stdout.splitlines():
         what, _, rest = line.partition("\t")
-        pid, _, command = rest.partition("\t")
+        pid, _, name = rest.partition("\t")
         if not pid.isdigit():
             continue
-        entry = {"pid": int(pid), "command": command.strip()[:_COMMAND_CHARS]}
+        entry = {"pid": int(pid), "name": name}
         if what == "SERVER":
             server = entry
         elif what in ("TERM", "KILL"):

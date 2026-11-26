@@ -4,6 +4,7 @@ container after it grades what the tests wrote, where before it the agent's left
 verifier reads a result file in the container, refusing a link. Needs Docker and a pull of two small public images."""
 
 import asyncio
+import json
 import shutil
 import subprocess
 import uuid
@@ -24,7 +25,9 @@ from tst.util.capabilities import missing_capability_reason
 pytestmark = pytest.mark.integration
 
 PORT = 8000
-WRITER = "while :; do echo 0 > /tmp/reward; sleep 0.2; done"
+# A key in a leftover's arguments, as a command the shell expanded it into holds it, which the report must not.
+KEY = "sk-test-not-a-real-key-0123456789"
+WRITER = f"while :; do echo 0 > /tmp/reward; sleep 0.2; done # {KEY}"
 # A leftover script whose name, and so its process name, holds a newline, ") " and a space: its /proc stat record
 # spans two lines.
 ODD = "/tmp/a\nb) c"
@@ -118,12 +121,13 @@ async def test_stop_agent_ends_what_the_agent_left_and_spares_the_rest(agent_lef
     await step.execute(context)
 
     report = context.metadata["stop_agent"]["stop"]
-    signalled = {entry["command"]: entry["signals"] for entry in report["processes"]}
-    assert signalled[f"sh -c {WRITER}"] == ["TERM"] and signalled[f"sh -c {DEAF}"] == ["TERM", "KILL"]
-    assert signalled[f"sh -c {TREE}"] == ["TERM"] and {"sleep 1001", "sleep 1002"} <= set(signalled)
-    assert signalled[f"/bin/sh {ODD.replace(chr(10), ' ')}"] == ["TERM"] and "sleep 1006" in signalled
-    assert str(PORT) in report["server"]["command"]
-    assert report["processes_left"] == []
+    signalled = [(entry["name"], entry["signals"]) for entry in report["processes"]]
+    # The writer, the tree and the shell deaf to SIGTERM, which took SIGKILL too; the odd script, named by its file
+    # with the newline a space; and their sleeps.
+    assert sum(name == "sh" for name, _ in signalled) >= 3 and ("sh", ["TERM", "KILL"]) in signalled
+    assert ("a b) c", ["TERM"]) in signalled and ("sleep", ["TERM"]) in signalled
+    assert report["server"]["name"] in ("nc", "perl") and report["processes_left"] == []
+    assert KEY not in json.dumps(report) and "/tmp/reward" not in json.dumps(report)
     left = _running(container)
     assert [c for c in left if c.startswith(("sh -c while", "sh -c trap", "sleep 100", "sleep 0.2", "/bin/sh /tmp/a"))
             ] == ["sleep 1003"]
@@ -178,8 +182,8 @@ async def test_a_server_of_another_user_is_found_though_root_cant_read_its_descr
         await StopAgentTaskStep(id="stop", version=None, agent_name="coder", grace_s=1).execute(context)
 
         report = context.metadata["stop_agent"]["stop"]
-        assert report["server"]["command"] == server
-        assert f"sh -c {WRITER}" in {entry["command"] for entry in report["processes"]}
+        assert report["server"]["name"] == "nc"
+        assert "sh" in {entry["name"] for entry in report["processes"]}
         left = _running(container)
         assert "sleep 1004" in left and server in left and f"sh -c {WRITER}" not in left
     finally:

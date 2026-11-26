@@ -14,9 +14,8 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps import stop_agent
 from agent_env.task_step.task_steps.stop_agent import StopAgentTaskStep
 
-SERVER = "SERVER\t7\t/opt/agent/venv/bin/uvicorn a2a_server:app --port 8123 \n"
-ENDED = (SERVER + "TERM\t20\tsh -c while :; do echo 0 > /logs/verifier/reward.txt; done \n"
-         "TERM\t21\tsh -c trap '' TERM; sleep 1000 \nKILL\t21\tsh -c trap '' TERM; sleep 1000 \n")
+SERVER = "SERVER\t7\tuvicorn\n"
+ENDED = SERVER + "TERM\t20\tsh\nTERM\t21\tsleep\nKILL\t21\tsleep\n"
 CLEARED = (f"file\t1\t2\t1795600000\t{'a' * 64}\t\nlink\t1\t\t\t\t/etc/shadow \nmissing\t\t\t\t\t\n")
 
 
@@ -102,10 +101,10 @@ def test_an_installed_agent_is_stopped_in_its_container_as_root_and_reported(sto
     assert report == {
         "agent_name": "coder", "container": "repo-sb-1",
         "cancelled": [{"task_id": "task-1", "cancelled": True}, {"task_id": "task-2", "cancelled": True}],
-        "server": {"pid": 7, "command": "/opt/agent/venv/bin/uvicorn a2a_server:app --port 8123"},
+        "server": {"pid": 7, "name": "uvicorn"},
         "processes": [
-            {"pid": 20, "command": "sh -c while :; do echo 0 > /logs/verifier/reward.txt; done", "signals": ["TERM"]},
-            {"pid": 21, "command": "sh -c trap '' TERM; sleep 1000", "signals": ["TERM", "KILL"]},
+            {"pid": 20, "name": "sh", "signals": ["TERM"]},
+            {"pid": 21, "name": "sleep", "signals": ["TERM", "KILL"]},
         ],
         "processes_ended": 2, "processes_left": [],
         "cleared": [
@@ -165,13 +164,13 @@ def test_a_turn_past_cancelling_is_recorded_with_the_agents_answer(stopping):
 
 
 def test_a_process_that_outlives_sigkill_fails_the_step_once_the_report_is_written(stopping):
-    stopping.sandbox = _Sandbox(ended=(0, ENDED + "LEFT\t30\tsleep 1000 \n", ""))
+    stopping.sandbox = _Sandbox(ended=(0, ENDED + "LEFT\t30\tsleep\n", ""))
     context = _context(installed_container="repo")
 
-    with pytest.raises(RuntimeError, match=r"1 process\(es\) still ran after SIGKILL: 30 \(sleep 1000\)"):
+    with pytest.raises(RuntimeError, match=r"1 process\(es\) still ran after SIGKILL: 30 \(sleep\)"):
         asyncio.run(_step(clear_paths=["/r"]).execute(context))
 
-    assert context.metadata["stop_agent"]["stop"]["processes_left"] == [{"pid": 30, "command": "sleep 1000"}]
+    assert context.metadata["stop_agent"]["stop"]["processes_left"] == [{"pid": 30, "name": "sleep"}]
     assert context.metadata["stop_agent"]["stop"]["cleared"]
 
 
