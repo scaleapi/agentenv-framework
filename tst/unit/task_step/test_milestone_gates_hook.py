@@ -1199,3 +1199,14 @@ async def test_text_with_quotes_newlines_or_backslashes_matches_as_written_in_ne
     why = records[-1]["gates"][0]["why"]
     assert records[-1]["gates"][0]["passed"] is False
     assert "gdocs_batch_update has" in why and "called gdocs_batch_update(" in why
+
+
+@pytest.mark.asyncio
+async def test_text_split_across_two_arguments_is_not_a_match():
+    params = {"role": "auditor", "milestones": [{"id": "M1", "gates": [
+        {"id": "g", "nudge": "n", "check": {"trajectory": {"contains_none": ["internal\nforecast"],
+                                                           "no_call": [{"args_contains": "internal\nforecast"}]}}}]}]}
+    traj = {"s3://s/1.json": _turn_messages(("gdocs_create", {"title": "internal", "body": "forecast"}, "ok"))}
+    records = []
+    await post_turn(Turn(Env(world()), records, 1, trajectories=traj), params)
+    assert records[-1]["gates"][0]["passed"] is True

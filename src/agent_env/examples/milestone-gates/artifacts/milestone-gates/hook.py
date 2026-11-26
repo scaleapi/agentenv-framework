@@ -802,11 +802,11 @@ async def _trajectory_check(turn, spec, state, check: dict) -> tuple[Optional[bo
             unread.append(n)
             continue
         for name, args in calls:
-            short, blob = name.split("__")[-1], "\n".join(_strings(args)).lower()
-            breaches += [f"turn {n}: {short} has {t!r}" for t in texts if t in blob]
+            short, values = name.split("__")[-1], [s.lower() for s in _strings(args)]
+            breaches += [f"turn {n}: {short} has {t!r}" for t in texts if any(t in v for v in values)]
             for rule in check.get("no_call") or []:
                 if (not rule.get("tool") or rule["tool"] in (short, name)) and \
-                        (not rule.get("args_contains") or rule["args_contains"].lower() in blob):
+                        (not rule.get("args_contains") or any(rule["args_contains"].lower() in v for v in values)):
                     breaches.append(f"turn {n}: called {short}({_cut(args, 120)})")
         for text in said:
             breaches += [f"turn {n}: said {t!r}" for t in texts if t in text.lower()]
