@@ -74,12 +74,17 @@ The A2A server starts with the real-time marker, so it and its records stay on r
   hosts it reaches by plain HTTP alone, which have no certificate to check, go direct. `NO_PROXY` goes by host, not
   scheme, so a host the agent also reaches over TLS stays behind the proxy. The image's proxy reaches private networks
   too (`AGENTENV_EGRESS_PRIVATE`), so a host over TLS at a private address works at any date as well. Unarmed, the page
-  holds real time and the CLI goes out directly.
+  holds real time and the CLI goes out directly. Which way it goes is settled when the bridge starts the CLI, so a clock
+  armed while a CLI runs reaches its proxy settings with the next one: arm the clock before the turn that needs it.
 - **One rule for every clocked agent.** That rule is `agent_egress.py` in `utils/agent_clock`, which only agent images
   take (`agent_clock = "utils/agent_clock"` in `shared_sources.toml`), so changing it rebuilds no computer base. The
   bridge imports it, and the image and `install.sh` copy it beside the bridge with the clock's `clockpage.py`, whose
-  layout and check it reads the page by, so every agent put on the clock, OpenCode's and Letta Code's too, goes out
-  the same way.
+  layout and check it reads the page by, so every agent put on the clock, OpenCode's, Letta Code's, Antigravity's and
+  Codex's too, goes out the same way.
+- **Codex's CLI on real time.** The Codex CLI is a static binary, which the preloaded library never reaches, so it
+  keeps real time whatever the clock; the commands it runs read the env's time. While the clock is armed, each CLI
+  run's model relay puts the env's date, read from `date`, where the CLI writes its own, and refuses a call it can't date
+  (`codex_date.py`).
 
 Started as a user other than root, the image runs the A2A server alone, on real time, as before.
 

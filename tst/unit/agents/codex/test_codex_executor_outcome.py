@@ -183,9 +183,10 @@ def test_concurrent_same_context_turns_share_one_session(codex, monkeypatch):
     assert seen_thread_ids == [None, "shared-thread"]
 
 
-def test_every_server_is_required_and_mcp_remote_gets_the_ca_variables(monkeypatch, tmp_path):
+def test_every_server_is_required_and_mcp_remote_gets_the_ca_and_proxy_variables(monkeypatch, tmp_path):
     """Codex drops an optional server that misses its 1s grace, which mcp-remote always does; and codex hands a stdio
-    server only a few of its variables, so the CA ones are named for it to pass on."""
+    server only a few of its variables, so the CA ones, and the egress proxy's an armed clock sets, are named for it to
+    pass on."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     asyncio.run(codex_config.write_mcp_servers(
         {"envmcp": {"url": "https://gw/mcp", "headers": None},
@@ -193,6 +194,7 @@ def test_every_server_is_required_and_mcp_remote_gets_the_ca_variables(monkeypat
 
     servers = tomllib.loads((tmp_path / "config.toml").read_text())["mcp_servers"]
     assert {name: (server["required"], server["env_vars"]) for name, server in servers.items()} == {
-        name: (True, ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"])
+        name: (True, ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE", "HTTP_PROXY", "HTTPS_PROXY",
+                      "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"])
         for name in ("envmcp", "peer_agents")
     }

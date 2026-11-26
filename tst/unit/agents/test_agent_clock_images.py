@@ -207,3 +207,29 @@ def test_every_clocked_image_copies_the_shared_module_and_the_page_format_beside
     folders = _copied_to((AGENTS_DIR / agent / "Dockerfile").read_text())
 
     assert set.intersection(*(folders.get(name, set()) for name in (*_bridges(agent), *SHARED_FILES))), folders
+
+
+# Their start-agent adds a provider's CA bundle to agent-env's; Claude Code's doesn't yet.
+CA_MERGING = ["antigravity", "codex", "letta-code", "opencode"]
+
+
+@pytest.mark.parametrize("agent", CA_MERGING)
+def test_start_agent_keeps_a_providers_ca_bundle_trusted_by_the_server_and_the_proxy(agent, tmp_path):
+    """Sail points SSL_CERT_FILE and the like at the bundle it signs model requests under; root.conf points the server
+    at agent-env's bundles, so start-agent adds the provider's to them and to the proxy's roots, once each."""
+    start = (AGENTS_DIR / agent / "start-agent").read_text()
+    merge = start[start.index('for bundle in "${SSL_CERT_FILE'):start.index("exec supervisord")]
+    targets = {"/etc/agentenv/ca-bundle.pem": tmp_path / "ca-bundle.pem", "/etc/agentenv/ca.pem": tmp_path / "ca.pem",
+               "/usr/local/lib/agentenv-egress/roots.pem": tmp_path / "roots.pem"}
+    for real, fake in targets.items():
+        fake.write_text("SYSTEM ROOTS\n")
+        merge = merge.replace(real, str(fake))
+    sail = tmp_path / "sailbox-ca-bundle.crt"
+    sail.write_text("-----BEGIN CERTIFICATE-----\nSAIL\n-----END CERTIFICATE-----\n")
+
+    subprocess.run(["sh", "-c", merge], check=True, env={"PATH": "/usr/bin:/bin", "SSL_CERT_FILE": str(sail),
+                   "NODE_EXTRA_CA_CERTS": str(sail), "REQUESTS_CA_BUNDLE": "/etc/agentenv/ca-bundle.pem"})
+
+    for fake in targets.values():
+        text = fake.read_text()
+        assert text.startswith("SYSTEM ROOTS\n") and text.count("SAIL") == 1, (fake.name, text)

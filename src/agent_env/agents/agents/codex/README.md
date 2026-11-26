@@ -24,7 +24,12 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
   server. Its `AgentEnv-Role` header is the role its registration names, unless the task has a role of its own, which
   reaches that task's CLI alone as `-c` overrides, so tasks of different roles running at once share the file. Codex
   hands such a server only a few of its own variables, so the entry names `NODE_EXTRA_CA_CERTS`,
-  `NODE_TLS_REJECT_UNAUTHORIZED` and `SSL_CERT_FILE` for it to pass on.
+  `NODE_TLS_REJECT_UNAUTHORIZED` and `SSL_CERT_FILE` for it to pass on, and the proxy variables an armed clock sets
+  (below); `--enable-proxy` has mcp-remote take them, and connect directly when none is set.
+
+Each CLI run calls the endpoint through a model relay of its own on loopback (`model_relay.py`, shared with the other
+agents'), given to it as a `-c` override of the provider's `base_url`, which forwards each call and its answer as they
+come.
 
 | Extension | Implementation |
 |---|---|
@@ -39,8 +44,26 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 | `triggers/v1` | SDK default |
 
 The image is `python:3.11-slim` with Node, the CLIs, the agent and the Python packages `model-requirements.txt` pins for
-the model's scripts, running as the `agent` user; Codex's state is in
-`/home/agent/.codex` whatever the uid.
+the model's scripts. It starts as root (`start-agent`), whose supervisord runs the A2A server as the `agent` user;
+started as another user, it runs the server alone, as before. Codex's state is in `/home/agent/.codex` whatever the uid.
+
+The image follows a task env's clock as the agents README describes, once a `sync_env_clock` sets `agent_clock`. The
+Codex CLI is a static binary, which the preloaded libfaketime never reaches, so the CLI itself stays on real time: its
+threads, their rollouts and the times in its events keep real time, and a clock set behind them breaks nothing. The
+commands the model runs, and the MCP clients the CLI starts, read the env's time. The CLI writes the date it tells the
+model, the `<current_date>` of its environment context, and the time of the reminder it gives a turn at `persistent`
+effort, from its own clock, so while the clock is armed the run's relay puts the env's date and time there, read from
+`date`, in every message of each model call, a resumed thread's earlier ones included (`codex_date.py`). A call whose
+date the relay can't read, or that writes a date or time in a form it doesn't know, is refused, so the turn fails rather
+than tell the model the machine's date. The `<timezone>` the CLI names is the container's, which the clock doesn't
+change. On an armed clock the CLI's commands and MCP clients go out through the egress proxy, its model calls go to the
+relay directly, and the relay, on real time, reaches the endpoint directly. Without a `LITELLM_BASE_URL` the CLI has no
+provider of agent-env's and no relay, so nothing tells it the env's date.
+
+For a model in its catalog, such as `gpt-6-astra`, the CLI runs in code mode: the model calls its tools from JavaScript
+it hands the `exec` tool, which runs in `codex-code-mode-host`, another static binary. The tools it calls there follow
+the clock as above, but JavaScript's own `Date` in that code reads real time; the `clock` namespace's `sleep` only
+waits, so it's unaffected.
 
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;
 config.toml stays as it is. `{"disable": "*"}` turns off every setting below, `{"only": [...]}` every one but those whose

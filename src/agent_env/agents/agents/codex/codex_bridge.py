@@ -17,12 +17,15 @@ import signal
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codex_config import MODEL_HEADERS_ENV, model_headers
+from agent_egress import clock_armed, egress_env
+from codex_config import MODEL_HEADERS_ENV, endpoint_root, model_headers, relayed_provider
+from codex_date import env_date_rewrite
+from model_relay import Calls, model_relay
 
 logger = logging.getLogger(__name__)
 WORKSPACE_DIR = os.environ.get("CODEX_WORKSPACE_DIR", "/app")
@@ -92,11 +95,13 @@ def get_last_attribution_snapshot() -> dict[str, str | None]:
         return dict(_last_attribution)
 
 
-def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
-            task_id: str | None = None) -> dict[str, str]:
+def cli_env(environ: Mapping[str, str], *, project_id: str | None = None, task_id: str | None = None,
+            urls: Iterable[str] = (), armed: bool = False) -> dict[str, str]:
     """The CLI's environment: this process's, with the endpoint's key also under the name codex's own precheck
     reads, and the run's attribution, which config.toml's env_http_headers sends as headers on each model call. The
-    run's tags join the x-litellm-tags [model.headers] names."""
+    run's tags join the x-litellm-tags [model.headers] names. On an armed clock (``armed``) it has the egress proxy
+    (``egress_env``) for what the CLI's commands and MCP clients reach, the env's MCP servers (``urls``) among them;
+    the CLI's model calls go to the turn's relay on loopback, which stays direct."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("OPENAI_API_KEY"):
         env["OPENAI_API_KEY"] = env["LITELLM_API_KEY"]
@@ -110,7 +115,7 @@ def cli_env(environ: Mapping[str, str], *, project_id: str | None = None,
                        if name.lower() == _TAGS_HEADER), "")
     if joined := _join_tags(configured, ",".join(tags)):
         env["LITELLM_TAGS"] = joined
-    return env
+    return {**env, **egress_env(environ, urls, armed=armed)}
 
 
 @dataclass
@@ -773,6 +778,7 @@ async def _run_codex_once(
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
     prior_tool_calls: int = 0,
+    mcp_urls: Sequence[str] = (),
 ) -> CodexResult:
     # JSON Schema: codex's `--output-schema` flag takes a FILE PATH (unlike
     # claude-code's inline-JSON `--json-schema`). Write the inner schema to a
@@ -821,7 +827,7 @@ async def _run_codex_once(
         f"inactivity_watchdog={inactivity_s}s)"
     )
 
-    subprocess_env = cli_env(os.environ, project_id=project_id, task_id=task_id)
+    subprocess_env = cli_env(os.environ, project_id=project_id, task_id=task_id, urls=mcp_urls, armed=clock_armed())
     if project_id or task_id:
         _record_attribution(project_id=project_id, task_id=task_id)
         logger.info(
@@ -830,8 +836,14 @@ async def _run_codex_once(
             subprocess_env.get("LITELLM_TAGS", "(unset)"),
         )
 
+    # The CLI, a static binary on real time, writes the machine's date; the endpoint is called through a relay of this
+    # run's own, which tells the model the env's on an armed clock (codex_date).
+    relays = contextlib.AsyncExitStack()
     proc = None
     try:
+        if (upstream := endpoint_root(os.environ)) is not None:
+            relay = await relays.enter_async_context(model_relay(upstream, Calls(), rewrite=env_date_rewrite))
+            cmd += [arg for override in relayed_provider(relay) for arg in ("-c", override)]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -934,6 +946,7 @@ async def _run_codex_once(
         )
     finally:
         _RUNNING.discard(proc)
+        await relays.aclose()
         if schema_file is not None and schema_file.exists():
             try:
                 schema_file.unlink()
@@ -954,12 +967,14 @@ async def run_codex(
     event_callback: Callable[[dict], None] | None = None,
     config_overrides: Sequence[str] = (),
     max_turns: int | None = None,
+    mcp_urls: Sequence[str] = (),
 ) -> CodexResult:
     """Run one logical turn with bounded transient recovery.
 
     `max_turns` bounds the turn's tool calls, each of which is one model request when the CLI sends no parallel calls,
     as for a model its catalog has no entry for; `model_requests` counts the requests from the rollout. The turn's
-    counts include its subagents' calls, read from their own rollouts.
+    counts include its subagents' calls, read from their own rollouts. `mcp_urls` are the env's MCP servers, which
+    the CLI's MCP clients connect to.
     """
     deadline = time.monotonic() + timeout_s
     before = read_rollout(thread_id) or Rollout()
@@ -995,6 +1010,7 @@ async def run_codex(
             config_overrides=config_overrides,
             max_turns=max_turns,
             prior_tool_calls=tool_call_count,
+            mcp_urls=mcp_urls,
         )
         failure = _resumable_api_failure(result)
         tool_call_count += result.tool_call_count

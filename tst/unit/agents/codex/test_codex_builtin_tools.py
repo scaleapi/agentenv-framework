@@ -206,12 +206,13 @@ def _alive(pid: int) -> bool:
 
 
 def test_a_catalog_read_past_its_time_is_killed_and_fails_the_selection(cli, tmp_path):
-    """The read gets only the time it's given, and its child doesn't outlive it."""
+    """The read gets only the time it's given, and its child doesn't outlive it. The time leaves a loaded machine
+    time to start the stand-in CLI and its child."""
     pid_file = _hanging_cli(tmp_path)
     tools = a2a_server.CodexConfig(builtin_tools={"disable": "*"}).builtin_tools
 
-    with pytest.raises(RuntimeError, match="no catalog within 1s"):
-        asyncio.run(codex_config.catalog_overrides(tools, timeout_s=1))
+    with pytest.raises(RuntimeError, match="no catalog within 3s"):
+        asyncio.run(codex_config.catalog_overrides(tools, timeout_s=3))
     assert not _alive(int(pid_file.read_text()))
 
 
