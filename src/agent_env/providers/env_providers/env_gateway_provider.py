@@ -41,7 +41,8 @@ from agent_env.env.gateway.constants import (
     COMPUTERS_ENV,
     CONSOLE_FRAME_ANCESTORS_ENV,
     CONSOLE_URLS_ENV,
-    CONTROL_TOKEN_CHILDREN_ENV,
+    CHILD_CONTROL_TOKENS_ENV,
+    CONTROL_TOKEN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
@@ -57,7 +58,6 @@ from agent_env.env.envs.service_db import (
     DB_MCP_SERVICE_NAME,
     PGWEB_SERVICE_NAME,
 )
-from agent_env.env.envs.computer.utils.boot import control_environment
 from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
@@ -569,10 +569,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
         gateway_env.extend(f"      - {key}={value}" for key, value in consoles_environment(state_provider.console_urls()).items())
-        gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in control_token_environment(control_token).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}"
-                           for key, value in control_token_children_environment(external_children, control_token).items())
+                           for key, value in child_control_tokens_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in computers_environment(external_children).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
@@ -685,7 +685,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         artifact_id: str | None = None,
         artifact_version: int | None = None,
-        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
 
@@ -835,7 +835,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
-        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
         control_token: str | None = None,
     ) -> DeployedGateway:
@@ -964,7 +964,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             # Everything but the gateway, beside the children; then the gateway, which waits for every child it fronts.
             # Both run to the end before either's failure is raised, so no child is still starting when the deploy closes.
             up, started = await asyncio.gather(self._compose_up(sandbox, f"--scale {GATEWAY_SERVICE_NAME}=0"),
-                                               children(tunnel_url(gateway_port), control_token),
+                                               children(tunnel_url(gateway_port)),
                                                return_exceptions=True)
             for result in (up, started):
                 if isinstance(result, BaseException):
@@ -1053,7 +1053,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
         mcp_server_name: str | None = None,
-        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
@@ -1110,7 +1110,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             ]
             aux_coros = [self._provision_sidecar(deploy, spec) for spec in sidecar_specs]
             # The children start beside them; the gateway, created last, has no address to give them.
-            child_coros = [children(None, control_token)] if children is not None else []
+            child_coros = [children(None)] if children is not None else []
             all_results = await asyncio.gather(*mcp_coros, *aux_coros, *child_coros, return_exceptions=True)
             external: list[ExternalChild] = []
 
@@ -1158,9 +1158,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 **consoles_environment(consoles),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
-                **control_environment(control_token),
+                **control_token_environment(control_token),
                 **clock_followers_environment(external),
-                **control_token_children_environment(external, control_token),
+                **child_control_tokens_environment(external),
                 **computers_environment(external),
                 **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
@@ -1540,7 +1540,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         control_token: str | None = None,
         attribution: Optional[Attribution] = None,
-        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
         stack_layout: StackLayout = DEFAULT_STACK_LAYOUT,
     ) -> DeployedGateway:
@@ -1866,11 +1866,15 @@ def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, 
     return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
 
 
-def control_token_children_environment(children: Iterable[ExternalChild], control_token: str | None) -> dict[str, str]:
-    """The children the gateway passes its control token on to: every child it fronts on a sandbox of its own, each
-    deployed with that token (``children``)."""
-    names = ",".join(child.name for child in children) if control_token else ""
-    return {CONTROL_TOKEN_CHILDREN_ENV: names} if names else {}
+def control_token_environment(control_token: str | None) -> dict[str, str]:
+    """The gateway's own control token, which its control routes, data plane and consoles take."""
+    return {CONTROL_TOKEN_ENV: control_token} if control_token else {}
+
+
+def child_control_tokens_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
+    """Each child's own control token, by name, which the gateway sends it in place of its own on its /svc routes."""
+    tokens = ",".join(f"{child.name}={child.control_token}" for child in children if child.control_token)
+    return {CHILD_CONTROL_TOKENS_ENV: tokens} if tokens else {}
 
 
 def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:

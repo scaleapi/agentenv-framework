@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -15,11 +16,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-from agentenv_protocol import CONTROL_TOKEN_ENV
+from agentenv_protocol import CONTROL_TOKEN_ENV, CONTROL_TOKEN_SHA256_ENV
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
+from agentenv_protocol.computer.card import COMPUTER, CONTROL_TOKEN_SHA256
 from agentenv_protocol.computer.platform import entry_for
 
 from agent_env.config import get_config
@@ -168,10 +170,19 @@ def control_token() -> str:
     return secrets.token_urlsafe(CONTROL_TOKEN_BYTES)
 
 
-def control_environment(token: Optional[str]) -> dict[str, str]:
-    """What hands a computer its control ``token`` in its boot environment; nothing without one, as for a computer an
-    older agent-env booted."""
-    return {CONTROL_TOKEN_ENV: token} if token else {}
+def control_environment(token: Optional[str], card: Optional[dict]) -> dict[str, str]:
+    """What hands a computer its control ``token`` in its boot environment, by what ``card``, its driver's as a probe
+    read it, says the driver takes: only the token's sha256 for a driver that takes that (computer/v1's
+    ``control_token``), so nothing in the computer holds the token; the token for one an older protocol built; both for
+    a driver no card describes yet, as on its probe, where each takes what it knows. Nothing without a token, as for a
+    computer an older agent-env booted."""
+    if not token:
+        return {}
+    verifier = {CONTROL_TOKEN_SHA256_ENV: hashlib.sha256(token.encode()).hexdigest()}
+    if card is None:
+        return {CONTROL_TOKEN_ENV: token, **verifier}
+    takes = protocol_v1.extension_params(card, COMPUTER).get("control_token") == CONTROL_TOKEN_SHA256
+    return verifier if takes else {CONTROL_TOKEN_ENV: token}
 
 
 def shm_environment(form: str, os_type: str, shm_mb: Optional[int]) -> dict[str, str]:
@@ -194,15 +205,17 @@ def shm_kwargs(sandbox_provider: SandboxProvider, shm_mb: Optional[int]) -> dict
 
 
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
+               card: Optional[dict] = None,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
                ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False,
                platform: str = "linux", shm_mb: Optional[int] = None) -> Booted:
-    """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
+    """``image``, of ``form``, booted with ``environment`` and its control ``token``, as ``card``, its driver's, says it
+    takes it (``control_environment``), on ``sandbox_provider``, which the
     caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, its ``/dev/shm`` ``shm_mb`` MiB
     where the sandbox can size it, once the driver, asked with that token, says the computer is ready, or with
     ``held``, its boot apps' launch held, once it answers (``ready``); a boot that fails is torn down."""
-    environment = {**environment, **control_environment(token), **shm_environment(form, platform.partition("/")[0], shm_mb)}
+    environment = {**environment, **control_environment(token, card), **shm_environment(form, platform.partition("/")[0], shm_mb)}
     if form == "vm_bundle":
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
