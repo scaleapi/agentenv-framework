@@ -84,9 +84,8 @@ async def _until(check, what: str):
 async def agent_left_running(local_backends, request):
     """A container on a local sandbox, as an agent left it: a service of its own started before the agent's server,
     then the server, then the agent's leftovers (a writer that daemonized, one deaf to SIGTERM, a tree), orphaned as a
-    shell's background jobs are when it exits, and another user's process; a reward the agent wrote and a link it
-    planted. Yields the sandbox, the container and the run's context, the agent recorded as installed in the
-    container."""
+    shell's background jobs are when it exits, and another user's process; and a link it planted, for the verifier to
+    read. Yields the sandbox, the container and the run's context, the agent recorded as installed in the container."""
     image, server, other = USERLANDS[request.param]
     sandbox = await LocalSandboxProvider().create_vm()
     container = sandbox.scoped_name(f"repo-{uuid.uuid4().hex[:8]}")
@@ -95,7 +94,7 @@ async def agent_left_running(local_backends, request):
         _docker("exec", "-d", container, "sh", "-c", f"({SERVICE}) & sleep 1.1; {server} & sleep 1.1; "
                 f"setsid sh -c '{WRITER}' > /dev/null 2>&1 & sh -c \"{DEAF}\" & sh -c '{TREE}' & {other} & "
                 f"printf '#!/bin/sh\\nsleep 1006\\n' > '{ODD}'; chmod +x '{ODD}'; setsid '{ODD}' > /dev/null 2>&1 & "
-                "mkdir -p /logs; echo 1 > /logs/reward.txt; ln -s /etc/hostname /logs/link.txt; touch /logs/up")
+                "mkdir -p /logs; ln -s /etc/hostname /logs/link.txt; touch /logs/up")
         await _until(lambda: "sleep 1003" in _running(container) and "up" in _docker("exec", container, "ls", "/logs"),
                      "the agent's leftovers")
         yield sandbox, container, TaskStepContext(
@@ -115,10 +114,7 @@ async def agent_left_running(local_backends, request):
 @pytest.mark.parametrize("agent_left_running", sorted(USERLANDS), indirect=True)
 async def test_stop_agent_ends_what_the_agent_left_and_spares_the_rest(agent_left_running):
     sandbox, container, context = agent_left_running
-    step = StopAgentTaskStep(id="stop", version=None, agent_name="coder", grace_s=1,
-                             clear_paths=["/logs/reward.txt", "/logs/link.txt", "/logs/none"])
-
-    await step.execute(context)
+    await StopAgentTaskStep(id="stop", version=None, agent_name="coder", grace_s=1).execute(context)
 
     report = context.metadata["stop_agent"]["stop"]
     signalled = [(entry["name"], entry["signals"]) for entry in report["processes"]]
@@ -132,9 +128,6 @@ async def test_stop_agent_ends_what_the_agent_left_and_spares_the_rest(agent_lef
     assert [c for c in left if c.startswith(("sh -c while", "sh -c trap", "sleep 100", "sleep 0.2", "/bin/sh /tmp/a"))
             ] == ["sleep 1003"]
     assert any(SERVICE in c for c in left) and any(str(PORT) in c for c in left)
-    assert [(e["path"], e["kind"], e["removed"]) for e in report["cleared"]] == [
-        ("/logs/reward.txt", "file", True), ("/logs/link.txt", "link", True), ("/logs/none", "missing", False)]
-    assert report["cleared"][0]["size"] == 2 and report["cleared"][1]["target"] == "/etc/hostname"
     _docker("exec", container, "rm", "-f", "/tmp/reward")
     await asyncio.sleep(0.6)
     assert "reward" not in _docker("exec", container, "ls", "/tmp")

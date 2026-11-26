@@ -28,8 +28,6 @@ _UNREACHABLE_MIN_POLLS = 3
 # What a proxy in front of the agent answers when it can't reach it; any other status is the agent answering.
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 _CANCEL_TIMEOUT_SECONDS = 10
-# How much of an agent's answer to a cancel, or of the error reaching it, the caller is told.
-_CANCEL_ANSWER_CHARS = 300
 # The A2A tasks ``poll_a2a_task`` is polling in this process, or that ``wake_poll`` woke before their poll began, each
 # with the event ``wake_poll`` sets. A task its waker just ended can show as working for a moment longer, so a woken
 # poll asks again every _WOKEN_POLL_SECONDS for up to _WOKEN_FOR_SECONDS before going back to its interval.
@@ -255,9 +253,9 @@ async def _nap(woken: asyncio.Event, seconds: float) -> bool:
     return False
 
 
-async def cancel_a2a_task(a2a_url: str, task_id: str) -> Optional[str]:
-    """POST /a2a tasks/cancel, so the agent stops working on ``task_id``; None once it has, else why it hasn't. Best
-    effort: an agent that can't be reached, or won't cancel, is only logged."""
+async def cancel_a2a_task(a2a_url: str, task_id: str) -> None:
+    """POST /a2a tasks/cancel, so the agent stops working on ``task_id``. Best effort: an agent that can't be
+    reached, or won't cancel, is only logged."""
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(f"{a2a_url}/a2a", json={
@@ -268,12 +266,11 @@ async def cancel_a2a_task(a2a_url: str, task_id: str) -> Optional[str]:
         error = resp.json().get("error")
     except (httpx.HTTPError, ValueError) as e:
         logger.warning(f"Couldn't cancel A2A task {task_id}: {type(e).__name__}: {e}")
-        return f"{type(e).__name__}: {e}"[:_CANCEL_ANSWER_CHARS]
+        return
     if error:
         logger.warning(f"The agent didn't cancel A2A task {task_id}: {error}")
-        return str(error.get("message") or error if isinstance(error, dict) else error)[:_CANCEL_ANSWER_CHARS]
-    logger.info(f"Canceled A2A task {task_id}")
-    return None
+    else:
+        logger.info(f"Canceled A2A task {task_id}")
 
 
 _USAGE_FIELDS = frozenset(f.name for f in fields(Usage)) - {"provider_details"}

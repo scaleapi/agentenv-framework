@@ -1,35 +1,28 @@
-"""Stop an agent before the steps that read what it left, such as a verifier that runs tests in its container.
+"""End what an agent left running before the steps that read its container, such as a verifier that runs tests there.
 
 A task author places it after the agent's last turn, and has those steps depend on it (``agent-env task lint`` warns of
-a verifier that reads an agent's container without one). In order, it:
+a verifier that reads an agent's container without one). It ends the processes the agent started where it works, its
+container, or the sandbox when that is its container: those running as its server's user that started after the server
+did and descend from it, or were orphaned, as a shell's background job is when the shell exits; the server is what
+listens on the agent's A2A port there. Each takes SIGTERM, and those left after ``grace_s`` SIGKILL. The server keeps
+running, so a later step can still prompt it, as does everything that started before it and what that starts: a
+container's init, a task container's own services, the clock and egress programs of an image that runs them. So do the
+servers of the other agents in its container, and what they started; an orphan one of them left can't be told from
+this agent's, and ends too.
 
-1. cancels the A2A task of each turn the run sent the agent, so its server works on none;
-2. ends the processes the agent started where it works, its container, or the sandbox when that is its container: those
-   running as its server's user that started after the server did and descend from it, or were orphaned, as a shell's
-   background job is when the shell exits; the server is what listens on the agent's A2A port there. Each takes
-   SIGTERM, and those left after ``grace_s`` SIGKILL. The server keeps running, so a later step can still prompt it, as
-   does everything that started before it and what that starts: a container's init, a task container's own services,
-   the clock and egress programs of an image that runs them. So do the servers of the other agents in its container,
-   and what they started; an orphan one of them left can't be told from this agent's, and ends too;
-3. removes what is at each of ``clear_paths``, a result file the agent may have written, say.
-
-Its report is ``context.metadata["stop_agent"][step_id]``: each task and whether it was cancelled, the server, each
-process it ended with its name and the signals it took, and each path as it was before it was removed (its kind, and a
-file's size, mtime and sha256). A process is named as ``ps`` names it, never by its arguments, which can hold a secret
-the shell expanded, such as the agent's model key. A process still running after SIGKILL, or a path left in place,
-fails the step once the report is written. An agent installed on its sandbox's host is refused, since the processes and files
-there aren't its alone.
+Its report is ``context.metadata["stop_agent"][step_id]``: the server, and each process it ended with its name and the
+signals it took. A process is named as ``ps`` names it, never by its arguments, which can hold a secret the shell
+expanded, such as the agent's model key. A process still running after SIGKILL fails the step once the report is
+written. An agent installed on its sandbox's host is refused, since the processes there aren't its alone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import posixpath
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Optional
 
-from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
@@ -162,27 +155,8 @@ scan
 for p in $listed; do info "$p" && printf 'LEFT\t%s\t%s\n' "$p" "$name"; done
 """
 
-# Args: the paths. Prints a line per path, in order: its kind, whether it was removed, and a file's size, mtime and
-# sha256 or a link's target.
-_CLEAR_PATHS = r"""
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-for p in "$@"; do
-  kind=missing size= mtime= sha= target= removed=
-  if [ -L "$p" ]; then kind=link target=$(readlink -- "$p" | tr '\011\012' '  ')
-  elif [ -f "$p" ]; then
-    kind=file size=$(wc -c < "$p") mtime=$(stat -c %Y -- "$p" 2>/dev/null) sha=$(sha256sum < "$p" 2>/dev/null)
-    sha=${sha%% *}
-  elif [ -d "$p" ]; then kind=directory
-  elif [ -e "$p" ]; then kind=other
-  fi
-  if [ "$kind" != missing ] && rm -rf -- "$p" && [ ! -e "$p" ] && [ ! -L "$p" ]; then removed=1; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$kind" "$removed" "$size" "$mtime" "$sha" "$target"
-done
-"""
-
-
 class StopAgentTaskStep(TaskStep):
-    """Cancel ``agent_name``'s turns, end the processes it started and remove ``clear_paths``."""
+    """End the processes ``agent_name`` left running in its container."""
 
     type: ClassVar[str] = "stop_agent"
     entity_refs = ()
@@ -192,38 +166,30 @@ class StopAgentTaskStep(TaskStep):
         id: str,
         version: Optional[int],
         agent_name: Optional[str] = None,
-        clear_paths: Optional[list[str]] = None,
         grace_s: float = DEFAULT_GRACE_S,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.agent_name = agent_name or TaskStep.DEFAULT_AGENT_NAME
-        self.clear_paths = list(clear_paths or [])
         self.grace_s = grace_s
 
     def config_problems(self) -> list[str]:
         problems = []
         if not isinstance(self.agent_name, str):
             problems.append(f"agent_name must be a string, not {self.agent_name!r}")
-        for path in self.clear_paths:
-            if not isinstance(path, str) or not posixpath.isabs(path):
-                problems.append(f"clear_paths entry {path!r} isn't an absolute path")
-            elif posixpath.normpath(path) == "/":
-                problems.append(f"clear_paths entry {path!r} would remove the container's whole filesystem")
         if (isinstance(self.grace_s, bool) or not isinstance(self.grace_s, (int, float))
                 or not 0 <= self.grace_s <= MAX_GRACE_S):
             problems.append(f"grace_s must be a number of seconds from 0 to {MAX_GRACE_S}, not {self.grace_s!r}")
         return problems
 
     def to_dict(self) -> dict:
-        return {**super().to_dict(), "agent_name": self.agent_name, "clear_paths": self.clear_paths,
-                "grace_s": self.grace_s}
+        return {**super().to_dict(), "agent_name": self.agent_name, "grace_s": self.grace_s}
 
     @classmethod
     def from_dict(cls, data: dict) -> StopAgentTaskStep:
         return cls(**cls._base_from_dict(data), agent_name=data.get("agent_name"),
-                   clear_paths=data.get("clear_paths"), grace_s=data.get("grace_s", DEFAULT_GRACE_S))
+                   grace_s=data.get("grace_s", DEFAULT_GRACE_S))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
@@ -238,49 +204,25 @@ class StopAgentTaskStep(TaskStep):
         report: dict[str, Any] = {"agent_name": self.agent_name,
                                   "stopped_at": datetime.now(UTC).isoformat(timespec="seconds")}
         context.metadata.setdefault(REPORT_KEY, {})[self.id] = report
-        report["cancelled"] = await self._cancel(context, agent)
         sandbox, container = await self._place(agent)
         report["container"] = container
 
-        def run(script: str, *args: str):
-            prefix = ("sudo", "docker", "exec", "-u", "0", "-w", "/", container) if container else ()
-            return asyncio.wait_for(sandbox.exec_with_output(*prefix, "/bin/sh", "-c", script, "stop_agent", *args),
-                                    timeout=self.grace_s + _EXEC_MARGIN_S)
-
-        exit_code, stdout, stderr = await run(_END_PROCESSES, str(agent.a2a_port or DEFAULT_A2A_PORT),
-                                              str(round(self.grace_s / _POLL_S)), str(_POLL_S), str(_KILL_ROUNDS),
-                                              str(_KILL_PAUSE_S), *_neighbours(context, agent))
+        prefix = ("sudo", "docker", "exec", "-u", "0", "-w", "/", container) if container else ()
+        exit_code, stdout, stderr = await asyncio.wait_for(sandbox.exec_with_output(
+            *prefix, "/bin/sh", "-c", _END_PROCESSES, "stop_agent", str(agent.a2a_port or DEFAULT_A2A_PORT),
+            str(round(self.grace_s / _POLL_S)), str(_POLL_S), str(_KILL_ROUNDS), str(_KILL_PAUSE_S),
+            *_neighbours(context, agent)), timeout=self.grace_s + _EXEC_MARGIN_S)
         server, ended, left = _read_processes(stdout)
         report.update(server=server, processes=ended[:_REPORTED_PROCESSES], processes_ended=len(ended),
                       processes_left=left)
         if exit_code != 0:
             raise RuntimeError(f"stop_agent: couldn't end agent '{self.agent_name}''s processes (exit {exit_code}): "
                                f"{stderr.strip()[-_STDERR_TAIL_CHARS:]}")
-        problems = [f"{len(left)} process(es) still ran after SIGKILL: " + ", ".join(
-            f"{p['pid']} ({p['name']})" for p in left[:_LEFT_NAMED])] if left else []
-        if self.clear_paths:
-            exit_code, stdout, stderr = await run(_CLEAR_PATHS, *self.clear_paths)
-            report["cleared"] = cleared = _read_paths(self.clear_paths, stdout)
-            if exit_code != 0 or len(cleared) != len(self.clear_paths):
-                problems.append(f"couldn't clear the paths (exit {exit_code}): "
-                                f"{stderr.strip()[-_STDERR_TAIL_CHARS:]}")
-            if kept := [entry["path"] for entry in cleared if entry["kind"] != "missing" and not entry["removed"]]:
-                problems.append(f"couldn't remove {kept}")
-        logger.info(f"stop_agent: agent '{self.agent_name}': cancelled {len(report['cancelled'])} task(s), ended "
-                    f"{len(ended)} process(es), cleared {len(self.clear_paths)} path(s)")
-        if problems:
-            raise RuntimeError(f"stop_agent: agent '{self.agent_name}': " + "; ".join(problems))
+        logger.info(f"stop_agent: agent '{self.agent_name}': ended {len(ended)} process(es)")
+        if left:
+            raise RuntimeError(f"stop_agent: agent '{self.agent_name}': {len(left)} process(es) still ran after "
+                               "SIGKILL: " + ", ".join(f"{p['pid']} ({p['name']})" for p in left[:_LEFT_NAMED]))
         return context
-
-    async def _cancel(self, context: TaskStepContext, agent: DeployedAgent) -> list[dict[str, Any]]:
-        """Each A2A task of the agent's turns in this run, cancelled, with the agent's answer when it didn't cancel:
-        a turn that ended already is past cancelling."""
-        tasks = list(dict.fromkeys(response.agent_session_id for response in context.prompt_responses
-                                   if response.agent_name == self.agent_name and response.agent_session_id))
-        url = agent.a2a_url or agent.api_url
-        answers = await asyncio.gather(*(protocol.cancel_a2a_task(url, task) for task in tasks))
-        return [{"task_id": task, "cancelled": why is None, **({"why_not": why} if why else {})}
-                for task, why in zip(tasks, answers)]
 
     @staticmethod
     async def _place(agent: DeployedAgent):
@@ -316,17 +258,3 @@ def _read_processes(stdout: str) -> tuple[Optional[dict], list[dict], list[dict]
             left.append(entry)
     return server, list(ended.values()), left
 
-
-def _read_paths(paths: list[str], stdout: str) -> list[dict[str, Any]]:
-    """Each path's state before it was removed, and whether it was."""
-    cleared = []
-    for path, line in zip(paths, stdout.splitlines()):
-        kind, removed, size, mtime, sha256, target = (line.split("\t") + [""] * 6)[:6]
-        entry: dict[str, Any] = {"path": path, "kind": kind, "removed": removed == "1"}
-        if kind == "file":
-            entry.update(size=int(size) if size.strip().isdigit() else None, sha256=sha256 or None,
-                         mtime=(datetime.fromtimestamp(int(mtime), UTC).isoformat() if mtime.isdigit() else None))
-        elif kind == "link":
-            entry["target"] = target.strip()
-        cleared.append(entry)
-    return cleared

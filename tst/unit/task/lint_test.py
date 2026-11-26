@@ -364,7 +364,7 @@ def test_an_agent_name_that_isnt_a_string_names_no_agent_and_lint_still_answers(
 
 CODER = {"id": "coder", "type": "deploy_agent", "agent_name": "coder"}
 WORK = {"id": "work", "type": "prompt_agent", "agent_name": "coder", "prompt": "Fix the tests.", "prompt_id": "work"}
-STOP = {"id": "stop", "type": "stop_agent", "agent_name": "coder", "clear_paths": ["/logs/verifier/reward.txt"]}
+STOP = {"id": "stop", "type": "stop_agent", "agent_name": "coder"}
 PROBE = {"id": "probe", "type": "verify_sandbox", "agent_name": "coder", "verifier_id": "probe",
          "criteria": [{"type": "probe_file_exists", "criterion": "has it", "paths": ["a.txt"]}]}
 REPO = {"id": "repo", "type": "run_docker_container", "sandbox_name": "box", "container_name": "repo",
