@@ -56,7 +56,8 @@ def run(monkeypatch, tmp_path):
             return FakeCLI(*queue.pop(0))
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
-        return asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, **kwargs))
+        return asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False,
+                                                    **{"web_tools": True, **kwargs}))
 
     return _run
 

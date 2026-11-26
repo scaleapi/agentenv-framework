@@ -11,7 +11,7 @@ import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
 from starlette.testclient import TestClient
 
-from tst.unit.agents.gemini.agent import a2a_server, gemini_bridge, gemini_config
+from tst.unit.agents.gemini.agent import AGENT_DIR, a2a_server, gemini_bridge, gemini_config
 from tst.unit.agents.gemini.support import card, namespace_grant, send
 
 AGENT_CONFIG_PATH = AGENT_CONFIG_V1.endpoint
@@ -121,8 +121,8 @@ def test_each_run_gets_its_servers_role_and_system_prompt_in_settings_of_its_own
 
 
 def test_turns_sharing_a_system_prompt_share_its_file_until_the_last_ends(home):
-    with gemini_config.run_settings({}, "solver", "be brief") as first:
-        with gemini_config.run_settings({}, "auditor", "be brief") as second:
+    with gemini_config.run_settings({}, "solver", "be brief", web_tools=True) as first:
+        with gemini_config.run_settings({}, "auditor", "be brief", web_tools=True) as second:
             names = [json.loads(p.read_text())["context"]["fileName"][1] for p in (first, second)]
             assert names[0] == names[1]
         prompt = home / ".gemini" / names[0]
@@ -135,12 +135,27 @@ def test_a_run_includes_the_task_directories_that_exist_so_the_file_tools_read_t
     app_dir.mkdir()
     monkeypatch.setattr(gemini_config, "TASK_DIRS", (str(app_dir), str(data_dir)))
 
-    with gemini_config.run_settings({}, None, None) as path:
+    with gemini_config.run_settings({}, None, None, web_tools=True) as path:
         assert json.loads(path.read_text())["context"] == {"includeDirectories": [str(app_dir)]}
     data_dir.mkdir()
-    with gemini_config.run_settings({}, None, "be brief") as path:
+    with gemini_config.run_settings({}, None, "be brief", web_tools=True) as path:
         context = json.loads(path.read_text())["context"]
     assert context["includeDirectories"] == [str(app_dir), str(data_dir)] and context["fileName"][0] == "GEMINI.md"
+
+def test_web_tools_off_leaves_the_clis_web_tools_out_of_its_registry(home):
+    with gemini_config.run_settings({}, None, None, web_tools=False) as path:
+        assert json.loads(path.read_text())["tools"]["exclude"] == ["google_web_search", "web_fetch"]
+    with gemini_config.run_settings({}, None, None, web_tools=True) as path:
+        assert "tools" not in json.loads(path.read_text())
+
+
+def test_the_web_tools_mapping_is_that_of_the_cli_version_the_package_pins():
+    pinned = json.loads((AGENT_DIR / "package.json").read_text())["dependencies"]["@google/gemini-cli"]
+
+    assert gemini_config.WEB_TOOLS_CLI_VERSION == pinned, (
+        "the CLI version changed: check that tools.exclude still leaves google_web_search and web_fetch out of the "
+        "CLI's tool registry, then move WEB_TOOLS_CLI_VERSION")
+
 
 def test_a_duplicate_url_or_name_is_a_409(home, client):
     client.post(MCP_CONFIG_PATH, json={"url": "https://gw/a/mcp", "name": "env1"})

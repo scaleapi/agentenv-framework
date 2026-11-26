@@ -144,6 +144,8 @@ class OpenCodeConfig(AgentConfig):
     max_turns: int | None = None
     # Which of the CLI's own tools it may use. With any selection, the tools of the MCP servers agent-env gives it stay.
     builtin_tools: OpenCodeTools | None = None
+    # False: the CLI's own web tools, websearch and webfetch, are off whatever builtin_tools selects.
+    web_tools: bool = True
 
     @field_validator("output_format")
     @classmethod
@@ -388,6 +390,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         role=request.config.role,
                         attachment_paths=attachments,
                         builtin_tools=request.config.builtin_tools,
+                        web_tools=request.config.web_tools,
                         event_callback=record,
                         workspace=str(WORKSPACE_DIR),
                         max_turns=request.config.max_turns,

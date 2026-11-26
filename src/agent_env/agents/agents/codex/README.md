@@ -33,7 +33,7 @@ come.
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `CodexConfig`: `model`, `effort` (Codex's `model_reasoning_effort`; a set without it clears it), `system_prompt` (Codex's `developer_instructions`), `output_format` (a JSON schema, as `--output-schema`), `project_id`, `task_id`, `timeout_seconds`, `builtin_tools` (below) |
+| `agent-config/v1` | `CodexConfig`: `model`, `effort` (Codex's `model_reasoning_effort`; a set without it clears it), `system_prompt` (Codex's `developer_instructions`), `output_format` (a JSON schema, as `--output-schema`), `project_id`, `task_id`, `timeout_seconds`, `builtin_tools`, `web_tools` (below) |
 | `mcp-config/v1` | SDK default; written to `config.toml` before each task |
 | `skill-config/v1` | inline and bundle skills installed as `~/.agents/skills/<name>/SKILL.md`, where Codex finds them |
 | `trajectory/v1` | the task's `codex exec --json` events, live while it runs (format `codex-exec-json/1`) |
@@ -68,6 +68,9 @@ waits, so it's unaffected.
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;
 config.toml stays as it is. `{"disable": "*"}` turns off every setting below, `{"only": [...]}` every one but those whose
 tools it names, and a list to turn off those whose tools it names. A list names all of a setting's tools or none:
+
+A `deploy_agent` `web_tools: false` adds `-c web_search="disabled"`, which takes the CLI's web search tool off,
+whatever `builtin_tools` selects.
 
 | Tools | Override |
 |---|---|

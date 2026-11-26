@@ -48,7 +48,7 @@ def test_a_first_turn_sends_its_prompt_on_stdin_and_not_in_argv(spawned):
     result = asyncio.run(
         opencode_bridge.run_opencode(
             prompt="summarise the filing", context_id="ctx", model="m", workspace="/w"
-        )
+        , web_tools=True)
     )
 
     (call,) = spawned
@@ -77,8 +77,7 @@ def test_a_resumed_turn_names_its_session_and_sends_its_prompt_on_stdin(spawned)
             session_id="ses_0",
             model="m",
             attachment_paths=["/w/a.png"],
-            workspace="/w",
-        )
+            workspace="/w", web_tools=True)
     )
 
     (call,) = spawned
@@ -112,8 +111,7 @@ def test_a_one_mib_prompt_and_its_output_format_reach_stdin_byte_for_byte(spawne
             prompt=prompt,
             context_id="ctx",
             session_id="ses_0",
-            output_format={"type": "json_schema", "schema": schema},
-        )
+            output_format={"type": "json_schema", "schema": schema}, web_tools=True)
     )
 
     (call,) = spawned
@@ -142,7 +140,7 @@ def test_a_real_cli_reads_a_one_mib_prompt_whole_from_stdin(monkeypatch, tmp_pat
     result = asyncio.run(
         opencode_bridge.run_opencode(
             prompt=prompt, context_id="ctx", workspace=str(tmp_path)
-        )
+        , web_tools=True)
     )
 
     assert result.error is None, result.error
@@ -164,7 +162,7 @@ def test_a_cli_that_exits_before_reading_its_prompt_still_ends_the_turn(
     result = asyncio.run(
         opencode_bridge.run_opencode(
             prompt="x" * (4 * 1024 * 1024), context_id="ctx", timeout_s=30
-        )
+        , web_tools=True)
     )
 
     assert result.error == "Error: bad config"
@@ -193,8 +191,7 @@ def test_a_real_cli_that_prints_before_reading_its_prompt_does_not_deadlock(
             prompt="x" * (1024 * 1024),
             context_id="ctx",
             workspace=str(tmp_path),
-            timeout_s=20,
-        )
+            timeout_s=20, web_tools=True)
     )
 
     assert result.error is None, result.error
@@ -209,7 +206,7 @@ def test_a_failed_prompt_write_fails_the_turn(spawned, monkeypatch):
     monkeypatch.setattr(FakeStdin, "drain", drain_fails)
 
     with pytest.raises(OSError, match="Input/output error"):
-        asyncio.run(opencode_bridge.run_opencode(prompt="summarise", context_id="ctx"))
+        asyncio.run(opencode_bridge.run_opencode(prompt="summarise", context_id="ctx", web_tools=True))
 
     (call,) = spawned
     assert call["proc"].stdin.closed

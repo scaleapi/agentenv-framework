@@ -7,7 +7,8 @@ from tst.unit.agents.claude_code.agent import claude_bridge
 
 def _cli_model(model: str | None) -> str | None:
     cmd = claude_bridge._command("sess-1", False, model=model, allowed_tools=None, mcp_servers=None,
-                                 system_prompt=None, output_format=None, role=None, effort=None, max_turns=None)
+                                 system_prompt=None, output_format=None, role=None, effort=None, max_turns=None,
+                                 web_tools=True)
     return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
 
 

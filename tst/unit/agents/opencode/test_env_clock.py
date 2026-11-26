@@ -69,7 +69,7 @@ def test_every_turns_relay_puts_the_env_date_in_its_model_calls(monkeypatch):
 
     monkeypatch.setattr(opencode_bridge, "model_relay", relay)
     monkeypatch.setattr(opencode_bridge, "_run_opencode", turn)
-    asyncio.run(opencode_bridge.run_opencode("go", "ctx"))
+    asyncio.run(opencode_bridge.run_opencode("go", "ctx", web_tools=True))
 
     assert seen == {"rewrite": opencode_date.env_date_rewrite, "base_url": "http://relay"}
 

@@ -41,7 +41,7 @@ agent-env run agents --task browser-use-smoke
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort` (`low`, `medium` or `high`), `mode` (`default` or `ultrafast`, browser-use's accessibility-tree helpers), `system_prompt` (added to browser-use's instructions), `max_steps`, `browser`, `connect_by` (`ws` or `http`), `timeout_seconds` |
+| `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort` (`low`, `medium` or `high`), `mode` (`default` or `ultrafast`, browser-use's accessibility-tree helpers), `system_prompt` (added to browser-use's instructions), `max_steps`, `browser`, `connect_by` (`ws` or `http`), `timeout_seconds`. No `web_tools`: browsing is its job, so a deploy that turns web tools off fails |
 | `cdp-config/v1` | SDK default; each turn reads its endpoint with `request.cdp_endpoint(browser)` |
 | `mcp-config/v1` | SDK default; each server's tools are listed per turn and called over streamable HTTP |
 | `trajectory/v1` | browser-use's messages, as Pydantic AI writes them, each turn's when it ends, format `browser-use-messages/1` |

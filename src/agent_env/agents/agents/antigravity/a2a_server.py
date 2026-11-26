@@ -124,6 +124,8 @@ class AntigravityConfig(AgentConfig):
     max_turns: int | None = Field(default=None, gt=0)
     # Which of the SDK's own tools it may use. With any selection, the tools of the MCP servers agent-env gives it stay.
     builtin_tools: BuiltinTools[AntigravityTool] | None = None
+    # False: the SDK's own web tools, search_web and read_url_content, are off whatever builtin_tools selects.
+    web_tools: bool = True
 
 
 class FilePartMaterializeError(Exception):
@@ -336,6 +338,7 @@ class AntigravityAgent(DurableSessionRefs, AgentEnvAgent):
                         timeout_s=request.config.timeout_seconds,
                         role=request.config.role,
                         builtin_tools=request.config.builtin_tools,
+                        web_tools=request.config.web_tools,
                         max_turns=request.config.max_turns,
                         workspace=str(WORKSPACE_DIR),
                         event_callback=request.trajectory.append,

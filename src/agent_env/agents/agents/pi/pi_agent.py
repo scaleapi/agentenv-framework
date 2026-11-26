@@ -126,6 +126,8 @@ class PiConfig(AgentConfig):
     append_system_prompt: str | None = None
     effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     tools: str | None = None
+    # Its own tools have no web search or fetch, so false leaves them as they are.
+    web_tools: bool = True
     context_window: int = 200_000
     max_tokens: int = 32_000
     model_params: WriteOnly[dict[str, Any] | None] = None
@@ -743,3 +745,7 @@ class PiAgent(AgentEnvAgent):
 
 def _is_tool_result(event: Mapping[str, Any]) -> bool:
     return event.get("type") == "message_end" and (event.get("message") or {}).get("role") == "toolResult"
+
+
+# The pi version checked to have no web tools of its own, so web_tools False changes nothing.
+NO_WEB_TOOLS_VERSION = "1.1.0"

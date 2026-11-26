@@ -196,6 +196,8 @@ class GeminiConfig(AgentConfig):
     # x-litellm-customer-id / x-litellm-tags on every forwarded model call.
     project_id: str | None = None
     task_id: str | None = None
+    # False: the CLI's own web tools, google_web_search and web_fetch, are left out of its tool registry.
+    web_tools: bool = True
 
 
 @dataclass
@@ -658,7 +660,8 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                                                  _Calls(sink=request.trajectory.append))
             own = self.session_ref_for_context(context_id)
             try:
-                with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt) as settings:
+                with run_settings(request.mcp_servers, cfg.role, cfg.system_prompt,
+                                  web_tools=cfg.web_tools) as settings:
                     base_url = None
                     if os.environ.get("LITELLM_BASE_URL"):
                         port = os.environ.get("A2A_PORT") or "8000"

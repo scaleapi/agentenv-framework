@@ -737,6 +737,8 @@ async def run_claude(
     max_turns: int | None = None,
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
+    *,
+    web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
     aux_callback: Callable[[str, Any], None] | None = None,
     tool_shapes: set[tuple[str | None, str]] | None = None,
@@ -756,7 +758,7 @@ async def run_claude(
         _spawn_claude, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
         system_prompt=system_prompt, output_format=output_format, project_id=project_id, task_id=task_id,
         role=role, effort=effort, max_turns=max_turns, max_thinking_tokens=max_thinking_tokens,
-        builtin_tools=builtin_tools, event_callback=event_callback, on_stdout=on_stdout,
+        builtin_tools=builtin_tools, web_tools=web_tools, event_callback=event_callback, on_stdout=on_stdout,
     )
     tail = (await asyncio.to_thread(partial(SessionTail, session_id, on_stdout, tool_shapes if tool_shapes is not None
                                             else set(), new_document=new_document))
@@ -959,10 +961,11 @@ def _with_1m_window(model: str) -> str:
 def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools: list[str] | None,
              mcp_servers: dict[str, dict] | None, system_prompt: str | None, output_format: dict | None,
              role: str | None, effort: str | None, max_turns: int | None,
-             builtin_tools: ClaudeCodeTools | None = None) -> list[str]:
+             builtin_tools: ClaudeCodeTools | None = None, web_tools: bool) -> list[str]:
     """The CLI's argv. The prompt goes on stdin, since one argument over 128 KiB fails exec. ``builtin_tools`` selects
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
-    the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
+    the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``. ``web_tools`` False
+    turns the CLI's web tools off on top of any selection."""
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
            "--setting-sources", "user", "--settings", json.dumps(CLI_SETTINGS)]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
@@ -982,12 +985,17 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
         cmd += ["--json-schema", json.dumps(output_format["schema"])]
     if allowed_tools:
         cmd += ["--allowedTools", ",".join(allowed_tools)]
+    disallowed: list[str] = []
+    if builtin_tools is not None and isinstance(builtin_tools.disable, list):
+        disallowed += builtin_tools.disable
     if builtin_tools is not None:
         if builtin_tools.only is not None or builtin_tools.disable == "*":
             cmd += ["--tools", ",".join(builtin_tools.only or [])]
-        elif builtin_tools.disable:
-            cmd += ["--disallowedTools", ",".join(builtin_tools.disable)]
         cmd.append("--strict-mcp-config")
+    if not web_tools:
+        disallowed += [tool for tool in _WEB_TOOLS if tool not in disallowed]
+    if disallowed:
+        cmd += ["--disallowedTools", ",".join(disallowed)]
     if mcp_servers:
         def entry(info: dict) -> dict:
             server: dict = {"type": "http", "url": info["url"]}
@@ -1018,12 +1026,14 @@ async def _spawn_claude(
     max_turns: int | None = None,
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
+    *,
+    web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
     on_stdout: set[str] | None = None,
 ) -> ClaudeResult:
     cmd = _command(session_id, resume, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
-                   max_turns=max_turns, builtin_tools=builtin_tools)
+                   max_turns=max_turns, builtin_tools=builtin_tools, web_tools=web_tools)
     logger.info(f"Running claude CLI (resume={resume}, session_id={session_id}, model={model})")
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     proc = await _started(asyncio.create_subprocess_exec(
@@ -1151,3 +1161,7 @@ def _join_tags(configured: str, run: str) -> str:
     tags = [tag.strip() for tag in configured.split(",") if tag.strip()]
     keys = {tag.partition(":")[0] for tag in tags}
     return ",".join([*tags, *(tag for tag in run.split(",") if tag and tag.partition(":")[0] not in keys)])
+
+
+# The CLI's own web tools: what a deploy_agent web_tools False turns off.
+_WEB_TOOLS = ("WebSearch", "WebFetch")

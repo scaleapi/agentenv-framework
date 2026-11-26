@@ -159,16 +159,8 @@ def _config_request(agent_config: dict | None) -> dict:
 def _check_builtin_tools(agent_config: dict | None, agent_name: str, selection: dict) -> None:
     """Refuse a selection of the agent's own tools that its card's agent-config extension can't take: it has no
     ``builtin_tools``, or its schema doesn't name a tool the selection does."""
-    request = _config_request(agent_config)
-    if "builtin_tools" not in request.get("supported", []):
-        raise RuntimeError(f"Agent '{agent_name}' cannot have its own tools selected: its card's "
-                           f"{AGENT_CONFIG_V1.uri} takes no 'builtin_tools'")
-    schema = request.get("schema") or {}
-    field = (schema.get("properties") or {}).get("builtin_tools")
-    if field is not None:
-        error = best_match(Draft202012Validator({**field, "$defs": schema.get("$defs", {})}).iter_errors(selection))
-        if error is not None:
-            raise RuntimeError(f"Agent '{agent_name}' can't take builtin_tools {selection}: {error.message}")
+    if (problem := _builtin_tools_problem(agent_config, selection)) is not None:
+        raise RuntimeError(f"Agent '{agent_name}' {problem}")
 
 
 def _check_peer_tools(agent_config: dict | None, agent_name: str) -> None:
@@ -222,6 +214,7 @@ class DeployAgentTaskStep(TaskStep):
         role: Optional[str] = None,
         builtin_tools: Optional[dict] = None,
         peer_tools: Optional[bool] = None,
+        web_tools: Optional[bool] = None,
         enable_agent_changelog: bool = False,
         agent_changelog_toolcall_position_exclusive: Optional[int] = None,
         sandbox_name: Optional[str] = None,
@@ -259,6 +252,10 @@ class DeployAgentTaskStep(TaskStep):
         if peer_tools is not None and not isinstance(peer_tools, bool):
             raise ValueError(f"peer_tools must be true or false, not {peer_tools!r}")
         self.peer_tools = peer_tools
+        # False: the agent's own web search and fetch tools are off, whichever agent it is; its MCP tools stay.
+        if web_tools is not None and not isinstance(web_tools, bool):
+            raise ValueError(f"web_tools must be true or false, not {web_tools!r}")
+        self.web_tools = web_tools
         self.enable_agent_changelog = enable_agent_changelog
         self.agent_changelog_object_url = agent_changelog_object_url
         self.agent_changelog_toolcall_position_exclusive = agent_changelog_toolcall_position_exclusive
@@ -298,6 +295,7 @@ class DeployAgentTaskStep(TaskStep):
         base["role"] = self.role
         base["builtin_tools"] = self.builtin_tools
         base["peer_tools"] = self.peer_tools
+        base["web_tools"] = self.web_tools
         base["enable_agent_changelog"] = self.enable_agent_changelog
         base["agent_changelog_object_url"] = self.agent_changelog_object_url
         base["agent_changelog_toolcall_position_exclusive"] = self.agent_changelog_toolcall_position_exclusive
@@ -332,6 +330,7 @@ class DeployAgentTaskStep(TaskStep):
             role=data.get("role"),
             builtin_tools=data.get("builtin_tools"),
             peer_tools=data.get("peer_tools"),
+            web_tools=data.get("web_tools"),
             enable_agent_changelog=data.get("enable_agent_changelog", False),
             agent_changelog_object_url=data.get("agent_changelog_object_url"),
             agent_changelog_toolcall_position_exclusive=data.get("agent_changelog_toolcall_position_exclusive"),
@@ -479,16 +478,34 @@ class DeployAgentTaskStep(TaskStep):
             identity_payload["description"] = self.agent_description
         if self.role is not None:
             identity_payload["role"] = self.role
-        if self.builtin_tools is not None:
+        agent_config = A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG)
+        builtin_tools, web_off = _web_tools_from_selection(agent_config, self.builtin_tools)
+        web_tools = False if web_off else self.web_tools
+        if web_off:
+            logger.warning(f"Agent '{self.agent_name}' doesn't name the web tools builtin_tools "
+                           f"{self.builtin_tools} turns off; turning its own web tools off with web_tools instead")
+        if builtin_tools is not None:
             # Before the first request to the agent, so an agent that would keep its own tools never runs the task.
-            _check_builtin_tools(A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG), self.agent_name,
-                                 self.builtin_tools)
-            identity_payload["builtin_tools"] = self.builtin_tools
+            _check_builtin_tools(agent_config, self.agent_name, builtin_tools)
+            identity_payload["builtin_tools"] = builtin_tools
         if self.peer_tools is not None:
             if not self.peer_tools:
                 # Before the first request to the agent, as for builtin_tools.
-                _check_peer_tools(A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG), self.agent_name)
+                _check_peer_tools(agent_config, self.agent_name)
             identity_payload["peer_tools"] = self.peer_tools
+        if web_tools is None and resolved_policy and NetworkPolicy.from_dict(resolved_policy).restricts_egress:
+            # Hosted search reaches the model provider through the endpoint any such policy allows, so only the agent
+            # can turn it off. Best effort: an agent that can't is deployed as it is, as before the policy had a say.
+            if _takes_web_tools(agent_config):
+                web_tools = False
+            else:
+                logger.warning(f"Agent '{self.agent_name}' keeps its own web tools under a network policy that "
+                               f"restricts egress: its card's {AGENT_CONFIG_V1.uri} takes no 'web_tools'")
+        if web_tools is not None:
+            if not web_tools:
+                # Before the first request to the agent, as for builtin_tools.
+                _check_web_tools(agent_config, self.agent_name)
+            identity_payload["web_tools"] = web_tools
         identity = A2AAgent.negotiate_agent_config(card, identity_payload)
         if self.role is not None:
             carried_by = [via for via, carried in (
@@ -779,3 +796,57 @@ class DeployAgentTaskStep(TaskStep):
                 "source_artifact_id": universe.id,
                 "source_artifact_version": universe.version,
             })
+
+
+# The built-in agents' web search and fetch tools, by their own names. A task written for one agent turns those off with
+# builtin_tools; another agent deployed in its place can't take the names, so the step turns its web tools off with
+# web_tools instead. Kept until tasks name web_tools themselves.
+_OTHER_AGENTS_WEB_TOOLS = frozenset({
+    "WebSearch", "WebFetch",                # Claude Code
+    "web_search",                           # Codex
+    "websearch", "webfetch",                # OpenCode
+    "google_web_search", "web_fetch",       # Gemini CLI
+    "search_web", "read_url_content",       # Antigravity
+})
+
+
+def _takes_web_tools(agent_config: dict | None) -> bool:
+    """Whether the card's agent-config extension takes ``web_tools``."""
+    return "web_tools" in _config_request(agent_config).get("supported", [])
+
+
+def _check_web_tools(agent_config: dict | None, agent_name: str) -> None:
+    """Refuse to turn off the web tools of an agent whose card's agent-config extension can't take ``web_tools``: it
+    would keep them."""
+    if not _takes_web_tools(agent_config):
+        raise RuntimeError(f"Agent '{agent_name}' cannot have its web tools turned off: its card's "
+                           f"{AGENT_CONFIG_V1.uri} takes no 'web_tools'")
+
+
+def _web_tools_from_selection(agent_config: dict | None, selection: dict | None) -> tuple[dict | None, bool]:
+    """A ``{"disable": [...]}`` selection the agent can't take only because it names other agents' web tools: the
+    selection without those names (None when nothing is left) and True, so the step turns the agent's web tools off
+    instead. Any other selection, None included, comes back unchanged with False, and is checked as written."""
+    disable = (selection or {}).get("disable")
+    if not isinstance(disable, list):
+        return selection, False
+    unknown = [name for name in disable if _builtin_tools_problem(agent_config, {"disable": [name]}) is not None]
+    if not unknown or not set(unknown) <= _OTHER_AGENTS_WEB_TOOLS:
+        return selection, False
+    kept = [name for name in disable if name not in unknown]
+    return ({"disable": kept} if kept else None), True
+
+
+def _builtin_tools_problem(agent_config: dict | None, selection: dict) -> str | None:
+    """Why the card's agent-config extension can't take a selection of the agent's own tools, worded to follow
+    "Agent '<name>'", or None when it can."""
+    request = _config_request(agent_config)
+    if "builtin_tools" not in request.get("supported", []):
+        return f"cannot have its own tools selected: its card's {AGENT_CONFIG_V1.uri} takes no 'builtin_tools'"
+    schema = request.get("schema") or {}
+    field = (schema.get("properties") or {}).get("builtin_tools")
+    if field is not None:
+        error = best_match(Draft202012Validator({**field, "$defs": schema.get("$defs", {})}).iter_errors(selection))
+        if error is not None:
+            return f"can't take builtin_tools {selection}: {error.message}"
+    return None

@@ -27,26 +27,26 @@ def _model_entry(config: dict, model: str = MODEL) -> dict:
 
 
 def test_tool_choice_always_dropped():
-    config = _build_config(MODEL, None, {}, None)
+    config = _build_config(MODEL, None, {}, None, web_tools=True)
     options = _model_entry(config)["options"]
     assert options["additional_drop_params"] == ["tool_choice"]
 
 
 def test_effort_merges_with_drop_params():
-    config = _build_config(MODEL, None, {}, None, effort="medium")
+    config = _build_config(MODEL, None, {}, None, effort="medium", web_tools=True)
     options = _model_entry(config)["options"]
     assert options["additional_drop_params"] == ["tool_choice"]
     assert options["reasoningEffort"] == "medium"
 
 
 def test_no_effort_omits_reasoning_key():
-    config = _build_config(MODEL, None, {}, None)
+    config = _build_config(MODEL, None, {}, None, web_tools=True)
     options = _model_entry(config)["options"]
     assert "reasoningEffort" not in options
 
 
 def test_model_reference_and_provider_untouched():
-    config = _build_config(MODEL, None, {"x-litellm-tags": "taskId:t1"}, None)
+    config = _build_config(MODEL, None, {"x-litellm-tags": "taskId:t1"}, None, web_tools=True)
     assert config["model"] == f"litellm/{MODEL}"
     assert config["provider"]["litellm"]["options"]["headers"]["x-litellm-tags"] == "taskId:t1"
     # The headless permission contract must survive options changes.
@@ -59,7 +59,7 @@ def test_model_reference_and_provider_untouched():
     ("https://gateway.example/v1", "https://gateway.example/v1"),
 ])
 def test_the_endpoint_is_the_configured_base_urls_v1(base, expected):
-    config = _build_config(MODEL, None, {}, None, environ={"LITELLM_BASE_URL": base})
+    config = _build_config(MODEL, None, {}, None, environ={"LITELLM_BASE_URL": base}, web_tools=True)
 
     assert config["provider"]["litellm"]["options"]["baseURL"] == expected
     assert config["provider"]["litellm"]["options"]["apiKey"] == "{env:LITELLM_API_KEY}"
@@ -85,8 +85,8 @@ def test_the_runs_role_replaces_the_role_a_server_is_registered_with_in_any_case
     servers = {"env": {"url": "https://mcp.example/mcp", "headers": {"agentenv-role": "registered", "X-Key": "k"}},
                "peer_agents": {"url": "http://127.0.0.1:8000/ext/peer-agents/mcp", "headers": None}}
 
-    with_role = _build_config(MODEL, servers, {}, "solver")["mcp"]
-    without_role = _build_config(MODEL, servers, {}, None)["mcp"]
+    with_role = _build_config(MODEL, servers, {}, "solver", web_tools=True)["mcp"]
+    without_role = _build_config(MODEL, servers, {}, None, web_tools=True)["mcp"]
 
     assert with_role == {
         "env": {"type": "remote", "url": "https://mcp.example/mcp", "enabled": True,
@@ -128,7 +128,7 @@ def test_a_turn_runs_in_its_workspace_with_tls_checks_on(monkeypatch, spawned):
 
     asyncio.run(opencode_bridge.run_opencode(
         prompt="go", context_id="ctx", session_id="ses_0", model="m", project_id="p-1", task_id="t-1",
-        attachment_paths=["/w/a.png"], workspace="/w"))
+        attachment_paths=["/w/a.png"], workspace="/w", web_tools=True))
 
     ((argv, env),) = spawned
     assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0",
@@ -144,7 +144,7 @@ def test_a_turn_runs_in_its_workspace_with_tls_checks_on(monkeypatch, spawned):
 def test_a_turn_with_no_model_of_its_own_runs_the_default(monkeypatch, spawned):
     monkeypatch.setattr(opencode_bridge, "DEFAULT_MODEL", "provider/fallback")
 
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", web_tools=True))
 
     ((argv, env),) = spawned
     assert argv[argv.index("--model") + 1] == "litellm/provider/fallback"
@@ -157,7 +157,8 @@ def test_the_system_prompt_reaches_the_model_as_instructions_and_the_output_form
     schema = {"type": "object"}
 
     asyncio.run(opencode_bridge.run_opencode(
-        prompt="go", context_id="ctx", system_prompt="be brief", output_format={"type": "json_schema", "schema": schema}))
+        prompt="go", context_id="ctx", system_prompt="be brief",
+        output_format={"type": "json_schema", "schema": schema}, web_tools=True))
 
     ((argv, env),) = spawned
     assert spawned.clis[0].stdin.data == (b'go\n\nReturn only a JSON object matching this schema, with no Markdown or '
@@ -172,14 +173,14 @@ def test_on_an_armed_clock_only_the_endpoint_the_relay_dates_is_enabled(monkeypa
     """A provider a project's opencode.json adds, as for a subagent's model, would reach a model with the real date."""
     monkeypatch.setattr(opencode_bridge, "clock_armed", lambda: armed)
 
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", web_tools=True))
 
     ((_argv, env),) = spawned
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"]).get("enabled_providers") == (["litellm"] if armed else None)
 
 
 def test_a_turn_with_no_system_prompt_names_no_instructions(spawned):
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", web_tools=True))
 
     ((_argv, env),) = spawned
     assert "instructions" not in json.loads(env["OPENCODE_CONFIG_CONTENT"])
@@ -215,7 +216,7 @@ def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_
     monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example/v1")
     monkeypatch.setattr(opencode_bridge, "model_relay", relay)
 
-    result = asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m"))
+    result = asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m", web_tools=True))
 
     ((_, env),) = spawned
     assert relays == ["https://gateway.example"]
@@ -231,18 +232,19 @@ def test_a_turns_provider_calls_its_own_model_relay_and_its_usage_is_the_relays_
 
 
 def test_max_output_tokens_sets_the_models_output_limit_alone():
-    entry = _model_entry(_build_config(MODEL, None, {}, None, max_output_tokens=64000))
+    entry = _model_entry(_build_config(MODEL, None, {}, None, max_output_tokens=64000, web_tools=True))
     # No context limit, which would turn on OpenCode's auto-compaction.
     assert entry["limit"] == {"output": 64000}
 
 
 def test_no_max_output_tokens_omits_the_limit():
-    assert "limit" not in _model_entry(_build_config(MODEL, None, {}, None))
+    assert "limit" not in _model_entry(_build_config(MODEL, None, {}, None, web_tools=True))
 
 
 def test_max_output_tokens_also_reaches_the_cli_as_its_output_cap(spawned):
     """OpenCode caps a step at min(limit.output, the variable), so the limit alone can't raise it past 32,000."""
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m", max_output_tokens=64000))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m", max_output_tokens=64000,
+                                             web_tools=True))
 
     ((_argv, env),) = spawned
     assert env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "64000"
@@ -252,7 +254,7 @@ def test_max_output_tokens_also_reaches_the_cli_as_its_output_cap(spawned):
 def test_a_turn_with_no_max_output_tokens_sets_no_output_cap(monkeypatch, spawned):
     monkeypatch.delenv("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", raising=False)
 
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m"))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", model="m", web_tools=True))
 
     ((_argv, env),) = spawned
     assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX" not in env
