@@ -30,7 +30,8 @@ MAX_URL_BYTES = 1 << 30
 DEFAULT_DATA_PATHS = ("Desktop", "Documents", "Downloads")
 #: Where the base class writes recordings, relative to the driver's home, and keeps them when there is no grant.
 RECORDINGS_DIR = ".agentenv-recordings"
-_PATHS = TypeAdapter(list[RelativePath])
+#: Paths relative to the session user's home: those data/get is given, and a driver's ``default_data_paths``.
+RELATIVE_PATHS = TypeAdapter(tuple[RelativePath, ...])
 
 
 class DataPlane:
@@ -61,7 +62,7 @@ class DataPlane:
     async def _computer_data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None,
                                  paths: Optional[list[str]] = None) -> list:
         try:
-            named = _PATHS.validate_python(paths) if paths is not None else list(self.default_data_paths)
+            named = list(RELATIVE_PATHS.validate_python(paths) if paths is not None else self.default_data_paths)
         except ValidationError:
             raise ValueError(f"data/get on a computer takes paths relative to the home, not {paths!r}") from None
         leaving_out = await self._computer.app_paths()

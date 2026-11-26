@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 import hashlib
 import json
+import os
 import sys
-import textwrap
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -30,32 +30,7 @@ from agentenv_protocol.computer.manifest import ManifestSegment  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 ANDROID = Platform(os="android", arch="amd64", display="none")
-FAKE_ADB = textwrap.dedent('''\
-    import json, os, shutil, subprocess, sys
-    from pathlib import Path
-    device = Path(os.environ["FAKE_DEVICE"])
-    args = sys.argv[1:]
-    if os.environ.get("FAKE_OFFLINE"):
-        print("error: device offline", file=sys.stderr); sys.exit(1)
-    if os.environ.get("FAKE_DAEMON_STARTS"):
-        print("* daemon not running; starting now at tcp:5037\\n* daemon started successfully", file=sys.stderr)
-    with open(device.parent / "calls.jsonl", "a") as out:
-        out.write(json.dumps({"args": args, "serial": os.environ.get("ANDROID_SERIAL"),
-                              "server": os.environ.get("ADB_SERVER_SOCKET")}) + "\\n")
-    def local(remote):
-        return device / Path(remote).relative_to("/sdcard")
-    if args[0] == "pull" and os.environ.get("FAKE_PULL_HANGS"):
-        (device.parent / "adb.pid").write_text(str(os.getpid())); import time; time.sleep(60)
-    if args[0] == "push" and os.environ.get("FAKE_PUSH_FAILS"):
-        local(args[2]).write_bytes(b"half"); print("error: connection reset", file=sys.stderr); sys.exit(1)
-    elif args[0] == "push":
-        shutil.copy(args[1], local(args[2]))
-    elif args[0] == "pull":
-        source = local(args[1])
-        (shutil.copytree if source.is_dir() else shutil.copy)(source, Path(args[2]) / source.name)
-    elif args[0] == "shell" and not args[1].startswith("am broadcast"):
-        sys.exit(subprocess.run(["sh", "-c", args[1].replace("/sdcard", str(device))]).returncode)
-''')
+FAKE_ADB = Path(__file__).with_name("fake_adb.py")
 
 
 class BesideDriver(FakeDriver):
@@ -70,7 +45,7 @@ class BesideDriver(FakeDriver):
 def device(tmp_path, monkeypatch):
     (tmp_path / "sdcard").mkdir()
     adb = tmp_path / "fake-adb"
-    adb.write_text(f"#!{sys.executable}\n{FAKE_ADB}")
+    adb.write_text(f"#!{sys.executable}\n{FAKE_ADB.read_text()}")
     adb.chmod(0o755)
     monkeypatch.setenv("AGENTENV_ADB", str(adb))
     monkeypatch.setenv("FAKE_DEVICE", str(tmp_path / "sdcard"))
@@ -110,12 +85,12 @@ async def test_commands_and_files_go_through_adb_under_sdcard_and_recordings_sta
     computer = {e["uri"]: e for e in card["capabilities"]["extensions"]}["urn:agentenv:computer/v1"]["params"]
     assert (computer["placement"], computer["default_data_paths"]) == ("beside", ["Download", "DCIM"])
     calls = _calls(device)
-    assert [call["args"][0] for call in calls] == ["shell", "push", "shell", "shell", "shell", "pull", "shell"]
-    assert calls[1]["args"][2].startswith("/sdcard/Download/.agentenv-") and calls[1]["args"][2].endswith(".part")
-    assert calls[2]["args"][1] == f"mv -f {calls[1]['args'][2]} /sdcard/Download/f.csv"
-    assert calls[3]["args"][1].startswith("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE")
-    command = calls[-1]["args"][1]
-    assert "cd /sdcard/Download " in command and command.endswith("exec test -f f.csv")
+    pushed = [call["args"][2] for call in calls if call["args"][0] == "push"]
+    shell = [call["args"][1] for call in calls if call["args"][0] == "shell"]
+    assert (device / "Download" / "f.csv").read_bytes() == b"1,2"
+    assert not list((device / "Download").glob(".agentenv-*"))
+    assert len(pushed) == 1 and pushed[0].startswith("/sdcard/Download/.agentenv-")
+    assert "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Download/f.csv" in shell
     assert {(call["serial"], call["server"]) for call in calls} == {("emulator-5554", "tcp:10.0.0.2:5037")}
 
 

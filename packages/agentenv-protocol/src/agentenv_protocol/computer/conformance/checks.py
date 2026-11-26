@@ -55,7 +55,8 @@ DATA_PLANE = (INTAKE_EXTENSION_URI, DATA_OBJECTS_EXTENSION_URI)
 STAGE = ".agentenv-probe"
 #: How the probe reads a staged file's owner: through the python3 the fixture runs on, the same on every OS.
 OWNER = ("python3", "-c", "import os, sys; print(os.stat(sys.argv[1]).st_uid)")
-DEVICE_OWNER = ("stat", "-c", "%u")
+#: How it reads the owner on Android, which has no python3: toybox's stat.
+ANDROID_OWNER = ("stat", "-c", "%u")
 #: Where a page driver's computer_upload takes files from, relative to the session user's home.
 UPLOADS = "Uploads"
 #: What the probe answers the page fixture's prompt with.
@@ -146,6 +147,8 @@ class Probe:
         self.gtk = not self.page and platform.get("display") == "wayland"
         self.fixture = "page_fixture.py" if self.page else "wayland_fixture.py" if self.gtk else "fixture.py"
         self.windows = platform.get("os") == "windows"
+        self.android = platform.get("os") == "android"
+        #: Whether the driver runs beside the device, so the recordings it keeps are in its own home, not the device's.
         self.beside = self.features.get("placement") == "beside"
         #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or on the GTK
         #: desk GTK's own Ctrl+A.
@@ -693,7 +696,7 @@ class Probe:
 
         async def one_user() -> str | None:
             uid = (await self.driver.run("id", "-u"))["stdout"].strip()
-            reader = DEVICE_OWNER if self.beside else OWNER
+            reader = ANDROID_OWNER if self.android else OWNER
             owner = (await self.driver.run(*reader, f"{STAGE}/{self.fixture}"))["stdout"].strip()
             if uid == "0":
                 return "commands run as root"

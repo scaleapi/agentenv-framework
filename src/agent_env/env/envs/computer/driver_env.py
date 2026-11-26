@@ -9,6 +9,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional
 
+from agentenv_protocol.computer.checks import DEFAULT_PLACEMENT, placement_problem
 from agentenv_protocol.computer.driver import DriverDeclaration
 from agentenv_protocol.computer.platform import entry_for
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -30,7 +31,6 @@ DECLARE_TIMEOUT_S = 120
 #: The port the SDK serves a driver on when MCP_PORT doesn't name one.
 DEFAULT_PORT = 18765
 MAX_PORT = 65535
-PLACEMENTS = ("inside", "beside")
 
 
 class KnownFailure(BaseModel):
@@ -51,7 +51,7 @@ class ComputerDriverEnv(Env):
     def __init__(self, id: str, version: Optional[int], module: str, files: FileArtifactUniverse,
                  declaration: DriverDeclaration, install: Optional[dict[str, Install]] = None, port: int = DEFAULT_PORT,
                  metadata: Optional[dict[str, Any]] = None,
-                 known_failures: Optional[dict[str, list[KnownFailure]]] = None, placement: str = "inside"):
+                 known_failures: Optional[dict[str, list[KnownFailure]]] = None, placement: str = DEFAULT_PLACEMENT):
         super().__init__(id, version, metadata=metadata)
         self.module = module
         self.files = files
@@ -66,7 +66,7 @@ class ComputerDriverEnv(Env):
                 "declaration": self.declaration.model_dump(mode="json", exclude_none=True),
                 "files": {"id": self.files.id, "version": self.files.version, "type": self.files.type},
                 "install": {os_type: install.model_dump(exclude_none=True) for os_type, install in self.install.items()},
-                "port": self.port, **({"placement": self.placement} if self.placement != "inside" else {}),
+                "port": self.port, **({"placement": self.placement} if self.placement != DEFAULT_PLACEMENT else {}),
                 **({"known_failures": {os_type: [failure.model_dump() for failure in failures]
                                        for os_type, failures in self.known_failures.items()}}
                    if self.known_failures else {})}
@@ -80,14 +80,14 @@ class ComputerDriverEnv(Env):
                    declaration=DriverDeclaration.model_validate(data["declaration"]), install=install,
                    port=data.get("port", DEFAULT_PORT), metadata=data.get("metadata") or {},
                    known_failures=_known_failures(data.get("known_failures") or {})[0],
-                   placement=data.get("placement", "inside"))
+                   placement=data.get("placement", DEFAULT_PLACEMENT))
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerDriverEnv:
         """The driver's class is read in a process of its own (``declared``)."""
         fields = cls.accept_toml(data, ctx)
         declaration = DriverDeclaration.model_validate(declared(ctx, fields["module"], cls.type))
-        placement = fields.get("placement", "inside")
+        placement = fields.get("placement", DEFAULT_PLACEMENT)
         problems = [*unsupported(fields["install"], declaration.supports, "install"),
                     *unsupported(fields.get("known_failures") or {}, declaration.supports, "known_failures")]
         if placement != declaration.placement:
@@ -105,7 +105,7 @@ class ComputerDriverEnv(Env):
         toml = {"type": self.type, "module": self.module}
         if self.port != DEFAULT_PORT:
             toml["port"] = self.port
-        if self.placement != "inside":
+        if self.placement != DEFAULT_PLACEMENT:
             toml["placement"] = self.placement
         if self.install:
             toml["install"] = {key: install.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
@@ -133,11 +133,8 @@ class ComputerDriverEnv(Env):
                             f"{', '.join(sorted(files))}")
         if not 1 <= fields.get("port", DEFAULT_PORT) <= MAX_PORT:
             problems.append(f"port must be 1 to {MAX_PORT}, not {fields['port']}")
-        if fields.get("placement") == "provider":
-            problems.append("placement provider, a driver its device's provider serves, isn't supported yet: use "
-                            "inside or beside")
-        elif fields.get("placement", "inside") not in PLACEMENTS:
-            problems.append(f"placement is one of {list(PLACEMENTS)}, not {fields['placement']!r}")
+        if problem := placement_problem(fields.get("placement", DEFAULT_PLACEMENT)):
+            problems.append(problem)
         fields["known_failures"], unknown = _known_failures(fields.get("known_failures", {}))
         problems += unknown
         fields["install"], invalid = installs(fields.get("install", {}))

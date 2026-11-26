@@ -18,14 +18,21 @@ from .operations import ExecResult
 #: Who the device's commands run as, and the home they run in, which the computer skill names to the agent.
 USER = "shell"
 HOME = PurePosixPath("/sdcard")
+#: How long one adb call the defaults make for their own bookkeeping may take; a push or pull, ``TRANSFER_TIMEOUT_S``.
 ADB_TIMEOUT_S = 60
 TRANSFER_TIMEOUT_S = 600
+#: What the device's shell prints on stderr before it runs a command, so what adb printed before it is adb's own.
 STARTED = b"agentenv-started\n"
-ADB_LINES = 4096
+#: The most of stderr adb's own messages may fill before ``STARTED``, as when it starts its server.
+ADB_PREAMBLE_BYTES = 4096
+#: What the device's shell prints on stderr, exiting ``NOT_FOUND_EXIT``, when the folder or the program isn't there.
 CANNOT_RUN = "agentenv-cannot-run:"
 NOT_FOUND_EXIT = 127
+#: How much of what the device answered an error quotes.
 SHOWN_BYTES = 500
+#: How many hex characters name the partial file a write pushes beside its target before renaming it over it.
 PARTIAL_ID_CHARS = 12
+#: The broadcast that has the media scanner list a written file, so gallery and file apps see it.
 MEDIA_SCAN = "android.intent.action.MEDIA_SCANNER_SCAN_FILE"
 
 
@@ -41,7 +48,7 @@ async def run_in_session(argv: list[str], cwd: str | None, env: dict[str, str] |
                f"({lookup}command -v {program}) >/dev/null 2>&1 || {_refused('not found')}; "
                f"exec {'env ' + assignments if assignments else ''}{shlex.join(argv)}")
     process = await _spawn("shell", command)
-    stdout, stderr = _Capped(output_bytes), _Capped(output_bytes + len(STARTED) + ADB_LINES)
+    stdout, stderr = _Capped(output_bytes), _Capped(output_bytes + len(STARTED) + ADB_PREAMBLE_BYTES)
     readers = asyncio.gather(stdout.read(process.stdout), stderr.read(process.stderr))
     timed_out = False
     try:
@@ -54,7 +61,7 @@ async def run_in_session(argv: list[str], cwd: str | None, env: dict[str, str] |
         timed_out = True
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(readers, DRAIN_S)
-    start = stderr.kept.find(STARTED, 0, ADB_LINES + len(STARTED))
+    start = stderr.kept.find(STARTED, 0, ADB_PREAMBLE_BYTES + len(STARTED))
     if start < 0 and not timed_out:
         raise DeviceUnavailable(f"adb didn't start {argv[0]!r} on the device: "
                                 f"{stderr.kept.decode(errors='replace').strip()[:SHOWN_BYTES]}")

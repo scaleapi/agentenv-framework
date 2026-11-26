@@ -2,17 +2,26 @@
 members leave the base class's own alone, and its features are in range."""
 from __future__ import annotations
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from ..errors import AgentEnvError
-from ..transfers import RelativePath
+from .dataplane import RELATIVE_PATHS
 from .keys import canonical
 from .operations import declared
 from .recording import check_recording
 from .settings import MAX_SCREENSHOT_DELAY_MS, ComputerSettings
 
 BUTTONS = ("left", "right", "middle", "back", "forward")
-_DATA_PATHS = TypeAdapter(tuple[RelativePath, ...])
+#: Where a driver runs, its card's ``placement``: inside its computer, the default, or beside a device it reaches.
+PLACEMENTS = ("inside", "beside")
+DEFAULT_PLACEMENT = "inside"
+
+
+def placement_problem(placement: object) -> str | None:
+    """What is wrong with a driver's placement, as its class or its driver env's env.toml gives it, or None."""
+    if placement == "provider":
+        return "placement provider, a driver its device's provider serves, isn't supported yet: use inside or beside"
+    return None if placement in PLACEMENTS else f"placement is inside or beside, got {placement!r}"
 
 
 def check_names(cls: type, base: type) -> None:
@@ -49,13 +58,10 @@ def check_features(cls: type) -> None:
         problems.append(f"Settings is ComputerSettings or a subclass of it, got {cls.Settings!r}")
     if cls.screen_kind not in ("desktop", "page"):
         problems.append(f"screen_kind is desktop or page, got {cls.screen_kind!r}")
-    if cls.placement == "provider":
-        problems.append("placement provider, a driver its device's provider serves, isn't supported yet: use inside "
-                        "or beside")
-    elif cls.placement not in ("inside", "beside"):
-        problems.append(f"placement is inside or beside, got {cls.placement!r}")
+    if problem := placement_problem(cls.placement):
+        problems.append(problem)
     try:
-        _DATA_PATHS.validate_python(cls.default_data_paths, strict=True)
+        RELATIVE_PATHS.validate_python(cls.default_data_paths, strict=True)
     except ValidationError:
         problems.append(f"default_data_paths is a tuple of normalized paths relative to the session user's home, got "
                         f"{cls.default_data_paths!r}")

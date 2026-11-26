@@ -22,7 +22,7 @@ from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvi
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import _adb, _linux, annotate, apps, card, svc
-from .checks import check_features, check_names
+from .checks import DEFAULT_PLACEMENT, check_features, check_names
 from .dataplane import DEFAULT_DATA_PATHS, DataPlane
 from .errors import TargetUnavailable
 from .extensions import Extensions
@@ -65,7 +65,7 @@ class DriverDeclaration(BaseModel):
 
     @property
     def placement(self) -> str:
-        return next((p.features["placement"] for p in self.platforms if "placement" in p.features), "inside")
+        return next((p.features["placement"] for p in self.platforms if "placement" in p.features), DEFAULT_PLACEMENT)
 
 
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):
@@ -110,7 +110,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     screen_kind: ClassVar[Literal["desktop", "page"]] = "desktop"
     #: Where the driver runs, on its card: ``inside`` its computer as the session user, or ``beside`` a device it
     #: reaches, such as a phone over adb, whose platform it passes to ``__init__``.
-    placement: ClassVar[Literal["inside", "beside"]] = "inside"
+    placement: ClassVar[Literal["inside", "beside"]] = DEFAULT_PLACEMENT
     #: The folders under the session user's home that data/get returns when its caller names none, on the card.
     default_data_paths: ClassVar[tuple[str, ...]] = DEFAULT_DATA_PATHS
     tool_access = True

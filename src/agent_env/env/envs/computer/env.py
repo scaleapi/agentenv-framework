@@ -56,9 +56,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Where load_artifact puts files in a computer by default: one of the folders data/get returns by default.
-DEFAULT_DESTINATION = "Downloads"
-DEFAULT_DESTINATIONS = {"android": "Download"}
+#: Where load_artifact puts files in a computer by default, by OS type: one of the folders data/get returns by default
+#: there, which Android's shared storage names ``Download``.
+DEFAULT_DESTINATIONS = {"linux": "Downloads", "macos": "Downloads", "windows": "Downloads", "android": "Download"}
 #: The computer app env's type: an app composed into a computer env, and a computer env of its own.
 APP_TYPE = "computer_app"
 #: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed, and
@@ -396,8 +396,7 @@ class ComputerEnv(Env):
         if destination_path is not None and posixpath.isabs(destination_path):
             raise ValueError(f"{self.id}: a computer's destination_path is relative to its session user's home, not "
                              f"{destination_path!r}")
-        destination = posixpath.normpath(destination_path or DEFAULT_DESTINATIONS.get(self.computer.os.type,
-                                                                                      DEFAULT_DESTINATION))
+        destination = posixpath.normpath(destination_path or DEFAULT_DESTINATIONS[self.computer.os.type])
         validate_relative_filename(destination)
         files = file_artifact_universe.get_file_artifacts()
         for filename in files:
