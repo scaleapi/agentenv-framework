@@ -511,9 +511,10 @@ class Usage:
         ``cached_tokens`` it counts, and ``cache_write_tokens`` with them. Anthropic's ``input_tokens``, and the
         ``prompt_tokens`` a LiteLLM proxy sends with Anthropic's ``cache_read_input_tokens`` and
         ``cache_creation_input_tokens`` beside it, count neither, so they're added, to ``total_tokens`` too. A
-        provider's split of its cache writes by how long they're kept (Anthropic's ``cache_creation``, OpenAI's
-        ``cache_write_tokens_details``), priced apart, is kept in ``provider_details``; so are the keys of a usage
-        in none of these shapes, as ``unrecognized``. A value that isn't a count is left out."""
+        provider's split of its cache writes by how long they're kept (Anthropic's ``cache_creation``, which a LiteLLM
+        client's ``cache_creation_token_details`` is kept as, and OpenAI's ``cache_write_tokens_details``), priced
+        apart, is kept in ``provider_details``; so are the keys of a usage in none of these shapes, as
+        ``unrecognized``. A value that isn't a count is left out."""
         key = "prompt_tokens" if "prompt_tokens" in usage else "input_tokens"
         details = usage.get(f"{key}_details")
         details = details if isinstance(details, Mapping) else {}
@@ -532,7 +533,7 @@ class Usage:
             total += missing
         elif input_tokens is not None and output is not None:
             total = input_tokens + output
-        kept = {"cache_creation": usage.get("cache_creation"),
+        kept = {"cache_creation": usage.get("cache_creation") or details.get("cache_creation_token_details"),
                 "cache_write_tokens_details": details.get("cache_write_tokens_details")}
         provider_details: dict[str, Any] = {
             name: counts for name, split in kept.items() if isinstance(split, Mapping)

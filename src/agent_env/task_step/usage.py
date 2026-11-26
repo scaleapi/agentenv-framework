@@ -42,6 +42,7 @@ class CostFields(TypedDict):
     unit_prices: NotRequired[dict[str, float]]
     cost_assumed: NotRequired[list[str]]
     unpriced_reason: NotRequired[str]
+    cache_write_1h_tokens: NotRequired[int]
 
 
 class ModelEntry(CostFields):
@@ -147,18 +148,25 @@ class RoleUsage:
         return entry
 
     def _by_model(self, counted: list[Usage], prices: PriceTable) -> list[tuple[ModelEntry, Cost]]:
-        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, and a turn without
-        them counted as the role's model's."""
+        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, each taking the
+        turn's cache-write split as ``_row_split`` gives it, and a turn without them counted as the role's model's."""
         shares: dict[Optional[str], list[Any]] = {}
+        charged: dict[Optional[str], list[dict[str, Any]]] = {}
         for usage in counted:
             if usage.models:
+                split = _row_split(usage)
                 for share in usage.models:
                     shares.setdefault(share.model, []).append(share)
+                    record = share.to_dict()
+                    if split is not None:
+                        record["provider_details"] = {"cache_creation": split}
+                    charged.setdefault(share.model, []).append(record)
             else:
                 shares.setdefault(self.model, []).append(usage)
+                charged.setdefault(self.model, []).append(usage.to_dict())
         rows = []
         for model, of in shares.items():
-            cost = _cost_of(_tokens(of), [share.cost_usd for share in of], model=model, prices=prices,
+            cost = _cost_of(_tokens(charged[model]), [share.cost_usd for share in of], model=model, prices=prices,
                             reported_by=self.reported_by)
             row = ModelEntry(model=model, **{name: _total(of, name) for name in _MODEL_COUNTS},
                              input_includes_cache=_agreed(of), **cost.fields())
@@ -173,10 +181,21 @@ def _total(records: Iterable[Any], name: str) -> Any:
 
 
 def _tokens(records: list[Any]) -> Optional[Tokens]:
-    """The records' tokens summed, each read by its own ``input_includes_cache``; None when one lacks its input or
-    output, so a sum that can't be charged in full isn't priced short."""
-    charged = [Tokens.of(record.to_dict()) for record in records]
+    """The records' tokens (each a ``Usage`` or its dict) summed, each read by its own ``input_includes_cache``; None
+    when one lacks its input or output, so a sum that can't be charged in full isn't priced short."""
+    charged = [Tokens.of(record if isinstance(record, dict) else record.to_dict()) for record in records]
     return reduce(operator.add, charged) if charged and None not in charged else None
+
+
+def _row_split(usage: Usage) -> Optional[dict[str, Any]]:
+    """The cache-write split each of a turn's per-model rows takes: the turn's own when it ran one model, none kept an
+    hour when the turn kept none, else None, since a turn's hour-long writes can't be told apart by model."""
+    split = usage.provider_details.get("cache_creation")
+    if not isinstance(split, dict) or not split:
+        return None
+    if len(usage.models) == 1:
+        return dict(split)
+    return None if split.get("ephemeral_1h_input_tokens") else {"ephemeral_1h_input_tokens": 0}
 
 
 def _agreed(records: list[Any]) -> Optional[bool]:
@@ -205,7 +224,8 @@ def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
         return Cost(None, CostStatus.UNPRICED, None, reported_usd, unpriced=unpriced.unpriced)
     least = next((cost for cost in costs if cost.status is not CostStatus.PRICED), costs[0])
     assumed = tuple(dict.fromkeys(assumed for cost in costs for assumed in cost.assumed))
-    return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed)
+    return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed,
+                cache_write_1h=sum(cost.cache_write_1h or 0 for cost in costs) or None)
 
 
 def _combined(costs: list[Cost]) -> Cost:
@@ -225,7 +245,8 @@ def _combined(costs: list[Cost]) -> Cost:
     return Cost(sum(c.usd for c in costed), status, sources.pop() if len(sources) == 1 else None,
                 sum(bills) if bills else None,
                 uncached_input=sum(uncached) if priced and None not in uncached else None,
-                unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed)
+                unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed,
+                cache_write_1h=sum(c.cache_write_1h or 0 for c in priced) or None)
 
 
 def _unreported() -> Usage:

@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -21,7 +22,11 @@ LITELLM = "litellm"
 # The map a LiteLLM release ships; LiteLLM itself loads a newer one from the network at import unless told not to.
 _MAP_FILE = "litellm/model_prices_and_context_window_backup.json"
 _MAP_KEYS = {"input": "input_cost_per_token", "output": "output_cost_per_token",
-             "cache_read": "cache_read_input_token_cost", "cache_write": "cache_creation_input_token_cost"}
+             "cache_read": "cache_read_input_token_cost", "cache_write": "cache_creation_input_token_cost",
+             "cache_write_1h": "cache_creation_input_token_cost_above_1hr"}
+# A long-context tier's rate: one of those keys, then the prompt size past which a call is charged it, as
+# ``_above_272k_tokens`` or ``_above_272000_tokens``. Service-tier and batch rates end otherwise, so they never match.
+_TIER_KEY = re.compile(rf"^({'|'.join(map(re.escape, _MAP_KEYS.values()))})_above_(\d+)(k?)_tokens$")
 
 
 class CostStatus(StrEnum):
@@ -42,11 +47,19 @@ class ReportedBy(StrEnum):
 
 
 class Assumed(StrEnum):
-    """A guess that makes a priced cost an upper bound."""
+    """A guess a priced cost made. Most make it an upper bound; those that ``errs_low``, a lower bound: a sum of calls
+    one of which may have passed a long-context tier, priced at the base rates, and cache writes that may have been
+    kept an hour, priced at the five-minute rate."""
 
     CACHE_READ_RATE = "cache_read_rate"
     CACHE_WRITE_RATE = "cache_write_rate"
     INPUT_EXCLUDES_CACHE = "input_excludes_cache"
+    BELOW_CONTEXT_TIER = "below_context_tier"
+    CACHE_WRITE_5M = "cache_write_5m"
+
+    @property
+    def errs_low(self) -> bool:
+        return self in (Assumed.BELOW_CONTEXT_TIER, Assumed.CACHE_WRITE_5M)
 
 
 class Unpriced(StrEnum):
@@ -59,13 +72,35 @@ class Unpriced(StrEnum):
 
 
 @dataclass(frozen=True)
+class ContextTier:
+    """The rates a call whose prompt, cache included, is over ``threshold`` tokens is charged; a rate the map doesn't
+    give for the tier stays at the base rate."""
+
+    threshold: int
+    input: Optional[float] = None
+    output: Optional[float] = None
+    cache_read: Optional[float] = None
+    cache_write: Optional[float] = None
+    cache_write_1h: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class ModelPrice:
-    """A model's prices in USD per million tokens; a cache rate None when the map gives none."""
+    """A model's prices in USD per million tokens; a cache rate None when the map gives none. ``cache_write_1h`` is
+    the rate of cache writes kept an hour, and ``tiers`` the rates past each prompt size, lowest first."""
 
     input: float
     output: float
     cache_read: Optional[float] = None
     cache_write: Optional[float] = None
+    cache_write_1h: Optional[float] = None
+    tiers: tuple[ContextTier, ...] = ()
+
+    def past(self, tier: ContextTier) -> ModelPrice:
+        """The rates a call past ``tier`` is charged: the tier's own, else these. A call past several tiers takes each
+        in turn, lowest first, so a rate a higher tier lacks stays at the one below it, as LiteLLM bills it."""
+        return ModelPrice(*(own if (own := getattr(tier, rate)) is not None else getattr(self, rate)
+                            for rate in _MAP_KEYS))
 
 
 @dataclass(frozen=True)
@@ -83,7 +118,7 @@ class PriceTable:
         for name, info in cost_map.items():
             rates = {rate: _rate(info.get(key)) for rate, key in _MAP_KEYS.items()} if isinstance(info, dict) else {}
             if rates.get("input") is not None and rates.get("output") is not None:
-                entries[name] = ModelPrice(**rates)
+                entries[name] = ModelPrice(**rates, tiers=_tiers(info))
         return cls(entries, source)
 
     def lookup(self, model: str) -> Optional[ModelPrice]:
@@ -109,6 +144,18 @@ def litellm_prices() -> PriceTable:
     return PriceTable.from_cost_map(cost_map, f"{LITELLM}@{dist.version}")
 
 
+def _tiers(info: Mapping[str, Any]) -> tuple[ContextTier, ...]:
+    """A map entry's long-context tiers, lowest first: each prompt size one of its tier keys names, with that size's
+    rates."""
+    rate_of = {key: rate for rate, key in _MAP_KEYS.items()}
+    by_threshold: dict[int, dict[str, float]] = {}
+    for key, value in info.items():
+        if (match := _TIER_KEY.match(key)) and (rate := _rate(value)) is not None:
+            threshold = int(match[2]) * (1000 if match[3] else 1)
+            by_threshold.setdefault(threshold, {})[rate_of[match[1]]] = rate
+    return tuple(ContextTier(threshold, **rates) for threshold, rates in sorted(by_threshold.items()))
+
+
 def _rate(per_token: object) -> Optional[float]:
     """A per-token price as USD per million tokens; None for anything but a finite, non-negative number."""
     if isinstance(per_token, bool) or not isinstance(per_token, (int, float)):
@@ -121,40 +168,55 @@ class Tokens:
     """The tokens a usage record is charged for, each at its own rate: its input outside the cache, its output, and
     its cache reads and writes. They add up across records, so a step's turns are each read by their own
     ``input_includes_cache`` before they're summed; ``assumed_uncached`` says some record's cache tokens were taken as
-    outside its input, an upper bound."""
+    outside its input, an upper bound. ``cache_write_1h`` are the writes records said were kept an hour, and
+    ``unsplit_write`` those of records that didn't say how long theirs were kept. ``prompt`` is the largest record's
+    prompt, cache included, which decides whether a call may have passed a long-context tier, and ``one_call`` says the
+    tokens are one model call's, so a tier prices them exactly."""
 
     uncached_input: int
     output: int
     cache_read: int = 0
     cache_write: int = 0
     assumed_uncached: bool = False
+    cache_write_1h: int = 0
+    unsplit_write: int = 0
+    prompt: int = 0
+    one_call: bool = False
 
     @classmethod
-    def of(cls, usage: Mapping[str, Any]) -> Optional[Tokens]:
+    def of(cls, usage: Mapping[str, Any], *, one_call: bool = False) -> Optional[Tokens]:
         """``usage``'s tokens (``Usage.to_dict``'s keys); None without input and output counts.
         ``input_includes_cache`` says whether ``input_tokens`` counts the cache tokens. Unknown, it's taken not to (an
-        upper bound) unless the counts prove it, input being fewer than the cache tokens."""
+        upper bound) unless the counts prove it, input being fewer than the cache tokens. Its writes kept an hour are
+        ``provider_details.cache_creation``'s ``ephemeral_1h_input_tokens``, none when that split names none."""
         inputs, outputs = usage.get("input_tokens"), usage.get("output_tokens")
         if inputs is None or outputs is None:
             return None
         read, write = usage.get("cache_read_tokens") or 0, usage.get("cache_write_tokens") or 0
         cached = read + write
+        details = usage.get("provider_details")
+        split = details.get("cache_creation") if isinstance(details, Mapping) else None
+        hour = split.get("ephemeral_1h_input_tokens") if isinstance(split, Mapping) and split else None
+        hour = 0 if split and not isinstance(hour, int) else hour
+        written = (min(hour, write), 0) if hour is not None else (0, write)
         includes = usage.get("input_includes_cache")
         if includes is True and inputs >= cached:
-            return cls(inputs - cached, outputs, read, write)
-        return cls(inputs, outputs, read, write, includes is None and 0 < cached <= inputs)
+            return cls(inputs - cached, outputs, read, write, False, *written, inputs, one_call)
+        return cls(inputs, outputs, read, write, includes is None and 0 < cached <= inputs, *written,
+                   inputs + cached, one_call)
 
     def __add__(self, other: Tokens) -> Tokens:
         return Tokens(self.uncached_input + other.uncached_input, self.output + other.output,
                       self.cache_read + other.cache_read, self.cache_write + other.cache_write,
-                      self.assumed_uncached or other.assumed_uncached)
+                      self.assumed_uncached or other.assumed_uncached, self.cache_write_1h + other.cache_write_1h,
+                      self.unsplit_write + other.unsplit_write, max(self.prompt, other.prompt))
 
 
 @dataclass(frozen=True)
 class Cost:
     """A usage record's cost: its figure (None when unpriced), where it came from, and the agent's or endpoint's own
-    figure kept beside it; a priced one also has the uncached input and the unit prices it was charged at, the assumed
-    rates filled in, and what was assumed, which makes it an upper bound."""
+    figure kept beside it; a priced one also has the uncached input, the cache writes charged at the hour's rate and
+    the unit prices it was charged at, the assumed rates filled in, and what was assumed (``Assumed``)."""
 
     usd: Optional[float]
     status: CostStatus
@@ -164,10 +226,12 @@ class Cost:
     unit_prices: Optional[dict[str, float]] = None
     assumed: tuple[Assumed, ...] = ()
     unpriced: Optional[Unpriced] = None
+    cache_write_1h: Optional[int] = None
 
     #: Every key ``fields`` can write, so a record built from them keeps a call's whole cost.
     KEYS: ClassVar[tuple[str, ...]] = ("cost_usd", "cost_status", "cost_source", "reported_cost_usd",
-                                       "uncached_input_tokens", "unit_prices", "cost_assumed", "unpriced_reason")
+                                       "uncached_input_tokens", "unit_prices", "cost_assumed", "unpriced_reason",
+                                       "cache_write_1h_tokens")
 
     def fields(self) -> dict[str, Any]:
         """The cost as a usage entry's keys; the uncached input and unit prices only when it has them, as a price from
@@ -182,6 +246,8 @@ class Cost:
             record["cost_assumed"] = [assumed.value for assumed in self.assumed]
         if self.unpriced is not None:
             record["unpriced_reason"] = self.unpriced.value
+        if self.cache_write_1h:
+            record["cache_write_1h_tokens"] = self.cache_write_1h
         return record
 
 
@@ -208,8 +274,17 @@ def price(
 
 
 def _priced(tokens: Tokens, rates: ModelPrice, source: str, reported: Optional[float]) -> Cost:
-    """``tokens`` at ``rates``, a cache rate the map lacks taken as the input rate (an upper bound, marked)."""
+    """``tokens`` at ``rates``. A call past a long-context tier is charged the tier's rates; a sum of calls one of which
+    may have passed one, at the base rates, marked. Writes kept an hour are charged the hour's rate, and writes no
+    record split, the five-minute rate, marked when the hour's is higher. A cache rate the map lacks is taken as the
+    input rate, marked."""
     assumed = []
+    passed = [tier for tier in rates.tiers if tokens.prompt > tier.threshold]
+    if passed and tokens.one_call:
+        for tier in passed:
+            rates = rates.past(tier)
+    elif passed:
+        assumed.append(Assumed.BELOW_CONTEXT_TIER)
     read_rate, write_rate = rates.cache_read, rates.cache_write
     if read_rate is None:
         read_rate = rates.input
@@ -221,8 +296,14 @@ def _priced(tokens: Tokens, rates: ModelPrice, source: str, reported: Optional[f
             assumed.append(Assumed.CACHE_WRITE_RATE)
     if tokens.assumed_uncached:
         assumed.append(Assumed.INPUT_EXCLUDES_CACHE)
+    hour_rate = rates.cache_write_1h if rates.cache_write_1h is not None else write_rate
+    if tokens.unsplit_write and hour_rate > write_rate:
+        assumed.append(Assumed.CACHE_WRITE_5M)
     usd = (tokens.uncached_input * rates.input + tokens.output * rates.output + tokens.cache_read * read_rate
-           + tokens.cache_write * write_rate) / PER_MILLION
+           + (tokens.cache_write - tokens.cache_write_1h) * write_rate + tokens.cache_write_1h * hour_rate) / PER_MILLION
     unit = {"input": rates.input, "output": rates.output, "cache_read": read_rate, "cache_write": write_rate}
-    return Cost(usd, CostStatus.PRICED, source, reported, tokens.uncached_input, unit, tuple(assumed))
+    if tokens.cache_write_1h:
+        unit["cache_write_1h"] = hour_rate
+    return Cost(usd, CostStatus.PRICED, source, reported, tokens.uncached_input, unit, tuple(assumed),
+                cache_write_1h=tokens.cache_write_1h or None)
 

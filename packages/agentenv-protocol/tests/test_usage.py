@@ -118,6 +118,14 @@ RESPONSES = {
                                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 7809},
                                     Usage(input_tokens=7818, output_tokens=5, total_tokens=7823,
                                           cache_read_tokens=7809, cache_write_tokens=0, input_includes_cache=True)),
+    "litellm-client-claude-writes-for-an-hour": (
+        {"prompt_tokens": 7822, "completion_tokens": 5, "total_tokens": 7827, "cache_creation_input_tokens": 7813,
+         "cache_read_input_tokens": 0,
+         "prompt_tokens_details": {"cached_tokens": 0, "cache_creation_tokens": 7813, "cache_creation_token_details": {
+             "ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7813}}},
+        Usage(input_tokens=7822, output_tokens=5, total_tokens=7827, cache_read_tokens=0, cache_write_tokens=7813,
+              input_includes_cache=True,
+              provider_details={"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7813}})),
     "openai-gpt-reads": ({"prompt_tokens": 7822, "completion_tokens": 2, "total_tokens": 7824,
                           "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 7680}},
                          Usage(input_tokens=7822, output_tokens=2, total_tokens=7824, cache_read_tokens=7680,
