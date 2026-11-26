@@ -210,7 +210,7 @@ def test_every_clocked_image_copies_the_shared_module_and_the_page_format_beside
 
 
 # Their start-agent adds a provider's CA bundle to agent-env's; Claude Code's doesn't yet.
-CA_MERGING = ["codex", "letta-code", "opencode"]
+CA_MERGING = ["antigravity", "codex", "letta-code", "opencode"]
 
 
 @pytest.mark.parametrize("agent", CA_MERGING)
