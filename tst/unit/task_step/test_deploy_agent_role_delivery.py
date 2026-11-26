@@ -349,6 +349,18 @@ async def test_an_open_network_policy_leaves_web_tools_alone(wiring):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("step_policy, run_policy, sent", [
+    (None, ALLOWLIST, {"name": "solver", "web_tools": False}),
+    (ALLOWLIST, {"mode": "allow_all"}, {"name": "solver"}),
+], ids=["run-restricts", "run-opens"])
+async def test_the_runs_network_policy_override_decides_the_web_tools_default(wiring, step_policy, run_policy, sent):
+    wiring.context.metadata["user_overrides"] = {"network_policy": run_policy}
+    await wiring.deploy(_card(HEADERS_MCP, WEB_CONFIG), role=None, network_policy=step_policy)
+
+    assert wiring.bodies("/ext/agent-config") == [sent]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("selection, sent", [
     ({"disable": ["WebFetch", "WebSearch"]}, {"name": "solver", "web_tools": False}),
     ({"disable": ["Bash", "webfetch", "websearch"]},

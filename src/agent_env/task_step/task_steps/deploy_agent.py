@@ -503,7 +503,7 @@ class DeployAgentTaskStep(TaskStep):
                 # Before the first request to the agent, as for builtin_tools.
                 _check_peer_tools(agent_config, self.agent_name)
             identity_payload["peer_tools"] = self.peer_tools
-        if web_tools is None and self.network_policy and NetworkPolicy.from_dict(self.network_policy).restricts_egress:
+        if web_tools is None and resolved_policy and NetworkPolicy.from_dict(resolved_policy).restricts_egress:
             # Hosted search reaches the model provider through the endpoint any such policy allows, so only the agent
             # can turn it off. Best effort: an agent that can't is deployed as it is, as before the policy had a say.
             if _takes_web_tools(agent_config):
