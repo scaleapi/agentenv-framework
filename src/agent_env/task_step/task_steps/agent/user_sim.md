@@ -201,6 +201,48 @@ The task is refused when it loads if the step has no run to rate (none, or sever
 before it or has a `depends_on` that doesn't name it, if the run's user isn't a user sim a `deploy_user_sim_agent`
 step deploys, if two rating steps rate the same run, or if `satisfaction` isn't a list of non-empty lines.
 
+## Grading from the user's side
+
+A `user_satisfaction_grading` step grades the assistant the way its user would, from what the user saw, and keeps a log
+of what went wrong and when. It goes after the run's `user_sim_judge` (so a run the user sim spoiled is never graded)
+and `rate_user_satisfaction` (whose lines it reads), and is recorded only: it never fails the task or decides a verdict.
+
+```json
+{"id": "satisfaction-grading", "type": "user_satisfaction_grading", "run_step_id": "week",
+ "depends_on": ["usersim-judge", "rate"], "verifier_id": "psi_satisfaction_grading"}
+```
+
+| Field | | What it is |
+|---|---|---|
+| `run_step_id` | required | The `always_on` or `prompt_agent` step whose run it grades |
+| `judge_model` | the config's judge | The model that reads the run; a run's `judge_model` override comes first |
+| `judge_timeout_seconds` | 600 | The longest the judge's call may take |
+| `min_passing_score` | 0.5 | The grade's pass mark, a 3 out of 5; nothing gates on it |
+| `fail_task_on_error` | false | A judge that gives no log fails the grade, not the task |
+
+The judge reads the run as `user_sim_judge` does: the user sim's instructions, rebuilt and checked against the run's
+`prompt_sha256`, and every check-in, what the user was sent and how they answered. From the rating it takes the S lines
+and what the user read after the last check-in. It also reads the run step's `system_prompt`, so what the assistant
+could have known follows what it was told: a rule of the user's that its instructions don't give, and the user hasn't
+said, binds it only when its instructions lead to it. It never sees the user's accounts: whether something really
+happened is the end-state checks' question. One call answers for the whole run. First come two checklists, every action
+the assistant reported (did it need an OK, and did it have one?) and every question or request to the user (could the
+assistant have handled it?). Then come the incidents, each at the check-in where the user could first see it, in six
+dimensions (`overstepped`, `put_it_on_me`, `ignored_me`, `got_it_wrong`, `left_hanging`, `too_much`), and the end
+outcome. The checklists hold the incidents to them: an unapproved purchase no incident names is added, and a hand-back
+takes its severity from its kind (a question is minor, a step for the user major).
+
+The score is computed from the log (`user_satisfaction_grading_core.score`): 5, less each incident's cost by severity,
+more for a repeat of the same thing, half for one the assistant put right, then less for an end outcome short of done,
+never under 1. The grade's score is that 1-5 score as 0-1; its rows, one per dimension and one for the outcome, each
+weigh 0, so an aggregate that pools them moves nothing. The entry (`verifications[<verifier_id>]`) has the score's
+parts, the run's details, the judge's calls and cost, and `log_object_url`, the whole log in the object store. A run
+that ended on an error, or whose user sim never read, is skipped.
+
+The task is refused when it loads if the step has no run to grade, comes before it, doesn't depend on it and on the
+run's `user_sim_judge` and `rate_user_satisfaction` steps, or if the run's user isn't a user sim a
+`deploy_user_sim_agent` step deploys.
+
 ## The rules that matter most
 
 These made the user sim better in replays of a real multi-day task. The instructions drove more of the gain than how
