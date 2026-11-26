@@ -31,12 +31,22 @@ Params:
                            logs)
   trajectory_max_chars     the most rendered trajectory one judge call gets (default 600000); the oldest turns
                            before the open milestone are cut first
-  milestones      [{id, line?, type?, skip_if_done?, blocking?, max_nudges?, show?, artifacts: {name: artifact},
-                    gates: [gate]}]
+  milestones      [{id, line?, type?, skip_if_done?, blocking?, max_nudges?, show?, group?, carry_gates?,
+                    artifacts: {name: artifact}, gates: [gate]}]
                   ``line`` is the text the sim sends to open the milestone, used to tell when it has moved on.
                   When a milestone is done, each next one the agent has already done is skipped (its gates all pass
                   then, at least one of them on something the agent made): the note tells the sim to skip its line.
                   ``skip_if_done: false`` turns that off for a milestone; type ``correct`` is never skipped.
+                  ``group`` makes an entry a revision of an earlier milestone (its id): a change asked of work already
+                  done, with gates of its own. A milestone's revisions follow it one after another, each opened,
+                  nudged, given up on and ended like any milestone, and by default never skipped. ``carry_gates:
+                  true`` checks the previous revision's gates (and keeps its artifacts) too, but for any gate the
+                  revision writes with the same id, which replaces it. The summary nests revisions under their
+                  milestone.
+
+After the wrap-up is answered, the last milestone is checked once more, and so is the latest revision of every earlier
+milestone, on its state gates only (not no_new or trajectory_judge, which are about the turns it was open): one found
+broken is ``undone``.
 
 A gate is {id, nudge, check}, with check one of:
   {"trajectory_judge": "statement"}            one LLM call: is the statement true of the agent's work, read from its
@@ -51,6 +61,17 @@ A gate is {id, nudge, check}, with check one of:
   {"artifact": name, "judge": "statement"}     one yes/no LLM call: is the statement true of the artifact's text
   {"no_new": [call + {"baseline_count"?}]}     no item added since the milestone opened (the first milestone,
                                                which opens before the hook first runs, needs ``baseline_count``)
+  {"no_removed": [call + {"baseline_count"?}]} no item removed since the milestone opened: the count is not below
+                                               its count then (``baseline_count`` as for no_new)
+  {"trajectory": {contains_none?, no_call?, scope?}}
+                                               code over the agent's own work in its trajectories, no model call:
+                                               ``contains_none`` [text, ...] appears in none of its tool calls'
+                                               arguments or what it said (its reads' results aren't its work), and
+                                               ``no_call`` [{tool?, args_contains?}, ...] matches none of its tool
+                                               calls (``tool`` the name without its app prefix). ``scope`` is
+                                               "step" (the open milestone's turns, the default), "run" (every turn
+                                               so far) or {"before": milestone id} (the turns before that milestone
+                                               opened or was skipped; every turn so far if it hasn't been)
 A call is {tool, args?, path?, where?, number?}: ``path`` is a dotted path into the tool's JSON result, ``where``
 keeps the list items whose fields contain the given text, and ``number`` reads a count the tool reports (that field of
 the first item) instead of counting the list. ``expect`` is "exists", or {"count": {"eq"|"min"|"max": n}},
@@ -70,7 +91,9 @@ from typing import Any, Optional
 # milestone whose evidence never arrives is let go (or ends the run, if blocking) instead of holding forever.
 HOLD_NOTE = ("Nothing could be checked this time. Don't move on: reply to what the assistant said, and stay on the "
              "milestone you're on.")
-MILESTONE_KEYS = {"id", "line", "type", "skip_if_done", "blocking", "max_nudges", "show", "artifacts", "gates"}
+MILESTONE_KEYS = {"id", "line", "type", "skip_if_done", "blocking", "max_nudges", "show", "artifacts", "gates", "group",
+                  "carry_gates"}
+DONE = ("passed", "skipped")  # the statuses that count a milestone done
 DEFAULT_FINAL = "Everything you asked for is done. Wrap up the way you planned (send your last line), then stop."
 # The wrap-up after a milestone was let go: nothing claims it was all done, and the user takes on nothing new.
 DEFAULT_FINAL_GAVE_UP = ("Wrap up now: send your last line, then stop. Don't say everything is done, and don't ask "
@@ -112,11 +135,23 @@ async def _post_turn(turn, spec):
     state = _state(turn.records())
     milestones = spec["milestones"]
     if state["finished"]:  # the wrap-up was sent and the agent has answered it
-        # Check the last milestone once more: the agent may have changed its work while answering the wrap-up, and
-        # the summary should match what it left, as the task's final rubric will.
+        # Check the work once more: the agent may have changed it while answering the wrap-up, or broken an earlier
+        # milestone's work since, and the summary should match what it left, as the task's final rubric will.
+        env = _env(turn, spec)
         m = milestones[state["index"]]
-        gates = await _run_gates(turn, spec, _env(turn, spec), m, state)
-        turn.record({"decision": "done", "milestone": m["id"], "gates": gates})
+        gates = await _run_gates(turn, spec, env, m, state)
+        record = {"decision": "done", "milestone": m["id"], "gates": gates}
+        earlier = []
+        for o in _latest_revisions(spec):
+            if o["group"] == m["group"]:
+                continue
+            kept = [g for g in o["gates"] if _state_check(g["check"])]
+            if kept:
+                earlier.append({"milestone": o["id"], "gates": await _run_gates(
+                    turn, spec, env, {**o, "gates": kept}, {**state, "baselines": {}})})
+        if earlier:
+            record["final_checks"] = earlier
+        turn.record(record)
         return {"end": "milestones_done"}
     if state["idle"]:  # the sim repeated itself last turn; the agent has answered that, so end before asking again
         turn.record({"decision": "end", "end": "sim_idle"})
@@ -203,14 +238,16 @@ def _gate_type(check: dict) -> str:
 def _summary(spec: dict, records: list[dict]) -> dict:
     """Where the conversation got to, from this hook's records, for whoever grades it (Turn.summarize): each
     milestone's status (not_reached, open, passed, skipped (done before it opened), gave_up (let go after max_nudges),
-    undone (done, then broken while the agent answered the wrap-up),
+    undone (done, then found broken by the check after the wrap-up),
     passed_over (the user sim moved past it), derailed (a blocking one that never passed, which ended the run)), the
     turn it opened and closed, nudges spent, and each gate's last verdict and type; then the furthest milestone
-    reached, how many were done, and the end reason once the hook ended the conversation."""
+    reached, how many were done, and the end reason once the hook ended the conversation. With revisions, each
+    milestone's row holds its revisions' rows and rolls them up (``_rollup``)."""
     if not spec["enabled"]:
         return {"enabled": False}
     milestones = spec["milestones"]
-    types = {g["id"]: g.get("type") or _gate_type(g["check"]) for m in milestones for g in m["gates"]}
+    # By milestone entry and gate: a revision may override a gate with another check, and each row shows its own.
+    types = {(m["id"], g["id"]): g.get("type") or _gate_type(g["check"]) for m in milestones for g in m["gates"]}
     rows = [{"id": m["id"], "status": "not_reached", "opened_turn": None, "closed_turn": None, "nudges": 0,
              "gates": {}} for m in milestones]
     rows[0].update(status="open", opened_turn=1)
@@ -218,7 +255,8 @@ def _summary(spec: dict, records: list[dict]) -> dict:
     end = None
 
     def verdicts(row, gates):
-        row["gates"].update({g["id"]: {"passed": g["passed"], "type": types.get(g["id"])} for g in gates})
+        row["gates"].update({g["id"]: {"passed": g["passed"], "type": types.get((row["id"], g["id"]))}
+                             for g in gates})
 
     for r in records:
         turn, row = r.get("turn"), by_id.get(r.get("milestone"))
@@ -252,12 +290,50 @@ def _summary(spec: dict, records: list[dict]) -> dict:
                     row.update(status="passed", closed_turn=turn)  # done in the end, after the wrap-up
                 elif any(g["passed"] is False for g in final) and row["status"] in ("passed", "skipped"):
                     row.update(status="undone", closed_turn=turn)  # done before, broken while answering the wrap-up
+            # An earlier milestone's latest revision, checked on its state gates only: those passing don't prove a
+            # revision let go is done, so the check can only find one broken.
+            for f in r.get("final_checks") or []:
+                earlier = by_id.get(f["milestone"])
+                if earlier is None:
+                    continue
+                verdicts(earlier, f["gates"])
+                if any(g["passed"] is False for g in f["gates"]) and earlier["status"] in ("passed", "skipped"):
+                    earlier.update(status="undone", closed_turn=turn)
         elif r.get("decision") == "end":
             end = r.get("end")
-    reached = [row["id"] for row in rows if row["status"] != "not_reached"]
-    return {"enabled": True, "reached": reached[-1] if reached else None,
-            "done": sum(row["status"] in ("passed", "skipped") for row in rows), "total": len(rows),
-            "end": end, "milestones": rows}
+    for m, row in zip(milestones, rows):
+        for gid in [g["id"] for g in m["gates"] if g.get("carried")]:
+            if gid in row["gates"]:
+                row["gates"][gid]["carried"] = True
+    groups: dict[str, list[dict]] = {}
+    for m, row in zip(milestones, rows):
+        groups.setdefault(m["group"], []).append(row)
+    if all(len(revs) == 1 for revs in groups.values()):  # no revisions: one row per milestone, as always
+        reached = [row["id"] for row in rows if row["status"] != "not_reached"]
+        return {"enabled": True, "reached": reached[-1] if reached else None,
+                "done": sum(row["status"] in DONE for row in rows), "total": len(rows),
+                "end": end, "milestones": rows}
+    out = [revs[0] if len(revs) == 1 else _rollup(head, revs) for head, revs in groups.items()]
+    reached = [row for row in out if row["status"] != "not_reached"]
+    return {"enabled": True, "reached": reached[-1]["id"] if reached else None,
+            "reached_revision": (reached[-1].get("reached_revision", reached[-1]["id"]) if reached else None),
+            "done": sum(row["status"] in DONE for row in out), "total": len(out),
+            "revisions_done": sum(row["status"] in DONE for row in rows), "revisions_total": len(rows),
+            "end": end, "milestones": out}
+
+
+def _rollup(head: str, revs: list[dict]) -> dict:
+    """A milestone with revisions: its revisions' rows (numbered from 1, the milestone as first written), under the
+    status of the furthest one reached, as that's the work the user last asked for."""
+    for k, rev in enumerate(revs, 1):
+        rev["revision"] = k
+    reached = [rev for rev in revs if rev["status"] != "not_reached"]
+    top = reached[-1] if reached else None
+    return {"id": head, "status": top["status"] if top else "not_reached",
+            "opened_turn": reached[0]["opened_turn"] if reached else None,
+            "closed_turn": top["closed_turn"] if top else None, "nudges": sum(rev["nudges"] for rev in revs),
+            "reached_revision": top["id"] if top else None, "revisions_done": sum(rev["status"] in DONE for rev in revs),
+            "revisions": revs}
 
 
 async def _skips(turn, spec, env, state, nxt) -> tuple[int, list[dict]]:
@@ -271,7 +347,7 @@ async def _skips(turn, spec, env, state, nxt) -> tuple[int, list[dict]]:
         if not m["skip_if_done"] or m["type"] == "correct":
             break
         gates = await _run_gates(turn, spec, env, m, {**state, "baselines": await _baselines(env, spec, m)})
-        made = [g for g in m["gates"] if "no_new" not in g["check"]]
+        made = [g for g in m["gates"] if not set(g["check"]) & {"no_new", "no_removed", "trajectory"}]
         if not made or not all(r["passed"] is True for r in gates):
             break
         skipped.append({"milestone": m["id"], "gates": gates})
@@ -373,6 +449,20 @@ async def _run_gates(turn, spec, env, m, state) -> list[dict]:
     return sorted(out, key=lambda r: order[r["id"]])
 
 
+def _state_check(check: dict) -> bool:
+    """A gate on the state the agent left, which still means something after its milestone closed: not a no_new or
+    no_removed (nothing added or removed while the milestone was open) or a trajectory check (what the agent did)."""
+    return not set(check) & {"no_new", "no_removed", "trajectory_judge", "trajectory"}
+
+
+def _latest_revisions(spec: dict) -> list[dict]:
+    """Each milestone's last revision (a milestone without revisions is its own), in order."""
+    last: dict[str, dict] = {}
+    for m in spec["milestones"]:
+        last[m["group"]] = m
+    return list(last.values())
+
+
 def _costly(check: dict) -> bool:
     """A gate that costs a model call: run only when every other gate passes."""
     return "judge" in check or "trajectory_judge" in check
@@ -387,6 +477,10 @@ async def _gate(turn, spec, env, m, state, g, artifacts) -> dict:
             passed, why = _expect(await _call(env, spec["role"], check["call"]), check["expect"])
         elif "no_new" in check:
             passed, why = await _no_new(env, spec["role"], m, state, check["no_new"], g["id"])
+        elif "no_removed" in check:
+            passed, why = await _no_new(env, spec["role"], m, state, check["no_removed"], g["id"], removed=True)
+        elif "trajectory" in check:
+            passed, why = await _trajectory_check(turn, spec, state, check["trajectory"])
         else:
             text = await _artifact(env, spec["role"], m, check["artifact"], artifacts)
             if text is None:
@@ -472,31 +566,33 @@ def _baseline_key(m: dict, gate_id: str, i: int) -> str:
     return f"{m['id']}:{gate_id}:{i}"
 
 
-async def _no_new(env, role, m, state, calls, gate_id: str) -> tuple[Optional[bool], str]:
-    """Nothing added since the milestone opened. Unknown (None) when a baseline couldn't be read then: comparing
-    against nothing would be a guess."""
-    added, missing = [], []
+async def _no_new(env, role, m, state, calls, gate_id: str, removed: bool = False) -> tuple[Optional[bool], str]:
+    """Nothing added (or, with ``removed``, nothing removed) since the milestone opened. Unknown (None) when a
+    baseline couldn't be read then: comparing against nothing would be a guess."""
+    changed, missing = [], []
     for i, call in enumerate(calls):
         base = state["baselines"].get(_baseline_key(m, gate_id, i), call.get("baseline_count"))
         if base is None:
             missing.append(call["tool"])
             continue
         n = _size(await _call(env, role, call))
-        if n > base:
-            added.append(f"{call['tool']} +{n - base}")
-    if added:  # a failure another call found stands, whatever couldn't be compared
-        return False, "new: " + ", ".join(added)
+        if removed and n < base:
+            changed.append(f"{call['tool']} -{base - n}")
+        elif not removed and n > base:
+            changed.append(f"{call['tool']} +{n - base}")
+    if changed:  # a failure another call found stands, whatever couldn't be compared
+        return False, ("removed: " if removed else "new: ") + ", ".join(changed)
     if missing:
         return None, f"unknown: no baseline for {', '.join(missing)} (it couldn't be read when {m['id']} opened)"
-    return True, "nothing new"
+    return True, "nothing removed" if removed else "nothing new"
 
 
 async def _baselines(env, spec, m) -> dict:
-    """Each no_new call's count when ``m`` opens, keyed by gate and call. A read that fails leaves its baseline
-    missing (its gate is then unknown), rather than failing the step over a temporary tool error."""
+    """Each no_new and no_removed call's count when ``m`` opens, keyed by gate and call. A read that fails leaves its
+    baseline missing (its gate is then unknown), rather than failing the step over a temporary tool error."""
     out = {}
     for g in m["gates"]:
-        for i, call in enumerate(g["check"].get("no_new") or []):
+        for i, call in enumerate(g["check"].get("no_new") or g["check"].get("no_removed") or []):
             try:
                 out[_baseline_key(m, g["id"], i)] = _size(await _call(env, spec["role"], call))
             except Exception:  # noqa: BLE001 - a missing baseline makes only this gate unknown
@@ -645,8 +741,8 @@ async def _trajectory_gate(turn, spec, state, statement: str) -> tuple[Optional[
             texts.append((n, "(no trajectory for this turn)"))
             continue
         if url not in _RENDERED:
-            raw = await turn.read_trajectory(n)
-            _RENDERED[url] = render_trajectory(json.loads(raw)) if raw else "(empty trajectory)"
+            messages = await _messages(turn, n, url)
+            _RENDERED[url] = render_trajectory(messages) if messages is not None else "(empty trajectory)"
         if n in step and not _RENDERED[url].strip():
             # Work in a format this renderer doesn't read (not claude-code's stream-json) would show as nothing.
             return None, f"unknown: turn {n}'s trajectory isn't in a format this hook reads"
@@ -657,6 +753,91 @@ async def _trajectory_gate(turn, spec, state, statement: str) -> tuple[Optional[
 
 
 _RENDERED: dict[str, str] = {}  # rendered turns by trajectory URL, kept for the step: a turn's trajectory never changes
+_MESSAGES: dict[str, Optional[list]] = {}  # each turn's messages by URL, read once for every gate that reads it
+
+
+async def _messages(turn, n: int, url: str) -> Optional[list]:
+    if url not in _MESSAGES:
+        raw = await turn.read_trajectory(n)
+        _MESSAGES[url] = json.loads(raw) if raw else None
+    return _MESSAGES[url]
+
+
+def _opened_turn(spec: dict, records: list[dict], mid: str) -> Optional[int]:
+    """The turn milestone ``mid``'s line reached the agent (the turn after the one that opened or skipped it), or
+    None if it hasn't been reached."""
+    index = [m["id"] for m in spec["milestones"]].index(mid)
+    if index == 0:
+        return 1
+    for r in records:
+        if (r.get("next_index") == index and not r.get("wrap_up")) or any(
+                s["milestone"] == mid for s in r.get("skipped") or []):
+            return int(r.get("turn", 0)) + 1
+    return None
+
+
+async def _trajectory_check(turn, spec, state, check: dict) -> tuple[Optional[bool], str]:
+    """Code over the agent's tool calls and what it said in the turns ``scope`` names: none carries a
+    ``contains_none`` text, and no call matches a ``no_call``. A breach in the turns that could be read fails it; a
+    turn in scope that couldn't be read otherwise makes it unknown."""
+    scope = check.get("scope", "step")
+    if scope == "step":
+        turns = range(state.get("since", 1), turn.number + 1)
+    elif scope == "run":
+        turns = range(1, turn.number + 1)
+    else:
+        opened = _opened_turn(spec, turn.records(), scope["before"])
+        turns = range(1, (opened if opened is not None else turn.number + 1))
+    urls = tuple(getattr(turn, "trajectory_urls", ()) or ())
+    texts = [t.lower() for t in check.get("contains_none") or []]
+    breaches, unread = [], []
+    for n in turns:
+        url = urls[n - 1] if n <= len(urls) else None
+        try:
+            messages = await _messages(turn, n, url) if url is not None else None
+        except Exception:  # noqa: BLE001 - a turn that can't be fetched or parsed is unread, not a breach
+            messages = None
+        calls, said = _work(messages if isinstance(messages, list) else [])
+        if not messages or not (calls or said):  # not fetched, empty, or a format this hook doesn't read
+            unread.append(n)
+            continue
+        for name, args in calls:
+            short, values = name.split("__")[-1], [s.lower() for s in _strings(args)]
+            breaches += [f"turn {n}: {short} has {t!r}" for t in texts if any(t in v for v in values)]
+            for rule in check.get("no_call") or []:
+                if (not rule.get("tool") or rule["tool"] in (short, name)) and \
+                        (not rule.get("args_contains") or any(rule["args_contains"].lower() in v for v in values)):
+                    breaches.append(f"turn {n}: called {short}({_cut(args, 120)})")
+        for text in said:
+            breaches += [f"turn {n}: said {t!r}" for t in texts if t in text.lower()]
+    if breaches:
+        return False, "; ".join(breaches[:5]) + (f" (+{len(breaches) - 5} more)" if len(breaches) > 5 else "")
+    if unread:
+        return None, f"unknown: no readable trajectory for turn(s) {unread}"
+    return True, f"clean over turn(s) {turns.start}-{turns.stop - 1}" if len(turns) else "no turns in scope"
+
+
+def _strings(value: Any) -> list[str]:
+    """Every text a tool call's arguments hold, nested values included, as written (not JSON-escaped)."""
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return [] if value is None else [value if isinstance(value, str) else json.dumps(value)]
+
+
+def _work(messages: list) -> tuple[list[tuple[str, Any]], list[str]]:
+    """A claude-code turn's (stream-json) tool calls, as (name, input), and the text the agent wrote."""
+    calls, said = [], []
+    for m in messages:
+        if not isinstance(m, dict) or m.get("type") != "assistant":
+            continue
+        for block in (m.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                calls.append((block.get("name", "?"), block.get("input")))
+            elif isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                said.append(block["text"])
+    return calls, said
 
 
 def _evidence(texts: list[tuple[int, str]], step: range, max_chars: int) -> str:
@@ -761,26 +942,30 @@ def _env(turn, spec):
 GATE_KEYS = {"id", "nudge", "check", "type"}
 GATE_TYPES = ("format", "action", "content")
 FORMAT_KEYS = {"max_paragraphs", "max_sentences", "contains_all", "contains_none"}
+TRAJECTORY_KEYS = {"contains_none", "no_call", "scope"}
+CHECK_KINDS = ("trajectory_judge", "trajectory", "call", "no_new", "no_removed", "artifact")
 
 
 def _check_problem(check: dict) -> Optional[str]:
     """What's wrong with a gate's check, or None: exactly one kind, with what that kind needs."""
-    kinds = [k for k in ("trajectory_judge", "call", "no_new", "artifact") if k in check]
+    kinds = [k for k in CHECK_KINDS if k in check]
     if len(kinds) != 1:
-        return f"check needs exactly one of trajectory_judge, call, no_new, artifact; got {sorted(check)}"
+        return f"check needs exactly one of {', '.join(CHECK_KINDS)}; got {sorted(check)}"
     kind = kinds[0]
     if kind == "trajectory_judge":
         return None if isinstance(check[kind], str) and check[kind].strip() else "trajectory_judge needs a statement"
+    if kind == "trajectory":
+        return _trajectory_problem(check[kind])
     if kind == "call":
         if not isinstance(check["call"], dict) or not check["call"].get("tool"):
             return "call needs a tool"
         return _expect_problem(check.get("expect"))
-    if kind == "no_new":
-        calls = check["no_new"]
+    if kind in ("no_new", "no_removed"):
+        calls = check[kind]
         if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) and c.get("tool") for c in calls):
-            return "no_new needs a list of calls, each with a tool"
+            return f"{kind} needs a list of calls, each with a tool"
         bad = [c["baseline_count"] for c in calls if c.get("baseline_count") is not None and not _whole(c["baseline_count"])]
-        return f"no_new baseline_count must be a whole number, got {bad[0]!r}" if bad else None
+        return f"{kind} baseline_count must be a whole number, got {bad[0]!r}" if bad else None
     how = [k for k in ("expect", "format", "judge") if k in check]
     if len(how) != 1:
         return f"an artifact check needs exactly one of expect, format, judge; got {how or 'none'}"
@@ -799,6 +984,25 @@ def _check_problem(check: dict) -> Optional[str]:
                 return f"format.{key} must be a list of text, got {fmt[key]!r}"
     if how == ["judge"] and not (isinstance(check["judge"], str) and check["judge"].strip()):
         return "judge needs a statement"
+    return None
+
+
+def _trajectory_problem(spec: Any) -> Optional[str]:
+    if not isinstance(spec, dict) or set(spec) - TRAJECTORY_KEYS:
+        return f"trajectory takes {sorted(TRAJECTORY_KEYS)}"
+    none, calls = spec.get("contains_none"), spec.get("no_call")
+    if none is None and calls is None:
+        return "trajectory needs contains_none or no_call"
+    if none is not None and not (isinstance(none, list) and none and all(isinstance(t, str) and t for t in none)):
+        return f"trajectory.contains_none must be a list of text, got {none!r}"
+    if calls is not None and not (isinstance(calls, list) and calls and all(
+            isinstance(c, dict) and c and not set(c) - {"tool", "args_contains"}
+            and all(isinstance(v, str) and v for v in c.values()) for c in calls)):
+        return "trajectory.no_call must be a list of {tool?, args_contains?}, each with at least one, as text"
+    scope = spec.get("scope", "step")
+    if scope not in ("step", "run") and not (isinstance(scope, dict) and set(scope) == {"before"}
+                                             and isinstance(scope["before"], str) and scope["before"]):
+        return f'trajectory.scope must be "step", "run" or {{"before": milestone id}}, got {scope!r}'
     return None
 
 
@@ -828,44 +1032,79 @@ def _spec(params: dict) -> dict:
     milestones = params.get("milestones")
     if not isinstance(milestones, list) or not milestones:
         raise ValueError("milestone-gates needs milestones")
-    out = []
+    out, authored = [], []  # authored: (gate id, overrides a carried gate) for every gate the spec writes
     for i, m in enumerate(milestones):
         unknown = set(m) - MILESTONE_KEYS
         if unknown:
             raise ValueError(f"milestone {i} has unknown keys {sorted(unknown)}")
-        gates = m.get("gates") or []
-        if not gates:
-            raise ValueError(f"milestone {m.get('id', i)} has no gates")
-        for g in gates:
+        mid = m.get("id") or f"M{i + 1}"
+        if any(mid == o["id"] for o in out):
+            raise ValueError(f"milestone ids must be unique: {mid!r} is repeated")
+        prev = out[-1] if out else None
+        group, carry = m.get("group"), m.get("carry_gates", False)
+        if not isinstance(carry, bool):
+            raise ValueError(f"milestone {mid}: carry_gates must be true or false")
+        if group is not None:
+            # A revision names the milestone it revises: an earlier one of the group just before it, so a
+            # milestone's revisions run one after another.
+            named = next((o for o in out if o["id"] == group), None)
+            if named is None:
+                raise ValueError(f"milestone {mid}: group {group!r} names no earlier milestone")
+            if named["group"] != prev["group"]:
+                raise ValueError(f"milestone {mid}: a revision of {named['group']} must follow it or its last "
+                                 f"revision, not {prev['id']}")
+        elif carry:
+            raise ValueError(f"milestone {mid}: carry_gates needs group (the milestone it revises)")
+        own = m.get("gates") or []
+        if not own:
+            raise ValueError(f"milestone {mid} has no gates")
+        own_ids = [g.get("id") for g in own if isinstance(g, dict) and g.get("id")]
+        twice = sorted({gid for gid in own_ids if own_ids.count(gid) > 1})
+        if twice:  # two gates of one id: one override would replace the other, and its check would never run
+            raise ValueError(f"milestone {mid}: gate ids must be unique within a milestone; repeated: {twice}")
+        carried = {g["id"]: g for g in prev["gates"]} if carry else {}
+        artifacts = {**(prev["artifacts"] if carry else {}), **(m.get("artifacts") or {})}
+        for g in own:
             if not g.get("id") or not g.get("nudge") or not isinstance(g.get("check"), dict):
-                raise ValueError(f"milestone {m.get('id', i)}: each gate needs id, nudge and check")
+                raise ValueError(f"milestone {mid}: each gate needs id, nudge and check")
             unknown_gate = set(g) - GATE_KEYS
             if unknown_gate:
                 raise ValueError(f"gate {g['id']} has unknown keys {sorted(unknown_gate)}")
             if g.get("type") is not None and g["type"] not in GATE_TYPES:
                 raise ValueError(f"gate {g['id']}: type {g['type']!r} is not one of {list(GATE_TYPES)}")
             art = g["check"].get("artifact")
-            if art is not None and art not in (m.get("artifacts") or {}):
+            if art is not None and art not in artifacts:
                 raise ValueError(f"gate {g['id']} names artifact {art!r}, not in its milestone's artifacts")
             problem = _check_problem(g["check"])
             if problem:
                 raise ValueError(f"gate {g['id']}: {problem}")
             if i == 0:
-                for call in g["check"].get("no_new") or []:
-                    if call.get("baseline_count") is None:
-                        raise ValueError(f"gate {g['id']}: a no_new gate in the first milestone needs baseline_count")
-        out.append({"id": m.get("id") or f"M{i + 1}", "line": m.get("line"), "blocking": m.get("blocking", True),
-                    "max_nudges": int(m.get("max_nudges", 3)), "show": m.get("show"),
-                    "type": m.get("type"), "skip_if_done": bool(m.get("skip_if_done", True)),
-                    "artifacts": m.get("artifacts") or {}, "gates": gates})
-    ids = [g["id"] for m in out for g in m["gates"]]
+                for kind in ("no_new", "no_removed"):
+                    if any(c.get("baseline_count") is None for c in g["check"].get(kind) or []):
+                        raise ValueError(f"gate {g['id']}: a {kind} gate in the first milestone needs baseline_count")
+            authored.append((g["id"], g["id"] in carried))
+        # Carried gates keep their place; one the revision overrides (same id) takes its place, new ones follow.
+        mine = {g["id"]: g for g in own}
+        gates = [mine.pop(gid) if gid in mine else {**g, "carried": True} for gid, g in carried.items()]
+        gates += list(mine.values())
+        revision = prev["revision"] + 1 if group is not None else 1
+        out.append({"id": mid, "line": m.get("line"), "blocking": m.get("blocking", True),
+                    "max_nudges": int(m.get("max_nudges", 3)), "show": m.get("show"), "type": m.get("type"),
+                    # a revision asks for a change to work already done, so by default it's never skipped as done
+                    "skip_if_done": bool(m.get("skip_if_done", group is None)),
+                    "group": prev["group"] if group is not None else mid, "revision": revision,
+                    "artifacts": artifacts, "gates": gates})
+    ids = [gid for gid, override in authored if not override]
     repeated = sorted({gid for gid in ids if ids.count(gid) > 1})
     if repeated:
-        raise ValueError(f"gate ids must be unique; repeated: {repeated}")
-    milestone_ids = [m["id"] for m in out]
-    if len(set(milestone_ids)) != len(milestone_ids):
-        raise ValueError(f"milestone ids must be unique: {milestone_ids}")
+        raise ValueError(f"gate ids must be unique (a revision with carry_gates may reuse one it carries, to "
+                         f"override it); repeated: {repeated}")
     checks = [g["check"] for m in out for g in m["gates"]]
+    known = {m["id"] for m in out}
+    for c in checks:
+        before = (c.get("trajectory") or {}).get("scope")
+        if isinstance(before, dict) and before["before"] not in known:
+            raise ValueError(f"trajectory scope names milestone {before['before']!r}, which the spec doesn't have")
     for key, kind in (("judge_model", "judge"), ("trajectory_judge_model", "trajectory_judge")):
         if any(kind in c for c in checks) and not (isinstance(params.get(key), str) and params[key].strip()):
             raise ValueError(f"milestone-gates needs {key}: a gate uses {kind}")
