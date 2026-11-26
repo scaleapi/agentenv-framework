@@ -188,6 +188,15 @@ def test_a_turn_on_several_models_with_writes_kept_an_hour_marks_its_rows_as_pos
     assert "cost_assumed" not in haiku and entry["cost_assumed"] == ["cache_write_5m"]
 
 
+def test_a_turn_on_several_models_whose_split_misses_some_writes_marks_its_rows(monkeypatch):
+    partial = {"cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 0}}
+
+    entry = _entry(monkeypatch, replace(TURN, provider_details=partial), prices=HOURLY)
+
+    sonnet, _ = entry["models"]
+    assert sonnet["cost_assumed"] == ["cache_write_5m"] and entry["cost_assumed"] == ["cache_write_5m"]
+
+
 def test_a_turn_on_several_models_that_kept_no_write_an_hour_prices_its_rows_unmarked(monkeypatch):
     entry = _entry(monkeypatch, replace(TURN, provider_details=_split(0)), prices=HOURLY)
 

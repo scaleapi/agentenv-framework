@@ -188,17 +188,17 @@ class Tokens:
         """``usage``'s tokens (``Usage.to_dict``'s keys); None without input and output counts.
         ``input_includes_cache`` says whether ``input_tokens`` counts the cache tokens. Unknown, it's taken not to (an
         upper bound) unless the counts prove it, input being fewer than the cache tokens. Its writes kept an hour are
-        ``provider_details.cache_creation``'s ``ephemeral_1h_input_tokens``, none when that split names none."""
+        ``provider_details.cache_creation``'s (``cache_write_split``), and the writes that split doesn't cover, all of
+        them without one, are ``unsplit_write``."""
         inputs, outputs = usage.get("input_tokens"), usage.get("output_tokens")
         if inputs is None or outputs is None:
             return None
         read, write = usage.get("cache_read_tokens") or 0, usage.get("cache_write_tokens") or 0
         cached = read + write
         details = usage.get("provider_details")
-        split = details.get("cache_creation") if isinstance(details, Mapping) else None
-        hour = split.get("ephemeral_1h_input_tokens") if isinstance(split, Mapping) and split else None
-        hour = 0 if split and not isinstance(hour, int) else hour
-        written = (min(hour, write), 0) if hour is not None else (0, write)
+        five, hour = cache_write_split(details.get("cache_creation") if isinstance(details, Mapping) else None) or (0, 0)
+        hour = min(hour, write)
+        written = (hour, write - min(write, five + hour))
         includes = usage.get("input_includes_cache")
         if includes is True and inputs >= cached:
             return cls(inputs - cached, outputs, read, write, False, *written, inputs, one_call)
@@ -210,6 +210,20 @@ class Tokens:
                       self.cache_read + other.cache_read, self.cache_write + other.cache_write,
                       self.assumed_uncached or other.assumed_uncached, self.cache_write_1h + other.cache_write_1h,
                       self.unsplit_write + other.unsplit_write, max(self.prompt, other.prompt))
+
+
+def cache_write_split(split: object) -> Optional[tuple[int, int]]:
+    """A usage's split of its cache writes by how long they're kept, as (five-minute, one-hour) writes, from Anthropic's
+    ``ephemeral_5m_input_tokens`` and ``ephemeral_1h_input_tokens``. A count that isn't a non-negative integer is
+    unknown, and the split None when neither count is known."""
+    if not isinstance(split, Mapping):
+        return None
+    five, hour = (_count(split.get(key)) for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"))
+    return None if five is None and hour is None else (five or 0, hour or 0)
+
+
+def _count(value: object) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 @dataclass(frozen=True)

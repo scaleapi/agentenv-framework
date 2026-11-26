@@ -289,6 +289,23 @@ def test_writes_kept_an_hour_are_charged_the_hours_rate_and_the_split_is_kept(us
     assert cost.fields()["cache_write_1h_tokens"] == 3000
 
 
+def test_writes_a_split_doesnt_cover_are_charged_the_five_minute_rate_and_marked():
+    cost = _priced(Tokens.of(_call(10_000, cache_write_tokens=1000, provider_details={
+        "cache_creation": {"ephemeral_5m_input_tokens": 100}})), model="claude-x")
+
+    assert cost.usd == pytest.approx((9000 * 1.0 + 1000 * 5.0 + 1000 * 1.25) / PER_MILLION)
+    assert cost.assumed == (Assumed.CACHE_WRITE_5M,)
+
+
+@pytest.mark.parametrize("hour", [-3000, True, "3000", 2.5], ids=["negative", "bool", "string", "float"])
+def test_a_split_count_that_isnt_a_non_negative_integer_is_unknown(hour):
+    cost = _priced(Tokens.of(_call(10_000, cache_write_tokens=4000, provider_details={
+        "cache_creation": {"ephemeral_1h_input_tokens": hour}})), model="claude-x")
+
+    assert cost.usd == pytest.approx((6000 * 1.0 + 1000 * 5.0 + 4000 * 1.25) / PER_MILLION)
+    assert cost.assumed == (Assumed.CACHE_WRITE_5M,) and cost.cache_write_1h is None
+
+
 def test_writes_with_no_split_are_charged_the_five_minute_rate_marked_only_when_the_hour_costs_more():
     marked = _priced(Tokens.of(_call(10_000, cache_write_tokens=4000)), model="claude-x")
     no_hour_rate = _priced(Tokens.of(_call(10_000, cache_write_tokens=4000)), model="claude-flat")
@@ -315,9 +332,18 @@ def _litellm_cost(model: str, prompt: int, read: int, write: int, hour: int, out
     return theirs, ours.usd
 
 
-@pytest.mark.parametrize(("model", "hour"), [("claude-haiku-5-5", 5000), ("gpt-6.1-sol", 0)])
+def _tiered(prefix: str, *, hour: bool) -> str:
+    """The first model of the installed map named ``prefix``... without a provider, with one long-context tier and, or
+    without, a rate for writes kept an hour; LiteLLM's maps differ in which models they tier."""
+    return next(name for name, rates in sorted(litellm_prices().entries.items())
+                if name.startswith(prefix) and "/" not in name and len(rates.tiers) == 1
+                and (rates.cache_write_1h is not None) == hour)
+
+
+@pytest.mark.parametrize(("prefix", "hour"), [("claude-", 5000), ("gpt-", 0)], ids=["claude-hour-writes", "gpt"])
 @pytest.mark.parametrize("past_tier", [True, False], ids=["past", "under"])
-def test_one_calls_price_matches_litellms_own_cost_past_and_under_its_tier(model, hour, past_tier):
+def test_one_calls_price_matches_litellms_own_cost_past_and_under_its_tier(prefix, hour, past_tier):
+    model = _tiered(prefix, hour=bool(hour))
     [tier] = litellm_prices().lookup(model).tiers
     prompt = tier.threshold + 50_000 if past_tier else tier.threshold - 10_000
 

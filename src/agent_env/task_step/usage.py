@@ -14,7 +14,7 @@ from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import (
-    Cost, CostStatus, PriceTable, ReportedBy, Tokens, litellm_prices, price,
+    Cost, CostStatus, PriceTable, ReportedBy, Tokens, cache_write_split, litellm_prices, price,
 )
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
@@ -154,11 +154,10 @@ class RoleUsage:
         charged: dict[Optional[str], list[dict[str, Any]]] = {}
         for usage in counted:
             if usage.models:
-                split = _row_split(usage)
                 for share in usage.models:
                     shares.setdefault(share.model, []).append(share)
                     record = share.to_dict()
-                    if split is not None:
+                    if (split := _row_split(usage, share)) is not None:
                         record["provider_details"] = {"cache_creation": split}
                     charged.setdefault(share.model, []).append(record)
             else:
@@ -187,15 +186,21 @@ def _tokens(records: list[Any]) -> Optional[Tokens]:
     return reduce(operator.add, charged) if charged and None not in charged else None
 
 
-def _row_split(usage: Usage) -> Optional[dict[str, Any]]:
-    """The cache-write split each of a turn's per-model rows takes: the turn's own when it ran one model, none kept an
-    hour when the turn kept none, else None, since a turn's hour-long writes can't be told apart by model."""
-    split = usage.provider_details.get("cache_creation")
-    if not isinstance(split, dict) or not split:
+def _row_split(usage: Usage, share: Any) -> Optional[dict[str, Any]]:
+    """The cache-write split a turn's per-model row takes: the turn's own when it ran one model; all of the row's
+    writes kept five minutes when the turn's split covers every write and kept none an hour; else None, since a turn's
+    hour-long or uncovered writes can't be told apart by model."""
+    raw = usage.provider_details.get("cache_creation")
+    split = cache_write_split(raw)
+    if split is None:
         return None
     if len(usage.models) == 1:
-        return dict(split)
-    return None if split.get("ephemeral_1h_input_tokens") else {"ephemeral_1h_input_tokens": 0}
+        return dict(raw)
+    five, hour = split
+    writes = usage.cache_write_tokens
+    if writes is None:
+        writes = sum(row.cache_write_tokens or 0 for row in usage.models)
+    return {"ephemeral_5m_input_tokens": share.cache_write_tokens or 0} if not hour and five >= writes else None
 
 
 def _agreed(records: list[Any]) -> Optional[bool]:
