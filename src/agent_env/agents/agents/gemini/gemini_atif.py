@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from agentenv_protocol.atif import Adapter, Native, atif_adapter, aux, finish, native
@@ -93,7 +94,7 @@ class GeminiAtif(Adapter):
     @aux("session", type="gemini")
     def message(self, record: dict[str, Any], turn: Any) -> None:
         tokens = record.get("tokens")
-        index = self._match(_transcript_inputs(tokens))
+        index = self._match(_transcript_inputs(tokens), _instant(record.get("timestamp")))
         call = None
         if index is not None:
             for side in self._calls[:index]:
@@ -126,13 +127,18 @@ class GeminiAtif(Adapter):
             turn.error(message=self._error, kind="infra_error", step=self._refused)
         self._new_task()
 
-    def _match(self, inputs: int | None) -> int | None:
-        """Which of the proxy's calls not yet written made the response counting ``inputs``: the first answered with
-        that input, else one whose counts the proxy couldn't read ahead of every answered call, which may be later
-        messages'; the calls before it wrote no message. None when no call did, as for a response the proxy didn't
-        see, and the response takes the transcript's count."""
-        outcomes = [call.get("outcome") for call in self._calls]
-        for index, call in enumerate(self._calls):
+    def _match(self, inputs: int | None, written: datetime | None) -> int | None:
+        """Which of the proxy's calls not yet written made the response counting ``inputs``, its message written at
+        ``written``: of the calls that had ended by then, the CLI writing a response's message once its call ends, the
+        first answered with that input, else one whose counts the proxy couldn't read ahead of every answered call,
+        which may be later messages'; the calls before it wrote no message. None when no call did, as for a response
+        the proxy didn't see, and the response takes the transcript's count."""
+        ended = len(self._calls)
+        if written is not None:
+            ended = next((index for index, call in enumerate(self._calls)
+                          if (end := _instant(call.get("timestamp"))) is not None and end > written), ended)
+        outcomes = [call.get("outcome") for call in self._calls[:ended]]
+        for index, call in enumerate(self._calls[:ended]):
             if outcomes[index] == "answered" and inputs is not None \
                     and _usage(call.get("usage")).get("input_tokens") == inputs:
                 return index
@@ -196,6 +202,15 @@ class GeminiAtif(Adapter):
         if log:
             end_task()
         return Native(log=log)
+
+
+def _instant(value: Any) -> datetime | None:
+    """A record's time, as the CLI and the proxy write it (ISO 8601, ``Z`` for UTC), in UTC when it names no zone."""
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return instant.replace(tzinfo=timezone.utc) if instant is not None and instant.tzinfo is None else instant
 
 
 def _thought(thought: Any) -> str | None:

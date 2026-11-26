@@ -55,8 +55,9 @@ class Feed:
     def tool_use(self, tool_id, name="run_shell_command"):
         return self.native({"type": "tool_use", "tool_name": name, "tool_id": tool_id, "parameters": {}})
 
-    def message(self, message_id, content="", *, tokens=None, thoughts=(), calls=(), model=MODEL):
-        message = {"id": message_id, "timestamp": self.at(), "type": "gemini", "content": content,
+    def message(self, message_id, content="", *, tokens=None, thoughts=(), calls=(), model=MODEL, at=None):
+        """A model message, written at ``at`` (else now), fed now: the bridge feeds one once a later one follows it."""
+        message = {"id": message_id, "timestamp": at or self.at(), "type": "gemini", "content": content,
                    "thoughts": [{"subject": subject, "description": description, "timestamp": self.at()}
                                 for subject, description in thoughts],
                    "tokens": tokens or {"input": 7338, "output": 77, "cached": 0, "thoughts": 105, "tool": 0,
@@ -203,11 +204,11 @@ def seeded_session(seed: int) -> tuple[list[Feed], dict]:
     follows it, or all at the task's end. With what the copy must hold."""
     rng = random.Random(seed)
     image = png()
-    want = {"input": 0, "steps": 0, "calls": set(), "messages": [], "unreported": 0}
+    want = {"input": 0, "output": 0, "steps": 0, "calls": set(), "messages": [], "unreported": 0}
     n = iter(range(10**6))
     feeds = []
     for _ in range(rng.randint(1, 3)):
-        feed, held, lagged = Feed(), [], rng.random() < 0.5
+        feed, held, lagged, previous = Feed(), [], rng.random() < 0.5, None
         for _ in range(rng.randint(1, 4)):
             if rng.random() < 0.2:
                 feed.call(outcome="refused", status=rng.choice([429, 500, 503]))
@@ -216,13 +217,20 @@ def seeded_session(seed: int) -> tuple[list[Feed], dict]:
                 side = rng.randint(100, 900)
                 feed.call(inputs=side, output=1)
                 want["input"] += side
+                want["output"] += 1
                 want["steps"] += 1
-            inputs, tool_tokens = rng.randint(1000, 9000), rng.choice([0, 0, 40])
+            # An uncounted call's next one sometimes has its very input, so only times tell them apart.
+            inputs = previous if previous is not None and rng.random() < 0.5 else rng.randint(1000, 9000)
+            tool_tokens, previous = rng.choice([0, 0, 40]), None
+            # The transcript counts a response as its call did, its thoughts in its output here.
+            output = rng.randint(1, 50)
             if rng.random() < 0.1:
                 feed.call(outcome="unreported")
                 want["unreported"] += 1
+                previous = inputs
             else:
-                feed.call(inputs=inputs + tool_tokens, output=rng.randint(1, 50), cached=rng.randint(0, inputs))
+                feed.call(inputs=inputs + tool_tokens, output=output, cached=rng.randint(0, inputs))
+            want["output"] += output
             want["input"] += inputs + tool_tokens
             calls = []
             for _ in range(rng.choice([0, 1, 1, 2])):
@@ -234,19 +242,20 @@ def seeded_session(seed: int) -> tuple[list[Feed], dict]:
             text = rng.choice(["", "", "done", "looking"])
             thoughts = [("Plan", "Run it.")] * rng.randint(0, 2)
             message_id = f"m-{next(n)}"
-            message = (message_id, text, {"input": inputs, "output": 10, "cached": 0, "thoughts": 5,
-                                          "tool": tool_tokens}, thoughts, calls)
+            message = (message_id, text, {"input": inputs, "output": output, "cached": 0, "thoughts": 0,
+                                          "tool": tool_tokens}, thoughts, calls, Feed.at())
             want["messages"].append(text)
             want["steps"] += 1
             held.append(message)
             while len(held) > (1 if lagged else 10**6):
-                message_id, text, tokens, thoughts, calls = held.pop(0)
-                feed.message(message_id, text, tokens=tokens, thoughts=thoughts, calls=calls)
-        for message_id, text, tokens, thoughts, calls in held:
-            feed.message(message_id, text, tokens=tokens, thoughts=thoughts, calls=calls)
+                message_id, text, tokens, thoughts, calls, at = held.pop(0)
+                feed.message(message_id, text, tokens=tokens, thoughts=thoughts, calls=calls, at=at)
+        for message_id, text, tokens, thoughts, calls, at in held:
+            feed.message(message_id, text, tokens=tokens, thoughts=thoughts, calls=calls, at=at)
         if rng.random() < 0.2:
             feed.call(inputs=500, output=1)
             want["input"] += 500
+            want["output"] += 1
             want["steps"] += 1
         feeds.append(feed.result())
     return feeds, want
@@ -262,6 +271,7 @@ def test_a_seeded_sessions_copy_holds_every_response_and_every_call_the_proxy_fo
     assert 0 <= surplus <= want["unreported"]
     assert sum(step["llm_call_count"] == 1 and "metrics" not in step for step in steps) >= surplus
     assert sum(step.get("metrics", {}).get("prompt_tokens", 0) for step in steps) == want["input"]
+    assert sum(step.get("metrics", {}).get("completion_tokens", 0) for step in steps) == want["output"]
     assert [step["message"] for step in steps if step["message"]] == [text for text in want["messages"] if text]
     calls = [call["tool_call_id"] for step in steps for call in step.get("tool_calls") or ()]
     results = {result["source_call_id"] for step in steps for result in (step.get("observation") or {}).get(
@@ -276,3 +286,15 @@ def test_a_response_isnt_joined_to_a_call_the_proxy_couldnt_count_past_an_answer
 
     assert [step["message"] for step in steps] == ["ok", "", ""]
     assert [step.get("metrics", {}).get("prompt_tokens") for step in steps] == [7338, 900, None]
+
+
+def test_a_response_takes_its_own_uncounted_call_not_the_next_answered_one_of_the_same_input():
+    feed = Feed().call(outcome="unreported")
+    written = Feed.at()
+    feed.call(inputs=7338, output=20)
+    feed.message("m-1", "first", tokens={"input": 7338, "output": 7, "thoughts": 3}, at=written)
+    feed.message("m-2", "second", tokens={"input": 7338, "output": 18, "thoughts": 2}).result()
+    first, second = agent_steps(run(feed).document)
+
+    assert (first["message"], first["metrics"]["completion_tokens"]) == ("first", 10)
+    assert (second["message"], second["metrics"]["completion_tokens"]) == ("second", 20)
