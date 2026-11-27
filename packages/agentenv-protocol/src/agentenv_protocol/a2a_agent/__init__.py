@@ -135,6 +135,8 @@ from .tasks.v1 import (
     ModelUsage,
     Usage,
     WriteOnly,
+    ttl_label,
+    ttl_seconds,
 )
 from ..transfers import (
     HttpGetGrant,
@@ -277,6 +279,8 @@ __all__ = [
     "Uploaded",
     "ModelUsage",
     "Usage",
+    "ttl_label",
+    "ttl_seconds",
     "WriteNamespaceGrant",
     "WriteObject",
     "WriteOnly",

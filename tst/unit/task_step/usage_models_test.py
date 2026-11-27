@@ -199,21 +199,25 @@ def test_a_turn_on_several_models_whose_split_misses_some_writes_marks_its_rows(
     assert sonnet["cost_assumed"] == ["default_cache_ttl"] and entry["cost_assumed"] == ["default_cache_ttl"]
 
 
-def test_a_turn_on_several_models_that_kept_no_write_an_hour_prices_its_rows_unmarked(monkeypatch):
-    entry = _entry(monkeypatch, replace(TURN, provider_details=_split(0)), prices=HOURLY)
+def test_a_turn_on_several_models_whose_rows_say_how_long_their_writes_were_kept_prices_each_exactly(monkeypatch):
+    sonnet = replace(SONNET_SHARE, cache_write_ttl_tokens={"5m": 200, "1h": 300})
 
-    sonnet, _ = entry["models"]
-    assert sonnet["cost_usd"] == pytest.approx(0.011775) and "cost_assumed" not in entry
+    entry = _entry(monkeypatch, replace(TURN, models=(sonnet, HAIKU_SHARE)), prices=HOURLY)
+
+    sonnet_row, haiku_row = entry["models"]
+    assert sonnet_row["cost_usd"] == pytest.approx(0.011775 + 300 * (6.0 - 3.75) / 1e6)
+    assert sonnet_row["cache_write_ttl_tokens"] == {"1h": 300} and "cost_assumed" not in entry
+    assert "cache_write_ttl_tokens" not in haiku_row and entry["cache_write_ttl_tokens"] == {"1h": 300}
 
 
-def test_a_turn_on_several_models_whose_writes_were_all_kept_one_time_gives_each_row_that_time(monkeypatch):
-    twelve = {"cache_write_tokens_details": {"ttl_30m_tokens": 0, "ttl_12h_tokens": 500}}
+def test_a_row_whose_writes_were_kept_twelve_hours_is_charged_that_times_rate(monkeypatch):
     prices = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
                                             cache_write_ttl={43200: 7.5}),
                          HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25)}, "litellm@test")
+    sonnet = replace(SONNET_SHARE, cache_write_ttl_tokens={"12h": 500})
 
-    entry = _entry(monkeypatch, replace(TURN, provider_details=twelve), prices=prices)
+    entry = _entry(monkeypatch, replace(TURN, models=(sonnet, HAIKU_SHARE)), prices=prices)
 
-    sonnet, haiku = entry["models"]
-    assert sonnet["cost_usd"] == pytest.approx(0.011775 + 500 * (7.5 - 3.75) / 1e6)
-    assert sonnet["cache_write_ttl_tokens"] == {"12h": 500} and "cost_assumed" not in entry
+    sonnet_row, _ = entry["models"]
+    assert sonnet_row["cost_usd"] == pytest.approx(0.011775 + 500 * (7.5 - 3.75) / 1e6)
+    assert sonnet_row["cache_write_ttl_tokens"] == {"12h": 500} and "cost_assumed" not in entry

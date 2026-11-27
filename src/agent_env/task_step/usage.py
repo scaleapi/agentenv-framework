@@ -14,7 +14,7 @@ from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import (
-    Cost, CostStatus, PriceTable, ReportedBy, Tokens, cache_write_split, litellm_prices, price, ttl_label,
+    Cost, CostStatus, PriceTable, ReportedBy, Tokens, litellm_prices, price,
 )
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
@@ -148,8 +148,9 @@ class RoleUsage:
         return entry
 
     def _by_model(self, counted: list[Usage], prices: PriceTable) -> list[tuple[ModelEntry, Cost]]:
-        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, each taking the
-        turn's cache-write split as ``_row_split`` gives it, and a turn without them counted as the role's model's."""
+        """The turns' counts by model, each priced at its own model's rate: a turn's ``models``, and a turn without them
+        counted as the role's model's. A row says its own writes by how long they were kept; the one row of a turn
+        that ran one model takes the turn's when it doesn't, as an older agent's row may not."""
         shares: dict[Optional[str], list[Any]] = {}
         charged: dict[Optional[str], list[dict[str, Any]]] = {}
         for usage in counted:
@@ -157,8 +158,8 @@ class RoleUsage:
                 for share in usage.models:
                     shares.setdefault(share.model, []).append(share)
                     record = share.to_dict()
-                    if (split := _row_split(usage, share)) is not None:
-                        record["provider_details"] = split
+                    if share.cache_write_ttl_tokens is None and len(usage.models) == 1 and usage.cache_write_ttl_tokens:
+                        record["cache_write_ttl_tokens"] = dict(usage.cache_write_ttl_tokens)
                     charged.setdefault(share.model, []).append(record)
             else:
                 shares.setdefault(self.model, []).append(usage)
@@ -184,24 +185,6 @@ def _tokens(records: list[Any]) -> Optional[Tokens]:
     when one lacks its input or output, so a sum that can't be charged in full isn't priced short."""
     charged = [Tokens.of(record if isinstance(record, dict) else record.to_dict()) for record in records]
     return reduce(operator.add, charged) if charged and None not in charged else None
-
-
-def _row_split(usage: Usage, share: Any) -> Optional[dict[str, Any]]:
-    """The cache-write split (as ``provider_details``) a turn's per-model row takes: the turn's own when it ran one
-    model; all of the row's writes kept one time when the turn's split puts every write at that time; else None,
-    since a turn's writes kept different times, or not covered, can't be told apart by model."""
-    split = cache_write_split(usage.provider_details)
-    if split is None:
-        return None
-    if len(usage.models) == 1:
-        return dict(usage.provider_details)
-    writes = usage.cache_write_tokens
-    if writes is None:
-        writes = sum(row.cache_write_tokens or 0 for row in usage.models)
-    kept = [(seconds, count) for seconds, count in split.items() if count]
-    if len(kept) != 1 or kept[0][1] < writes:
-        return None
-    return {"cache_write_tokens_details": {f"ttl_{ttl_label(kept[0][0])}_tokens": share.cache_write_tokens or 0}}
 
 
 def _agreed(records: list[Any]) -> Optional[bool]:

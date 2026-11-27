@@ -15,6 +15,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar, Mapping, Optional
 
+from agentenv_protocol.a2a_agent import ttl_label, ttl_seconds
+
 logger = logging.getLogger(__name__)
 
 PER_MILLION = 1_000_000
@@ -24,16 +26,12 @@ _MAP_FILE = "litellm/model_prices_and_context_window_backup.json"
 _MAP_KEYS = {"input": "input_cost_per_token", "output": "output_cost_per_token",
              "cache_read": "cache_read_input_token_cost", "cache_write": "cache_creation_input_token_cost"}
 # The rate of cache writes kept at least a while, as ``cache_creation_input_token_cost_above_1hr``.
-_TTL = r"cache_creation_input_token_cost_above_\d+(?:hr|min)"
-_TTL_KEY = re.compile(r"^cache_creation_input_token_cost_above_(\d+)(hr|min)$")
+_TTL = r"cache_creation_input_token_cost_above_\d+(?:sec|min|hour|hr|day|[smhd])"
+_TTL_KEY = re.compile(r"^cache_creation_input_token_cost_above_(\d+)(sec|min|hour|hr|day|[smhd])$")
+_TTL_UNIT = {"s": "s", "sec": "s", "m": "m", "min": "m", "h": "h", "hr": "h", "hour": "h", "d": "d", "day": "d"}
 # A long-context tier's rate: one of those keys, then the prompt size past which a call is charged it, as
 # ``_above_272k_tokens`` or ``_above_272000_tokens``. Service-tier and batch rates end otherwise, so they never match.
 _TIER_KEY = re.compile(rf"^({'|'.join(map(re.escape, _MAP_KEYS.values()))}|{_TTL})_above_(\d+)(k?)_tokens$")
-# A count of cache writes kept a while, as a provider splits them: Anthropic's ``ephemeral_1h_input_tokens`` (which a
-# LiteLLM client's ``cache_creation_token_details`` repeats) under ``cache_creation``, OpenAI's ``ttl_12h_tokens``
-# under ``cache_write_tokens_details``.
-_SPLITS = ("cache_creation", "cache_write_tokens_details")
-_TTL_COUNT = re.compile(r"^(?:ephemeral_|ttl_)?(\d+)(m|h|min|hr)(?:_input)?_tokens$")
 
 
 class CostStatus(StrEnum):
@@ -178,12 +176,7 @@ def _tiers(info: Mapping[str, Any]) -> tuple[ContextTier, ...]:
 def _ttl_seconds(key: str) -> Optional[int]:
     """How long writes are kept for the rate a map key names, ``..._above_1hr`` as 3600; None for any other key."""
     match = _TTL_KEY.match(key)
-    return int(match[1]) * (3600 if match[2] == "hr" else 60) if match else None
-
-
-def ttl_label(seconds: int) -> str:
-    """A time writes are kept, as ``unit_prices`` and ``cache_write_ttl_tokens`` name it: ``1h``, ``12h``, ``30m``."""
-    return f"{seconds // 3600}h" if seconds % 3600 == 0 else f"{seconds // 60}m"
+    return ttl_seconds(f"{match[1]}{_TTL_UNIT[match[2]]}") if match else None
 
 
 def _rate(per_token: object) -> Optional[float]:
@@ -218,15 +211,18 @@ class Tokens:
         """``usage``'s tokens (``Usage.to_dict``'s keys); None without input and output counts.
         ``input_includes_cache`` says whether ``input_tokens`` counts the cache tokens. Unknown, it's taken not to (an
         upper bound) unless the counts prove it, input being fewer than the cache tokens. Its writes by how long they
-        were kept are its ``provider_details``' split (``cache_write_split``), longest first, up to its writes; the
-        writes the split doesn't cover, all of them without one, are ``unsplit_write``."""
+        were kept are its ``cache_write_ttl_tokens``, longest first, up to its writes, a time or count that can't be
+        read left out; the writes they don't cover, all of them without any, are ``unsplit_write``."""
         inputs, outputs = usage.get("input_tokens"), usage.get("output_tokens")
         if inputs is None or outputs is None:
             return None
         read, write = usage.get("cache_read_tokens") or 0, usage.get("cache_write_tokens") or 0
         cached = read + write
+        ttl = usage.get("cache_write_ttl_tokens")
+        said = {seconds: kept for label, value in (ttl.items() if isinstance(ttl, Mapping) else ())
+                if (seconds := ttl_seconds(label)) is not None and (kept := _count(value))}
         kept, left = {}, write
-        for seconds, count in sorted((cache_write_split(usage.get("provider_details")) or {}).items(), reverse=True):
+        for seconds, count in sorted(said.items(), reverse=True):
             if taken := min(count, left):
                 kept[seconds], left = taken, left - taken
         written = (kept, left)
@@ -244,22 +240,6 @@ class Tokens:
                       self.cache_read + other.cache_read, self.cache_write + other.cache_write,
                       self.assumed_uncached or other.assumed_uncached, kept,
                       self.unsplit_write + other.unsplit_write, max(self.prompt, other.prompt))
-
-
-def cache_write_split(details: object) -> Optional[dict[int, int]]:
-    """A usage's cache writes by how long they were kept, in seconds, from the splits its ``provider_details`` keep
-    (``_SPLITS``), each count named for its time (``ephemeral_5m_input_tokens``, ``ttl_12h_tokens``). A count that
-    isn't a non-negative integer is unknown; None when no count is known."""
-    if not isinstance(details, Mapping):
-        return None
-    split: dict[int, int] = {}
-    for name in _SPLITS:
-        counts = details.get(name)
-        for key, value in counts.items() if isinstance(counts, Mapping) else ():
-            if (match := _TTL_COUNT.match(str(key))) and (count := _count(value)) is not None:
-                seconds = int(match[1]) * (3600 if match[2] in ("h", "hr") else 60)
-                split[seconds] = split.get(seconds, 0) + count
-    return split or None
 
 
 def _count(value: object) -> Optional[int]:

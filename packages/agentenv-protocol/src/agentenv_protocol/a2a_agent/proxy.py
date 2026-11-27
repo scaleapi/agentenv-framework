@@ -58,7 +58,7 @@ from .extensions import (
     extension,
 )
 from .framework import AgentEnvAgent, AgentIdentity, a2a_agent
-from .tasks.v1 import AgentConfig, ModelUsage, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage
+from .tasks.v1 import AgentConfig, ModelUsage, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage, ttl_sum
 from ..tool_client import ToolResult, ToolSession, ToolSessionError
 from ..transfers import download
 from ..types import EnvironmentTool
@@ -522,7 +522,8 @@ def _tool_error(message: str) -> ProxyToolResult:
     return ProxyToolResult(content=[{"type": "text", "text": f"error: {message}"}], is_error=True)
 
 
-_USAGE_SUMS = (*(f.name for f in fields(Usage) if f.name.endswith("_tokens")), "cost_usd")
+_USAGE_SUMS = (*(f.name for f in fields(Usage) if f.name.endswith("_tokens") and f.name != "cache_write_ttl_tokens"),
+               "cost_usd")
 # Each provider's split of its cache writes by how long they're kept, which ``Usage.from_model_response`` keeps.
 _CACHE_WRITE_SPLITS = ("cache_creation", "cache_write_tokens_details")
 
@@ -560,7 +561,8 @@ def _turn_usage(turn: _Turn) -> Usage:
     as the lower bound it is; how many had cache counts with no word on whether their input held them
     (``cache_unsettled``), which leaves the turn's flag unknown; how many usages were in a shape none of the readers
     know (``unrecognized``); and each provider's split of the cache writes, summed, a reported ``Usage``'s split
-    counted only where it holds counts, as its ``provider_details`` may hold anything."""
+    counted only where it holds counts, as its ``provider_details`` may hold anything. Its writes by how long they
+    were kept are the calls' summed."""
     calls = [usage for _, usage in turn.model_calls]
     sums, unreported = {}, {}
     for name in _USAGE_SUMS:
@@ -581,6 +583,7 @@ def _turn_usage(turn: _Turn) -> Usage:
                **({"cache_unsettled": unsettled} if unsettled else {}),
                **({"unrecognized": unrecognized} if unrecognized else {}), **splits}
     return Usage(tool_call_count=len(turn.actions), **sums,
+                 cache_write_ttl_tokens=ttl_sum(call.cache_write_ttl_tokens for call in calls),
                  input_includes_cache=True if sums["input_tokens"] is not None and not unsettled else None,
                  models=_by_model(turn), provider_details=details if calls else {})
 

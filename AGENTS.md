@@ -94,14 +94,14 @@ or one of them only where it is used.
   (`Assumed.errs_low`). A call whose prompt, cache included, is over a model's long-context tier is charged the tier's
   rates only when it's priced alone, as core's own calls are (`complete`); a sum of calls, as an agent's turns are,
   one of which went over, is priced at the base rates and marked `below_context_tier`. Cache writes a usage says how
-  long were kept (its `provider_details` split, Anthropic's `ephemeral_<N>m|h_input_tokens` or OpenAI's
-  `ttl_<N>m|h_tokens`, any time) are charged the map's rate for the longest time at most theirs
-  (`cache_creation_input_token_cost_above_<N>hr`), else the base write rate, and those charged more are kept in
-  `cache_write_ttl_tokens` by time (`{"1h": n}`) with `unit_prices` `cache_write_<time>`; writes with no split, on a
-  model that charges more for some longer time, are charged the base write rate and marked `default_cache_ttl`. A turn
-  that gives its counts by model (`Usage.models`) is priced model by model, each at its own rate, and its entry keeps
-  a row per model (`models`), its `cost_usd` their sum; a turn on one model gives its row the turn's split of cache
-  writes.
+  long were kept (`Usage.cache_write_ttl_tokens`, `{"1h": n}`, which the protocol reads from a provider's split in
+  `provider_details` when an agent doesn't set it) are charged the map's rate for the longest time at most theirs
+  (`cache_creation_input_token_cost_above_<N>hr`), else the base write rate, and those charged more are kept in the
+  entry's `cache_write_ttl_tokens` with `unit_prices` `cache_write_<time>`; writes it doesn't count, on a model that
+  charges more for some longer time, are charged the base write rate and marked `default_cache_ttl`. A turn that
+  gives its counts by model (`Usage.models`) is priced model by model, each at its own rate and its own writes by time
+  (`ModelUsage.cache_write_ttl_tokens`, a one-model turn's row taking the turn's when it gives none), and its entry
+  keeps a row per model (`models`), its `cost_usd` their sum.
 - Core's own model calls, the judges', go through `config/model_call.py` (`resolve_route`, `complete`), the only
   module in core that imports LiteLLM (`tst/unit/config/test_one_model_call_path.py`). Each call returns the model it
   called, the host it reached and its cost: what the endpoint billed, a LiteLLM proxy's `x-litellm-response-cost`, as

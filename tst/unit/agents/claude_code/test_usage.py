@@ -75,7 +75,8 @@ def test_a_new_sessions_turn_counts_every_call_its_subagents_included():
     assert _counts(usage) == _truth(TURN_1)
     assert usage.input_includes_cache is True and usage.cost_usd == 0.0452852
     assert "unreported_calls" not in usage.provider_details
-    assert usage.models == (ModelUsage(model=HAIKU, **_truth(TURN_1), input_includes_cache=True, cost_usd=0.0452852),)
+    assert usage.models == (ModelUsage(model=HAIKU, **_truth(TURN_1), input_includes_cache=True, cost_usd=0.0452852,
+                                       cache_write_ttl_tokens={"5m": _truth(TURN_1)["cache_write_tokens"]}),)
     assert "models" not in usage.provider_details
 
 
@@ -91,7 +92,8 @@ def test_a_turn_whose_subagent_ran_on_another_model_gives_each_models_counts_and
         ModelUsage(model=sonnet, input_tokens=64020, output_tokens=300, cache_read_tokens=60000,
                    cache_write_tokens=4000, input_includes_cache=True, cost_usd=0.05),
         ModelUsage(model=HAIKU, input_tokens=22010, output_tokens=90, cache_read_tokens=20000,
-                   cache_write_tokens=2000, input_includes_cache=True, cost_usd=0.004))
+                   cache_write_tokens=2000, input_includes_cache=True, cost_usd=0.004,
+                   cache_write_ttl_tokens={"5m": 2000}))
     assert usage.cost_usd == pytest.approx(0.054) and usage.input_tokens == 64020 + 22010
 
 

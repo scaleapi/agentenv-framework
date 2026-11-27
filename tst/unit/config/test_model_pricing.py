@@ -242,6 +242,12 @@ def _call(prompt: int, output: int = 1000, **more) -> dict:
     return {"input_tokens": prompt, "output_tokens": output, "input_includes_cache": True, **more}
 
 
+def _reported(prompt: int, **more) -> dict:
+    """An agent's usage as the protocol reads it, so a provider's split in ``provider_details`` is read into
+    ``cache_write_ttl_tokens`` as an agent's turn is."""
+    return Usage.from_dict(_call(prompt, **more)).to_dict()
+
+
 def _priced(tokens, model="long-1"):
     return price(tokens, None, model=model, prices=TIERED, reported_by=ReportedBy.HARNESS)
 
@@ -278,8 +284,8 @@ def test_a_sum_with_a_record_past_a_tier_is_priced_at_the_base_rate_and_marked_a
 
 
 @pytest.mark.parametrize("usage", [
-    _call(10_000, cache_write_tokens=4000,
-          provider_details={"cache_creation": {"ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 3000}}),
+    _reported(10_000, cache_write_tokens=4000,
+              provider_details={"cache_creation": {"ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 3000}}),
     Usage.from_model_response({"prompt_tokens": 10_000, "completion_tokens": 1000, "prompt_tokens_details": {
         "cached_tokens": 0, "cache_write_tokens": 4000, "cache_creation_token_details": {
             "ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 3000}}}).to_dict(),
@@ -293,7 +299,7 @@ def test_writes_kept_an_hour_are_charged_the_hours_rate_and_the_split_is_kept(us
 
 
 def test_writes_a_split_doesnt_cover_are_charged_the_five_minute_rate_and_marked():
-    cost = _priced(Tokens.of(_call(10_000, cache_write_tokens=1000, provider_details={
+    cost = _priced(Tokens.of(_reported(10_000, cache_write_tokens=1000, provider_details={
         "cache_creation": {"ephemeral_5m_input_tokens": 100}})), model="claude-x")
 
     assert cost.usd == pytest.approx((9000 * 1.0 + 1000 * 5.0 + 1000 * 1.25) / PER_MILLION)
@@ -302,11 +308,14 @@ def test_writes_a_split_doesnt_cover_are_charged_the_five_minute_rate_and_marked
 
 @pytest.mark.parametrize("hour", [-3000, True, "3000", 2.5], ids=["negative", "bool", "string", "float"])
 def test_a_split_count_that_isnt_a_non_negative_integer_is_unknown(hour):
-    cost = _priced(Tokens.of(_call(10_000, cache_write_tokens=4000, provider_details={
-        "cache_creation": {"ephemeral_1h_input_tokens": hour}})), model="claude-x")
+    from_provider = _reported(10_000, cache_write_tokens=4000, provider_details={
+        "cache_creation": {"ephemeral_1h_input_tokens": hour}})
+    as_recorded = {**_call(10_000, cache_write_tokens=4000), "cache_write_ttl_tokens": {"1h": hour}}
 
-    assert cost.usd == pytest.approx((6000 * 1.0 + 1000 * 5.0 + 4000 * 1.25) / PER_MILLION)
-    assert cost.assumed == (Assumed.DEFAULT_CACHE_TTL,) and cost.cache_write_ttl is None
+    for usage in (from_provider, as_recorded):
+        cost = _priced(Tokens.of(usage), model="claude-x")
+        assert cost.usd == pytest.approx((6000 * 1.0 + 1000 * 5.0 + 4000 * 1.25) / PER_MILLION)
+        assert cost.assumed == (Assumed.DEFAULT_CACHE_TTL,) and cost.cache_write_ttl is None
 
 
 def test_writes_with_no_split_are_charged_the_five_minute_rate_marked_only_when_the_hour_costs_more():
@@ -336,7 +345,7 @@ def test_a_maps_rates_for_writes_kept_a_while_are_read_for_any_time():
 
 
 def test_writes_split_by_any_time_are_charged_the_rate_of_the_longest_time_at_most_theirs():
-    cost = _kept(_call(10_000, cache_write_tokens=6000, provider_details={"cache_write_tokens_details": {
+    cost = _kept(_reported(10_000, cache_write_tokens=6000, provider_details={"cache_write_tokens_details": {
         "ttl_30m_tokens": 1000, "ttl_2h_tokens": 2000, "ttl_12h_tokens": 3000}}))
 
     assert cost.usd == pytest.approx((4000 * 2.0 + 1000 * 10.0 + 1000 * 2.5 + 2000 * 3.0 + 3000 * 5.0) / PER_MILLION)
