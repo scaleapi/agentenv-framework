@@ -740,17 +740,20 @@ async def run_claude(
     *,
     web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
+    resume_prompt: str | None = None,
     aux_callback: Callable[[str, Any], None] | None = None,
     tool_shapes: set[tuple[str | None, str]] | None = None,
     new_document: bool = False,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
     is left of ``timeout_s``, so the turn never outlives its caller's deadline. ``CLAUDE_API_ERROR_RETRIES=0`` turns
-    resumes off. ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is
-    held until it's known not to be resumed. ``aux_callback``, given, gets the ATIF adapter's aux records, in order
-    with the stdout events: the transcripts' new records as the CLI writes them, each resumed attempt's error
-    `result`; ``tool_shapes`` holds the request shapes the conversation's document was fed already, and
-    ``new_document`` says the turn opens a new one, which is fed the transcript's latest shape first."""
+    resumes off. The resume is prompted with ``resume_prompt``, else ``_RESUME_PROMPT``, which asks the model to
+    finish the request it was given: a caller whose model isn't doing a task, such as a simulated user, sets its own.
+    ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is held until it's
+    known not to be resumed. ``aux_callback``, given, gets the ATIF adapter's aux records, in order with the stdout
+    events: the transcripts' new records as the CLI writes them, each resumed attempt's error `result`;
+    ``tool_shapes`` holds the request shapes the conversation's document was fed already, and ``new_document`` says
+    the turn opens a new one, which is fed the transcript's latest shape first."""
     deadline = time.monotonic() + timeout_s
     retries_left = _configured_api_error_retries()
     on_stdout: set[str] = set()
@@ -825,7 +828,7 @@ async def run_claude(
             aux_callback("attempt", result.trajectory[-1])
         first_failure = first_failure or result.error_detail
         retries_left -= 1
-        attempt_prompt, attempt_resume, attempt_session = _RESUME_PROMPT, True, result.session_id
+        attempt_prompt, attempt_resume, attempt_session = resume_prompt or _RESUME_PROMPT, True, result.session_id
         backoff = _RETRY_BACKOFF_S[min(attempts - 1, len(_RETRY_BACKOFF_S) - 1)]
         logger.warning(f"claude CLI turn cut short ({_redact(failure)!r}); resuming session {attempt_session} "
                        f"in {backoff}s with {int(budget_left)}s of the original {timeout_s}s budget left")

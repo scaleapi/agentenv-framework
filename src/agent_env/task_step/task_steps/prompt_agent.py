@@ -55,7 +55,7 @@ from agent_env.task_step.task_steps.notification_delivery import delivered_parts
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent.user_sim_common import USER_SIM_RESUME_PROMPT, iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -619,7 +619,8 @@ class PromptAgentTaskStep(TaskStep):
             user_model = self._resolve_user_model(context)
             user_card = user_sim.a2a_card or {}
             # Its own tools and peer tools as deploy_agent set them, again, as for the agent above.
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items()
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model,
+                                             "resume_prompt": USER_SIM_RESUME_PROMPT}.items()
                            if v is not None} | A2AAgent.tool_settings(user_card)
             negotiated = A2AAgent.negotiate_agent_config(user_card, user_config)
             if negotiated:
@@ -1425,7 +1426,11 @@ class _UserSide:
             self._cut_off()
             return {"end": "user_timeout"}
 
+        # Counted before the trajectory fetch, so a run cancelled while it waits keeps the turn's spend.
         self._record_usage(user_turn.reply)
+        if self._is_user_sim:
+            await self._save_user_sim_trajectory(number, user_turn.task_id, user_a2a_task_id)
+
         if user_turn.state != TaskState.completed:
             logger.info(f"user_a2a_url returned state={user_turn.state}; ending multi-turn")
             return {"end": "user_not_completed"}
@@ -1452,6 +1457,31 @@ class _UserSide:
             logger.info(f"user-sim signaled done=true at turn {number}; ending multi-turn")
             return {"end": "user_done"}
         return {"message": [{"kind": "text", "text": message_text}]}
+
+    async def _save_user_sim_trajectory(self, number: int, user_task_id: str, user_a2a_task_id: str) -> None:
+        """Store the user-sim's own trajectory for this answer, when its card serves one, and record where it went.
+        Best-effort: a failed fetch is logged and the conversation goes on."""
+        card = self._user_sim.a2a_card or {}
+        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        if not traj_ext:
+            return
+        prefix = self._step._trajectory_prefix().rstrip("/") + "/usersim/"
+        try:
+            # Bounded like _user_sim_trajectory: the next turn waits on this, and the trace is optional.
+            stored = await asyncio.wait_for(
+                fetch_native_trajectory(
+                    self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
+                    card=card, sandbox_type=self._user_sim.sandbox_type, headers=self._user_sim.control_headers,
+                ),
+                _USER_SIM_TRAJECTORY_FETCH_SECONDS,
+            )
+        except Exception as e:
+            logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")
+            return
+        if stored.url is None:
+            logger.warning(f"user-sim trajectory fetch at turn {number} returned no trajectory; nothing stored")
+            return
+        self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": stored.url})
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)

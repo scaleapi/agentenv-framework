@@ -144,6 +144,9 @@ class ClaudeCodeConfig(AgentConfig):
     max_thinking_tokens: int | None = None
     # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
     builtin_tools: ClaudeCodeTools | None = None
+    # What a turn cut short by a transient API error is resumed with; unset, the bridge asks the model to finish the
+    # request it was given, which suits a task but not a simulated user.
+    resume_prompt: str | None = None
     # Whether a turn gets the SDK's peer_agents MCP tools, to message the task's other agents.
     peer_tools: bool = True
     # False: the CLI's own web tools, WebSearch and WebFetch, are off whatever builtin_tools selects.
@@ -606,6 +609,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
+                resume_prompt=cfg.resume_prompt,
                 web_tools=cfg.web_tools,
                 event_callback=request.trajectory.append,
                 **self._atif_feed(request),

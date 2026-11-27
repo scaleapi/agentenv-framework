@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -12,8 +13,10 @@ from agent_env.a2a_agent import conversation_store
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.task_steps import prompt_agent as prompt_agent_module
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, pattern_reasons
+from agent_env.task_step.usage import ModelRole, StepUsage
 
 AGENT = "http://agent.test"
 USER = "http://user.test"
@@ -447,6 +450,109 @@ async def test_with_no_agent_trigger_fired_the_llm_user_sim_answers(monkeypatch)
         FIRING_LOG,
     ]
     assert ctx.metadata["agent_trigger_firings"] == {"talk": [{"turn": 1, "fired": []}]}
+
+
+# ---- the user-sim's own trajectory -----------------------------------------------------------------------------------
+
+_TRAJ = {"uri": "urn:agentenv:trajectory/v1", "params": {"endpoint": "/ext/trajectory"}}
+_USER_SIM_CARD_WITH_TRAJ = {"capabilities": {"extensions": [_AGENT_CONFIG, _TRAJ]}}
+
+
+
+@pytest.mark.asyncio
+async def test_a_run_cancelled_while_the_user_sims_trajectory_is_fetched_keeps_that_turns_usage(monkeypatch):
+    counted = []
+    real_turn = StepUsage.turn
+
+    def turn(self, role, reply):
+        counted.append(role)
+        return real_turn(self, role, reply)
+
+    async def cancelled_fetch(*a, **kw):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(StepUsage, "turn", turn)
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", cancelled_fetch)
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("one")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _step(turns=2, trajectory_output_prefix="s3://bucket/traj").execute(ctx)
+
+    assert ModelRole.USER_SIMULATOR in counted  # the sim's answer came back before the fetch was cancelled
+
+@pytest.mark.asyncio
+async def test_the_user_sims_own_trajectory_is_stored_per_answer_under_the_steps_prefix(monkeypatch):
+    fetched = []
+
+    async def fake_fetch(a2a_url, traj_ext, server_task_id, prefix, name, *, sandbox_type, headers, card=None):
+        fetched.append((a2a_url, server_task_id, prefix, sandbox_type))
+        return prompt_agent_module.StoredTrajectory(f"{prefix}{name}.json")
+
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", fake_fetch)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two"), text("draft three")], USER: [sim("one"), sim("two")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    await _step(turns=3, trajectory_output_prefix="s3://bucket/traj").execute(ctx)
+
+    peers.requests(ctx)
+    assert fetched == [(USER, "task-2", "s3://bucket/traj/usersim/", "local"),
+                       (USER, "task-4", "s3://bucket/traj/usersim/", "local")]
+    # Stored under the id the conversation's user-side message was sent with.
+    sent_ids = [r[2]["params"]["message"]["messageId"] for r in peers.raw
+                if r[1] == f"{USER}/a2a" and r[2]["method"] == "message/send"]
+    assert ctx.metadata["usersim_trajectories"] == {"talk": [
+        {"turn": turn, "a2a_task_id": i, "url": f"s3://bucket/traj/usersim/{i}.json"}
+        for turn, i in enumerate(sent_ids, start=1)]}
+    assert len(sent_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_user_sim_trajectory_fetch_is_not_recorded_and_the_conversation_goes_on(monkeypatch):
+    async def failing_fetch(*args, **kwargs):
+        raise RuntimeError("no trajectory")
+
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", failing_fetch)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    await _step(turns=2).execute(ctx)
+
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter"), "<id3>", "<ctx>")
+    assert "usersim_trajectories" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_trajectory_fetch_that_hangs_is_cut_off_and_the_conversation_goes_on(monkeypatch):
+    import asyncio
+
+    async def hanging_fetch(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", hanging_fetch)
+    monkeypatch.setattr(prompt_agent_module, "_USER_SIM_TRAJECTORY_FETCH_SECONDS", 0.05)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    await asyncio.wait_for(_step(turns=2).execute(ctx), 10)
+
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter"), "<id3>", "<ctx>")
+    assert "usersim_trajectories" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_user_sim_trajectory_fetch_that_stores_nothing_is_not_recorded(monkeypatch):
+    async def empty_fetch(*args, **kwargs):
+        return prompt_agent_module.StoredTrajectory()
+
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", empty_fetch)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    await _step(turns=2).execute(ctx)
+
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter"), "<id3>", "<ctx>")
+    assert "usersim_trajectories" not in ctx.metadata
 
 
 # ---- a human peer ---------------------------------------------------------------------------------------------------
