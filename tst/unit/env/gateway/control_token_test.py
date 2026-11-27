@@ -281,12 +281,13 @@ async def test_an_mcp_server_whose_endpoint_is_configured_encoded_is_guarded_at_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/svc/desk/agentenv/ext/browser/cdp", "/svc/desk/mcp"])
 async def test_a_child_env_of_its_own_takes_its_own_token_through_the_proxy(monkeypatch, path):
-    """A child the gateway was told takes a token of its own gets it; the same child unnamed is guarded, as any backing
-    server is, though it has its own name."""
+    """A child the gateway was told takes a token of its own gets it; the same child unnamed has its data plane guarded,
+    as any backing server's is, though its key is its own name."""
     backing = _Backing(monkeypatch)
     computer = {"internal_mcp_servers": [InternalMCPServer(name="desk", mcp_url="http://desk:18765/mcp")],
                 "rest_proxy_urls": {"desk": "http://desk:18765"}, "website_urls": {}}
-    assert await _proxied(TOKEN, "POST", path, {"Authorization": "Bearer the-computers"}, **computer) == 401
+    assert await _proxied(TOKEN, "POST", "/svc/desk/agentenv", {"Authorization": "Bearer the-computers"},
+                          **computer) == 401
     assert await _proxied(TOKEN, "POST", path, {"Authorization": "Bearer the-computers"},
                           child_control_tokens={"desk": "the-computers"}, **computer) != 401
     forwarded = [(at, sent) for at, sent in zip(backing.paths, backing.authorization) if at != WELL_KNOWN_PATH]
