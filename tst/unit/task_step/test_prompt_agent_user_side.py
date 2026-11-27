@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -15,6 +16,7 @@ from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import prompt_agent as prompt_agent_module
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, pattern_reasons
+from agent_env.task_step.usage import ModelRole, StepUsage
 
 AGENT = "http://agent.test"
 USER = "http://user.test"
@@ -455,6 +457,29 @@ async def test_with_no_agent_trigger_fired_the_llm_user_sim_answers(monkeypatch)
 _TRAJ = {"uri": "urn:agentenv:trajectory/v1", "params": {"endpoint": "/ext/trajectory"}}
 _USER_SIM_CARD_WITH_TRAJ = {"capabilities": {"extensions": [_AGENT_CONFIG, _TRAJ]}}
 
+
+
+@pytest.mark.asyncio
+async def test_a_run_cancelled_while_the_user_sims_trajectory_is_fetched_keeps_that_turns_usage(monkeypatch):
+    counted = []
+    real_turn = StepUsage.turn
+
+    def turn(self, role, reply):
+        counted.append(role)
+        return real_turn(self, role, reply)
+
+    async def cancelled_fetch(*a, **kw):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(StepUsage, "turn", turn)
+    monkeypatch.setattr(prompt_agent_module, "fetch_native_trajectory", cancelled_fetch)
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("one")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _step(turns=2, trajectory_output_prefix="s3://bucket/traj").execute(ctx)
+
+    assert ModelRole.USER_SIMULATOR in counted  # the sim's answer came back before the fetch was cancelled
 
 @pytest.mark.asyncio
 async def test_the_user_sims_own_trajectory_is_stored_per_answer_under_the_steps_prefix(monkeypatch):

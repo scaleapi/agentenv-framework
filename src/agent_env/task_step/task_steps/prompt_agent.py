@@ -1426,10 +1426,11 @@ class _UserSide:
             self._cut_off()
             return {"end": "user_timeout"}
 
+        # Counted before the trajectory fetch, so a run cancelled while it waits keeps the turn's spend.
+        self._record_usage(user_turn.reply)
         if self._is_user_sim:
             await self._save_user_sim_trajectory(number, user_turn.task_id, user_a2a_task_id)
 
-        self._record_usage(user_turn.reply)
         if user_turn.state != TaskState.completed:
             logger.info(f"user_a2a_url returned state={user_turn.state}; ending multi-turn")
             return {"end": "user_not_completed"}
