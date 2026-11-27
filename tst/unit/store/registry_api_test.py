@@ -13,6 +13,7 @@ from agent_env.store.image_store import registry_api
 from agent_env.store.image_store.registry_api import (
     NoSuchImageError,
     RegistryRefusedError,
+    by_digest,
     pin_digest,
     pin_if_served,
     pinned_from,
@@ -230,6 +231,24 @@ def test_a_digest_docker_couldnt_pull_by_is_refused_before_any_request(fake_regi
 ], ids=["tag", "latest", "loopback port", "digest", "another tag", "another name", "another digest", "unpinned"])
 def test_a_pin_pins_the_ref_it_was_pinned_from(pinned, ref, pins):
     assert pinned_from(pinned, ref) is pins
+
+
+@pytest.mark.parametrize("ref, named", [
+    (f"ghcr.io/acme/app:1@{DIGEST}", f"ghcr.io/acme/app@{DIGEST}"),
+    (f"localhost:5000/team/app:1@{DIGEST}", f"localhost:5000/team/app@{DIGEST}"),
+    (f"ghcr.io/acme/app@{DIGEST}", f"ghcr.io/acme/app@{DIGEST}"),
+    ("ghcr.io/acme/app:1", "ghcr.io/acme/app:1"),
+], ids=["tag and digest", "loopback port", "digest", "tag"])
+def test_by_digest_drops_a_tag_beside_a_digest(ref, named):
+    assert by_digest(ref) == named
+
+
+def test_a_ref_by_digest_alone_still_pins_once_its_tag_has_moved(fake_registry):
+    fake_registry(lambda request: _served(DIGEST if request.url.path.endswith(DIGEST) else OTHER))
+
+    with pytest.raises(ValueError, match="names"):
+        pin_digest(f"ghcr.io/acme/app:1@{DIGEST}", None)
+    assert pin_digest(by_digest(f"ghcr.io/acme/app:1@{DIGEST}"), None) == f"ghcr.io/acme/app@{DIGEST}"
 
 
 def _ghcr(served):

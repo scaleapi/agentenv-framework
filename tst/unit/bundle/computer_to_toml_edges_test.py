@@ -108,9 +108,10 @@ def test_a_base_named_from_a_registry_with_a_disk_built_from_a_source_is_written
 
     assert sorted(path.name for path in (tmp_path / "out" / "artifacts" / "base").iterdir()) == ["artifact.toml"]
     assert [(pulled.folder, pulled.image) for pulled in imported.pulled] == [
-        ("artifacts/base", f"ghcr.io/acme/desk:1@{DIGEST}")]
+        ("artifacts/base", f"ghcr.io/acme/desk@{DIGEST}")]
     read = ComputerArtifact.get(f"{_run(tmp_path / 'out')}/base")
-    assert read.image().image_name == stored.image().image_name == f"ghcr.io/acme/desk:1@{DIGEST}"
+    assert stored.image().image_name == f"ghcr.io/acme/desk:1@{DIGEST}"
+    assert read.image().image_name == f"ghcr.io/acme/desk@{DIGEST}"
     assert read.forms.disk == stored.forms.disk and read.forms.disk.source.url == "https://images.example/noble.img"
 
 
