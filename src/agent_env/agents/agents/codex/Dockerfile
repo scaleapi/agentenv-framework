@@ -35,7 +35,7 @@ RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error && 
 COPY requirements.txt model-requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
-COPY a2a_server.py codex_bridge.py codex_config.py codex_date.py codex_kit.py entrypoint.sh install.sh run.sh ./
+COPY a2a_server.py codex_atif.py codex_bridge.py codex_config.py codex_date.py codex_kit.py entrypoint.sh install.sh run.sh ./
 # Every clocked agent's egress rule, which the bridge imports, the clock page's format it reads, and the model relay
 # each CLI run calls the endpoint through (shared_sources.toml).
 COPY agent_clock/agent_egress.py clock/clockpage.py model_relay/model_relay.py ./

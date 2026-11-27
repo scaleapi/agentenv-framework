@@ -22,23 +22,25 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from agentenv_protocol.atif import Adapter, AtifError, Native, atif_adapter, aux, finish, native
+from agentenv_protocol.atif import (
+    COMPACTION_TRIGGERS,
+    Adapter,
+    AtifError,
+    Native,
+    atif_adapter,
+    aux,
+    finish,
+    is_token_count,
+    native,
+)
 
 NATIVE_FORMAT = "claude-code-stream-json/1"
 #: The CLI versions the recorded fixtures come from; a unit test holds the Dockerfile's pin to this list.
 TESTED_WITH = ("2.1.322",)
 #: The model a message the CLI wrote itself names, such as an API error's, which no model call produced.
 _SYNTHETIC_MODEL = "<synthetic>"
-#: What sets a compaction off, as atif/1's COMPACTION_TRIGGERS names it.
-_TRIGGERS = ("manual", "auto")
 #: A step's token counts as the builder takes them, and as the turn record and a session record give them.
 _COUNTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
-
-
-def _token_count(value: Any) -> int | None:
-    """``value`` when it counts tokens, as atif/1's ``is_token_count`` says, which the module defines itself: it
-    imports only what its protocol floor has, and the image installs any protocol at or above that floor."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 @dataclass(frozen=True)
@@ -147,8 +149,9 @@ class ClaudeCodeAtif(Adapter):
         """The CLI's compaction: the next user message on stdout is its summary."""
         metadata = record.get("compact_metadata") if _is_mapping(record.get("compact_metadata")) else {}
         trigger, before, after = (metadata.get(key) for key in ("trigger", "pre_tokens", "post_tokens"))
-        self._boundary = _Boundary(trigger=trigger if trigger in _TRIGGERS else None,
-                                   tokens_before=_token_count(before), tokens_after=_token_count(after))
+        self._boundary = _Boundary(trigger=trigger if trigger in COMPACTION_TRIGGERS else None,
+                                   tokens_before=before if is_token_count(before) else None,
+                                   tokens_after=after if is_token_count(after) else None)
 
     @native(type="system", where={"subtype": "init"})
     def init(self, record: dict[str, Any], turn: Any) -> None:
@@ -443,7 +446,7 @@ class ClaudeCodeAtif(Adapter):
         counts = {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
                   "cache_read_tokens": usage.get("cache_read_input_tokens"),
                   "cache_write_tokens": usage.get("cache_creation_input_tokens")}
-        counts = {name: value for name, value in counts.items() if _token_count(value) is not None}
+        counts = {name: value for name, value in counts.items() if is_token_count(value)}
         return counts or None
 
     def _attempt_failed(self, result: dict[str, Any], turn: Any) -> None:

@@ -1,0 +1,231 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-gemini-browser",
+ "agent": {
+  "name": "Gemini",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-25T17:35:31.935292Z",
+   "source": "user",
+   "message": "Use the browser tools to open https://example.com, then call the screenshot tool with no filename so the image comes back to you, and reply with the main heading you see in it.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-gemini-browser",
+     "task_id": "1a943585-0355-4770-b3ef-12d85d3968ec",
+     "message_id": "5bfdc6464081449ca2c20e5f89ac8468",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-25T17:35:35.784Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "reasoning_content": "Navigating and Capturing: I'm currently focused on opening the specified URL and then capturing a screenshot. This initial phase is crucial for proceeding with the subsequent extraction task.\n\nBrowsing and Acquiring: I've successfully initiated the navigation to the target URL. My immediate next step is to acquire a screenshot of the loaded page, which will then allow me to proceed with the analysis and extraction.",
+   "tool_calls": [
+    {
+     "tool_call_id": "mcp_browser_browser_navigate_1795628135779_0",
+     "function_name": "mcp_browser_browser_navigate",
+     "arguments": {
+      "url": "https://example.com"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "mcp_browser_browser_navigate_1795628135779_0",
+      "content": "### Ran Playwright code\n```js\nawait page.goto('https://example.com');\n```\n### Page\n- Page URL: https://example.com/\n- Page Title: Example Domain\n### Snapshot\n- [Snapshot](../tmp/.playwright-mcp/page-2026-11-25T17-35-36-152Z.yml)"
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 7968,
+    "cached_tokens": 0,
+    "completion_tokens": 137
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 191,
+       "visibility": "summary"
+      },
+      {
+       "chars": 225,
+       "visibility": "summary"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-25T17:35:38.357Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "reasoning_content": "Navigating and Capturing: I've reached the target URL and captured a screenshot. My next step is to analyze this image to extract the primary heading.",
+   "tool_calls": [
+    {
+     "tool_call_id": "mcp_browser_browser_take_screenshot_1795628138356_0",
+     "function_name": "mcp_browser_browser_take_screenshot",
+     "arguments": {}
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "mcp_browser_browser_take_screenshot_1795628138356_0",
+      "content": "params must have required property 'scale'",
+      "extra": {
+       "agentenv": {
+        "status": "error"
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 8079,
+    "cached_tokens": 7631,
+    "completion_tokens": 46
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 150,
+       "visibility": "summary"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 4,
+   "timestamp": "2026-11-25T17:35:40.294Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "reasoning_content": "Correcting Screenshot Scaling: I've identified an oversight in my previous attempt, specifically the omission of the `scale` parameter when calling the `mcp_browser_browser _take_screenshot` tool. I'm now proceeding with `scale='css'` to rectify this.",
+   "tool_calls": [
+    {
+     "tool_call_id": "mcp_browser_browser_take_screenshot_1795628140293_0",
+     "function_name": "mcp_browser_browser_take_screenshot",
+     "arguments": {
+      "scale": "css"
+     }
+    }
+   ],
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "mcp_browser_browser_take_screenshot_1795628140293_0",
+      "content": [
+       {
+        "type": "text",
+        "text": "### Result\n- [Screenshot of viewport](../tmp/.playwright-mcp/page-2026-11-25T17-35-40-331Z.png)\n### Ran Playwright code\n```js\n// Screenshot viewport and save it as ../tmp/.playwright-mcp/page-2026-11-25T17-35-40-331Z.png\nawait page.screenshot({\n  path: '../tmp/.playwright-mcp/page-2026-11-25T17-35-40-331Z.png',\n  scale: 'css',\n  type: 'png'\n});\n```\n[Tool 'browser_take_screenshot' provided the following image data with mime-type: image/png]"
+       },
+       {
+        "type": "image",
+        "source": {
+         "media_type": "image/png",
+         "path": "media/8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d.png"
+        }
+       }
+      ],
+      "extra": {
+       "agentenv": {
+        "media": {
+         "media/8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d.png": {
+          "sha256": "8757b6f760d44b0bb96f10cac556a38aec68c21fb7f8a715ece0cb6e02148c6d",
+          "bytes": 73860,
+          "width": 1280,
+          "height": 720
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "prompt_tokens": 8108,
+    "cached_tokens": 0,
+    "completion_tokens": 81
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 251,
+       "visibility": "summary"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 5,
+   "timestamp": "2026-11-25T17:35:43.125Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "The main heading is: \"This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.\"",
+   "reasoning_content": "Observing Documentation Header: I'm focusing on the prominent header in the screenshot, noting its clear directive regarding domain usage for documentation and discouraging reliance for live testing.",
+   "metrics": {
+    "prompt_tokens": 10127,
+    "cached_tokens": 0,
+    "completion_tokens": 71
+   },
+   "llm_call_count": 1,
+   "extra": {
+    "agentenv": {
+     "reasoning": [
+      {
+       "chars": 199,
+       "visibility": "summary"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step_id": 6,
+   "timestamp": "2026-11-25T17:35:43.159299Z",
+   "source": "agent",
+   "message": "\nThe main heading is: \"This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.\"",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "completed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 34282,
+  "total_completion_tokens": 335,
+  "total_cached_tokens": 7631,
+  "total_steps": 6
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "gemini-stream-json/1",
+   "adapter": {
+    "name": "gemini-stream-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

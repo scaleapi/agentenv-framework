@@ -5,6 +5,7 @@ without counts, or still running when the turn ended, counts as a call whose usa
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -90,7 +91,10 @@ def native(upstream, agent):
 
 
 def _records(agent) -> list[dict]:
-    return agent._routes[TOKEN].calls.records
+    """The route's records, each stamped with when its call ended, without the stamp."""
+    records = agent._routes[TOKEN].calls.records
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", record["timestamp"]) for record in records)
+    return [{key: value for key, value in record.items() if key != "timestamp"} for record in records]
 
 
 def test_the_passthrough_records_each_generate_call_and_what_it_used(native, agent, client):

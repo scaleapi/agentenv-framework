@@ -15,7 +15,7 @@ import agent_env
 AGENTS_DIR = Path(agent_env.__file__).parent / "agents" / "agents"
 #: Each bundled agent's native format, and where its tests import the module holding its agent class.
 #: The agents with an ATIF adapter, whose cards offer atif/1 beside native.
-SERVES_ATIF = {"claude-code"}
+SERVES_ATIF = {"claude-code", "codex", "gemini"}
 AGENTS = {
     "antigravity": ("antigravity-sdk/1", "tst.unit.agents.antigravity.agent", "a2a_server"),
     "claude-code": ("claude-code-stream-json/1", "tst.unit.agents.claude_code.agent", "a2a_server"),

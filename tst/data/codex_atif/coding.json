@@ -1,0 +1,751 @@
+{
+ "scenario": "coding",
+ "cli": "0.162.1",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-codex-coding",
+    "task_id": "bd7a1e3f-f854-4f46-acbd-45ebb37ffc9a",
+    "message_id": "20cd1cac8c1c44e08a5713a8605356d4",
+    "agent_name": "Codex",
+    "agent_version": "1.0.0",
+    "agent_model": "gpt-5.5",
+    "started_at": "2026-11-26T04:35:47.165326Z",
+    "inbound": [
+     "Create hello.py that prints the sum of the integers 1 to 100, run it with python3, and reply with only the number it prints."
+    ],
+    "state": "completed",
+    "final": [
+     "5050"
+    ],
+    "ended_at": "2026-11-26T04:35:53.433311Z",
+    "data": [
+     {
+      "data": {
+       "tool_call_count": 2,
+       "token_usage": {
+        "input_tokens": 40339,
+        "cached_input_tokens": 26368,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 111,
+        "reasoning_output_tokens": 0
+       }
+      }
+     }
+    ]
+   },
+   "native": [
+    {
+     "type": "thread.started",
+     "thread_id": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+     "timestamp": "2026-11-26T04:35:47.615+00:00"
+    },
+    {
+     "type": "turn.started",
+     "timestamp": "2026-11-26T04:35:47.653+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_0",
+      "type": "agent_message",
+      "text": "I’ll add the tiny script, run it, and then keep the reply to the printed value only."
+     },
+     "timestamp": "2026-11-26T04:35:49.818+00:00"
+    },
+    {
+     "type": "item.started",
+     "item": {
+      "id": "item_1",
+      "type": "file_change",
+      "changes": [
+       {
+        "path": "/app/hello.py",
+        "kind": "add"
+       }
+      ],
+      "status": "in_progress"
+     },
+     "timestamp": "2026-11-26T04:35:50.024+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_1",
+      "type": "file_change",
+      "changes": [
+       {
+        "path": "/app/hello.py",
+        "kind": "add"
+       }
+      ],
+      "status": "completed"
+     },
+     "timestamp": "2026-11-26T04:35:50.026+00:00"
+    },
+    {
+     "type": "item.started",
+     "item": {
+      "id": "item_2",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'python3 hello.py'",
+      "aggregated_output": "",
+      "exit_code": null,
+      "status": "in_progress"
+     },
+     "timestamp": "2026-11-26T04:35:51.456+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_2",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'python3 hello.py'",
+      "aggregated_output": "5050\n",
+      "exit_code": 0,
+      "status": "completed"
+     },
+     "timestamp": "2026-11-26T04:35:51.457+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_3",
+      "type": "agent_message",
+      "text": "5050"
+     },
+     "timestamp": "2026-11-26T04:35:53.309+00:00"
+    },
+    {
+     "type": "turn.completed",
+     "usage": {
+      "input_tokens": 40339,
+      "cached_input_tokens": 26368,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 111,
+      "reasoning_output_tokens": 0
+     },
+     "timestamp": "2026-11-26T04:35:53.329+00:00"
+    },
+    {
+     "type": "agentenv.usage",
+     "usage": {
+      "input_tokens": 40339,
+      "cached_input_tokens": 26368,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 111,
+      "reasoning_output_tokens": 0
+     },
+     "model_requests": 3,
+     "timestamp": "2026-11-26T04:35:53.432+00:00"
+    }
+   ],
+   "aux": [
+    {
+     "name": "rollout",
+     "record": {
+      "type": "session_meta",
+      "timestamp": "2026-11-26T04:35:47.621Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "id": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+       "cli_version": "0.162.1"
+      }
+     },
+     "after": 1
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-26T04:35:47.621Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "task_started"
+      }
+     },
+     "after": 1
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "turn_context",
+      "timestamp": "2026-11-26T04:35:47.656Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "model": "gpt-5.5"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:49.817Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "message",
+       "id": "msg_02561ca5471cc31b016b07b7256d608197b2806e9b89ee2851",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "output_text",
+         "text": "I’ll add the tiny script, run it, and then keep the reply to the printed value only."
+        }
+       ],
+       "phase": "commentary"
+      }
+     },
+     "after": 3
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:50.017Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "custom_tool_call",
+       "id": "ctc_02561ca5471cc31b016b07b725c1448197a5feb3a06da7a9f8",
+       "status": "completed",
+       "call_id": "call_1ytuq2dzhRaE0nNPTj3I8G60",
+       "name": "apply_patch",
+       "input": "*** Begin Patch\n*** Add File: hello.py\n+print(sum(range(1, 101)))\n*** End Patch\n"
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-26T04:35:50.035Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "response_id": "resp_02561ca5471cc31b016b07b723eb788197a03b38432c54dc5c",
+       "usage": {
+        "input_tokens": 13349,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 64,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13413
+       }
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:50.037Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "custom_tool_call_output",
+       "id": "ctco_01a21623-6c95-7cf1-946a-e0ff5b1d8710",
+       "call_id": "call_1ytuq2dzhRaE0nNPTj3I8G60",
+       "output": "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nA hello.py\n"
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:51.397Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "function_call",
+       "id": "fc_02561ca5471cc31b016b07b72720988197a12fe62215b094b6",
+       "name": "exec_command",
+       "arguments": "{\"cmd\":\"python3 hello.py\",\"workdir\":\"/app\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}",
+       "call_id": "call_zWBFNUqEHKDJXlQyeWgUAaEv"
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-26T04:35:51.408Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "response_id": "resp_02561ca5471cc31b016b07b72630a0819794cc7e3f1d775511",
+       "usage": {
+        "input_tokens": 13450,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 41,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13491
+       }
+      }
+     },
+     "after": 7
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:51.459Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "function_call_output",
+       "id": "fco_01a21623-7223-74c1-ae3c-1e30709d4ac1",
+       "call_id": "call_zWBFNUqEHKDJXlQyeWgUAaEv",
+       "output": "Chunk ID: f6e23b\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\n5050\n"
+      }
+     },
+     "after": 7
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:53.309Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "message",
+       "id": "msg_02561ca5471cc31b016b07b728f8d88197a9dcf91135940151",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "output_text",
+         "text": "5050"
+        }
+       ],
+       "phase": "final_answer"
+      }
+     },
+     "after": 9
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-26T04:35:53.315Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "response_id": "resp_02561ca5471cc31b016b07b7279cd08197b9b0dce5a09a73ac",
+       "usage": {
+        "input_tokens": 13540,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 6,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13546
+       }
+      }
+     },
+     "after": 9
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-26T04:35:53.324Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "task_complete"
+      }
+     },
+     "after": 9
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 40339,
+    "output_tokens": 111,
+    "total_tokens": 40450,
+    "cache_read_tokens": 26368,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "gpt-5.5",
+      "calls": 3,
+      "input_tokens": 40339,
+      "output_tokens": 111,
+      "cache_read_tokens": 26368,
+      "cache_write_tokens": 0,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  },
+  {
+   "turn": {
+    "index": 1,
+    "context_id": "ctx-codex-coding",
+    "task_id": "5d3f82f2-6a78-4af4-868b-954c8c24f07b",
+    "message_id": "28da6b9f79764a3cbf5a1fca720e9d11",
+    "agent_name": "Codex",
+    "agent_version": "1.0.0",
+    "agent_model": "gpt-5.5",
+    "started_at": "2026-11-26T04:35:54.202594Z",
+    "inbound": [
+     "Now change it to sum 1 to 1000, run it again, and reply with only the number."
+    ],
+    "state": "completed",
+    "final": [
+     "500500"
+    ],
+    "ended_at": "2026-11-26T04:36:00.581435Z",
+    "data": [
+     {
+      "data": {
+       "tool_call_count": 2,
+       "token_usage": {
+        "input_tokens": 41030,
+        "cached_input_tokens": 39552,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 118,
+        "reasoning_output_tokens": 0
+       }
+      }
+     }
+    ]
+   },
+   "native": [
+    {
+     "type": "thread.started",
+     "thread_id": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+     "timestamp": "2026-11-26T04:35:54.535+00:00"
+    },
+    {
+     "type": "turn.started",
+     "timestamp": "2026-11-26T04:35:54.547+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_0",
+      "type": "agent_message",
+      "text": "I’ll update the range to 1000 and run the same script again."
+     },
+     "timestamp": "2026-11-26T04:35:56.644+00:00"
+    },
+    {
+     "type": "item.started",
+     "item": {
+      "id": "item_1",
+      "type": "file_change",
+      "changes": [
+       {
+        "path": "/app/hello.py",
+        "kind": "update"
+       }
+      ],
+      "status": "in_progress"
+     },
+     "timestamp": "2026-11-26T04:35:56.662+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_1",
+      "type": "file_change",
+      "changes": [
+       {
+        "path": "/app/hello.py",
+        "kind": "update"
+       }
+      ],
+      "status": "completed"
+     },
+     "timestamp": "2026-11-26T04:35:56.664+00:00"
+    },
+    {
+     "type": "item.started",
+     "item": {
+      "id": "item_2",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'python3 hello.py'",
+      "aggregated_output": "",
+      "exit_code": null,
+      "status": "in_progress"
+     },
+     "timestamp": "2026-11-26T04:35:58.952+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_2",
+      "type": "command_execution",
+      "command": "/bin/sh -lc 'python3 hello.py'",
+      "aggregated_output": "500500\n",
+      "exit_code": 0,
+      "status": "completed"
+     },
+     "timestamp": "2026-11-26T04:35:58.954+00:00"
+    },
+    {
+     "type": "item.completed",
+     "item": {
+      "id": "item_3",
+      "type": "agent_message",
+      "text": "500500"
+     },
+     "timestamp": "2026-11-26T04:36:00.456+00:00"
+    },
+    {
+     "type": "turn.completed",
+     "usage": {
+      "input_tokens": 81369,
+      "cached_input_tokens": 65920,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 229,
+      "reasoning_output_tokens": 0
+     },
+     "timestamp": "2026-11-26T04:36:00.483+00:00"
+    },
+    {
+     "type": "agentenv.usage",
+     "usage": {
+      "input_tokens": 41030,
+      "cached_input_tokens": 39552,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 118,
+      "reasoning_output_tokens": 0
+     },
+     "model_requests": 3,
+     "timestamp": "2026-11-26T04:36:00.581+00:00"
+    }
+   ],
+   "aux": [
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-26T04:35:54.543Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "task_started"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "turn_context",
+      "timestamp": "2026-11-26T04:35:54.547Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "model": "gpt-5.5"
+      }
+     },
+     "after": 2
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:56.643Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "message",
+       "id": "msg_02561ca5471cc31b016b07b72c177c8197915b29fe55192e21",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "output_text",
+         "text": "I’ll update the range to 1000 and run the same script again."
+        }
+       ],
+       "phase": "commentary"
+      }
+     },
+     "after": 3
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:56.657Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "custom_tool_call",
+       "id": "ctc_02561ca5471cc31b016b07b72c55a08197a9fee2a37b4ab973",
+       "status": "completed",
+       "call_id": "call_r52v3lVyIDiXZjmi86FodQS9",
+       "name": "apply_patch",
+       "input": "*** Begin Patch\n*** Update File: hello.py\n@@\n-print(sum(range(1, 101)))\n+print(sum(range(1, 1001)))\n*** End Patch\n"
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-26T04:35:56.659Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "response_id": "resp_02561ca5471cc31b016b07b72ab38c8197a3ccc1fd9e6f0d71",
+       "usage": {
+        "input_tokens": 13575,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 71,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13646
+       }
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:56.665Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "custom_tool_call_output",
+       "id": "ctco_01a21623-8679-75f1-865b-00c8042ab648",
+       "call_id": "call_r52v3lVyIDiXZjmi86FodQS9",
+       "output": "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM hello.py\n"
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:58.899Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "function_call",
+       "id": "fc_02561ca5471cc31b016b07b72ea50c8197b76eb7412123ce66",
+       "name": "exec_command",
+       "arguments": "{\"cmd\":\"python3 hello.py\",\"workdir\":\"/app\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}",
+       "call_id": "call_tF11vypL2AIaZ0kT5XngABsc"
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-26T04:35:58.912Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "response_id": "resp_02561ca5471cc31b016b07b72d3f7081979bed1e03f377dbd5",
+       "usage": {
+        "input_tokens": 13683,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 41,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13724
+       }
+      }
+     },
+     "after": 5
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:35:58.956Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "function_call_output",
+       "id": "fco_01a21623-8f6c-7fd1-aaf5-c7820bf366f6",
+       "call_id": "call_tF11vypL2AIaZ0kT5XngABsc",
+       "output": "Chunk ID: ad0f98\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\n500500\n"
+      }
+     },
+     "after": 7
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "response_item",
+      "timestamp": "2026-11-26T04:36:00.456Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "message",
+       "id": "msg_02561ca5471cc31b016b07b73047c0819794f4ff46b00b3ddd",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "output_text",
+         "text": "500500"
+        }
+       ],
+       "phase": "final_answer"
+      }
+     },
+     "after": 8
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "token_usage_record",
+      "timestamp": "2026-11-26T04:36:00.471Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "response_id": "resp_02561ca5471cc31b016b07b72f51e48197873f6b92838a654b",
+       "usage": {
+        "input_tokens": 13772,
+        "cached_input_tokens": 13184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 6,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 13778
+       }
+      }
+     },
+     "after": 9
+    },
+    {
+     "name": "rollout",
+     "record": {
+      "type": "event_msg",
+      "timestamp": "2026-11-26T04:36:00.478Z",
+      "thread": "01a21623-6217-7f20-87c1-22a72c6fd3a9",
+      "payload": {
+       "type": "task_complete"
+      }
+     },
+     "after": 9
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 41030,
+    "output_tokens": 118,
+    "total_tokens": 41148,
+    "cache_read_tokens": 39552,
+    "cache_write_tokens": 0,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "gpt-5.5",
+      "calls": 3,
+      "input_tokens": 41030,
+      "output_tokens": 118,
+      "cache_read_tokens": 39552,
+      "cache_write_tokens": 0,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,66 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-gemini-refused",
+ "agent": {
+  "name": "Gemini",
+  "version": "1.0.0",
+  "model_name": "gemini-2.5-flash"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-25T17:35:45.463809Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-gemini-refused",
+     "task_id": "a48b74d6-0353-4975-a1b1-1ecaee9547dc",
+     "message_id": "00d065530cc54b05a2a72a36a6488e49",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-25T17:35:47.076Z",
+   "source": "agent",
+   "model_name": "gemini-2.5-flash",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "[API Error: {\"error\":{\"message\":\"refused by the recording proxy\",\"code\":400}}]"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-25T17:35:47.126863Z",
+   "source": "agent",
+   "message": "gemini CLI exited with code 144: [API Error: {\"error\":{\"message\":\"refused by the recording proxy\",\"code\":400}}]",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 3
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "gemini-stream-json/1",
+   "adapter": {
+    "name": "gemini-stream-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}

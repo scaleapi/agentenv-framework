@@ -36,7 +36,7 @@ come.
 | `agent-config/v1` | `CodexConfig`: `model`, `effort` (Codex's `model_reasoning_effort`; a set without it clears it), `system_prompt` (Codex's `developer_instructions`), `output_format` (a JSON schema, as `--output-schema`), `project_id`, `task_id`, `timeout_seconds`, `builtin_tools`, `web_tools` (below) |
 | `mcp-config/v1` | SDK default; written to `config.toml` before each task |
 | `skill-config/v1` | inline and bundle skills installed as `~/.agents/skills/<name>/SKILL.md`, where Codex finds them |
-| `trajectory/v1` | the task's `codex exec --json` events, live while it runs (format `codex-exec-json/1`) |
+| `trajectory/v1` | the task's `codex exec --json` events, live while it runs (format `codex-exec-json/1`); `atif/1` when the run prescribes it, built live from the CLI's rollout (`codex_atif.py`): a step per model response with its time (the rollout's, real time on an armed clock too) and usage, each sub-agent embedded under its `spawn_agent` call, a resumed attempt's steps numbered |
 | `snapshot/v1` | `save` uploads the thread's rollout JSONL and the workspace as a gzipped tar, each held to a size limit, once no task of the context runs; `load` writes the rollout under a fresh thread id, replaces the workspace's contents (extracted aside first) and binds the thread to the target context |
 | `peer-agents/v1` | SDK default: the CLI reaches the task's other agents through the SDK's `peer_agents` MCP tools |
 | `attribution-probe/v1` | the `project_id` and `task_id` the last CLI run sent |

@@ -1,0 +1,309 @@
+{
+ "scenario": "retried",
+ "cli": "0.38.2",
+ "turns": [
+  {
+   "turn": {
+    "index": 0,
+    "context_id": "ctx-gemini-retried",
+    "task_id": "58a376ad-8a81-4351-89da-51e4c9e72a94",
+    "message_id": "1a19396f38214af5a69e2933c64d00c0",
+    "agent_name": "Gemini",
+    "agent_version": "1.0.0",
+    "agent_model": "gemini-2.5-flash",
+    "started_at": "2026-11-25T17:35:48.976245Z",
+    "inbound": [
+     "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    ],
+    "state": "completed",
+    "final": [
+     "first second"
+    ],
+    "ended_at": "2026-11-25T17:36:09.041661Z",
+    "data": [
+     {
+      "data": {
+       "tool_call_count": 2
+      }
+     }
+    ]
+   },
+   "native": [
+    {
+     "type": "init",
+     "timestamp": "2026-11-25T17:35:50.545Z",
+     "session_id": "cff4bfb5-cedd-4bc1-a99f-a6b9d8c85f39",
+     "model": "gemini-2.5-flash"
+    },
+    {
+     "type": "message",
+     "timestamp": "2026-11-25T17:35:50.546Z",
+     "role": "user",
+     "content": "Run `echo first` with your shell tool, then run `echo second` with it, then reply with both outputs on one line."
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 200,
+     "outcome": "answered",
+     "usage": {
+      "input_tokens": 7332,
+      "output_tokens": 84,
+      "cache_read_tokens": 6979,
+      "reasoning_tokens": 53
+     },
+     "timestamp": "2026-11-25T17:35:51.976Z"
+    },
+    {
+     "type": "tool_use",
+     "timestamp": "2026-11-25T17:35:51.980Z",
+     "tool_name": "run_shell_command",
+     "tool_id": "run_shell_command_1795628151980_0",
+     "parameters": {
+      "command": "echo first",
+      "description": "Echoes the word \"first\" to standard output."
+     }
+    },
+    {
+     "type": "tool_result",
+     "timestamp": "2026-11-25T17:35:52.015Z",
+     "tool_id": "run_shell_command_1795628151980_0",
+     "status": "success"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 503,
+     "outcome": "refused",
+     "timestamp": "2026-11-25T17:35:52.027Z"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 503,
+     "outcome": "refused",
+     "timestamp": "2026-11-25T17:35:58.495Z"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 200,
+     "outcome": "answered",
+     "usage": {
+      "input_tokens": 7376,
+      "output_tokens": 75,
+      "cache_read_tokens": 6974,
+      "reasoning_tokens": 43
+     },
+     "timestamp": "2026-11-25T17:36:08.227Z"
+    },
+    {
+     "type": "tool_use",
+     "timestamp": "2026-11-25T17:36:08.230Z",
+     "tool_name": "run_shell_command",
+     "tool_id": "run_shell_command_1795628168230_0",
+     "parameters": {
+      "command": "echo second",
+      "description": "Echoes the word \"second\" to standard output."
+     }
+    },
+    {
+     "type": "tool_result",
+     "timestamp": "2026-11-25T17:36:08.247Z",
+     "tool_id": "run_shell_command_1795628168230_0",
+     "status": "success"
+    },
+    {
+     "type": "agentenv.model_call",
+     "via": "passthrough",
+     "model": "gemini-2.5-flash",
+     "status": 200,
+     "outcome": "answered",
+     "usage": {
+      "input_tokens": 7420,
+      "output_tokens": 2,
+      "cache_read_tokens": 6968,
+      "reasoning_tokens": 0
+     },
+     "timestamp": "2026-11-25T17:36:09.004Z"
+    },
+    {
+     "type": "message",
+     "timestamp": "2026-11-25T17:36:09.007Z",
+     "role": "assistant",
+     "content": "first second",
+     "delta": true
+    },
+    {
+     "type": "result",
+     "timestamp": "2026-11-25T17:36:09.008Z",
+     "status": "success",
+     "stats": {
+      "total_tokens": 22289,
+      "input_tokens": 22128,
+      "output_tokens": 65,
+      "cached": 20921,
+      "input": 1207,
+      "duration_ms": 18463,
+      "tool_calls": 2,
+      "models": {
+       "gemini-2.5-flash": {
+        "total_tokens": 22289,
+        "input_tokens": 22128,
+        "output_tokens": 65,
+        "cached": 20921,
+        "input": 1207
+       }
+      }
+     }
+    }
+   ],
+   "aux": [
+    {
+     "name": "session",
+     "record": {
+      "type": "gemini",
+      "id": "137c775b-bcf6-4292-b290-2fd72a28c8ed",
+      "timestamp": "2026-11-25T17:35:51.985Z",
+      "model": "gemini-2.5-flash",
+      "content": "",
+      "thoughts": [
+       {
+        "subject": "Executing and Combining Commands",
+        "description": "I'm preparing to execute the two requested shell commands. My plan is to use the `run_shell_command` tool for each `echo` instruction, and then I'll consolidate their outputs into a single, unified response.",
+        "timestamp": "2026-11-25T17:35:51.979Z"
+       }
+      ],
+      "tokens": {
+       "input": 7332,
+       "output": 31,
+       "cached": 6979,
+       "thoughts": 53,
+       "tool": 0,
+       "total": 7416
+      },
+      "toolCalls": [
+       {
+        "id": "run_shell_command_1795628151980_0",
+        "name": "run_shell_command",
+        "args": {
+         "command": "echo first",
+         "description": "Echoes the word \"first\" to standard output."
+        },
+        "status": "success",
+        "timestamp": "2026-11-25T17:35:52.016Z",
+        "result": [
+         {
+          "functionResponse": {
+           "id": "run_shell_command_1795628151980_0",
+           "name": "run_shell_command",
+           "response": {
+            "output": "Output: first\nBackground PIDs: NaN\nProcess Group PGID: 46"
+           }
+          }
+         }
+        ]
+       }
+      ]
+     },
+     "after": 10
+    },
+    {
+     "name": "session",
+     "record": {
+      "type": "gemini",
+      "id": "721c5add-08da-4713-8562-e2fe25e2369f",
+      "timestamp": "2026-11-25T17:36:08.231Z",
+      "model": "gemini-2.5-flash",
+      "content": "",
+      "thoughts": [
+       {
+        "subject": "Executing and Combining",
+        "description": "I've completed the first `echo` and am now focused on executing the second. My next step is to seamlessly merge their outputs into a single, cohesive line.",
+        "timestamp": "2026-11-25T17:36:08.229Z"
+       }
+      ],
+      "tokens": {
+       "input": 7376,
+       "output": 32,
+       "cached": 6974,
+       "thoughts": 43,
+       "tool": 0,
+       "total": 7451
+      },
+      "toolCalls": [
+       {
+        "id": "run_shell_command_1795628168230_0",
+        "name": "run_shell_command",
+        "args": {
+         "command": "echo second",
+         "description": "Echoes the word \"second\" to standard output."
+        },
+        "status": "success",
+        "timestamp": "2026-11-25T17:36:08.247Z",
+        "result": [
+         {
+          "functionResponse": {
+           "id": "run_shell_command_1795628168230_0",
+           "name": "run_shell_command",
+           "response": {
+            "output": "Output: second\nBackground PIDs: NaN\nProcess Group PGID: 50"
+           }
+          }
+         }
+        ]
+       }
+      ]
+     },
+     "after": 13
+    },
+    {
+     "name": "session",
+     "record": {
+      "type": "gemini",
+      "id": "9e734789-3aef-427a-9a48-e85cb015d087",
+      "timestamp": "2026-11-25T17:36:09.008Z",
+      "model": "gemini-2.5-flash",
+      "content": "first second",
+      "thoughts": [],
+      "tokens": {
+       "input": 7420,
+       "output": 2,
+       "cached": 6968,
+       "thoughts": 0,
+       "tool": 0,
+       "total": 7422
+      }
+     },
+     "after": 13
+    }
+   ],
+   "usage": {
+    "tool_call_count": 2,
+    "input_tokens": 22128,
+    "output_tokens": 161,
+    "total_tokens": 22289,
+    "cache_read_tokens": 20921,
+    "input_includes_cache": true,
+    "models": [
+     {
+      "model": "gemini-2.5-flash",
+      "calls": 3,
+      "input_tokens": 22128,
+      "output_tokens": 161,
+      "cache_read_tokens": 20921,
+      "input_includes_cache": true
+     }
+    ],
+    "provider_details": {
+     "model_calls": 3,
+     "reasoning_tokens": 96
+    }
+   }
+  }
+ ]
+}

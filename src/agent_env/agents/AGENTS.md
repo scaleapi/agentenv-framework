@@ -162,7 +162,9 @@ other with `self.register_secret(value)`, in `run` or later, and the SDK writes 
 Reference: `enable(TRAJECTORY_V1, live=True, ...)`, `ClaudeCodeAgent.run` passing
 `event_callback=request.trajectory.append`, and `get_context_trajectory` / `upload_context_trajectory`. Its adapter,
 `claude_code_atif.py`, builds steps from stream-json with each message's time, usage and tools from the CLI's session
-transcript, which `claude_bridge.SessionTail` feeds as aux records only while `request.trajectory.builds_atif`. A runtime
+transcript, which `claude_bridge.SessionTail` feeds as aux records only while `request.trajectory.builds_atif`. Codex's,
+`codex_atif.py`, builds them from the CLI's rollout alone, which `codex_bridge.RolloutTail` feeds; Gemini's,
+`gemini_atif.py`, from its session transcript (`gemini_bridge.SessionTail`) and the proxy's call records. A runtime
 that only has a record at the end returns it with `native_trajectory(...)`: `agents/pi/pi_agent.py` `_result`.
 
 ### `skill-config/v1`, `/ext/skill-config`

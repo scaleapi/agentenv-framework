@@ -1,4 +1,4 @@
 # The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
-# image is built again only when this folder changes. The floor is the first with ModelUsage.of, which gives a model's
-# share of a turn from its calls; raise it when the agent needs a newer protocol.
-agentenv-framework-protocol[agent]>=0.1.643
+# image is built again only when this folder changes. The floor is the first with atif/1 profile 1.2, whose
+# is_token_count the atif/1 adapter counts tokens with; raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.660

@@ -59,6 +59,7 @@ from agentenv_protocol.a2a_agent import (
     extension,
 )
 from agentenv_protocol.transfers import Uploaded, upload
+from gemini_atif import GeminiAtif
 from gemini_bridge import (
     GEMINI_HOME,
     GEMINI_PROJECTS_JSON,
@@ -200,6 +201,12 @@ class GeminiConfig(AgentConfig):
     web_tools: bool = True
 
 
+def _builds_atif(request: TaskRequest[GeminiConfig]) -> bool:
+    """Whether the task feeds an atif/1 copy; a protocol from before ``builds_atif`` is taken to, and its copy is built
+    only when the run prescribed it."""
+    return getattr(request.trajectory, "builds_atif", True)
+
+
 @dataclass
 class _Calls:
     """The generate calls one run's route forwarded, each recorded as it ended (and handed to ``sink``, the turn's
@@ -214,7 +221,8 @@ class _Calls:
         counts we could read counts as a call whose usage is unknown."""
         outcome = "refused" if status is None or status >= 400 else "answered" if counts is not None else "unreported"
         record = {"type": "agentenv.model_call", "via": via, "model": model, "status": status, "outcome": outcome,
-                  **({"usage": counts} if outcome == "answered" else {})}
+                  **({"usage": counts} if outcome == "answered" else {}),
+                  "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
         self.records.append(record)
         if self.sink is not None:
             self.sink(record)
@@ -574,7 +582,10 @@ async def _vertex_openai_bridge(
             TRAJECTORY_V1,
             live=True,
             native=TRAJECTORY_FORMAT,
-            description="Retrieve a task's Gemini stream-json trajectory, also while it runs.",
+            atif=GeminiAtif,
+            description=(
+                "Retrieve a task's Gemini stream-json trajectory, also while it runs; atif/1 when the run prescribes it."
+            ),
         ),
         enable(MCP_CONFIG_V1, description="Register MCP servers the Gemini CLI should connect to."),
         enable(SKILL_CONFIG_V1, description="Register a skill loaded by the Gemini CLI from ~/.gemini/skills/."),
@@ -683,6 +694,7 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                         env=cli_env(os.environ, system_settings=settings, base_url=base_url),
                         cwd=GEMINI_CWD,
                         other_sessions=lambda: {*self.bound_session_refs(), *self._claimed_sessions} - {own},
+                        aux_callback=request.trajectory.aux if _builds_atif(request) else None,
                     )
             except Exception as e:
                 logger.error(f"gemini CLI invocation raised: {e}", exc_info=True)

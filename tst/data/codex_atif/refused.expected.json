@@ -1,0 +1,65 @@
+{
+ "schema_version": "ATIF-v1.8",
+ "session_id": "ctx-codex-refused",
+ "agent": {
+  "name": "Codex",
+  "version": "1.0.0",
+  "model_name": "gpt-5.5"
+ },
+ "steps": [
+  {
+   "step_id": 1,
+   "timestamp": "2026-11-26T04:36:19.968615Z",
+   "source": "user",
+   "message": "Reply with ok.",
+   "extra": {
+    "agentenv": {
+     "context_id": "ctx-codex-refused",
+     "task_id": "7de2a29f-52c8-4a60-9dfb-00e7521aab95",
+     "message_id": "4a260f1cdfb2499babf455a316dd373f",
+     "turn": 0
+    }
+   }
+  },
+  {
+   "step_id": 2,
+   "timestamp": "2026-11-26T04:36:20.401Z",
+   "source": "agent",
+   "message": "",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "error": {
+      "kind": "infra_error",
+      "message": "{\"error\": {\"message\": \"refused by the recording proxy\", \"code\": 400}}"
+     }
+    }
+   }
+  },
+  {
+   "step_id": 3,
+   "timestamp": "2026-11-26T04:36:20.421907Z",
+   "source": "agent",
+   "message": "codex CLI exited with code 1: refused by the recording proxy [400]",
+   "llm_call_count": 0,
+   "extra": {
+    "agentenv": {
+     "state": "failed"
+    }
+   }
+  }
+ ],
+ "final_metrics": {
+  "total_steps": 3
+ },
+ "extra": {
+  "agentenv": {
+   "version": "1.2",
+   "native_format": "codex-exec-json/1",
+   "adapter": {
+    "name": "codex-exec-json-atif",
+    "version": "0.1.0"
+   }
+  }
+ }
+}
