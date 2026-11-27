@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -23,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from gemini_config import SYSTEM_SETTINGS_ENV, gemini_home
+from gemini_transcript import SESSION_POLL_S, SessionTail
+from tail_follow import following
 
 logger = logging.getLogger(__name__)
 
@@ -160,145 +163,6 @@ def _unclaimed_session_id(since: float, claimed: Collection[str], cwd: str) -> s
         logger.warning(f"not recovering a session: {len(found)} unclaimed transcripts were written during the run")
         return None
     return next(iter(found), None)
-
-
-SESSION_POLL_S = 0.25
-
-
-def session_aux(message: dict) -> dict | None:
-    """A session transcript's model message as the atif/1 adapter's ``session`` aux record: what the adapter reads of
-    it, or None for a message it doesn't read (the user's, the CLI's notices). Each call keeps its result, without how
-    the CLI displays it."""
-    if message.get("type") != "gemini":
-        return None
-    record = {key: message[key] for key in ("type", "id", "timestamp", "model", "content", "thoughts", "tokens")
-              if message.get(key) is not None}
-    calls = [{key: call[key] for key in ("id", "name", "args", "status", "timestamp", "result")
-              if call.get(key) is not None} for call in message.get("toolCalls") or () if isinstance(call, dict)]
-    if calls:
-        record["toolCalls"] = calls
-    return record
-
-
-def transcript_messages(text: str, jsonl: bool) -> list[dict] | None:
-    """A transcript's messages in order: a ``.json`` file's ``messages``, which the CLI rewrites whole, or a ``.jsonl``
-    file's lines after its first, the session's metadata, a message written again replacing its earlier copy in its
-    place. None for a ``.json`` file that doesn't parse whole, as one the CLI is writing; a ``.jsonl`` line not yet
-    whole is left out."""
-    if not jsonl:
-        try:
-            transcript = json.loads(text)
-        except ValueError:
-            return None
-        messages = transcript.get("messages") if isinstance(transcript, dict) else None
-        return [message for message in messages if isinstance(message, dict)] if isinstance(messages, list) else None
-    by_id: dict[str, dict] = {}
-    for line in text.splitlines(keepends=True)[1:]:
-        try:
-            message = json.loads(line) if line.endswith("\n") else None
-        except ValueError:
-            continue
-        if isinstance(message, dict) and isinstance(message.get("id"), str):
-            by_id[message["id"]] = message
-    return list(by_id.values())
-
-
-class SessionTail:
-    """One turn's new model messages from the session's transcript, ``.json`` or ``.jsonl``, as ``session_aux`` gives
-    them: each once a later message follows it, since the CLI adds a message's tool calls and their results after
-    writing it, and the last at the turn's end. A resumed session's messages from before the turn aren't fed again,
-    one restored from a snapshot's included. ``bind`` names the session once the CLI has started a new one."""
-
-    def __init__(self, session_id: str | None, cwd: str) -> None:
-        self._lock = threading.Lock()
-        self._cwd = cwd
-        self._session: str | None = None
-        self._path: Path | None = None
-        self._stamp: tuple[int, int] | None = None
-        self._messages: list[dict] = []
-        self._fed: set[str] = set()
-        self._resumed = False
-        if session_id:
-            self.bind(session_id, resumed=True)
-
-    def bind(self, session_id: str, *, resumed: bool = False) -> None:
-        with self._lock:
-            if self._session is not None:
-                return
-            self._session, self._resumed = session_id, resumed
-            if resumed:
-                self._load()
-
-    def read(self, *, final: bool = False) -> list[dict]:
-        """The messages settled since the last read, in order; with ``final``, the last one too."""
-        with self._lock:
-            self._load()
-            settled = self._messages if final else self._messages[:-1]
-            fed = []
-            for message in settled:
-                if not isinstance(message.get("id"), str) or message["id"] in self._fed:
-                    continue
-                self._fed.add(message["id"])
-                if (record := session_aux(message)) is not None:
-                    fed.append(record)
-            return fed
-
-    def _load(self) -> None:
-        """The transcript's messages, read again when the file changed: one the CLI is still writing is read at the
-        next poll, and one it moved, as from ``.json`` to ``.jsonl``, is found and read in this one."""
-        if self._session is None:
-            return
-        for _ in range(2):
-            if self._path is None:
-                self._path = find_session_file(self._session, self._cwd)
-                if self._path is None:
-                    return
-            try:
-                status = self._path.stat()
-                stamp = (status.st_mtime_ns, status.st_size)
-                if stamp == self._stamp:
-                    return
-                text = self._path.read_text()
-                break
-            except FileNotFoundError:
-                self._path = self._stamp = None
-            except OSError:
-                return
-        else:
-            return
-        messages = transcript_messages(text, jsonl=self._path.suffix == ".jsonl")
-        if messages is not None:
-            self._stamp = stamp
-            self._messages = messages
-            if self._resumed:
-                # The transcript as the turn found it: what's in it already is earlier turns'.
-                self._fed.update(message.get("id") for message in self._messages)
-                self._resumed = False
-
-
-async def follow_session(tail: SessionTail, feed: Callable[[str, dict], None], stopped: asyncio.Event) -> None:
-    """Feed ``tail``'s messages while the CLI runs, then, once ``stopped`` is set, what the transcript gained since. A read
-    in progress when it's set is fed first, since the read has already moved past what it returns."""
-    while not stopped.is_set():
-        for record in await asyncio.to_thread(tail.read):
-            feed("session", record)
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stopped.wait(), SESSION_POLL_S)
-    for record in await asyncio.to_thread(tail.read, final=True):
-        feed("session", record)
-
-
-async def stop_following_session(following: asyncio.Task, stopped: asyncio.Event) -> None:
-    """Have the follower feed what's left once the CLI has exited, and wait for it. A follower that failed is logged;
-    the turn goes on without its later messages."""
-    stopped.set()
-    try:
-        await following
-    except asyncio.CancelledError:
-        following.cancel()
-        raise
-    except Exception:
-        logger.warning("following the transcript failed; the ATIF copy lacks its later messages", exc_info=True)
 
 
 def detect_format(raw: bytes) -> str:
@@ -675,7 +539,8 @@ async def run_gemini(
     )
     started = time.time()
     # Read before the CLI starts, so a resumed session's messages from earlier turns are the ones it skips.
-    tail = await asyncio.to_thread(SessionTail, session_id, cwd or os.getcwd()) if aux_callback is not None else None
+    tail = await asyncio.to_thread(SessionTail, session_id, functools.partial(find_session_file, cwd=cwd or os.getcwd())) \
+        if aux_callback is not None else None
     proc = await _started(asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -689,8 +554,6 @@ async def run_gemini(
     response_parts: list[str] = []
     tool_count = 0
     captured_session_id: str | None = session_id
-    stopped = asyncio.Event()
-    following = asyncio.create_task(follow_session(tail, aux_callback, stopped)) if tail is not None else None
 
     def on_line(line: str) -> None:
         nonlocal tool_count, captured_session_id
@@ -730,29 +593,33 @@ async def run_gemini(
         if event_callback is not None:
             event_callback(event)
 
-    try:
-        stderr = await asyncio.wait_for(_stream_cli(proc, on_line), timeout=timeout_s)
-    except asyncio.CancelledError:
-        _kill_cli(proc)
-        await _reap(proc)
-        raise
-    except asyncio.TimeoutError:
-        _kill_cli(proc)
-        await _reap(proc)
-        return GeminiResult(
-            response="", tool_call_count=0, session_id=captured_session_id,
-            error=f"gemini CLI timed out after {timeout_s}s",
-        )
-    except Exception:
-        # A failure while reading, such as an event_callback that raises, must
-        # not leave the CLI running.
-        _kill_cli(proc)
-        await _reap(proc)
-        raise
-    finally:
-        _RUNNING.discard(proc)
-        if following is not None:
-            await stop_following_session(following, stopped)
+    def read(final: bool) -> list[tuple[str, dict]]:
+        return [("session", record) for record in tail.read(final=final)]
+
+    follow = following(read, aux_callback, SESSION_POLL_S, "transcript") if tail is not None \
+        else contextlib.nullcontext()
+    async with follow:
+        try:
+            stderr = await asyncio.wait_for(_stream_cli(proc, on_line), timeout=timeout_s)
+        except asyncio.CancelledError:
+            _kill_cli(proc)
+            await _reap(proc)
+            raise
+        except asyncio.TimeoutError:
+            _kill_cli(proc)
+            await _reap(proc)
+            return GeminiResult(
+                response="", tool_call_count=0, session_id=captured_session_id,
+                error=f"gemini CLI timed out after {timeout_s}s",
+            )
+        except Exception:
+            # A failure while reading, such as an event_callback that raises, must
+            # not leave the CLI running.
+            _kill_cli(proc)
+            await _reap(proc)
+            raise
+        finally:
+            _RUNNING.discard(proc)
 
     response = "".join(response_parts)
     err: str | None = None

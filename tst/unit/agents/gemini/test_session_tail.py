@@ -1,18 +1,24 @@
-"""The bridge's session tail, which feeds Gemini's atif/1 adapter: each turn's new model messages from the transcript
+"""The session tail that feeds Gemini's atif/1 adapter (``gemini_transcript``): each turn's new model messages from the transcript
 the CLI rewrites whole, each once a later one follows it and the last at the turn's end, and ``run_gemini`` feeding
 them while the CLI runs and the rest once it has exited."""
 import asyncio
+import functools
 import json
 import os
-import threading
 
 import pytest
 
-from tst.unit.agents.gemini.agent import gemini_bridge
+from tst.unit.agents.gemini.agent import gemini_bridge, gemini_transcript
 from tst.unit.agents.gemini.fake_cli import FakeCLI
 from tst.unit.agents.gemini.support import chats
 
 SESSION = "97b4a411-6d52-4c55-9e61-1b2c3d4e5f60"
+
+
+def tail_for(session):
+    """The tail a turn on ``session`` (None for a new one) follows, over the transcripts the home fixture puts in place."""
+    return gemini_transcript.SessionTail(session, functools.partial(gemini_bridge.find_session_file,
+                                                                    cwd=os.environ["GEMINI_CWD"]))
 
 
 def user(message_id):
@@ -40,7 +46,7 @@ def ids(records):
 
 
 def test_a_message_is_fed_once_a_later_one_follows_it_and_the_last_at_the_turns_end(home):
-    tail = gemini_bridge.SessionTail(None, os.environ["GEMINI_CWD"])
+    tail = tail_for(None)
     tail.bind(SESSION)
     write(home, user("u-1"), model("g-1"))
     assert tail.read() == []
@@ -53,14 +59,14 @@ def test_a_message_is_fed_once_a_later_one_follows_it_and_the_last_at_the_turns_
 
 def test_a_resumed_sessions_earlier_messages_are_not_fed_again(home):
     write(home, user("u-1"), model("g-1"), model("g-2"))
-    tail = gemini_bridge.SessionTail(SESSION, os.environ["GEMINI_CWD"])
+    tail = tail_for(SESSION)
     write(home, user("u-1"), model("g-1"), model("g-2"), user("u-2"), model("g-3"))
 
     assert ids(tail.read(final=True)) == ["g-3"]
 
 
 def test_a_transcript_the_cli_is_still_writing_is_read_at_the_next_poll(home):
-    tail = gemini_bridge.SessionTail(None, os.environ["GEMINI_CWD"])
+    tail = tail_for(None)
     tail.bind(SESSION)
     whole = json.dumps({"sessionId": SESSION, "messages": [user("u-1"), model("g-1")]})
     write(home, raw=whole[:len(whole) // 2])
@@ -71,7 +77,7 @@ def test_a_transcript_the_cli_is_still_writing_is_read_at_the_next_poll(home):
 
 
 def test_a_model_message_keeps_what_the_adapter_reads_and_drops_how_the_cli_displays_it():
-    record = gemini_bridge.session_aux(model("g-1", "done"))
+    record = gemini_transcript.session_aux(model("g-1", "done"))
 
     assert record == {"type": "gemini", "id": "g-1", "timestamp": "2026-11-25T16:24:27.358Z", "content": "done",
                       "tokens": {"input": 7338, "output": 77}, "model": "gemini-2.5-flash",
@@ -79,7 +85,7 @@ def test_a_model_message_keeps_what_the_adapter_reads_and_drops_how_the_cli_disp
                                      "status": "success", "timestamp": "2026-11-25T16:24:27.367Z",
                                      "result": [{"functionResponse": {"id": "write_1",
                                                                       "response": {"output": "ok"}}}]}]}
-    assert gemini_bridge.session_aux(user("u-1")) is None
+    assert gemini_transcript.session_aux(user("u-1")) is None
 
 
 @pytest.fixture
@@ -121,41 +127,6 @@ def test_run_gemini_feeds_the_turns_messages_while_the_cli_runs_and_the_last_onc
     assert ids(record for _, record in fed) == ["g-1", "g-2"]
 
 
-class _SlowTail:
-    """A tail whose second read is still running when the follower is told to stop."""
-
-    def __init__(self):
-        self.reads, self.release, self.reading = 0, threading.Event(), threading.Event()
-
-    def read(self, *, final=False):
-        if final:
-            return [{"id": "final"}]
-        self.reads += 1
-        if self.reads == 2:
-            self.reading.set()
-            self.release.wait(5)
-            return [{"id": "in flight"}]
-        return [{"id": "first"}] if self.reads == 1 else []
-
-
-def test_a_read_in_flight_when_following_stops_is_fed_before_the_final_one(monkeypatch):
-    monkeypatch.setattr(gemini_bridge, "SESSION_POLL_S", 0.01)
-    tail, fed = _SlowTail(), []
-
-    async def follow():
-        stopped = asyncio.Event()
-        following = asyncio.create_task(gemini_bridge.follow_session(tail, lambda name, r: fed.append(r), stopped))
-        await asyncio.to_thread(tail.reading.wait, 5)
-        stopping = asyncio.create_task(gemini_bridge.stop_following_session(following, stopped))
-        await asyncio.sleep(0.05)
-        tail.release.set()
-        await stopping
-
-    asyncio.run(follow())
-
-    assert ids(fed) == ["first", "in flight", "final"]
-
-
 def write_jsonl(home, *messages):
     path = chats(home) / f"session-2026-11-25T16-24-{SESSION[:8]}.jsonl"
     path.write_text("".join(json.dumps(line) + "\n" for line in ({"sessionId": SESSION, "projectHash": "p"},
@@ -165,7 +136,7 @@ def write_jsonl(home, *messages):
 
 def test_a_restored_jsonl_sessions_new_messages_are_fed_as_their_latest_copy_and_its_earlier_ones_not_again(home):
     path = write_jsonl(home, user("u-1"), model("g-1"))
-    tail = gemini_bridge.SessionTail(SESSION, os.environ["GEMINI_CWD"])
+    tail = tail_for(SESSION)
     first = {**model("g-2"), "toolCalls": []}
     write_jsonl(home, user("u-1"), model("g-1"), user("u-2"), first)
     assert tail.read() == []
@@ -177,7 +148,7 @@ def test_a_restored_jsonl_sessions_new_messages_are_fed_as_their_latest_copy_and
 
 
 def test_a_settled_message_written_again_in_a_jsonl_transcript_is_fed_as_its_latest_copy(home):
-    tail = gemini_bridge.SessionTail(None, os.environ["GEMINI_CWD"])
+    tail = tail_for(None)
     tail.bind(SESSION)
     write_jsonl(home, user("u-1"), {**model("g-1"), "toolCalls": []}, model("g-1"), model("g-2", "5050"))
 
@@ -186,7 +157,7 @@ def test_a_settled_message_written_again_in_a_jsonl_transcript_is_fed_as_its_lat
 
 
 def test_a_transcript_moved_from_json_to_jsonl_is_found_again_and_nothing_is_fed_twice(home):
-    tail = gemini_bridge.SessionTail(None, os.environ["GEMINI_CWD"])
+    tail = tail_for(None)
     tail.bind(SESSION)
     legacy = write(home, user("u-1"), model("g-1"), model("g-2"))
     assert ids(tail.read()) == ["g-1"]

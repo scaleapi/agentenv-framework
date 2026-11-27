@@ -13,7 +13,7 @@ import zlib
 import pytest
 from agentenv_protocol.atif import Fed, RecordedTask, TurnContext, check_adapter, profile_of
 
-from tst.unit.agents.gemini.agent import AGENT_DIR, gemini_atif, gemini_bridge
+from tst.unit.agents.gemini.agent import AGENT_DIR, gemini_atif, gemini_transcript
 
 GeminiAtif = gemini_atif.GeminiAtif
 MODEL = "gemini-2.5-flash"
@@ -63,7 +63,7 @@ class Feed:
                    "tokens": tokens or {"input": 7338, "output": 77, "cached": 0, "thoughts": 105, "tool": 0,
                                         "total": 7520},
                    "model": model, "toolCalls": list(calls)}
-        self.records.append(Fed(gemini_bridge.session_aux(message), aux="session"))
+        self.records.append(Fed(gemini_transcript.session_aux(message), aux="session"))
         return self
 
     def result(self, error=None):

@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from agent_egress import clock_armed, egress_env
+from tail_follow import following
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -568,6 +569,13 @@ class SessionTail:
         self._shapes.update(shapes)
         self._earlier_shape = None
 
+    def take(self, final: bool = False) -> list[tuple[str, dict]]:
+        """What ``read`` gives, committed: the follower feeds every read it makes (``tail_follow``). The transcript has
+        no end of its own to read to, so a final read is like any other."""
+        records, files, shapes = self.read()
+        self.advance(files, shapes)
+        return records
+
     @staticmethod
     def _new_lines(path: Path, tailed: _TailedFile | None) -> tuple[_TailedFile, list[bytes]]:
         status = path.stat()
@@ -654,35 +662,6 @@ def _ends_in(file, tailed: _TailedFile) -> bool:
         return True
     file.seek(tailed.offset - len(tailed.last))
     return file.read(len(tailed.last)) == tailed.last
-
-
-async def _stop_following(following: asyncio.Task, tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
-    """Stop following once the CLI has exited, then feed what its transcripts gained since the last read. A follower
-    that failed is logged; the turn goes on without its records."""
-    following.cancel()
-    try:
-        await following
-    except asyncio.CancelledError:
-        if (current := asyncio.current_task()) is not None and current.cancelling():
-            raise
-    except Exception:
-        logger.warning("following the session transcript failed; the ATIF copy lacks its later records", exc_info=True)
-        return
-    await _feed_tail(tail, feed)
-
-
-async def _follow(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
-    """Feed ``tail``'s records while the CLI runs."""
-    while True:
-        await _feed_tail(tail, feed)
-        await asyncio.sleep(SESSION_POLL_S)
-
-
-async def _feed_tail(tail: SessionTail, feed: Callable[[str, Any], None]) -> None:
-    records, files, shapes = await asyncio.to_thread(tail.read)
-    tail.advance(files, shapes)
-    for name, record in records:
-        feed(name, record)
 
 
 def _one_line(text: str) -> str:
@@ -782,15 +761,13 @@ async def run_claude(
                              else max(int(deadline - time.monotonic()) - _DEADLINE_HEADROOM_S, 1))
         # Each scrub ends before the turn does, cancelled or not: a later turn on the context mustn't start while it
         # can still replace the transcript that turn appends to.
-        following = asyncio.create_task(_follow(tail, aux_callback)) if tail is not None else None
+        follow = following(tail.take, aux_callback, SESSION_POLL_S, "session transcript") if tail is not None \
+            else contextlib.nullcontext()
         try:
-            result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
-                                 timeout_s=attempt_timeout_s)
-            if following is not None:
-                await _stop_following(following, tail, aux_callback)
+            async with follow:
+                result = await spawn(prompt=attempt_prompt, session_id=attempt_session, resume=attempt_resume,
+                                     timeout_s=attempt_timeout_s)
         finally:
-            if following is not None:
-                following.cancel()
             await in_thread_to_its_end(scrub_session_transcript, attempt_session)
         if result.session_id != attempt_session:
             await in_thread_to_its_end(scrub_session_transcript, result.session_id)
