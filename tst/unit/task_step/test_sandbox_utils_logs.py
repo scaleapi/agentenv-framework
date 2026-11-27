@@ -95,6 +95,31 @@ async def test_long_stdout_does_not_push_out_stderr(install):
 
 
 @pytest.mark.asyncio
+async def test_max_chars_widens_each_stream(install):
+    sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("x" * 5000, "y" * 5000)})
+
+    out = await fetch_container_logs(install(sandbox), max_chars=3000)
+
+    assert (out.count("x"), out.count("y")) == (3000, 3000)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_shorter_than_max_chars_is_kept_whole(install):
+    sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("", "z" * 499)})
+
+    out = await fetch_container_logs(install(sandbox))
+
+    assert out.count("z") == 499
+
+
+@pytest.mark.asyncio
+async def test_max_chars_zero_keeps_nothing(install):
+    sandbox = FakeSandbox(rows=[("c1", "agent-api")], logs={"c1": ("x" * 50, "y" * 50)})
+
+    assert await fetch_container_logs(install(sandbox), max_chars=0) is None
+
+
+@pytest.mark.asyncio
 async def test_no_docker_is_none_after_one_exec(install):
     sandbox = FakeSandbox(docker_ok=False)
 

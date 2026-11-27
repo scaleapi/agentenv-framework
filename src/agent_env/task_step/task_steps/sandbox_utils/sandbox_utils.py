@@ -34,7 +34,14 @@ def ended_turn_error(state: Any, reply: TerminalResponse) -> str:
     return ": ".join(part for part in (f"state {state}", detail, text) if part)
 
 
-async def fetch_container_logs(agent, tail: int = 500) -> Optional[str]:
+def _last_chars(text: str, limit: int) -> str:
+    """The last ``limit`` characters of ``text``; none for a limit of zero or less, where ``text[-0:]`` would keep all."""
+    return text[max(len(text) - max(limit, 0), 0):]
+
+
+async def fetch_container_logs(
+    agent, tail: int = 500, *, max_chars: int = _STREAM_TAIL_CHARS
+) -> Optional[str]:
     """Tail the docker logs of the agent's container, so a failed A2A task stays diagnosable
     after its sandbox is reaped.
 
@@ -42,6 +49,9 @@ async def fetch_container_logs(agent, tail: int = 500) -> Optional[str]:
     containers are tailed up to ``_FALLBACK_CONTAINER_LIMIT``, agent-named ones first. Best
     effort: None on any failure, including a sandbox with no docker, so it never masks the
     task's own failure.
+
+    ``max_chars`` bounds each stream of each container. The default keeps the result small
+    enough to inline in an error message; a caller that stores the logs elsewhere can ask for more.
     """
     sandbox_id = getattr(agent, "sandbox_id", None)
     if not sandbox_id:
@@ -70,8 +80,8 @@ async def fetch_container_logs(agent, tail: int = 500) -> Optional[str]:
                     "sudo", "docker", "logs", "--tail", str(tail), cid,
                 )
                 parts = []
-                out_tail = (out or "").strip()[-_STREAM_TAIL_CHARS:]
-                err_tail = (err or "").strip()[-_STREAM_TAIL_CHARS:]
+                out_tail = _last_chars((out or "").strip(), max_chars)
+                err_tail = _last_chars((err or "").strip(), max_chars)
                 if out_tail:
                     parts.append(f"[stdout]\n{out_tail}")
                 if err_tail:
