@@ -538,9 +538,22 @@ class PromptAgentTaskStep(TaskStep):
         hooks = await PostTurnHooks.load(self.post_turn_hooks, self.id) if self.post_turn_hooks else None
         try:
             return await self._converse(context, a2a_context_id=a2a_context_id, series=series, hooks=hooks)
+        except BaseException:
+            if not self.context_id:  # then the conversation's id is a2a_context_id; a shared one stays open
+                self._close_left_open(a2a_context_id)
+            raise
         finally:
             if hooks is not None:
                 hooks.close()
+
+    def _close_left_open(self, conversation_id: str) -> None:
+        """Close the conversation a failed or cancelled run leaves active, never replacing the run's own error."""
+        try:
+            conversation = conversation_store.get_conversation(conversation_id)
+            if conversation and conversation.get("status") == "active":
+                conversation_store.mark_closed(conversation_id)
+        except Exception as e:
+            logger.warning(f"prompt_agent '{self.id}': could not close conversation {conversation_id}: {e}")
 
     async def _converse(
         self,
@@ -652,12 +665,19 @@ class PromptAgentTaskStep(TaskStep):
             conversation_id = f"{self.context_id}-{run_component}-{len(run_component)}"
         else:
             conversation_id = solver_context_id
+            if context.instance_id:
+                # An earlier run of this step whose worker died left its conversation active.
+                leftovers = conversation_store.close_active_for_step(context.instance_id, self.id)
+                if leftovers:
+                    logger.info(f"prompt_agent '{self.id}': closed conversations an earlier run left active: "
+                                f"{leftovers}")
         try:
             conversation_store.create_conversation(
                 conversation_id=conversation_id,
                 task_instance_id=context.instance_id or "",
                 source_agent_name=self.user_agent_name,
                 target_agent_name=self.agent_name,
+                step_id=None if self.context_id else self.id,
             )
         except DuplicateKeyError:
             # reuse a pre-existing conversation on retry/resume (store raises agent_env.store.DuplicateKeyError, not pymongo's)

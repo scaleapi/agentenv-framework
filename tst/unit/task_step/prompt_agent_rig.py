@@ -13,7 +13,7 @@ from agent_env.task_step.task_steps import prompt_agent as pa
 
 #: The conversation store calls a prompt step makes, which these tests keep from reaching a store.
 CONVERSATION_STORE_CALLS = ("create_conversation", "add_a2a_task", "complete_a2a_task", "mark_closed",
-                            "get_conversation")
+                            "get_conversation", "close_active_for_step")
 AGENT_URL = "http://agent.test"
 
 
