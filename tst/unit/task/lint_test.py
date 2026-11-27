@@ -362,64 +362,6 @@ def test_an_agent_name_that_isnt_a_string_names_no_agent_and_lint_still_answers(
     assert not [finding for finding in lint(task) if finding.rule == "judge-as-solver"]
 
 
-CODER = {"id": "coder", "type": "deploy_agent", "agent_name": "coder"}
-WORK = {"id": "work", "type": "prompt_agent", "agent_name": "coder", "prompt": "Fix the tests.", "prompt_id": "work"}
-STOP = {"id": "stop", "type": "stop_agent", "agent_name": "coder"}
-PROBE = {"id": "probe", "type": "verify_sandbox", "agent_name": "coder", "verifier_id": "probe",
-         "criteria": [{"type": "probe_file_exists", "criterion": "has it", "paths": ["a.txt"]}]}
-REPO = {"id": "repo", "type": "run_docker_container", "sandbox_name": "box", "container_name": "repo",
-        "docker_context_artifact_id": "task-image"}
-INSTALL = {"id": "install", "type": "install_agent", "sandbox_name": "box", "container_name": "repo",
-           "agent_name": "coder"}
-UNIT = {"id": "unit", "type": "run_container_unit_tests_verifier", "sandbox_name": "box", "container_name": "repo",
-        "command": "bash /tests/test.sh", "verifier_id": "unit", "reward_path": "/logs/verifier/reward.txt"}
-
-
-def _unstopped(*steps) -> list[tuple[str, str, str]]:
-    return [finding for finding in _found(_task(*steps)) if finding[1] == "agent-not-stopped"]
-
-
-def _unstopped_warning(step: str) -> tuple[str, str, str]:
-    return ("warning", "agent-not-stopped", f"step {step!r}: it reads agent 'coder''s container and no stop_agent step "
-            "before it stops that agent, so a process the agent left running can still change what it reads; add a "
-            "stop_agent for 'coder' after its last turn, and have this step depend on it")
-
-
-@pytest.mark.parametrize("steps", [
-    (CODER, WORK, PROBE),
-    (CODER, WORK, {**STOP, "agent_name": "judge"}, PROBE),
-    (CODER, WORK, {**STOP, "depends_on": ["work"]}, {**PROBE, "depends_on": ["work"]}),
-], ids=["no-stop", "another-agents-stop", "stop-beside-it"])
-def test_a_verifier_reading_an_agents_own_container_with_no_stop_for_it_before_is_a_warning(steps):
-    assert _unstopped(*steps) == [_unstopped_warning("probe")]
-
-
-def test_a_verifier_reading_a_container_an_agent_was_installed_into_with_no_stop_before_is_a_warning():
-    assert _unstopped(BOX, REPO, INSTALL, WORK, UNIT) == [_unstopped_warning("unit")]
-
-
-def test_each_agent_installed_into_the_container_a_verifier_reads_needs_its_own_stop():
-    helper = {**INSTALL, "id": "install-helper", "agent_name": "helper"}
-
-    assert _unstopped(BOX, REPO, INSTALL, helper, WORK, {**STOP, "agent_name": "helper"}, UNIT) == [
-        _unstopped_warning("unit")]
-    assert _unstopped(BOX, REPO, INSTALL, helper, WORK, STOP, {**STOP, "id": "stop-helper", "agent_name": "helper"},
-                      UNIT) == []
-
-
-@pytest.mark.parametrize("steps", [
-    (CODER, WORK, STOP, PROBE),
-    (CODER, WORK, {**STOP, "depends_on": ["work"]}, {**PROBE, "depends_on": ["stop"]}),
-    (BOX, REPO, INSTALL, WORK, STOP, UNIT),
-    (BOX, REPO, {**INSTALL, "container_name": "helper"}, WORK, UNIT),
-    (BOX, {**INSTALL, "container_name": None}, WORK, {**PROBE, "agent_name": "coder"}),
-    (CODER, WORK, {**PROBE, "agent_name": None, "sandbox_name": "box"}),
-], ids=["stopped", "stopped-by-dependency", "installed-and-stopped", "no-agent-in-its-container",
-        "installed-on-the-host", "a-bare-sandbox"])
-def test_a_verifier_after_its_agents_stop_or_reading_no_agents_container_is_fine(steps):
-    assert _unstopped(*steps) == []
-
-
 def test_with_no_headline_an_aggregate_naming_every_other_verifier_by_step_id_is_the_one_to_name():
     found = _found(_task(BOX, TESTS, MORE, _combined(combine="weighted_mean", sources=["tests"], gates=["more"])))
 

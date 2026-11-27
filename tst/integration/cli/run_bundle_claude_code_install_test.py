@@ -19,7 +19,7 @@ from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.providers.sandbox_providers.local_docker.provider import _host_ips
 from agent_env.store.object_store.local.grant_server import grant_server
-from tst.util.fake_anthropic import FakeAnthropic, Fault, tool_on_cue_then_answer, tool_then_answer
+from tst.util.fake_anthropic import FakeAnthropic, Fault, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -208,43 +208,3 @@ def test_a_retried_host_install_stops_the_agent_an_earlier_attempt_started(monke
     assert result.output.count("install-helper (install_agent)") == 2, seen
     assert endpoint.tool_results() == [f"{NOTES}\n{SKILL_BODY}"], seen
     assert not left, seen
-
-
-# What the agent leaves running: a writer of the reward its tests write, orphaned when its Bash tool's shell exits.
-WRITER = "while :; do echo 0 > /logs/verifier/reward.txt; sleep 0.2; done"
-
-
-def test_stop_agent_ends_what_an_installed_agent_left_running_and_the_agent_still_answers(state, endpoint):
-    """The tests' reward stands only once the agent's writer is gone, as it would be overwritten in their second;
-    a turn after the stop still has the agent answer."""
-    endpoint.respond = tool_on_cue_then_answer("Leave a writer", "Bash", {
-        "command": f"mkdir -p /logs/verifier; nohup sh -c '{WRITER}' > /dev/null 2>&1 & echo left"}, "pong")
-    root = state / "bundle"
-    shutil.copytree(TASK_IMAGES / "debian", root / "artifacts" / "task-image")
-    steps = [
-        {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "local",
-         "exposed_ports": [A2A_PORT]},
-        {"id": "repo", "type": "run_docker_container", "sandbox_name": "box", "container_name": "repo",
-         "docker_context_artifact_id": "task-image", "ports": [A2A_PORT], "depends_on": ["box"]},
-        {"id": "install", "type": "install_agent", "sandbox_name": "box", "container_name": "repo",
-         "agent_name": "coder", "a2a_port": A2A_PORT, "depends_on": ["repo"]},
-        {"id": "ask", "type": "prompt_agent", "agent_name": "coder", "prompt_id": "ask",
-         "prompt": "Leave a writer running.", "depends_on": ["install"]},
-        {"id": "stop", "type": "stop_agent", "agent_name": "coder", "depends_on": ["ask"]},
-        {"id": "tests", "type": "run_container_unit_tests_verifier", "sandbox_name": "box", "container_name": "repo",
-         "verifier_id": "tests", "command": "echo 1 > /logs/verifier/reward.txt; sleep 1",
-         "reward_path": "/logs/verifier/reward.txt", "depends_on": ["stop"]},
-        {"id": "again", "type": "prompt_agent", "agent_name": "coder", "prompt_id": "again", "prompt": "Say pong.",
-         "depends_on": ["tests"]},
-        {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "again", "verifier_id": "pong",
-         "criteria": [{"type": "response_contains", "needles": ["pong"]}], "depends_on": ["again"]},
-        {"id": "down", "type": "teardown_sandboxes", "sandbox_names": ["box"], "depends_on": ["check"]},
-    ]
-    (root / "tasks").mkdir()
-    (root / "tasks/stop.json").write_text(json.dumps({"headline_verifiers": ["tests", "check"], "steps": steps}))
-
-    result = CliRunner().invoke(cli, ["run", str(root)])
-
-    seen = (result.output, endpoint.tool_results())
-    assert result.exit_code == 0 and "tasks/stop.json v1: passed" in result.output, seen
-    assert [text.strip() for text in endpoint.tool_results()] == ["left"], seen

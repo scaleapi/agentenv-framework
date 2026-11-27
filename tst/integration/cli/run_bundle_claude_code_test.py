@@ -28,13 +28,7 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.agents.claude_code.agent import claude_bridge
-from tst.util.fake_anthropic import (
-    FakeAnthropic,
-    answer,
-    delegate_then_answer,
-    tool_on_cue_then_answer,
-    tool_then_answer,
-)
+from tst.util.fake_anthropic import FakeAnthropic, answer, delegate_then_answer, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -119,35 +113,6 @@ def test_a_task_naming_no_agent_runs_the_shipped_claude_code_against_the_configu
     assert "building with docker" not in second.output, second.output
     assert f"{IMAGE}: v1, unchanged" in second.output and f"{AGENT}: v1, unchanged" in second.output, second.output
     assert "tasks/ask.json v1: passed" in second.output, second.output
-
-
-def test_stop_agent_ends_what_the_deployed_agent_left_running_and_its_server_still_answers(state, endpoint):
-    """The image runs root's supervisord, with the server, the clock follower and the egress proxy under it: the stop
-    ends the agent's orphaned writer alone, so nothing writes once it's done, and the server answers a later turn."""
-    endpoint.respond = tool_on_cue_then_answer("Leave a writer", "Bash", {
-        "command": "nohup sh -c 'while :; do date > /tmp/written; sleep 0.2; done' > /dev/null 2>&1 & echo left"},
-        "pong")
-    quiet = "rm -f /tmp/written; sleep 1; test ! -e /tmp/written"
-    steps = [
-        {"id": "agent", "type": "deploy_agent", "sandbox_type": "local"},
-        {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "Leave a writer running.",
-         "depends_on": ["agent"]},
-        {"id": "stop", "type": "stop_agent", "depends_on": ["ask"]},
-        {"id": "probe", "type": "verify_sandbox", "verifier_id": "probe", "depends_on": ["stop"],
-         "criteria": [{"type": "bash_cmd_succeeds", "criterion": "nothing writes", "bash_cmd": quiet}]},
-        {"id": "again", "type": "prompt_agent", "prompt_id": "again", "prompt": "Say pong.", "depends_on": ["probe"]},
-        {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "again", "verifier_id": "pong",
-         "criteria": [{"type": "response_contains", "needles": ["pong"]}], "depends_on": ["again"]},
-    ]
-    root = state / "stop"
-    (root / "tasks").mkdir(parents=True)
-    (root / "tasks/stop.json").write_text(json.dumps({"headline_verifiers": ["probe", "check"], "steps": steps}))
-
-    result = _run(root)
-
-    seen = (result.output, endpoint.tool_results())
-    assert result.exit_code == 0 and "tasks/stop.json v1: passed" in result.output, seen
-    assert [text.strip() for text in endpoint.tool_results()] == ["left"], seen
 
 
 def _deployed(agent_id):

@@ -132,9 +132,6 @@ class DeployedAgent:
     on_host: bool = False
     # The container install_agent put it in, as the sandbox's host names it; none for a host install or a deploy.
     installed_container: str | None = None
-    # The port its A2A server listens on where it runs, as install_agent chose it; None for a deployed agent, whose
-    # server listens on DEFAULT_A2A_PORT.
-    a2a_port: int | None = None
     # The envs deploy_agent registered with it, by id.
     env_ids: list[str] = field(default_factory=list)
     # Per env id, the deploy_env step whose deployment deploy_agent bound it to; an env it isn't in binds it to none.
@@ -160,7 +157,6 @@ class DeployedAgent:
             network_policy=data.get("network_policy"),
             on_host=bool(data.get("on_host", False)),
             installed_container=data.get("installed_container"),
-            a2a_port=data.get("a2a_port"),
             env_ids=list(data.get("env_ids") or []),
             env_bindings=dict(data.get("env_bindings") or {}),
             control_token=data.get("control_token"),

@@ -401,7 +401,6 @@ class InstallAgentTaskStep(TaskStep):
             instance_id=deployed.instance_id,
             on_host=host_mode,
             installed_container=container,
-            a2a_port=a2a_port,
             control_token=deployed.control_token,
             model_endpoint_host=_installed_model_host(agent),
         ))
