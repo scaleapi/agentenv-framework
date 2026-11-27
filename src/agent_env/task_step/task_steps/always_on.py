@@ -48,7 +48,7 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
 - End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
-  user_sim_error, user_sim_invalid, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
+  agent_turn_infra_error, user_sim_error, user_sim_invalid, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
   loop's docstring), so a recurring trigger that never wakes the agent can't move the clock forever. What was still pending is recorded (``pending_at_end``): replies held, messages the user
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
@@ -56,7 +56,12 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   end and included, and listed as never read. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
   own messages and the agent's message_user texts, then the user's last word that never reached the agent and an end
   marker with the end reason. An agent turn that doesn't complete (failed, canceled, rejected, timed out) ends the run
-  and sets the response's ``error_type`` (as prompt_agent does for a failed one), so verifiers skip the run.
+  and sets the response's ``error_type`` (as prompt_agent does for a failed one): a rubrics judge scores the run 0
+  without judging it (a ``prompt_error`` row), and the user-sim judge and the satisfaction rating skip it. A turn that
+  failed for an infrastructure reason, its agent's ``error_type`` being ``infra_error`` or the agent having stopped
+  answering (its sandbox died), is not the agent's failure: the run is recorded the same way, with end reason
+  agent_turn_infra_error and the turn's ``error_code``, and then the step fails with ``AgentTurnInfraError``, so no
+  verifier grades it and a ``retry_config`` can redo it.
 - With ``continue_after_wake_limit`` on, a turn (a wake's, or its nudge's) that reaches its time limit
   (``timeout_seconds``) or its tool-call limit (``max_turns``) ends only that wake: what it did stands, its messages to
   the user are taken as any wake's are, and the run goes on to its next event, still bounded by ``max_wakes`` and the
@@ -67,7 +72,7 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   can't confirm canceled ends the run as before. The next wake opens with a note that the last turn was cut off
   (``CUT_OFF_TEXT``). Each cut-off is in the timeline (``wake_cut_off``, and ``cut_off`` on the turn's end), the run's
   record (``cut_off_wakes``) and what the judge reads. A turn that fails for any other reason (an agent crash, a
-  protocol error) still ends the run.
+  protocol error) still ends the run, and one that failed for an infrastructure reason fails the step as above.
 - Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
@@ -138,7 +143,14 @@ from agent_env.env.gateway.constants import (
 )
 from agent_env.config.model import ModelRole
 from agent_env.store import DuplicateKeyError, get_config
-from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, TurnTrajectory
+from agent_env.task_step.context import (
+    INFRA_ERROR,
+    AgentTurnInfraError,
+    PromptResponse,
+    StepContextError,
+    TaskStepContext,
+    TurnTrajectory,
+)
 from agent_env.task_step.snapshot_utils.atif_copies import AtifCopies
 from agent_env.task_step.usage import StepUsage
 from agent_env.task_step.task_step import TaskStep
@@ -199,7 +211,11 @@ LEFTOVER_TAKE_SECONDS = 60.0
 # The final check-in's line when the task sets no `final`: the step's, not the user's.
 FINAL_DEFAULT_TEXT = "Time's up on this job. Send {first} a short wrap-up: what's done, and anything still open."
 NOTHING_CAN_WAKE = "nothing_can_wake_the_agent"  # until finish() tells finished_nothing_pending from stuck
-ERROR_ENDS = ("agent_turn_failed", "agent_turn_timeout", "user_sim_error", "step_error")
+# An agent turn that failed for an infrastructure reason: recorded as any failed turn, then the step fails
+# (AgentTurnInfraError). An agent that stopped answering is one, with this error_code.
+AGENT_TURN_INFRA_ERROR = "agent_turn_infra_error"
+AGENT_UNREACHABLE_CODE = "agent_env.agent_unreachable"
+ERROR_ENDS = ("agent_turn_failed", "agent_turn_timeout", AGENT_TURN_INFRA_ERROR, "user_sim_error", "step_error")
 # A turn's limits, which continue_after_wake_limit lets end only the wake, and how the agent and the judge are told.
 TIME_LIMIT, TOOL_CALL_LIMIT = "time_limit", "tool_call_limit"
 LIMIT_WORDS = {TIME_LIMIT: "time limit", TOOL_CALL_LIMIT: "tool-call limit"}
@@ -228,6 +244,7 @@ END_NOTES = {
     "stuck": "Nothing could wake the assistant again, though something was still pending.",
     "agent_turn_failed": "The assistant's turn failed.",
     "agent_turn_timeout": "The assistant's turn timed out.",
+    AGENT_TURN_INFRA_ERROR: "The assistant's turn failed for an infrastructure reason, not the assistant's doing.",
     "user_sim_error": "The user simulator failed.",
     "user_sim_invalid": "The user simulator's answer still read as the assistant's after its rewrites.",
     "step_error": "The run stopped on an error.",
@@ -466,7 +483,7 @@ class _Run:
         self.all_messages: list[dict] = []
         self.final_task_id = ""
         self.error: Optional[str] = None
-        self.error_type: Optional[str] = None  # set as prompt_agent sets it, so verifiers skip a run that broke
+        self.error_type: Optional[str] = None  # set as prompt_agent sets it, so verifiers know the run broke
         self.error_code: Optional[str] = None
         self.chat_pending: list[dict] = []  # the agent's message_user texts not yet in the graded conversation
         self.reaction: Optional[dict] = None  # her last read's answer when she said nothing
@@ -648,6 +665,11 @@ class _Run:
             raise
         finally:
             await self.finish()
+        if self.end_reason == AGENT_TURN_INFRA_ERROR:
+            raise AgentTurnInfraError(
+                f"always_on: wake {self.wakes}'s agent turn failed for an infrastructure reason "
+                f"(error_type={self.error_type}, error_code={self.error_code}); the run is recorded but not graded: "
+                f"{self.error}")
 
     async def _load_plugin(self, spec: Optional[dict]) -> ModuleType:
         if not spec:
@@ -1474,8 +1496,8 @@ class _Run:
         except TimeoutError as e:
             ended = await self._stopped_at_time_limit(e)
             if ended is None:
-                self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
-                self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1),
+                state = self._no_answer(e, "agent turn")
+                self.log("agent_turn_end", n=self.wakes, state=state, real_seconds=round(time.time() - t, 1),
                          **({"stop": "unconfirmed"} if step.continue_after_wake_limit else {}))
                 return
             turn, stopped = self._stopped_turn(ended, f"agent turn timed out after {step.timeout_seconds}s: {e}")
@@ -1594,9 +1616,9 @@ class _Run:
         except TimeoutError as e:
             ended = await self._stopped_at_time_limit(e)
             if ended is None:
-                self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
+                state = self._no_answer(e, "agent nudge turn")
                 self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
-                         state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1),
+                         state=state, outcome=state, real_seconds=round(time.time() - t, 1),
                          **({"stop": "unconfirmed"} if step.continue_after_wake_limit else {}))
                 return
             turn, stopped = self._stopped_turn(ended, f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
@@ -1701,10 +1723,21 @@ class _Run:
 
     def _failed(self, error_type: str, error: str, error_code: Optional[str] = None) -> None:
         """An agent turn didn't complete (failed, canceled, rejected or timed out): the run ends, and its prompt
-        response carries ``error_type`` the way prompt_agent's does, so verifiers skip it instead of grading it as a
-        normal run."""
+        response carries ``error_type`` the way prompt_agent's does, so a rubrics judge scores it 0 unjudged and other
+        verifiers skip it. An ``infra_error`` ends it as agent_turn_infra_error, which fails the step once the run is
+        recorded (``go``), so it is graded by none."""
         self.error, self.error_type, self.error_code = error, error_type, error_code
-        self.end_reason = "agent_turn_timeout" if error_type == "agent_turn_timeout" else "agent_turn_failed"
+        self.end_reason = (AGENT_TURN_INFRA_ERROR if error_type == INFRA_ERROR
+                           else "agent_turn_timeout" if error_type == "agent_turn_timeout" else "agent_turn_failed")
+
+    def _no_answer(self, error: TimeoutError, turn: str) -> str:
+        """A turn the agent never answered: one that stopped answering (its sandbox died) failed for an
+        infrastructure reason; else it timed out. The state the timeline records it in."""
+        if isinstance(error, protocol.AgentUnreachableError):
+            self._failed(INFRA_ERROR, f"{turn}: {error}", AGENT_UNREACHABLE_CODE)
+            return "unreachable"
+        self._failed("agent_turn_timeout", f"{turn} timed out after {self.step.timeout_seconds}s: {error}")
+        return "timeout"
 
     async def read(self, now: datetime, last: bool = False) -> None:
         """The user sim reads what the agent sent since her last read, at ``now``; ``last`` marks the read after the
@@ -2005,7 +2038,7 @@ class _Run:
         if step.continue_after_wake_limit:
             counts["cut_off_wakes"] = len(self.cut_offs)
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
-                  "error_type": self.error_type, "counts": counts,
+                  "error_type": self.error_type, "error_code": self.error_code, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version,
                                "agent_name": self.us.get("agent_name"), "context_id": self.user_context_id,
                                **self.user_setup},

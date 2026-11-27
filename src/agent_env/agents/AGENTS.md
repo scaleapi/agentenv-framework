@@ -69,7 +69,10 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   `requirements.txt` protocol floor at the first release that has them.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
   happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
-  never sent.
+  never sent. prompt_agent fails its step on either. always_on ends its run on either, but grades only an
+  `agent_error` turn (a rubrics judge's 0): an `infra_error` turn fails the step once the run is recorded
+  (`AgentTurnInfraError`), so no verifier grades it and its `retry_config` can redo it. So a failure that may be the
+  model's (a limit it ran into, a refusal, a malformed call) is an `agent_error`, not an `infra_error`.
 - **Context and sessions:** turns of one `context_id` run one at a time; different contexts run concurrently, and the
   validator relies on it, so don't serialize them. Return your runtime's conversation id as `session_ref` and the next
   turn in that context gets it back; bind it before the runtime starts, so a live trajectory read or a mid-turn

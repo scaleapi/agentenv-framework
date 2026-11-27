@@ -1,6 +1,7 @@
 """A wake whose turn reaches its time or tool-call limit, with continue_after_wake_limit on: only that wake ends, its
 work stands, the agent is told at its next wake, the run goes on, and the record and the judge's files say so. Off,
-and for any other failure, the run ends as an error, as it always has."""
+and for any other failure, the run ends as an error, as it always has; one that failed for an infrastructure reason
+also fails its step."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import json
 import pytest
 
 from agent_env.a2a_agent.protocol import AgentUnreachableError
+from agent_env.task_step.context import AgentTurnInfraError
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.verifiers.always_on_staging import INDEX_FILE, stage_run, wake_file
 from tst.unit.task_step.always_on_harness import Fail, Rig, Slow
@@ -286,7 +288,7 @@ async def test_the_judge_s_files_and_prompt_show_the_cut_off(monkeypatch, tmp_pa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [
     Fail("claude CLI exited with code 1: API Error: 500 Internal server error"),
-    Fail("A2A protocol error: invalid task state", error_type="infra_error"),
+    Fail("pydantic_ai said no", error_type="agent_error", error_code="pydantic_ai.error"),
 ])
 async def test_a_turn_that_fails_for_another_reason_still_ends_the_run_as_an_error(monkeypatch, tmp_path, failure):
     def agent(n, texts, rig):
@@ -300,6 +302,45 @@ async def test_a_turn_that_fails_for_another_reason_still_ends_the_run_as_an_err
     record = rig.record(ctx)
     assert record["end_reason"] == "agent_turn_failed" and record["cut_off_wakes"] == []
     assert ctx.prompt_responses[0].error_type == (failure.error_type or "agent_turn_failed")
+
+
+@pytest.mark.asyncio
+async def test_an_infra_error_turn_is_no_limit_so_it_ends_the_run_and_fails_the_step(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        rig.message("on it")
+        return Fail("A2A protocol error: invalid task state", error_type="infra_error", error_code="framework.x")
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    ctx = rig.context()
+    await rig.arm()
+    _alert_later(rig)
+    try:
+        with pytest.raises(AgentTurnInfraError):
+            await rig.run(rig.step(max_turns=150, continue_after_wake_limit=True), ctx)
+    finally:
+        await rig.close()
+
+    assert len(rig.sent) == 1
+    record = rig.record(ctx)
+    assert (record["end_reason"], record["cut_off_wakes"]) == (ao.AGENT_TURN_INFRA_ERROR, [])
+    assert (ctx.prompt_responses[0].error_type, ctx.prompt_responses[0].error_code) == ("infra_error", "framework.x")
+
+
+@pytest.mark.asyncio
+async def test_a_harness_timeout_code_with_the_setting_on_cuts_the_wake_off_with_no_message_to_match(monkeypatch,
+                                                                                                    tmp_path):
+    def agent(n, texts, rig):
+        if n == 1:
+            rig.message("on it")
+            return Fail("the run stopped", error_code="psi.timeout")
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    ctx = await _run(rig, continue_after_wake_limit=True)
+
+    [cut] = rig.record(ctx)["cut_off_wakes"]
+    assert cut["limit"] == "time_limit" and rig.record(ctx)["end_reason"] == "finished_nothing_pending"
 
 
 @pytest.mark.asyncio
@@ -343,15 +384,28 @@ async def test_a_turn_that_reached_its_tool_call_limit_just_as_its_time_runs_out
 
 
 @pytest.mark.asyncio
-async def test_an_agent_that_stops_answering_still_ends_the_run(monkeypatch, tmp_path):
+@pytest.mark.parametrize("continue_after_wake_limit", [True, False], ids=["on", "off"])
+async def test_an_agent_that_stops_answering_ends_the_run_and_fails_the_step_as_infra(monkeypatch, tmp_path,
+                                                                                      continue_after_wake_limit):
     def agent(n, texts, rig):
         raise AgentUnreachableError("The agent on sandbox sb stopped answering")
 
     rig = Rig(monkeypatch, tmp_path, agent=agent)
-    ctx = await _run(rig, continue_after_wake_limit=True)
+    ctx = rig.context()
+    await rig.arm()
+    try:
+        with pytest.raises(AgentTurnInfraError, match="error_code=agent_env.agent_unreachable"):
+            await rig.run(rig.step(continue_after_wake_limit=continue_after_wake_limit), ctx)
+    finally:
+        await rig.close()
 
     assert rig.cancels == [] and len(rig.sent) == 1
-    assert rig.record(ctx)["end_reason"] == "agent_turn_timeout"
+    record = rig.record(ctx)
+    assert (record["end_reason"], record["error_type"], record["error_code"]) == (
+        ao.AGENT_TURN_INFRA_ERROR, "infra_error", ao.AGENT_UNREACHABLE_CODE)
+    assert "stopped answering" in record["error"]
+    [turn] = rig.events(ctx, "agent_turn_end")
+    assert turn["state"] == "unreachable"
 
 
 # ---- off: as before --------------------------------------------------------------------------------------------------

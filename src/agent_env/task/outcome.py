@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from agent_env.task_step.context import VerifierNotPassingError
+from agent_env.task_step.context import AgentTurnInfraError, VerifierNotPassingError
 from agent_env.task_step.task_step import StepRole
 
 if TYPE_CHECKING:
@@ -54,8 +54,9 @@ _CAUSE_PATTERNS: tuple[tuple[FailureCause, re.Pattern[str]], ...] = (
     )),
 )
 
-# A failure of one of these types is one the A2A client or the model SDK retries, whatever its message says.
-_TRANSIENT_TYPES = (TimeoutError, ConnectionError, httpx.TransportError)
+# A failure of one of these types is one the A2A client or the model SDK retries, whatever its message says; or, for
+# an agent turn that failed for an infrastructure reason, one its agent says agent-env may retry.
+_TRANSIENT_TYPES = (TimeoutError, ConnectionError, httpx.TransportError, AgentTurnInfraError)
 
 
 def _chain(exc: BaseException) -> Iterator[BaseException]:

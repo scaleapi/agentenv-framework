@@ -18,7 +18,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.task.task import Task
-from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.context import AgentTurnInfraError, DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers import is_rubrics_verifier
@@ -27,7 +27,7 @@ from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import (
     UngradableRunError,
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RUN_CONTEXT_PARTS, RubricsVerifierTaskStep
-from tst.unit.task_step.always_on_harness import Rig
+from tst.unit.task_step.always_on_harness import Fail, Rig
 from tst.util import atif_runs
 from tst.util.config import install_model_config
 
@@ -131,6 +131,27 @@ async def test_a_failed_always_on_run_is_skipped_like_a_failed_prompt(monkeypatc
 
     [row] = ctx.metadata["verifications"]["rubric"]["results"]
     assert row["id"] == "prompt_error" and "agent_turn_timeout" in row["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_tolerated_run_whose_turn_failed_for_an_infrastructure_reason_is_skipped_not_scored(monkeypatch,
+                                                                                                    tmp_path):
+    def fails(n, texts, rig):
+        return Fail("APIStatusError: 502 Bad Gateway", error_type="infra_error", error_code="psi.gateway")
+
+    rig = Rig(monkeypatch, tmp_path, agent=fails)
+    await rig.arm()
+    ctx = rig.context()
+    with pytest.raises(AgentTurnInfraError):
+        await rig.run(rig.step(), ctx)
+    verifier = _verifier()
+    _capture(monkeypatch, verifier)
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert (entry["results"], entry["score"]) == ([], None) and "psi.gateway" in entry["skipped"]
+    assert ctx.metadata["grades"]["judge"]["verifier_status"] == "skipped"
 
 
 @pytest.mark.asyncio
@@ -842,6 +863,22 @@ async def test_a_compaction_that_doesn_t_say_who_wrote_its_summary_leaves_the_ru
 
     assert captured == {} and sandbox.files == {}
     assert "rubric" not in (ctx.metadata.get("verifications") or {})
+
+
+def test_the_files_note_says_how_to_read_a_failure_only_for_a_run_whose_harness_reports_one():
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import _files_note
+    from agent_env.task_step.task_steps.verifiers.always_on_staging import StagedRun
+
+    files = {"index.md": "", "wakes/wake_001.jsonl": ""}
+    rule = ('A "harness_note" line with "failure" is the harness saying why that wake failed ("kind"). A failure of kind '
+            "gateway, harness, throttled or timeout_call is the infrastructure's (the model endpoint, or the harness "
+            "itself), not the assistant's doing.")
+
+    failed = _files_note("/s", StagedRun(files, {"agent_labeled_trajectories": 1,
+                                                 "harness_failures": [{"wake": 1, "kind": "gateway"}]}))
+
+    assert rule in failed
+    assert rule not in _files_note("/s", StagedRun(files, {"agent_labeled_trajectories": 1}))
 
 
 def test_the_files_note_says_whose_a_summary_s_losses_are_by_who_wrote_it():

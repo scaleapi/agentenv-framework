@@ -66,6 +66,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format im
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import AtifDocuments, TurnSource
 from agent_env.task_step.task_steps.verifiers.judge_utils.atif_turns import turns as turn_sources
 from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import (
+    INFRA_FAILURE_KINDS,
     TrajectoryFormatError,
     TurnEvents,
     atif_turn_events,
@@ -154,6 +155,12 @@ sits in its wake file where it happened, by its "phase": a "before_turn" change 
 the assistant saw this wake, such as a contact's reply); a "turn" or "nudge" change after that turn's tool calls (the \
 assistant's own were made by its calls of the tool "actors" names; another's came at some point during that turn); \
 an "after_turn" change after the turn ended (contacts and triggers answering it).{missing}"""
+# Added after _HARNESS_NOTE for a run in which the harness says a wake failed (its record's "harness_failures").
+_INFRA_KINDS = sorted(INFRA_FAILURE_KINDS)
+_FAILURE_NOTE = f"""
+- A "harness_note" line with "failure" is the harness saying why that wake failed ("kind"). A failure of kind \
+{", ".join(_INFRA_KINDS[:-1])} or {_INFRA_KINDS[-1]} is the infrastructure's (the model endpoint, or the harness \
+itself), not the assistant's doing."""
 # Added after _HARNESS_NOTE for a run with a compaction, by who wrote its summary (its note's "written_by", in
 # "compaction"): whose a loss the summary caused is.
 _COMPACTION_NOTES = {
@@ -577,7 +584,8 @@ def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> 
                 "for them only the run's record is there: " + ", ".join(str(n) for n in gaps) + ".") if gaps else ""
     writers = r.get("compaction_summaries_written_by") or {}
     lines = _HARNESS_NOTE if r.get("agent_labeled_trajectories") else _HARNESS_LINES + _NOTES_ORDER
-    harness = (lines + "".join(note for writer, note in _COMPACTION_NOTES.items() if writer in writers)
+    harness = (lines + (_FAILURE_NOTE if r.get("harness_failures") else "")
+               + "".join(note for writer, note in _COMPACTION_NOTES.items() if writer in writers)
                + (_CONTEXT_LOSS_NOTE if context_loss else "")) if _harness_read(r) else ""
     values = r.get("app_change_values")
     missing = (f"\n- {values['missing']} app changes have no \"changed_fields\": the run's record of its apps' changes "

@@ -527,6 +527,42 @@ def test_the_index_has_a_line_for_a_compaction_naming_its_wakes_and_pointing_at_
         "written_by": "assistant", "wakes_summarized": 3, "wakes_kept": 2, "first_kept_wake": 4}
 
 
+def _failed_v7_run(run, kind: str):
+    """The v7 run with wake 4's trace ending in the harness's account of why the wake failed (a harness.error span)."""
+    timeline, turns = _v7_run(run)
+    spans = json.loads((RECORDED / "turn_otel_v7_compaction_gpt.json").read_text())
+    at = max(str(s.get("end_time") or s["start_time"]) for s in spans)
+    spans.append({"name": "harness.error", "start_time": at, "end_time": at, "parent_id": None,
+                  "status": {"status_code": "ERROR"},
+                  "attributes": {"gen_ai.agent.name": "harness", "gen_ai.main_agent.name": "Orchestrator",
+                                 "harness.error.kind": kind, "harness.error.class": "APIStatusError",
+                                 "harness.error.message": "APIStatusError: Error code: 502", "harness.error.http_status": 502}})
+    turns[_url(timeline, 4)] = turn_events(json.dumps(spans))
+    return timeline, turns
+
+
+@pytest.mark.parametrize("kind,whose", [
+    ("gateway", "; an infrastructure failure isn't the assistant's doing"),
+    ("model", ""),
+])
+def test_a_wake_the_harness_says_failed_has_a_note_with_its_failure_and_an_index_error_line(run, kind, whose):
+    staged = stage_run(*_failed_v7_run(run, kind))
+
+    wake4 = _lines(staged.files, "wakes/wake_004.jsonl")
+    [i] = [i for i, line in enumerate(wake4, 1) if line.get("failure")]
+    note = wake4[i - 1]
+    assert note["event"] == "harness_note" and note["failure"]["kind"] == kind
+    assert note["failure"]["http_status"] == 502 and note["text"].startswith("The harness says this wake failed: ")
+    assert not [line for line in wake4[i:] if line["event"] in ("tool_call", "assistant_text", "assistant_thinking")]
+    block = staged.files[INDEX_FILE][staged.files[INDEX_FILE].index("## Wake 4 "):]
+    assert f"- error: the harness says the wake failed ({kind}){whose} (wakes/wake_004.jsonl:{i})" in block
+    assert staged.record["harness_failures"] == [{"wake": 4, "kind": kind}]
+
+
+def test_a_run_whose_harness_reports_no_failure_records_none(run):
+    assert "harness_failures" not in stage_run(*_v7_run(run)).record
+
+
 def test_the_index_says_a_compaction_came_partway_through_the_turn_when_the_assistant_had_acted(run):
     """Claude Code compacts inside a turn, once the history fills; a harness's save turn before its compaction isn't
     the assistant's own turn, so the v7 wake's stays before it."""

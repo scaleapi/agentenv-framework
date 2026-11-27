@@ -65,6 +65,15 @@ class VerifierNotPassingError(RuntimeError):
     """A verifier set to fail its task when its verdict isn't passing recorded one that isn't. Grading the same run
     again could pass it, so a runner should not retry it."""
 
+
+# The A2A error_type of a turn that couldn't happen for a reason that isn't the agent's, which agent-env may retry.
+INFRA_ERROR = "infra_error"
+
+
+class AgentTurnInfraError(RuntimeError):
+    """An agent turn failed for an infrastructure reason (its agent said ``infra_error``, or stopped answering), so the
+    run says nothing about the agent: its step fails once the run is recorded, and a ``retry_config`` can redo it."""
+
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
     HEARTBEAT_KEY,
