@@ -24,10 +24,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from a2a.types import AgentSkill
+from agentenv_protocol import AgentEnvError
 from agentenv_protocol.a2a_agent import (
     AGENT_CONFIG_V1,
     ATTRIBUTION_PROBE_V1,
@@ -313,6 +314,34 @@ class _LimitedWriter:
         return self.written
 
 
+def _link_restores_inside(root: Path, name: str, linkname: str) -> bool:
+    """Whether a restore, whichever links it has extracted so far, resolves the link inside the workspace.
+
+    The walk stays lexical and inside the root, and never takes `..` once it has passed a link, so another
+    link in the tree can only move it deeper into the workspace, never out. A link in a loop is refused too,
+    since a restore's resolve raises on it.
+    """
+    if linkname.startswith("/"):
+        return False
+    parts = list(PurePosixPath(name).parent.parts)
+    through_link = False
+    for part in linkname.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if through_link or not parts:
+                return False
+            parts.pop()
+            continue
+        parts.append(part)
+        through_link = through_link or root.joinpath(*parts).is_symlink()
+    try:
+        root.joinpath(name).resolve()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _build_workspace_archive(path: Path) -> None:
     if not WORKSPACE_DIR.is_dir():
         raise FileNotFoundError(f"workspace directory does not exist: {WORKSPACE_DIR}")
@@ -328,22 +357,16 @@ def _build_workspace_archive(path: Path) -> None:
                 f"workspace contains unsupported entry: {member.name}"
             )
         if member.issym():
-            link = Path(member.linkname)
-            link_target = (
-                link
-                if link.is_absolute()
-                else workspace_root / Path(member.name).parent / link
-            ).resolve()
-            if (
-                link.is_absolute()
-                or (
-                    link_target != workspace_root
-                    and workspace_root not in link_target.parents
-                )
+            if not _link_restores_inside(
+                workspace_root, member.name, member.linkname
             ):
-                raise ValueError(
-                    f"workspace contains unsafe link: {member.name}"
+                # A restore refuses such a link, so the snapshot leaves it out.
+                logger.warning(
+                    "workspace snapshot skips a link a restore would refuse: %s -> %s",
+                    member.name,
+                    member.linkname,
                 )
+                return None
         member_count += 1
         uncompressed_bytes += member.size
         if member_count > _MAX_SNAPSHOT_MEMBERS:
@@ -947,7 +970,11 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             # Without a workspace directory this uploads the empty file: agent-env
             # requires both objects, and a load reads an empty workspace as "conversation only".
             if workspace_target is not None and WORKSPACE_DIR.is_dir():
-                await in_thread_to_its_end(_build_workspace_archive, archive_path)
+                try:
+                    await in_thread_to_its_end(_build_workspace_archive, archive_path)
+                except ValueError as e:
+                    logger.warning("workspace snapshot failed: %s", e)
+                    raise AgentEnvError("workspace_unarchivable", str(e), status=422) from e
         except BaseException:
             if archive_path is not None:
                 archive_path.unlink(missing_ok=True)
