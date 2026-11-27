@@ -504,6 +504,11 @@ class PromptAgentTaskStep(TaskStep):
         # Minted here, not in `_execute_conversation`, so the series can address the
         # same session before the first turn.
         a2a_context_id = self.context_id or uuid.uuid4().hex
+        if not self.context_id and context.instance_id:
+            # Before anything reaches the agent, so a re-run that fails early still closes what a dead run left active.
+            leftovers = conversation_store.close_active_for_step(context.instance_id, self.id)
+            if leftovers:
+                logger.info(f"prompt_agent '{self.id}': closed conversations an earlier run left active: {leftovers}")
         if not self.snapshot_config:
             return await self._execute_conversation(context, a2a_context_id=a2a_context_id)
         series = SnapshotSeries(
@@ -665,12 +670,6 @@ class PromptAgentTaskStep(TaskStep):
             conversation_id = f"{self.context_id}-{run_component}-{len(run_component)}"
         else:
             conversation_id = solver_context_id
-            if context.instance_id:
-                # An earlier run of this step whose worker died left its conversation active.
-                leftovers = conversation_store.close_active_for_step(context.instance_id, self.id)
-                if leftovers:
-                    logger.info(f"prompt_agent '{self.id}': closed conversations an earlier run left active: "
-                                f"{leftovers}")
         try:
             conversation_store.create_conversation(
                 conversation_id=conversation_id,

@@ -110,6 +110,26 @@ async def test_a_rerun_closes_the_conversation_a_dead_run_left_active(local_stor
 
 
 @pytest.mark.asyncio
+async def test_a_rerun_that_fails_before_its_own_conversation_still_closes_the_one_left_active(local_stores,
+                                                                                              monkeypatch):
+    _wire(monkeypatch, [RuntimeError("worker died")])
+    with monkeypatch.context() as dying:
+        dying.setattr(PromptAgentTaskStep, "_close_left_open", lambda self, conversation_id: None)
+        with pytest.raises(RuntimeError):
+            await _step().execute(_context())
+
+    async def agent_unreachable(*args, **kwargs):
+        raise ConnectionError("agent unreachable")
+
+    monkeypatch.setattr(pa, "prescribe_formats", agent_unreachable)
+    with pytest.raises(ConnectionError):
+        await _step().execute(_context())
+
+    [left] = _conversations()
+    assert left["status"] == "closed"
+
+
+@pytest.mark.asyncio
 async def test_a_shared_conversation_is_left_as_before(local_stores, monkeypatch):
     _wire(monkeypatch, [RuntimeError("agent unreachable"), "done"])
 
