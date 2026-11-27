@@ -23,6 +23,7 @@ from agent_env.task_step.task_steps.deploy_agent import _choose_mcp_url
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.run_docker_container import RunDockerContainerTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
+    READ_REGULAR_FILE,
     RunContainerUnitTestsVerifierTaskStep,
 )
 from tst.util.exec_scripts import run_with_stubs
@@ -37,6 +38,7 @@ class _RecordingSandbox(LocalSandbox):
     def __init__(self, work_dir, *, build_error: str | None = None):
         super().__init__(sandbox_id=SANDBOX_ID, work_dir=work_dir, port_map={8000: HOST_PORT})
         self.scripts: list[str] = []
+        self.calls: list[tuple[str, ...]] = []
         self._build_error = build_error
 
     async def exec_script(self, script, *, max_retries=0):
@@ -47,6 +49,7 @@ class _RecordingSandbox(LocalSandbox):
 
     async def exec_with_output(self, *args):
         self.scripts.append(args[-1])
+        self.calls.append(args)
         return 0, "", ""
 
     async def docker_cp(self, source, destination, *, remove_source=False):
@@ -175,7 +178,8 @@ async def test_a_verifier_runs_in_the_sandboxs_own_container(tmp_path, monkeypat
                                                 command="true", reward_path="/tmp/reward").execute(context)
 
     assert any(f"c-{SANDBOX_ID} timeout --kill-after" in s for s in sandbox.scripts)
-    assert any(s.startswith(f"docker cp c-{SANDBOX_ID}:/tmp/reward ") for s in sandbox.scripts)
+    assert ("sudo", "docker", "exec", "-u", "0", "-w", "/", f"c-{SANDBOX_ID}", "sh", "-c", READ_REGULAR_FILE, "read",
+            "/tmp/reward") in sandbox.calls
 
 
 @pytest.mark.asyncio

@@ -10,8 +10,9 @@ driver's computer-exec/v1 ``run``, with ``env_vars`` in their environment; ``res
 
 stdout and stderr are each persisted as their own FileArtifact in S3 (so the
 verification entry stays small and the full output is addressable via the
-artifact API). Result files declared via `result_paths` are docker-cp'd out of
-the container and stored inline in `extracted_files` (parsed JSON when valid).
+artifact API). Result files declared via `result_paths` are read in the
+container, a link or anything but a regular file refused, and stored inline in
+`extracted_files` (parsed JSON when valid).
 
 The command and env are resolved per run from ``step_overrides`` and
 ``metadata["seed"]`` (see ``_resolve_command``), so one stored task can be pointed
@@ -84,6 +85,8 @@ _RESERVED_ENV_KEYS = frozenset({
     "PATH", "HOME",
 })
 _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
+# Prints the file its argument names, which must be a regular file and not a link; `-w /` resolves a relative path.
+READ_REGULAR_FILE = 'if [ -L "$1" ] || [ ! -f "$1" ]; then echo "not a regular file" >&2; exit 3; fi; exec cat -- "$1"'
 
 
 class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
@@ -591,13 +594,12 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
                 pass
 
     async def _extract_file(self, sandbox, path_in_container: str) -> str:
-        """`docker cp` a file out of the container, read it from the VM, return text."""
-        vm_temp = f"/tmp/_verifier_out_{uuid.uuid4().hex[:8]}"
-        await sandbox.docker_cp(f"{sandbox.scoped_name(self.container_name)}:{path_in_container}", vm_temp)
-        try:
-            exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "cat", vm_temp)
-            if exit_code != 0:
-                raise RuntimeError(f"cat {vm_temp} failed (exit {exit_code}): {stderr}")
-            return stdout
-        finally:
-            await sandbox.exec_script(f"rm -f {shlex.quote(vm_temp)}")
+        """A result file's text, read in the container as root: a link, or anything but a regular file, is refused, so
+        one the agent left there can't point the read at a file outside the container."""
+        exit_code, stdout, stderr = await sandbox.exec_with_output(
+            "sudo", "docker", "exec", "-u", "0", "-w", "/", sandbox.scoped_name(self.container_name),
+            "sh", "-c", READ_REGULAR_FILE, "read", path_in_container)
+        if exit_code != 0:
+            raise RuntimeError(f"couldn't read {path_in_container!r} (exit {exit_code}): "
+                               f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+        return stdout

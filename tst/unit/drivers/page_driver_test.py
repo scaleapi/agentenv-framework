@@ -63,9 +63,9 @@ CARD = {"name": "chromium", "capabilities": {"extensions": [{"uri": BROWSER, "pa
 #: A stand-in for Playwright MCP on the port and CDP address it's started with: browser_snapshot says what it was
 #: started with and which session called it, and browser_wait_for waits. Started on an address ending /exits, it exits
 #: at once; on one ending /silent-once, the first time it writes its pid to the marker it's given and never listens; on
-#: one ending /wedged-once, the first time it listens but never answers.
+#: one ending /wedged-once, the first time it listens but never answers. Those two write their marker before importing
+#: mcp, which on a busy runner takes longer than the start window a test gives them.
 FAKE_PLAYWRIGHT_MCP = """import asyncio, json, os, sys, time
-from mcp.server.fastmcp import Context, FastMCP
 args = sys.argv[1:]
 endpoint, port = args[args.index("--cdp-endpoint") + 1], int(args[args.index("--port") + 1])
 if endpoint.endswith("/exits"):
@@ -81,6 +81,7 @@ if endpoint.endswith("/wedged-once") and not os.path.exists(marker):
     accepted = []
     while True:
         accepted.append(held.accept())
+from mcp.server.fastmcp import Context, FastMCP
 app = FastMCP("fake", host="127.0.0.1", port=port)
 @app.tool()
 def browser_snapshot(ctx: Context) -> str:

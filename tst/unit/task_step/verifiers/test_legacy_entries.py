@@ -22,6 +22,7 @@ from agent_env.task_step.task_steps.verifiers import verify_sandbox as verify_sa
 from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
+    READ_REGULAR_FILE,
     RunContainerUnitTestsVerifierTaskStep as RunContainer,
 )
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
@@ -48,13 +49,13 @@ def outcome(step, context) -> tuple[str | None, dict | None]:
 
 
 class _ContainerSandbox:
-    """The task container's files as a dict: ``rm -f`` and ``docker cp`` act on it, and the command runs ``test_sh``,
-    which returns its exit code, stdout and stderr."""
+    """The task container's files as a dict: ``rm -f`` and the in-container read act on it, and the command runs
+    ``test_sh``, which returns its exit code, stdout and stderr."""
 
     type = None
 
     def __init__(self, files, test_sh):
-        self.files, self.vm_files, self.test_sh = dict(files), {}, test_sh
+        self.files, self.test_sh = dict(files), test_sh
 
     def scoped_name(self, name):
         return name
@@ -64,20 +65,13 @@ class _ContainerSandbox:
         if words[0] == "docker" and "rm" in words:
             for path in words[words.index("--") + 1:]:
                 self.files.pop(path, None)
-        elif words[:2] == ["rm", "-f"]:
-            self.vm_files.pop(words[2], None)
         return ""
 
     async def exec_with_output(self, *args):
-        if args[:2] == ("sudo", "cat"):
-            return 0, self.vm_files[args[2]], ""
+        if READ_REGULAR_FILE in args:
+            path = args[-1]
+            return (0, self.files[path], "") if path in self.files else (3, "", "not a regular file")
         return self.test_sh(self.files)
-
-    async def docker_cp(self, source, destination):
-        path = source.split(":", 1)[1]
-        if path not in self.files:
-            raise RuntimeError(f"no such file: {path}")
-        self.vm_files[destination] = self.files[path]
 
 
 def _pinned(monkeypatch):
