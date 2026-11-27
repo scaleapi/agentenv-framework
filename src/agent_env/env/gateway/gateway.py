@@ -11,7 +11,7 @@ import posixpath
 import socket
 import subprocess
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -214,7 +214,6 @@ class Gateway:
         self._site_names = {site: lowered(names) for site, names in (site_names or {}).items()}
         self._listed_by_name = frozenset(listed_by_name)
         self._mcp_endpoints = mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
-        self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_cards: dict[str, SiteCard] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
@@ -229,6 +228,8 @@ class Gateway:
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
         self._child_bearers = {name: f"Bearer {token}".encode() for name, token in (child_control_tokens or {}).items()}
+        self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls,
+                                        self._control_token_children | self._child_bearers.keys())
         self._consoles = dict(console_urls or {}) if control_token else {}
         self._console_session = ConsoleSession(control_token) if PGWEB_CONSOLE in self._consoles else None
         self._console_csp = " ".join(["frame-ancestors 'self'", *console_frame_ancestors]).encode()
@@ -1910,10 +1911,12 @@ def _normalized(path: str) -> str:
 
 def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> bool:
     """Whether ``path``, as a site's server would route it, is its data plane or its env card, or one of the paths
-    ``reserved`` names (``site_reserved_paths``), or under one."""
-    normalized = _normalized(path)
-    return normalized == WELL_KNOWN_PATH or any(normalized == base or normalized.startswith(base.rstrip("/") + "/")
-                                                for base in (RPC_PATH, *reserved))
+    ``reserved`` names (``site_reserved_paths``), or under one, ignoring case, as some servers route and the /svc
+    guard (``is_child_mcp_path``) judges."""
+    normalized = _normalized(path).lower()
+    return normalized == WELL_KNOWN_PATH.lower() or any(
+        normalized == base or normalized.startswith(base.rstrip("/") + "/")
+        for base in (reserved_path.lower() for reserved_path in (RPC_PATH, *reserved)))
 
 
 def route_environment_name(key: str, base_url: str, servers: list[InternalMCPServer], *, website: bool) -> str:
@@ -1980,17 +1983,16 @@ def svc_route(path: str) -> tuple[str, str] | None:
     return child, rest
 
 
-def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
-                rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
+def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str], rest_proxy_urls: dict[str, str],
+                children: Collection[str]) -> dict[str, tuple[str, ...]]:
     """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
     extensions included, its LEGACY_STATE_ROUTES, and an MCP server's own endpoint (``mcp_endpoints``), which skips
-    the gateway's trajectory and triggers. A child env registered under its own name, a computer, takes its own token,
-    so none of its paths are here."""
+    the gateway's trajectory and triggers. Only the ``children`` the gateway was told take a token of their own, a
+    multi env's computers, are left out; any other key is guarded whatever its name, a live site's that an MCP server
+    shares included."""
     endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
     return {key: (RPC_PATH, *LEGACY_STATE_ROUTES, *((endpoints[key],) if key in endpoints else ()))
-            for key, base in rest_proxy_urls.items()
-            if key in website_urls or route_environment_name(key, base, servers, website=False) != key
-            or not any(server.name == key for server in servers)}
+            for key in rest_proxy_urls if key not in children}
 
 
 class CardURL(NamedTuple):

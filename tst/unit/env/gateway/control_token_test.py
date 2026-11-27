@@ -61,7 +61,9 @@ PROXIED_OPEN = [("GET", "/svc/mcp-svc/.well-known/agent-env.json"), ("GET", "/sv
 SITE_REFUSED = [*(f"/website/shop{path}" for path in LEGACY), "/website/shop/api/reset/x",
                 "/website/shop/export-snapshot?stream=1", "/website/shop/x/../export-state",
                 "/website/shop/x/../api/add", "/website/shop/public%2Fx/../api/reset",
-                "/website/shop/x/../api/_state", "/website/shop/api/%5Fstate"]
+                "/website/shop/x/../api/_state", "/website/shop/api/%5Fstate", "/website/shop/API/Reset",
+                "/website/shop/Export-Snapshot", "/website/shop/x/../API/_State", "/website/shop/%41PI/add",
+                "/website/shop/EXPORT-STATE?stream=1"]
 _RealAsyncClient = httpx.AsyncClient
 
 
@@ -279,19 +281,28 @@ async def test_an_mcp_server_whose_endpoint_is_configured_encoded_is_guarded_at_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/svc/desk/agentenv/ext/browser/cdp", "/svc/desk/mcp"])
 async def test_a_child_env_of_its_own_takes_its_own_token_through_the_proxy(monkeypatch, path):
+    """A child the gateway was told takes a token of its own gets it; the same child unnamed is guarded, as any backing
+    server is, though it has its own name."""
     backing = _Backing(monkeypatch)
     computer = {"internal_mcp_servers": [InternalMCPServer(name="desk", mcp_url="http://desk:18765/mcp")],
                 "rest_proxy_urls": {"desk": "http://desk:18765"}, "website_urls": {}}
-    assert await _proxied(TOKEN, "POST", path, {"Authorization": "Bearer the-computers"}, **computer) != 401
+    assert await _proxied(TOKEN, "POST", path, {"Authorization": "Bearer the-computers"}, **computer) == 401
+    assert await _proxied(TOKEN, "POST", path, {"Authorization": "Bearer the-computers"},
+                          child_control_tokens={"desk": "the-computers"}, **computer) != 401
     forwarded = [(at, sent) for at, sent in zip(backing.paths, backing.authorization) if at != WELL_KNOWN_PATH]
     assert forwarded == [(path.removeprefix("/svc/desk"), "Bearer the-computers")]
 
 
 @pytest.mark.asyncio
-async def test_a_live_websites_data_plane_is_guarded_though_it_has_no_website_route(monkeypatch):
+@pytest.mark.parametrize("servers", [[], [InternalMCPServer(name="github", mcp_url="http://github-mcp:8000/mcp")]],
+                         ids=["alone", "sharing-an-mcp-servers-name"])
+async def test_a_live_websites_data_plane_is_guarded_though_it_has_no_website_route(monkeypatch, servers):
     backing = _Backing(monkeypatch)
-    live = {"rest_proxy_urls": {"github": "http://github-website-backend:8000"}, "website_urls": {}}
-    assert await _proxied(TOKEN, "POST", "/svc/github/agentenv", {}, **live) == 401
+    live = {"internal_mcp_servers": servers, "website_urls": {},
+            "rest_proxy_urls": {"github": "http://github-website-backend:8000", "mcp-github": "http://github-mcp:8000"}}
+    for path in ("/svc/github/agentenv", "/svc/github/x/../agentenv", "/svc/github/%61gentenv",
+                 "/svc/github/agentenv/ext/website/ready", "/svc/github/export-state"):
+        assert await _proxied(TOKEN, "POST", path, {}, **live) == 401, path
     assert await _proxied(TOKEN, "POST", "/svc/github/agentenv", {"Authorization": f"Bearer {TOKEN}"}, **live) != 401
     assert backing.paths == ["/agentenv"]
 
