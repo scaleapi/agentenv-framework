@@ -22,7 +22,7 @@ carry it.
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `OpenHandsConfig`: `model`, `effort` (the LLM's reasoning effort), `system_prompt` (replaces OpenHands' own), `append_system_prompt`, `max_iterations`, `timeout_seconds` |
+| `agent-config/v1` | `OpenHandsConfig`: `model`, `effort` (the LLM's reasoning effort), `system_prompt` (replaces OpenHands' own), `append_system_prompt`, `max_iterations`, `timeout_seconds`, `web_tools` (OpenHands runs without its browser tools, so `false` changes nothing) |
 | `mcp-config/v1` | SDK default; each server becomes an HTTP `MCPServer` in the agent's `mcp_config`, with its headers, sent as written: a `${VAR}` in a URL or header is not filled from the agent's environment |
 | `skill-config/v1` | inline and bundle skills installed as `SKILL.md` directories under `~/.openhands-a2a/skills`, loaded into the agent's context |
 | `trajectory/v1` | live: the task's OpenHands SDK events, appended as the conversation emits them (format `openhands-events/v1`) |

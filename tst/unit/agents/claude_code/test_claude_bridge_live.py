@@ -43,7 +43,8 @@ def _run(**kwargs):
     reported: list[dict] = []
     result = asyncio.run(
         claude_bridge.run_claude(
-            prompt="p", session_id="sess-1", resume=False, event_callback=reported.append, **kwargs
+            prompt="p", session_id="sess-1", resume=False, event_callback=reported.append,
+            **{"web_tools": True, **kwargs}
         )
     )
     return result, reported
@@ -85,7 +86,8 @@ def test_events_are_reported_while_the_cli_runs(cli):
     async def turn():
         reported: list[dict] = []
         running = asyncio.create_task(
-            claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, event_callback=reported.append)
+            claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, event_callback=reported.append,
+                                     web_tools=True)
         )
         async with asyncio.timeout(5):
             while not reported:
@@ -149,6 +151,7 @@ def test_a_callback_that_raises_kills_the_cli(cli):
         raise ValueError("rejected")
 
     with pytest.raises(ValueError, match="rejected"):
-        asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, event_callback=refuse))
+        asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, event_callback=refuse,
+                                             web_tools=True))
 
     assert started[0].killed

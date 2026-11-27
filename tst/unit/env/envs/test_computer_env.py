@@ -31,7 +31,7 @@ from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
 from agent_env.artifact.artifacts import docker_image
-from agent_env.artifact.artifacts.computer import ComputerArtifact
+from agent_env.artifact.artifacts.computer import OS_TYPES, ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
@@ -51,7 +51,7 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.store.image_store import registry_api
 from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
-from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
+from agent_env.env.envs.computer.env import COMPUTER_TOOLS, DEFAULT_DESTINATIONS, ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.utils.install import Install, MacInstall, Service, WindowsInstall
@@ -2036,6 +2036,10 @@ async def test_a_load_writes_each_file_into_the_computers_downloads_through_its_
     batches = [sorted(marker["path"] for marker in markers) for kind, markers, _ in computer.calls]
     assert sorted(batches) == [["Downloads/a.txt", "Downloads/b.txt"], ["Downloads/sub/big.bin"]]
     assert (computer.home / "Downloads/sub/big.bin").read_bytes() == b"x" * 20
+
+
+def test_every_os_type_has_a_folder_a_load_puts_files_in_by_default():
+    assert set(OS_TYPES) <= set(DEFAULT_DESTINATIONS)
 
 
 @pytest.mark.asyncio

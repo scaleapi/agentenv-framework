@@ -55,7 +55,7 @@ async def turn(prompt, session_id, timeout_s=300):
     events = []
     result = await antigravity_bridge.run_antigravity(
         prompt, model="m", session_id=session_id, mcp_servers=None, system_prompt=None, timeout_s=timeout_s, role=None,
-        builtin_tools=None, max_turns=None, workspace=sys.argv[1], event_callback=events.append)
+        builtin_tools=None, web_tools=True, max_turns=None, workspace=sys.argv[1], event_callback=events.append)
     return {"response": result.response, "error": result.error, "error_code": result.error_code,
             "session_id": result.session_id, "tool_calls": result.tool_call_count, "usage": result.usage.to_dict(),
             "events": events, "stored": antigravity_bridge.conversation_store_exists(result.session_id)}

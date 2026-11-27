@@ -87,8 +87,7 @@ async def test_formatted_turn_requires_valid_json_schema_output(monkeypatch, ans
         output_format={"type": "json_schema", "schema": {
             "type": "object", "properties": {"answer": {"type": "string"}},
             "required": ["answer"],
-        }},
-    )
+        }}, web_tools=True)
     assert result.error_code == expected_error
     if expected_error is None:
         assert result.structured_output == {"answer": "done"}

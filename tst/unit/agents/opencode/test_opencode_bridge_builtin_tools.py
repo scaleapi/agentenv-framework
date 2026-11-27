@@ -27,9 +27,25 @@ _SERVERS = {"env4821": {"url": "https://gw/mcp", "headers": None},
             "fake-env.x": {"url": "https://gw2/mcp", "headers": None}}
 
 
-def _permission(selection: dict | None, servers: dict | None = None) -> dict:
-    tools = a2a_server.OpenCodeConfig(builtin_tools=selection).builtin_tools
-    return opencode_bridge._build_config(MODEL, servers, {}, None, builtin_tools=tools)["permission"]
+def _permission(selection: dict | None, servers: dict | None = None, web_tools: bool = True) -> dict:
+    config = a2a_server.OpenCodeConfig(builtin_tools=selection, web_tools=web_tools)
+    return opencode_bridge._build_config(MODEL, servers, {}, None, builtin_tools=config.builtin_tools,
+                                         web_tools=config.web_tools)["permission"]
+
+
+@pytest.mark.parametrize("selection", [None, {"disable": ["bash"]}, {"only": ["read", "webfetch"]}, {"disable": "*"}],
+                         ids=["no-selection", "disable-list", "only-with-webfetch", "disable-all"])
+def test_web_tools_off_denies_the_clis_web_tools_after_any_selection_with_question_last(selection):
+    rules = _permission(selection, _SERVERS, web_tools=False)
+
+    assert rules["websearch"] == rules["webfetch"] == "deny"
+    assert list(rules)[-3:] == ["websearch", "webfetch", "question"] and rules["question"] == "deny"
+
+
+def test_web_tools_on_leaves_the_clis_web_tools_on():
+    rules = _permission({"disable": ["bash"]}, _SERVERS, web_tools=True)
+
+    assert rules == {"*": "allow", "bash": "deny", "question": "deny"}
 
 
 @pytest.fixture
@@ -55,7 +71,7 @@ def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawn
 
     asyncio.run(opencode_bridge.run_opencode(
         prompt="go", context_id="ctx", session_id="ses_0", model="m", mcp_servers={"env": {"url": "https://gw/mcp"}},
-        effort="high", attachment_paths=["/w/a.png"], workspace="/w"))
+        effort="high", attachment_paths=["/w/a.png"], workspace="/w", web_tools=True))
 
     ((argv, env, cli),) = spawned
     assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0",
@@ -99,7 +115,7 @@ def test_without_mcp_servers_disable_all_denies_every_tool():
 def test_the_selection_reaches_the_cli(spawned):
     tools = a2a_server.OpenCodeConfig(builtin_tools={"disable": "*"}).builtin_tools
 
-    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", builtin_tools=tools))
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", builtin_tools=tools, web_tools=True))
 
     ((argv, env, cli),) = spawned
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny", **_CHECKS, "question": "deny"}
@@ -115,7 +131,7 @@ def test_turns_get_the_selection_the_agent_config_set(monkeypatch, oc):
 
     async def fake_run_opencode(**kwargs):
         config = opencode_bridge._build_config(MODEL, kwargs["mcp_servers"], {}, None,
-                                               builtin_tools=kwargs.get("builtin_tools"))
+                                               builtin_tools=kwargs.get("builtin_tools"), web_tools=True)
         permissions.append(config["permission"])
         return result()
 

@@ -34,7 +34,7 @@ disk:
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `OpenCodeConfig`: `model`, `effort` (the provider's `reasoningEffort`), `max_output_tokens` (prompt_agent's field of that name: the output tokens, reasoning included, one model request may produce, 32,000 by default; it sets the model's `limit.output` and `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX`, since OpenCode takes the smaller of the two. A task whose last step stops at the cap fails with `output_token_limit`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `max_turns` (the steps, model requests, a task may make, as Claude Code's `--max-turns`: once the last one asks for another, the CLI is killed and the task fails with `Reached maximum number of turns (N)`. OpenCode v1's own `steps` limit isn't used, since it doesn't stop a model that keeps calling tools), `builtin_tools` (below) |
+| `agent-config/v1` | `OpenCodeConfig`: `model`, `effort` (the provider's `reasoningEffort`), `max_output_tokens` (prompt_agent's field of that name: the output tokens, reasoning included, one model request may produce, 32,000 by default; it sets the model's `limit.output` and `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX`, since OpenCode takes the smaller of the two. A task whose last step stops at the cap fails with `output_token_limit`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `max_turns` (the steps, model requests, a task may make, as Claude Code's `--max-turns`: once the last one asks for another, the CLI is killed and the task fails with `Reached maximum number of turns (N)`. OpenCode v1's own `steps` limit isn't used, since it doesn't stop a model that keeps calling tools), `builtin_tools`, `web_tools` (below) |
 | `mcp-config/v1` | SDK default; each server passed to the task's CLI |
 | `skill-config/v1` | inline and bundle skills installed as `$XDG_CONFIG_HOME/opencode/skills/<name>/`, where OpenCode finds them |
 | `trajectory/v1` | the task's `opencode run --format json` events, live while it runs (format `opencode-events/1`) |
@@ -55,3 +55,6 @@ the workspace, and `doom_loop`. The names are `OpenCodeTool`'s in
 `opencode_bridge.py`, the CLI's permission names: `edit` also covers `write` and `apply_patch`, which can't be selected
 alone, and `read` covers the MCP resource tools. A test fails when package.json's `opencode-ai` moves, until
 `OpenCodeTool` and `TOOLS_CLI_VERSION` move with it.
+
+A `deploy_agent` `web_tools: false` denies the CLI's web tools, `websearch` and `webfetch`, in the same `permission`,
+whatever `builtin_tools` selects.

@@ -28,8 +28,14 @@ MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 ROLE_HEADER = "AgentEnv-Role"
 _ROLE_VARIABLE = "AGENTENV_ROLE"
 # Codex hands a stdio MCP server only a few of its own variables; these tell mcp-remote, a Node client, which
-# certificates to trust.
+# certificates to trust and, on an armed clock, the egress proxy to go out through (agent_egress.egress_env): Node
+# checks an HTTPS server's certificate against the env's date, which the proxy, on real time, doesn't.
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
+_PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
+              "NODE_USE_ENV_PROXY")
+# The provider agent-env configures, and the path of LiteLLM's Responses API route under the endpoint's API root.
+_PROVIDER = "litellm"
+_PROVIDER_PATH = "/openai/v1"
 
 # The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
 TOOLS_CLI_VERSION = "0.162.1"
@@ -75,17 +81,20 @@ class CodexTools(BaseModel):
         return self
 
 
-def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
-    """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep; none without one. The MCP
-    tools agent-env gives the agent stay with any selection."""
+def builtin_tools_overrides(builtin_tools: CodexTools | None, *, web_tools: bool) -> list[str]:
+    """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep, and its web search when
+    ``web_tools`` is False; none without either. The MCP tools agent-env gives the agent stay with any selection."""
+    off: list[frozenset[str]] = []
     if builtin_tools is None:
-        return []
-    if builtin_tools.only is not None:
+        pass
+    elif builtin_tools.only is not None:
         off = [tools for tools, _ in _TOOL_SWITCHES if not tools <= set(builtin_tools.only)]
     elif builtin_tools.disable == "*":
         off = [tools for tools, _ in _TOOL_SWITCHES]
     else:
         off = [tools for tools, _ in _TOOL_SWITCHES if tools <= set(builtin_tools.disable)]
+    if not web_tools and _WEB_TOOLS not in off:
+        off.append(_WEB_TOOLS)
     return [override for tools, overrides in _TOOL_SWITCHES if tools in off for override in overrides]
 
 
@@ -203,6 +212,18 @@ def _api_root(url: str) -> str:
     return urlunsplit(parts._replace(path=parts.path.rstrip("/").removesuffix("/v1").rstrip("/")))
 
 
+def endpoint_root(environ: Mapping[str, str]) -> str | None:
+    """The API root of the endpoint agent-env configured, under which the provider's route is; None without one, when
+    the CLI has no provider of agent-env's."""
+    base_url = environ.get("LITELLM_BASE_URL") or ""
+    return _api_root(base_url) if base_url else None
+
+
+def relayed_provider(relay: str) -> list[str]:
+    """The `-c` override that has one CLI run call the provider through ``relay``, a model relay to its API root."""
+    return [f"model_providers.{_PROVIDER}.base_url={json.dumps(relay + _PROVIDER_PATH)}"]
+
+
 def write_base_config(environ: Mapping[str, str]) -> None:
     """The settings every turn shares: the collaboration tools, and the model endpoint agent-env configured as a
     Responses API provider, with its headers and the run's attribution on each call."""
@@ -212,12 +233,11 @@ def write_base_config(environ: Mapping[str, str]) -> None:
     cfg.setdefault("features", {})["multi_agent_v2"] = True
     # Off by default since 0.162.0; a selection turns it off again with a `-c` override.
     cfg.setdefault("tools", {}).setdefault("update_plan", {})["enabled"] = True
-    base_url = environ.get("LITELLM_BASE_URL") or ""
-    if base_url:
-        cfg["model_provider"] = "litellm"
+    if root := endpoint_root(environ):
+        cfg["model_provider"] = _PROVIDER
         provider = {
             "name": "LiteLLM proxy",
-            "base_url": _api_root(base_url) + "/openai/v1",
+            "base_url": root + _PROVIDER_PATH,
             "env_key": "LITELLM_API_KEY",
             "wire_api": "responses",
             # Bound codex retry/idle behavior so a hung stream fails fast
@@ -242,7 +262,7 @@ def write_base_config(environ: Mapping[str, str]) -> None:
         # a Responses API may refuse when the history replays encrypted tool-call arguments. Remote compaction sends
         # the tools.
         provider["capabilities"] = {"remote_compaction": "v2"}
-        cfg.setdefault("model_providers", {})["litellm"] = provider
+        cfg.setdefault("model_providers", {})[_PROVIDER] = provider
     _write(cfg)
 
 
@@ -250,7 +270,9 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
     """Build a codex `mcp_servers.<name>` config table.
 
     Wraps the URL in `mcp-remote` (stdio shim), a Node client that trusts the
-    certificates `_TRUST_ENV` names in the agent's environment. Each header is passed
+    certificates `_TRUST_ENV` names in the agent's environment and, with
+    `--enable-proxy`, goes out through the proxy `_PROXY_ENV` names there, directly
+    when it names none. Each header is passed
     as a `--header "Name: Value"` arg. The `AgentEnv-Role` header, which the env
     gateway filters tools by, is mcp-remote's `${AGENTENV_ROLE}`: the role the
     registration's own headers name, from the entry's env, unless a CLI run passes
@@ -258,7 +280,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
     concurrent turns of different roles share it.
     """
     registered = ""
-    args: list[str] = [url, "--allow-http"]
+    args: list[str] = [url, "--allow-http", "--enable-proxy"]
     for k, v in (headers or {}).items():
         if k.lower() == ROLE_HEADER.lower():
             registered = v
@@ -269,7 +291,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
         "command": "mcp-remote",
         "args": args,
         "env": {_ROLE_VARIABLE: registered},
-        "env_vars": list(_TRUST_ENV),
+        "env_vars": [*_TRUST_ENV, *_PROXY_ENV],
         "startup_timeout_sec": 60,
         # Codex silently drops non-`required` servers that miss its hard-coded
         # 1s startup grace, which mcp-remote always does — but a `required`
@@ -295,3 +317,8 @@ def role_overrides(servers: Mapping[str, Any], role: str | None) -> list[str]:
     if not role:
         return []
     return [f"mcp_servers.{name}.env.{_ROLE_VARIABLE}={json.dumps(role, ensure_ascii=False)}" for name in servers]
+
+
+
+# The CLI's own web tool: what a deploy_agent web_tools False turns off.
+_WEB_TOOLS = frozenset({"web_search"})

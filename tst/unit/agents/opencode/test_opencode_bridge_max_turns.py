@@ -76,7 +76,8 @@ def cli(monkeypatch):
 
         monkeypatch.setattr(opencode_bridge.asyncio, "create_subprocess_exec", spawn)
         result = await asyncio.wait_for(
-            opencode_bridge.run_opencode(prompt="p", context_id="limit-test", timeout_s=60, **kwargs), 10)
+            opencode_bridge.run_opencode(prompt="p", context_id="limit-test", timeout_s=60,
+                                         **{"web_tools": True, **kwargs}), 10)
         return result, proc
 
     return run
@@ -171,7 +172,8 @@ def test_a_turn_limit_kills_a_real_cli_and_returns_without_waiting_for_it(monkey
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
 
     result = asyncio.run(asyncio.wait_for(
-        opencode_bridge.run_opencode(prompt="p", context_id="limit-test", timeout_s=60, max_turns=2), 10))
+        opencode_bridge.run_opencode(prompt="p", context_id="limit-test", timeout_s=60, max_turns=2,
+                                     web_tools=True), 10))
 
     assert (result.error, result.tool_call_count) == (LIMIT_ERROR.format(2), 2)
     with pytest.raises(ProcessLookupError):

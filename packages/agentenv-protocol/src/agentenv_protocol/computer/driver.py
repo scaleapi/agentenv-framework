@@ -21,9 +21,9 @@ from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvi
                                      control_check, environment_card, read_only_tools)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import _linux, annotate, apps, card, svc
-from .checks import check_features, check_names
-from .dataplane import DataPlane
+from . import _adb, _linux, annotate, apps, card, svc
+from .checks import DEFAULT_PLACEMENT, check_features, check_names
+from .dataplane import DEFAULT_DATA_PATHS, DataPlane
 from .errors import TargetUnavailable
 from .extensions import Extensions
 from .operations import ReadyCheck, check_class, default_for
@@ -62,6 +62,10 @@ class DriverDeclaration(BaseModel):
     supports: list[dict[str, Any]]
     platforms: list[DriverPlatform]
     settings: Optional[dict[str, Any]] = None
+
+    @property
+    def placement(self) -> str:
+        return next((p.features["placement"] for p in self.platforms if "placement" in p.features), DEFAULT_PLACEMENT)
 
 
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):
@@ -104,6 +108,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     #: What the computer's screen shows, its card's ``screen``: a ``desktop``, or a website browser's ``page``, its
     #: active tab.
     screen_kind: ClassVar[Literal["desktop", "page"]] = "desktop"
+    #: Where the driver runs, on its card: ``inside`` its computer as the session user, or ``beside`` a device it
+    #: reaches, such as a phone over adb, whose platform it passes to ``__init__``.
+    placement: ClassVar[Literal["inside", "beside"]] = DEFAULT_PLACEMENT
+    #: The folders under the session user's home that data/get returns when its caller names none, on the card.
+    default_data_paths: ClassVar[tuple[str, ...]] = DEFAULT_DATA_PATHS
     tool_access = True
     #: What the base class keeps for the driver, built by ``__init__``.
     _computer: ComputerRuntime | None = None
@@ -300,7 +309,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         if self._computer is None:
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
 
-    # The defaults for the OS operations on Linux, macOS and Windows.
+    # The defaults for the OS operations on Linux, macOS and Windows, and from beside an Android device.
 
     @default_for("run_in_session", os=["linux", "macos", "windows"])
     async def _computer_linux_run_in_session(self, argv: list, cwd: str | None, env: dict | None, timeout_s: float):
@@ -309,6 +318,18 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     @default_for("write_files", os=["linux", "macos", "windows"])
     async def _computer_linux_write_files(self, files: dict) -> None:
         await asyncio.to_thread(_linux.write_files, files)
+
+    @default_for("run_in_session", os="android")
+    async def _computer_android_run_in_session(self, argv: list, cwd: str | None, env: dict | None, timeout_s: float):
+        return await _adb.run_in_session(argv, cwd, env, timeout_s, output_bytes=self.settings.exec_output_bytes)
+
+    @default_for("write_files", os="android")
+    async def _computer_android_write_files(self, files: dict) -> None:
+        await _adb.write_files(files)
+
+    @default_for("read_files", os="android")
+    async def _computer_android_read_files(self, paths: list, into: Path) -> None:
+        await _adb.read_files(paths, into)
 
 
 def computer_driver(name: str | None = None, *, supports: list | None = None) -> Callable:

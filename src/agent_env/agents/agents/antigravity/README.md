@@ -38,7 +38,7 @@ The rest of each task's config:
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `AntigravityConfig`: `model`, `effort`, `system_prompt`, `project_id`, `task_id`, `timeout_seconds` (1800 by default; past it the task fails with `timeout`), `max_turns` (the model calls a task may make, the SDK's `max_model_calls`; a task stopped at it fails with `max_turns_exceeded`), `builtin_tools` (below) |
+| `agent-config/v1` | `AntigravityConfig`: `model`, `effort`, `system_prompt`, `project_id`, `task_id`, `timeout_seconds` (1800 by default; past it the task fails with `timeout`), `max_turns` (the model calls a task may make, the SDK's `max_model_calls`; a task stopped at it fails with `max_turns_exceeded`), `builtin_tools`, `web_tools` (below) |
 | `mcp-config/v1` | SDK default; each server passed to the task's harness. One that fails to start fails the task with `mcp_load_failed`, an infra error |
 | `skill-config/v1` | inline and bundle skills installed as `$ANTIGRAVITY_HOME/skills/<name>/`, the harness's skills path; an inline `SKILL.md` without frontmatter gets one from the skill's name and description, since the SDK lists a skill by its frontmatter alone |
 | `trajectory/v1` | the SDK's streamed steps, a step's text and thought each as one record, and each tool call's result from the SDK's hooks after it, live while the task runs (format `antigravity-sdk/1`) |
@@ -73,3 +73,6 @@ every tool but those named, a list to turn off turns off those alone; the tools 
 agent stay in every case, `finish`, which ends a task, stays on, and `ask_question` and `generate_image` stay off. The
 names are `AntigravityTool`'s in `antigravity_bridge.py`, the SDK's own: `search_web` and `read_url_content` are its
 web tools. A test fails when `requirements.txt`'s SDK pin moves, until `SDK_VERSION` moves with it.
+
+A `deploy_agent` `web_tools: false` turns off the SDK's web tools, `search_web` and `read_url_content`, whatever
+`builtin_tools` selects.

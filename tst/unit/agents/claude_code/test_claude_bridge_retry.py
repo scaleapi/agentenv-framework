@@ -63,7 +63,7 @@ def _write_session(scripted, session_id="sess-1"):
 
 def test_success_makes_exactly_one_invocation(scripted):
     scripted["queue"].append((_ok_stdout(), 0))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 1
     assert result.error is None
     assert result.response == "done"
@@ -75,7 +75,7 @@ def test_stalled_turn_resumes_the_session_and_recovers(scripted):
     scripted["queue"].append((_api_error_stdout("API Error: The operation timed out.", tool_uses=3), 1))
     scripted["queue"].append((_ok_stdout("finished after resume"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 2
     assert result.error is None
@@ -97,7 +97,7 @@ def test_abandoned_attempt_leaves_its_work_but_not_its_error(scripted):
     scripted["queue"].append((_api_error_stdout("API Error: The operation timed out.", tool_uses=3), 1))
     scripted["queue"].append((_ok_stdout("finished after resume"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     results = [e for e in result.trajectory if e.get("type") == "result"]
     assert len(results) == 1
@@ -111,7 +111,7 @@ def test_abandoned_attempt_leaves_its_work_but_not_its_error(scripted):
 def test_non_resumable_api_error_is_not_retried(scripted):
     _write_session(scripted)
     scripted["queue"].append((_api_error_stdout("API Error: 401 authentication_error"), 1))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 1
     assert result.error is not None
     assert len(scripted["calls"]) == 1
@@ -129,7 +129,7 @@ def test_non_resumable_api_error_is_not_retried(scripted):
 def test_unreachable_endpoint_is_never_retried(scripted, message):
     _write_session(scripted)
     scripted["queue"].append((_api_error_stdout(message), 1))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 1
     assert len(scripted["calls"]) == 1
 
@@ -137,14 +137,14 @@ def test_unreachable_endpoint_is_never_retried(scripted, message):
 def test_cli_death_without_a_result_event_is_not_retried(scripted):
     _write_session(scripted)
     scripted["queue"].append((b"", 1))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 1
     assert len(scripted["calls"]) == 1
 
 
 def test_missing_session_transcript_blocks_the_resume(scripted):
     scripted["queue"].append((_api_error_stdout("API Error: The operation timed out."), 1))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 1
     assert result.error is not None
 
@@ -154,7 +154,7 @@ def test_retries_are_bounded(scripted, monkeypatch):
     monkeypatch.setenv("CLAUDE_API_ERROR_RETRIES", "1")
     for _ in range(3):
         scripted["queue"].append((_api_error_stdout("API Error: The operation timed out."), 1))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 2
     assert result.error is not None
 
@@ -163,7 +163,7 @@ def test_retries_can_be_disabled(scripted, monkeypatch):
     _write_session(scripted)
     monkeypatch.setenv("CLAUDE_API_ERROR_RETRIES", "0")
     scripted["queue"].append((_api_error_stdout("API Error: The operation timed out."), 1))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 1
 
 
@@ -174,8 +174,7 @@ def test_exhausted_time_budget_blocks_the_resume(scripted):
     result = asyncio.run(
         claude_bridge.run_claude(
             prompt="p", session_id="sess-1", resume=False,
-            timeout_s=claude_bridge._MIN_RETRY_BUDGET_S - 1,
-        )
+            timeout_s=claude_bridge._MIN_RETRY_BUDGET_S - 1, web_tools=True)
     )
     assert result.attempts == 1
     assert result.error is not None
@@ -192,7 +191,7 @@ def test_structured_output_survives_a_resume(scripted):
     result = asyncio.run(
         claude_bridge.run_claude(
             prompt="p", session_id="sess-1", resume=False, output_format=schema
-        )
+        , web_tools=True)
     )
 
     assert result.structured_output == {"verdict": "pass"}
@@ -217,7 +216,7 @@ def test_resumable_markers(scripted, message):
     _write_session(scripted)
     scripted["queue"].append((_api_error_stdout(message), 1))
     scripted["queue"].append((_ok_stdout("recovered"), 0))
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
     assert result.attempts == 2, f"expected {message!r} to be resumable"
     assert result.error is None
 
@@ -267,7 +266,7 @@ def test_captured_cli_verdicts(scripted, name):
     )
     scripted["queue"].append((_ok_stdout("recovered"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == (2 if case["resumable"] else 1)
 
@@ -290,7 +289,7 @@ def test_api_error_status_gates_a_completed_turn(scripted, api_error_status, exp
     )
     scripted["queue"].append((_ok_stdout("recovered"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == expected_attempts
 
@@ -302,7 +301,7 @@ def test_message_markers_still_apply_without_a_terminal_reason(scripted):
     scripted["queue"].append((_api_error_stdout("API Error: The operation timed out."), 1))
     scripted["queue"].append((_ok_stdout("recovered"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 2
 
@@ -311,7 +310,7 @@ def test_unknown_message_without_a_terminal_reason_is_not_resumed(scripted):
     _write_session(scripted)
     scripted["queue"].append((_api_error_stdout("API Error: something brand new"), 1))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 1
 
@@ -330,7 +329,7 @@ def test_a_client_error_vetoes_even_when_the_prose_matches_a_marker(scripted, ap
                            api_error_status=api_error_status), 1)
     )
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 1
 
@@ -346,7 +345,7 @@ def test_a_permanent_reason_does_not_veto_a_marker_it_cannot_explain(scripted):
     )
     scripted["queue"].append((_ok_stdout("recovered"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 2
 
@@ -361,7 +360,7 @@ def test_the_original_failure_survives_into_the_final_error(scripted):
     )
     scripted["queue"].append((_api_error_stdout("API Error: something permanent"), 1))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 2
     assert result.error == (
@@ -375,7 +374,7 @@ def test_a_resume_that_fails_the_same_way_names_it_once(scripted):
     for _ in range(3):
         scripted["queue"].append((_api_error_stdout("API Error: The operation timed out."), 1))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 3
     assert result.error == "claude CLI exited with code 1 on attempt 3: API Error: The operation timed out."
@@ -385,7 +384,7 @@ def test_an_unresumed_turn_does_not_gain_an_attribution_suffix(scripted):
     _write_session(scripted)
     scripted["queue"].append((_api_error_stdout("API Error: something permanent"), 1))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 1
     assert result.error == "claude CLI exited with code 1: API Error: something permanent"
@@ -413,6 +412,6 @@ def test_the_retryable_4xx_survive_the_veto(scripted, api_error_status, expected
     )
     scripted["queue"].append((_ok_stdout("recovered"), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == expected_attempts

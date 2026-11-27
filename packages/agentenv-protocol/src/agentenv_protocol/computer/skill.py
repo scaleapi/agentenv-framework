@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import _adb
 from .keys import PRINTABLE_KEYS
 from .platform import entry_for, platform_key
 
@@ -42,6 +43,9 @@ SHORTCUTS = {
 """,
 }
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}
+#: Who the agent acts as, and its home, by OS type, where the base class's OS defaults reach the device from beside it
+#: rather than run as the driver's own user: on Android, adb's shell user under shared storage.
+_ACCOUNTS = {"android": (_adb.USER, _adb.HOME)}
 
 
 async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, str]]:
@@ -53,6 +57,7 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
     session = _SESSIONS.get(platform.display or "", "a desktop session")
     if desktop := os.environ.get("XDG_CURRENT_DESKTOP"):
         session += f" ({desktop})"
+    user, home = _ACCOUNTS.get(platform.os or "") or (getpass.getuser(), Path.home())
     description = (f"How to use this computer through its computer_* tools: {system}, {display.width}x{display.height}, "
                    "what its input takes, and its shortcuts.")
     bundled = await driver.bundled_skill()
@@ -68,7 +73,7 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
     sections = [
         *opening,
         "## The computer",
-        "\n".join([f"- {system}, {session}.", f"- You act as `{getpass.getuser()}`, whose home is `{Path.home()}`.",
+        "\n".join([f"- {system}, {session}.", f"- You act as `{user}`, whose home is `{home}`.",
                    f"- The screen is {display.width}x{display.height}."]),
         "## Input",
         _input(driver),

@@ -30,7 +30,7 @@ snapshots carry it. A file part larger than 256 MiB, inline or downloaded, fails
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `PydanticAIConfig`: `model`, `effort` (Pydantic AI's `thinking` setting), `system_prompt` (added to the agent's instructions), `request_limit` (model requests per turn, default 500), `timeout_seconds` |
+| `agent-config/v1` | `PydanticAIConfig`: `model`, `effort` (Pydantic AI's `thinking` setting), `system_prompt` (added to the agent's instructions), `request_limit` (model requests per turn, default 500), `timeout_seconds`, `web_tools` (the agent's tools have no web search or fetch, so `false` changes nothing) |
 | `mcp-config/v1` | SDK default; each server becomes an `MCPToolset` on its URL, with its headers, its tools named as the server names them |
 | `skill-config/v1` | inline and bundle skills installed as `SKILL.md` directories under `~/.pydantic-ai-a2a/skills`, offered to the model through the harness's `Skills`, which it loads with `load_capability` |
 | `trajectory/v1` | live: the task's Pydantic AI messages (`ModelMessagesTypeAdapter`, format `pydantic-ai-messages/v1`), appended as each request and response completes |

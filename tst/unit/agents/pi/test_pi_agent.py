@@ -868,3 +868,10 @@ def test_registration_model_is_the_fallback(
     argv = json.loads(record.read_text())["argv"]
     assert task["status"]["state"] == "completed"
     assert argv[argv.index("--model") + 1] == "fallback-model"
+
+
+def test_web_tools_is_a_no_op_checked_on_the_pi_version_install_pins():
+    pinned = re.search(r"^PI_VERSION=(\S+)$", (AGENT_DIR / "install.sh").read_text(), re.M).group(1)
+
+    assert pi_agent.NO_WEB_TOOLS_VERSION == pinned, (
+        "pi moved: check that its built-in tools still include no web search or fetch, then move NO_WEB_TOOLS_VERSION")

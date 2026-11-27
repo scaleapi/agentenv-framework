@@ -258,7 +258,8 @@ def _mcp_tool_prefix(server: str) -> str:
 _NON_TOOL_PERMISSIONS = ("external_directory", "doom_loop")
 
 
-def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict] | None) -> dict[str, str]:
+def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict] | None, *,
+                web_tools: bool) -> dict[str, str]:
     """The config's ``permission``: which tools the CLI offers the model. A denied tool is left out of the model's
     tool list, not only refused when called. Without a selection every tool is allowed; ``{"disable": "*"}`` and
     ``{"only": [...]}`` deny every tool but those named and the tools of ``mcp_servers``, which a ``"*"`` deny would
@@ -268,18 +269,24 @@ def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict
     A ``"*"`` deny would also deny the CLI's checks that aren't tools: ``external_directory``, which every file tool
     asks before it touches a path outside the run directory, and ``doom_loop``, which it asks when the model repeats
     a call. Those stay allowed, as ``"*": "allow"`` leaves them, so a kept tool works as it does without a
-    selection."""
+    selection. ``web_tools`` False denies the CLI's web tools whatever the selection keeps."""
     if builtin_tools is None:
-        return {"*": "allow", "question": "deny"}
-    if isinstance(builtin_tools.disable, list):
-        return {"*": "allow", **{tool: "deny" for tool in builtin_tools.disable}, "question": "deny"}
-    return {
-        "*": "deny",
-        **{check: "allow" for check in _NON_TOOL_PERMISSIONS},
-        **{tool: "allow" for tool in builtin_tools.only or []},
-        **{f"{_mcp_tool_prefix(name)}*": "allow" for name in mcp_servers or {}},
-        "question": "deny",
-    }
+        rules = {"*": "allow"}
+    elif isinstance(builtin_tools.disable, list):
+        rules = {"*": "allow", **{tool: "deny" for tool in builtin_tools.disable}}
+    else:
+        rules = {
+            "*": "deny",
+            **{check: "allow" for check in _NON_TOOL_PERMISSIONS},
+            **{tool: "allow" for tool in builtin_tools.only or []},
+            **{f"{_mcp_tool_prefix(name)}*": "allow" for name in mcp_servers or {}},
+        }
+    if not web_tools:
+        # After the selection's rules, since the CLI applies the last rule that matches a tool.
+        rules = {tool: rule for tool, rule in rules.items() if tool not in _WEB_TOOLS}
+        rules.update({tool: "deny" for tool in _WEB_TOOLS})
+    rules.pop("question", None)
+    return {**rules, "question": "deny"}
 
 
 def _build_config(
@@ -293,6 +300,8 @@ def _build_config(
     builtin_tools: OpenCodeTools | None = None,
     max_output_tokens: int | None = None,
     armed: bool = False,
+    *,
+    web_tools: bool,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
@@ -345,7 +354,7 @@ def _build_config(
         # Headless: hard-deny the "ask the human" tool so a run can never block
         # waiting for input; every other tool is allowed unless builtin_tools
         # selects otherwise.
-        "permission": _permission(builtin_tools, mcp_servers),
+        "permission": _permission(builtin_tools, mcp_servers, web_tools=web_tools),
         "autoupdate": False,
     }
     if instructions:
@@ -471,6 +480,8 @@ async def _run_opencode(
     attachment_paths: list[str] | None = None,
     effort: str | None = None,
     builtin_tools: OpenCodeTools | None = None,
+    *,
+    web_tools: bool,
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
     max_turns: int | None = None,
@@ -478,8 +489,9 @@ async def _run_opencode(
     max_output_tokens: int | None = None,
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``, its provider calling ``base_url``, the endpoint's when None. ``event_callback`` gets each JSON event as the CLI prints it:
-    exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
-    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
+    exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, and
+    ``web_tools`` False turns its web tools off, as ``_permission`` describes; the tools of ``mcp_servers`` stay
+    offered with any selection.
 
     ``max_turns`` bounds the turn's steps, OpenCode's model requests, as ``--max-turns`` bounds Claude Code's: once
     the last step it allows asks for another, the CLI is killed and the turn fails. OpenCode v1's own ``steps`` limit
@@ -507,7 +519,7 @@ async def _run_opencode(
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
                            environ={**os.environ, "LITELLM_BASE_URL": base_url} if base_url else os.environ,
                            instructions=instructions, builtin_tools=builtin_tools,
-                           max_output_tokens=max_output_tokens, armed=armed)
+                           max_output_tokens=max_output_tokens, armed=armed, web_tools=web_tools)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn
@@ -833,3 +845,7 @@ def _join_tags(configured: str, run: str) -> str:
     tags = [tag.strip() for tag in configured.split(",") if tag.strip()]
     keys = {tag.partition(":")[0] for tag in tags}
     return ",".join([*tags, *(tag for tag in run.split(",") if tag and tag.partition(":")[0] not in keys)])
+
+
+# The CLI's own web tools: what a deploy_agent web_tools False denies.
+_WEB_TOOLS = ("websearch", "webfetch")

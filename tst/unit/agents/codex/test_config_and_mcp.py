@@ -149,13 +149,15 @@ def test_turns_of_different_roles_share_one_config_and_each_cli_gets_its_own_rol
     assert first == second == third
     assert first["env4821"] == {
         "command": "mcp-remote",
-        "args": ["https://gw/mcp", "--allow-http", "--header", "X-Tenant: t", "--header", "AgentEnv-Role: ${AGENTENV_ROLE}"],
+        "args": ["https://gw/mcp", "--allow-http", "--enable-proxy", "--header", "X-Tenant: t", "--header",
+                 "AgentEnv-Role: ${AGENTENV_ROLE}"],
         "env": {"AGENTENV_ROLE": ""},
-        "env_vars": ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"],
+        "env_vars": ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE", "HTTP_PROXY", "HTTPS_PROXY",
+                     "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"],
         "startup_timeout_sec": 60,
         "required": True,
     }
-    assert (first["audited"]["args"][2:], first["audited"]["env"]) == (
+    assert (first["audited"]["args"][3:], first["audited"]["env"]) == (
         ["--header", "AgentEnv-Role: ${AGENTENV_ROLE}"], {"AGENTENV_ROLE": "auditor"})
     assert first["peer_agents"]["args"][0] == "http://127.0.0.1:8000/ext/peer-agents/mcp"
     servers = ("env4821", "audited", "peer_agents")

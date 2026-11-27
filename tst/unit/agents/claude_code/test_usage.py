@@ -162,9 +162,9 @@ def test_run_claude_starts_a_resumed_turn_from_the_sessions_last_tally(scripted,
         scripted["queue"].append(("".join(_event(type="result", subtype="success", result="42", session_id=session,
                                                  usage=usage, modelUsage=tally) for usage in results).encode(), 0))
 
-    first = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
-    second = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=True))
-    elsewhere = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-2", resume=True))
+    first = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
+    second = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=True, web_tools=True))
+    elsewhere = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-2", resume=True, web_tools=True))
 
     assert (first.run_usage, first.model_usage, first.session_base) == (RESULTS_1, TALLY_1, {})
     # Its transcript has model calls but no cost-state, so the base is the process's own last tally.
@@ -198,7 +198,7 @@ def test_a_run_killed_before_it_exited_isnt_in_the_next_turns_base(scripted, mon
     scripted["queue"].append((_event(type="result", subtype="success", result="42", session_id="sess-1",
                                      usage=RESULTS_2[0], modelUsage=TALLY_2).encode(), 0))
 
-    resumed = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=True))
+    resumed = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=True, web_tools=True))
 
     assert resumed.session_base == TALLY_1
 
@@ -214,7 +214,7 @@ def test_run_claude_keeps_each_runs_usage_across_a_resume(scripted):  # noqa: F8
     scripted["queue"].append((_event(type="result", subtype="success", result="42", session_id="sess-1",
                                      usage=RESULTS_1[1], modelUsage=TALLY_1).encode(), 0))
 
-    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, web_tools=True))
 
     assert result.attempts == 2 and result.run_usage == RESULTS_1 and result.model_usage == TALLY_1
 
@@ -233,7 +233,7 @@ def test_a_run_that_hangs_after_its_result_keeps_the_usage_it_reported(monkeypat
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", hung)
         results.append(asyncio.run(claude_bridge._spawn_claude(prompt="p", session_id="s", resume=False,
-                                                               timeout_s=0.2)))
+                                                               timeout_s=0.2, web_tools=True)))
 
     after, before = results
     assert after.error and (after.run_usage, after.model_usage, after.unreported_calls) == (RESULTS_2, TALLY_2, 0)

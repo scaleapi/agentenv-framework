@@ -2,8 +2,8 @@
 clock/v1 sync_time; sync_env_clock declares it a follower at the real gateway and hands it its config; from then on
 every program the agent's user runs, its CLI included, reads the env's time while the A2A server stays on real time; a
 clock write that waits for followers waits for it; and once teardown_sandboxes takes it down, writes stop waiting for
-it. An agent whose CLI speaks a protocol a stub endpoint serves, Anthropic's messages or OpenAI's chat completions,
-also runs one real turn.
+it. An agent whose CLI speaks a protocol a stub endpoint serves, Anthropic's messages or OpenAI's chat completions or
+responses, also runs one real turn.
 
 Runs over images built beforehand, from this branch: AGENTENV_E2E_AGENT_IMAGES names one per agent, as
 ``claude-code=<tag>,codex=<tag>``; an agent it doesn't name is skipped as a missing capability."""
@@ -16,12 +16,14 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 from agentenv_protocol.client import ExtensionCallError
 
+import agent_env
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.a2a_agent.clock import FOLLOWING_KEY
 from agent_env.artifact import DockerImageArtifact
@@ -40,7 +42,7 @@ from tst.integration.task_step.test_prompt_agent_live_trajectory_local import (
     local_registry as local_registry,
 )
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
-from tst.util import fake_openai
+from tst.util import fake_openai, fake_responses
 from tst.util.capabilities import agent_clock_image, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
 
@@ -98,6 +100,29 @@ async def _letta_turn(context: TaskStepContext, endpoint: fake_openai.FakeOpenAI
     assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
 
+async def _codex_turn(context: TaskStepContext, endpoint: fake_responses.FakeResponses) -> None:
+    """One turn of the real Codex CLI, its proxy variables set: the CLI, a static binary, stays on real time, its model
+    calls reach the turn's relay on loopback, which the egress proxy would refuse, and the date the relay gives the
+    model and a `date` the model runs are the env's."""
+    endpoint.respond = fake_responses.tool_then_answer("exec_command", {"cmd": "date -u +%FT%TZ"},
+                                                       prefix="the shell said: ")
+    # A model the CLI's catalog doesn't know, which it offers its shell to as exec_command.
+    await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
+                              model="gpt-x", max_conversation_turns=1).execute(context)
+    bodies = [json.dumps(call.body) for call in endpoint.calls()]
+    dated = {m for body in bodies for m in re.findall(r"<current_date>([^<]*)</current_date>", body)}
+    print("the date the model was told:", dated, "date:", endpoint.tool_results())
+    assert dated == {VIRTUAL[:10]}, dated
+    assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
+    assert not [body for body in bodies if str(datetime.now(timezone.utc).date()) in body]
+
+
+def _pinned(agent: str, package: str) -> str:
+    """The version of ``package`` the agent's package.json pins, which its CLI's --version names."""
+    folder = Path(agent_env.__file__).parent / "agents" / "agents" / agent
+    return json.loads((folder / "package.json").read_text())["dependencies"][package]
+
+
 @dataclass(frozen=True)
 class Agent:
     """What the test needs of an agent's image: its bridge module, a command its CLI answers without a model (which
@@ -114,9 +139,11 @@ class Agent:
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
+    "codex": Agent(bridge="codex_bridge", version=("codex", "--version"), shows=f"codex-cli {_pinned('codex', '@openai/codex')}",
+                   turn=_codex_turn, endpoint=fake_responses.FakeResponses),
     "letta-code": Agent(bridge="letta_code_bridge", version=("letta", "--version"), shows="(Letta Code)",
                         turn=_letta_turn, endpoint=fake_openai.FakeOpenAI),
-    "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
+    "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows=_pinned("opencode", "opencode-ai")),
 }
 
 

@@ -579,3 +579,8 @@ class _EventParser:
             error = (error + "\n" + stderr.decode(errors="replace")[-ERROR_MESSAGE_LIMIT:])[-ERROR_MESSAGE_LIMIT:]
         return LettaCodeResult(response=self.response, tool_call_count=len(self.tools), session_id=self.session_id,
                                trajectory=self.trajectory, error=error)
+
+
+# The CLI version checked to give a local-backend agent no web tools of its own (its web_search and fetch_webpage are
+# cloud-backend tools), so web_tools False changes nothing.
+NO_WEB_TOOLS_CLI_VERSION = "0.34.26"
