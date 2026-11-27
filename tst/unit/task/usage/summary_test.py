@@ -89,7 +89,7 @@ def test_a_cost_priced_on_an_assumed_rate_is_at_most_and_with_uncounted_usage_an
         "cost: estimated $0.0005 (solver gpt-4.1-mini estimated $0.0005, 1.1k in, 11 out, partial)")
 
 
-@pytest.mark.parametrize("low", ["below_context_tier", "cache_write_5m"])
+@pytest.mark.parametrize("low", ["below_context_tier", "default_cache_ttl"])
 def test_a_cost_priced_on_a_rate_that_errs_low_is_at_least_and_with_one_that_errs_high_an_estimate(low):
     marked = _entry("solver", "m", 1000, 10, 0.004, cost_assumed=[low])
     summary = summarize([marked, _entry("judge", "j", 100, 1, 0.0001)])

@@ -101,7 +101,7 @@ def test_a_one_model_turns_writes_kept_an_hour_are_priced_at_the_hours_rate(monk
                      "cacheCreationEphemeral1hInputTokens": 1500, "costUSD": 0.004}}
     usage = a2a_server._usage(_result(run_usage=[], model_usage=tally, session_base={}))
     prices = PriceTable({HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25,
-                                           cache_write_1h=2.0)}, "litellm@test")
+                                           cache_write_ttl={3600: 2.0})}, "litellm@test")
     monkeypatch.setattr(usage_module, "litellm_prices", lambda: prices)
     context = TaskStepContext()
     steps = StepUsage(context, "solve")
@@ -111,7 +111,7 @@ def test_a_one_model_turns_writes_kept_an_hour_are_priced_at_the_hours_rate(monk
 
     [row] = context.metadata["step_usage"]["solve"][0]["models"]
     assert row["cost_usd"] == pytest.approx((10 * 1.0 + 90 * 5.0 + 20000 * 0.1 + 500 * 1.25 + 1500 * 2.0) / 1e6)
-    assert row["cache_write_1h_tokens"] == 1500 and "cost_assumed" not in row
+    assert row["cache_write_ttl_tokens"] == {"1h": 1500} and "cost_assumed" not in row
 
 
 def test_a_resumed_turn_counts_its_own_calls_not_the_sessions():

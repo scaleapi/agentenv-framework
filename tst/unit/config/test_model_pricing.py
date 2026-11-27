@@ -66,7 +66,8 @@ def test_the_installed_litellms_map_is_read_without_importing_litellm():
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.strip()
 
     version = importlib.metadata.version("litellm")
-    assert out == (f"litellm@{version} ModelPrice(input=0.4, output=1.6, cache_read=0.1, cache_write=None, cache_write_1h=None, tiers=()) "
+    assert out == (f"litellm@{version} ModelPrice(input=0.4, output=1.6, cache_read=0.1, cache_write=None, cache_write_ttl={{}}, "
+                   "tiers=()) "
                    "False")
     assert len(litellm_prices().entries) > 1000
 
@@ -229,7 +230,8 @@ TIERED_MAP = {
                "input_cost_per_token_priority_above_272k_tokens": 9e-06,
                "input_cost_per_token_above_272k_tokens_batches": 1e-06},
     "claude-x": {"input_cost_per_token": 1e-06, "output_cost_per_token": 5e-06, "cache_read_input_token_cost": 1e-07,
-                 "cache_creation_input_token_cost": 1.25e-06, "cache_creation_input_token_cost_above_1hr": 2e-06},
+                 "cache_creation_input_token_cost": 1.25e-06, "cache_creation_input_token_cost_above_1hr": 2e-06,
+                 "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 4e-06},
     "claude-flat": {"input_cost_per_token": 1e-06, "output_cost_per_token": 5e-06,
                     "cache_read_input_token_cost": 1e-07, "cache_creation_input_token_cost": 1.25e-06},
 }
@@ -247,7 +249,8 @@ def _priced(tokens, model="long-1"):
 def test_a_maps_tiers_are_read_in_either_spelling_lowest_first_without_service_tier_or_batch_rates():
     assert TIERED.lookup("long-1").tiers == (ContextTier(272_000, input=4.0, output=15.0),
                                               ContextTier(1_000_000, input=8.0))
-    assert (TIERED.lookup("claude-x").cache_write_1h, TIERED.lookup("claude-x").tiers) == (2.0, ())
+    assert (TIERED.lookup("claude-x").cache_write_ttl, TIERED.lookup("claude-x").tiers) == (
+        {3600: 2.0}, (ContextTier(100_000, cache_write_ttl={3600: 4.0}),))
 
 
 def test_records_each_under_the_lowest_tier_are_priced_at_the_base_rate_even_when_they_sum_past_it():
@@ -286,7 +289,7 @@ def test_writes_kept_an_hour_are_charged_the_hours_rate_and_the_split_is_kept(us
 
     assert cost.usd == pytest.approx((6000 * 1.0 + 1000 * 5.0 + 1000 * 1.25 + 3000 * 2.0) / PER_MILLION)
     assert cost.assumed == () and cost.unit_prices["cache_write_1h"] == 2.0
-    assert cost.fields()["cache_write_1h_tokens"] == 3000
+    assert cost.fields()["cache_write_ttl_tokens"] == {"1h": 3000}
 
 
 def test_writes_a_split_doesnt_cover_are_charged_the_five_minute_rate_and_marked():
@@ -294,7 +297,7 @@ def test_writes_a_split_doesnt_cover_are_charged_the_five_minute_rate_and_marked
         "cache_creation": {"ephemeral_5m_input_tokens": 100}})), model="claude-x")
 
     assert cost.usd == pytest.approx((9000 * 1.0 + 1000 * 5.0 + 1000 * 1.25) / PER_MILLION)
-    assert cost.assumed == (Assumed.CACHE_WRITE_5M,)
+    assert cost.assumed == (Assumed.DEFAULT_CACHE_TTL,)
 
 
 @pytest.mark.parametrize("hour", [-3000, True, "3000", 2.5], ids=["negative", "bool", "string", "float"])
@@ -303,7 +306,7 @@ def test_a_split_count_that_isnt_a_non_negative_integer_is_unknown(hour):
         "cache_creation": {"ephemeral_1h_input_tokens": hour}})), model="claude-x")
 
     assert cost.usd == pytest.approx((6000 * 1.0 + 1000 * 5.0 + 4000 * 1.25) / PER_MILLION)
-    assert cost.assumed == (Assumed.CACHE_WRITE_5M,) and cost.cache_write_1h is None
+    assert cost.assumed == (Assumed.DEFAULT_CACHE_TTL,) and cost.cache_write_ttl is None
 
 
 def test_writes_with_no_split_are_charged_the_five_minute_rate_marked_only_when_the_hour_costs_more():
@@ -312,9 +315,41 @@ def test_writes_with_no_split_are_charged_the_five_minute_rate_marked_only_when_
     no_writes = _priced(Tokens.of(_call(10_000)), model="claude-x")
 
     assert marked.usd == pytest.approx((6000 * 1.0 + 1000 * 5.0 + 4000 * 1.25) / PER_MILLION)
-    assert marked.assumed == (Assumed.CACHE_WRITE_5M,) and Assumed.CACHE_WRITE_5M.errs_low
+    assert marked.assumed == (Assumed.DEFAULT_CACHE_TTL,) and Assumed.DEFAULT_CACHE_TTL.errs_low
     assert no_hour_rate.assumed == () == no_writes.assumed
-    assert "cache_write_1h" not in marked.unit_prices and "cache_write_1h_tokens" not in marked.fields()
+    assert "cache_write_1h" not in marked.unit_prices and "cache_write_ttl_tokens" not in marked.fields()
+
+
+# A model that charges more for writes kept twelve hours and ninety minutes, as OpenAI's twelve-hour rate is written.
+KEPT = PriceTable.from_cost_map({"gpt-x": {
+    "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05, "cache_read_input_token_cost": 2e-07,
+    "cache_creation_input_token_cost": 2.5e-06, "cache_creation_input_token_cost_above_12hr": 5e-06,
+    "cache_creation_input_token_cost_above_90min": 3e-06}}, "litellm@test")
+
+
+def _kept(usage):
+    return price(Tokens.of(usage), None, model="gpt-x", prices=KEPT, reported_by=ReportedBy.HARNESS)
+
+
+def test_a_maps_rates_for_writes_kept_a_while_are_read_for_any_time():
+    assert KEPT.lookup("gpt-x").cache_write_ttl == {43200: 5.0, 5400: 3.0}
+
+
+def test_writes_split_by_any_time_are_charged_the_rate_of_the_longest_time_at_most_theirs():
+    cost = _kept(_call(10_000, cache_write_tokens=6000, provider_details={"cache_write_tokens_details": {
+        "ttl_30m_tokens": 1000, "ttl_2h_tokens": 2000, "ttl_12h_tokens": 3000}}))
+
+    assert cost.usd == pytest.approx((4000 * 2.0 + 1000 * 10.0 + 1000 * 2.5 + 2000 * 3.0 + 3000 * 5.0) / PER_MILLION)
+    assert cost.fields()["cache_write_ttl_tokens"] == {"2h": 2000, "12h": 3000} and cost.assumed == ()
+    assert (cost.unit_prices["cache_write_2h"], cost.unit_prices["cache_write_12h"]) == (3.0, 5.0)
+    assert "cache_write_30m" not in cost.unit_prices
+
+
+def test_writes_with_no_split_on_a_model_that_charges_more_for_a_longer_time_are_marked():
+    cost = _kept(_call(10_000, cache_write_tokens=6000))
+
+    assert cost.usd == pytest.approx((4000 * 2.0 + 1000 * 10.0 + 6000 * 2.5) / PER_MILLION)
+    assert cost.assumed == (Assumed.DEFAULT_CACHE_TTL,)
 
 
 def _litellm_cost(model: str, prompt: int, read: int, write: int, hour: int, output: int) -> tuple[float, float]:
@@ -337,7 +372,7 @@ def _tiered(prefix: str, *, hour: bool) -> str:
     without, a rate for writes kept an hour; LiteLLM's maps differ in which models they tier."""
     return next(name for name, rates in sorted(litellm_prices().entries.items())
                 if name.startswith(prefix) and "/" not in name and len(rates.tiers) == 1
-                and (rates.cache_write_1h is not None) == hour)
+                and bool(rates.cache_write_ttl) == hour)
 
 
 @pytest.mark.parametrize(("prefix", "hour"), [("claude-", 5000), ("gpt-", 0)], ids=["claude-hour-writes", "gpt"])

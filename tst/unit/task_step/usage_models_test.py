@@ -158,8 +158,10 @@ def test_a_turn_whose_rows_cant_all_be_priced_leaves_the_entry_unpriced_rather_t
 
 
 # The same models with a rate for cache writes kept an hour, as Claude's are.
-HOURLY = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75, cache_write_1h=6.0),
-                     HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25, cache_write_1h=2.0)},
+HOURLY = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
+                                        cache_write_ttl={3600: 6.0}),
+                     HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25,
+                                       cache_write_ttl={3600: 2.0})},
                     "litellm@test")
 
 
@@ -175,17 +177,17 @@ def test_a_one_model_turn_gives_its_row_the_turns_cache_write_split(monkeypatch)
 
     [row] = entry["models"]
     assert row["cost_usd"] == pytest.approx((500 * 3.0 + 400 * 15.0 + 8000 * 0.3 + 200 * 3.75 + 300 * 6.0) / 1e6)
-    assert (row["cache_write_1h_tokens"], row["unit_prices"]["cache_write_1h"]) == (300, 6.0)
+    assert (row["cache_write_ttl_tokens"], row["unit_prices"]["cache_write_1h"]) == ({"1h": 300}, 6.0)
     assert "cost_assumed" not in row and "cost_assumed" not in entry
-    assert entry["cache_write_1h_tokens"] == 300
+    assert entry["cache_write_ttl_tokens"] == {"1h": 300}
 
 
 def test_a_turn_on_several_models_with_writes_kept_an_hour_marks_its_rows_as_possibly_low(monkeypatch):
     entry = _entry(monkeypatch, replace(TURN, provider_details=_split(300)), prices=HOURLY)
 
     sonnet, haiku = entry["models"]
-    assert sonnet["cost_usd"] == pytest.approx(0.011775) and sonnet["cost_assumed"] == ["cache_write_5m"]
-    assert "cost_assumed" not in haiku and entry["cost_assumed"] == ["cache_write_5m"]
+    assert sonnet["cost_usd"] == pytest.approx(0.011775) and sonnet["cost_assumed"] == ["default_cache_ttl"]
+    assert "cost_assumed" not in haiku and entry["cost_assumed"] == ["default_cache_ttl"]
 
 
 def test_a_turn_on_several_models_whose_split_misses_some_writes_marks_its_rows(monkeypatch):
@@ -194,7 +196,7 @@ def test_a_turn_on_several_models_whose_split_misses_some_writes_marks_its_rows(
     entry = _entry(monkeypatch, replace(TURN, provider_details=partial), prices=HOURLY)
 
     sonnet, _ = entry["models"]
-    assert sonnet["cost_assumed"] == ["cache_write_5m"] and entry["cost_assumed"] == ["cache_write_5m"]
+    assert sonnet["cost_assumed"] == ["default_cache_ttl"] and entry["cost_assumed"] == ["default_cache_ttl"]
 
 
 def test_a_turn_on_several_models_that_kept_no_write_an_hour_prices_its_rows_unmarked(monkeypatch):
@@ -202,3 +204,16 @@ def test_a_turn_on_several_models_that_kept_no_write_an_hour_prices_its_rows_unm
 
     sonnet, _ = entry["models"]
     assert sonnet["cost_usd"] == pytest.approx(0.011775) and "cost_assumed" not in entry
+
+
+def test_a_turn_on_several_models_whose_writes_were_all_kept_one_time_gives_each_row_that_time(monkeypatch):
+    twelve = {"cache_write_tokens_details": {"ttl_30m_tokens": 0, "ttl_12h_tokens": 500}}
+    prices = PriceTable({SONNET: ModelPrice(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75,
+                                            cache_write_ttl={43200: 7.5}),
+                         HAIKU: ModelPrice(input=1.0, output=5.0, cache_read=0.1, cache_write=1.25)}, "litellm@test")
+
+    entry = _entry(monkeypatch, replace(TURN, provider_details=twelve), prices=prices)
+
+    sonnet, haiku = entry["models"]
+    assert sonnet["cost_usd"] == pytest.approx(0.011775 + 500 * (7.5 - 3.75) / 1e6)
+    assert sonnet["cache_write_ttl_tokens"] == {"12h": 500} and "cost_assumed" not in entry

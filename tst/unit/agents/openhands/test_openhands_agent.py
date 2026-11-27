@@ -731,4 +731,4 @@ def test_a_claude_turn_through_a_proxy_that_counts_the_cache_is_priced_once() ->
     assert (usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens, usage.input_includes_cache) == (
         21194, 10371, 10799, True)
     assert abs(entry["cost_usd"] - 0.01595985) < 1e-9 and entry["uncached_input_tokens"] == 24
-    assert entry["cost_assumed"] == ["cache_write_5m"]
+    assert entry["cost_assumed"] == ["default_cache_ttl"]

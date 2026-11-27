@@ -14,7 +14,7 @@ from agentenv_protocol.a2a_agent import Usage
 
 from agent_env.config.model import ModelRole
 from agent_env.config.model_pricing import (
-    Cost, CostStatus, PriceTable, ReportedBy, Tokens, cache_write_split, litellm_prices, price,
+    Cost, CostStatus, PriceTable, ReportedBy, Tokens, cache_write_split, litellm_prices, price, ttl_label,
 )
 from agent_env.task_step.context import ATTEMPT_EPOCH, DeployedAgent, TaskStepContext
 
@@ -42,7 +42,7 @@ class CostFields(TypedDict):
     unit_prices: NotRequired[dict[str, float]]
     cost_assumed: NotRequired[list[str]]
     unpriced_reason: NotRequired[str]
-    cache_write_1h_tokens: NotRequired[int]
+    cache_write_ttl_tokens: NotRequired[dict[str, int]]
 
 
 class ModelEntry(CostFields):
@@ -158,7 +158,7 @@ class RoleUsage:
                     shares.setdefault(share.model, []).append(share)
                     record = share.to_dict()
                     if (split := _row_split(usage, share)) is not None:
-                        record["provider_details"] = {"cache_creation": split}
+                        record["provider_details"] = split
                     charged.setdefault(share.model, []).append(record)
             else:
                 shares.setdefault(self.model, []).append(usage)
@@ -187,20 +187,21 @@ def _tokens(records: list[Any]) -> Optional[Tokens]:
 
 
 def _row_split(usage: Usage, share: Any) -> Optional[dict[str, Any]]:
-    """The cache-write split a turn's per-model row takes: the turn's own when it ran one model; all of the row's
-    writes kept five minutes when the turn's split covers every write and kept none an hour; else None, since a turn's
-    hour-long or uncovered writes can't be told apart by model."""
-    raw = usage.provider_details.get("cache_creation")
-    split = cache_write_split(raw)
+    """The cache-write split (as ``provider_details``) a turn's per-model row takes: the turn's own when it ran one
+    model; all of the row's writes kept one time when the turn's split puts every write at that time; else None,
+    since a turn's writes kept different times, or not covered, can't be told apart by model."""
+    split = cache_write_split(usage.provider_details)
     if split is None:
         return None
     if len(usage.models) == 1:
-        return dict(raw)
-    five, hour = split
+        return dict(usage.provider_details)
     writes = usage.cache_write_tokens
     if writes is None:
         writes = sum(row.cache_write_tokens or 0 for row in usage.models)
-    return {"ephemeral_5m_input_tokens": share.cache_write_tokens or 0} if not hour and five >= writes else None
+    kept = [(seconds, count) for seconds, count in split.items() if count]
+    if len(kept) != 1 or kept[0][1] < writes:
+        return None
+    return {"cache_write_tokens_details": {f"ttl_{ttl_label(kept[0][0])}_tokens": share.cache_write_tokens or 0}}
 
 
 def _agreed(records: list[Any]) -> Optional[bool]:
@@ -230,7 +231,7 @@ def _summed(costs: list[Cost], reported_usd: Optional[float]) -> Cost:
     least = next((cost for cost in costs if cost.status is not CostStatus.PRICED), costs[0])
     assumed = tuple(dict.fromkeys(assumed for cost in costs for assumed in cost.assumed))
     return Cost(sum(cost.usd for cost in costs), least.status, least.source, reported_usd, assumed=assumed,
-                cache_write_1h=sum(cost.cache_write_1h or 0 for cost in costs) or None)
+                cache_write_ttl=_ttl_total(costs))
 
 
 def _combined(costs: list[Cost]) -> Cost:
@@ -251,7 +252,16 @@ def _combined(costs: list[Cost]) -> Cost:
                 sum(bills) if bills else None,
                 uncached_input=sum(uncached) if priced and None not in uncached else None,
                 unit_prices=next(iter(rates.values())) if len(rates) == 1 else None, assumed=assumed,
-                cache_write_1h=sum(c.cache_write_1h or 0 for c in priced) or None)
+                cache_write_ttl=_ttl_total(priced))
+
+
+def _ttl_total(costs: list[Cost]) -> Optional[dict[str, int]]:
+    """The costs' writes charged above the base write rate, summed by how long they were kept; None when none were."""
+    total: dict[str, int] = {}
+    for cost in costs:
+        for label, count in (cost.cache_write_ttl or {}).items():
+            total[label] = total.get(label, 0) + count
+    return total or None
 
 
 def _unreported() -> Usage:
