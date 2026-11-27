@@ -6,11 +6,13 @@ agent-env and the hub imports it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from agent_env.store import DuplicateKeyError, Eq, Filter, UpdateSpec, get_config
+from agent_env.store import DuplicateKeyError, Eq, Filter, Ne, UpdateSpec, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,20 +58,28 @@ class ReviewStore:
         label: Optional[str] = None,
         upstream: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Register a review as awaiting a decision. Idempotent — a retry won't clobber a recorded decision."""
+        """Register a review as awaiting a decision on ``upstream``. Idempotent for the same output — a retry won't
+        clobber a recorded decision. Given a different ``upstream`` (the steps before the review ran again), it
+        replaces the record with one awaiting a decision on that output."""
+        upstream_json = json.dumps(upstream or {}, sort_keys=True, default=str)
+        digest = hashlib.sha256(upstream_json.encode()).hexdigest()
         doc = {
             "instance_id": instance_id,
             "step_id": step_id,
             "state": AWAITING,
             "label": label,
             "upstream": upstream or {},
+            "upstream_digest": digest,
             "awaiting_at": self._now(),
             "expires_at": datetime.now(timezone.utc) + _TTL,
         }
         try:
             self._doc_store.insert(REVIEWS_COLLECTION, doc)
         except DuplicateKeyError:
-            pass
+            if upstream is not None:
+                filt = Filter.of(instance_id=instance_id, step_id=step_id)
+                filt = filt.where("upstream_digest", Ne(digest))
+                self._doc_store.replace(REVIEWS_COLLECTION, filt, doc)
 
     def get(self, instance_id: str, step_id: str) -> Optional[dict[str, Any]]:
         return self._doc_store.find_one(

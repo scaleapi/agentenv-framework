@@ -1113,3 +1113,106 @@ def test_validate_dag_accepts_ancestor_resume_point():
     c = _FlakyPrompt("c", retry_config=RetryConfig(retry_from_step_id="a"), depends_on=["a"])
     # Should not raise.
     Task(id="t", version=1, steps=[a, c])
+
+
+@pytest.mark.asyncio
+async def test_a_review_the_retry_re_runs_waits_for_a_decision_on_the_new_output(store):
+    """A span retry re-runs the agent on a fresh world. The review after it must show the operator the new output and
+    wait for their decision on it, not reuse the one they gave the first attempt's output."""
+    from agent_env.task_step.review_store import CONTINUE, get_review_store
+    from agent_env.task_step.task_steps.review import ReviewTaskStep
+
+    deploy = _FakeDeployEnv("s0")
+    solve = _FlakyPrompt("solve", fail_times=0)
+    review = ReviewTaskStep(id="review", version=None, timeout_seconds=60, poll_interval_seconds=0.01)
+    collect = _FlakyPrompt("collect", retry_config=RetryConfig(retry_from_step_id="s0"), fail_times=1)
+    run = asyncio.ensure_future(Task(id="t", version=1, steps=[deploy, solve, review, collect]).run(
+        context=TaskStepContext()))
+    reviews, approved = get_review_store(), []
+    while not run.done():  # the operator: approves each output a review shows them, once
+        for awaiting in reviews.list_awaiting():
+            approved.append(awaiting["upstream"]["response"])
+            reviews.set_decision(awaiting["instance_id"], awaiting["step_id"], CONTINUE, decided_by="operator")
+        await asyncio.sleep(0.01)
+    result = run.result()
+
+    assert [p.response for p in result.prompt_responses if p.step_id == "solve"] == ["attempt-2"]
+    assert approved == ["attempt-1", "attempt-2"]
+
+
+async def _operate(run, decide) -> list[str]:
+    """The hub's operator until ``run`` is done: gives each output a review shows (``list_awaiting``) the decision
+    ``decide(n)``, n counting the outputs shown from 0. Returns the outputs shown, in order."""
+    from agent_env.task_step.review_store import get_review_store
+
+    reviews, shown = get_review_store(), []
+    while not run.done():
+        for awaiting in reviews.list_awaiting():
+            shown.append(awaiting["upstream"]["response"])
+            decision = decide(len(shown) - 1)
+            reviews.set_decision(awaiting["instance_id"], awaiting["step_id"], decision, decided_by="operator")
+        await asyncio.sleep(0.01)
+    return shown
+
+
+def _review(timeout_seconds=60):
+    from agent_env.task_step.task_steps.review import ReviewTaskStep
+
+    return ReviewTaskStep(id="review", version=None, timeout_seconds=timeout_seconds, poll_interval_seconds=0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_review_that_regenerates_a_rejected_output_asks_about_the_new_one(store):
+    """retry_config on the review itself: the operator's abort re-runs the agent, and the review must then ask about
+    the regenerated output, not abort it on the decision given on the rejected one."""
+    from agent_env.task_step.review_store import ABORT, CONTINUE
+
+    review = _review()
+    review.retry_config = RetryConfig(retry_from_step_id="solve")
+    task = Task(id="t", version=1, steps=[_FakeDeployEnv("s0"), _FlakyPrompt("solve", fail_times=0), review])
+    run = asyncio.ensure_future(task.run(context=TaskStepContext()))
+
+    assert await _operate(run, lambda n: ABORT if n == 0 else CONTINUE) == ["attempt-1", "attempt-2"]
+    assert run.result().metadata["review_decisions"]["review"]["decision"] == CONTINUE
+
+
+@pytest.mark.asyncio
+async def test_a_resume_from_before_the_review_asks_about_the_new_output(store):
+    """A resume of the same instance from a step before the review (its persisted context, a start_step and its
+    instance id) re-runs the agent; the review must ask about the new output."""
+    from agent_env.task.store import find_task_instance
+    from agent_env.task_step.review_store import CONTINUE
+
+    solve = _FlakyPrompt("solve", fail_times=0)
+    task = Task(id="t", version=1, steps=[_FakeDeployEnv("s0"), solve, _review(), _FlakyPrompt("collect")])
+    first = asyncio.ensure_future(task.run(context=TaskStepContext(), instance_id="i"))
+    shown = await _operate(first, lambda n: CONTINUE)
+    with pytest.raises(RuntimeError, match="flaky boom"):  # the step after the approved review fails
+        first.result()
+    stored = TaskStepContext.from_dict(find_task_instance("i").context)
+    again = asyncio.ensure_future(task.run(context=stored, instance_id="i", start_step=1))  # from `solve`
+    shown += await _operate(again, lambda n: CONTINUE)
+    again.result()
+
+    assert solve.attempts == 2
+    assert shown == ["attempt-1", "attempt-2"]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_at_the_review_keeps_the_decision_given_on_its_output(store):
+    """A resume of the same instance at the review (the worker gave up waiting, then the operator decided) re-runs
+    no step before it, so the output is the one decided on: the decision holds and nobody is asked again."""
+    from agent_env.task.store import find_task_instance
+    from agent_env.task_step.review_store import CONTINUE, get_review_store
+
+    def task(review):
+        return Task(id="t", version=1, steps=[_FakeDeployEnv("s0"), _FlakyPrompt("solve", fail_times=0), review])
+
+    with pytest.raises(TimeoutError):
+        await task(_review(timeout_seconds=0.2)).run(context=TaskStepContext(), instance_id="i")
+    assert get_review_store().set_decision("i", "review", CONTINUE, decided_by="operator")
+    stored = TaskStepContext.from_dict(find_task_instance("i").context)
+    again = asyncio.ensure_future(task(_review()).run(context=stored, instance_id="i", start_step=2))
+
+    assert await _operate(again, lambda n: CONTINUE) == []
+    assert again.result().metadata["review_decisions"]["review"] == {"decision": CONTINUE, "decided_by": "operator"}
